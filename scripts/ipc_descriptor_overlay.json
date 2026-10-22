@@ -1547,7 +1547,6 @@
     "notes": "A seed is not an equilibrium (grains placed without their radius, no contact carrying the bed's weight, sub-cell density noise in liquid). With on_seed (default true) every seed is relaxed at the start of the next step: the domain's own solver steps run with time, sources, heat, gas, foam and MSF stopped, and all velocities and spins are zeroed after each step. It stops when the 95th percentile of per-step displacement is below displacement_m (m per step, default 0.0002), when it stops falling (settle_plateau: the solver's own floor) or at max_steps (default 240). request=true (default) relaxes the current particles too, e.g. a bed poured by sources. Omitted settings are kept. fluid.list_domains reports settle_on_seed/max_steps/displacement_m, settle_pending, settle_ran, settle_converged, settle_plateau, settle_steps, settle_particles, settle_first_p95_m, settle_residual_p95_m, settle_ms, and live_motion_samples/mean_m/p95_m/max_m (last frame's displacement of a carrier sample, by position). Animated colliders are not sampled while settling.",
     "tags": "simulation|reset"
   },
-
   "fluid.reset": {
     "summary": "Reset every fluid and gas simulation to frame zero",
     "tags": "simulation|reset|rewind"
@@ -6180,6 +6179,18 @@
     "notes": "For determinism probes (Faz 2-W gate: enabling whitewater must leave the primary hashes unchanged). Hashes are hex strings; centroid/mean_speed are the tolerant view when runs are not bit-identical.",
     "tags": "fluid|determinism|measure|verify|whitewater",
     "related": "fluid.get|fluid.step|fluid.reset"
+  },
+  "fluid.particle_extremes": {
+    "summary": "Hottest and coldest live particles of a domain (count 1..64 each, default 8) with substance, solver model, granular transport, kelvin, mass fraction, rest mass, solid share, pore water, frozen flag, position and velocity",
+    "notes": "Says WHICH particle a max/min reading belongs to: thermal_max_kelvin and particle_max_kelvin only say that one ran past every source. Reads the host particle arrays at query time, so call it right after the fluid.step that showed the reading. Unwritten particles (0 K or non-finite) are skipped; measured counts the rest. index is the slot in the live arrays and changes when particles are added or removed; particle_id is stable. fusion_solid_fraction -1 = unresolved. granular_transport is dem|mpm for a granular parcel (its substance's), empty otherwise.",
+    "tags": "fluid|particle|temperature|kelvin|measure|verify|thermal|debug",
+    "related": "fluid.get|fluid.list_domains|fluid.step|fluid.run|fluid.state_digest"
+  },
+  "fluid.gas_cell_extremes": {
+    "summary": "Hottest (by air temperature) and most vapour-laden gas cells of a Matter domain (count 1..64 each, default 8): Tv, air T, vapour kg and kg/m^3 against 1 atm of pure vapour at that T, fog water, rain and rain temperature, foreign gas, energy",
+    "notes": "Rain parcels are born at their cell's rain temperature, so a rain parcel past every source (fluid.particle_extremes) means an air cell past it; this says which. air_kelvin is T behind the field's Tv (airKelvinFromVirtual). pure_vapour_kg_m3 = P Mv / (R T): vapour_kg_m3 above it is vapour past its physical ceiling; max_vapour_over_pure is the largest ratio over every fluid cell. rain_kelvin = rain energy / (c rain), 0 without rain. A device-resident inventory is copied to the host for the read (the live one is untouched); inventory=false means the domain carries none. Cells at the ambient holding nothing are skipped. Read right after the fluid.step that showed the reading.",
+    "tags": "fluid|gas|vapour|temperature|kelvin|fog|rain|measure|verify|debug",
+    "related": "fluid.particle_extremes|gas.step_stats|fluid.list_domains|fluid.step"
   },
   "world.get_weather": {
     "summary": "Return the weather derived from the climate: cloud base (LCL), genus, coverage, depth, freezing level, precipitation mm/h, snow, lightning rate",

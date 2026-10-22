@@ -258,6 +258,8 @@ struct VkVolumeInstance {
     // padding is where the two are free to disagree, and a stride mismatch does
     // not fail loudly — it reads the NEXT volume's fields as this one's.
     float    _uvw_pad[1];
+    // Appended at byte 624; total record stride is now 672 bytes.
+    float density_curve[12];
 };
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;

@@ -10,6 +10,7 @@
 
 #pragma once
 #include <cstdint>
+#include <cstddef>
 
 #ifdef _MSC_VER
     #define VK_VOL_ALIGN(n) __declspec(align(n))
@@ -95,7 +96,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float max_temperature;        // reference max temperature
     int   color_ramp_enabled;     // 1 = use color ramp instead of pure blackbody
     int   ramp_stop_count;        // active stops in ramp (0..8)
-    int   _ramp_pad[2];           // alignment
+    int   _ramp_pad[2];           // internal light steps (0=off), update stride
     float ramp_positions[8];      // stop positions [0..1]
     float ramp_colors_r[8];       // stop R components
     float ramp_colors_g[8];       // stop G components
@@ -105,7 +106,9 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float random_walk_enabled;    // 1 = path-traced multiple scattering (volume_closesthit)
     float random_walk_max_events; // 8..512 scattering events per walk
     float random_walk_exact_events; // 1..512 true-phase events before the similarity switch
-    float _retired_cloud[5];   // retired Faz 3b: sky clouds are no longer a volume (ATMOSPHERE_CLOUDS.md)
+    // Emission response: enabled, temperature power, density power, EV, saturation.
+    // Name retained for the existing 624-byte shader ABI; zero enabled is legacy.
+    float _retired_cloud[5];
     // [0..6] = isosurface/foam data for source_type 4. For other volume
     // types [6] stores authored minimum emission temperature. [7..11] =
     // bounded Material Graph density-noise program.
@@ -219,11 +222,13 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // and a stride disagreement here does not fail — it shifts every volume
     // after the first and reads the neighbour's fields as this one's.
     float    _uvw_pad[1];
+    // Appended at byte 624; total record stride is now 672 bytes.
+    float density_curve[12];
 };
 
-// Compile-time size check (624 bytes). Growing this is a five-file edit — see
+// Compile-time size check (672 bytes). Growing this is a five-file edit — see
 // the UVW block above for the list and the reason.
-static_assert(sizeof(VkVolumeInstance) == 624, "VkVolumeInstance must be 624 bytes");
+static_assert(sizeof(VkVolumeInstance) == 672, "VkVolumeInstance must be 672 bytes");
 
 /**
  * @struct VkVolumeParams

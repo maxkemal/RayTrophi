@@ -3,12 +3,12 @@
 #define RT_SURFACE_SDF_SHADOW_QUERY
 
 // Native SurfaceSDF occlusion for RayFusion shadow rays. This reads the same
-// 624-byte VkVolumeInstance table and NanoVDB addresses as the surface pass.
+// 672-byte VkVolumeInstance table and NanoVDB addresses as the surface pass.
 layout(set = 0, binding = 6, std430) readonly buffer RfVolumeRawBuffer {
     uint rfVolumeWords[];
 };
 
-const uint RF_VOLUME_STRIDE_WORDS = 156u;
+const uint RF_VOLUME_STRIDE_WORDS = 168u;
 
 uint rfVolWord(uint volumeIndex, uint byteOffset) {
     return rfVolumeWords[volumeIndex * RF_VOLUME_STRIDE_WORDS +
@@ -137,7 +137,7 @@ bool rfSurfaceSdfOccludes(vec3 origin, vec3 direction, float rayMin,
                           uint materialCount) {
     uint count = min(volumeCount, 16u);
     for (uint vi = 0u; vi < count; ++vi) {
-        if (rfVolWord(vi, 172u) == 0u || rfVolWord(vi, 168u) != 2u ||
+        if (rfVolWord(vi, 168u) == 0u || rfVolWord(vi, 168u) != 2u ||
             int(rfVolWord(vi, 428u)) != 4 ||
             rfVolAddress(vi, 232u) == uint64_t(0)) {
             continue;

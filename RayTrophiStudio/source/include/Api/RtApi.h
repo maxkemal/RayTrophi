@@ -4652,6 +4652,9 @@ struct FluidDomainInfo {
     double   thermal_grain_heat_to_walls_j = 0.0;
     double   thermal_grain_energy_residual_j = 0.0;
     float    thermal_grain_ms = 0.0f;
+    // Parcels of one cell trading heat (snow beside water), 2026-10-20.
+    uint64_t thermal_in_cell_mixed_cells = 0;
+    double   thermal_in_cell_heat_j = 0.0;
     // P9: the grain-air film read a vapour inventory (host or device readback);
     // false with a humid gas lane = it treated the air as dry.
     bool     thermal_grain_air_humid = false;
@@ -4686,6 +4689,7 @@ struct FluidDomainInfo {
     // residual above the tolerance = the solve stopped unconverged.
     int      pressure_iterations = 24;
     float    pressure_relative_residual = 1.0e-5f;
+    bool     pressure_iterations_grid_scaled = true;
     int      pressure_cg_iterations = 0;
     int      pressure_cg_max_iterations = 0;
     double   pressure_cg_final_relative_residual = 0.0;
@@ -4903,11 +4907,16 @@ struct SimulationFlowSourceInfo {
     // `temperature` above, which is the gas solver's normalised unit.
     bool  fluid_temperature_override = false;
     float fluid_temperature_kelvin = 353.0f;
-    // Read-only: the Kelvin particles are actually born at, and whether a
-    // meltable solid (Snow, Ice) was lowered under its melt point because the
-    // ambient is warmer (Fluid::substanceAmbientBirthKelvin).
-    float fluid_birth_kelvin = 0.0f;
-    bool  fluid_born_solid = false;
+    // Read-only (2026-10-20, replaces fluid_born_solid, which said "solid" for
+    // a liquid capped at its boiling point too, and reported a birth for gas
+    // sources): the Kelvin particles are born at, the constitutive model they
+    // are born in ("fluid", "granular", "elastic"; "" = this source pours no
+    // particles - a gas source of a domain with a gas phase), and why the
+    // ambient was overridden: "solid_under_melt" (Snow, Ice kept solid in a
+    // warmer domain), "liquid_at_boiling" (a liquid never born above Tb), or "".
+    float       fluid_birth_kelvin = 0.0f;
+    std::string fluid_birth_model;
+    std::string fluid_birth_lowered;
     // Wet-at-birth fraction of the grain substance's water capacity (0..1).
     float grain_birth_saturation = 0.0f;
     bool use_time_limit = false;
@@ -5108,14 +5117,84 @@ struct FluidStateDigest {
 };
 Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDigest& out);
 
+// The hottest and coldest live particles of a domain, each with what it is
+// (2026-10-21). thermal_max_kelvin says THAT a parcel ran past every source;
+// only this says WHICH one: its substance, solver model, mass and phase share.
+// Unwritten particles (0 K or non-finite) are skipped, as in particle_max_kelvin.
+struct FluidParticleProbe {
+    uint64_t    index = 0;          // slot in the live particle arrays (not stable)
+    uint64_t    particle_id = 0;    // stable identity; 0 = the domain keeps none
+    std::string substance;          // resolved name; "" = untagged (domain default)
+    uint32_t    substance_tag = 0;
+    std::string model;              // fluid | granular | elastic | auto
+    std::string granular_transport; // dem | mpm for a granular parcel, else ""
+    float       kelvin = 0.0f;
+    float       mass_fraction = 0.0f;
+    float       rest_mass_kg = 0.0f;
+    float       fusion_solid_fraction = -1.0f;  // -1 = unresolved (NaN) or absent
+    float       pore_water_kg = 0.0f;
+    bool        frozen = false;     // kParticleFlagFrozen
+    double      position[3] = { 0.0, 0.0, 0.0 };
+    double      velocity[3] = { 0.0, 0.0, 0.0 };
+};
+struct FluidParticleExtremes {
+    bool     live = false;
+    uint64_t particles = 0;         // live particle count
+    uint64_t measured = 0;          // particles with a written temperature
+    std::vector<FluidParticleProbe> hottest;  // descending kelvin
+    std::vector<FluidParticleProbe> coldest;  // ascending kelvin
+};
+// count 1..64 per list.
+Result getFluidParticleExtremes(const std::string& domain_id_or_name, uint32_t count,
+                                FluidParticleExtremes& out);
+
+// The hottest and the most vapour-laden air cells of a Matter domain's gas
+// grid (2026-10-21). Rain parcels are born at their cell's rain temperature,
+// so a parcel past every source means an air cell past it; this says which
+// cell and what it holds. air_kelvin is T (the field holds Tv); vapour above
+// pure_vapour_kg_m3 (1 atm of pure vapour at that T) is vapour past its
+// physical ceiling.
+struct FluidGasCellProbe {
+    uint64_t cell = 0;
+    int      ijk[3] = { 0, 0, 0 };
+    double   center[3] = { 0.0, 0.0, 0.0 };
+    float    virtual_kelvin = 0.0f;     // the field's Tv
+    float    air_kelvin = 0.0f;         // T behind Tv
+    float    vapour_kg = 0.0f;
+    float    vapour_kg_m3 = 0.0f;
+    float    pure_vapour_kg_m3 = 0.0f;  // P Mv / (R T)
+    float    condensate_kg = 0.0f;      // fog water
+    float    rain_kg = 0.0f;
+    float    rain_kelvin = 0.0f;        // rain energy / (c rain); 0 = no rain
+    float    foreign_kg = 0.0f;
+    float    energy_j = 0.0f;
+    bool     solid = false;
+};
+struct FluidGasCellExtremes {
+    bool     live = false;
+    bool     inventory = false;   // the domain carries a vapour inventory
+    std::string condensable_substance;
+    uint64_t cells = 0;
+    double   voxel_m = 0.0;
+    float    max_vapour_over_pure = 0.0f;  // over every fluid cell
+    std::vector<FluidGasCellProbe> hottest;       // by air_kelvin, descending
+    std::vector<FluidGasCellProbe> most_vapour;   // by vapour_kg_m3, descending
+};
+// count 1..64 per list.
+Result getFluidGasCellExtremes(const std::string& domain_id_or_name, uint32_t count,
+                               FluidGasCellExtremes& out);
+
 // A liquid domain's particle budget (the panel's Max Particles). Seeding and
 // emitters stop at it. No ceiling (at least 1); the panel's 10M is a drag range.
 Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_particles);
-// Liquid pressure solve: iteration cap (>= 1) and relative residual (> 0;
-// the solvers clamp to [1e-8, 1e-2]). Null keeps a value. fluid.set_param
-// pressure_iterations / pressure_relative_residual.
+// Liquid pressure solve: iteration cap (>= 1), relative residual (> 0;
+// the solvers clamp to [1e-8, 1e-2]) and whether the cap grows with the grid
+// (effective cap = max(cap, 4 x longest axis)). Null keeps a value.
+// fluid.set_param pressure_iterations / pressure_relative_residual /
+// pressure_iterations_grid_scaled.
 Result setFluidPressureSolver(const std::string& domain_id_or_name, const int* iterations,
-                              const float* relative_residual);
+                              const float* relative_residual,
+                              const bool* grid_scaled = nullptr);
 // The grid's per-axis density knob (panel: Max Auto Resolution), gas or liquid.
 // No ceiling (at least 32). The resource budget, when enforced, may still
 // coarsen the grid, and a GPU grid stops at ~1080^3 cells (32-bit face

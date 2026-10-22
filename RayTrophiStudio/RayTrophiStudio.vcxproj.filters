@@ -1054,6 +1054,12 @@
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
     <None Include="source\shaders\volume_closesthit.rchit" />
+    <None Include="source\shaders\volume_phase_cache.glsl" />
+    <None Include="source\shaders\sphere_shadow_probe.glsl" />
+    <None Include="source\shaders\volume_solid_probe.glsl" />
+    <None Include="source\shaders\volume_nano_optical.glsl" />
+    <None Include="source\shaders\volume_rt_shadow_march.glsl" />
+    <None Include="source\shaders\volume_rt_empty_sample.glsl" />
     <None Include="source\shaders\volume_intersection.rint" />
     <None Include="cpp.hint" />
   </ItemGroup>
@@ -1535,6 +1541,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFluid.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSubstance.cpp">
@@ -2873,5 +2882,16 @@
     <ClCompile Include="source\src\Scene\AudioSourceRuntime.cpp" />
     <ClCompile Include="source\src\Scene\AudioMixerRuntime.cpp" />
     <ClCompile Include="source\src\UI\AudioMixerUI.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\VolumeMaterialService.h" />
+  </ItemGroup>
+  <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
   </ItemGroup>
 </Project>

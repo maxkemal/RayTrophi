@@ -164,6 +164,7 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
                      FluidDomainInfo& info) {
     info.settle_on_seed = d.fluid_seed_settle;
     info.pressure_iterations = d.fluid_params.pressure_iterations;
+    info.pressure_iterations_grid_scaled = d.fluid_params.pressure_iterations_grid_scaled;
     info.pressure_relative_residual = d.fluid_params.pressure_relative_residual;
     info.seed_mode = d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel
         ? "fill_level" : "box";
@@ -508,6 +509,8 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.thermal_grain_mean_kelvin = ts.grain_mean_kelvin;
     info.thermal_grain_max_kelvin = ts.grain_max_kelvin;
     info.thermal_grain_heat_to_liquid_j = ts.grain_heat_to_liquid_j;
+    info.thermal_in_cell_mixed_cells = static_cast<uint64_t>(ts.in_cell_mixed_cells);
+    info.thermal_in_cell_heat_j = ts.in_cell_heat_j;
     info.thermal_grain_heat_to_gas_j = ts.grain_heat_to_gas_j;
     info.thermal_grain_heat_to_walls_j = ts.grain_heat_to_walls_j;
     info.thermal_grain_energy_residual_j = ts.grain_energy_residual_j;
@@ -1416,7 +1419,7 @@ Result setFluidMaxParticles(const std::string& domain_id_or_name, uint64_t max_p
 }
 
 Result setFluidPressureSolver(const std::string& domain_id_or_name, const int* iterations,
-                              const float* relative_residual) {
+                              const float* relative_residual, const bool* grid_scaled) {
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (iterations && *iterations < 1) return Result::fail("pressure_iterations must be >= 1");
     if (relative_residual && !(*relative_residual > 0.0f))
@@ -1428,6 +1431,7 @@ Result setFluidPressureSolver(const std::string& domain_id_or_name, const int* i
     // of time is the user's.
     if (iterations) domain->fluid_params.pressure_iterations = *iterations;
     if (relative_residual) domain->fluid_params.pressure_relative_residual = *relative_residual;
+    if (grid_scaled) domain->fluid_params.pressure_iterations_grid_scaled = *grid_scaled;
     invalidateScriptSimulation();
     return Result::success();
 }
@@ -1461,43 +1465,7 @@ bool whitewaterSimulationDiffers(const RayTrophiSim::Fluid::FoamParams& a,
 }
 } // namespace
 
-Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDigest& out) {
-    Result error;
-    auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
-    if (!domain) return error;
-    out = FluidStateDigest{};
-    const auto* state = liveStateFor(*domain);
-    if (!state) return Result::success();
-    auto fnv = [](uint64_t h, const Vec3& v) {
-        const float f[3] = { v.x, v.y, v.z };
-        const unsigned char* b = reinterpret_cast<const unsigned char*>(f);
-        for (std::size_t i = 0; i < sizeof(f); ++i) { h ^= b[i]; h *= 1099511628211ull; }
-        return h;
-    };
-    const auto& ps = state->particles;
-    out.live = true;
-    out.particles = ps.position.size();
-    out.position_hash = out.velocity_hash = 1469598103934665603ull;
-    double cx = 0.0, cy = 0.0, cz = 0.0, speed = 0.0;
-    for (std::size_t i = 0; i < ps.position.size(); ++i) {
-        out.position_hash = fnv(out.position_hash, ps.position[i]);
-        cx += ps.position[i].x; cy += ps.position[i].y; cz += ps.position[i].z;
-        if (i < ps.velocity.size()) {
-            out.velocity_hash = fnv(out.velocity_hash, ps.velocity[i]);
-            speed += ps.velocity[i].length();
-        }
-    }
-    if (out.particles > 0) {
-        const double n = static_cast<double>(out.particles);
-        out.centroid[0] = cx / n; out.centroid[1] = cy / n; out.centroid[2] = cz / n;
-        out.mean_speed = speed / n;
-    }
-    out.whitewater_particles = state->foam.size();
-    out.whitewater_position_hash = 1469598103934665603ull;
-    for (const auto& p : state->foam.position)
-        out.whitewater_position_hash = fnv(out.whitewater_position_hash, p);
-    return Result::success();
-}
+// getFluidStateDigest lives in RtApiFluidParticles.cpp.
 
 Result getFluidWhitewater(const std::string& domain_id_or_name,
                           RayTrophiSim::Fluid::FoamParams& params,
@@ -3269,13 +3237,38 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     out.fluid_temperature_kelvin = source.fluid_temperature_kelvin;
     // The emitter's own rule (MatterDomainSources.inl), not a re-derivation.
     out.fluid_birth_kelvin = source.fluid_temperature_kelvin;
-    if (g_ctx && !source.fluid_temperature_override && source.domain_index >= 0 &&
-        source.domain_index < static_cast<int>(domains.size())) {
-        const auto& domain = domains[static_cast<std::size_t>(source.domain_index)];
+    const bool in_domain = source.domain_index >= 0 &&
+        source.domain_index < static_cast<int>(domains.size());
+    const auto* birth_domain = in_domain ? &domains[static_cast<std::size_t>(source.domain_index)]
+                                         : nullptr;
+    // The same routing as MatterDomainSources.inl: a domain with a gas phase
+    // turns a non-liquid source into density, not particles.
+    const bool pours_particles = birth_domain &&
+        RayTrophiSim::simulationDomainHasLiquid(birth_domain->type) &&
+        (!RayTrophiSim::simulationDomainHasGas(birth_domain->type) ||
+         source.phase == RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid);
+    if (!pours_particles) {
+        out.fluid_birth_kelvin = 0.0f;
+    }
+    if (g_ctx && pours_particles && !source.fluid_temperature_override) {
+        const auto& domain = *birth_domain;
         const auto& world = g_ctx->scene.ensureParticleSimulationSystem().worldThermal();
+        const uint32_t tag = RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
+        bool lowered = false;
         out.fluid_birth_kelvin = RayTrophiSim::Fluid::substanceAmbientBirthKelvin(
-            RayTrophiSim::Fluid::substanceTag(source.fluid_substance), domain.fluid_params,
-            RayTrophiSim::fluidDomainAmbientKelvin(domain, world), &out.fluid_born_solid);
+            tag, domain.fluid_params, RayTrophiSim::fluidDomainAmbientKelvin(domain, world),
+            &lowered);
+        if (lowered) {
+            out.fluid_birth_lowered = RayTrophiSim::Fluid::substanceHasSolidSkeleton(
+                RayTrophiSim::Fluid::particleSubstance(tag, domain.fluid_params))
+                ? "solid_under_melt" : "liquid_at_boiling";
+        }
+    }
+    if (pours_particles) {
+        out.fluid_birth_model = RayTrophiSim::Fluid::matterConstitutiveModelName(
+            RayTrophiSim::Fluid::substanceBirthModel(
+                RayTrophiSim::Fluid::substanceTag(source.fluid_substance),
+                birth_domain->fluid_params, out.fluid_birth_kelvin));
     }
     out.grain_birth_saturation = source.grain_birth_saturation;
     out.use_time_limit = source.use_time_limit;

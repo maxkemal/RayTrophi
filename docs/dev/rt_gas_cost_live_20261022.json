@@ -1,0 +1,851 @@
+{
+  "frame": 101,
+  "original_material": {
+    "absorption_coefficient": 1.4600000381469727,
+    "absorption_color": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "adaptive_stepping": true,
+    "anisotropy": 0.20600000023841858,
+    "back_anisotropy": -0.30000001192092896,
+    "blackbody_intensity": 38.194000244140625,
+    "color_ramp": [
+      [
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.20000000298023224,
+        0.10000000149011612,
+        0.0,
+        0.0,
+        0.30000001192092896
+      ],
+      [
+        0.4000000059604645,
+        0.800000011920929,
+        0.20000000298023224,
+        0.0,
+        0.699999988079071
+      ],
+      [
+        0.699999988079071,
+        1.0,
+        0.6000000238418579,
+        0.10000000149011612,
+        0.8999999761581421
+      ],
+      [
+        1.0,
+        1.0,
+        1.0,
+        0.800000011920929,
+        1.0
+      ]
+    ],
+    "density_curve": {
+      "enabled": true,
+      "values": [
+        0.0,
+        0.3983517289161682,
+        0.5679944753646851,
+        0.7287086844444275,
+        0.7912086248397827,
+        0.8626371622085571,
+        0.9251371622085571,
+        1.0
+      ]
+    },
+    "density_cutoff": 0.009999999776482582,
+    "density_multiplier": 11.111000061035156,
+    "density_power": 1.0,
+    "density_remap_high": 1.0,
+    "density_remap_low": 0.0,
+    "emission_color": [
+      1.0,
+      0.5,
+      0.10000000149011612
+    ],
+    "emission_exposure_ev": 0.0,
+    "emission_mode": 2,
+    "emission_saturation": 1.0,
+    "emission_strength": 0.0,
+    "exact_scatter_events": 4,
+    "internal_light_steps": 0,
+    "internal_light_stride": 8,
+    "lobe_mix": 0.699999988079071,
+    "max_scatter_events": 32,
+    "max_steps": 256,
+    "multi_scatter": 0.30000001192092896,
+    "ramp_enabled": false,
+    "random_walk": false,
+    "response_enabled": false,
+    "scatter_coefficient": 0.0,
+    "scatter_color": [
+      0.8999999761581421,
+      0.8999999761581421,
+      0.9200000166893005
+    ],
+    "shadow_steps": 8,
+    "shadow_strength": 0.800000011920929,
+    "shadow_stride": 4,
+    "temperature_max": 4150.0,
+    "temperature_min": 0.0,
+    "temperature_power": 1.0,
+    "temperature_scale": 0.31299999356269836,
+    "voxel_step_multiplier": 0.5
+  },
+  "rows": [
+    {
+      "case": "scatter0",
+      "settings_patch": {},
+      "timings": [
+        {
+          "synchronized_wall_ms": 29827.721499998006,
+          "samples": 8,
+          "wall_ms_per_sample": 3728.4651874997508,
+          "submission_ms_per_sample": 3684.603515625
+        },
+        {
+          "synchronized_wall_ms": 30015.110100008314,
+          "samples": 8,
+          "wall_ms_per_sample": 3751.8887625010393,
+          "submission_ms_per_sample": 3706.04345703125
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 1692.4071044921875,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674480,
+        "charged_other": 0,
+        "charged_specular": 61215,
+        "charged_transmission": 0,
+        "completed_intervals": 982500,
+        "density_samples": 34519450,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987375
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 972950911,
+        "enabled": true,
+        "extinction_terminations": 4836,
+        "free_passes": 1665897,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 7118311,
+        "majorant_queries": 7118311,
+        "majorant_segments_skipped": 9882623,
+        "medium_passes": 85249,
+        "paths_bounce_capped": 47066,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 0,
+        "solid_probe_hits": 691096,
+        "solid_probe_runs": 1678471,
+        "step_budget_exhausted": 39,
+        "teleports": 987375,
+        "temporal_accepted": 32181,
+        "temporal_rejected": 328,
+        "topology_segments_skipped": 963068288,
+        "volume_rays": 987375,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.9608304848715,
+      "shadow_per_volume_ray": 0.0,
+      "optical_skips_per_volume_ray": 10.008986453981517
+    },
+    {
+      "case": "scatter1",
+      "settings_patch": {
+        "scatter_coefficient": 1
+      },
+      "timings": [
+        {
+          "synchronized_wall_ms": 30531.692100004875,
+          "samples": 8,
+          "wall_ms_per_sample": 3816.4615125006094,
+          "submission_ms_per_sample": 3758.57177734375
+        },
+        {
+          "synchronized_wall_ms": 30409.276199992746,
+          "samples": 8,
+          "wall_ms_per_sample": 3801.1595249990933,
+          "submission_ms_per_sample": 3766.93212890625
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 1712.266357421875,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674228,
+        "charged_other": 0,
+        "charged_specular": 61198,
+        "charged_transmission": 0,
+        "completed_intervals": 977034,
+        "density_samples": 34328484,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987340
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 969489191,
+        "enabled": true,
+        "extinction_terminations": 10268,
+        "free_passes": 1660173,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 9307081,
+        "majorant_queries": 9307081,
+        "majorant_segments_skipped": 9850282,
+        "medium_passes": 90376,
+        "paths_bounce_capped": 47051,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 5298181,
+        "solid_probe_hits": 691014,
+        "solid_probe_runs": 1678354,
+        "step_budget_exhausted": 38,
+        "teleports": 987340,
+        "temporal_accepted": 37639,
+        "temporal_rejected": 416,
+        "topology_segments_skipped": 959638909,
+        "volume_rays": 987340,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.768655174509284,
+      "shadow_per_volume_ray": 5.366116028926206,
+      "optical_skips_per_volume_ray": 9.97658557335872
+    },
+    {
+      "case": "scatter0001",
+      "settings_patch": {
+        "scatter_coefficient": 0.001
+      },
+      "timings": [
+        {
+          "synchronized_wall_ms": 30522.606800004723,
+          "samples": 8,
+          "wall_ms_per_sample": 3815.3258500005904,
+          "submission_ms_per_sample": 3750.7490234375
+        },
+        {
+          "synchronized_wall_ms": 30534.766099997796,
+          "samples": 8,
+          "wall_ms_per_sample": 3816.8457624997245,
+          "submission_ms_per_sample": 3758.10009765625
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 1744.076904296875,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674480,
+        "charged_other": 0,
+        "charged_specular": 61215,
+        "charged_transmission": 0,
+        "completed_intervals": 982496,
+        "density_samples": 34519264,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987375
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 972950792,
+        "enabled": true,
+        "extinction_terminations": 4840,
+        "free_passes": 1665892,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 8856366,
+        "majorant_queries": 8856366,
+        "majorant_segments_skipped": 9882554,
+        "medium_passes": 85257,
+        "paths_bounce_capped": 47066,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 4137004,
+        "solid_probe_hits": 691096,
+        "solid_probe_runs": 1678471,
+        "step_budget_exhausted": 39,
+        "teleports": 987375,
+        "temporal_accepted": 32186,
+        "temporal_rejected": 328,
+        "topology_segments_skipped": 963068238,
+        "volume_rays": 987375,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.96064210659577,
+      "shadow_per_volume_ray": 4.189901506519813,
+      "optical_skips_per_volume_ray": 10.00891657171794
+    },
+    {
+      "case": "scatter1_no_shadow",
+      "settings_patch": {
+        "scatter_coefficient": 1,
+        "shadow_steps": 0
+      },
+      "timings": [
+        {
+          "synchronized_wall_ms": 12607.224300008966,
+          "samples": 8,
+          "wall_ms_per_sample": 1575.9030375011207,
+          "submission_ms_per_sample": 1494.506103515625
+        },
+        {
+          "synchronized_wall_ms": 12294.724499995937,
+          "samples": 8,
+          "wall_ms_per_sample": 1536.840562499492,
+          "submission_ms_per_sample": 1464.18408203125
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 771.7058715820312,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674228,
+        "charged_other": 0,
+        "charged_specular": 61198,
+        "charged_transmission": 0,
+        "completed_intervals": 977034,
+        "density_samples": 34328484,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987340
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 969489191,
+        "enabled": true,
+        "extinction_terminations": 10268,
+        "free_passes": 1660173,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 7020152,
+        "majorant_queries": 7020152,
+        "majorant_segments_skipped": 9850282,
+        "medium_passes": 90376,
+        "paths_bounce_capped": 47051,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 0,
+        "solid_probe_hits": 691014,
+        "solid_probe_runs": 1678354,
+        "step_budget_exhausted": 38,
+        "teleports": 987340,
+        "temporal_accepted": 37639,
+        "temporal_rejected": 416,
+        "topology_segments_skipped": 959638909,
+        "volume_rays": 987340,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.768655174509284,
+      "shadow_per_volume_ray": 0.0,
+      "optical_skips_per_volume_ray": 9.97658557335872
+    },
+    {
+      "case": "scatter1_stride16",
+      "settings_patch": {
+        "scatter_coefficient": 1,
+        "shadow_stride": 16
+      },
+      "timings": [
+        {
+          "synchronized_wall_ms": 31131.994399998803,
+          "samples": 8,
+          "wall_ms_per_sample": 3891.4992999998503,
+          "submission_ms_per_sample": 3830.022216796875
+        },
+        {
+          "synchronized_wall_ms": 31042.30539999844,
+          "samples": 8,
+          "wall_ms_per_sample": 3880.288174999805,
+          "submission_ms_per_sample": 3818.666259765625
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 1727.7894287109375,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674228,
+        "charged_other": 0,
+        "charged_specular": 61198,
+        "charged_transmission": 0,
+        "completed_intervals": 977034,
+        "density_samples": 34328484,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987340
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 969489191,
+        "enabled": true,
+        "extinction_terminations": 10268,
+        "free_passes": 1660173,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 7984749,
+        "majorant_queries": 7984749,
+        "majorant_segments_skipped": 9850282,
+        "medium_passes": 90376,
+        "paths_bounce_capped": 47051,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 2311551,
+        "solid_probe_hits": 691014,
+        "solid_probe_runs": 1678354,
+        "step_budget_exhausted": 38,
+        "teleports": 987340,
+        "temporal_accepted": 37639,
+        "temporal_rejected": 416,
+        "topology_segments_skipped": 959638909,
+        "volume_rays": 987340,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.768655174509284,
+      "shadow_per_volume_ray": 2.3411904713675127,
+      "optical_skips_per_volume_ray": 9.97658557335872
+    },
+    {
+      "case": "scatter1_density0",
+      "settings_patch": {
+        "scatter_coefficient": 1,
+        "density_multiplier": 0
+      },
+      "timings": [
+        {
+          "synchronized_wall_ms": 7409.819499996956,
+          "samples": 8,
+          "wall_ms_per_sample": 926.2274374996196,
+          "submission_ms_per_sample": 879.595703125
+        },
+        {
+          "synchronized_wall_ms": 7474.918300009449,
+          "samples": 8,
+          "wall_ms_per_sample": 934.3647875011811,
+          "submission_ms_per_sample": 873.521728515625
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 415.7007141113281,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674977,
+        "charged_other": 0,
+        "charged_specular": 61255,
+        "charged_transmission": 0,
+        "completed_intervals": 987390,
+        "density_samples": 34554781,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987430
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 973929102,
+        "enabled": true,
+        "extinction_terminations": 0,
+        "free_passes": 1674786,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 7137830,
+        "majorant_queries": 7137830,
+        "majorant_segments_skipped": 9889886,
+        "medium_passes": 0,
+        "paths_bounce_capped": 47186,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 0,
+        "solid_probe_hits": 691251,
+        "solid_probe_runs": 1678681,
+        "step_budget_exhausted": 40,
+        "teleports": 987430,
+        "temporal_accepted": 0,
+        "temporal_rejected": 0,
+        "topology_segments_skipped": 964039216,
+        "volume_rays": 987430,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.99466392554409,
+      "shadow_per_volume_ray": 0.0,
+      "optical_skips_per_volume_ray": 10.01578441003413
+    },
+    {
+      "case": "scatter0_repeat",
+      "settings_patch": {},
+      "timings": [
+        {
+          "synchronized_wall_ms": 30885.999200007063,
+          "samples": 8,
+          "wall_ms_per_sample": 3860.749900000883,
+          "submission_ms_per_sample": 3818.975830078125
+        },
+        {
+          "synchronized_wall_ms": 30814.800599997398,
+          "samples": 8,
+          "wall_ms_per_sample": 3851.8500749996747,
+          "submission_ms_per_sample": 3801.749267578125
+        }
+      ],
+      "instrumented_samples_requested": 4,
+      "instrumented_render": {
+        "converged": false,
+        "ms_per_frame": 1743.423583984375,
+        "samples_rendered": 4
+      },
+      "stats": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 674480,
+        "charged_other": 0,
+        "charged_specular": 61215,
+        "charged_transmission": 0,
+        "completed_intervals": 982500,
+        "density_samples": 34519450,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 3175200,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 987375
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 972950911,
+        "enabled": true,
+        "extinction_terminations": 4836,
+        "free_passes": 1665897,
+        "gas_handoffs": 0,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 7118311,
+        "majorant_queries": 7118311,
+        "majorant_segments_skipped": 9882623,
+        "medium_passes": 85249,
+        "paths_bounce_capped": 47066,
+        "paths_pass_capped": 0,
+        "paths_traced": 3175200,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 0,
+        "solid_probe_hits": 691096,
+        "solid_probe_runs": 1678471,
+        "step_budget_exhausted": 39,
+        "teleports": 987375,
+        "temporal_accepted": 32181,
+        "temporal_rejected": 328,
+        "topology_segments_skipped": 963068288,
+        "volume_rays": 987375,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_volume_ray": 34.9608304848715,
+      "shadow_per_volume_ray": 0.0,
+      "optical_skips_per_volume_ray": 10.008986453981517
+    }
+  ],
+  "timing_note": "INVALID AS RT TIMING: viewport.render_frames invokes Renderer::render_progressive_pass, the CPU reference path. Keep only normalized Vulkan counter evidence; those counters were collected by the natural display loop and are not attributable to exactly the requested four CPU passes.",
+  "material_restored": true,
+  "counter_enabled_restored": true,
+  "final_frame": 101,
+  "timings_valid_for_rt": false
+}

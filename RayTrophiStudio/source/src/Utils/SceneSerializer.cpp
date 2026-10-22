@@ -363,6 +363,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["cfl"] = d.fluid_params.cfl;
     j["fluid_params"]["max_substeps"] = d.fluid_params.max_substeps;
     j["fluid_params"]["pressure_iterations"] = d.fluid_params.pressure_iterations;
+    j["fluid_params"]["pressure_iterations_grid_scaled"] = d.fluid_params.pressure_iterations_grid_scaled;
     j["fluid_params"]["pressure_relative_residual"] = d.fluid_params.pressure_relative_residual;
     j["fluid_params"]["pressure_multigrid_preconditioner"] = d.fluid_params.pressure_multigrid_preconditioner;
     j["fluid_params"]["apic_blend"] = d.fluid_params.apic_blend;
@@ -564,6 +565,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (fp.contains("cfl")) d.fluid_params.cfl = fp["cfl"];
         if (fp.contains("max_substeps")) d.fluid_params.max_substeps = fp["max_substeps"];
         if (fp.contains("pressure_iterations")) d.fluid_params.pressure_iterations = fp["pressure_iterations"];
+        if (fp.contains("pressure_iterations_grid_scaled")) d.fluid_params.pressure_iterations_grid_scaled = fp["pressure_iterations_grid_scaled"];
         if (fp.contains("pressure_relative_residual")) d.fluid_params.pressure_relative_residual = fp["pressure_relative_residual"];
         if (fp.contains("pressure_multigrid_preconditioner")) d.fluid_params.pressure_multigrid_preconditioner = fp["pressure_multigrid_preconditioner"];
         if (fp.contains("apic_blend")) d.fluid_params.apic_blend = fp["apic_blend"];

@@ -1,6 +1,7 @@
 #include "RtLensWeatherBindings.h"
 #include "RtObjectSubstanceBindings.h"
 #include "RtPostBindings.h"
+#include "RtVolumeMaterialBindings.h"
 #include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
 #include "RtMatterModels.h"
@@ -376,7 +377,8 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"fluid_temperature_override", s.fluid_temperature_override},
         {"fluid_temperature_kelvin", s.fluid_temperature_kelvin},
         {"fluid_birth_kelvin", s.fluid_birth_kelvin},
-        {"fluid_born_solid", s.fluid_born_solid},
+        {"fluid_birth_model", s.fluid_birth_model},
+        {"fluid_birth_lowered", s.fluid_birth_lowered},
         {"grain_birth_saturation", s.grain_birth_saturation},
         {"use_time_limit", s.use_time_limit},
         {"start_time", s.start_time}, {"end_time", s.end_time},
@@ -826,6 +828,7 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
                 {"live_motion_p95_m", info.live_motion_p95_m},
                 {"live_motion_max_m", info.live_motion_max_m},
                 {"pressure_iterations", info.pressure_iterations},
+                {"pressure_iterations_grid_scaled", info.pressure_iterations_grid_scaled},
                 {"pressure_relative_residual", info.pressure_relative_residual},
                 {"pressure_cg_iterations", info.pressure_cg_iterations},
                 {"pressure_cg_max_iterations", info.pressure_cg_max_iterations},
@@ -852,6 +855,8 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
                 {"thermal_grain_mean_kelvin", info.thermal_grain_mean_kelvin},
                 {"thermal_grain_max_kelvin", info.thermal_grain_max_kelvin},
                 {"thermal_grain_heat_to_liquid_j", info.thermal_grain_heat_to_liquid_j},
+                {"thermal_in_cell_mixed_cells", info.thermal_in_cell_mixed_cells},
+                {"thermal_in_cell_heat_j", info.thermal_in_cell_heat_j},
                 {"thermal_grain_heat_to_gas_j", info.thermal_grain_heat_to_gas_j},
                 {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
                 {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
@@ -959,6 +964,10 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json volume_material_result;
+    if (dispatchVolumeMaterialIpc(method, params,
+            [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+            volume_material_result)) return volume_material_result;
     json object_substance_result;
     if (dispatchObjectSubstanceIpc(method, params,
         [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
@@ -3240,6 +3249,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"live_motion_p95_m", info.live_motion_p95_m},
                         {"live_motion_max_m", info.live_motion_max_m},
                         {"pressure_iterations", info.pressure_iterations},
+                        {"pressure_iterations_grid_scaled", info.pressure_iterations_grid_scaled},
                         {"pressure_relative_residual", info.pressure_relative_residual},
                         {"pressure_cg_iterations", info.pressure_cg_iterations},
                         {"pressure_cg_max_iterations", info.pressure_cg_max_iterations},
@@ -3266,6 +3276,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"thermal_grain_mean_kelvin", info.thermal_grain_mean_kelvin},
                         {"thermal_grain_max_kelvin", info.thermal_grain_max_kelvin},
                         {"thermal_grain_heat_to_liquid_j", info.thermal_grain_heat_to_liquid_j},
+                        {"thermal_in_cell_mixed_cells", info.thermal_in_cell_mixed_cells},
+                        {"thermal_in_cell_heat_j", info.thermal_in_cell_heat_j},
                         {"thermal_grain_heat_to_gas_j", info.thermal_grain_heat_to_gas_j},
                         {"thermal_grain_heat_to_walls_j", info.thermal_grain_heat_to_walls_j},
                         {"thermal_grain_energy_residual_j", info.thermal_grain_energy_residual_j},
@@ -3614,13 +3626,17 @@ json dispatchMethod(const std::string& method, const json& params) {
                 if (!tr.ok) return tr;
             }
             if (params.contains("pressure_iterations") ||
-                params.contains("pressure_relative_residual")) {
+                params.contains("pressure_relative_residual") ||
+                params.contains("pressure_iterations_grid_scaled")) {
                 const bool has_iter = params.contains("pressure_iterations");
                 const bool has_res = params.contains("pressure_relative_residual");
+                const bool has_scaled = params.contains("pressure_iterations_grid_scaled");
                 const int iter = optionalInt(params, "pressure_iterations", 24);
                 const float res = optionalFloat(params, "pressure_relative_residual", 1.0e-5f);
+                const bool scaled = optionalBool(params, "pressure_iterations_grid_scaled", true);
                 rtapi::Result pr = rtapi::setFluidPressureSolver(domain,
-                    has_iter ? &iter : nullptr, has_res ? &res : nullptr);
+                    has_iter ? &iter : nullptr, has_res ? &res : nullptr,
+                    has_scaled ? &scaled : nullptr);
                 if (!pr.ok) return pr;
             }
             if (params.contains("max_particles")) {
@@ -3985,6 +4001,68 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"mean_speed", dg.mean_speed},
                 {"whitewater_particles", dg.whitewater_particles},
                 {"whitewater_position_hash", hex(dg.whitewater_position_hash)}};
+        });
+    }
+    if (method == "fluid.particle_extremes") {
+        std::string domain = requireString(params, "domain");
+        const int count = params.contains("count") ? requireInt(params, "count") : 8;
+        if (count < 1 || count > 64) throw std::runtime_error("count must be 1..64");
+        return enqueueQuery([domain, count](UIContext&) {
+            rtapi::FluidParticleExtremes ex;
+            auto r = rtapi::getFluidParticleExtremes(domain, static_cast<uint32_t>(count), ex);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            auto rows = [](const std::vector<rtapi::FluidParticleProbe>& list) {
+                nlohmann::json out = nlohmann::json::array();
+                for (const auto& p : list) {
+                    out.push_back({
+                        {"index", p.index}, {"particle_id", p.particle_id},
+                        {"substance", p.substance}, {"substance_tag", p.substance_tag},
+                        {"model", p.model}, {"granular_transport", p.granular_transport},
+                        {"kelvin", p.kelvin}, {"mass_fraction", p.mass_fraction},
+                        {"rest_mass_kg", p.rest_mass_kg},
+                        {"fusion_solid_fraction", p.fusion_solid_fraction},
+                        {"pore_water_kg", p.pore_water_kg}, {"frozen", p.frozen},
+                        {"position", nlohmann::json::array({p.position[0], p.position[1], p.position[2]})},
+                        {"velocity", nlohmann::json::array({p.velocity[0], p.velocity[1], p.velocity[2]})}});
+                }
+                return out;
+            };
+            return nlohmann::json{
+                {"ok", true}, {"live", ex.live}, {"particles", ex.particles},
+                {"measured", ex.measured},
+                {"hottest", rows(ex.hottest)}, {"coldest", rows(ex.coldest)}};
+        });
+    }
+    if (method == "fluid.gas_cell_extremes") {
+        std::string domain = requireString(params, "domain");
+        const int count = params.contains("count") ? requireInt(params, "count") : 8;
+        if (count < 1 || count > 64) throw std::runtime_error("count must be 1..64");
+        return enqueueQuery([domain, count](UIContext&) {
+            rtapi::FluidGasCellExtremes ex;
+            auto r = rtapi::getFluidGasCellExtremes(domain, static_cast<uint32_t>(count), ex);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            auto rows = [](const std::vector<rtapi::FluidGasCellProbe>& list) {
+                nlohmann::json out = nlohmann::json::array();
+                for (const auto& p : list) {
+                    out.push_back({
+                        {"cell", p.cell},
+                        {"ijk", nlohmann::json::array({p.ijk[0], p.ijk[1], p.ijk[2]})},
+                        {"center", nlohmann::json::array({p.center[0], p.center[1], p.center[2]})},
+                        {"virtual_kelvin", p.virtual_kelvin}, {"air_kelvin", p.air_kelvin},
+                        {"vapour_kg", p.vapour_kg}, {"vapour_kg_m3", p.vapour_kg_m3},
+                        {"pure_vapour_kg_m3", p.pure_vapour_kg_m3},
+                        {"condensate_kg", p.condensate_kg}, {"rain_kg", p.rain_kg},
+                        {"rain_kelvin", p.rain_kelvin}, {"foreign_kg", p.foreign_kg},
+                        {"energy_j", p.energy_j}, {"solid", p.solid}});
+                }
+                return out;
+            };
+            return nlohmann::json{
+                {"ok", true}, {"live", ex.live}, {"inventory", ex.inventory},
+                {"condensable_substance", ex.condensable_substance},
+                {"cells", ex.cells}, {"voxel_m", ex.voxel_m},
+                {"max_vapour_over_pure", ex.max_vapour_over_pure},
+                {"hottest", rows(ex.hottest)}, {"most_vapour", rows(ex.most_vapour)}};
         });
     }
     if (method == "fluid.get_whitewater") {

@@ -1200,33 +1200,40 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         float div_val = -scale_div *
             ((Uxh - Uxl) + (Uyh - Uyl) + (Uzh - Uzl));
 
-        // Density relaxation (2026-10-19). An over-packed cell gets a
-        // divergence source (1/s; positive raises pressure and expels) that
-        // removes its excess over density_relaxation_s seconds. The density
-        // is the cell's parcel count averaged with its fluid 6-neighbours,
-        // and only the part above one standard error of that mean counts.
-        // ★ The old term read excess/target directly as a velocity jump in
-        // m/s, independent of h and dt, from the raw integer count: a RESTING
-        // tank's count noise (~sqrt(ppc)) pumped ~0.05 m/s into still water
-        // (2026-10-19 probe). Same formula in sim_fluid_cg_residual_init,
-        // sim_sparse_pressure and the CUDA residual kernel.
+        // Density relaxation. A cell's mean parcel count is pulled to
+        // particles_per_cell through a divergence source (1/s; positive raises
+        // pressure and expels) over density_relaxation_s seconds.
+        // ★ The 2026-10-19 term read excess/target as a velocity jump in m/s
+        // from the raw count: a RESTING tank's count noise pumped ~0.05 m/s.
+        // ★ Its successor was one-sided with a one-standard-error dead band:
+        // a resting column sank to the band's edge at 8 parcels/cell (-5 % in
+        // 600 frames, still falling; impacts flattened into a floor layer) and
+        // rectified noise into a 10 % swell at 27 (2026-10-20 D0 probe).
+        // Now two-sided with no band: the 27-cell mean keeps the noise small,
+        // and the under-filled side acts only where all six faces open onto
+        // liquid, so the free surface and wall layers are never sucked in.
+        // Same formula in sim_fluid_density_relaxation.glsl and the CUDA kernel.
         if (params.density_relaxation_s > 0.0f) {
             const float target = static_cast<float>(std::max(1, params.particles_per_cell));
-            float sum = static_cast<float>(proj_cell_count[grid.cellIndex(i, j, k)]);
-            float n = 1.0f;
-            const auto neighbour = [&](int a, int b, int c) {
-                if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz) return;
-                const size_t q = grid.cellIndex(a, b, c);
-                if (cell[q] != CELL_FLUID) return;
-                sum += static_cast<float>(proj_cell_count[q]);
-                n += 1.0f;
+            const auto fluid_at = [&](int a, int b, int c) {
+                return a >= 0 && b >= 0 && c >= 0 && a < nx && b < ny && c < nz &&
+                    cell[grid.cellIndex(a, b, c)] == CELL_FLUID;
             };
-            neighbour(i - 1, j, k); neighbour(i + 1, j, k);
-            neighbour(i, j - 1, k); neighbour(i, j + 1, k);
-            neighbour(i, j, k - 1); neighbour(i, j, k + 1);
-            const float mean = sum / n;
-            const float noise = std::sqrt(target / n);
-            const float excess = std::max(mean - target - noise, 0.0f) / target;
+            float sum = 0.0f, n = 0.0f;
+            for (int dz = -1; dz <= 1; ++dz)
+                for (int dy = -1; dy <= 1; ++dy)
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        if (!fluid_at(i + dx, j + dy, k + dz)) continue;
+                        sum += static_cast<float>(
+                            proj_cell_count[grid.cellIndex(i + dx, j + dy, k + dz)]);
+                        n += 1.0f;
+                    }
+            const bool interior = fluid_at(i - 1, j, k) && fluid_at(i + 1, j, k) &&
+                fluid_at(i, j - 1, k) && fluid_at(i, j + 1, k) &&
+                fluid_at(i, j, k - 1) && fluid_at(i, j, k + 1);
+            float excess = n > 0.0f ? (sum / n - target) / target : 0.0f;
+            if (!interior) excess = std::max(excess, 0.0f);
+            excess = std::clamp(excess, -0.5f, 4.0f);
             div_val += excess / std::max(params.density_relaxation_s, dt);
         }
 
@@ -1245,7 +1252,7 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
     //   b[c]   = div[c] / pressure_scale         (already-scaled negative div)
     // After PCG: subtract dt*grad(p)/h from faces; identical to the old code.
     const float pressure_scale = dt / (h * h);
-    const int   max_iterations = std::max(1, params.pressure_iterations);
+    const int   max_iterations = effectivePressureIterationCap(params, nx, ny, nz);
 
     // Function-static scratch — per-call vector<float> allocation stalls on the
     // heap lock under contention; reuse across frames and grow as needed.

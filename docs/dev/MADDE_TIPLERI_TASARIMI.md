@@ -271,6 +271,45 @@ Eşitlik ölçütü: oran ≤ 1.10, sayılar %2 içinde, sıvı merkezi bir voks
 içinde, hız %10 içinde. İki faz da EQUAL. **Karar 1'in ölçüm kapısı
 kapandı; T6 (uzman Gas/Liquid domain tiplerinin sökümü) kullanıcı kararı.**
 
+## 6g. T6 eşlik denetimi — tipe bağlı dallar (2026-10-20, koddan)
+
+Kullanıcı kararı: T6 B seçeneği. Çekirdekte tek tip Matter kalacak; panelde ve
+IPC'de Gas/Liquid ön ayar olacak. Bu bölüm önce ne değişeceğini çıkarıyor.
+
+Envanter: `SimulationDomainType::Gas` 8, `::Fluid` 10, `::Matter` 51 doğrudan
+kullanım; `simulationDomainHasGas/HasLiquid` 107 çağrı. Bu 107 çağrı tek tipte
+her zaman true döner. Asıl iş, uzman yolun Matter'dan **farklı** davrandığı
+dallardır:
+
+| # | Yer | Uzman davranış | Matter davranışı | Göçte sonuç |
+|---|---|---|---|---|
+| E1 | `ParticleSimulation.cpp` `transferFluidPhasesToGas` | Sıvı domain'i örtüşen gaz domain'iyle bir kez takas eder | Sıvı **kendi** gaz şeridiyle de takas eder; döngü örtüşen her gaz şeridini gezer | ★ Sıvı+gaz iki domain'li sahnede yüzey ısısı/buharlaşma **iki** gaz ızgarasına gider (çift sayım). Yanma/sis ilk sıradaki şeride gider, ateşli domain'e değil. Sessizce makul görünür |
+| E2 | `MatterDomainSources.inl:30/92` | Fluid domain'de her kaynak parçacık doğurur; Gas domain'de her kaynak yoğunluk basar | Kaynağın `phase` alanı karar verir | Göçte kaynak fazı domain'in eski tipine göre yazılmalı. Yoksa `phase=Gas` kalmış bir sıvı kaynağı duman basar |
+| E3 | `scene_data.h:3314` | Gas: canlı yoğun GPU görünümü (sıfır kopya) | Gaz ikincil sis yuvasından, host yoğunluğu yüklenerek | Gaz ön ayarında görüntü maliyeti artar (her kare indirme + yükleme). T0 yalnız adımı ölçtü; bu ölçülmedi |
+| E4 | `RtApiFluid.cpp:1093/1160`, `RtVolumeMaterialBindings`, panel | Gas gölgelendiricisi `shader` | Matter gazı `fluid_fog_shader` | Göçte `shader` → `fluid_fog_shader` taşınmalı, yoksa duman varsayılan görünüme düşer |
+| E5 | `GranularVirtualScene.cpp:60` | Fluid + VirtualParticles + `granular_enabled` sanal tane mesh'i | Yok (Matter taneleri DEM'de) | Bu render yolu Matter'da ölü. Söküm adayı (kural 5) |
+| E6 | `SimCache.cpp:589`, `FluidCacheRestore.h` | Uzman yerleşim: birincil ızgara = tek faz | Birincil = gaz, ikincil = sıvı | Eski Fluid önbellekleri yanlış ızgaraya okunur. Gerekçeyle reddedilmeli |
+| E7 | `FluidDomainStep.inl:275` | Fluid sıvısı örtüşen gaz yoksa ortam filmiyle soğur | `air_through_gas = matter_domain`: hep kendi gaz ızgarası | Sıvı ön ayarında ısı ortam yerine boş gaz şeridine gider. Fiziksel olarak daha doğru, ama dinlenik sıvı termal testlerinin sayıları değişir |
+| E8 | `GasSaturation.cpp:410` | Gas domain'inde yağmur hedefi yok | Yağmur kendi sıvı şeridine iner | Gaz ön ayarı yağmur doğurabilir. Fiziksel; eski sahnede yeni davranış |
+| E9 | `MatterGrainStep.inl:587` | — | Gaz şeridi hareketliyse taneye sürükleme | Yalnız Matter'da var; göçte kayıp yok |
+| E10 | `ParticleSimulation.cpp:7021`, `FluidRenderProxy`, köpük tamponu | Tek hesap tamponu | İkincil tampon | Mekanik: tek tipte hep ikincil |
+
+**Sonuç:** basit söküm (tipi Matter'a çevirmek) E1, E2, E4 ve E6'yı bozar. E1 en
+sinsisi: hata vermez, sayılar yalnız biraz kayar. Gaz/sıvı "ön ayarı"nın bir
+anlam taşıması için domain'in **şerit anahtarları** olmalı:
+`gas_lane_enabled` ve `liquid_lane_enabled`. Kapalı şerit ızgara ayırmaz,
+adım atmaz ve takasa girmez. Bunun sonucunda:
+- `simulationDomainHasGas/HasLiquid` tipi değil anahtarları okur.
+- Ön ayar = anahtar + varsayılan değerler (gaz: duman gölgelendiricisi, ateş; sıvı:
+  Water, yüzey görünümü).
+- E1, E3 ve E7 kendiliğinden eski davranışa döner: kapalı gaz şeridi takasa
+  girmez, sıvı örtüşen domain'in gazına gider.
+
+Açık nokta: tek şeritli Matter'da birincil/ikincil ızgara düzeni.
+`liquidUsesSecondaryGrid` şu an tipe bakıyor; gaz şeridi kapalıyken sıvı
+ikincilde, birincil ızgara boş kalır. Birincil ızgaradan sınır/çözünürlük
+okuyan yerler (gizmo, önbellek, görüntü) bu durumda denetlenmeli.
+
 ## 7. Açık sorular
 
 - `gas_channel`: gaz şeridi tek "smoke" yoğunluğu mu, yoksa tür başına kanal mı? Buhar ile

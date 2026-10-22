@@ -271,7 +271,9 @@ def main():
 
             if args.wet_only:
                 # (1) Cohesion A/B without liquid: grains born half saturated,
-                # standing for .5 mm sand (Bond-number scale 2500): bridges
+                # standing for .5 mm sand (cohesion scale R/r = 50; the
+                # Bond-number scale 2500 this arm was written with retired
+                # 2026-10-21): bridges
                 # must hold the collapsed column together; dry it spreads.
                 arms = {}
                 for wet in (False, True):

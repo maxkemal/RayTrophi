@@ -967,7 +967,7 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
         }
         if (job.hasSphere) {
             groups.push_back(makeHitGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR,
-                                          chitStage, VK_SHADER_UNUSED_KHR, sphereIntStage));
+                                          chitStage, anyhitStage, sphereIntStage));
         }
         job.photonGroupIdx = VK_SHADER_UNUSED_KHR;
         if (job.hasPhoton) {

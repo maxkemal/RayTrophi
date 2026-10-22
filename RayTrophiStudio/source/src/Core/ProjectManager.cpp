@@ -751,6 +751,7 @@ static json domainVolumeShaderToJson(const VolumeShader& shader) {
     s["scattering"] = shader.scattering.toJson();
     s["absorption"] = shader.absorption.toJson();
     s["emission"] = shader.emission.toJson();
+    s["emission_response"] = shader.emission_response.toJson();
     s["quality"] = shader.quality.toJson();
     s["material_program"] = shader.material_program.toJson();
     s["material_graph"] = shader.material_graph;
@@ -769,6 +770,9 @@ static std::shared_ptr<VolumeShader> domainVolumeShaderFromJson(const json& js) 
     if (js.contains("scattering")) shader->scattering.fromJson(js["scattering"]);
     if (js.contains("absorption")) shader->absorption.fromJson(js["absorption"]);
     if (js.contains("emission")) shader->emission.fromJson(js["emission"]);
+    if (js.contains("emission_response")) {
+        shader->emission_response.fromJson(js["emission_response"]);
+    }
     if (js.contains("quality")) shader->quality.fromJson(js["quality"]);
     if (js.contains("material_program")) shader->material_program.fromJson(js["material_program"]);
     shader->material_graph = js.value("material_graph", std::string());
@@ -5202,6 +5206,7 @@ json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVo
              s["scattering"] = shader->scattering.toJson();
              s["absorption"] = shader->absorption.toJson();
              s["emission"] = shader->emission.toJson();
+             s["emission_response"] = shader->emission_response.toJson();
              s["quality"] = shader->quality.toJson();
              s["material_program"] = shader->material_program.toJson();
              s["material_graph"] = shader->material_graph;
@@ -5281,6 +5286,9 @@ void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) 
             if (j_shader.contains("scattering")) shader->scattering.fromJson(j_shader["scattering"]);
             if (j_shader.contains("absorption")) shader->absorption.fromJson(j_shader["absorption"]);
             if (j_shader.contains("emission")) shader->emission.fromJson(j_shader["emission"]);
+            if (j_shader.contains("emission_response")) {
+                shader->emission_response.fromJson(j_shader["emission_response"]);
+            }
             if (j_shader.contains("quality")) shader->quality.fromJson(j_shader["quality"]);
             if (j_shader.contains("material_program")) shader->material_program.fromJson(j_shader["material_program"]);
             shader->material_graph = j_shader.value("material_graph", std::string());
@@ -5881,6 +5889,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"cfl", domain.fluid_params.cfl},
             {"max_substeps", domain.fluid_params.max_substeps},
             {"pressure_iterations", domain.fluid_params.pressure_iterations},
+            {"pressure_iterations_grid_scaled", domain.fluid_params.pressure_iterations_grid_scaled},
             {"pressure_relative_residual", domain.fluid_params.pressure_relative_residual},
             {"pressure_multigrid_preconditioner", domain.fluid_params.pressure_multigrid_preconditioner},
             {"sor_omega", domain.fluid_params.sor_omega},
@@ -6455,6 +6464,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);
             domain.fluid_params.max_substeps = f.value("max_substeps", domain.fluid_params.max_substeps);
             domain.fluid_params.pressure_iterations = f.value("pressure_iterations", domain.fluid_params.pressure_iterations);
+            domain.fluid_params.pressure_iterations_grid_scaled = f.value("pressure_iterations_grid_scaled", domain.fluid_params.pressure_iterations_grid_scaled);
             domain.fluid_params.pressure_relative_residual = f.value("pressure_relative_residual", domain.fluid_params.pressure_relative_residual);
             domain.fluid_params.pressure_multigrid_preconditioner = f.value("pressure_multigrid_preconditioner", domain.fluid_params.pressure_multigrid_preconditioner);
             domain.fluid_params.sor_omega = f.value("sor_omega", domain.fluid_params.sor_omega);

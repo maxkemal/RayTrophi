@@ -1,0 +1,69 @@
+{
+  "sand": {
+    "hot": {
+      "thermal_fusion_absorbed_j": 1041487.9645071533,
+      "thermal_melted_this_frame": 493.0,
+      "thermal_in_cell_heat_j": 7492.9475896292815,
+      "thermal_grain_heat_to_liquid_j": 4946194.843191254,
+      "thermal_grain_energy_residual_j": -1.399019379511035e-09,
+      "thermal_evaporated_kg": 1.470549131573301,
+      "max_kelvin": 900.0,
+      "step_ms_median": 175.2615
+    },
+    "cold": {
+      "thermal_fusion_absorbed_j": 64420.967364996155,
+      "thermal_melted_this_frame": 3.0,
+      "thermal_in_cell_heat_j": 678.5306882049335,
+      "thermal_grain_heat_to_liquid_j": 123178.71815197043,
+      "thermal_grain_energy_residual_j": 3.4314355350228976e-10,
+      "thermal_evaporated_kg": 0.0,
+      "max_kelvin": 287.8941650390625,
+      "step_ms_median": 92.5802
+    }
+  },
+  "boil": {
+    "hot": {
+      "thermal_fusion_absorbed_j": 0.0,
+      "thermal_melted_this_frame": 0.0,
+      "thermal_in_cell_heat_j": 103613.87384509065,
+      "thermal_grain_heat_to_liquid_j": 6659941.249379305,
+      "thermal_grain_energy_residual_j": -3.2079753020664015e-09,
+      "thermal_evaporated_kg": 1.0806783260223227,
+      "max_kelvin": 900.0,
+      "step_ms_median": 26.1741
+    },
+    "cold": {
+      "thermal_fusion_absorbed_j": 0.0,
+      "thermal_melted_this_frame": 0.0,
+      "thermal_in_cell_heat_j": 15989.660479559703,
+      "thermal_grain_heat_to_liquid_j": 463884.3642725874,
+      "thermal_grain_energy_residual_j": 1.0815225104376935e-09,
+      "thermal_evaporated_kg": 0.0005014043809588078,
+      "max_kelvin": 340.0,
+      "step_ms_median": 25.6441
+    }
+  },
+  "mix": {
+    "thermal_fusion_absorbed_j": 47930.787656914974,
+    "thermal_melted_this_frame": 0.0,
+    "thermal_in_cell_heat_j": 137879.97572014833,
+    "thermal_grain_heat_to_liquid_j": 247203.59973513416,
+    "thermal_grain_energy_residual_j": -6.7026726131717035e-09,
+    "thermal_evaporated_kg": 0.0005764032597035359,
+    "max_kelvin": 293.0002746582031,
+    "step_ms_median": 335.1843
+  },
+  "verdicts": {
+    "sand_heats_snow_pool": true,
+    "hot_sand_melts_snow": true,
+    "hot_sand_beats_control": true,
+    "grain_ledger_closes": true,
+    "snow_never_above_hot_sand": true,
+    "hot_sand_boils_water": true,
+    "boil_beats_control": true,
+    "boil_ledger_closes": true,
+    "parcel_never_above_hot_sand": true,
+    "mix_parcel_never_above_sources": true,
+    "mix_ledger_closes": true
+  }
+}

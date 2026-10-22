@@ -83,7 +83,7 @@ struct ThermalLiquidStats {
     // false: no grains, or the pass did not run - the rows are then unmeasured.
     bool        grain_measured = false;
     std::size_t grain_count = 0;
-    std::size_t grain_wetted = 0;              // grains sharing a cell with liquid
+    std::size_t grain_wetted = 0;              // grains sharing a cell with liquid or MPM parcels
     float       grain_min_kelvin = 0.0f;
     float       grain_mean_kelvin = 0.0f;
     float       grain_max_kelvin = 0.0f;
@@ -94,6 +94,10 @@ struct ThermalLiquidStats {
     // Anything else means one side was written without the other.
     double      grain_energy_residual_j = 0.0;
     float       grain_thermal_ms = 0.0f;
+    // Parcels of one cell trading heat with each other (conductThermalLiquid,
+    // 2026-10-20): snow beside water in the same cell.
+    std::size_t in_cell_mixed_cells = 0;
+    double      in_cell_heat_j = 0.0;          // heat moved inside cells this step
     float       min_kelvin = 0.0f;
     float       mean_kelvin = 0.0f;
     float       max_kelvin = 0.0f;

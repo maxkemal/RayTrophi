@@ -1893,7 +1893,16 @@ bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
     if (!compute || !compute->supportsDispatch() || particle_count == 0 || dt <= 0.0f) {
         return false;
     }
-    if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers)) {
+    if (publish_velocity) {
+        if (!ensureGpuFluidParticleBuffers(state, compute, gpu_buffers)) {
+            return false;
+        }
+    } else if (!gpu_buffers.fluid_positions.valid() || !gpu_buffers.fluid_velocities.valid() ||
+               gpu_buffers.fluid_particle_capacity < particle_count) {
+        // Resident (shared Matter clock substep): the device streams ARE the
+        // state between substeps. Re-uploading the host copy here rewound every
+        // substep to the frame start, so MPM parcels sharing a domain with DEM
+        // grains never left their emitter (2026-10-20, Sand + Snow scene).
         return false;
     }
 

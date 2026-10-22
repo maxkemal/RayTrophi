@@ -1,4 +1,5 @@
 #include "PostProcess/PostService.h"
+#include "UI/VolumeMaterialUI.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - MAIN ENTRY POINT
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9085,6 +9086,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     
     bool changed = false;
     ImGui::PushID(shader.get());
+    changed |= drawPhysicalVolumeMaterialUI(*shader);
 
     // Homogeneous Volume Material Graph output.  This is the first vertical
     // slice of the graph runtime: enabled sockets override VolumeShader values
@@ -9442,7 +9444,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         // shader re-clamped the step to a per-viewport constant. A control that
         // sets dials the user can already see, some of them dead, reads as a
         // quality guarantee it cannot make. The defaults now carry that job.
-        UIWidgets::HelpMarker("Primary spacing follows source voxel size: 0.5 samples every other voxel, 1.0 one per voxel. Max Steps is a strict per-ray cost ceiling and is the dial that actually bounds cost — the realtime viewport applies its own ceiling on top (96/256/512 by viewport preset).");
+        UIWidgets::HelpMarker("Spacing = voxel size x this value: 0.5 requests two samples per voxel, 1.0 one per voxel. Max Steps stretches the spacing when that request exceeds the per-ray budget. RayFusion also caps the budget at 96/256/512 by viewport quality.");
 
         if (ImGui::SliderFloat("Voxels / Sample", &shader->quality.voxel_step_multiplier, 0.1f, 8.0f, "%.3f", ImGuiSliderFlags_Logarithmic)) {
             shader->quality.adaptive_stepping = true;

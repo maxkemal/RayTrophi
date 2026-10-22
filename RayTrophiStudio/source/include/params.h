@@ -9,6 +9,8 @@
 * =========================================================================
 */
 #pragma once
+// RayGenParams owns OptixTraversableHandle fields; do not rely on include order.
+#include <optix.h>
 #include <vector_types.h>
 #include <material_gpu.h>
 #include "World.h"
@@ -341,6 +343,10 @@ struct GpuVDBVolume {
     // Producer's dense_version. The backend re-uploads only when it changes:
     // the grid is megabytes and does not change on frames the sim did not step.
     uint64_t dense_host_version;
+    int internal_light_steps = 0;
+    int internal_light_stride = 8;
+    float emission_response[5] = {};
+    float density_curve[12] = {};
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -412,6 +418,10 @@ struct GpuGasVolume {
     float shadow_strength;
     float max_temperature; // For normalization
     float pad;
+    int internal_light_steps = 0;
+    int internal_light_stride = 8;
+    float emission_response[5] = {};
+    float density_curve[12] = {};
 };
 
 struct RayGenParams {

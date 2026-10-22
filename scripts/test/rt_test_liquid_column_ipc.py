@@ -8,8 +8,9 @@ solver's own report. Gates:
   * truncation_reported: a seed cut by a small Max Particles says so
     (seed_truncated, emitted < requested, top below the region top);
   * pressure_reported: the solve reports its cap and iterations used;
-  * level_holds_at_400: with 400 iterations the settled level is within 5%
-    of the level the particle count implies.
+  * default_cap_converges / level_holds_by_default (D1): with the cap
+    scaled to the grid the solve converges and the settled level stays within
+    3 % of the seed's own level.
 The per-cap numbers go to docs/dev/liquid_column_live.json; the decision
 (raise / scale the cap, multigrid) is read from them, not from a gate.
 """
@@ -58,26 +59,49 @@ def main():
         finally:
             call('fluid.remove_domain', domain=name)
 
-        for cap in (24, 100, 400):
-            name = 'T_Column_%d' % cap
+        # D1 (2026-10-20): 'auto' is the default since D1 - the authored 24
+        # with the cap scaled to the grid (4 x longest axis = 240 at 1 cm).
+        # The fixed runs turn the scaling off to measure the cap itself.
+        for key, cap, scaled in (('cap24', 24, False), ('cap400', 400, False),
+                                 ('auto', 24, True)):
+            name = 'T_Column_%s' % key
             domain(name, VOXEL, 4000000)
             try:
-                call('fluid.set_param', domain=name, pressure_iterations=cap)
+                call('fluid.set_param', domain=name, pressure_iterations=cap,
+                     pressure_iterations_grid_scaled=scaled)
                 call('timeline.set_frame', frame=0)
                 call('fluid.seed', domain=name, seed_min=[-.3, 0, -.3], seed_max=[.3, THICK, .3],
                      particles_per_cell=PPC, replace=True)
                 seeded = row(name)
+                # The seed's own level before any step: separates "the seed
+                # packs cells evenly and the column collapses" (user, 2026-10-20)
+                # from "the solve cannot hold the column".
+                seed_level = 2 * call('fluid.state_digest', domain=name)['centroid'][1]
+                # fluid.run: one IPC call per chunk (the per-step loop paid two
+                # frames of cadence per step at 1 cm).
+                early = []
+                for _ in range(6):
+                    call('fluid.run', steps=5, dt=DT, sample_every=0, domains=[name])
+                    early.append(2 * call('fluid.state_digest', domain=name)['centroid'][1])
+                call('fluid.run', steps=90, dt=DT, sample_every=0, domains=[name])
                 ys, iters, res = [], [], []
-                for f in range(150):
-                    call('fluid.step', dt=DT)
-                    if f >= 120:
-                        ys.append(call('fluid.state_digest', domain=name)['centroid'][1])
-                        r = row(name)
-                        iters.append(r['pressure_cg_iterations'])
-                        res.append(r['pressure_cg_final_relative_residual'])
+                for _ in range(6):
+                    out = call('fluid.run', steps=5, dt=DT, sample_every=0, domains=[name],
+                               fields=['pressure_iterations', 'pressure_cg_iterations',
+                                       'pressure_cg_max_iterations',
+                                       'pressure_cg_final_relative_residual',
+                                       'pressure_cg_multigrid'])
+                    ys.append(call('fluid.state_digest', domain=name)['centroid'][1])
+                    r = out['samples'][-1]['domains'][name]
+                    iters.append(r['pressure_cg_iterations'])
+                    res.append(r['pressure_cg_final_relative_residual'])
+                step_ms = out['step_ms']['median']
                 expected = seeded['particle_count'] / PPC * VOXEL ** 3 / AREA
                 level = 2 * sum(ys) / len(ys)
-                data['cap%d' % cap] = {
+                data[key] = {
+                    'grid_scaled': scaled, 'level_vs_seed': level / seed_level,
+                    'seed_level_m': seed_level, 'early_levels_m': early,
+                    'seed_ratio': seed_level / expected, 'step_ms_median': step_ms,
                     'particles': seeded['particle_count'],
                     'seed_truncated': seeded['seed_truncated'],
                     'pressure_iterations_set': r['pressure_iterations'],
@@ -88,7 +112,7 @@ def main():
                     'expected_level_m': expected, 'settled_level_m': level,
                     'level_ratio': level / expected,
                 }
-                print('cap', cap, json.dumps(data['cap%d' % cap]), flush=True)
+                print(key, json.dumps(data[key]), flush=True)
                 OUT.write_text(json.dumps(data, indent=2), encoding='utf-8')
             finally:
                 call('fluid.remove_domain', domain=name)
@@ -98,15 +122,17 @@ def main():
             'truncation_reported': cut['seed_truncated'] and
                                    cut['seed_emitted_particles'] < cut['seed_requested_particles'] and
                                    cut['seed_top_y'] < cut['seed_region_top_y'],
-            # Reported, and the cap the solve used follows the setting (some
-            # paths scale it, so not necessarily equal).
-            'pressure_reported': all(data['cap%d' % c]['cg_iterations_mean'] > 0 and
-                                     data['cap%d' % c]['pressure_iterations_set'] == c
-                                     for c in (24, 100, 400)) and
-                                 data['cap24']['cg_max_iterations'] <
-                                 data['cap100']['cg_max_iterations'] <
-                                 data['cap400']['cg_max_iterations'],
-            'level_holds_at_400': abs(data['cap400']['level_ratio'] - 1.0) < .05,
+            # Reported, and the cap the solve used: fixed caps as set, the
+            # scaled one at 4 x the longest axis (60 cells at 1 cm).
+            'pressure_reported': all(data[k]['cg_iterations_mean'] > 0 for k in
+                                     ('cap24', 'cap400', 'auto')) and
+                                 data['cap24']['cg_max_iterations'] == 24 and
+                                 data['cap400']['cg_max_iterations'] == 400 and
+                                 data['auto']['cg_max_iterations'] >= 200,
+            'default_cap_converges': data['auto']['cg_residual_mean'] < 1.0e-3,
+            # Against the seed's own level (2 x centroid reads a slab ~3 % low,
+            # D0): two-sided density relaxation keeps the column (D1).
+            'level_holds_by_default': abs(data['auto']['level_vs_seed'] - 1.0) < .03,
         }
         data['verdicts'] = verdicts
         OUT.write_text(json.dumps(data, indent=2), encoding='utf-8')

@@ -101,6 +101,13 @@ bool CloudState::anyEnabled() const {
 }
 
 bool validateCloudMaterial(const CloudMaterial& m, std::string* error) {
+    if (!inRange(m.scattering_saturation, 0.0f, 2.0f) ||
+        !inRange(m.emission_saturation, 0.0f, 2.0f)) {
+        return fail(error, "material scattering/emission saturation must be within 0..2");
+    }
+    if (!inRange(m.emission_exposure_ev, -16.0f, 16.0f)) {
+        return fail(error, "material.emission_exposure_ev must be within -16..16");
+    }
     if (!inRange(m.density_multiplier, 0.0f, 100.0f)) {
         return fail(error, "material.density_multiplier must be within 0..100");
     }
@@ -281,6 +288,9 @@ bool validateClouds(const CloudState& c, std::string* error) {
 void cloudMaterialToJson(const CloudMaterial& m, nlohmann::json& j) {
     j = {
         {"density_multiplier", m.density_multiplier},
+        {"scattering_saturation", m.scattering_saturation},
+        {"emission_saturation", m.emission_saturation},
+        {"emission_exposure_ev", m.emission_exposure_ev},
         {"scattering_coefficient", m.scattering_coefficient},
         {"scattering_color", {m.scattering_color.x, m.scattering_color.y,
                               m.scattering_color.z}},
@@ -394,6 +404,15 @@ bool cloudMaterialFromJson(const nlohmann::json& s, CloudMaterial& out,
         return fail(error, "material must be an object");
     }
     m.density_multiplier = s.value("density_multiplier", m.density_multiplier);
+    for (const char* key : {"scattering_saturation", "emission_saturation",
+                            "emission_exposure_ev"}) {
+        if (s.contains(key) && !s[key].is_number()) {
+            return fail(error, std::string("material.") + key + " must be a number");
+        }
+    }
+    m.scattering_saturation = s.value("scattering_saturation", m.scattering_saturation);
+    m.emission_saturation = s.value("emission_saturation", m.emission_saturation);
+    m.emission_exposure_ev = s.value("emission_exposure_ev", m.emission_exposure_ev);
     m.scattering_coefficient = s.value("scattering_coefficient", m.scattering_coefficient);
     m.absorption_coefficient = s.value("absorption_coefficient", m.absorption_coefficient);
     m.override_anisotropy = s.value("override_anisotropy", m.override_anisotropy);
@@ -680,6 +699,9 @@ CloudMaterial lerpCloudMaterial(const CloudMaterial& a, const CloudMaterial& b, 
     r.absorption_coefficient =
         lerpf(a.absorption_coefficient, b.absorption_coefficient, t);
     r.scattering_color = a.scattering_color * (1.0f - t) + b.scattering_color * t;
+    r.scattering_saturation = lerpf(a.scattering_saturation, b.scattering_saturation, t);
+    r.emission_saturation = lerpf(a.emission_saturation, b.emission_saturation, t);
+    r.emission_exposure_ev = lerpf(a.emission_exposure_ev, b.emission_exposure_ev, t);
     r.override_anisotropy = t < 1.0f ? a.override_anisotropy : b.override_anisotropy;
     r.anisotropy = lerpf(a.anisotropy, b.anisotropy, t);
     r.emission_color = a.emission_color * (1.0f - t) + b.emission_color * t;

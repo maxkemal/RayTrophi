@@ -94,6 +94,8 @@ float sample_vz(float fi,float fj,float fk){
     return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
 }
 
+#include "sim_grid_scalar_trace.glsl"
+
 void main() {
 #ifdef INVENTORY_SCALAR
     uint linear_id = gl_GlobalInvocationID.x +
@@ -112,17 +114,15 @@ void main() {
     float inv_h = pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
     float s = pc.dt*inv_h;
 
-    float vx=sample_vx(lx,ly-0.5,lz-0.5);
-    float vy=sample_vy(lx-0.5,ly,lz-0.5);
-    float vz=sample_vz(lx-0.5,ly-0.5,lz);
-
     // Reverse pass: advect the forward result by -dt, i.e. sample it ahead.
-    float ax=lx+vx*s-0.5, ay=ly+vy*s-0.5, az=lz+vz*s-0.5;
+    vec3 ahead = gridScalarTrace(vec3(lx, ly, lz), -s) - vec3(0.5);
+    float ax = ahead.x, ay = ahead.y, az = ahead.z;
     int ai=int(floor(ax)), aj=int(floor(ay)), ak=int(floor(az));
     float reverse = trilinearFwd(ai,aj,ak,ax-float(ai),ay-float(aj),az-float(ak));
 
     // Source stencil of the forward backtrace supplies the monotonicity bounds.
-    float bx=lx-vx*s-0.5, by=ly-vy*s-0.5, bz=lz-vz*s-0.5;
+    vec3 back = gridScalarTrace(vec3(lx, ly, lz), s) - vec3(0.5);
+    float bx = back.x, by = back.y, bz = back.z;
     int bi=int(floor(bx)), bj=int(floor(by)), bk=int(floor(bz));
     float lo =  3.402823466e+38;
     float hi = -3.402823466e+38;

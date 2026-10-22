@@ -363,7 +363,7 @@ inline CloudParamsGPU makeCloudParamsGPU(const atmosphere::CloudState& c, float 
                                          float planet_radius_m,
                                          float altitude_offset_m) {
     CloudParamsGPU p{};
-    const atmosphere::CloudMaterial& m = c.material;
+    const atmosphere::CloudMaterial m = atmosphere::resolvedCloudMaterial(c.material);
     const float total = m.scattering_coefficient + m.absorption_coefficient;
     const float extinctionScale = m.density_multiplier * total;
     const float albedo = total > 0.0f ? m.scattering_coefficient / total : 0.0f;

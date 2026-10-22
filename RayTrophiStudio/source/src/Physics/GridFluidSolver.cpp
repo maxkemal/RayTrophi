@@ -8,6 +8,7 @@
 * =========================================================================
 */
 #include "GridFluidSolver.h"
+#include "GridAdvectionTrace.h"
 
 #include "SimulationWorld.h" // SimulationForceFieldSnapshot, SimulationSystemKind
 #include "CurlNoise.h"       // Physics::Noise::curlFBM_animated
@@ -344,13 +345,17 @@ void advectScalar(FluidGrid& grid,
     const Boundary boundary = params.boundary;
 
     // Forward trace: phi^ = A(phi, +dt).
+    const auto trace = [&](const Vec3& p, float signedDt) {
+        return traceScalarMidpoint(p, signedDt,
+            [&](const Vec3& sample) { return grid.sampleVelocity(sample); });
+    };
     static thread_local std::vector<float> forward;
     forward.assign(field.size(), 0.0f);
     for (int k = min_k; k <= max_k; ++k)
         for (int j = min_j; j <= max_j; ++j)
             for (int i = min_i; i <= max_i; ++i) {
                 const Vec3 p = grid.gridToWorld(i, j, k);
-                const Vec3 back = p - grid.sampleVelocity(p) * dt;
+                const Vec3 back = trace(p, dt);
                 forward[grid.cellIndex(i, j, k)] =
                     sampleScalarAt(grid, field, back, boundary, background);
             }
@@ -370,9 +375,8 @@ void advectScalar(FluidGrid& grid,
             for (int i = min_i; i <= max_i; ++i) {
                 const std::size_t c = grid.cellIndex(i, j, k);
                 const Vec3 p = grid.gridToWorld(i, j, k);
-                const Vec3 vel = grid.sampleVelocity(p);
-                const Vec3 back = p - vel * dt;
-                const Vec3 ahead = p + vel * dt;
+                const Vec3 back = trace(p, dt);
+                const Vec3 ahead = trace(p, -dt);
                 const float reverse =
                     sampleScalarAt(grid, forward, ahead, boundary, background);
                 float lo = 0.0f, hi = 0.0f;

@@ -1,6 +1,7 @@
 #include "RtLensWeatherBindings.h"
 #include "RtObjectSubstanceBindings.h"
 #include "RtPostBindings.h"
+#include "RtVolumeMaterialBindings.h"
 #include "RtAudioBindings.h"
 #include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
@@ -218,6 +219,7 @@ static py::dict autosaveStatusToDict(const rtapi::AutosaveStatus& st) {
 
 PYBIND11_EMBEDDED_MODULE(rt, module) {
     module.doc() = "RayTrophi Studio embedded scripting API";
+    registerVolumeMaterialPython(module);
 
     rtpy::registerTemplateBindings(module);
     rtpy::registerAudioBindings(module);
@@ -1601,6 +1603,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["live_motion_p95_m"] = info.live_motion_p95_m;
         d["live_motion_max_m"] = info.live_motion_max_m;
         d["pressure_iterations"] = info.pressure_iterations;
+        d["pressure_iterations_grid_scaled"] = info.pressure_iterations_grid_scaled;
         d["pressure_relative_residual"] = info.pressure_relative_residual;
         d["pressure_cg_iterations"] = info.pressure_cg_iterations;
         d["pressure_cg_max_iterations"] = info.pressure_cg_max_iterations;
@@ -1627,6 +1630,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_grain_mean_kelvin"] = info.thermal_grain_mean_kelvin;
         d["thermal_grain_max_kelvin"] = info.thermal_grain_max_kelvin;
         d["thermal_grain_heat_to_liquid_j"] = info.thermal_grain_heat_to_liquid_j;
+        d["thermal_in_cell_mixed_cells"] = info.thermal_in_cell_mixed_cells;
+        d["thermal_in_cell_heat_j"] = info.thermal_in_cell_heat_j;
         d["thermal_grain_heat_to_gas_j"] = info.thermal_grain_heat_to_gas_j;
         d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
         d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
@@ -1935,6 +1940,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["live_motion_p95_m"] = info.live_motion_p95_m;
         d["live_motion_max_m"] = info.live_motion_max_m;
         d["pressure_iterations"] = info.pressure_iterations;
+        d["pressure_iterations_grid_scaled"] = info.pressure_iterations_grid_scaled;
         d["pressure_relative_residual"] = info.pressure_relative_residual;
         d["pressure_cg_iterations"] = info.pressure_cg_iterations;
         d["pressure_cg_max_iterations"] = info.pressure_cg_max_iterations;
@@ -1961,6 +1967,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_grain_mean_kelvin"] = info.thermal_grain_mean_kelvin;
         d["thermal_grain_max_kelvin"] = info.thermal_grain_max_kelvin;
         d["thermal_grain_heat_to_liquid_j"] = info.thermal_grain_heat_to_liquid_j;
+        d["thermal_in_cell_mixed_cells"] = info.thermal_in_cell_mixed_cells;
+        d["thermal_in_cell_heat_j"] = info.thermal_in_cell_heat_j;
         d["thermal_grain_heat_to_gas_j"] = info.thermal_grain_heat_to_gas_j;
         d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
         d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
@@ -2251,6 +2259,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["live_motion_p95_m"] = info.live_motion_p95_m;
         d["live_motion_max_m"] = info.live_motion_max_m;
         d["pressure_iterations"] = info.pressure_iterations;
+        d["pressure_iterations_grid_scaled"] = info.pressure_iterations_grid_scaled;
         d["pressure_relative_residual"] = info.pressure_relative_residual;
         d["pressure_cg_iterations"] = info.pressure_cg_iterations;
         d["pressure_cg_max_iterations"] = info.pressure_cg_max_iterations;
@@ -2277,6 +2286,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["thermal_grain_mean_kelvin"] = info.thermal_grain_mean_kelvin;
         d["thermal_grain_max_kelvin"] = info.thermal_grain_max_kelvin;
         d["thermal_grain_heat_to_liquid_j"] = info.thermal_grain_heat_to_liquid_j;
+        d["thermal_in_cell_mixed_cells"] = info.thermal_in_cell_mixed_cells;
+        d["thermal_in_cell_heat_j"] = info.thermal_in_cell_heat_j;
         d["thermal_grain_heat_to_gas_j"] = info.thermal_grain_heat_to_gas_j;
         d["thermal_grain_heat_to_walls_j"] = info.thermal_grain_heat_to_walls_j;
         d["thermal_grain_energy_residual_j"] = info.thermal_grain_energy_residual_j;
@@ -2790,14 +2801,18 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                p_enabled, p_visible,
                                                p_granular_max_solver_substeps));
         if (has_thermal_patch) requireResult(rtapi::setFluidThermal(domain, thermal_patch));
-        if (kwargs.contains("pressure_iterations") || kwargs.contains("pressure_relative_residual")) {
-            int iter = 0; float res = 0.0f;
+        if (kwargs.contains("pressure_iterations") || kwargs.contains("pressure_relative_residual") ||
+            kwargs.contains("pressure_iterations_grid_scaled")) {
+            int iter = 0; float res = 0.0f; bool scaled = true;
             const bool has_iter = kwargs.contains("pressure_iterations");
             const bool has_res = kwargs.contains("pressure_relative_residual");
+            const bool has_scaled = kwargs.contains("pressure_iterations_grid_scaled");
             if (has_iter) iter = py::cast<int>(kwargs["pressure_iterations"]);
             if (has_res) res = py::cast<float>(kwargs["pressure_relative_residual"]);
+            if (has_scaled) scaled = py::cast<bool>(kwargs["pressure_iterations_grid_scaled"]);
             requireResult(rtapi::setFluidPressureSolver(domain, has_iter ? &iter : nullptr,
-                                                        has_res ? &res : nullptr));
+                                                        has_res ? &res : nullptr,
+                                                        has_scaled ? &scaled : nullptr));
         }
         if (kwargs.contains("max_particles"))
             requireResult(rtapi::setFluidMaxParticles(domain, py::cast<uint64_t>(kwargs["max_particles"])));
@@ -3177,6 +3192,69 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return d;
     }, py::arg("domain"), "Bit-exact fingerprint of the live particle state (determinism probes).");
 
+    // Hottest / coldest particles with what they are (IPC fluid.particle_extremes).
+    fluid.def("particle_extremes", [](const std::string& domain, int count) {
+        if (count < 1 || count > 64) throw std::runtime_error("count must be 1..64");
+        rtapi::FluidParticleExtremes ex;
+        requireResult(rtapi::getFluidParticleExtremes(domain, static_cast<uint32_t>(count), ex));
+        auto rows = [](const std::vector<rtapi::FluidParticleProbe>& list) {
+            py::list out;
+            for (const auto& p : list) {
+                py::dict d;
+                d["index"] = p.index; d["particle_id"] = p.particle_id;
+                d["substance"] = p.substance; d["substance_tag"] = p.substance_tag;
+                d["model"] = p.model; d["granular_transport"] = p.granular_transport;
+                d["kelvin"] = p.kelvin; d["mass_fraction"] = p.mass_fraction;
+                d["rest_mass_kg"] = p.rest_mass_kg;
+                d["fusion_solid_fraction"] = p.fusion_solid_fraction;
+                d["pore_water_kg"] = p.pore_water_kg; d["frozen"] = p.frozen;
+                d["position"] = py::make_tuple(p.position[0], p.position[1], p.position[2]);
+                d["velocity"] = py::make_tuple(p.velocity[0], p.velocity[1], p.velocity[2]);
+                out.append(d);
+            }
+            return out;
+        };
+        py::dict d;
+        d["live"] = ex.live; d["particles"] = ex.particles; d["measured"] = ex.measured;
+        d["hottest"] = rows(ex.hottest); d["coldest"] = rows(ex.coldest);
+        return d;
+    }, py::arg("domain"), py::arg("count") = 8,
+       "Hottest and coldest live particles (count 1..64 each) with substance, solver model, "
+       "granular transport, mass fraction, solid share, position and velocity.");
+
+    // Hottest / most vapour-laden gas cells (IPC fluid.gas_cell_extremes).
+    fluid.def("gas_cell_extremes", [](const std::string& domain, int count) {
+        if (count < 1 || count > 64) throw std::runtime_error("count must be 1..64");
+        rtapi::FluidGasCellExtremes ex;
+        requireResult(rtapi::getFluidGasCellExtremes(domain, static_cast<uint32_t>(count), ex));
+        auto rows = [](const std::vector<rtapi::FluidGasCellProbe>& list) {
+            py::list out;
+            for (const auto& p : list) {
+                py::dict d;
+                d["cell"] = p.cell;
+                d["ijk"] = py::make_tuple(p.ijk[0], p.ijk[1], p.ijk[2]);
+                d["center"] = py::make_tuple(p.center[0], p.center[1], p.center[2]);
+                d["virtual_kelvin"] = p.virtual_kelvin; d["air_kelvin"] = p.air_kelvin;
+                d["vapour_kg"] = p.vapour_kg; d["vapour_kg_m3"] = p.vapour_kg_m3;
+                d["pure_vapour_kg_m3"] = p.pure_vapour_kg_m3;
+                d["condensate_kg"] = p.condensate_kg; d["rain_kg"] = p.rain_kg;
+                d["rain_kelvin"] = p.rain_kelvin; d["foreign_kg"] = p.foreign_kg;
+                d["energy_j"] = p.energy_j; d["solid"] = p.solid;
+                out.append(d);
+            }
+            return out;
+        };
+        py::dict d;
+        d["live"] = ex.live; d["inventory"] = ex.inventory;
+        d["condensable_substance"] = ex.condensable_substance;
+        d["cells"] = ex.cells; d["voxel_m"] = ex.voxel_m;
+        d["max_vapour_over_pure"] = ex.max_vapour_over_pure;
+        d["hottest"] = rows(ex.hottest); d["most_vapour"] = rows(ex.most_vapour);
+        return d;
+    }, py::arg("domain"), py::arg("count") = 8,
+       "Hottest (air T) and most vapour-laden gas cells (count 1..64 each) with Tv, T, "
+       "vapour against 1 atm of pure vapour, fog, rain and its temperature.");
+
     // Whitewater (IPC fluid.get_whitewater / set_whitewater).
     fluid.def("get_whitewater", [](const std::string& domain) {
         RayTrophiSim::Fluid::FoamParams p;
@@ -3429,7 +3507,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_temperature_override"] = s.fluid_temperature_override;
         d["fluid_temperature_kelvin"] = s.fluid_temperature_kelvin;
         d["fluid_birth_kelvin"] = s.fluid_birth_kelvin;
-        d["fluid_born_solid"] = s.fluid_born_solid;
+        d["fluid_birth_model"] = s.fluid_birth_model;
+        d["fluid_birth_lowered"] = s.fluid_birth_lowered;
         d["grain_birth_saturation"] = s.grain_birth_saturation;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;

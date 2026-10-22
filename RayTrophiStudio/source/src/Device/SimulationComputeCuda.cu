@@ -1362,22 +1362,31 @@ __global__ void fluid_cg_residual_init_kernel(const float* divergence,
     const float inv_dt = c.dt > 1e-8f ? 1.0f / c.dt : 0.0f;
     float rhs = -divergence[id] * h * h * inv_dt;
     // Density relaxation: same formula as the CPU PCG and
-    // sim_fluid_cg_residual_init (neighbour-averaged count above one standard
-    // error, removed over density_relaxation_s seconds).
+    // sim_fluid_density_relaxation.glsl. Two-sided (2026-10-20): the 27-cell
+    // mean count is pulled to particles_per_cell over density_relaxation_s;
+    // the under-filled side only where all six faces open onto liquid.
     if (c.density_relaxation_s > 0.0f && c.particles_per_cell > 0) {
-        const int sx = 1, sy = c.nx, sz = c.nx * c.ny;
+        const int sz = c.nx * c.ny;
         const int i = id % c.nx, j = (id / c.nx) % c.ny, k = id / sz;
-        float sum = fluid_mask[id], n = 1.0f;
-        const auto add = [&](bool ok, int q) {
-            if (!ok) return;
-            const float m = fluid_mask[q];
-            if (m >= 0.5f) { sum += m; n += 1.0f; }
+        const auto mask_at = [&](int a, int b, int d) {
+            if (a < 0 || b < 0 || d < 0 || a >= c.nx || b >= c.ny || d >= c.nz) return 0.0f;
+            return fluid_mask[a + b * c.nx + d * sz];
         };
-        add(i > 0, id - sx); add(i + 1 < c.nx, id + sx);
-        add(j > 0, id - sy); add(j + 1 < c.ny, id + sy);
-        add(k > 0, id - sz); add(k + 1 < c.nz, id + sz);
+        float sum = 0.0f, n = 0.0f;
+        for (int dz = -1; dz <= 1; ++dz)
+            for (int dy = -1; dy <= 1; ++dy)
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const float m = mask_at(i + dx, j + dy, k + dz);
+                    if (m >= 0.5f) { sum += m; n += 1.0f; }
+                }
+        const bool interior =
+            mask_at(i - 1, j, k) >= 0.5f && mask_at(i + 1, j, k) >= 0.5f &&
+            mask_at(i, j - 1, k) >= 0.5f && mask_at(i, j + 1, k) >= 0.5f &&
+            mask_at(i, j, k - 1) >= 0.5f && mask_at(i, j, k + 1) >= 0.5f;
         const float target = static_cast<float>(c.particles_per_cell);
-        const float excess = fmaxf(sum / n - target - sqrtf(target / n), 0.0f) / target;
+        float excess = n > 0.0f ? (sum / n - target) / target : 0.0f;
+        if (!interior) excess = fmaxf(excess, 0.0f);
+        excess = fminf(fmaxf(excess, -0.5f), 4.0f);
         rhs += excess / fmaxf(c.density_relaxation_s, c.dt) * h * h * inv_dt;
     }
     r[id] = rhs;

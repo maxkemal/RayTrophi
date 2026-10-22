@@ -211,6 +211,8 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
+    if (method == "gas.get_source_materials") return Read;
+    if (method == "gas.set_source_materials") return SceneWrite;
     if (method == "camera.sample_lens_weather") return Read;
     if (method.rfind("audio.", 0) == 0) {
         if (method == "audio.analysis_get" || method == "audio.physical_catalogue") return Read;
@@ -324,6 +326,8 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "fluid.matter_models") return Read;
     if (method == "fluid.grain_reference") return Read;
     if (method == "fluid.grain_settings") return Read;
+    if (method == "fluid.particle_extremes") return Read;
+    if (method == "fluid.gas_cell_extremes") return Read;
     if (method == "fluid.set_pore_exchange") return SceneWrite;
     if (method == "fluid.set_grain_settings") return SceneWrite;
     if (method == "fluid.settle") return SceneWrite;

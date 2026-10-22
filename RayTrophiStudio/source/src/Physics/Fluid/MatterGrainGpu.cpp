@@ -412,9 +412,13 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const double mu_r = params.rolling_friction;
     // Wet: liquid bridge stiffness at contact, |dF/dS| = F0 * 2.1 sqrt(R/V),
     // F0 = 2 pi gamma cos(theta) R x scale (stiffest for the smallest bridge).
+    // Coarse graining keeps the bulk cohesive stress: a simulated grain of
+    // radius R stands for (R/r)^2 real bridges of 2 pi gamma r each, so
+    // scale = R/r (2026-10-21). The earlier (R/r)^2 kept the per-grain Bond
+    // number instead, which makes the bulk R/r times too cohesive (a wet
+    // 25 mm grain standing for 0.25 mm sand: walls 100x too tall).
     const float cohesion_scale = params.represented_grain_radius_m > 0.0f
-        ? (params.radius_m / params.represented_grain_radius_m) *
-          (params.radius_m / params.represented_grain_radius_m) : 1.0f;
+        ? params.radius_m / params.represented_grain_radius_m : 1.0f;
     const double capillary = params.wet_grains ? 2.0 * 3.14159265358979 *
         params.surface_tension_n_m * std::cos(params.contact_angle_deg * 0.017453292519943295) *
         cohesion_scale : 0.0;

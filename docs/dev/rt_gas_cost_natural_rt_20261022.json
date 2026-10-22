@@ -1,0 +1,73 @@
+{
+  "frame": 101,
+  "method": "Natural Vulkan RT main loop; status sample deltas, not viewport.render_frames. Wall time includes UI/main-loop scheduling.",
+  "rows": [
+    {
+      "case": "scatter0",
+      "settings_patch": {},
+      "start_sample": 8,
+      "end_sample": 40,
+      "wall_ms": 3486.8490000080783,
+      "samples": 32,
+      "wall_ms_per_rt_sample": 108.96403125025245
+    },
+    {
+      "case": "scatter0001",
+      "settings_patch": {
+        "scatter_coefficient": 0.001
+      },
+      "start_sample": 8,
+      "end_sample": 40,
+      "wall_ms": 8779.075099999318,
+      "samples": 32,
+      "wall_ms_per_rt_sample": 274.3460968749787
+    },
+    {
+      "case": "scatter1",
+      "settings_patch": {
+        "scatter_coefficient": 1
+      },
+      "start_sample": 8,
+      "end_sample": 40,
+      "wall_ms": 8003.036599999177,
+      "samples": 32,
+      "wall_ms_per_rt_sample": 250.0948937499743
+    },
+    {
+      "case": "scatter1_no_shadow",
+      "settings_patch": {
+        "scatter_coefficient": 1,
+        "shadow_steps": 0
+      },
+      "start_sample": 8,
+      "end_sample": 40,
+      "wall_ms": 5676.689500003704,
+      "samples": 32,
+      "wall_ms_per_rt_sample": 177.39654687511575
+    },
+    {
+      "case": "scatter1_density0",
+      "settings_patch": {
+        "scatter_coefficient": 1,
+        "density_multiplier": 0
+      },
+      "start_sample": 8,
+      "end_sample": 40,
+      "wall_ms": 2856.5527999890037,
+      "samples": 32,
+      "wall_ms_per_rt_sample": 89.26727499965637
+    },
+    {
+      "case": "scatter0_repeat",
+      "settings_patch": {},
+      "start_sample": 8,
+      "end_sample": 40,
+      "wall_ms": 3366.1468000063905,
+      "samples": 32,
+      "wall_ms_per_rt_sample": 105.1920875001997
+    }
+  ],
+  "material_restored": true,
+  "counter_enabled_restored": true,
+  "final_frame": 101
+}

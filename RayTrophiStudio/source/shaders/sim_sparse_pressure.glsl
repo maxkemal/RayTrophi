@@ -65,6 +65,14 @@ bool inside(ivec3 cell) {
         all(lessThan(cell, ivec3(pc.nx, pc.ny, pc.nz)));
 }
 
+float rtDensityMask(ivec3 c) {
+    if (!inside(c)) {
+        return pc.boundary == 0 ? 0.0 : -1.0;
+    }
+    return mask[denseIndex(c)];
+}
+#include "sim_fluid_density_relaxation.glsl"
+
 uint tileIndex(ivec3 cell) {
     uvec3 tile = uvec3(cell) / 8u;
     return tile.x + pc.tiles_x * (tile.y + pc.tiles_y * tile.z);
@@ -173,20 +181,10 @@ void main() {
     float h = pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0;
     float inv_dt = pc.dt > 1e-8 ? 1.0 / pc.dt : 0.0;
     float rhs = -divergence[id] * h * h * inv_dt;
-    // Density relaxation: same formula as sim_fluid_cg_residual_init.
+    // Density relaxation: sim_fluid_density_relaxation.glsl (two-sided).
     if (pc.density_relaxation_s > 0.0 && pc.particles_per_cell > 0) {
-        float sum = mask[id], n = 1.0;
-        for (int axis = 0; axis < 3; ++axis) {
-            for (int direction = -1; direction <= 1; direction += 2) {
-                ivec3 near_cell = cell;
-                near_cell[axis] += direction;
-                if (!inside(near_cell)) continue;
-                float m = mask[denseIndex(near_cell)];
-                if (m >= 0.5) { sum += m; n += 1.0; }
-            }
-        }
         float target = float(pc.particles_per_cell);
-        float excess = max(sum / n - target - sqrt(target / n), 0.0) / target;
+        float excess = rtDensityExcess(rtDensitySample(cell), target, target);
         rhs += excess / max(pc.density_relaxation_s, pc.dt) * h * h * inv_dt;
     }
     residual[lane] = rhs;
