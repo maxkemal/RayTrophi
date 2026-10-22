@@ -1523,6 +1523,31 @@ struct VolumeTablesInfo {
 };
 VolumeTablesInfo volumeTables();
 
+// TLAS instance preparation per Vulkan backend role (render.instance_stats).
+// Until 2026-10-22 these numbers existed only in the Volume Performance panel.
+// instance_count is the TLAS size the last build/update saw; the procedural
+// sphere cloud is ONE of those instances, its primitives are sphere_records.
+struct InstancePreparationRow {
+    std::string role;                  // "render" | "viewport"
+    bool is_vulkan = false;
+    bool gpu_path_available = false;
+    bool gpu_path_used_last_frame = false;
+    std::string last_path;             // idle_or_cpu | gpu_build | gpu_update | gpu_raster
+    uint32_t instance_count = 0;
+    uint32_t dirty_group_count = 0;
+    uint64_t upload_bytes = 0;
+    double cpu_prepare_ms = 0.0;
+    uint64_t gpu_dispatches = 0;
+    uint64_t cpu_fallbacks = 0;
+    uint64_t sphere_records = 0;
+    uint32_t sphere_pool_capacity = 0;
+};
+struct InstancePreparationInfo {
+    bool available = false;            // false = no Vulkan backend at all
+    std::vector<InstancePreparationRow> backends;
+};
+InstancePreparationInfo instancePreparationStats();
+
 // ---------------------------------------------------------------------------
 // Per-SLOT volume table (render.volume_slots).
 //
@@ -3118,12 +3143,16 @@ Result setNodePortVisible(const std::string& graph_type, const std::string& grap
 // still runs through the normal editor path (same scope note as Faz 3d).
 // ---------------------------------------------------------------------------
 struct NodeParamValue {
-    enum class Kind { None, Float, Int, Bool, Vector2, Vector3, Vector4, String };
+    // Rows: a list of equal-length numeric rows, for node PROPERTIES that are
+    // lists - Color Ramp stops [pos, r, g, b], Float Curve points [x, y],
+    // RGB Curves "curves.<i>.points". Never a pin value.
+    enum class Kind { None, Float, Int, Bool, Vector2, Vector3, Vector4, String, Rows };
     Kind kind = Kind::None;
     float floats[4] = { 0.0f, 0.0f, 0.0f, 0.0f };  // scalar in [0]; vectors fill in order
     int int_value = 0;
     bool bool_value = false;
     std::string string_value;
+    std::vector<std::vector<float>> rows;
 };
 
 struct NodeParamInfo {
@@ -3142,8 +3171,9 @@ Result setNodeParam(const std::string& graph_type, const std::string& graph_name
                     unsigned int node_id, int pin_index, const NodeParamValue& value);
 
 struct NodePropertyInfo {
-    std::string name;        // dotted serialized path, e.g. "amplitude" or "params.iterations"
-    std::string data_type;   // float|int|bool|string
+    std::string name;        // dotted serialized path, e.g. "amplitude", "params.iterations",
+                             // "curves.2.points" (a list element is addressed by its index)
+    std::string data_type;   // float|int|bool|string|rows
     NodeParamValue value;
 };
 
@@ -4350,6 +4380,24 @@ struct FluidDomainInfo {
     uint64_t virtual_grain_budget = 0;
     uint64_t virtual_grain_rt_estimated_bytes = 0;
     float grain_size_variation = 0.0f;
+    // Near-camera grain meshes: settings, then the split the render bridge
+    // produced on its last pass ("off" / "active" / why it is not running).
+    bool  grain_mesh_near_enabled = false;
+    bool grain_mesh_near_source_materials = false;
+    std::string grain_mesh_near_shape = "scene";
+    std::vector<std::string> grain_mesh_near_sources;
+    float grain_mesh_near_distance = 0.0f;
+    uint32_t grain_mesh_near_budget = 0;
+    std::string grain_mesh_near_status = "off";
+    uint32_t grain_mesh_near_exemplars = 0;
+    uint32_t grain_mesh_near_exemplars_without_volume = 0;
+    uint64_t grain_mesh_near_exemplar_triangles = 0;
+    float grain_mesh_near_mean_volume_scale = 1.0f;
+    uint32_t grain_mesh_near_mesh_sources = 0;
+    uint64_t grain_mesh_near_instances = 0;
+    uint64_t grain_mesh_near_over_budget = 0;
+    uint64_t grain_mesh_near_sphere_instances = 0;
+    uint64_t grain_mesh_near_mesh_slots = 0;
     // VolumeFog Gaussian spread (sigma, simulation voxels); 0 = raw splat.
     float fog_spread_voxels = 0.0f;
     // VolumeFog world-space erosion (fluid.set_fog); strength 0 = off.
@@ -4732,6 +4780,15 @@ struct FluidSplatGeometryPatch {
     std::optional<float> grain_size_variation;   // 0..0.75, volume-normalized
     std::optional<bool> granular_physical_carriers;
     std::optional<uint64_t> virtual_grain_budget; // 1M..32M visual spheres
+    // Near-camera grain meshes (Fluid/GrainMeshNear.h). Needs geometry
+    // 'icosphere' and one visual sphere per particle; sources are live scene
+    // nodes (e.g. the shard_objects of physics.fracture_object).
+    std::optional<bool> near_mesh_enabled;
+    std::optional<bool> near_mesh_source_materials;
+    std::optional<std::string> near_mesh_shape; // scene | rock | voronoi
+    std::optional<std::vector<std::string>> near_mesh_sources;  // live scene nodes
+    std::optional<float> near_mesh_distance;     // > 0 m from the camera
+    std::optional<uint32_t> near_mesh_budget;    // mesh instances; 0 = all spheres
 };
 
 // Volumetric Fog shaping of a liquid domain. Empty fields keep their value.

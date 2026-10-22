@@ -528,6 +528,7 @@
     <ClInclude Include="source\include\LosslessFrameArray.h" />
     <ClInclude Include="source\include\MatterGridFrameCache.h" />
     <ClInclude Include="source\include\SimFrameCacheMemory.h" />
+    <ClInclude Include="source\include\UI\GrainMeshLibraryUI.h" />
     <ClInclude Include="source\include\UI\ParticleAppearanceUI.h" />
     <ClInclude Include="source\include\UI\ParticleBillboardBuilder.h" />
     <ClInclude Include="source\include\ParticleAppearanceProfile.h" />
@@ -633,6 +634,7 @@
     <ClInclude Include="source\include\Fluid\APICFluidSolver.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleSeedPattern.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleVisualRadius.h" />
+    <ClInclude Include="source\include\Fluid\GrainMeshNear.h" />
     <ClInclude Include="source\include\Fluid\FluidRenderProxy.h" />
     <ClInclude Include="source\include\Fluid\FluidActiveWindow.h" />
     <ClInclude Include="source\include\Fluid\FluidActivePressure.h" />
@@ -730,6 +732,16 @@
     <ClInclude Include="source\include\Template\StartupPreferences.h" />
     <ClInclude Include="source\include\Template\PathUtils.h" />
     <ClInclude Include="source\include\Template\UserTemplateManager.h" />
+    <ClInclude Include="source\include\GrainGenerator.h" />
+    <ClInclude Include="source\include\Api\GrainGeneratorApi.h" />
+    <ClInclude Include="source\include\UI\GrainGeneratorUI.h" />
+    <ClCompile Include="source\src\Scene\GrainGenerator.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGrainGenerator.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcGrainGenerator.cpp" />
+    <ClInclude Include="source\src\Api\RtIpcGrainGenerator.h" />
+    <ClCompile Include="source\src\Api\RtPythonGrainGenerator.cpp" />
+    <ClInclude Include="source\src\Api\RtPythonGrainGenerator.h" />
+    <ClCompile Include="source\src\UI\GrainGeneratorUI.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -1831,6 +1843,7 @@
     <ClCompile Include="source\src\UI\scene_ui_hierarchy.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_lights.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_materials.cpp" />
+    <ClCompile Include="source\src\UI\GrainMeshLibraryUI.cpp" />
     <ClCompile Include="source\src\UI\ParticleAppearanceUI.cpp" />
     <ClCompile Include="source\src\UI\ParticleBillboardBuilder.cpp" />
     <ClCompile Include="source\src\UI\scene_ui_modifiers.cpp" />
@@ -1990,6 +2003,7 @@
     <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleSeedPattern.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleVisualRadius.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GrainMeshNear.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidRenderProxy.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp" />

@@ -1,3 +1,4 @@
+#include "UI/GrainGeneratorUI.h"
 #include "PostProcess/PostService.h"
 #include "UI/VolumeMaterialUI.h"
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -5929,6 +5930,10 @@ void SceneUI::drawAuxWindows(UIContext& ctx)
         ImGui::End();
     }
     
+    if (GrainGeneratorUI::consumeOpenRequest()) {
+        show_procedural_generator = true;
+        procedural_generator_type = 4;
+    }
     if (show_procedural_generator) {
         drawProceduralGeneratorWindow(ctx);
     }

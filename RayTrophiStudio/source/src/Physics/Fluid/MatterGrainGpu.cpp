@@ -26,10 +26,9 @@ namespace {
 // spring xyz, rolling spring xyz}. Was two banks of 32 B slots (1536 B), whose
 // gather on every reorder needed the second bank; the host now keeps each
 // grain on its block instead.
-constexpr std::size_t kHistoryBytesPerGrain =
-    kMatterGrainContactBudget * 7 * sizeof(uint32_t);
-// The occupied-slot mask is one 32-bit word.
-static_assert(kMatterGrainContactBudget <= 32);
+std::size_t historyBytesPerGrain(uint32_t contacts) {
+    return std::size_t(contacts) * 7 * sizeof(uint32_t);
+}
 // Grain -> block map entry bit: the block's old records are ignored this frame
 // (a newborn grain, or every grain after a history reset).
 constexpr uint32_t kFreshHistoryBlock = 0x80000000u;
@@ -38,7 +37,9 @@ constexpr uint32_t kFreshHistoryBlock = 0x80000000u;
 // 16 sleeping grains (last substep).
 constexpr std::size_t kDiagnosticWords = 17;
 // Per grain {count, kMatterGrainListCapacity neighbour indices}.
-constexpr std::size_t kListBytesPerGrain = (1 + kMatterGrainListCapacity) * sizeof(uint32_t);
+std::size_t listBytesPerGrain(uint32_t capacity) {
+    return (std::size_t(capacity) + 1) * sizeof(uint32_t);
+}
 
 bool finite(const Vec3& v) {
     return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
@@ -81,16 +82,17 @@ std::size_t bucketBytes(uint32_t buckets) {
 }
 
 // Bytes the particle-side buffers occupy at `capacity` grains.
-std::size_t particleBytes(std::size_t capacity, bool audio_enabled) {
+std::size_t particleBytes(std::size_t capacity, bool audio_enabled,
+    uint32_t list_capacity, uint32_t contact_capacity) {
     return bucketBytes(bucketsFor(capacity)) +
-        2 * capacity * sizeof(float) +             // mass, ids
+        (3 * capacity + 4) * sizeof(float) +       // mass, radius, real radius, ids
         18 * capacity * sizeof(float) +            // bank 0 (pos/vel/affine)
         9 * capacity * sizeof(float) +             // scratch bank
         12 * capacity * sizeof(float) +            // liquid coupling
-        capacity * kHistoryBytesPerGrain +
-        capacity * kListBytesPerGrain +            // Verlet neighbour list
+        capacity * historyBytesPerGrain(contact_capacity) +
+        capacity * listBytesPerGrain(list_capacity) +            // Verlet neighbour list
         3 * capacity * sizeof(float) +             // list build positions
-        5 * capacity * sizeof(uint32_t) +          // map + owner/mask/rest/skipped time
+        8 * capacity * sizeof(uint32_t) +          // map + owner/mask/rest/skipped time
         (kDiagnosticWords + (audio_enabled ? kGrainAudioWords * capacity : 0)) * sizeof(uint32_t);
 }
 
@@ -141,7 +143,8 @@ std::size_t grownCapacity(std::size_t current, std::size_t count) {
 }
 
 bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& runtime,
-                     std::size_t capacity, bool audio_enabled, std::string& error) {
+                     std::size_t capacity, bool audio_enabled, uint32_t list_capacity,
+                     uint32_t contact_capacity, std::string& error) {
     MatterGrainGpuRuntime candidate;
     candidate.buckets = bucketsFor(capacity);
     candidate.positions = makeBuffer(compute, "grain_positions", capacity * sizeof(Vec3));
@@ -154,17 +157,17 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.bucket_slots = makeBuffer(compute, "grain_bucket_slots",
         std::size_t{kMatterGrainBucketTables} * candidate.buckets * kMatterGrainBucketCapacity *
         sizeof(uint32_t));
-    candidate.mass = makeBuffer(compute, "grain_mass", capacity * sizeof(float));
+    candidate.mass = makeBuffer(compute, "grain_mass_radius", (2 * capacity + 4) * sizeof(float));
     candidate.ids = makeBuffer(compute, "grain_ids", capacity * sizeof(uint32_t));
     candidate.scratch = makeBuffer(compute, "grain_scratch_state", 9 * capacity * sizeof(float));
     candidate.history = makeBuffer(compute, "grain_contact_history",
-        capacity * kHistoryBytesPerGrain);
+        capacity * historyBytesPerGrain(contact_capacity));
     candidate.history_blocks = makeBuffer(compute, "grain_history_blocks",
-        5 * capacity * sizeof(uint32_t));
+        8 * capacity * sizeof(uint32_t));
     candidate.diagnostics = makeBuffer(compute, "grain_diagnostics",
         (kDiagnosticWords + (audio_enabled ? kGrainAudioWords * capacity : 0)) * sizeof(uint32_t));
     candidate.neighbour_list = makeBuffer(compute, "grain_neighbour_list",
-        capacity * kListBytesPerGrain);
+        capacity * listBytesPerGrain(list_capacity));
     candidate.build_positions = makeBuffer(compute, "grain_list_build_positions",
         capacity * sizeof(Vec3));
     if (!particleBuffersValid(candidate)) {
@@ -196,6 +199,8 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     runtime.build_positions = candidate.build_positions;
     runtime.buckets = candidate.buckets;
     runtime.capacity = capacity;
+    runtime.neighbour_list_capacity = list_capacity;
+    runtime.contact_history_capacity = contact_capacity;
     runtime.history_fresh = true;
     runtime.coupling_zero = false;
     return true;
@@ -226,6 +231,22 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
 }
 
 } // namespace
+
+void invalidateMatterGrainAfterReset(MatterGrainGpuRuntime& runtime) {
+    runtime.cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+    runtime.history_fresh = true;
+    runtime.coupling_zero = false;
+    runtime.sleep_context_valid = false;
+    runtime.published_ids.clear();
+    runtime.history_block.clear();
+    runtime.published_positions.clear();
+    runtime.published_velocities.clear();
+    runtime.published_affines.clear();
+    runtime.published_masses.clear();
+    runtime.collider_previous_vertices.clear();
+    runtime.collider_previous_time = -1.0;
+    runtime.collider_uploaded = false;
+}
 
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& r) {
     destroy(compute, {&r.positions, &r.velocities, &r.affines, &r.coupling,
@@ -278,9 +299,26 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             "per-grain/per-face arrays";
         return false;
     }
-    std::vector<float> masses(count);
+    const uint32_t list_capacity = std::max(runtime.requested_list_capacity,
+        matterGrainMaximumRadius(params) > params.radius_m ? 128u : kMatterGrainListCapacity);
+    const uint32_t contact_capacity = std::max(runtime.requested_contact_capacity,
+        matterGrainMaximumRadius(params) > params.radius_m ? 64u :
+            static_cast<uint32_t>(kMatterGrainContactBudget));
+    if (count * uint64_t(contact_capacity) * 7 > UINT32_MAX ||
+        count * (uint64_t(list_capacity) + 1) > UINT32_MAX) {
+        error = "grain neighbour list layout exceeds shader index width; reduce grain count "
+            "or the physical size ratio";
+        return false;
+    }
+    std::vector<float> masses(2 * count + 4);
+    masses[2 * count + 3] = static_cast<float>(contact_capacity);
+    masses[2 * count + 2] = static_cast<float>(list_capacity);
+    masses[2 * count] = params.represented_grain_radius_m;
+    masses[2 * count + 1] = matterGrainMaximumRadius(params);
+    const float maximum_radius = matterGrainMaximumRadius(params);
     std::vector<uint32_t> ids(count);
     float minimum_mass = std::numeric_limits<float>::max();
+    double maximum_contact_rate = 0.0;
     float maximum_speed = 0.0f;
     if (mpm_contact) {
         maximum_speed = mpm_contact->maximumSpeed();
@@ -288,6 +326,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // Wet grains carry their held water (B6): it moves with the grain.
     double minimum_bridge_volume = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < count; ++i) {
+        masses[count + i] = matterGrainRadius(params, p, i);
         const float water = p.pore_water_mass_kg[i];
         masses[i] = p.rest_mass_kg[i] * p.mass_fraction[i] + (params.wet_grains ? water : 0.0f);
         if (water > 0.0f) {
@@ -308,6 +347,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         // History keys: 31-bit stable identity; the top bit marks supports.
         ids[i] = static_cast<uint32_t>(p.particle_id[i] & 0x7fffffffull);
         minimum_mass = std::min(minimum_mass, masses[i]);
+        maximum_contact_rate = std::max(maximum_contact_rate, matterGrainContactRateBound(
+            masses[count + i], maximum_radius, masses[i],
+            double(params.stiffness_n_m) / params.radius_m));
         maximum_speed = std::max(maximum_speed, p.velocity[i].length());
     }
     // Liquid coupling rows: {lump velocity, beta}, {buoyancy accel, lump mass},
@@ -403,11 +445,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // one (MPM parcels in reach) advances state a re-run would apply twice.
     const bool adaptive_contacts = !(mpm_contact && mpm_contact->active()) && !common_driver;
     const uint32_t cfl_contacts = adaptive_contacts
-        ? std::clamp(runtime.cfl_contact_hint, 12u, static_cast<uint32_t>(kMatterGrainContactBudget))
-        : static_cast<uint32_t>(kMatterGrainContactBudget);
+        ? std::clamp(runtime.cfl_contact_hint, 12u, contact_capacity)
+        : contact_capacity;
     const double budget = cfl_contacts;
     const double m = minimum_mass;
-    const double k = params.stiffness_n_m;
+    // For every body i, all incident k_ij / m_i are bounded by this measured
+    // maximum. Gershgorin then gives omega^2 <= 2 * contacts * max(k_ij/m_i).
+    // The equivalent k,m below retain the existing accuracy/damping algebra,
+    // without pairing the smallest grain mass with the largest stone's k.
+    const double k = maximum_contact_rate * m;
     const double kt = params.tangential_stiffness_ratio * k;
     const double mu_r = params.rolling_friction;
     // Wet: liquid bridge stiffness at contact, |dF/dS| = F0 * 2.1 sqrt(R/V),
@@ -418,14 +464,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // number instead, which makes the bulk R/r times too cohesive (a wet
     // 25 mm grain standing for 0.25 mm sand: walls 100x too tall).
     const float cohesion_scale = params.represented_grain_radius_m > 0.0f
-        ? params.radius_m / params.represented_grain_radius_m : 1.0f;
+        ? maximum_radius / params.represented_grain_radius_m : 1.0f;
     const double capillary = params.wet_grains ? 2.0 * 3.14159265358979 *
         params.surface_tension_n_m * std::cos(params.contact_angle_deg * 0.017453292519943295) *
         cohesion_scale : 0.0;
     const double bridge_stiffness = std::isfinite(minimum_bridge_volume)
-        ? capillary * params.radius_m * 2.1 * std::sqrt(params.radius_m / minimum_bridge_volume)
+        ? capillary * maximum_radius * 2.1 * std::sqrt(maximum_radius / minimum_bridge_volume)
         : 0.0;
-    const double k_effective = std::max({k, 3.5 * kt, 2.8125 * mu_r * mu_r * k,
+    const double rolling_factor = maximum_radius > params.radius_m ? 5.625 : 2.8125;
+    const double k_effective = std::max({k, 3.5 * kt, rolling_factor * mu_r * mu_r * k,
         bridge_stiffness});
     const double accuracy_dt = 3.14159265358979 * std::sqrt(.5 * m / k) /
         params.contact_resolution;
@@ -483,15 +530,18 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         return false;
     }
 
-    const bool grow_particles = !particleBuffersValid(runtime) || runtime.capacity < count;
+    const bool grow_particles = !particleBuffersValid(runtime) || runtime.capacity < count ||
+        runtime.neighbour_list_capacity != list_capacity ||
+        runtime.contact_history_capacity != contact_capacity;
     const bool grow_collider = !colliderBuffersValid(runtime) ||
         runtime.triangle_capacity < std::max(triangles.size(), std::size_t{1});
-    const auto largest_particle_buffer = [](std::size_t grains) {
-        return std::max({grains * kHistoryBytesPerGrain, grains * kListBytesPerGrain,
+    const auto largest_particle_buffer = [list_capacity, contact_capacity](std::size_t grains) {
+        return std::max({grains * historyBytesPerGrain(contact_capacity),
+            grains * listBytesPerGrain(list_capacity),
             std::size_t{kMatterGrainBucketTables} * bucketsFor(grains) *
                 kMatterGrainBucketCapacity * sizeof(uint32_t)});
     };
-    std::size_t capacity = grow_particles
+    std::size_t capacity = runtime.capacity < count || !particleBuffersValid(runtime)
         ? grownCapacity(runtime.capacity, count) : runtime.capacity;
     // Growth headroom must not be what breaks the device limit: 1.09M grains
     // fit a 2 GiB storage buffer, the 1.5x headroom on top of 1M did not, and
@@ -504,12 +554,14 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     const std::size_t triangle_capacity = grow_collider
         ? std::max(triangles.size(), std::size_t{1}) : runtime.triangle_capacity;
-    std::size_t working = particleBytes(capacity, params.audio_telemetry_enabled) +
+    std::size_t working = particleBytes(capacity, params.audio_telemetry_enabled,
+        list_capacity, contact_capacity) +
         colliderBytes(triangle_capacity);
     if (grow_particles || grow_collider) {
         // Existing scratch remains allocated during transactional replacement.
         working += (grow_particles && runtime.capacity
-            ? particleBytes(runtime.capacity, runtime.audio_telemetry_enabled) : 0) +
+            ? particleBytes(runtime.capacity, runtime.audio_telemetry_enabled,
+                runtime.neighbour_list_capacity, runtime.contact_history_capacity) : 0) +
             (grow_collider && runtime.triangle_capacity
                 ? colliderBytes(runtime.triangle_capacity) : 0);
     }
@@ -545,7 +597,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         error = "grain buffer of " + std::to_string(largest_buffer / (1024 * 1024)) +
             " MiB for " + std::to_string(count) + " grains exceeds the device storage-buffer "
             "limit of " + std::to_string(compute.caps().max_storage_buffer_bytes / (1024 * 1024)) +
-            " MiB (contact history is " + std::to_string(kHistoryBytesPerGrain) +
+            " MiB (contact history is " + std::to_string(historyBytesPerGrain(contact_capacity)) +
             " B per grain in one buffer)";
         return false;
     }
@@ -558,7 +610,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         return false;
     }
     if ((grow_particles && !ensureParticles(compute, runtime, capacity,
-            params.audio_telemetry_enabled, error)) ||
+            params.audio_telemetry_enabled, list_capacity, contact_capacity, error)) ||
         (grow_collider && !ensureCollider(compute, runtime, triangle_capacity, error))) {
         return false;
     }
@@ -743,7 +795,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             uploaded;
         uploaded = compute.uploadBuffer(runtime.affines, p.affine.data(), count * sizeof(AffineC)) &&
             uploaded;
-        upload_bytes += count * (sizeof(float) + sizeof(uint32_t) + 2 * sizeof(Vec3) + sizeof(AffineC));
+        upload_bytes += masses.size() * sizeof(float) +
+            count * (sizeof(uint32_t) + 2 * sizeof(Vec3) + sizeof(AffineC));
     }
     if (!rows_resident) {
         uploaded = compute.uploadBuffer(runtime.coupling, coupling_rows.data(),
@@ -761,14 +814,14 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     runtime.coupling_zero = zero_rows;
     report.upload_ms = ms_since(upload_start);
-    // Bridges reach past contact up to the rupture distance; the hash cell
-    // grows by that skin so the 27-cell search still finds every bridge.
-    const float rupture_cap = params.wet_grains ? .5f * params.radius_m : 0.0f;
-    // Hash cell = Verlet list cutoff: contact (2r), bridge reach and the skin
-    // that lets the list stay valid until a grain has moved half of it.
+    // Keep the hash on the minimum-radius scale. The list builder expands
+    // its cell search for each grain using the saved maximum radius.
+    const float rupture_cap = params.wet_grains ? .5f * maximum_radius : 0.0f;
+    // For fixed size this is the original Verlet cutoff. For mixed sizes,
+    // pair cutoffs grow separately; the minimum-radius skin remains shared.
     constants.wet[0] = 2.0f * params.radius_m + rupture_cap +
         kMatterGrainListSkinRadii * params.radius_m;
-    constants.wet[1] = static_cast<float>(capillary);
+    constants.wet[1] = static_cast<float>(capillary / cohesion_scale);
     constants.wet[2] = rupture_cap;
     // Float slot carrying the uint offset of the collider vertex velocities.
     std::memcpy(&constants.wet[3], &runtime.collider_velocity_offset, sizeof(uint32_t));
@@ -899,15 +952,39 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         error = "grain sleep/audio metadata layout mismatch; use matching C++ and shaders";
         return false;
     }
+    // The failed dispatch has not published host positions or reaction impulses.
+    // Only the standalone DEM lane can replay safely: shared MPM/liquid clocks
+    // have already advanced external owners and must refuse instead.
+    if (ok && overflow == 8u && adaptive_contacts && list_capacity < count) {
+        runtime.requested_list_capacity = static_cast<uint32_t>(
+            std::min<std::size_t>(count, std::size_t(list_capacity) * 2));
+        const bool rerun = stepMatterGrainGpu(p, low, high, params, dt, gravity, budget_bytes,
+            compute, runtime, triangles, coupling, drag_out, report, error, motion,
+            mpm_contact, common_driver);
+        ++report.neighbour_list_retries;
+        return rerun;
+    }
+    if (ok && (overflow & 1u) != 0u && (overflow & ~9u) == 0u &&
+        adaptive_contacts && contact_capacity < 128u) {
+        runtime.requested_contact_capacity = std::min(128u, contact_capacity * 2u);
+        if ((overflow & 8u) != 0u) {
+            runtime.requested_list_capacity = static_cast<uint32_t>(
+                std::min<std::size_t>(count, std::size_t(list_capacity) * 2));
+        }
+        const bool rerun = stepMatterGrainGpu(p, low, high, params, dt, gravity, budget_bytes,
+            compute, runtime, triangles, coupling, drag_out, report, error, motion,
+            mpm_contact, common_driver);
+        ++report.contact_history_retries;
+        return rerun;
+    }
     if (!ok || overflow) {
         error = (overflow & 4u) ? "grain neighbour bucket overflow (more than 16 grains hashed "
-                "to one bucket); grains overlap far beyond contact" :
+                "to one bucket); reduce packing or the physical size ratio" :
             (overflow & 2u) ? "grain collider BVH traversal stack exceeded (64)" :
-            (overflow & 8u) ? "grain neighbour list full (more than 32 grains within 2r + skin); "
-                "grains overlap far beyond contact" :
-            overflow ? "grain contact count exceeds the 24-contact history/CFL budget "
-                "(or 24 history records were held in one substep); "
-                "reduce emitter packing or stiffness overlap" :
+            (overflow & 8u) ? "grain neighbour list full at the allocated capacity; "
+                "reduce packing or the physical size ratio" :
+            overflow ? "grain contacts exceed the allocated history capacity; "
+                "reduce emitter packing, size ratio or stiffness overlap" :
             "grain publication rejected nonfinite/readback state";
         return false;
     }
@@ -915,8 +992,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         // More contacts than the bound assumed: those grains may have stepped
         // past their stability limit. Nothing is published; the host state is
         // untouched and history_fresh is already set, so the re-run uploads it
-        // again and runs at the full budget (once: the hint is then 24).
-        runtime.cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+        // again using the measured maximum plus a margin, bounded by storage.
+        runtime.cfl_contact_hint = std::min(contact_capacity, diagnostics[2] + 4u);
         const bool rerun = stepMatterGrainGpu(p, low, high, params, dt, gravity, budget_bytes,
             compute, runtime, triangles, coupling, drag_out, report, error, motion,
             mpm_contact, common_driver);
@@ -972,9 +1049,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.limit = substeps > planned_grain_substeps ? "common CFL/travel" : limiting.second;
     report.max_contacts = diagnostics[2];
     report.cfl_contacts = cfl_contacts;
+    report.cfl_stiffness_mass_rate_s2 = maximum_contact_rate;
     report.cfl_budget_retry = false;
     runtime.cfl_contact_hint = std::clamp(diagnostics[2] + 4u, 12u,
-        static_cast<uint32_t>(kMatterGrainContactBudget));
+        contact_capacity);
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
     report.liquid_bridges = diagnostics[5];
@@ -985,6 +1063,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.contactless_grains = diagnostics[10];
     report.collider_nodes_visited = diagnostics[11];
     report.list_rebuilds = diagnostics[15];
+    report.neighbour_list_capacity = list_capacity;
+    report.contact_history_capacity = contact_capacity;
     report.sleeping_grains = diagnostics[16];
     report.history_reset = history_reset;
     report.history_reset_reason = reset_reason;

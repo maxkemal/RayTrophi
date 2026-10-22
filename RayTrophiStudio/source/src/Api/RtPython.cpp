@@ -46,6 +46,7 @@
 #include "RtUiBindings.h"
 #include "RtPyCommon.h" // shared binding helpers + rtpy::registerSceneBindings
 #include "RtPythonFracture.h"
+#include "RtPythonGrainGenerator.h"
 #include "RtPythonParticle.h"
 #include "RtPythonKinematicCollider.h"
 #include "RtPythonPressure.h"
@@ -165,6 +166,11 @@ py::object nodeParamToPython(const rtapi::NodeParamValue& v) {
         case K::Vector3: return py::make_tuple(v.floats[0], v.floats[1], v.floats[2]);
         case K::Vector4: return py::make_tuple(v.floats[0], v.floats[1], v.floats[2], v.floats[3]);
         case K::String:  return py::str(v.string_value);
+        case K::Rows: {
+            py::list rows;
+            for (const auto& row : v.rows) rows.append(py::cast(row));
+            return std::move(rows);
+        }
         case K::None:    default: return py::none();
     }
 }
@@ -181,6 +187,13 @@ rtapi::NodeParamValue nodeParamFromPython(const py::handle& value) {
         out.kind = K::Float; out.floats[0] = py::cast<float>(value);
     } else if (py::isinstance<py::str>(value)) {
         out.kind = K::String; out.string_value = py::cast<std::string>(value);
+    } else if ((py::isinstance<py::tuple>(value) || py::isinstance<py::list>(value)) &&
+               py::len(value) > 0 &&
+               (py::isinstance<py::tuple>(value[py::int_(0)]) ||
+                py::isinstance<py::list>(value[py::int_(0)]))) {
+        // [[pos, r, g, b], ...]: a list property (nodes.set_property only).
+        out.kind = K::Rows;
+        out.rows = py::cast<std::vector<std::vector<float>>>(value);
     } else if (py::isinstance<py::tuple>(value) || py::isinstance<py::list>(value)) {
         auto seq = py::cast<std::vector<float>>(value);
         if (seq.size() < 2 || seq.size() > 4)
@@ -197,6 +210,28 @@ rtapi::NodeParamValue nodeParamFromPython(const py::handle& value) {
 
 // Dosya kapsaminda: pybind lambda'lari yakalamasiz, yani kapsayan fonksiyonun
 // yerel bir lambda'sina basvuramazlar (E1735).
+// Near-camera grain mesh settings + the split the render bridge published.
+static py::dict grainMeshNearDict(const rtapi::FluidDomainInfo& info) {
+    py::dict split;
+    split["enabled"] = info.grain_mesh_near_enabled;
+    split["source_materials"] = info.grain_mesh_near_source_materials;
+    split["shape"] = info.grain_mesh_near_shape;
+    split["sources"] = info.grain_mesh_near_sources;
+    split["distance"] = info.grain_mesh_near_distance;
+    split["budget"] = info.grain_mesh_near_budget;
+    split["status"] = info.grain_mesh_near_status;
+    split["exemplars"] = info.grain_mesh_near_exemplars;
+    split["exemplars_without_volume"] = info.grain_mesh_near_exemplars_without_volume;
+    split["exemplar_triangles"] = info.grain_mesh_near_exemplar_triangles;
+    split["mean_volume_scale"] = info.grain_mesh_near_mean_volume_scale;
+    split["mesh_sources"] = info.grain_mesh_near_mesh_sources;
+    split["near_instances"] = info.grain_mesh_near_instances;
+    split["near_over_budget"] = info.grain_mesh_near_over_budget;
+    split["sphere_instances"] = info.grain_mesh_near_sphere_instances;
+    split["mesh_slots"] = info.grain_mesh_near_mesh_slots;
+    return split;
+}
+
 static py::dict autosaveStatusToDict(const rtapi::AutosaveStatus& st) {
     py::dict d;
     d["enabled"] = st.enabled;
@@ -411,6 +446,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        py::arg("animations") = true, py::arg("skinning") = true,
        py::arg("selected_only") = false, py::arg("bake_terrain_materials") = true,
        py::arg("terrain_bake_resolution") = 1024, py::arg("gpu_instancing") = true);
+    rtpy::registerGrainGeneratorBindings(scene);
     scene.def("add_primitive", [](const std::string& type, const std::string& name, float size) {
         std::string newName;
         requireResult(rtapi::addPrimitive(type, name, size, newName));
@@ -1695,6 +1731,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["virtual_grain_rt_estimated_bytes"] =
             info.virtual_grain_rt_estimated_bytes;
         d["grain_size_variation"] = info.grain_size_variation;
+        d["grain_mesh_near"] = grainMeshNearDict(info);
         d["fog_spread_voxels"] = info.fog_spread_voxels;
         d["fog_erosion_strength"] = info.fog_erosion_strength;
         d["fog_erosion_size"] = info.fog_erosion_size;
@@ -2032,6 +2069,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["virtual_grain_rt_estimated_bytes"] =
                 info.virtual_grain_rt_estimated_bytes;
             d["grain_size_variation"] = info.grain_size_variation;
+            d["grain_mesh_near"] = grainMeshNearDict(info);
             d["fog_spread_voxels"] = info.fog_spread_voxels;
             d["fog_erosion_strength"] = info.fog_erosion_strength;
             d["fog_erosion_size"] = info.fog_erosion_size;
@@ -2351,6 +2389,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["virtual_grain_rt_estimated_bytes"] =
             info.virtual_grain_rt_estimated_bytes;
         d["grain_size_variation"] = info.grain_size_variation;
+        d["grain_mesh_near"] = grainMeshNearDict(info);
         d["fog_spread_voxels"] = info.fog_spread_voxels;
         d["fog_erosion_strength"] = info.fog_erosion_strength;
         d["fog_erosion_size"] = info.fog_erosion_size;
@@ -2530,7 +2569,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                  const py::object& virtual_grains,
                  const py::object& grain_size_variation,
                  const py::object& virtual_grain_budget,
-                 const py::object& granular_physical_carriers) {
+                 const py::object& granular_physical_carriers,
+                 const py::object& near_mesh_enabled,
+                 const py::object& near_mesh_sources,
+                 const py::object& near_mesh_distance,
+                 const py::object& near_mesh_budget,
+                 const py::object& near_mesh_source_materials,
+                 const py::object& near_mesh_shape) {
         rtapi::FluidSplatGeometryPatch patch;
         if (!geometry.is_none()) patch.geometry = py::cast<std::string>(geometry);
         if (!geometry_source.is_none()) patch.geometry_source = py::cast<std::string>(geometry_source);
@@ -2548,6 +2593,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             patch.granular_physical_carriers =
                 py::cast<bool>(granular_physical_carriers);
         }
+        if (!near_mesh_shape.is_none()) patch.near_mesh_shape = py::cast<std::string>(near_mesh_shape);
+        if (!near_mesh_source_materials.is_none()) {
+            patch.near_mesh_source_materials = py::cast<bool>(near_mesh_source_materials);
+        }
+        if (!near_mesh_enabled.is_none()) patch.near_mesh_enabled = py::cast<bool>(near_mesh_enabled);
+        if (!near_mesh_sources.is_none()) {
+            patch.near_mesh_sources = py::cast<std::vector<std::string>>(near_mesh_sources);
+        }
+        if (!near_mesh_distance.is_none()) patch.near_mesh_distance = py::cast<float>(near_mesh_distance);
+        if (!near_mesh_budget.is_none()) patch.near_mesh_budget = py::cast<uint32_t>(near_mesh_budget);
         requireResult(rtapi::setFluidSplatGeometry(domain, patch));
     }, py::arg("domain"), py::arg("geometry") = py::none(),
        py::arg("geometry_source") = py::none(), py::arg("subdivisions") = py::none(),
@@ -2556,6 +2611,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        py::arg("grain_size_variation") = py::none(),
        py::arg("virtual_grain_budget") = py::none(),
        py::arg("granular_physical_carriers") = py::none(),
+       py::arg("near_mesh_enabled") = py::none(),
+       py::arg("near_mesh_sources") = py::none(),
+       py::arg("near_mesh_distance") = py::none(),
+       py::arg("near_mesh_budget") = py::none(),
+       py::arg("near_mesh_source_materials") = py::none(),
+       py::arg("near_mesh_shape") = py::none(),
+       "Near meshes: near_mesh_shape 'scene' | 'rock' | 'voronoi'; "
+       "near_mesh_source_materials=True preserves scene exemplar face materials and UVs. "
+       "Near meshes support DEM, MPM and fluid splats, use one primary shape per carrier, "
+       "and leave solver physics and whitewater refinement unchanged. "
        "Splat geometry: geometry 'icosphere' | 'icosphere_mesh' | 'scene_object', geometry_source "
        "(live scene node), subdivisions 0..3 (20/80/320/1280 triangles), "
        "radius_factor 0.05..1.5, size_multiplier 0.05..8. Out-of-range values "
@@ -5802,6 +5867,33 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "non-zero means the realtime viewport was never given the volumes and "
        "will draw none. volume_stats() cannot see this — a pass that never ran "
        "counts zero, exactly like a scene with no volumes.");
+    render.def("instance_stats", [] {
+        const rtapi::InstancePreparationInfo t = rtapi::instancePreparationStats();
+        py::dict d;
+        py::list backends;
+        for (const auto& b : t.backends) {
+            py::dict e;
+            e["role"] = b.role;
+            e["is_vulkan"] = b.is_vulkan;
+            e["gpu_path_available"] = b.gpu_path_available;
+            e["gpu_path_used_last_frame"] = b.gpu_path_used_last_frame;
+            e["last_path"] = b.last_path;
+            e["instance_count"] = b.instance_count;
+            e["dirty_group_count"] = b.dirty_group_count;
+            e["upload_bytes"] = b.upload_bytes;
+            e["cpu_prepare_ms"] = b.cpu_prepare_ms;
+            e["gpu_dispatches"] = b.gpu_dispatches;
+            e["cpu_fallbacks"] = b.cpu_fallbacks;
+            e["sphere_records"] = b.sphere_records;
+            e["sphere_pool_capacity"] = b.sphere_pool_capacity;
+            backends.append(e);
+        }
+        d["available"] = t.available;
+        d["backends"] = backends;
+        return d;
+    }, "TLAS instance preparation per Vulkan backend role: instance_count, last "
+       "build/update path, CPU prepare ms, and the procedural sphere cloud's "
+       "record count (its primitives, which are not TLAS instances).");
     render.def("volume_slots", [] {
         const rtapi::VolumeSlotsInfo t = rtapi::volumeSlots();
         auto vec3 = [](const Vec3& v) { return py::make_tuple(v.x, v.y, v.z); };

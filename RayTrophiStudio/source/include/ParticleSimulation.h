@@ -691,6 +691,16 @@ struct SimulationGridDomainDesc {
     // 2 = icosphere as triangles on RT (mode 0 is the procedural sphere cloud there).
     int   fluid_particle_geometry_mode = 0;
     std::string fluid_particle_geometry_source;
+    // Near-camera grain meshes (Fluid/GrainMeshNear.h). With procedural
+    // spheres, DEM/MPM/fluid splats closer to the camera than the distance use
+    // a generated rock/Voronoi library or flat scene exemplars. While enabled,
+    // the primary view uses one shape per carrier; solver physics is unchanged.
+    bool  fluid_grain_mesh_near_enabled = false;
+    bool fluid_grain_mesh_near_source_materials = false;
+    std::string fluid_grain_mesh_near_shape = "scene";
+    std::vector<std::string> fluid_grain_mesh_near_sources;
+    float fluid_grain_mesh_near_distance = 2.0f;      // metres from the camera
+    uint32_t fluid_grain_mesh_near_budget = 200000u;  // mesh instances, nearest-agnostic
     bool  fluid_particle_emissive = false;
     float fluid_particle_emission = 0.0f;
     // Optional: explicit MaterialManager material id for splats. -1 preserves

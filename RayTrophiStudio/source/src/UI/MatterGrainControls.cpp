@@ -33,8 +33,108 @@ void apply(const SimulationGridDomainDesc& domain, const MatterGrainParams& p) {
 void showError(const SimulationGridDomainDesc& domain) {
     const auto found = grainErrors().find(domain.name);
     if (found != grainErrors().end()) {
-        DomainUi::Reason(found->second.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.42f, 0.25f, 1.0f));
+        ImGui::TextWrapped("SETTINGS NOT APPLIED");
+        ImGui::TextWrapped("%s", found->second.c_str());
+        ImGui::PopStyleColor();
+        ImGui::Separator();
     }
+}
+
+void drawGrainSizes(const SimulationGridDomainDesc& domain,
+    const SimulationGridDomainState* state) {
+    struct Draft {
+        MatterGrainParams value;
+        uint64_t saved_signature = 0;
+        bool initialized = false;
+        bool dirty = false;
+    };
+    static std::map<std::string, Draft> drafts;
+    auto& draft = drafts[domain.name];
+    const uint64_t signature = matterGrainSizeSignature(domain.fluid_params.grain);
+    if (!draft.initialized || signature != draft.saved_signature) {
+        draft.value = domain.fluid_params.grain;
+        draft.saved_signature = signature;
+        draft.initialized = true;
+        draft.dirty = false;
+    }
+    auto& sizes = draft.value;
+    ImGui::SeparatorText("Physical grain sizes");
+    const bool live = state && !state->particles.empty();
+    if (live) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+        ImGui::TextWrapped("RESET REQUIRED: existing grains keep their birth size. "
+            "You can prepare settings below, then reset particles and apply.");
+        ImGui::PopStyleColor();
+    }
+    draft.dirty |= DomainUi::Float("Minimum radius (m)", &sizes.radius_m,
+        .001f, .001f, 1.0f, "%.4f", "Edit both radii, then Apply size settings.");
+    draft.dirty |= DomainUi::Float("Maximum radius (m)", &sizes.radius_max_m,
+        .001f, 0.0f, 1.0f, "%.4f", "0 = fixed size. Maximum up to 4x minimum.");
+    ImGui::TextWrapped("Allowed maximum: %.4f to %.4f m, or 0 for fixed size.",
+        sizes.radius_m, std::min(1.0f, 4.0f * sizes.radius_m));
+    int distribution = sizes.size_distribution == "bimodal" ? 2 :
+        sizes.size_distribution == "log_uniform" ? 1 : 0;
+    if (DomainUi::Choice("Size distribution", &distribution,
+            "Uniform\0Log uniform\0Sand + large stones\0",
+            "Sand + large stones gives direct control over the small/large count ratio.")) {
+        const char* modes[] = {"uniform", "log_uniform", "bimodal"};
+        sizes.size_distribution = modes[distribution];
+        draft.dirty = true;
+    }
+    if (distribution == 2) {
+        float percent = sizes.large_grain_fraction * 100.0f;
+        if (ImGui::SliderFloat("Large stones (%)", &percent, 0.0f, 100.0f, "%.1f%%")) {
+            sizes.large_grain_fraction = percent * 0.01f;
+            draft.dirty = true;
+        }
+        ImGui::TextWrapped("By count: small sand %.1f%% / large stones %.1f%%.",
+            100.0f - percent, percent);
+        const double ratio = matterGrainMaximumRadius(sizes) / sizes.radius_m;
+        const double weighted = sizes.large_grain_fraction * ratio * ratio * ratio;
+        const double total = weighted + 1.0 - sizes.large_grain_fraction;
+        ImGui::TextWrapped("Large stones occupy about %.1f%% of volume and mass "
+            "at equal density. A few large stones can look dominant.",
+            total > 0.0 ? 100.0 * weighted / total : 0.0);
+    } else {
+        ImGui::TextWrapped("For mostly small sand with occasional large stones, "
+            "choose Sand + large stones and set the large-stone percentage.");
+    }
+    if (ImGui::Button("Mostly sand: 95% / 5%")) {
+        sizes.size_distribution = "bimodal";
+        sizes.large_grain_fraction = 0.05f;
+        draft.dirty = true;
+    }
+    draft.dirty |= DomainUi::Int("Size seed", &sizes.size_seed, 1.0f, 0, 2147483647,
+        "Stable per grain identity. Reset particles before applying.");
+    auto candidate = domain.fluid_params.grain;
+    const nlohmann::json patch = {{"radius_m", sizes.radius_m},
+        {"radius_max_m", sizes.radius_max_m}, {"size_distribution", sizes.size_distribution},
+        {"large_grain_fraction", sizes.large_grain_fraction}, {"size_seed", sizes.size_seed}};
+    std::string error;
+    const bool valid = patchMatterGrainParams(patch, candidate, error);
+    if (!valid) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.42f, 0.25f, 1.0f));
+        ImGui::TextWrapped("CHECK SIZE VALUES: %s", error.c_str());
+        ImGui::PopStyleColor();
+    }
+    if (draft.dirty) {
+        ImGui::TextWrapped("Size changes are pending; the simulation still uses saved settings.");
+    }
+    ImGui::BeginDisabled(live || !valid || !draft.dirty);
+    if (ImGui::Button("Apply size settings")) {
+        apply(domain, candidate);
+        if (grainErrors().find(domain.name) == grainErrors().end()) {
+            draft.dirty = false;
+        }
+    }
+    ImGui::EndDisabled();
+    if (draft.dirty && ImGui::Button("Discard size changes")) {
+        draft.value = domain.fluid_params.grain;
+        draft.dirty = false;
+    }
+    showError(domain);
+    ImGui::Separator();
 }
 
 } // namespace
@@ -114,8 +214,12 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     } else if (state && state->fluid_stats.mixed_step_held) {
         // Not greyed: a held step freezes every grain where it was born,
         // and this line is the only place that says why.
-        ImGui::TextWrapped("Step held - grains do not move: %s",
-                           state->fluid_stats.gpu_status.c_str());
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.42f, 0.25f, 1.0f));
+        ImGui::TextWrapped("SIMULATION STOPPED - grains cannot move");
+        ImGui::TextWrapped("%s", state->fluid_stats.gpu_status.c_str());
+        ImGui::PopStyleColor();
+        ImGui::TextWrapped("If more substeps are required, increase Contact substep limit "
+            "under Advanced solver. Size changes require a particle reset.");
     } else {
         ImGui::TextWrapped("Solver: DEM grains (%s).", ownership.substance.c_str());
     }
@@ -128,13 +232,8 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
             "Script: fluid.matter_models(domain=...)['grain_ownership']");
     }
     if (ownership.wanted) {
-        changed |= DomainUi::Float("Simulation grain radius (m)", &p.radius_m, .001f, .001f, 1.0f,
-            "%.4f",
-            "Radius of one simulated grain (0.001..1 m). Sets cost: grain count ~ 1/r^3.\n"
-            "Contact stiffness follows it (k ~ r keeps the impact overlap fraction).\n"
-            "The real grain size is the substance's (grain_real_radius_m).\n"
-            "Reset particles after editing.\n"
-            "Script: fluid.set_grain_settings(radius_m=...)");
+        drawGrainSizes(domain, state);
+        p = domain.fluid_params.grain;
         ImGui::TextDisabled("Contact stiffness %.0f N/m (from the radius)",
             p.stiffness_scale * kMatterGrainStiffnessPerRadius * p.radius_m);
         int accuracy = p.contact_resolution == 12 ? 0 : p.contact_resolution == 24 ? 1
@@ -206,7 +305,6 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     if (changed) {
         apply(domain, p);
     }
-    showError(domain);
     ImGui::PopID();
 }
 

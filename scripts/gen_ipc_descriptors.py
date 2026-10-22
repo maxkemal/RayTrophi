@@ -48,6 +48,8 @@ SOURCES = [p for p in IPC_FILES
 # that reader so generated discovery follows its schema, not just the delegate.
 SOURCES.append(os.path.join(API, "RtApiGrainReference.cpp"))
 SOURCES.append(os.path.join(API, "RtApiMatterGrain.cpp"))
+SOURCES.append(os.path.join(API, "RtApiGrainGenerator.cpp"))
+SOURCES.append(os.path.join(API, "../Scene/GrainGenerator.cpp"))
 SOURCES.append(os.path.join(API, "../Physics/Fluid/MatterGrainParams.cpp"))
 
 

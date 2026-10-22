@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -34,6 +35,8 @@
 #include "MaterialGraphApply.h"
 #include "MaterialManager.h"
 #include "PrincipledBSDF.h"
+#include "ProjectManager.h"
+#include "Volumetric.h"
 #include "TerrainManager.h"
 #include "TerrainNodesV2.h"
 #include "NodeSystem/Graph.h"
@@ -146,6 +149,34 @@ Result removeNodeGraph(const std::string& graph_type, const std::string& graph_n
     if (graph_type == "material") {
         if (g_ctx->scene.material_node_graphs.erase(graph_name) == 0)
             return Result::fail("material node graph not found: " + graph_name);
+        // The graph's compiled per-pixel program lives ON THE MATERIAL, not in
+        // the graph. Erasing only the graph left that program shading every
+        // hit (CPU + Vulkan RT) with no graph left to show or edit it: a
+        // base_color written afterwards was overridden by the dead program.
+        // The folded constants stay - they are ordinary material values now.
+        auto& manager = MaterialManager::getInstance();
+        const uint16_t id = manager.getMaterialID(graph_name);
+        if (id != MaterialManager::INVALID_MATERIAL_ID) {
+            bool dropped = false;
+            Material* material = manager.getMaterial(id);
+            if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(material)) {
+                dropped = pbsdf->proceduralProgram != nullptr;
+                pbsdf->proceduralProgram.reset();
+            } else if (auto* volume = dynamic_cast<Volumetric*>(material)) {
+                dropped = volume->proceduralProgram != nullptr;
+                volume->proceduralProgram.reset();
+            }
+            if (dropped) {
+                g_ctx->renderer.resetCPUAccumulation();
+                if (g_ctx->backend_ptr) {
+                    g_ctx->renderer.updateBackendMaterial(g_ctx->scene, id);
+                    g_ctx->renderer.syncMaterialProgramsToBackend(g_ctx->backend_ptr);
+                    g_ctx->backend_ptr->resetAccumulation();
+                }
+                g_ctx->start_render = true;
+            }
+        }
+        ProjectManager::getInstance().markModified();
         return Result::success();
     }
     if (graph_type == "geometry") {
@@ -548,6 +579,9 @@ Result setNodeParam(const std::string& graph_type, const std::string& graph_name
     if (pin_index < 0 || pin_index >= static_cast<int>(node->inputs.size()))
         return Result::fail("pin_index out of range (node has " +
                             std::to_string(node->inputs.size()) + " inputs)");
+    if (value.kind == NodeParamValue::Kind::Rows)
+        return Result::fail("a list of rows is a node property value, not a pin value "
+                            "(use nodes.set_property)");
     Result r = setPinDefault(node->inputs[pin_index], value);
     if (!r) return r;
     // Mark this node and everything downstream dirty so the next evaluation picks
@@ -565,6 +599,35 @@ bool isStructuralNodeProperty(const std::string& name) {
            name == "size" || name == "inputs" || name == "outputs" || name == "metadata";
 }
 
+// A flat array of 2-4 numbers, as a Vector2/3/4 value.
+bool jsonToNodeVector(const nlohmann::json& value, NodeParamValue& out) {
+    if (!value.is_array() || value.size() < 2 || value.size() > 4) return false;
+    for (const auto& x : value)
+        if (!x.is_number()) return false;
+    using K = NodeParamValue::Kind;
+    out.kind = value.size() == 2 ? K::Vector2 : value.size() == 3 ? K::Vector3 : K::Vector4;
+    for (size_t i = 0; i < value.size(); ++i) out.floats[i] = value[i].get<float>();
+    return true;
+}
+
+// A JSON array whose every element is an array of numbers. Empty counts: a
+// node may legitimately serialize an empty list.
+bool jsonToNodeRows(const nlohmann::json& value, std::vector<std::vector<float>>& out) {
+    out.clear();
+    if (!value.is_array()) return false;
+    for (const auto& row : value) {
+        if (!row.is_array()) return false;
+        std::vector<float> r;
+        r.reserve(row.size());
+        for (const auto& x : row) {
+            if (!x.is_number()) return false;
+            r.push_back(x.get<float>());
+        }
+        out.push_back(std::move(r));
+    }
+    return true;
+}
+
 // `filter_structural` must be set ONLY for serializers that emit the whole node
 // (terrain). Material and geometry nodes serialize just their parameter block,
 // where a top-level key like "position" is a genuine parameter — several nodes
@@ -580,7 +643,32 @@ void collectNodeProperties(const nlohmann::json& value, const std::string& prefi
         }
         return;
     }
-    if (prefix.empty() || value.is_array() || value.is_null()) return;
+    if (prefix.empty() || value.is_null()) return;
+    if (value.is_array()) {
+        // A flat 2-4 number array is a vector (Noise "c1"/"c2" colours).
+        NodePropertyInfo vec;
+        if (jsonToNodeVector(value, vec.value)) {
+            vec.name = prefix;
+            vec.data_type = "vector" + std::to_string(value.size());
+            out.push_back(std::move(vec));
+            return;
+        }
+        // A list of numeric rows (ramp stops, curve points) is one property;
+        // a list of objects (RGB Curves' four curves) is walked by index.
+        NodePropertyInfo rows;
+        if (jsonToNodeRows(value, rows.value.rows)) {
+            rows.name = prefix;
+            rows.data_type = "rows";
+            rows.value.kind = NodeParamValue::Kind::Rows;
+            out.push_back(std::move(rows));
+            return;
+        }
+        for (size_t i = 0; i < value.size(); ++i) {
+            if (value[i].is_object())
+                collectNodeProperties(value[i], prefix + "." + std::to_string(i), out, false);
+        }
+        return;
+    }
     NodePropertyInfo info;
     info.name = prefix;
     if (value.is_boolean()) {
@@ -612,8 +700,17 @@ nlohmann::json* findNodePropertyJson(nlohmann::json& root, const std::string& pa
     while (start < path.size()) {
         const size_t dot = path.find('.', start);
         const std::string key = path.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
-        if (!current->is_object() || !current->contains(key)) return nullptr;
-        current = &(*current)[key];
+        if (current->is_array()) {
+            // "curves.2.points": a list element by index (collectNodeProperties names it so).
+            if (key.empty() || key.size() > 6 ||
+                key.find_first_not_of("0123456789") != std::string::npos) return nullptr;
+            const size_t index = static_cast<size_t>(std::stoul(key));
+            if (index >= current->size()) return nullptr;
+            current = &(*current)[index];
+        } else {
+            if (!current->is_object() || !current->contains(key)) return nullptr;
+            current = &(*current)[key];
+        }
         if (dot == std::string::npos) break;
         start = dot + 1;
     }
@@ -711,6 +808,81 @@ Result getNodeProperty(const std::string& graph_type, const std::string& graph_n
     return Result::fail("node property not found: " + property);
 }
 
+namespace {
+
+// Re-serialize a node the same way serializedNode() does, for read-back.
+void serializeNodeAs(NodeSystem::NodeBase* node, NodeSerializerKind kind, nlohmann::json& out) {
+    out = nlohmann::json::object();
+    switch (kind) {
+        case NodeSerializerKind::Terrain:
+            static_cast<TerrainNodesV2::TerrainNodeBase*>(node)->serializeToJson(out); break;
+        case NodeSerializerKind::MaterialParams:
+            static_cast<MaterialNodesV2::MaterialNodeBase*>(node)->serializeParams(out); break;
+        case NodeSerializerKind::GeometryParams:
+            static_cast<GeometryNodesV2::GeometryNodeBase*>(node)->serializeParams(out); break;
+        default: break;
+    }
+}
+
+// A list property is replaced whole. The node's own deserializer is the
+// validator: it may drop short rows or cap the count (Color Ramp keeps 8
+// stops). Whatever it did is read back, and anything other than exactly the
+// requested rows is refused with the old value restored - a silently shorter
+// ramp is the failure this facade exists to prevent.
+Result setNodeRowsProperty(NodeSystem::GraphBase* graph, NodeSystem::NodeBase* node,
+                           unsigned int node_id, NodeSerializerKind kind,
+                           nlohmann::json& serialized, nlohmann::json& target,
+                           const std::string& property, const NodeParamValue& value) {
+    std::vector<std::vector<float>> current;
+    if (!jsonToNodeRows(target, current))
+        return Result::fail("node property '" + property + "' is a list of objects; "
+                            "address one element, e.g. '" + property + ".0.<field>'");
+    if (value.kind != NodeParamValue::Kind::Rows)
+        return Result::fail("node property '" + property + "' is a list of rows; "
+                            "pass [[...], [...]]");
+    if (value.rows.empty())
+        return Result::fail("node property '" + property + "' needs at least one row");
+    const size_t width = !current.empty() ? current.front().size() : value.rows.front().size();
+    for (size_t i = 0; i < value.rows.size(); ++i) {
+        if (value.rows[i].size() != width)
+            return Result::fail("node property '" + property + "': row " + std::to_string(i) +
+                                " has " + std::to_string(value.rows[i].size()) +
+                                " values, expected " + std::to_string(width));
+        for (float x : value.rows[i])
+            if (!std::isfinite(x))
+                return Result::fail("node property '" + property + "': row " +
+                                    std::to_string(i) + " has a non-finite value");
+    }
+
+    nlohmann::json previous;
+    serializeNodeAs(node, kind, previous);
+    nlohmann::json rows = nlohmann::json::array();
+    for (const auto& row : value.rows) rows.push_back(row);
+    target = std::move(rows);
+    if (Result applied = applySerializedNode(node, kind, serialized); !applied) return applied;
+
+    nlohmann::json after;
+    serializeNodeAs(node, kind, after);
+    const nlohmann::json* kept = findNodePropertyJson(after, property);
+    std::vector<std::vector<float>> got;
+    if (!kept || !jsonToNodeRows(*kept, got) || got != value.rows) {
+        applySerializedNode(node, kind, previous);
+        if (got.size() == value.rows.size())
+            return Result::fail("node rewrote the rows of '" + property + "' (it sorts or "
+                                "clamps them - pass them in its order and range); "
+                                "previous value restored");
+        return Result::fail("node refused the value of '" + property + "' (kept " +
+                            std::to_string(got.size()) + " of " +
+                            std::to_string(value.rows.size()) +
+                            " rows); previous value restored");
+    }
+    node->dirty = true;
+    graph->markDirtyDownstream(node_id);
+    return Result::success();
+}
+
+} // namespace
+
 Result setNodeProperty(const std::string& graph_type, const std::string& graph_name,
                        unsigned int node_id, const std::string& property,
                        const NodeParamValue& value) {
@@ -722,7 +894,24 @@ Result setNodeProperty(const std::string& graph_type, const std::string& graph_n
     Result r = serializedNode(*g_ctx, graph_type, graph_name, node_id, graph, node, serialized, kind);
     if (!r.ok) return r;
     nlohmann::json* target = findNodePropertyJson(serialized, property);
-    if (!target || target->is_array() || target->is_object() || target->is_null())
+    NodeParamValue current_vector;
+    if (target && jsonToNodeVector(*target, current_vector)) {
+        using K = NodeParamValue::Kind;
+        const size_t want = target->size();
+        const size_t given = value.kind == K::Vector2 ? 2 : value.kind == K::Vector3 ? 3
+                           : value.kind == K::Vector4 ? 4 : 0;
+        if (given != want)
+            return Result::fail("node property '" + property + "' is a vector of " +
+                                std::to_string(want) + " numbers");
+        for (size_t i = 0; i < want; ++i) (*target)[i] = value.floats[i];
+        if (Result applied = applySerializedNode(node, kind, serialized); !applied) return applied;
+        node->dirty = true;
+        graph->markDirtyDownstream(node_id);
+        return Result::success();
+    }
+    if (target && target->is_array())
+        return setNodeRowsProperty(graph, node, node_id, kind, serialized, *target, property, value);
+    if (!target || target->is_object() || target->is_null())
         return Result::fail("node property not found or not scalar: " + property);
     if (target->is_boolean() && value.kind == NodeParamValue::Kind::Bool) *target = value.bool_value;
     else if ((target->is_number_integer() || target->is_number_unsigned()) && value.kind == NodeParamValue::Kind::Int) *target = value.int_value;

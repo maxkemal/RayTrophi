@@ -30,6 +30,11 @@ layout(push_constant) uniform Constants {
     uvec4 dimensions;
     vec4 gravity;
 } pc;
+float grainRadius(uint g) { return grain_mass[pc.counts.z + g]; }
+float grainVolume(uint g) {
+    float r = grainRadius(g);
+    return 4.188790205 * r * r * r;
+}
 const uint EMPTY = 0xffffffffu;
 vec3 position(uint i) {
     if (i < pc.counts.x) {
@@ -108,14 +113,15 @@ float solidVolume(ivec3 c) {
             ivec3 near = c + ivec3(x, y, z);
             uint j = heads[pc.counts.y + hash(near)];
             while (j != EMPTY) {
-                if (all(equal(cell(j), near))) volume += weight(position(j), c) * pc.material.y;
+                if (all(equal(cell(j), near))) {
+                    volume += weight(position(j), c) * grainVolume(j - pc.counts.x);
+                }
                 j = links[j];
             }
         }
     return volume;
 }
-float dragCoefficient(float speed, float density, float viscosity, float voidage) {
-    float d = 2.0 * pc.material.x;
+float dragCoefficient(float d, float speed, float density, float viscosity, float voidage) {
     float re = max(density * voidage * d * max(speed, 0.0) / viscosity, 1e-6);
     float corrected_speed = re * viscosity / (density * voidage * d);
     float cd = pow(0.63 + 4.8 / sqrt(re), 2.0);
@@ -177,7 +183,7 @@ void main() {
         if (!inside(c)) continue;
         uint leader = fieldLeader(c);
         float w = weight(p, c);
-        if (leader != EMPTY && w > 0.0) addSolid(4u * leader + 2u, w * pc.material.y);
+        if (leader != EMPTY && w > 0.0) addSolid(4u * leader + 2u, w * grainVolume(i));
     }
 #elif defined(FLUID_REFRESH)
     if (i >= pc.counts.z) return;
@@ -220,7 +226,7 @@ void main() {
         mu += w * a.y;
         float pores = clamp(1.0 - a.z / cv, pc.material.z, 1.0) * cv;
         wet += w * min(1.0, a.x / (0.5 * pores));
-        float share = w * pc.material.y / max(a.z, pc.material.y) * f.w;
+        float share = w * grainVolume(i) / max(a.z, grainVolume(i)) * f.w;
         shares[n] = share;
         lump += share;
         momentum += share * f.xyz;
@@ -233,9 +239,9 @@ void main() {
         float density = mass / volume;
         float voidage = clamp(1.0 - solid / (weights * cv), pc.material.z, 1.0);
         float submerged = clamp(wet / weights, 0.0, 1.0);
-        float beta = submerged * dragCoefficient(length(sampled - grainVelocity(i)),
-            density, mu / mass, voidage);
-        vec3 lift = -pc.gravity.xyz * (submerged * density * pc.material.y / grain_mass[i]);
+        float beta = submerged * dragCoefficient(2.0 * grainRadius(i),
+            length(sampled - grainVelocity(i)), density, mu / mass, voidage);
+        vec3 lift = -pc.gravity.xyz * (submerged * density * grainVolume(i) / grain_mass[i]);
         coupling[3u * i] = vec4(sampled, beta);
         coupling[3u * i + 1u] = vec4(lift + external_acceleration[i].xyz, lump);
         buoyancy[i] = vec4(lift, 0.0);

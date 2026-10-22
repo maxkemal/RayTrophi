@@ -445,6 +445,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_particle_subdivisions"] = d.fluid_particle_subdivisions;
     j["fluid_particle_geometry_mode"] = d.fluid_particle_geometry_mode;
     j["fluid_particle_geometry_source"] = d.fluid_particle_geometry_source;
+    j["fluid_grain_mesh_near_enabled"] = d.fluid_grain_mesh_near_enabled;
+    j["fluid_grain_mesh_near_source_materials"] = d.fluid_grain_mesh_near_source_materials;
+    j["fluid_grain_mesh_near_shape"] = d.fluid_grain_mesh_near_shape;
+    j["fluid_grain_mesh_near_sources"] = d.fluid_grain_mesh_near_sources;
+    j["fluid_grain_mesh_near_distance"] = d.fluid_grain_mesh_near_distance;
+    j["fluid_grain_mesh_near_budget"] = d.fluid_grain_mesh_near_budget;
     j["fluid_particle_emissive"] = d.fluid_particle_emissive;
     j["fluid_particle_emission"] = d.fluid_particle_emission;
     j["fluid_particle_material_id"] = d.fluid_particle_material_id;
@@ -681,6 +687,15 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_subdivisions")) d.fluid_particle_subdivisions = j["fluid_particle_subdivisions"];
     if (j.contains("fluid_particle_geometry_mode")) d.fluid_particle_geometry_mode = j["fluid_particle_geometry_mode"];
     if (j.contains("fluid_particle_geometry_source")) d.fluid_particle_geometry_source = j["fluid_particle_geometry_source"];
+    if (j.contains("fluid_grain_mesh_near_shape"))
+        d.fluid_grain_mesh_near_shape = j["fluid_grain_mesh_near_shape"];
+    if (j.contains("fluid_grain_mesh_near_source_materials"))
+        d.fluid_grain_mesh_near_source_materials = j["fluid_grain_mesh_near_source_materials"];
+    if (j.contains("fluid_grain_mesh_near_enabled")) d.fluid_grain_mesh_near_enabled = j["fluid_grain_mesh_near_enabled"];
+    if (j.contains("fluid_grain_mesh_near_sources") && j["fluid_grain_mesh_near_sources"].is_array())
+        d.fluid_grain_mesh_near_sources = j["fluid_grain_mesh_near_sources"].get<std::vector<std::string>>();
+    if (j.contains("fluid_grain_mesh_near_distance")) d.fluid_grain_mesh_near_distance = j["fluid_grain_mesh_near_distance"];
+    if (j.contains("fluid_grain_mesh_near_budget")) d.fluid_grain_mesh_near_budget = j["fluid_grain_mesh_near_budget"];
     if (j.contains("fluid_particle_emissive")) d.fluid_particle_emissive = j["fluid_particle_emissive"];
     if (j.contains("fluid_particle_emission")) d.fluid_particle_emission = j["fluid_particle_emission"];
     if (j.contains("fluid_particle_material_id")) d.fluid_particle_material_id = j["fluid_particle_material_id"];

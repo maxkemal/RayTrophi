@@ -26,9 +26,9 @@ layout(std430, binding = 7) buffer Scratch { float scratch[]; };
 // key, tangential spring xyz, rolling spring xyz), updated in place.
 layout(std430, binding = 8) buffer History { uint history[]; };
 // [0, capacity): grain -> history block (FRESH bit: ignore the block's old
-// records this frame). [capacity + 4b]: owner id of block b, [+1]: mask of
-// its occupied slots, [+2]: rest seconds (float bits, AUDIT bit set by a
-// neighbour audit request), [+3]: skipped solve time while asleep, or rest-clock
+// records this frame). [capacity + 7b]: owner id, [+1..4]: occupied masks,
+// [+5]: rest seconds (float bits, AUDIT bit set by a neighbour audit request),
+// [+6]: skipped solve time while asleep, or rest-clock
 // rounding compensation while awake (float bits; only the owner reads/writes it).
 // The host keeps each grain on its block across frames.
 layout(std430, binding = 9) coherent buffer HistoryBlocks { uint history_blocks[]; };
@@ -64,14 +64,15 @@ layout(push_constant) uniform Constants {
 
 // Contact budget shared with the host CFL (kMatterGrainContactBudget). Every
 // grain, domain-wall and mesh-patch contact of one grain needs a history slot.
-const uint SLOTS = 24u;
-const float BUDGET = 24.0;
+uint historyCapacity() { return uint(masses[2u * pc.meta.x + 3u]); }
+#define SLOTS historyCapacity()
+#define BUDGET float(historyCapacity())
 // Shared with the host (kMatterGrainBucketCapacity).
 const uint BUCKET = 16u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 27u;
+const uint REVISION = 30u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -79,11 +80,13 @@ const uint FRESH = 0x80000000u;
 #include "sim_matter_grain_sleep_transfer.glsl"
 #include "sim_matter_grain_audio.glsl"
 // Shared with the host (kMatterGrainListCapacity).
-const uint LIST = 32u;
+uint listCapacity() { return uint(masses[2u * pc.meta.x + 2u]); }
 // diagnostics words: 12..14 rebuild flags (k%3), 15 builds this frame,
 // 16 sleeping grains on the last substep.
 uint flagWord(uint k) { return 12u + k % 3u; }
 bool rebuildNow() { return diagnostics[flagWord(pc.substep.x)] != 0u; }
+
+float radius(uint i) { return masses[pc.meta.x + i]; }
 
 uint readBank() { return pc.substep.x & 1u; }
 uint writeBank() { return readBank() ^ 1u; }
@@ -176,14 +179,14 @@ uint g_history_probes = 0u;
 uint g_nodes = 0u;
 uint g_sticking = 0u;
 uint g_block = 0u;
-uint g_old_mask = 0u;
-uint g_touched = 0u;
-uint g_allocated = 0u;
+uvec4 g_old_mask = uvec4(0u);
+uvec4 g_touched = uvec4(0u);
+uvec4 g_allocated = uvec4(0u);
 
 uint slotWord(uint s) { return (g_block*SLOTS+s)*SLOT_WORDS; }
-uint ownerWord() { return pc.substep.y+4u*g_block; }
+uint ownerWord() { return pc.substep.y+7u*g_block; }
 // Rest counter word of grain j's block (j's map entry may still carry FRESH).
-uint restWordOf(uint j) { return pc.substep.y+4u*(history_blocks[j] & ~FRESH)+2u; }
+uint restWordOf(uint j) { return pc.substep.y+7u*(history_blocks[j] & ~FRESH)+5u; }
 uint sleepRestLimit() { return floatBitsToUint(max(pc.sleep.w,pc.step_contact.x)); }
 bool sleepOn() { return pc.sleep.y > 0.0; }
 // This grain is moving; only a meaningful transferred kick requests an audit.
@@ -210,14 +213,16 @@ void requestNeighbourAudit(uint j) {
 uint previousSprings(uint key, out vec3 tangential, out vec3 rolling) {
     tangential = vec3(0.0);
     rolling = vec3(0.0);
-    for (uint m=g_old_mask; m != 0u; m &= m-1u) {
-        uint s = uint(findLSB(m));
-        uint b = slotWord(s);
-        ++g_history_probes;
-        if (history[b] != key) continue;
-        tangential = uintBitsToFloat(uvec3(history[b+1u],history[b+2u],history[b+3u]));
-        rolling = uintBitsToFloat(uvec3(history[b+4u],history[b+5u],history[b+6u]));
-        return s;
+    for (uint word = 0u; word < 4u; ++word) {
+        for (uint m = g_old_mask[word]; m != 0u; m &= m - 1u) {
+            uint s = word * 32u + uint(findLSB(m));
+            uint b = slotWord(s);
+            ++g_history_probes;
+            if (history[b] != key) continue;
+            tangential = uintBitsToFloat(uvec3(history[b+1u],history[b+2u],history[b+3u]));
+            rolling = uintBitsToFloat(uvec3(history[b+4u],history[b+5u],history[b+6u]));
+            return s;
+        }
     }
     return EMPTY;
 }
@@ -225,12 +230,20 @@ uint previousSprings(uint key, out vec3 tangential, out vec3 rolling) {
 // new ones) refuses publication like the contact budget itself.
 void keepSprings(uint slot, uint key, vec3 tangential, vec3 rolling) {
     if (slot == EMPTY) {
-        uint open_slots = ~(g_old_mask|g_allocated) & ((1u<<SLOTS)-1u);
-        if (open_slots == 0u) { atomicOr(diagnostics[0],1u); return; }
-        slot = uint(findLSB(open_slots));
-        g_allocated |= 1u<<slot;
+        for (uint word = 0u; word < 4u && word * 32u < SLOTS; ++word) {
+            uint remaining = SLOTS - word * 32u;
+            uint valid = remaining >= 32u ? 0xffffffffu : (1u << remaining) - 1u;
+            uint open_slots = ~(g_old_mask[word] | g_allocated[word]) & valid;
+            if (open_slots != 0u) {
+                uint bit = uint(findLSB(open_slots));
+                slot = word * 32u + bit;
+                g_allocated[word] |= 1u << bit;
+                break;
+            }
+        }
+        if (slot == EMPTY) { atomicOr(diagnostics[0],1u); return; }
     } else {
-        g_touched |= 1u<<slot;
+        g_touched[slot / 32u] |= 1u << (slot % 32u);
     }
     uint b = slotWord(slot);
     uvec3 t = floatBitsToUint(tangential), r = floatBitsToUint(rolling);
@@ -255,15 +268,17 @@ uint g_bridges = 0u;
 void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force) {
     float volume = (coupling[3u*i+2u].w+coupling[3u*j+2u].w)/12.0;
     if (volume <= 0.0 || pc.wet.y <= 0.0) return;
-    float gap = max(d-2.0*r,0.0);
+    float gap = max(d-radius(i)-radius(j),0.0);
+    float real_radius = masses[2u * pc.meta.x];
+    float prefactor = pc.wet.y * (real_radius > 0.0 ? max(1.0, r / real_radius) : 1.0);
     if (gap >= min(pow(volume,1.0/3.0),pc.wet.z)) return;
     float s = gap*sqrt(r/volume);
-    force -= n*(pc.wet.y*r/(1.0+2.1*s+10.0*s*s));
+    force -= n*(prefactor*r/(1.0+2.1*s+10.0*s*s));
     ++g_bridges;
     if (g_probe_sleep_transfer) {
         vec3 relative = velocity(i, readBank()) - velocity(j, readBank());
         float inverse_pair_mass = 1.0 / masses[i] + 1.0 / masses[j];
-        float ceiling = min(pc.wet.y * r * grainSleepAuditHorizon(),
+        float ceiling = min(prefactor * r * grainSleepAuditHorizon(),
                             2.0 * length(relative) / inverse_pair_mass);
         g_bridge_forecast_impulse = n * ceiling;
     }
@@ -276,7 +291,8 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     if (overlap <= 0.0) return;
     ++g_contacts;
     float dt = pc.step_contact.x;
-    float k = pc.high_stiffness.w;
+    float radius_scale = (key & WALL_KEY) != 0u ? effective_radius : 2.0 * effective_radius;
+    float k = pc.high_stiffness.w * radius_scale / pc.low_radius.w;
     float normal_speed = dot(relative,n);
     // step_contact.y is the damping ratio of the material's restitution;
     // c = 2 zeta sqrt(k m_eff) gives every contact the same rebound.
@@ -400,11 +416,14 @@ void main() {
     if (i >= pc.meta.x) return;
     uint bank = readBank();
     vec3 p = position(i,bank);
-    float cutoff2 = pc.wet.x*pc.wet.x;
+    float skin = 0.5 * pc.low_radius.w;
     ivec3 own = cell(p);
-    uint base = i*(LIST+1u);
+    uint base = i*(listCapacity()+1u);
     uint listed = 0u;
-    for (int z=-1; z<=1; ++z) for (int y=-1; y<=1; ++y) for (int x=-1; x<=1; ++x) {
+    int reach = int(ceil((radius(i) + masses[2u * pc.meta.x + 1u] + pc.wet.z + skin) /
+        pc.wet.x));
+    for (int z=-reach; z<=reach; ++z) for (int y=-reach; y<=reach; ++y)
+    for (int x=-reach; x<=reach; ++x) {
         ivec3 wanted = own+ivec3(x,y,z);
         uint b = bucket(wanted);
         uint stored = min(bucket_counts[b],BUCKET);
@@ -414,8 +433,9 @@ void main() {
             vec3 pj = position(j,bank);
             if (!all(equal(cell(pj),wanted))) continue;
             vec3 separation = p-pj;
-            if (dot(separation,separation) >= cutoff2) continue;
-            if (listed == LIST) { atomicOr(diagnostics[0],8u); continue; }
+            float cutoff = radius(i) + radius(j) + pc.wet.z + skin;
+            if (dot(separation,separation) >= cutoff * cutoff) continue;
+            if (listed == listCapacity()) { atomicOr(diagnostics[0],8u); continue; }
             neighbour_list[base+1u+listed++] = j;
         }
     }
@@ -442,11 +462,13 @@ void main() {
     if ((entry & FRESH) != 0u) {
         if (pc.substep.x == 0u) history_blocks[i] = g_block;
     } else if (history_blocks[ownerWord()] == ids[i]) {
-        g_old_mask = history_blocks[ownerWord()+1u];
+        for (uint word = 0u; word < 4u; ++word) {
+            g_old_mask[word] = history_blocks[ownerWord()+1u+word];
+        }
         valid_block = true;
     }
     vec3 p = position(i,bank), v = velocity(i,bank), w = omega(i,bank);
-    float r = pc.low_radius.w, im = 1.0/masses[i], ii = 2.5*im/(r*r);
+    float r = radius(i), im = 1.0/masses[i], ii = 2.5*im/(r*r);
     uint dst = writeBank();
     vec4 drag = coupling[3u*i];
     vec4 lift = coupling[3u*i+1u];
@@ -456,8 +478,8 @@ void main() {
     // solve between audits. The last substep always evaluates actual contacts
     // and bridges, so diagnostics and the next frame's CFL include sleepers.
     uint rest = 0u;
-    uint rest_word = ownerWord()+2u;
-    uint elapsed_word = ownerWord()+3u;
+    uint rest_word = ownerWord()+5u;
+    uint elapsed_word = ownerWord()+6u;
     bool context_changed = floatBitsToUint(pc.sleep.z) != 0u;
     uint stored_rest = valid_block ? history_blocks[rest_word] & ~AUDIT : 0u;
     bool was_sleeping = valid_block && stored_rest >= sleepRestLimit();
@@ -481,7 +503,7 @@ void main() {
     }
     g_fast = sleepOn() && (dot(v,v) >= pc.sleep.y*pc.sleep.y || length(w)*r >= pc.sleep.y);
     vec3 f = vec3(0.0), t = vec3(0.0);
-    uint list_base = i*(LIST+1u);
+    uint list_base = i*(listCapacity()+1u);
     uint listed = neighbour_list[list_base];
     g_scanned += listed;
     for (uint s=0u; s<listed; ++s) {
@@ -499,27 +521,33 @@ void main() {
         vec3 separation = p-position(j,bank);
         float d = length(separation);
         uint bridges_before = g_bridges;
-        if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);
+        float rj = radius(j);
+        float sum_radius = r + rj;
+        float effective_radius = r * rj / sum_radius;
+        if (d < sum_radius+pc.wet.z && d > 1e-9) {
+            bridge(i,j,d,separation/d,2.0*effective_radius,f);
+        }
         bool linked = g_bridges != bridges_before;
-        if (d < 2.0*r) {
+        if (d < sum_radius) {
             linked = true;
             ++g_pairs;
             vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
-            vec3 arm = -n*(.5*d);
+            vec3 arm = -n*(d * r / sum_radius);
+            vec3 other_arm = n*(d * rj / sum_radius);
             vec3 wj = omega(j,bank);
-            float jm = 1.0/masses[j], ji = 2.5*jm/(r*r);
-            vec3 relative = v+cross(w,arm)-velocity(j,bank)-cross(wj,-arm);
-            contact(i,ids[j],n,2.0*r-d,arm,relative,w-wj,ii,ji,.5*r,
-                im+jm+dot(arm,arm)*(ii+ji),im+jm,f,t);
+            float jm = 1.0/masses[j], ji = 2.5*jm/(rj*rj);
+            vec3 relative = v+cross(w,arm)-velocity(j,bank)-cross(wj,other_arm);
+            contact(i,ids[j],n,sum_radius-d,arm,relative,w-wj,ii,ji,effective_radius,
+                im+jm+dot(arm,arm)*ii+dot(other_arm,other_arm)*ji,im+jm,f,t);
         }
         if (g_probe_sleep_transfer && linked) {
-            float jm = 1.0/masses[j], ji = 2.5*jm/(r*r);
+            float jm = 1.0/masses[j], ji = 2.5*jm/(rj*rj);
             bool significant = grainSleepKickSignificant(g_pair_dynamic_impulse,
-                g_pair_dynamic_angular_impulse,jm,ji,r) ||
+                g_pair_dynamic_angular_impulse,jm,ji,rj) ||
                 grainSleepKickSignificant(g_pair_forecast_impulse,
-                    g_pair_forecast_angular_impulse,jm,ji,r) ||
-                grainSleepKickSignificant(g_bridge_forecast_impulse,vec3(0.0),jm,ji,r);
-            if (significant || !can_sleep) {
+                    g_pair_forecast_angular_impulse,jm,ji,rj) ||
+                grainSleepKickSignificant(g_bridge_forecast_impulse,vec3(0.0),jm,ji,rj);
+            if (significant || !can_sleep || abs(r - rj) > 1e-7) {
                 requestNeighbourAudit(j);
             }
         }
@@ -667,7 +695,9 @@ void main() {
     }
     if (g_contacts > SLOTS) atomicOr(diagnostics[0],1u);
     history_blocks[ownerWord()] = ids[i];
-    history_blocks[ownerWord()+1u] = g_touched|g_allocated;
+    for (uint word = 0u; word < 4u; ++word) {
+        history_blocks[ownerWord()+1u+word] = g_touched[word] | g_allocated[word];
+    }
     atomicMax(diagnostics[2],g_contacts);
     if (pc.substep.x == pc.substep.w) {
         atomicAdd(diagnostics[3],g_sticking);
@@ -700,10 +730,10 @@ void main() {
     if (sleepOn() && !force_balanced && !g_fast) {
         // Newly unbalanced supports propagate wake even before they acquire
         // speed. Include bridge reach, since cohesion may link separated grains.
-        float reach = 2.0*r+pc.wet.z;
         for (uint s=0u; s<listed; ++s) {
             uint j = neighbour_list[list_base+1u+s];
             vec3 separation = p-position(j,bank);
+            float reach = r + radius(j) + pc.wet.z;
             if (dot(separation,separation) < reach*reach) {
                 requestNeighbourAudit(j);
             }
@@ -749,7 +779,7 @@ void main() {
     // Rebuild the lists before substep k+1 once this grain has moved half the
     // skin since the build: two grains then closed at most the whole skin, so
     // every pair inside 2r + rupture cap was inside the cutoff at the build.
-    float half_skin = .5*(pc.wet.x-2.0*r-pc.wet.z);
+    float half_skin = .25 * pc.low_radius.w;
     vec3 moved = p-vec3(build_positions[3u*i],build_positions[3u*i+1u],build_positions[3u*i+2u]);
     uint next_flag = flagWord(pc.substep.x+1u);
     if (dot(moved,moved) > half_skin*half_skin && diagnostics[next_flag] == 0u)

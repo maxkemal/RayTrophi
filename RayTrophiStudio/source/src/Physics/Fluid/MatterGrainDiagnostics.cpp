@@ -164,6 +164,8 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         liquid_shape["center_y_m"] = liquid_mass > 0.0 ? liquid_moment / liquid_mass : 0.0;
     }
     double spin_energy = 0.0, maximum_spin = 0.0;
+    double minimum_radius = 1e30, maximum_radius = 0.0, sphere_volume = 0.0;
+    std::size_t small_grains = 0, large_grains = 0;
     double angular[3] = {};
     std::vector<Vec3> centres;
     centres.reserve(p.size());
@@ -184,7 +186,16 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         const Vec3 w = Vec3(a.col1.z - a.col2.y, a.col2.x - a.col0.z,
                             a.col0.y - a.col1.x) * .5f;
         const double mass = double(p.rest_mass_kg[i]) * p.mass_fraction[i];
-        const double inertia = .4 * mass * params.radius_m * params.radius_m;
+        const double radius = matterGrainRadius(params, p, i);
+        minimum_radius = std::min(minimum_radius, radius);
+        maximum_radius = std::max(maximum_radius, radius);
+        sphere_volume += 4.18879020478639 * radius * radius * radius;
+        if (radius > 0.5 * (params.radius_m + matterGrainMaximumRadius(params))) {
+            ++large_grains;
+        } else {
+            ++small_grains;
+        }
+        const double inertia = .4 * mass * radius * radius;
         const double w2 = double(w.x) * w.x + double(w.y) * w.y + double(w.z) * w.z;
         spin_energy += .5 * inertia * w2;
         maximum_spin = std::max(maximum_spin, std::sqrt(w2));
@@ -200,8 +211,13 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"substep_dt_s", report->substep_dt}, {"substep_limit", report->limit},
             {"max_contacts_per_grain", report->max_contacts},
             {"cfl_contacts_per_grain", report->cfl_contacts},
+            {"cfl_stiffness_mass_rate_s2", report->cfl_stiffness_mass_rate_s2},
             {"cfl_contact_budget_retry", report->cfl_budget_retry},
             {"neighbour_list_builds", report->list_rebuilds},
+            {"neighbour_list_capacity", report->neighbour_list_capacity},
+            {"neighbour_list_retries", report->neighbour_list_retries},
+            {"contact_history_capacity", report->contact_history_capacity},
+            {"contact_history_retries", report->contact_history_retries},
             {"sleeping_grains", report->sleeping_grains},
             {"cost_last_substep", {{"neighbour_candidates", report->neighbour_candidates},
                 {"grain_pairs", report->grain_pairs},
@@ -304,11 +320,20 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                            : "force_dem_viscous_sliding_candidate"},
         {"collider_structure", "flat_bvh"}, {"max_support_contacts", 4},
         {"max_surface_patches", 8}, {"contact_shader_revision", kMatterGrainShaderRevision},
-        {"contact_budget", kMatterGrainContactBudget}, {"runtime", runtime},
+        {"contact_budget", report && report->substeps > 0 ? report->contact_history_capacity :
+            (matterGrainMaximumRadius(params) > params.radius_m ? 64u :
+                static_cast<uint32_t>(kMatterGrainContactBudget))}, {"runtime", runtime},
         {"rolling_model", params.rolling_friction > 0.0f ? "epsd2_spring" : "none"},
         {"pile", matterGrainPileProfile(centres, params.radius_m)},
         {"neighbour_structure", "verlet_list_fixed_buckets"},
-        {"radius_m", params.radius_m}, {"spin_energy_j", spin_energy},
+        {"size_population", {{"count", centres.size()},
+            {"radius_min_m", centres.empty() ? nlohmann::json(nullptr) : nlohmann::json(minimum_radius)},
+            {"radius_max_m", centres.empty() ? nlohmann::json(nullptr) : nlohmann::json(maximum_radius)},
+            {"sphere_volume_m3", sphere_volume}, {"small_count", small_grains},
+            {"large_count", large_grains}}},
+        {"radius_m", params.radius_m}, {"radius_max_m", matterGrainMaximumRadius(params)},
+        {"size_distribution", params.size_distribution}, {"size_seed", params.size_seed},
+        {"large_grain_fraction", params.large_grain_fraction}, {"spin_energy_j", spin_energy},
         {"max_spin_rad_s", maximum_spin},
         {"angular_momentum_kg_m2_s", {angular[0], angular[1], angular[2]}},
         {"history_static_friction", history}, {"wet_coupling", params.wet_grains},

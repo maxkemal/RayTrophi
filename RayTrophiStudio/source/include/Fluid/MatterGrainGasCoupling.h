@@ -13,6 +13,7 @@ namespace FluidSim {
 class FluidGrid;
 }
 namespace RayTrophiSim::Fluid {
+struct MatterGrainParams;
 class FluidParticles;
 
 // The gas lane's temperature field holds the VIRTUAL temperature Tv
@@ -54,6 +55,7 @@ struct MatterGrainGasAir {
 void exchangeMatterGrainGasDrag(const FluidParticles& grains, float grain_radius,
                                 FluidSim::FluidGrid& gas, const MatterGrainGasAir& air,
                                 float dt, std::vector<Vec3>& acceleration,
-                                MatterGrainStepReport& report);
+                                MatterGrainStepReport& report,
+    const MatterGrainParams* size_policy = nullptr);
 
 } // namespace RayTrophiSim::Fluid

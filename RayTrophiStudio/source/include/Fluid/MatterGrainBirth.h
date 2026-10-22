@@ -9,6 +9,16 @@
 namespace RayTrophiSim::Fluid {
 struct APICSolverParams;
 
+// DEM initial state uses physical sphere spacing, independent of voxel/PPC.
+// Returns accepted births that did not fit the budget (at most one extra probe).
+struct MatterGrainSeedResult {
+    std::size_t emitted = 0;
+    bool truncated = false;
+};
+MatterGrainSeedResult seedMatterGrainBox(FluidParticles& particles,
+    const FluidSim::FluidGrid& grid, const Vec3& low, const Vec3& high,
+    const APICSolverParams& params, float kelvin, std::size_t budget);
+
 // Host authoring/birth boundary only. Existing simulation state stays unchanged;
 // accepted new centers occupy the hash immediately, before subsequent births.
 class MatterGrainBirthFilter {
@@ -16,7 +26,7 @@ public:
     MatterGrainBirthFilter(const FluidParticles& particles,
                           const FluidSim::FluidGrid& grid, float radius,
                           const APICSolverParams* params = nullptr);
-    bool accept(const Vec3& position);
+    bool accept(const Vec3& position, float radius = 0.0f);
 
 private:
     struct Cell {
@@ -32,7 +42,11 @@ private:
     Vec3 low_, high_;
     float radius_ = 0.0f;
     float spacing_ = 0.0f;
-    std::unordered_map<Cell, std::vector<Vec3>, Hash> cells_;
+    struct Sphere {
+        Vec3 position;
+        float radius;
+    };
+    std::unordered_map<Cell, std::vector<Sphere>, Hash> cells_;
 };
 
 } // namespace RayTrophiSim::Fluid

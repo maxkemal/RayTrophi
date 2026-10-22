@@ -62,6 +62,7 @@ checkpoints, not proof that a later build/listening/physics gate passed.
 
 | Document | Area |
 |---|---|
+| [KUM_TANE_GEOMETRISI_VE_MINERAL_KARISIMI.md](KUM_TANE_GEOMETRISI_VE_MINERAL_KARISIMI.md) | **AKTİF 2026-10-22 (rev. 6: K0 + gerçek Voronoi shard + mineral karışımı canlı ölçüldü; opak kumda shard bedava, kuvars transmission 2.7×; materyal derleyici pin düzeltmesi derleme bekliyor).** Taneli maddelerde küreden gerçek taneye: karar = mevcut generator (Voronoi fracture / Rock) + yakın-kamera üçgen instancing (hibrit, uzak taneler küre bulutunda), `rint` çokyüzlüsü yedek; asıl maliyet instance sayısı. K0: `fluid.set_splat_geometry near_mesh_*`, `fluid.get grain_mesh_near`, yeni `render.instance_stats`, ölçüm `scripts/test/rt_k0_grain_mesh_near_ipc.py`, mineral materyali `scripts/test/rt_grain_mineral_material.py`. K3 tane içi analitik yol tasarımı §7.4. |
 | [RT gas optical performance](RT_GAS_OPTICAL_PERFORMANCE.md) | AKTIF - single-material NanoVDB optical skips and affine ray sampling; build pending. |
 | [AUDIO_MASTER_PLAN.md](AUDIO_MASTER_PLAN.md) | **ACTIVE 2026-10-19.** Canonical remaining audio work: authoring/persistence, all-family synthesis, acoustic export/analysis and final acceptance. |
 | [PHYSICAL_AUDIO_SYNTHESIS_PLAN.md](PHYSICAL_AUDIO_SYNTHESIS_PLAN.md) | **ACTIVE 2026-10-19.** Eight-model V2 DSP and focus-routed history in source; build/listening pending. Future event/family gates remain open. |

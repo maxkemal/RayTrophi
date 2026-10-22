@@ -297,7 +297,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             proxy_high = Vec3::max(a, b) + Vec3(proxy.radius);
         }
         // A proxy that moves this frame may enter: pad by its travel.
-        const Vec3 pad(proxy.linear_velocity.length() * dt + params.grain.radius_m);
+        const Vec3 pad(proxy.linear_velocity.length() * dt + Fluid::matterGrainMaximumRadius(params.grain));
         if (proxy_high.x < low.x - pad.x || proxy_low.x > high.x + pad.x ||
             proxy_high.y < low.y - pad.y || proxy_low.y > high.y + pad.y ||
             proxy_high.z < low.z - pad.z || proxy_low.z > high.z + pad.z) {
@@ -396,7 +396,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     }
     bool resorted = false;
     const float disorder = Fluid::orderMatterGrainsByCell(state.particles, state.grid.origin,
-        2.0f * params.grain.radius_m, grain_order, !same_population,
+        2.0f * Fluid::matterGrainMaximumRadius(params.grain), grain_order, !same_population,
         Fluid::kMatterGrainResortDisorder, resorted);
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
@@ -486,7 +486,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             // Pore fraction never below .3: a packed bed is ~.36-.4, and a
             // face closed further would stall the projection's CG.
             Fluid::applyMatterGrainPorosity(state.grid, grains, params.grain.radius_m,
-                params.variational_solids, .3f, porosity.backup, report);
+                params.variational_solids, .3f, porosity.backup, report, &params.grain);
             buffers.porous_solid_velocity = true;
             liquid_params.variational_solids = true;
         }
@@ -545,14 +545,14 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         if (coupled) {
             if (!Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
                     Fluid::domainSubstance(params), state.grid.origin, state.grid.nx, state.grid.ny,
-                    state.grid.nz, state.grid.voxel_size, frame.field, error)) {
+                    state.grid.nz, state.grid.voxel_size, frame.field, error, &params.grain)) {
                 return false;
             }
             Fluid::prepareMatterGrainCoupling(grains, params.grain, params.gravity, dt,
                 frame, report);
             if (exclude && !Fluid::applyMatterGrainLiquidAccelerationForce(liquid,
                     liquid_start_velocity, liquid_start_id, grains, params.grain.radius_m,
-                    params.gravity, dt, frame, report, error)) {
+                    params.gravity, dt, frame, report, error, &params.grain)) {
                 return false;
             }
             report.volume_exclusion = exclude;
@@ -587,7 +587,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         if (state.type == SimulationDomainType::Matter && state.gas_stats.stepped &&
             state.gas_stats.max_speed > 1.0e-4f) {
             Fluid::exchangeMatterGrainGasDrag(grains, params.grain.radius_m,
-                Fluid::gasGrid(state), gas_air, dt, motion.external_acceleration, report);
+                Fluid::gasGrid(state), gas_air, dt, motion.external_acceleration, report, &params.grain);
             if (report.gas_coupled_grains == 0 && !(forces && !forces->empty())) {
                 // Nothing to carry: an empty row keeps the no-field fast path.
                 motion.external_acceleration.clear();
@@ -635,7 +635,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                     }
                     const auto remaining = budget ? budget - used : 0;
                     if (!mpm_contact.prepare(state.particles, buffers, grains.size(),
-                            params.grain.radius_m, params.grain.friction, dt, remaining, error)) {
+                            Fluid::matterGrainMaximumRadius(params.grain),
+                            params.grain.friction, dt, remaining, error)) {
                         return false;
                     }
                     if (coupled) {
@@ -673,7 +674,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                 };
                 return step_continuum(&clock);
             };
-        } else if (!mpm_contact.prepare(liquid, buffers, grains.size(), params.grain.radius_m,
+        } else if (!mpm_contact.prepare(liquid, buffers, grains.size(),
+                Fluid::matterGrainMaximumRadius(params.grain),
                 params.grain.friction, dt, grain_budget, error)) {
             return false;
         }
@@ -702,7 +704,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         if (shared_clock && params.grain.wet_grains && coupled &&
             !Fluid::buildMatterGrainLiquidField(liquid, grains, params.grain.radius_m,
                 Fluid::domainSubstance(params), state.grid.origin, state.grid.nx, state.grid.ny,
-                state.grid.nz, state.grid.voxel_size, frame.field, error)) {
+                state.grid.nz, state.grid.voxel_size, frame.field, error, &params.grain)) {
             return false;
         }
         Fluid::exchangeMatterGrainWater(liquid, grains, frame, params.grain, dt, report,

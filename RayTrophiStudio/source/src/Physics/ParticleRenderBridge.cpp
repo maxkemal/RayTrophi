@@ -45,6 +45,8 @@
 #include "Fluid/FluidRenderProxy.h"
 #include "Fluid/FluidSplatMaterialPolicy.h"
 #include "Fluid/FluidViewResolver.h"
+#include "Fluid/GrainMeshNear.h"
+#include "Camera.h"
 #include "globals.h"
 #include "PerfProfile.h"
 
@@ -284,70 +286,22 @@ void buildPrimitive(SceneData::ParticleRenderShape shape, int subdiv, uint16_t m
 }
 
 // Read a scene node directly from the canonical flat TriangleMesh SoA, recenter
-// it and normalize to unit max-extent. No source Triangle facades are consulted
-// or manufactured; the Triangle objects produced below belong solely to the
-// transient ScatterSource required by the instance backends.
+// it and normalize to unit max-extent (gatherNormalizedSceneFaces, shared with
+// the near grain exemplars). No source Triangle facades are consulted; the
+// Triangle objects produced below belong solely to the transient ScatterSource
+// required by the instance backends.
 void gatherSceneMeshSource(const std::vector<std::shared_ptr<Hittable>>& objects,
                            const std::string& node_name,
                            std::vector<std::shared_ptr<Triangle>>& out) {
     out.clear();
-    if (node_name.empty()) return;
-
-    struct FlatFace {
-        Vec3 p[3];
-        Vec3 n[3];
-        Vec2 uv[3];
-        uint16_t material = 0;
-    };
-    std::vector<FlatFace> faces;
-    Vec3 mn(1e30f, 1e30f, 1e30f), mx(-1e30f, -1e30f, -1e30f);
-    for (const auto& obj : objects) {
-        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
-        if (!mesh || mesh->nodeName != node_name || !mesh->geometry) continue;
-        const DNA::GeometryDetail& g = *mesh->geometry;
-        const Vec3* P = g.get_attribute_data<Vec3>("P");
-        const Vec3* P_orig = g.get_attribute_data<Vec3>("P_orig");
-        const Vec3* N = g.get_attribute_data<Vec3>("N");
-        const Vec3* N_orig = g.get_attribute_data<Vec3>("N_orig");
-        const Vec2* uv = g.get_attribute_data<Vec2>("uv");
-        const uint16_t* material = g.get_attribute_data<uint16_t>("materialID");
-        if ((!P && !P_orig) || g.indices.size() < 3) continue;
-        const Matrix4x4 xf = mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
-        const Matrix4x4 nt = mesh->transform ? mesh->transform->getNormalTransform() : Matrix4x4::identity();
-        const std::size_t vc = g.get_vertex_count();
-        for (std::size_t f = 0; f + 2 < g.indices.size(); f += 3) {
-            FlatFace face;
-            bool valid = true;
-            for (int c = 0; c < 3; ++c) {
-                const uint32_t vi = g.indices[f + static_cast<std::size_t>(c)];
-                if (vi >= vc) { valid = false; break; }
-                face.p[c] = P_orig ? xf.transform_point(P_orig[vi]) : P[vi];
-                const Vec3 local_n = N_orig ? N_orig[vi] : (N ? N[vi] : Vec3(0.0f, 1.0f, 0.0f));
-                face.n[c] = N_orig ? nt.transform_vector(local_n).normalize() : local_n.normalize();
-                face.uv[c] = uv ? uv[vi] : Vec2(0.0f, 0.0f);
-                mn = Vec3::min(mn, face.p[c]);
-                mx = Vec3::max(mx, face.p[c]);
-            }
-            if (!valid) continue;
-            face.material = material ? material[g.indices[f]] : 0;
-            faces.push_back(face);
-        }
-    }
-    if (faces.empty()) return;
-
-    const Vec3 center = (mn + mx) * 0.5f;
-    const Vec3 ext = mx - mn;
-    const float inv = 1.0f / std::max({ ext.x, ext.y, ext.z, 1e-4f });
+    std::vector<RayTrophiSim::Fluid::NormalizedSceneFace> faces;
+    if (!RayTrophiSim::Fluid::gatherNormalizedSceneFaces(objects, node_name, faces)) return;
     const std::string out_node = "[PSysSceneGeo] " + node_name;
-
     out.reserve(faces.size());
-    for (const FlatFace& f : faces) {
-        uint16_t mat = f.material == MaterialManager::INVALID_MATERIAL_ID ? 0 : f.material;
-        auto tri = std::make_shared<Triangle>((f.p[0] - center) * inv,
-                                              (f.p[1] - center) * inv,
-                                              (f.p[2] - center) * inv,
+    for (const auto& f : faces) {
+        auto tri = std::make_shared<Triangle>(f.p[0], f.p[1], f.p[2],
                                               f.n[0], f.n[1], f.n[2],
-                                              f.uv[0], f.uv[1], f.uv[2], mat);
+                                              f.uv[0], f.uv[1], f.uv[2], f.material);
         tri->setNodeName(out_node);
         out.push_back(std::move(tri));
     }
@@ -379,6 +333,21 @@ constexpr std::size_t kFluidSurfaceProxyInstanceCeiling = 32768;
 
 inline std::size_t fluidRenderBudget(std::size_t ui_max_particles) {
     return ui_max_particles == 0 ? std::numeric_limits<std::size_t>::max() : ui_max_particles;
+}
+
+// Near grain mesh pool (GrainMeshNear.h). The primary rule above is tuned for
+// one or two sources; the near pool has (material slots x exemplars) of them,
+// and its 256-slot floor with 4x growth left 12311 TLAS slots for 4591 live
+// grains (K0, 2026-10-22) - zero-scale instances parked at the origin, inside
+// the very pile being measured. Here: 25% headroom on 64-slot steps, nothing
+// for an empty source, and a shrink only once the live count halves, so a
+// steady camera rebuilds nothing.
+constexpr std::size_t kNearPoolStep = 64;
+
+inline std::size_t nearPoolCapacityFor(std::size_t live_count) {
+    if (live_count == 0) return 0;
+    const std::size_t padded = live_count + live_count / 4;
+    return (padded + kNearPoolStep - 1) / kNearPoolStep * kNearPoolStep;
 }
 
 inline std::size_t fluidPoolCapacityFor(std::size_t live_count, std::size_t budget) {
@@ -799,8 +768,26 @@ struct FluidSourceState {
     // original per-face materials; non-negative entries are explicit uniform
     // material overrides.
     std::vector<int> source_material_keys;
+    // Near grain meshes: camera position/threshold of the last split, so a
+    // moving camera re-splits a paused simulation.
+    uint64_t near_camera_key = 0;
 };
 std::unordered_map<int, FluidSourceState> g_fluid_source_state;
+
+// Near grain mesh pool of a domain particle pool (Fluid/GrainMeshNear.h), keyed
+// by the primary pool's group id. Both pools are filled by ONE particle walk,
+// so a particle is drawn either as a sphere or as a mesh, never both.
+struct GrainMeshGroupState {
+    int group_id = -1;
+    uint64_t signature = 0;
+    uint64_t content_hash = 0;
+    std::vector<int> material_keys;
+    std::vector<RayTrophiSim::Fluid::GrainExemplar> exemplars;
+    std::vector<std::size_t> source_capacities;
+    bool touched = false;   // split ran (or was skipped unchanged) this pass
+    bool release = false;   // split disabled or failed: delete the pool
+};
+std::unordered_map<int, GrainMeshGroupState> g_grain_mesh_groups;
 
 uint64_t fluidRenderSignature(const RayTrophiSim::Fluid::FluidObject& obj) {
     uint64_t h = 1469598103934665603ull;
@@ -1315,15 +1302,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
             const uint32_t requested_visual_children =
-                dconfig.fluid_params.grain.enabled ||
-                    (dconfig.fluid_params.granular_enabled &&
-                     dconfig.fluid_granular_physical_carriers)
-                ? 1u
-                : static_cast<uint32_t>(std::clamp(
-                      dconfig.fluid_particle_visual_children,
-                      1,
-                      static_cast<int>(
-                          RayTrophiSim::Fluid::kFluidRenderProxyMaxChildren)));
+                RayTrophiSim::Fluid::primarySplatVisualChildren(dconfig);
             const uint32_t effective_visual_children =
                 RayTrophiSim::Fluid::limitFluidRenderProxyChildren(
                     requested_visual_children,
@@ -1352,6 +1331,45 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 group->point_sphere_visual_size_variation = visual_size_variation;
                 structural_change = true;
             }
+            // ── Near grain meshes (GrainMeshNear.h, K0 measurement) ──────────
+            // Evaluated before the skip test: a camera move re-splits a paused
+            // simulation, and a config the split cannot honour says why.
+            namespace GF = RayTrophiSim::Fluid;
+            GF::GrainMeshNearStats near_stats;
+            near_stats.enabled = dconfig.fluid_grain_mesh_near_enabled;
+            near_stats.camera_distance = std::max(dconfig.fluid_grain_mesh_near_distance, 0.0f);
+            const std::size_t near_budget = dconfig.fluid_grain_mesh_near_budget;
+            bool near_active = false;
+            Vec3 near_camera(0.0f, 0.0f, 0.0f);
+            uint64_t near_camera_key = 0;
+            if (near_stats.enabled) {
+                const auto camera = getActiveCamera();
+                if (!procedural_splats) {
+                    near_stats.status = "needs geometry 'icosphere' (procedural spheres)";
+                } else if (visual_children != 1u) {
+                    near_stats.status = "needs one visual sphere per particle "
+                                        "(physical carriers or a grain domain)";
+                } else if (dconfig.fluid_grain_mesh_near_shape == "scene" &&
+                           dconfig.fluid_grain_mesh_near_sources.empty()) {
+                    near_stats.status = "no exemplar sources";
+                } else if (!camera) {
+                    near_stats.status = "no active camera";
+                } else {
+                    near_active = true;
+                    near_camera = camera->lookfrom;
+                    const float step = std::max(near_stats.camera_distance * 0.05f, 1e-3f);
+                    near_camera_key = hashCombine(hashCombine(hashCombine(
+                        static_cast<uint64_t>(std::llround(near_camera.x / step)),
+                        static_cast<uint64_t>(std::llround(near_camera.y / step))),
+                        static_cast<uint64_t>(std::llround(near_camera.z / step))),
+                        hashCombine(quantize(near_stats.camera_distance), near_budget));
+                }
+            }
+            if (!near_active) {
+                const auto near_it = g_grain_mesh_groups.find(group_id);
+                if (near_it != g_grain_mesh_groups.end()) near_it->second.release = true;
+            }
+
             // Source rebuild on geometry/material-routing changes. Scene mesh
             // faces keep their authored materials unless an explicit binding
             // requests a uniform override.
@@ -1360,7 +1378,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.y));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_color.z));
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_radius_factor));
-            sig = hashCombine(sig, quantize(dconfig.fluid_params.grain.radius_m));
+            sig = hashCombine(sig, GF::matterGrainSizeSignature(dconfig.fluid_params.grain));
             sig = hashCombine(sig, dconfig.fluid_params.grain.enabled ? 1ull : 0ull);
             sig = hashCombine(sig, quantize(dconfig.fluid_particle_size_multiplier));
             sig = hashCombine(sig, static_cast<uint64_t>(
@@ -1401,6 +1419,20 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             for (const auto route : dconfig.fluid_label_routes) {
                 sig = hashCombine(sig, static_cast<uint64_t>(route));
             }
+            sig = hashCombine(sig, near_active ? 1ull : 0ull);
+            sig = hashCombine(sig, dconfig.fluid_grain_mesh_near_source_materials ? 1ull : 0ull);
+            for (unsigned char c : dconfig.fluid_grain_mesh_near_shape) {
+                sig = hashCombine(sig, c);
+            }
+            for (const auto& name : dconfig.fluid_grain_mesh_near_sources) {
+                for (unsigned char c : name) sig = hashCombine(sig, static_cast<uint64_t>(c));
+                sig = hashCombine(sig, 0x5bd1e995ull);  // separator
+            }
+
+            if (near_active && dconfig.fluid_grain_mesh_near_shape == "scene") {
+                sig = hashCombine(sig, GF::grainMeshSceneSignature(
+                    world.objects, dconfig.fluid_grain_mesh_near_sources));
+            }
 
             const auto wet_palette = RayTrophiSim::Fluid::prepareMatterWetPalette(
                 dconfig, state.particles);
@@ -1413,9 +1445,15 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 RayTrophiSim::Fluid::matterPoreSettingsHash(dconfig.fluid_params.pore_exchange));
             FluidSourceState& st = g_fluid_source_state[group_id];
             if (!group->sources.empty() && st.signature == sig &&
-                st.state_version == state.version && st.content_hash != 0u) {
+                st.state_version == state.version && st.content_hash != 0u &&
+                st.near_camera_key == near_camera_key) {
+                if (near_active) {
+                    const auto near_it = g_grain_mesh_groups.find(group_id);
+                    if (near_it != g_grain_mesh_groups.end()) near_it->second.touched = true;
+                }
                 continue;
             }
+            st.near_camera_key = near_camera_key;
             if (group->sources.empty() || st.signature != sig ||
                 st.source_material_keys.size() != group->sources.size()) {
                 group->sources.clear();
@@ -1482,6 +1520,85 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 structural_change = true;
             }
 
+            // Near mesh sources: one per (material slot, exemplar), so the
+            // material axis (substance binding, wet band) stays the primary
+            // pool's and the shape axis is the exemplar's.
+            GrainMeshGroupState* near_state = nullptr;
+            InstanceGroup* near_group = nullptr;
+            if (near_active) {
+                GrainMeshGroupState& ms = g_grain_mesh_groups[group_id];
+                ms.release = false;
+                const bool ready = ms.signature == sig && ms.group_id >= 0 &&
+                    im.getGroup(ms.group_id) != nullptr &&
+                    ms.material_keys == st.source_material_keys;
+                if (!ready) {
+                    std::string error;
+                    if (!GF::buildGrainExemplars(world.objects,
+                            dconfig.fluid_grain_mesh_near_sources, ms.exemplars, error,
+                            dconfig.fluid_grain_mesh_near_shape)) {
+                        near_active = false;
+                        near_stats.status = error;
+                        ms.release = true;
+                    } else {
+                        if (ms.group_id < 0 || !im.getGroup(ms.group_id)) {
+                            ms.group_id = im.createGroup("[FluidDomGrainNear] " + system.name +
+                                                         " D" + std::to_string(d), "", {});
+                            // createGroup may reallocate the group vector.
+                            group = im.getGroup(group_id);
+                        }
+                        InstanceGroup* mg = im.getGroup(ms.group_id);
+                        if (!mg || !group) {
+                            near_active = false;
+                            near_stats.status = "instance group allocation failed";
+                            ms.release = true;
+                        } else {
+                            mg->transient = true;
+                            mg->point_sphere_mode = false;
+                            mg->rendered_rt_excluded = false;
+                            mg->raster_sphere_candidate = false;
+                            mg->sources.clear();
+                            const uint16_t fallback_mat = GF::resolveExistingSplatMaterial(
+                                dconfig.fluid_particle_material_id);
+                            for (const int key : st.source_material_keys) {
+                                const uint16_t mat = key >= 0 ? static_cast<uint16_t>(key)
+                                                              : fallback_mat;
+                                for (const auto& exemplar : ms.exemplars) {
+                                    ScatterSource src;
+                                    src.name = "[FluidDomGrainNearGeo] " + system.name + " D" +
+                                               std::to_string(d) + " M" + std::to_string(key) +
+                                               " " + exemplar.node;
+                                    src.weight = 1.0f;
+                                    GF::buildGrainExemplarTriangles(exemplar,
+                                        dconfig.fluid_grain_mesh_near_source_materials &&
+                                            dconfig.fluid_grain_mesh_near_shape == "scene"
+                                            ? -1 : mat, src.name, src.triangles);
+                                    src.computeCenter();
+                                    mg->sources.push_back(std::move(src));
+                                }
+                            }
+                            ms.source_capacities.assign(mg->sources.size(), 0);
+                            ms.material_keys = st.source_material_keys;
+                            ms.signature = sig;
+                            ms.content_hash = 0;
+                            structural_change = true;
+                        }
+                    }
+                }
+                if (!group) continue;
+                if (near_active) {
+                    near_state = &ms;
+                    near_group = im.getGroup(ms.group_id);
+                }
+            }
+            const std::size_t near_exemplars = near_state ? near_state->exemplars.size() : 0;
+            std::vector<std::vector<std::size_t>> near_particles(
+                near_group ? near_group->sources.size() : 0);
+            const float near_r2 = near_stats.camera_distance * near_stats.camera_distance;
+            auto particleId = [&](std::size_t pi) {
+                return pi < state.particles.particle_id.size()
+                    ? state.particles.particle_id[pi] : static_cast<uint64_t>(pi);
+            };
+
             // ── Pool grows monotonically, in chunks, and is budget-capped. ───
             // Explicit splats track the UI Max Particles value. SurfaceSDF's
             // raster compatibility proxy has its own smaller ceiling below.
@@ -1529,6 +1646,24 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                     view == RayTrophiSim::Fluid::FluidView::Surface && needs_raster_sdf_proxy &&
                     accepted_proxy_particles < proxy_budget &&
                     pi % proxy_stride == 0;
+                // The mesh view applies to every splat-routed primary carrier,
+                // independently of its DEM, MPM or fluid transport owner.
+                if (near_group && splat && accepted_particles < budget) {
+                    const Vec3& np = state.particles.position[pi];
+                    const Vec3 dp = np - near_camera;
+                    if (std::isfinite(np.x) && std::isfinite(np.y) && std::isfinite(np.z) &&
+                        Vec3::dot(dp, dp) < near_r2) {
+                        if (near_stats.near_instances < near_budget) {
+                            const uint32_t e = GF::grainExemplarFor(
+                                particleId(pi), static_cast<uint32_t>(near_exemplars));
+                            near_particles[source_index * near_exemplars + e].push_back(pi);
+                            ++near_stats.near_instances;
+                            ++accepted_particles;
+                            continue;
+                        }
+                        ++near_stats.near_over_budget;
+                    }
+                }
                 if ((splat || sampled_proxy) && accepted_particles < budget) {
                     source_particles[source_index].push_back(pi);
                     ++accepted_particles;
@@ -1615,11 +1750,8 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                         continue;
                     }
                     tr.position = p;
-                    const bool grain = !grain_domain ||
-                        (pi < state.particles.constitutive_model.size() &&
-                         state.particles.constitutive_model[pi] == static_cast<uint8_t>(
-                             RayTrophiSim::Fluid::MatterConstitutiveModel::Granular));
-                    const float d = grain ? diam : liquid_diam;
+                    const float d = GF::splatCarrierDiameter(
+                        dconfig, state.particles, pi, liquid_diam);
                     tr.scale = Vec3(d, d, d);
                     ++drawn;
                 }
@@ -1628,6 +1760,78 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
             content = hashCombine(content, quantize(diam));
             content = hashCombine(content, grain_domain ? quantize(liquid_diam) : 0ull);
             content = hashCombine(content, static_cast<uint64_t>(drawn));
+            content = hashCombine(content, near_camera_key);
+
+            if (near_group && near_state) {
+                GrainMeshGroupState& ms = *near_state;
+                if (ms.source_capacities.size() != near_particles.size()) {
+                    ms.source_capacities.assign(near_particles.size(), 0);
+                    structural_change = true;
+                }
+                std::size_t near_capacity = 0;
+                for (std::size_t s = 0; s < near_particles.size(); ++s) {
+                    const std::size_t live = near_particles[s].size();
+                    std::size_t& cap = ms.source_capacities[s];
+                    if (live > cap || live * 2 < cap) {
+                        const std::size_t want = nearPoolCapacityFor(live);
+                        if (want != cap) {
+                            cap = want;
+                            structural_change = true;
+                        }
+                    }
+                    near_capacity += cap;
+                }
+                auto& near_inst = near_group->instances;
+                if (near_inst.size() != near_capacity) {
+                    near_inst.resize(near_capacity);
+                    structural_change = true;
+                }
+                std::size_t near_base = 0;
+                for (std::size_t s = 0; s < near_particles.size(); ++s) {
+                    const auto& exemplar = ms.exemplars[s % near_exemplars];
+                    for (std::size_t local = 0; local < ms.source_capacities[s]; ++local) {
+                        InstanceTransform& tr = near_inst[near_base + local];
+                        tr.source_index = static_cast<int>(s);
+                        if (local >= near_particles[s].size()) {
+                            tr.position = Vec3(0.0f, 0.0f, 0.0f);
+                            tr.rotation = Vec3(0.0f, 0.0f, 0.0f);
+                            tr.scale = Vec3(0.0f, 0.0f, 0.0f);
+                            continue;
+                        }
+                        const std::size_t pi = near_particles[s][local];
+                        tr.position = state.particles.position[pi];
+                        tr.rotation = GF::grainEulerDegreesFor(particleId(pi));
+                        const float d_mesh = GF::splatCarrierDiameter(
+                            dconfig, state.particles, pi, liquid_diam) * exemplar.volume_scale;
+                        tr.scale = Vec3(d_mesh, d_mesh, d_mesh);
+                    }
+                    near_base += ms.source_capacities[s];
+                }
+                const uint64_t near_content = hashCombine(
+                    hashCombine(content, 0x4e454152ull), static_cast<uint64_t>(near_capacity));
+                if (structural_change || near_content != ms.content_hash) {
+                    ms.content_hash = near_content;
+                    near_group->gpu_dirty = true;
+                    if (!structural_change) motion_change = true;
+                }
+                ms.touched = true;
+
+                near_stats.status = "active";
+                near_stats.exemplars = static_cast<uint32_t>(near_exemplars);
+                double volume_scale_sum = 0.0;
+                for (const auto& exemplar : ms.exemplars) {
+                    near_stats.exemplar_triangles += exemplar.faces.size();
+                    volume_scale_sum += exemplar.volume_scale;
+                    if (!exemplar.volume_measured) ++near_stats.exemplars_without_volume;
+                }
+                near_stats.mean_volume_scale = near_exemplars > 0
+                    ? static_cast<float>(volume_scale_sum / static_cast<double>(near_exemplars))
+                    : 1.0f;
+                near_stats.mesh_sources = static_cast<uint32_t>(near_particles.size());
+                near_stats.mesh_slots = near_capacity;
+            }
+            near_stats.sphere_instances = drawn;
+            GF::publishGrainMeshNearStats(dconfig.name, near_stats);
 
             if (structural_change) {
                 st.content_hash = content;
@@ -1642,6 +1846,37 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 st.state_version = state.version;
             }
         }
+    }
+
+    // Near grain pools whose domain was not split this pass: deleted when the
+    // split was disabled or failed (or the primary pool is gone); only hidden
+    // when the domain is merely hidden or empty - deleting and recreating a
+    // pool under a rewind is the structural churn the primary pool avoids.
+    for (auto it = g_grain_mesh_groups.begin(); it != g_grain_mesh_groups.end();) {
+        GrainMeshGroupState& ms = it->second;
+        InstanceGroup* mg = ms.group_id >= 0 ? im.getGroup(ms.group_id) : nullptr;
+        if (im.getGroup(it->first) == nullptr || ms.release) {
+            if (mg) {
+                im.deleteGroup(ms.group_id);
+                structural_change = true;
+            }
+            it = g_grain_mesh_groups.erase(it);
+            continue;
+        }
+        if (!ms.touched && mg) {
+            bool had_visible = false;
+            for (auto& tr : mg->instances) {
+                had_visible |= tr.scale.x != 0.0f || tr.scale.y != 0.0f || tr.scale.z != 0.0f;
+                tr.scale = Vec3(0.0f);
+            }
+            if (had_visible) {
+                mg->gpu_dirty = true;
+                ms.content_hash = 0;
+                motion_change = true;
+            }
+        }
+        ms.touched = false;
+        ++it;
     }
 
     if (structural_change) {
@@ -1674,6 +1909,10 @@ void SceneData::releaseDomainFluidParticleInstances() {
         system.domain_particle_render_group_ids.clear();
         system.domain_particle_pool_capacities.clear();
     }
+    for (const auto& entry : g_grain_mesh_groups) {
+        if (entry.second.group_id >= 0) im.deleteGroup(entry.second.group_id);
+    }
+    g_grain_mesh_groups.clear();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

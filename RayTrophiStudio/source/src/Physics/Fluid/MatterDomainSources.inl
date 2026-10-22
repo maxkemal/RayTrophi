@@ -256,6 +256,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 source.fluid_emit_sample_serial += static_cast<uint64_t>(emit_count);
             }
 
+            state.particles.ensureParticleIdentities();
             const std::size_t before_emission = state.particles.size();
             state.particles.reserve(state.particles.size() + static_cast<std::size_t>(emit_count));
             Fluid::MatterGrainBirthFilter grain_filter(state.particles, Fluid::liquidGrid(state),
@@ -346,12 +347,16 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 if (!Fluid::gridContains(Fluid::liquidGrid(state), spawn_pos)) {
                     continue;
                 }
-                if (!grain_filter.accept(spawn_pos)) {
+                const float birth_radius = grain_birth ? Fluid::matterGrainRadius(
+                    fluid_domain.fluid_params.grain, state.particles.next_particle_id) : 0.0f;
+                if (!grain_filter.accept(spawn_pos, birth_radius)) {
                     continue;
                 }
                 state.particles.emit(
                     spawn_pos, emit_vel, emit_kelvin, 0.0f, emit_substance,
-                    nullptr, nullptr, grain_rest_mass, emit_model);
+                    nullptr, nullptr, grain_birth ? grain_rest_mass * std::pow(
+                        birth_radius / fluid_domain.fluid_params.grain.radius_m, 3.0f) : 0.0f,
+                    emit_model);
                 if (grain_birth) {
                     Fluid::initMatterGrainBirthWater(state.particles,
                         state.particles.size() - 1, source.grain_birth_saturation,

@@ -130,14 +130,17 @@ float SceneData::nodeMeshVolume(const std::string& node) const {
             const DNA::GeometryDetail* geometry = mesh->geometry.get();
             const Vec3* positions = geometry->get_attribute_data<Vec3>("P");
             if (!positions) continue;
-            // ★ The SoA is UNINDEXED: GeometryDetail stores per-corner vertices
-            // and carries no index buffer, so triangles are consecutive triples.
-            // (Welding is a separate cache built on demand, not part of the
-            // geometry.) Anything that assumes an index buffer here does not
-            // compile, which is the good outcome — it fails loudly.
+            // ★ Triangles come from `indices`, never from consecutive vertices.
+            // Fracture shards happen to be unwelded triples (indices[i] == i),
+            // but an imported source is genuinely indexed, and reading P[3f]
+            // there sums the volume of the wrong triangles without any error.
             const std::size_t vertex_count = geometry->get_vertex_count();
-            for (std::size_t v = 0; v + 2 < vertex_count; v += 3)
-                volume6 += positions[v].dot(positions[v + 1].cross(positions[v + 2]));
+            const auto& indices = geometry->indices;
+            for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+                const uint32_t a = indices[i], b = indices[i + 1], c = indices[i + 2];
+                if (a >= vertex_count || b >= vertex_count || c >= vertex_count) continue;
+                volume6 += positions[a].dot(positions[b].cross(positions[c]));
+            }
             continue;
         }
         if (auto tri = std::dynamic_pointer_cast<Triangle>(object)) {
