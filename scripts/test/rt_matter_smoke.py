@@ -49,6 +49,11 @@ ARMS = [
     ('liquid_column', 'rt_test_liquid_column_ipc.py', []),
     ('p9_melt', 'rt_test_p9_matter_ipc.py', ['--arm', 'melt']),
     ('p9_floor', 'rt_test_p9_matter_ipc.py', ['--arm', 'floor']),
+    ('mpm_dem_clock', 'rt_test_mpm_dem_shared_clock_ipc.py', []),
+    ('snow_heat', 'rt_test_snow_heat_ipc.py', []),
+    ('liquid_density', 'rt_test_liquid_density_ipc.py', []),
+    ('run_readback', 'rt_test_run_readback_ipc.py', []),
+    ('fast_fall', 'rt_test_fast_fall_ipc.py', []),
     ('p9_pore', 'rt_test_p9_matter_ipc.py', ['--arm', 'pore']),
     ('t0', 'rt_t0_matter_vs_specialized_perf.py', ['--rounds', '1']),
 ]
@@ -56,7 +61,7 @@ H1 = ('h1_suite', 'rt_h1_grain_suite.py', [])
 # Per-batch tier (2026-10-20 rule: at most ~10 minutes). The rest run once,
 # at the end of the plan.
 QUICK = ('substance', 'thermal_films', 'phase3_freeze', 'fire_steam', 'grain_readiness',
-         'seed_settle', 'p9_melt', 'p9_floor')
+         'seed_settle', 'p9_melt', 'p9_floor', 'mpm_dem_clock', 'run_readback', 'fast_fall')
 GATE = re.compile(r'^(PASS|FAIL)\s+(\S+)')
 
 

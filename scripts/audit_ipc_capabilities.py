@@ -87,7 +87,8 @@ def required(method, namespaces):
                          "capture_start", "capture_finish", "design_job_start", "design_render", "design_undo", "design_redo", "design_reuse"}:
             return "SceneWrite|FilesRead"
         return "SceneWrite"
-    if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings"):
+    if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings",
+                  "fluid.particle_extremes", "fluid.gas_cell_extremes"):
         return "Read"
     if method == "ipc.admin.audit.export":
         return "Admin|FilesWrite"

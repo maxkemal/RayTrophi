@@ -26,6 +26,9 @@
 
 #include "Vec3.h"
 #include "VolumeMaterialProgram.h"
+#include "VolumeRampPacking.h"
+#include "VolumeEmissionResponse.h"
+#include "VolumeDensityCurve.h"
 #include <string>
 #include <memory>
 #include <vector>
@@ -227,6 +230,7 @@ public:
     // DENSITY PROPERTIES (Controls opacity/scattering)
     // ═══════════════════════════════════════════════════════════════════════════
     struct DensitySettings {
+        VolumeDensityCurve curve;
         float multiplier = 1.0f;          ///< Overall density scale
         std::string channel = "density";   ///< VDB grid to sample
         float remap_low = 0.0f;           ///< Remap input range (low)
@@ -241,6 +245,7 @@ public:
             json j;
             j["multiplier"] = multiplier;
             j["channel"] = channel;
+            j["curve"] = curve.toJson();
             j["remap_low"] = remap_low;
             j["remap_high"] = remap_high;
             j["cutoff_threshold"] = cutoff_threshold;
@@ -251,6 +256,8 @@ public:
         void fromJson(const json& j) {
             if (j.contains("multiplier")) multiplier = j["multiplier"];
             if (j.contains("channel")) channel = j["channel"];
+            curve = VolumeDensityCurve{};
+            if (j.contains("curve")) curve.fromJson(j["curve"]);
             if (j.contains("remap_low")) remap_low = j["remap_low"];
             if (j.contains("remap_high")) remap_high = j["remap_high"];
             if (j.contains("cutoff_threshold")) cutoff_threshold = j["cutoff_threshold"];
@@ -427,6 +434,8 @@ public:
         int max_steps = 256;              ///< Maximum steps per ray (the real cost ceiling)
         int shadow_steps = 8;              ///< Steps for self-shadowing
         int shadow_stride = 4;             ///< Reuse one shadow result across N primary samples
+        int internal_light_steps = 0;      ///< 0 disables emission-to-smoke transport
+        int internal_light_stride = 8;     ///< Primary samples per incident-light query
         float shadow_strength = 0.8f;      ///< Self-shadow intensity (0-1)
         bool adaptive_stepping = true;     ///< Adjust step based on density
 
@@ -438,6 +447,8 @@ public:
             j["max_steps"] = max_steps;
             j["shadow_steps"] = shadow_steps;
             j["shadow_stride"] = shadow_stride;
+            j["internal_light_steps"] = internal_light_steps;
+            j["internal_light_stride"] = internal_light_stride;
             j["shadow_strength"] = shadow_strength;
             j["adaptive_stepping"] = adaptive_stepping;
             return j;
@@ -452,6 +463,10 @@ public:
             if (j.contains("max_steps")) max_steps = j["max_steps"];
             if (j.contains("shadow_steps")) shadow_steps = j["shadow_steps"];
             if (j.contains("shadow_stride")) shadow_stride = j["shadow_stride"];
+            internal_light_steps = j.value("internal_light_steps", 0);
+            internal_light_stride = j.value("internal_light_stride", 8);
+            internal_light_steps = (std::clamp)(internal_light_steps, 0, 32);
+            internal_light_stride = (std::clamp)(internal_light_stride, 1, 32);
             if (j.contains("shadow_strength")) shadow_strength = j["shadow_strength"];
             if (j.contains("adaptive_stepping")) adaptive_stepping = j["adaptive_stepping"];
             if (!has_voxel_multiplier) adaptive_stepping = false;
@@ -552,6 +567,8 @@ public:
         float scale = 1.0f;                ///< Velocity multiplier
     } motion_blur;
     
+    VolumeEmissionResponse emission_response;
+
     // Serialization
     json toJson() const {
         json j;
@@ -561,6 +578,7 @@ public:
         j["scattering"] = scattering.toJson();
         j["absorption"] = absorption.toJson();
         j["emission"] = emission.toJson();
+        j["emission_response"] = emission_response.toJson();
         j["quality"] = quality.toJson();
         j["material_program"] = material_program.toJson();
         j["motion_blur"] = {
@@ -578,6 +596,10 @@ public:
         if (j.contains("scattering")) scattering.fromJson(j["scattering"]);
         if (j.contains("absorption")) absorption.fromJson(j["absorption"]);
         if (j.contains("emission")) emission.fromJson(j["emission"]);
+        emission_response = VolumeEmissionResponse{};
+        if (j.contains("emission_response")) {
+            emission_response.fromJson(j["emission_response"]);
+        }
         if (j.contains("quality")) quality.fromJson(j["quality"]);
         if (j.contains("material_program")) material_program.fromJson(j["material_program"]);
         if (j.contains("motion_blur")) {
@@ -641,14 +663,7 @@ public:
         gpu.shadow_strength = quality.shadow_strength;
         
         // Color Ramp
-        gpu.color_ramp_enabled = emission.color_ramp.enabled ? 1 : 0;
-        gpu.ramp_stop_count = static_cast<int>(std::min(emission.color_ramp.stops.size(), static_cast<size_t>(8)));
-        for (int i = 0; i < gpu.ramp_stop_count; ++i) {
-            gpu.ramp_positions[i] = emission.color_ramp.stops[i].position;
-            gpu.ramp_colors_r[i] = static_cast<float>(emission.color_ramp.stops[i].color.x);
-            gpu.ramp_colors_g[i] = static_cast<float>(emission.color_ramp.stops[i].color.y);
-            gpu.ramp_colors_b[i] = static_cast<float>(emission.color_ramp.stops[i].color.z);
-        }
+        volume_material::packColorRamp(emission.color_ramp, gpu);
 
         // Motion blur
         gpu.motion_blur_enabled = motion_blur.enabled ? 1 : 0;

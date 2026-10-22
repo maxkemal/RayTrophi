@@ -509,7 +509,6 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.solver_viscosity_sweeps = 12.0f; p.solver_viscosity_wall_slip = 0.2f;
             p.solver_internal_friction = 0.35f;
             p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.90f;
-            p.solver_density_relaxation_s = 0.5f;
             p.solver_air_drag = 0.8f; p.solver_wall_damping = 0.30f;
             p.solver_affine_damping = 0.95f;
             add(p);
@@ -534,6 +533,10 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // P2G, before the FLIP snapshot, so any blend subtracts it back out.
             p.solver_flip_blend = 0.0f; p.solver_viscosity_wall_slip = 0.0f;
             p.solver_wall_damping = 0.40f;
+            // Medium sand, 0.5 mm across. A simulated grain stands for many of
+            // these: heat films see their surface (0 left hot sand in water
+            // at 599 K after 5 s, 2026-10-21) and wet bridges scale by R/r.
+            p.grain_real_radius_m = 0.00025f;
             add(p);
         }
         {
@@ -561,6 +564,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.solver_affine_damping = 0.96f;
             // 40, not 32: at 5 cm / 24 fps this E needs 33 substeps.
             p.solver_granular_max_substeps = 40.0f;
+            p.grain_real_radius_m = 0.004f;  // fine gravel, 8 mm across
             add(p);
         }
         {

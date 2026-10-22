@@ -1,7 +1,7 @@
 #ifndef RT_PREVIEW_VOLUME_FIELDS
 #define RT_PREVIEW_VOLUME_FIELDS
 
-const uint VOLUME_STRIDE_WORDS = 156u;
+const uint VOLUME_STRIDE_WORDS = 168u;
 
 uint volWord(uint vi, uint byteOffset) {
     return volumeWords[vi * VOLUME_STRIDE_WORDS + (byteOffset >> 2u)];
@@ -144,6 +144,13 @@ float sampleDense(uint vi, uint64_t address, vec3 local) {
 layout(buffer_reference, std430, buffer_reference_align=4)
 readonly buffer DenseGasMajorantGrid { float blocks[]; };
 
+#include "volume_density_curve.glsl"
+float previewDensityCurve(uint vi, float x) {
+    float curve[12];
+    for (int i = 0; i < 12; ++i) curve[i] = volFloat(vi, 624u + uint(i)*4u);
+    return volumeDensityCurve(x, curve);
+}
+
 float denseEmptyBlockStep(uint vi, vec3 worldPos, vec3 worldDir,
                           float baseStep, float cutoff) {
     uint64_t address = volAddress(vi, 512u);
@@ -171,7 +178,7 @@ float denseEmptyBlockStep(uint vi, vec3 worldPos, vec3 worldDir,
     DenseGasMajorantGrid mg = DenseGasMajorantGrid(address);
     float blockMax = mg.blocks[b.x + b.y*bdim.x + b.z*bdim.x*bdim.y];
     float low = volFloat(vi,76u), high = max(volFloat(vi,80u), low+1e-6);
-    if (max((blockMax-low)/(high-low), 0.0) > cutoff) return 0.0;
+    if (previewDensityCurve(vi, max((blockMax-low)/(high-low), 0.0)) > cutoff) return 0.0;
 
     vec3 bmin = origin + vec3(b) * blockWorld;
     vec3 bmax = bmin + vec3(blockWorld);
@@ -228,7 +235,7 @@ float sampleRawField(uint vi, uint64_t address, vec3 worldPos) {
 float sampleField(uint vi, uint64_t address, vec3 worldPos) {
     float d=sampleRawField(vi,address,worldPos);
     float low=volFloat(vi,76u), high=max(volFloat(vi,80u),low+1e-6);
-    d=max((d-low)/(high-low),0.0);
+    d=previewDensityCurve(vi, max((d-low)/(high-low),0.0));
     float cutoff=max(volFloat(vi,248u),0.0);
     if(d<=cutoff) return 0.0;
     float fade=cutoff>0.0?smoothstep(cutoff,cutoff*2.0,d):1.0;

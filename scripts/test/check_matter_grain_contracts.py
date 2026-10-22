@@ -253,7 +253,11 @@ def main():
     mixed = read('src/Physics/Fluid/MatterGpuStep.inl')
     porous_kernel = read('shaders/sim_fluid_divergence_porous.glsl')
     # Density correction must target the pore volume, or it refills the pores.
-    assert 'max(count - eps * ppc, 0.0) - max(count - ppc, 0.0)' in porous_kernel
+    # D1 (2026-10-20): the shared two-sided term at the pore target minus the
+    # same term at the full target (sim_fluid_density_relaxation.glsl).
+    assert 'rtDensityExcess(sample_here, eps * ppc, ppc) -' in porous_kernel
+    assert 'rtDensityExcess(sample_here, ppc, ppc)' in porous_kernel
+    assert '#include "sim_fluid_density_relaxation.glsl"' in porous_kernel
     coupling = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
     assert 'f.volume[c[n]] / (.5 * pores)' in coupling, 'submersion must be occupancy, not volume'
     assert 'has_granular ? static_cast<double>(elastic.required_substeps)' in mixed

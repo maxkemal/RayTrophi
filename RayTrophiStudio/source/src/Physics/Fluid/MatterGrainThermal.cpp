@@ -29,7 +29,9 @@ constexpr double kAirSpecificHeat = 1005.0;
 // A grain bed on a plate: point contacts with air between, not a wetting film.
 constexpr double kGrainWallFilm = 200.0;
 
-enum class Role : uint8_t { None, Liquid, Grain };
+// Continuum: the cell's pool the grains wet into - liquid parcels and, since
+// 2026-10-20, MPM-owned granular parcels (Snow beside DEM Sand).
+enum class Role : uint8_t { None, Continuum, Grain };
 
 Role roleOf(const FluidParticles& p, std::size_t i, const APICSolverParams& params) {
     if (i < p.mass_fraction.size() && !(p.mass_fraction[i] > 0.02f)) return Role::None;
@@ -38,12 +40,16 @@ Role roleOf(const FluidParticles& p, std::size_t i, const APICSolverParams& para
         ? static_cast<MatterConstitutiveModel>(p.constitutive_model[i])
         : MatterConstitutiveModel::Auto;
     if (model == MatterConstitutiveModel::Fluid || model == MatterConstitutiveModel::Auto) {
-        return Role::Liquid;
+        return Role::Continuum;
     }
     if (model != MatterConstitutiveModel::Granular || !params.grain.enabled) return Role::None;
     const uint32_t tag = i < p.substance_tag.size() ? p.substance_tag[i] : kSubstanceUntagged;
+    // ★ An MPM granular parcel used to be None: outside every heat path, so
+    // 600 K sand gave 263 K snow nothing and it never melted (2026-10-20,
+    // user scene). It joins the cell's pool; its melt then pays latent heat
+    // in updateThermalFreeze like any skeleton carrier.
     return substanceTransportOwner(tag, model, params) == MatterTransportOwner::Grain
-        ? Role::Grain : Role::None;
+        ? Role::Grain : Role::Continuum;
 }
 
 bool cellOf(const FluidSim::FluidGrid& g, const Vec3& x, int& i, int& j, int& k) {
@@ -106,6 +112,13 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
     const double h = grid.voxel_size;
     const double cell_volume = h * h * h;
     const double radius = std::max(1.0e-5, double(params.grain.radius_m));
+    // Films see the grains the simulated one stands for (2026-10-20). A 1 cm
+    // simulated grain representing 0.3 mm sand has 33x the surface per kg;
+    // with the simulated radius hot sand took minutes to quench in water
+    // (tau ~200 s at 2.5 cm). Grain-to-grain contact keeps the simulated
+    // radius: it is the simulated contact network.
+    const double film_radius = params.grain.represented_grain_radius_m > 0.0f
+        ? std::max(1.0e-6, double(params.grain.represented_grain_radius_m)) : radius;
 
     // Pass 1: roles, cells, the liquid pool of every cell and the grains' room.
     static std::vector<int> s_cell;
@@ -142,13 +155,19 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             ? double(particles.rest_mass_kg[p]) * fraction : 0.0;
         s_cell[p] = static_cast<int>(c);
         s_role[p] = role;
-        if (role == Role::Liquid) {
+        if (role == Role::Continuum) {
             const double cap = parcelHeatCapacity(particles, p, *profile, grid.voxel_size,
                                                   params.particles_per_cell);
             if (!(cap > 0.0)) { s_role[p] = Role::None; continue; }
             s_liquid_cap[c] += cap;
             s_liquid_t0[c] += cap * t;
-            const double rho = profile->liquid_density > 0.0f ? profile->liquid_density
+            // Volume in the parcel's own state: snow at its bulk density, not
+            // at the density of the water it melts into.
+            const bool solid_state = p < particles.constitutive_model.size() &&
+                particles.constitutive_model[p] ==
+                    static_cast<uint8_t>(MatterConstitutiveModel::Granular);
+            const double rho = !solid_state && profile->liquid_density > 0.0f
+                ? profile->liquid_density
                 : (profile->density > 0.0f ? profile->density : 1000.0f);
             s_liquid_volume[c] += mass / rho;
         } else {
@@ -244,7 +263,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             ? std::clamp(double(particles.mass_fraction[p]), 0.0, 1.0) : 1.0;
         cg[g] = cap;
         kg[g] = std::max(0.0f, sp->conductivity);
-        ag[g] = 3.0 * double(particles.rest_mass_kg[p]) * fraction / (rho * radius);
+        ag[g] = 3.0 * double(particles.rest_mass_kg[p]) * fraction / (rho * film_radius);
         eg[g] = std::clamp(double(sp->emissivity), 0.0, 1.0);
         const std::size_t c = static_cast<std::size_t>(s_cell[p]);
         const double room = std::max(cell_volume - s_grain_volume[c], 0.1 * cell_volume);
@@ -268,6 +287,11 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
     // Phase A: liquid pool, walls, grain <-> grain, per liquid cell.
     std::vector<std::size_t> order;
     const auto cell_starts = groupsOf(order, [&](std::size_t g) { return s_cell[grains[g]]; });
+    // Each cell's grain temperatures before the exchange: the contact deposit
+    // below may not carry a parcel past them (2026-10-21).
+    static std::vector<double> s_grain_hi, s_grain_lo;
+    s_grain_hi.assign(cells, -std::numeric_limits<double>::max());
+    s_grain_lo.assign(cells, std::numeric_limits<double>::max());
     double to_liquid = 0.0, to_walls = 0.0;
     int64_t wetted = 0;
     const int64_t cell_groups = static_cast<int64_t>(cell_starts.size()) - 1;
@@ -284,9 +308,11 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             const std::size_t g = order[o];
             const double cap = cg[g];
             if (!(cap > 0.0)) continue;
+            s_grain_hi[c] = std::max(s_grain_hi[c], tg[g]);
+            s_grain_lo[c] = std::min(s_grain_lo[c], tg[g]);
             // Wetted share: against the cell's liquid as one pool.
             if (wg[g] > 0.0 && s_liquid_cap[c] > 0.0) {
-                const double film = seriesFilm(kLiquidFilm, radius, kg[g]);
+                const double film = seriesFilm(kLiquidFilm, film_radius, kg[g]);
                 to_liquid += relax(tg[g], cap, s_liquid_t[c], s_liquid_cap[c],
                                    film * ag[g] * wg[g], dt);
                 ++wetted;
@@ -294,7 +320,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
             // Walls: an infinite container at wall_kelvin, a sixth of the
             // grain's surface per touching face.
             if (walls > 0) {
-                const double film = seriesFilm(kGrainWallFilm, radius, kg[g]);
+                const double film = seriesFilm(kGrainWallFilm, film_radius, kg[g]);
                 const double conductance = film * ag[g] * (walls / 6.0);
                 const double before = tg[g];
                 tg[g] = wall_kelvin + (tg[g] - wall_kelvin) * std::exp(-conductance * dt / cap);
@@ -381,7 +407,7 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
                 const double ts = tg[g], ta = a.kelvin;
                 const double radiation = a.flame * eg[g] * kSigma *
                     (ts * ts + ta * ta) * (ts + ta);
-                const double film = seriesFilm(kAirFilm + radiation, radius, kg[g]);
+                const double film = seriesFilm(kAirFilm + radiation, film_radius, kg[g]);
                 to_gas += relax(tg[g], cg[g], a.kelvin, a.capacity,
                                 film * ag[g] * (1.0 - wg[g]), dt);
             }
@@ -404,11 +430,114 @@ void exchangeMatterGrainHeat(FluidParticles& particles, const FluidSim::FluidGri
         sum += t;
         ++counted;
     }
+    // ★ The pool's energy change lands where the grains touch it (2026-10-20).
+    // Spread evenly, 600 K sand only warmed its cell's water by a fraction of a
+    // kelvin: nothing boiled on contact and snow under hot sand melted no
+    // faster at the contact than across the cell. Each continuum parcel takes
+    // a share by its proximity to the cell's grains (sum over them of
+    // 1 / (d^2 + (h/4)^2)), so the parcels at the contact reach the boiling or
+    // melting point first and the existing boiling / fusion passes take it
+    // from there. sum C dT is still exactly the pool's change.
+    // ★ Capped at the cell's grains (2026-10-21): a parcel close to the grains
+    // took so large a share that it ran past them (629.8 K beside 600 K sand,
+    // the ledger closed so no total showed it). Heat cannot carry a parcel
+    // past its source, so a parcel stops at the hottest grain's starting
+    // temperature (coldest, when the grains cool the pool) and its unused
+    // share goes to the others by their weights. The pool mean never passes
+    // the grains (relax ends between them), so the room always suffices; a
+    // remainder only appears for parcels that already started past the
+    // bound, and it is spread evenly as before.
+    static std::vector<int64_t> s_grain_begin;
+    static std::vector<double> s_parcel_weight, s_parcel_cap;
+    s_grain_begin.assign(cells, -1);
+    s_parcel_weight.assign(n, 0.0);
+    s_parcel_cap.assign(n, 0.0);
+    for (std::size_t o = 0; o < order.size(); ++o) {
+        const int cell = s_cell[grains[order[o]]];
+        if (cell >= 0 && (o == 0 || s_cell[grains[order[o - 1]]] != cell)) {
+            s_grain_begin[static_cast<std::size_t>(cell)] = static_cast<int64_t>(o);
+        }
+    }
+    const double soft = 0.0625 * h * h;
+    std::vector<std::size_t> touched;  // parcels of cells whose pool changed, by cell
     for (std::size_t p = 0; p < n; ++p) {
-        if (s_role[p] != Role::Liquid || s_cell[p] < 0) continue;
+        if (s_role[p] != Role::Continuum || s_cell[p] < 0) continue;
         const std::size_t c = static_cast<std::size_t>(s_cell[p]);
+        if (s_liquid_t[c] == s_liquid_t0[c]) continue;
+        touched.push_back(p);
+        if (s_grain_begin[c] < 0) continue;
+        double w = 0.0;
+        for (std::size_t o = static_cast<std::size_t>(s_grain_begin[c]);
+             o < order.size() && s_cell[grains[order[o]]] == static_cast<int>(c); ++o) {
+            const Vec3 d = particles.position[p] - particles.position[grains[order[o]]];
+            w += 1.0 / (double(d.x) * d.x + double(d.y) * d.y + double(d.z) * d.z + soft);
+        }
+        const uint32_t tag = p < particles.substance_tag.size()
+            ? particles.substance_tag[p] : kSubstanceUntagged;
+        const SubstanceProfile* sp = particleSubstance(tag, params);
+        s_parcel_weight[p] = w;
+        s_parcel_cap[p] = sp ? parcelHeatCapacity(particles, p, *sp, grid.voxel_size,
+                                                  params.particles_per_cell) : 0.0;
+    }
+    std::stable_sort(touched.begin(), touched.end(),
+                     [&](std::size_t x, std::size_t y) { return s_cell[x] < s_cell[y]; });
+    std::vector<std::size_t> open;
+    for (std::size_t b = 0; b < touched.size();) {
+        const std::size_t c = static_cast<std::size_t>(s_cell[touched[b]]);
+        std::size_t e = b;
+        while (e < touched.size() && s_cell[touched[e]] == static_cast<int>(c)) ++e;
         const double d = s_liquid_t[c] - s_liquid_t0[c];
-        if (d != 0.0) particles.temperature[p] += static_cast<float>(d);
+        // C_pool dT_pool = dE, handed out by weight: sum_p C_p dT_p = dE.
+        double remaining = s_liquid_cap[c] * d;
+        const double bound = d > 0.0 ? s_grain_hi[c] : s_grain_lo[c];
+        const bool capped = std::isfinite(bound) && std::abs(bound) <
+            std::numeric_limits<double>::max();
+        open.clear();
+        for (std::size_t q = b; q < e; ++q) {
+            const std::size_t p = touched[q];
+            if (s_parcel_weight[p] > 0.0 && s_parcel_cap[p] > 0.0) open.push_back(p);
+        }
+        // Water filling: clamp every parcel whose share passes the bound, hand
+        // the rest out again; each round closes at least one parcel.
+        while (!open.empty() && remaining != 0.0) {
+            double weight = 0.0;
+            for (const std::size_t p : open) weight += s_parcel_weight[p] * s_parcel_cap[p];
+            if (!(weight > 0.0)) break;
+            std::size_t kept = 0;
+            for (const std::size_t p : open) {
+                const double share = remaining * s_parcel_weight[p] * s_parcel_cap[p] / weight;
+                const double room = capped
+                    ? std::max(0.0, (bound - double(particles.temperature[p])) *
+                                    (d > 0.0 ? 1.0 : -1.0)) * s_parcel_cap[p]
+                    : std::numeric_limits<double>::max();
+                if (std::abs(share) > room) {
+                    const double given = d > 0.0 ? room : -room;
+                    particles.temperature[p] += static_cast<float>(given / s_parcel_cap[p]);
+                    remaining -= given;
+                } else {
+                    open[kept++] = p;
+                }
+            }
+            if (kept == open.size()) {
+                for (const std::size_t p : open) {
+                    particles.temperature[p] += static_cast<float>(
+                        remaining * s_parcel_weight[p] / weight);
+                }
+                remaining = 0.0;
+                break;
+            }
+            open.resize(kept);
+        }
+        if (remaining != 0.0) {
+            double capacity = 0.0;
+            for (std::size_t q = b; q < e; ++q) capacity += s_parcel_cap[touched[q]];
+            for (std::size_t q = b; q < e; ++q) {
+                const std::size_t p = touched[q];
+                particles.temperature[p] += static_cast<float>(
+                    capacity > 0.0 ? remaining / capacity : d);
+            }
+        }
+        b = e;
     }
     for (std::size_t c = 0; c < cells; ++c) {
         if (s_liquid_cap[c] > 0.0) residual += s_liquid_cap[c] * (s_liquid_t[c] - s_liquid_t0[c]);

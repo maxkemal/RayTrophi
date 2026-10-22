@@ -386,7 +386,11 @@ struct VkVolumeInstance {
     // padding is where the two are free to disagree, and a stride mismatch does
     // not fail loudly — it reads the NEXT volume's fields as this one's.
     float    _uvw_pad[1];
+    // Appended at byte 624; total record stride is now 672 bytes.
+    float density_curve[12];
 };
+#include "volume_density_curve.glsl"
+
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 // Cloud field (Faz 3b): the sun NEE below reads the clouds' shadow
@@ -578,8 +582,8 @@ float ch_volDensity(VkVolumeInstance vol, vec3 wp,
     } else if (vol.volume_type == 4 && vol.source_type == 5) {
         density = ch_sampleDenseGasFloat(vol.vdb_grid_address, vol, lp);
     }
-    density = max((density - vol.density_remap_low) /
-                  max(vol.density_remap_high - vol.density_remap_low, 1e-6), 0.0);
+    density = volumeDensityCurve(max((density - vol.density_remap_low) /
+                  max(vol.density_remap_high - vol.density_remap_low, 1e-6), 0.0), vol.density_curve);
     float densityCutoff = max(vol._reserved[0], 0.0);
     if (density <= densityCutoff) return 0.0;
     float cutoffFade = densityCutoff > 0.0

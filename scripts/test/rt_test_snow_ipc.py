@@ -129,7 +129,7 @@ def main():
             call('fluid.step', dt=1 / 60)
         domain_row = {d['name']: d for d in call('fluid.list_domains')['domains']}[DOMAIN]
         ambient = {'birth_kelvin': listed['fluid_birth_kelvin'],
-                   'born_solid': listed['fluid_born_solid'],
+                   'born_solid': listed['fluid_birth_model'] not in ('', 'fluid'),
                    'granular_particles': domain_row['granular_model_particles'],
                    'fluid_particles': domain_row['fluid_model_particles']}
         data['ambient_birth'] = ambient

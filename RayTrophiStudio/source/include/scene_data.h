@@ -4028,6 +4028,7 @@ struct SceneData {
         h = mix(h, fb(fp.cfl));
         h = mix(h, static_cast<uint64_t>(fp.max_substeps));
         h = mix(h, static_cast<uint64_t>(fp.pressure_iterations));
+        h = mix(h, fp.pressure_iterations_grid_scaled ? 1ull : 0ull);
         h = mix(h, fb(fp.pressure_relative_residual));
         h = mix(h, fp.pressure_multigrid_preconditioner ? 1ull : 0ull);
         h = mix(h, fb(fp.apic_blend));

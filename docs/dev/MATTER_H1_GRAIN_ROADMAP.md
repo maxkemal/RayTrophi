@@ -199,7 +199,7 @@ CPU + 2 yükleme/indirme). B4 bunu GPU'ya taşır.
 > **Yazılan:** kanonik `pore_water_mass_kg` sidecar'ı, hücre payı ile emilim (kare başına
 > hücre sıvısının en fazla yarısı, momentum kesin), kuruma (domain dışına, raporlanır),
 > `birth_saturation`, Willett (2000) sarkaç köprüsü (kopma V^(1/3), r/2 ile sınırlı),
-> `represented_grain_radius_m` ile Bond sayısı koruma. Islak sürtünme değişmedi; köprüler
+> `represented_grain_radius_m` ile Bond sayısı koruma (2026-10-21: emekli; ölçek R/r, toplu kohezyon gerilimi korunur, bkz. MATTER_ROADMAP_2026_10). Islak sürtünme değişmedi; köprüler
 > yalnız tane–tane. Kabul: `--wet-only`.
 
 - **Kod:** tane başına gözenek/köprü suyu (mevcut pore ledger anlamıyla: kütle iki yerde

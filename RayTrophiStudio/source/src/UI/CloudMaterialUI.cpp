@@ -31,6 +31,8 @@ static bool drawOpticalControls(atmosphere::CloudMaterial& m) {
                                0.01f, 0.0f, 100.0f, "%.3f");
     changed |= ImGui::ColorEdit3("Scattering colour", &m.scattering_color.x,
                                 ImGuiColorEditFlags_Float);
+    changed |= ImGui::SliderFloat("Scattering saturation", &m.scattering_saturation,
+                                  0.0f, 2.0f, "%.2f");
     changed |= ImGui::DragFloat("Absorption coefficient", &m.absorption_coefficient,
                                0.01f, 0.0f, 100.0f, "%.3f");
     ImGui::TextWrapped("Coefficients scale the layer extinction and cirrus optical depth. "
@@ -45,6 +47,12 @@ static bool drawOpticalControls(atmosphere::CloudMaterial& m) {
                                 ImGuiColorEditFlags_Float);
     changed |= ImGui::DragFloat("Emission strength", &m.emission_strength,
                                0.01f, 0.0f, 100000.0f, "%.3f");
+    changed |= ImGui::SliderFloat("Emission saturation", &m.emission_saturation,
+                                  0.0f, 2.0f, "%.2f");
+    changed |= ImGui::SliderFloat("Emission exposure (EV)", &m.emission_exposure_ev,
+                                  -16.0f, 16.0f, "%.2f");
+    ImGui::TextWrapped("Saturation 0 gives grey; 1 keeps the authored colour. "
+                       "Emission exposure +1 EV doubles emission only, not sunlight.");
     ImGui::TextWrapped("Emission is source radiance per optical depth. Zero density or "
                        "zero total extinction disables the cloud material.");
     ImGui::TreePop();

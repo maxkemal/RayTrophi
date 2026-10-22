@@ -1,0 +1,77 @@
+{
+  "render.rt_pipeline_status": {
+    "available": true,
+    "awaiting_install": false,
+    "backend": "vulkan",
+    "build_count": 1,
+    "cache_hit": null,
+    "cache_loaded": false,
+    "cache_loaded_bytes": 0,
+    "cache_path": "C:\\Users\\maxkemal\\AppData\\Local\\RayTrophiStudio\\vk_pipeline_cache\\rt_pipeline_10de_2503.bin",
+    "cache_reject_reason": "",
+    "compile_seconds": 495.2853215,
+    "deferred_threads": 13,
+    "error": "",
+    "rt_pipeline_state": "ready",
+    "stage_seconds": [
+      {
+        "seconds": null,
+        "stage": "raygen"
+      },
+      {
+        "seconds": null,
+        "stage": "miss"
+      },
+      {
+        "seconds": null,
+        "stage": "shadow_miss"
+      },
+      {
+        "seconds": null,
+        "stage": "closesthit"
+      },
+      {
+        "seconds": null,
+        "stage": "shadow_anyhit"
+      },
+      {
+        "seconds": null,
+        "stage": "volume_closesthit"
+      },
+      {
+        "seconds": null,
+        "stage": "volume_intersection"
+      },
+      {
+        "seconds": null,
+        "stage": "hair_closesthit"
+      },
+      {
+        "seconds": null,
+        "stage": "hair_intersection"
+      },
+      {
+        "seconds": null,
+        "stage": "hair_shadow_anyhit"
+      },
+      {
+        "seconds": null,
+        "stage": "sphere_intersection"
+      },
+      {
+        "seconds": null,
+        "stage": "photon"
+      },
+      {
+        "seconds": null,
+        "stage": "cloud_callable"
+      }
+    ]
+  },
+  "timeline.get_frame": 101,
+  "viewport.shading": {
+    "interactive_available": true,
+    "matcap_preset": 0,
+    "mode": "rendered"
+  }
+}

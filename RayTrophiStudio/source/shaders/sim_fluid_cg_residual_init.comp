@@ -1,9 +1,9 @@
 // sim_fluid_cg_residual_init.comp
 // MGPCG: r0 = b = -div*h*h/dt at fluid cells (0 elsewhere); pressure reset 0.
 // 1:1 port of the CUDA fluid_cg_residual_init_kernel, including the density
-// relaxation term (mask carries the per-cell parcel count): an over-packed
-// cell's excess, averaged with its fluid 6-neighbours and above one standard
-// error, is removed over density_relaxation_s seconds (APICFluidSolver.cpp).
+// relaxation term (mask carries the per-cell parcel count): the 27-cell mean
+// count is pulled to particles_per_cell over density_relaxation_s seconds,
+// two-sided (sim_fluid_density_relaxation.glsl, APICFluidSolver.cpp).
 #version 450
 layout(local_size_x = 256) in;
 
@@ -26,6 +26,14 @@ layout(set = 0, binding = 1) readonly buffer Mask       { float fluid_mask[]; };
 layout(set = 0, binding = 2) buffer Residual            { float r[]; };
 layout(set = 0, binding = 3) buffer Pressure            { float pressure[]; };
 
+float rtDensityMask(ivec3 c) {
+    if (c.x < 0 || c.y < 0 || c.z < 0 || c.x >= pc.nx || c.y >= pc.ny || c.z >= pc.nz) {
+        return pc.boundary == 0 ? 0.0 : -1.0;
+    }
+    return fluid_mask[c.x + c.y * pc.nx + c.z * pc.nx * pc.ny];
+}
+#include "sim_fluid_density_relaxation.glsl"
+
 void main() {
     int id = int(gl_GlobalInvocationID.x);
     if (id >= pc.nx * pc.ny * pc.nz) return;
@@ -35,18 +43,10 @@ void main() {
     float inv_dt = pc.dt > 1e-8 ? 1.0 / pc.dt : 0.0;
     float rhs = -divergence[id] * h * h * inv_dt;
     if (pc.density_relaxation_s > 0.0 && pc.particles_per_cell > 0) {
-        int sx = 1, sy = pc.nx, sz = pc.nx * pc.ny;
-        int i = id % pc.nx, j = (id / pc.nx) % pc.ny, k = id / sz;
-        float sum = fluid_mask[id], n = 1.0;
-        float m;
-        if (i > 0)         { m = fluid_mask[id - sx]; if (m >= 0.5) { sum += m; n += 1.0; } }
-        if (i + 1 < pc.nx) { m = fluid_mask[id + sx]; if (m >= 0.5) { sum += m; n += 1.0; } }
-        if (j > 0)         { m = fluid_mask[id - sy]; if (m >= 0.5) { sum += m; n += 1.0; } }
-        if (j + 1 < pc.ny) { m = fluid_mask[id + sy]; if (m >= 0.5) { sum += m; n += 1.0; } }
-        if (k > 0)         { m = fluid_mask[id - sz]; if (m >= 0.5) { sum += m; n += 1.0; } }
-        if (k + 1 < pc.nz) { m = fluid_mask[id + sz]; if (m >= 0.5) { sum += m; n += 1.0; } }
+        int sz = pc.nx * pc.ny;
+        ivec3 cell = ivec3(id % pc.nx, (id / pc.nx) % pc.ny, id / sz);
         float target = float(pc.particles_per_cell);
-        float excess = max(sum / n - target - sqrt(target / n), 0.0) / target;
+        float excess = rtDensityExcess(rtDensitySample(cell), target, target);
         rhs += excess / max(pc.density_relaxation_s, pc.dt) * h * h * inv_dt;
     }
     r[id] = rhs;

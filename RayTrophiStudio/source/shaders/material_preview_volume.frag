@@ -4,7 +4,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Realtime participating-media pass. It deliberately consumes the same raw
-// 624-byte VkVolumeInstance table as Vulkan RT (binding 20): simulation, VDB,
+// 672-byte VkVolumeInstance table as Vulkan RT (binding 20): simulation, VDB,
 // scripting and both renderers therefore have one volume-data authority.
 
 layout(location = 0) in vec2 vNdc;
@@ -12,6 +12,7 @@ layout(location = 0) out vec4 outColor;
 
 #include "post_chain.glsl"
 #include "material_preview_ray.glsl"
+#include "volume_material_response.glsl"
 
 layout(set = 0, binding = 2) uniform sampler2D envMaps[2];
 layout(set = 0, binding = 9) uniform sampler2D worldEnvironment;
@@ -105,7 +106,10 @@ vec3 rampColor(uint vi,float t){
 vec3 emissionAt(uint vi,vec3 p,float density){
     int mode=volInt(vi,256u);
     if(mode<=0)return vec3(0);
-    if(mode==1)return volVec3(vi,136u)*volFloat(vi,148u)*density;
+    float response[5];
+    for (int k = 0; k < 5; ++k) response[k] = volFloat(vi, 444u + uint(k) * 4u);
+    if(mode==1)return volumeEmissionSource(volVec3(vi,136u),1.0,density,1.0,
+        volFloat(vi,148u),response,false);
     uint64_t tempAddress=volAddress(vi,240u);
     uint64_t flameAddress=volAddress(vi,536u);
     bool hasTemp=tempAddress!=0ul;
@@ -165,7 +169,8 @@ vec3 emissionAt(uint vi,vec3 p,float density){
     // ramp is a statement about the FINAL colour, so scaling it
     // by T^4 would fight the author instead of helping them.
     float radiance=useRamp?1.0:pow(clamp(kelvin/hi,0.0,1.0),4.0);
-    vec3 e=c*radiance*density*volFloat(vi,264u)*(1.0+flame);
+    vec3 e=volumeEmissionSource(c,radiance,density,u,volFloat(vi,264u),response,true)
+        *(1.0+flame);
     float l=dot(e,vec3(0.2126,0.7152,0.0722));
     return l>64.0?e*(64.0/l):e;
 }
@@ -187,8 +192,11 @@ vec2 directionUv(vec3 d){d=normalize(d);return vec2(atan(d.z,d.x)/(2.0*PI)+0.5,a
 vec3 ambientLight(vec3 d){
     uint preset=pc.materialMeta.z;
     if(preset==3u){
-        if(worldMode==0u)return worldColor.rgb*worldParams.x;
-        return textureLod(worldIrradiance,directionUv(d),0.0).rgb*worldParams.y;
+        if(worldMode==0u)return worldColor.rgb*max(worldColor.w,0.0);
+        // Match the surface preview: Physical Sky's bake already includes its
+        // intensity. worldParams.y is an HDRI/overlay dial, not sky strength.
+        float intensity=worldMode==1u?max(worldParams.y,0.0):1.0;
+        return textureLod(worldIrradiance,directionUv(d),0.0).rgb*intensity;
     }
     return textureLod(envMaps[preset==2u?1:0],directionUv(d),5.0).rgb*0.35;
 }
@@ -205,6 +213,8 @@ float selfShadow(uint vi,vec3 p,vec3 l,float maxDistance){
     for(int i=0;i<12;++i){if(i>=steps)break;tau+=sampleField(vi,volAddress(vi,232u),p+l*(float(i)+0.5)*dt)*sigma*dt;}
     return exp(-tau*clamp(volFloat(vi,164u),0.0,1.0));
 }
+
+#include "volume_internal_preview.glsl"
 
 RtPostParams volumePostParams(){
     RtPostParams p; p.exposure=postA.x;p.gamma=postA.y;p.saturation=postA.z;
@@ -265,6 +275,9 @@ void main(){
         int steps=min(int(ceil(length/dt)),budget);
         float jitter=hash31(vec3(gl_FragCoord.xy,float(vi)));
         float cachedShadows[9];for(int k=0;k<9;++k)cachedShadows[k]=-1.0;
+        float cachedSkyShadow = -1.0;
+        vec3 cachedInternalLight = vec3(0.0);
+        bool cachedInternalLightValid = false;
         int stride=clamp(volInt(vi,180u),1,16);
         // Live dense gas publishes a per-block density maximum. Walking the
         // empty part of the bounding box used to burn the step budget that the
@@ -297,7 +310,8 @@ void main(){
                 trans*=vec3(1.0-sampleAlpha);
                 continue;
             }
-            vec3 sigmaS=max(volVec3(vi,88u),vec3(0))*max(volFloat(vi,100u),0.0)*density;
+            float sigmaS = max(volFloat(vi,100u), 0.0) * density;
+            vec3 scatterColor = clamp(volVec3(vi,88u), vec3(0.0), vec3(1.0));
             // Match RT: legacy black absorption means neutral extinction,
             // while a tint selects the wavelengths removed by the medium.
             // Treating black as zero made scatter=0 discard even emissive gas.
@@ -307,10 +321,19 @@ void main(){
             vec3 absorptionWeights = absorptionPeak > 1e-5
                 ? absorptionColor / absorptionPeak : vec3(1.0);
             vec3 sigmaA = absorptionWeights * max(volFloat(vi,132u),0.0) * density;
-            vec3 sigmaT=max(sigmaS+sigmaA,vec3(1e-6));
+            vec3 sigmaT=max(vec3(sigmaS)+sigmaA,vec3(1e-6));
             vec3 sampleT=exp(-sigmaT*dt), oneMinusT=vec3(1)-sampleT;
-            vec3 scatterWeight=oneMinusT*sigmaS/sigmaT;
-            vec3 light=ambientLight(-rd)*0.18;
+            vec3 albedo = vec3(sigmaS) / sigmaT;
+            vec3 scatterWeight=oneMinusT*albedo*scatterColor;
+            vec3 skyDirection = normalize(vec3(-rd.x * 0.35, 1.0, -rd.z * 0.35));
+            if (cachedSkyShadow < 0.0 || (s % max(stride, 8)) == 0) {
+                cachedSkyShadow = selfShadow(vi, p, skyDirection, 1e30);
+            }
+            float skyVisibility = cachedSkyShadow + volumeHigherOrderSkyVisibility(
+                cachedSkyShadow, volFloat(vi,116u), dot(albedo*scatterColor,
+                    vec3(0.2126, 0.7152, 0.0722)));
+            float environmentScale = pc.materialMeta.z == 3u ? 1.0 : 0.18;
+            vec3 light = ambientLight(skyDirection) * environmentScale * skyVisibility;
             uint lights=min(sceneLightCount,quality<=1u?2u:(quality==2u?4u:8u));
             for(uint li=0u;li<8u;++li){
                 if(li>=lights)break;vec3 l,rad;if(!evalLight(li,p,l,rad))continue;
@@ -322,13 +345,22 @@ void main(){
                 }
                 light+=rad*phaseDual(dot(rd,l),vi)*cachedShadows[li];
             }
-            vec3 emis=emissionAt(vi,p,density);
-            accum+=trans*(scatterWeight*light + oneMinusT*emis);
+            vec3 emis = emissionAt(vi,p,density);
+            if (volInt(vi, 280u) > 0 && volInt(vi, 256u) > 0) {
+                int internalStride = clamp(volInt(vi, 284u), 1, 32);
+                if (!cachedInternalLightValid || (s % internalStride) == 0) {
+                    cachedInternalLight = volumeInternalLighting(vi, p, rd);
+                    cachedInternalLightValid = true;
+                }
+                light += cachedInternalLight;
+            }
+            vec3 emissionSegment = oneMinusT * emis;
+            accum+=trans*(scatterWeight*light + emissionSegment);
             trans*=sampleT;
         }
     }
     float alpha=clamp(1.0-dot(trans,vec3(0.2126,0.7152,0.0722)),0.0,1.0);
-    if(alpha<1e-5)discard;
+    if(alpha<1e-5 && max(accum.r,max(accum.g,accum.b))<1e-5)discard;
     vec4 firstClip=pc.viewProj*vec4(ro+rd*firstContributionT,1.0);
     float firstDepth=firstClip.z/firstClip.w;
     if(firstClip.w<=1e-6 || firstDepth<0.0 || firstDepth>1.0)discard;

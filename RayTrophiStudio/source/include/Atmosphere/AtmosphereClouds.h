@@ -24,6 +24,7 @@
 */
 
 #include "Vec3.h"
+#include "VolumeAppearance.h"
 #include "json.hpp"
 #include <cstdint>
 #include <string>
@@ -40,11 +41,14 @@ struct CloudMaterial {
     float density_multiplier = 1.0f;
     float scattering_coefficient = 1.0f;
     Vec3 scattering_color = Vec3(1.0f);
+    float scattering_saturation = 1.0f;
     float absorption_coefficient = 0.0f;
     bool override_anisotropy = false;
     float anisotropy = 0.75f;
     Vec3 emission_color = Vec3(1.0f);
     float emission_strength = 0.0f;
+    float emission_saturation = 1.0f;
+    float emission_exposure_ev = 0.0f;
 };
 
 // One volumetric layer: a spherical shell between base and base+thickness.
@@ -362,13 +366,27 @@ bool cloudMaterialFromJson(const nlohmann::json& json, CloudMaterial& out,
                           std::string* error);
 CloudMaterial lerpCloudMaterial(const CloudMaterial& a, const CloudMaterial& b, float t);
 
+// Resolve authoring controls once, before master/layer composition. Reset the
+// controls so a resolved material cannot accidentally grade the colours twice.
+inline CloudMaterial resolvedCloudMaterial(const CloudMaterial& authored) {
+    CloudMaterial m = authored;
+    m.scattering_color = volume_appearance::scatterColor(
+        m.scattering_color, m.scattering_saturation);
+    m.emission_color = volume_appearance::emissionColor(
+        m.emission_color, m.emission_saturation, m.emission_exposure_ev);
+    m.scattering_saturation = 1.0f;
+    m.emission_saturation = 1.0f;
+    m.emission_exposure_ev = 0.0f;
+    return m;
+}
+
 inline CloudMaterial layerMaterial(const CloudState& state, int index) {
-    CloudMaterial m = state.material;
+    CloudMaterial m = resolvedCloudMaterial(state.material);
     const CloudLayer& layer = state.layers[index];
     if (!layer.use_custom_material) {
         return m;
     }
-    const CloudMaterial& local = layer.material;
+    const CloudMaterial local = resolvedCloudMaterial(layer.material);
     m.density_multiplier *= local.density_multiplier;
     m.scattering_coefficient *= local.scattering_coefficient;
     m.scattering_color = Vec3(m.scattering_color.x * local.scattering_color.x,

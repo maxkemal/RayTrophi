@@ -1549,6 +1549,23 @@ static const MethodDescriptor desc_fluid_create_domain = {
 };
 static const MethodRegistration reg_fluid_create_domain(desc_fluid_create_domain);
 
+static const MethodParam params_fluid_gas_cell_extremes[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"count", "int", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_gas_cell_extremes = {
+    "fluid.gas_cell_extremes", "fluid",
+    "Hottest (by air temperature) and most vapour-laden gas cells of a Matter domain (count 1..64 each, default 8): Tv, air T, vapour kg and kg/m^3 against 1 atm of pure vapour at that T, fog water, rain and rain temperature, foreign gas, energy",
+    "Rain parcels are born at their cell's rain temperature, so a rain parcel past every source (fluid.particle_extremes) means an air cell past it; this says which. air_kelvin is T behind the field's Tv (airKelvinFromVirtual). pure_vapour_kg_m3 = P Mv / (R T): vapour_kg_m3 above it is vapour past its physical ceiling; max_vapour_over_pure is the largest ratio over every fluid cell. rain_kelvin = rain energy / (c rain), 0 without rain. A device-resident inventory is copied to the host for the read (the live one is untouched); inventory=false means the domain carries none. Cells at the ambient holding nothing are skipped. Read right after the fluid.step that showed the reading.",
+    "read", "Read", false, "any",
+    "fluid|gas|cell|extremes|vapour|temperature|kelvin|fog|rain|measure|verify|debug",
+    "fluid.particle_extremes|gas.step_stats|fluid.list_domains|fluid.step",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_gas_cell_extremes, 2,
+    true
+};
+static const MethodRegistration reg_fluid_gas_cell_extremes(desc_fluid_gas_cell_extremes);
+
 static const MethodParam params_fluid_get[] = {
     {"domain", "string", true, "", nullptr, nullptr},
 };
@@ -1728,6 +1745,23 @@ static const MethodDescriptor desc_fluid_matter_models = {
     true
 };
 static const MethodRegistration reg_fluid_matter_models(desc_fluid_matter_models);
+
+static const MethodParam params_fluid_particle_extremes[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"count", "int", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_particle_extremes = {
+    "fluid.particle_extremes", "fluid",
+    "Hottest and coldest live particles of a domain (count 1..64 each, default 8) with substance, solver model, granular transport, kelvin, mass fraction, rest mass, solid share, pore water, frozen flag, position and velocity",
+    "Says WHICH particle a max/min reading belongs to: thermal_max_kelvin and particle_max_kelvin only say that one ran past every source. Reads the host particle arrays at query time, so call it right after the fluid.step that showed the reading. Unwritten particles (0 K or non-finite) are skipped; measured counts the rest. index is the slot in the live arrays and changes when particles are added or removed; particle_id is stable. fusion_solid_fraction -1 = unresolved. granular_transport is dem|mpm for a granular parcel (its substance's), empty otherwise.",
+    "read", "Read", false, "any",
+    "fluid|particle|extremes|temperature|kelvin|measure|verify|thermal|debug",
+    "fluid.get|fluid.list_domains|fluid.step|fluid.run|fluid.state_digest",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_particle_extremes, 2,
+    true
+};
+static const MethodRegistration reg_fluid_particle_extremes(desc_fluid_particle_extremes);
 
 static const MethodParam params_fluid_remove_domain[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -1975,6 +2009,7 @@ static const MethodParam params_fluid_set_param[] = {
     {"pore_scale", "any", false, "", nullptr, nullptr},
     {"position_smoothing", "any", false, "", nullptr, nullptr},
     {"pressure_iterations", "int", false, "", "24", nullptr},
+    {"pressure_iterations_grid_scaled", "bool", false, "", "true", nullptr},
     {"pressure_relative_residual", "float", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
@@ -2000,7 +2035,7 @@ static const MethodDescriptor desc_fluid_set_param = {
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 43,
+    params_fluid_set_param, 44,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -2576,6 +2611,7 @@ static const MethodParam params_gas_set_param[] = {
     {"pore_scale", "any", false, "", nullptr, nullptr},
     {"position_smoothing", "any", false, "", nullptr, nullptr},
     {"pressure_iterations", "int", false, "", "24", nullptr},
+    {"pressure_iterations_grid_scaled", "bool", false, "", "true", nullptr},
     {"pressure_relative_residual", "float", false, "", nullptr, nullptr},
     {"render_mode", "any", false, "", nullptr, nullptr},
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
@@ -2601,7 +2637,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 43,
+    params_gas_set_param, 44,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);

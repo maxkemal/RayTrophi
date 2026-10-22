@@ -84,6 +84,8 @@ float sample_vz(float fi,float fj,float fk){
     return mix(mix(c00,c10,fj-j0),mix(c01,c11,fj-j0),fk-k0);
 }
 
+#include "sim_grid_scalar_trace.glsl"
+
 void main() {
 #ifdef INVENTORY_SCALAR
     uint linear_id = gl_GlobalInvocationID.x +
@@ -100,9 +102,8 @@ void main() {
     int i=id%pc.nx, j=(id/pc.nx)%pc.ny, k=id/(pc.nx*pc.ny);
     float lx=float(i)+0.5, ly=float(j)+0.5, lz=float(k)+0.5;
     float inv_h = pc.voxel_size>1e-6 ? 1.0/pc.voxel_size : 1.0;
-    float vx=sample_vx(lx,ly-0.5,lz-0.5), vy=sample_vy(lx-0.5,ly,lz-0.5), vz=sample_vz(lx-0.5,ly-0.5,lz);
-    float bx=lx-vx*pc.dt*inv_h, by=ly-vy*pc.dt*inv_h, bz=lz-vz*pc.dt*inv_h;
-    bx-=0.5; by-=0.5; bz-=0.5;
+    vec3 back = gridScalarTrace(vec3(lx, ly, lz), pc.dt * inv_h) - vec3(0.5);
+    float bx = back.x, by = back.y, bz = back.z;
     // Boundary-aware fetch, matching the CPU advectScalar reference.
     int i0=int(floor(bx)), j0=int(floor(by)), k0=int(floor(bz));
     scalar_out[id]=trilinear(i0,j0,k0,bx-float(i0),by-float(j0),bz-float(k0));

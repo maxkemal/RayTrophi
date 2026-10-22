@@ -284,7 +284,7 @@ bool solveSparsePressure(SimulationComputeContext& compute,
         ++storage.dispatches;
         return true;
     };
-    const int maximum = std::max(params.pressure_iterations, 1);
+    const int maximum = effectivePressureIterationCap(params, nx, ny, nz);
     const double tolerance = std::clamp(double(params.pressure_relative_residual), 1e-8, 1e-2);
     if (compact_cells != 0) {
         if (!dispatch("sim_sparse_pressure_init", compact_cells) ||

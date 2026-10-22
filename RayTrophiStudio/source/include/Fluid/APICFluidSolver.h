@@ -103,6 +103,13 @@ struct APICSolverParams {
     // behavior; relaxing toward 1e-4 often reduces GPU MGPCG sync cost on
     // dense preview scenes.
     float pressure_relative_residual = 1.0e-5f;
+    // The cap grows with the grid (2026-10-20): the effective cap is
+    // max(pressure_iterations, 4 * longest axis). A Jacobi-PCG solve needs
+    // O(n) iterations to carry a hydrostatic column across n cells; at 1 cm
+    // (60 cells) the fixed 24 ended at a relative residual of 0.5 and the
+    // liquid lost 23 % of its height. The tolerance above still ends a
+    // converged solve early (400 allowed, 208 used at 1 cm).
+    bool  pressure_iterations_grid_scaled = true;
     // Experimental CUDA MGPCG Layer B. Uses a geometric V-cycle as the CG
     // preconditioner; keep optional because it trades extra dispatch work for
     // lower iteration count on large grids.
@@ -144,8 +151,13 @@ struct APICSolverParams {
     // making the PCG raise pressure there and push particles outward.
     // Without it, FLIP piles collapse on top of each other ("2D pile").
     // 0 = off (raw NS divergence only), 1.0 = sensible default for water.
-    // Seconds to remove a cell's excess density (above count noise); 0 = off.
-    float density_relaxation_s = 0.5f;
+    // Seconds to pull a cell's mean parcel count back to particles_per_cell;
+    // 0 = off. ★ 0.05 s since 2026-10-20: at 0.5 s a 2.25 m slab hitting the
+    // floor at 7.6 m/s was crushed to one parcel layer (centroid 3 cm above
+    // the floor instead of ~20 cm) and re-inflated over seconds. 0.05 s holds
+    // it best (12 cm at once); 0.02 s and below spring back hard (33 cm).
+    // A resting tank's motion did not change from 0.5 to 0.02 s (FLIP sets it).
+    float density_relaxation_s = 0.05f;
 
     // Per-particle viscous decay rate (1/s). Exponential energy loss:
     // v *= exp(-internal_friction * dt), applied to EVERY particle in
@@ -495,6 +507,15 @@ struct APICSolverParams {
     float surface_ball_radius = 0.9f;  // particle level-set ball radius (× voxel)
 
 };
+
+// Iteration cap the liquid pressure solve uses (pressure_iterations_grid_scaled).
+inline int effectivePressureIterationCap(const APICSolverParams& params, int nx, int ny, int nz) {
+    const int authored = params.pressure_iterations > 1 ? params.pressure_iterations : 1;
+    if (!params.pressure_iterations_grid_scaled) return authored;
+    const int longest = nx > ny ? (nx > nz ? nx : nz) : (ny > nz ? ny : nz);
+    const int scaled = longest > 0 ? 4 * longest : 0;
+    return authored > scaled ? authored : scaled;
+}
 
 struct APICSolverStats {
     bool mixed_model_step = false;

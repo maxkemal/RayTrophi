@@ -40,6 +40,11 @@ TAB = re.compile(r'BeginTabItem\s*\(\s*"([^"#]*)')
 # Intentional changes: baseline key -> new key, or "removed: reason".
 # Key format: "<label without ##id>".
 CHANGES = {
+    # 2026-10-19/20: capacity-free cooling rates retired (P1 films), the
+    # dimensionless density term rewritten in seconds (Density Relaxation).
+    'Air Cooling (1/s)': 'removed: P1 films replace the capacity-free air rate',
+    'Contact Cooling (1/s)': 'removed: P1 films replace the capacity-free contact rate',
+    'Density Correction Strength': 'removed: density_relaxation_s (Density Relaxation (s))',
     # 2026-10-06 grain reorganisation: material -> Matter tab, solver -> Solvers.
     'Physical radius (m)': 'Simulation grain radius (m)',
     'Represented grain radius (m, 0 = same)':

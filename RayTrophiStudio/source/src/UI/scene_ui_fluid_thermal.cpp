@@ -40,7 +40,7 @@ void drawBirthTemperatureWarning(float birth_kelvin,
                                  const RayTrophiSim::Fluid::APICSolverParams& params,
                                  uint32_t substance_tag) {
     if (!params.thermal_liquid_enabled) {
-        ImGui::TextDisabled("Cooling & Freezing is disabled on the domain.");
+        ImGui::TextDisabled("Heat Exchange is disabled on the domain.");
         return;
     }
 
@@ -154,11 +154,14 @@ bool drawDomainControls(
     float ambient_kelvin,
     const std::vector<RayTrophiSim::SimulationFlowSourceDesc>& sources,
     int domain_index) {
-    ImGui::SeparatorText("Thermal Liquid (cools, thickens, sets)");
+    ImGui::SeparatorText("Heat & Phase (melt, boil, freeze, conduct)");
 
     bool edited = false;
+    // 2026-10-20: was "Enable Cooling & Freezing" - the switch also heats,
+    // melts, boils and couples grains, and a user left it off expecting hot
+    // sand to melt snow.
     edited |= ImGui::Checkbox(
-        "Enable Cooling & Freezing",
+        "Enable Heat Exchange",
         &params.thermal_liquid_enabled);
     if (params.grain.enabled && params.thermal_liquid_enabled) {
         ImGui::TextDisabled("Grains share the heat (liquid, air, walls, contact). Ice here "
@@ -166,9 +169,9 @@ bool drawDomainControls(
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
-            "The domain cools all liquid parcels toward its effective ambient.\n"
-            "A source only chooses the parcel's birth temperature. Supported\n"
-            "parcels below the freeze point set and remain pinned.");
+            "Every heat path of the domain: walls, air, grains, parcel to parcel;\n"
+            "melting, boiling and freezing with their latent heat. Off, parcels keep\n"
+            "their birth temperature. A source only chooses that birth temperature.");
     }
 
     ImGui::TextDisabled("Effective Ambient: %.1f K", ambient_kelvin);
@@ -331,6 +334,10 @@ bool drawDomainControls(
             stats->grain_heat_to_walls_j,
             stats->grain_energy_residual_j, stats->grain_thermal_ms);
     }
+    if (stats->in_cell_mixed_cells > 0) {
+        ImGui::TextDisabled("In-cell exchange: %zu cells | heat %.3g J",
+                            stats->in_cell_mixed_cells, stats->in_cell_heat_j);
+    }
     if (stats->cold_unsupported > 0 && stats->frozen_particles == 0) {
         warningText(
             "%zu cold parcels touch no support (collider / closed wall).",
@@ -376,17 +383,17 @@ void drawSourceControls(
             std::max(1.0f, source.fluid_temperature_kelvin);
     }
 
-    bool born_solid = false;
+    bool lowered = false;
     const float effective_birth = source.fluid_temperature_override
         ? source.fluid_temperature_kelvin
         : RayTrophiSim::Fluid::substanceAmbientBirthKelvin(
               RayTrophiSim::Fluid::substanceTag(source.fluid_substance),
-              params, ambient_kelvin, &born_solid);
+              params, ambient_kelvin, &lowered);
     ImGui::TextDisabled(
         "Effective Birth Temperature: %.1f K | ambient delta %+.1f K",
         effective_birth,
         effective_birth - ambient_kelvin);
-    if (born_solid) {
+    if (lowered) {
         ImGui::TextDisabled(
             "%s is born at %.1f K, in its own phase (ambient %.1f K); it changes phase over time.",
             source.fluid_substance.c_str(), effective_birth, ambient_kelvin);

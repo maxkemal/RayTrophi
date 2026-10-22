@@ -7,7 +7,7 @@
 // Realtime SurfaceSDF compositor. The producer and Vulkan RT keep ownership of
 // the field; this pass reads the exact same VkVolumeInstance bytes through a raw
 // uint view. Raw access is intentional: there is no fifth private copy of the
-// 624-byte volume struct whose stride could silently drift from the RT ABI.
+// 672-byte volume struct whose stride could silently drift from the RT ABI.
 
 layout(location = 0) in vec2 vNdc;
 layout(location = 0) out vec4 outColor;
@@ -65,8 +65,8 @@ layout(set = 0, binding = 6, std430) readonly buffer PreviewSceneGlobalsBuffer {
 const uint PREVIEW_MAX_LIGHTS = 32u;
 #include "material_preview_shadow_data.glsl"
 
-// binding 20 aliases VulkanDevice::m_volumeBuffer. One record is 624 bytes =
-// 156 uints. Offsets below are byte offsets from vulkan_volume_types.h and are
+// binding 20 aliases VulkanDevice::m_volumeBuffer. One record is 672 bytes =
+// 168 uints. Offsets below are byte offsets from vulkan_volume_types.h and are
 // statically audited by scripts/audit_realtime_sdf_surface.py.
 layout(set = 0, binding = 20, std430) readonly buffer PreviewVolumeRawBuffer {
     uint volumeWords[];
@@ -84,7 +84,7 @@ layout(push_constant) uniform MaterialPreviewPushConstants {
 } pc;
 
 const float PI = 3.14159265358979323846;
-const uint VOLUME_STRIDE_WORDS = 156u;
+const uint VOLUME_STRIDE_WORDS = 168u;
 
 uint volWord(uint volumeIndex, uint byteOffset) {
     return volumeWords[volumeIndex * VOLUME_STRIDE_WORDS + (byteOffset >> 2u)];
@@ -446,7 +446,7 @@ void main() {
     uint count = min(pc.materialMeta.w, 16u);
     for (uint vi = 0u; vi < count; ++vi) {
         // is_active @172, volume_type @168, source_type @428, grid @232.
-        if (volWord(vi, 172u) == 0u || volWord(vi, 168u) != 2u ||
+        if (volWord(vi, 168u) == 0u || volWord(vi, 168u) != 2u ||
             int(volWord(vi, 428u)) != 4 || volAddress(vi, 232u) == uint64_t(0)) continue;
         float t;
         vec3 n;

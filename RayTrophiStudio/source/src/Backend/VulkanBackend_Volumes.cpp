@@ -718,6 +718,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.density_multiplier = src.density_multiplier;
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
+        std::copy(src.density_curve, src.density_curve + 12, dst.density_curve);
         dst.noise_scale = 1.0f;
         // Apply the authored density cutoff consistently on dense Vulkan,
         // NanoVDB Vulkan, OptiX and CPU. A Vulkan-only 1e-5 override retained a
@@ -780,6 +781,9 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.emissive_capacity = 0.0f;
         
         int vdb_id = src.vdb_id;
+        const auto* opticalSource = vdbManager.getVolume(vdb_id);
+        dst._uvw_pad[0] = opticalSource && opticalSource->filepath == "[LIVE SIMULATION]"
+            ? 1.0f : 0.0f;
         if (!liveDenseGas && vdb_id >= 0) {
             void* hostGrid = vdbManager.getHostGrid(vdb_id);
             const size_t gridSize = vdbManager.getHostGridSize(vdb_id);
@@ -1036,9 +1040,14 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.emission_mode       = src.emission_mode;
         dst.temperature_scale   = src.temperature_scale;
         dst.blackbody_intensity = src.blackbody_intensity;
+        for (int k = 0; k < 5; ++k) {
+            dst._retired_cloud[k] = src.emission_response[k];
+        }
         dst.max_temperature     = src.max_temperature;
         dst.color_ramp_enabled  = src.color_ramp_enabled;
         dst.ramp_stop_count     = std::min(src.ramp_stop_count, 8);
+        dst._ramp_pad[0] = std::clamp(src.internal_light_steps, 0, 32);
+        dst._ramp_pad[1] = std::clamp(src.internal_light_stride, 1, 32);
         for (int j = 0; j < dst.ramp_stop_count; ++j) {
             dst.ramp_positions[j] = src.ramp_positions[j];
             dst.ramp_colors_r[j]  = src.ramp_colors[j].x;
@@ -1316,6 +1325,7 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
         dst.density_multiplier = src.density_multiplier;
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
+        std::copy(src.density_curve, src.density_curve + 12, dst.density_curve);
         dst.noise_scale = 1.0f;
         dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
         dst._reserved[1] = src.emission_pad;

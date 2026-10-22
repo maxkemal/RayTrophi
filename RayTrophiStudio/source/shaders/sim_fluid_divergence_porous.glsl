@@ -78,6 +78,8 @@ float mask_at(int i, int j, int k) {
     return fluid_mask[cell_id(i, j, k)];
 }
 bool is_solid(int i, int j, int k) { return mask_at(i, j, k) < -0.5; }
+float rtDensityMask(ivec3 c) { return mask_at(c.x, c.y, c.z); }
+#include "sim_fluid_density_relaxation.glsl"
 
 // Fractional open weight of a MAC face. Domain-boundary faces follow the wall
 // mode (open = 1 Dirichlet, closed/periodic = 0 wall) rather than the array.
@@ -154,13 +156,15 @@ void main() {
     float div = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
 
     // Density correction with the pore volume as the target. residual_init
-    // pushes a cell back once it holds more than particles_per_cell parcels;
-    // a cell that is (1 - eps) grain holds only eps of that liquid at rest.
-    // Without this the correction refills the pores and undoes the exclusion
-    // the projection just enforced. eps is the mean open weight of the cell's
-    // interior faces that border no collider (porosity is the only thing that
-    // closes those); the extra term enters as rhs = -div h^2/dt, removed over
-    // density_relaxation_s like the main term (1/s, not a velocity).
+    // pulls a cell's mean count to particles_per_cell; a cell that is
+    // (1 - eps) grain holds only eps of that liquid at rest. Without this the
+    // correction refills the pores and undoes the exclusion the projection
+    // just enforced. eps is the mean open weight of the cell's interior faces
+    // that border no collider (porosity is the only thing that closes those).
+    // The extra term is the difference between the shared two-sided term at
+    // target eps*ppc and at ppc (sim_fluid_density_relaxation.glsl), so the
+    // sum of both is that term at the pore target exactly. It enters as
+    // rhs = -div h^2/dt, removed over density_relaxation_s (1/s).
     if (pc.density_relaxation_s > 0.0 && pc.particles_per_cell > 0) {
         float open = 0.0, faces = 0.0;
         if (i > 0 && !is_solid(i - 1, j, k))          { open += wxl; faces += 1.0; }
@@ -172,9 +176,10 @@ void main() {
         float eps = faces > 0.0 ? clamp(open / faces, 0.0, 1.0) : 1.0;
         if (eps < 0.999) {
             float ppc = float(pc.particles_per_cell);
-            float count = fluid_mask[id];
-            float extra = max(count - eps * ppc, 0.0) - max(count - ppc, 0.0);
-            div -= (extra / ppc) / max(pc.density_relaxation_s, pc.dt);
+            RtDensitySample sample_here = rtDensitySample(ivec3(i, j, k));
+            float extra = rtDensityExcess(sample_here, eps * ppc, ppc) -
+                          rtDensityExcess(sample_here, ppc, ppc);
+            div -= extra / max(pc.density_relaxation_s, pc.dt);
         }
     }
     divergence[id] = div;

@@ -59,8 +59,10 @@ checkpoints, not proof that a later build/listening/physics gate passed.
 
 ## Active plans (AKTIF)
 
+
 | Document | Area |
 |---|---|
+| [RT gas optical performance](RT_GAS_OPTICAL_PERFORMANCE.md) | AKTIF - single-material NanoVDB optical skips and affine ray sampling; build pending. |
 | [AUDIO_MASTER_PLAN.md](AUDIO_MASTER_PLAN.md) | **ACTIVE 2026-10-19.** Canonical remaining audio work: authoring/persistence, all-family synthesis, acoustic export/analysis and final acceptance. |
 | [PHYSICAL_AUDIO_SYNTHESIS_PLAN.md](PHYSICAL_AUDIO_SYNTHESIS_PLAN.md) | **ACTIVE 2026-10-19.** Eight-model V2 DSP and focus-routed history in source; build/listening pending. Future event/family gates remain open. |
 | [PHYSICAL_AUDIO_QUALITY_CLOSURE.md](PHYSICAL_AUDIO_QUALITY_CLOSURE.md) | **ACTIVE 2026-10-19.** All natural-event families: physical inputs, versioned synthesis, replay/export and listening-quality closure; not implemented completion. |
@@ -188,6 +190,7 @@ Volume shadow implementation: [REALTIME_VOLUME_SHADOWS.md](REALTIME_VOLUME_SHADO
 
 | Document | What it records |
 |---|---|
+| [Gas source material render audit](GAS_SOURCE_MATERIAL_RENDER_AUDIT.md) | ARSIV - per-source implementation rolled back by user request; performance port deferred. |
 | [volumetric_cloud_layer_roadmap.md](volumetric_cloud_layer_roadmap.md) | **ARCHIVED 2026-09-29 — superseded by ATMOSPHERE_SYSTEM.md.** Its "current state" section claimed `CloudLayerParams layers[2]`, per-layer volumes and removal from `world.objects`; none of it exists in code. Kept as a record of a plan that reported itself done. |
 | [GRANULAR_HEIGHTFIELD_GORUNUM.md](GRANULAR_HEIGHTFIELD_GORUNUM.md) | **ARCHIVED 2026-09-27 — removed.** `Virtual Particles` rendered liquids exactly like `Particles`; only granular domains were reclassified, without hysteresis. The 'flat sheets that keep changing' seen in RT were the foliage scatter proxy applied to splat pools, and Solid/Material invisibility was the raster compacting pool slots and then dropping the rebuild at the generation gate — both fixed outside this code. Kept for the G0 1M baseline and the G5 procedural-AABB RT idea. |
 | [HANDOFF_2026_09_09_RASTER_FRAME_COST.md](HANDOFF_2026_09_09_RASTER_FRAME_COST.md) | **ARCHIVED 2026-09-10 - both open targets closed and measured; see RASTER_FRAME_COST_2026_09_10.md. DEVIR NOTU, 2026-09-09.** Foliage sahnesinde cakilmanin sebebi RayFusion DEGIL: RT golge dispatch'i karenin %0,4'u (1,17 ms). Kare tamamen GPU-bound (CPU 0,69 ms/kare): main_pass 147,8 + transmission 103,2 ms. Dort kok neden kapatildi ve hepsi CANLI dogrulandi - derinlik on gecisi ana gecisle INVARIANT degildi (`VP*M*p` vs `VP*(M*p)`, maskenin 2 ULP'lik derinlik kapisi tutmuyordu), ekran isin golgesinde tmin SABIT 0,02 idi (belirsizlik z^2 ile buyur; zeminde yatay acne, ekran goruntusuyle teshis edildi), maske tek isik kapsiyordu oysa dunya gunesi ile senkron directional AYNI yon (shadow_atlas 38 ms -> SKIPPED), ve olcum aletinin kendi iki kusuru. ACIK BIRINCI HEDEF: alpha-test `discard` ERKEN DERINLIK TESTINI kapatiyor - depoda hicbir shader early_fragment_tests beyan etmiyor, ana pipeline LESS_OR_EQUAL + depth-write ON, yani ortulu foliage katmanlari TAM materyal shader'indan geciyor; kullanicinin 'kameraya birkac agac girse cakiliyor' gozlemi ve olculen ters iliski (ucgen %29 artarken main_pass %31 dustu) bunu isaret ediyor. On gecis zaten kosuyor, yani EQUAL + depth-write OFF + early_fragment_tests mumkun - ve on kosulu (iki gecisin bit bazinda ayni derinligi) bu oturumda saglandi. IKINCI HEDEF: transmission replay 72.030 ucgenlik su icin 27,3 M ucgen ciziyor (~379x); sahne seviyesindeki yeni kapi DOGRU calisiyor ama bu sahne icin yanlis granulerlik, mesh basina ayiklama gerekiyor - bayatlama yonu 'cam kaybolur' oldugu icin onbellek dikkat ister. Ayrica uc IPC olcum tuzagi kayitli: yanlis parametre adi sessiz bos kume uretir (bir 'sifir gecirgen materyal' raporu boyle uretildi, gercek 40) ve material.info ozetinin vaat ettigi parametre setini DONDURMUYOR. |
@@ -206,6 +209,7 @@ Volume shadow implementation: [REALTIME_VOLUME_SHADOWS.md](REALTIME_VOLUME_SHADO
 | [oidn_optimization_report.md](oidn_optimization_report.md) | OIDN denoiser CPU fallback and CUDA path |
 
 ## Proposed, not implemented (TASLAK)
+
 
 | Document | Area |
 |---|---|

@@ -1500,6 +1500,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         bool solver_edited = false;
         ImGui::DragFloat3("Gravity", &fluid->params.gravity.x, 0.05f, -100.0f, 100.0f, "%.2f");
         ImGui::SliderInt("Pressure Iterations", &fluid->params.pressure_iterations, 1, 120);
+        ImGui::Checkbox("Scale Iteration Cap With Grid", &fluid->params.pressure_iterations_grid_scaled);
         ImGui::DragFloat("Pressure Residual Target", &fluid->params.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
         ImGui::Checkbox("Pressure Layer B V-cycle", &fluid->params.pressure_multigrid_preconditioner);
         solver_edited |= ImGui::DragFloat("Density Relaxation (s)", &fluid->params.density_relaxation_s, 0.01f, 0.0f, 100.0f, "%.2f");

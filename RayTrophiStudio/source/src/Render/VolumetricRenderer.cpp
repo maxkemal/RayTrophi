@@ -796,6 +796,10 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         logIsoMaterialBinding(gv.iso_material_id);
         if (shader) {
             GpuVolumeShaderData gs = shader->toGPU();
+            shader->emission_response.pack(gv.emission_response);
+            shader->density.curve.pack(gv.density_curve);
+            gv.internal_light_steps = shader->quality.internal_light_steps;
+            gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier * vdb->density_scale;
             gv.density_remap_low = gs.density_remap_low;
             gv.density_remap_high = gs.density_remap_high;
@@ -910,6 +914,10 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         gv.material_program_index = resolveVolumeMaterialProgramIndex(shader);
         if (shader) {
             const GpuVolumeShaderData gs = shader->toGPU();
+            shader->emission_response.pack(gv.emission_response);
+            shader->density.curve.pack(gv.density_curve);
+            gv.internal_light_steps = shader->quality.internal_light_steps;
+            gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier;
             gv.density_remap_low = gs.density_remap_low;
             gv.density_remap_high = gs.density_remap_high;
@@ -946,14 +954,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.max_temperature = ambientKelvin + (std::max)(shader->emission.temperature_max, shader->emission.temperature_min + 1.0f);
 
             // Color Ramp
-            gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
-            gv.ramp_stop_count = static_cast<int>((std::min)(shader->emission.color_ramp.stops.size(), static_cast<size_t>(8)));
+            gv.color_ramp_enabled = gs.color_ramp_enabled;
+            gv.ramp_stop_count = gs.ramp_stop_count;
             for (int i = 0; i < gv.ramp_stop_count; ++i) {
-                gv.ramp_positions[i] = shader->emission.color_ramp.stops[i].position;
+                gv.ramp_positions[i] = gs.ramp_positions[i];
                 gv.ramp_colors[i] = make_float3(
-                    static_cast<float>(shader->emission.color_ramp.stops[i].color.x),
-                    static_cast<float>(shader->emission.color_ramp.stops[i].color.y),
-                    static_cast<float>(shader->emission.color_ramp.stops[i].color.z)
+                    gs.ramp_colors_r[i], gs.ramp_colors_g[i], gs.ramp_colors_b[i]
                 );
             }
 
@@ -996,6 +1002,10 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         auto shader = gas->getOrCreateShader();
         if (shader) {
             const GpuVolumeShaderData gs = shader->toGPU();
+            shader->emission_response.pack(gv.emission_response);
+            shader->density.curve.pack(gv.density_curve);
+            gv.internal_light_steps = shader->quality.internal_light_steps;
+            gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier;
             gv.density_remap_low = gs.density_remap_low;
             gv.density_remap_high = gs.density_remap_high;
@@ -1021,14 +1031,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             gv.max_temperature = ambientKelvin + (std::max)(shader->emission.temperature_max, shader->emission.temperature_min + 1.0f);
 
             // Color Ramp (Legacy)
-            gv.color_ramp_enabled = shader->emission.color_ramp.enabled ? 1 : 0;
-            gv.ramp_stop_count = static_cast<int>((std::min)(shader->emission.color_ramp.stops.size(), static_cast<size_t>(8)));
+            gv.color_ramp_enabled = gs.color_ramp_enabled;
+            gv.ramp_stop_count = gs.ramp_stop_count;
             for (int i = 0; i < gv.ramp_stop_count; ++i) {
-                gv.ramp_positions[i] = shader->emission.color_ramp.stops[i].position;
+                gv.ramp_positions[i] = gs.ramp_positions[i];
                 gv.ramp_colors[i] = make_float3(
-                    static_cast<float>(shader->emission.color_ramp.stops[i].color.x),
-                    static_cast<float>(shader->emission.color_ramp.stops[i].color.y),
-                    static_cast<float>(shader->emission.color_ramp.stops[i].color.z)
+                    gs.ramp_colors_r[i], gs.ramp_colors_g[i], gs.ramp_colors_b[i]
                 );
             }
         }

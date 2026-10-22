@@ -37,6 +37,44 @@ inline bool liveParcel(const FluidParticles& parts, std::size_t p) {
     return p >= parts.mass_fraction.size() || parts.mass_fraction[p] > 0.02f;
 }
 
+// DEM grain carriers keep their own films (exchangeMatterGrainHeat). An
+// MPM-owned granular parcel (Snow beside DEM Sand) is continuum and stays in
+// these passes: skipping every Granular parcel left snow with no wall, air
+// or in-cell exchange at all (2026-10-20).
+inline bool demGrainCarrier(const FluidParticles& parts, std::size_t p,
+                            const APICSolverParams& params) {
+    if (!params.grain.enabled || p >= parts.constitutive_model.size() ||
+        parts.constitutive_model[p] != static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
+        return false;
+    }
+    const uint32_t tag = p < parts.substance_tag.size()
+        ? parts.substance_tag[p] : kSubstanceUntagged;
+    return substanceTransportOwner(tag, MatterConstitutiveModel::Granular, params) ==
+        MatterTransportOwner::Grain;
+}
+
+// Parcel-to-parcel film inside one cell: the same contact film as a liquid
+// on a surface.
+constexpr double kInCellContactFilm = MaterialStateFieldSystem::kMsfContactFilmWm2K;
+
+// Contact surface of a continuum parcel: the sphere of its own volume, in
+// the state it is in (snow at its bulk density, water at the liquid's).
+double parcelContactArea(const FluidParticles& parts, std::size_t p,
+                         const SubstanceProfile& profile) {
+    if (p >= parts.rest_mass_kg.size()) return 0.0;
+    const double fraction = p < parts.mass_fraction.size()
+        ? std::clamp(double(parts.mass_fraction[p]), 0.0, 1.0) : 1.0;
+    const bool solid_state = p < parts.constitutive_model.size() &&
+        (parts.constitutive_model[p] == static_cast<uint8_t>(MatterConstitutiveModel::Granular) ||
+         parts.constitutive_model[p] == static_cast<uint8_t>(MatterConstitutiveModel::Elastic));
+    const double rho = !solid_state && profile.liquid_density > 0.0f
+        ? profile.liquid_density : (profile.density > 0.0f ? profile.density : 1000.0f);
+    const double volume = double(parts.rest_mass_kg[p]) * fraction / rho;
+    if (!(volume > 0.0)) return 0.0;
+    const double radius = std::cbrt(3.0 * volume / (4.0 * 3.14159265358979323846));
+    return 4.0 * 3.14159265358979323846 * radius * radius;
+}
+
 void measureTemperatures(const FluidParticles& parts, ThermalLiquidStats& stats) {
     const std::size_t n = std::min(parts.size(), parts.temperature.size());
     double sum = 0.0;
@@ -174,9 +212,7 @@ void coolThermalLiquid(FluidParticles& particles,
         // ★ Grain carriers trade with walls and air through films in
         // exchangeMatterGrainHeat (2026-10-19: this sink drained a hot gravel
         // bed into the floor in 1.5 s). Thermal fields still reach them below.
-        if (params.grain.enabled && p < particles.constitutive_model.size() &&
-            particles.constitutive_model[p] ==
-                static_cast<uint8_t>(MatterConstitutiveModel::Granular)) {
+        if (demGrainCarrier(particles, p, params)) {
             air_faces = 0;
             wall_faces = 0;
         }
@@ -361,10 +397,13 @@ void conductThermalLiquid(FluidParticles& particles,
     // Gather per cell: heat capacity C (J/K), energy C*T, capacity-weighted k.
     static std::vector<double> s_cap, s_energy, s_kcap;
     static std::vector<int> s_cell_of;
+    static std::vector<double> s_parcel_cap, s_parcel_g;
     s_cap.assign(cells, 0.0);
     s_energy.assign(cells, 0.0);
     s_kcap.assign(cells, 0.0);
     s_cell_of.assign(n, -1);
+    s_parcel_cap.assign(n, 0.0);
+    s_parcel_g.assign(n, 0.0);
     uint32_t cached_tag = ~0u;
     const SubstanceProfile* profile = nullptr;
     for (std::size_t p = 0; p < n; ++p) {
@@ -388,6 +427,12 @@ void conductThermalLiquid(FluidParticles& particles,
         s_cap[c] += cap;
         s_energy[c] += cap * t;
         s_kcap[c] += cap * std::max(0.0f, profile->conductivity);
+        s_parcel_cap[p] = cap;
+        // In-cell contact (below). No Biot term: a continuum parcel is loose
+        // snow or liquid the neighbour soaks into, not a solid sphere.
+        if (!demGrainCarrier(particles, p, params)) {
+            s_parcel_g[p] = kInCellContactFilm * parcelContactArea(particles, p, *profile);
+        }
     }
 
     // Cell temperatures before and after; faces solved pairwise, implicitly:
@@ -436,6 +481,51 @@ void conductThermalLiquid(FluidParticles& particles,
         particles.temperature[p] += static_cast<float>(s_t[c] - s_t0[c]);
     }
     stats.conducting_cells = live_cells;
+
+    // ★ Inside a cell (2026-10-20). The faces above move every parcel of a
+    // cell by the same dT, so two parcels sharing a cell never met: 263 K snow
+    // in 293 K water kept its gap forever. Each continuum parcel relaxes toward
+    // its cell's continuum mean (it against the rest of the cell, exactly),
+    // then one uniform shift restores the cell's energy to the joule.
+    static std::vector<double> s_mix_cap, s_mix_energy, s_mix_q;
+    static std::vector<uint32_t> s_mix_count;
+    s_mix_cap.assign(cells, 0.0);
+    s_mix_energy.assign(cells, 0.0);
+    s_mix_q.assign(cells, 0.0);
+    s_mix_count.assign(cells, 0u);
+    for (std::size_t p = 0; p < n; ++p) {
+        const int c = s_cell_of[p];
+        if (c < 0 || !(s_parcel_g[p] > 0.0)) continue;
+        s_mix_cap[c] += s_parcel_cap[p];
+        s_mix_energy[c] += s_parcel_cap[p] * particles.temperature[p];
+        ++s_mix_count[c];
+    }
+    double moved = 0.0;
+    std::size_t mixed_cells = 0;
+    for (std::size_t p = 0; p < n; ++p) {
+        const int c = s_cell_of[p];
+        if (c < 0 || !(s_parcel_g[p] > 0.0) || s_mix_count[c] < 2) continue;
+        const double cp = s_parcel_cap[p];
+        const double rest = s_mix_cap[c] - cp;
+        if (!(rest > 0.0)) continue;
+        const double mean = s_mix_energy[c] / s_mix_cap[c];
+        const double tp = particles.temperature[p];
+        const double decay = 1.0 - std::exp(-s_parcel_g[p] * dt * (1.0 / cp + 1.0 / rest));
+        const double dtp = (mean - tp) * decay;
+        particles.temperature[p] = static_cast<float>(tp + dtp);
+        s_mix_q[c] += cp * dtp;
+        moved += std::abs(cp * dtp);
+    }
+    for (std::size_t p = 0; p < n; ++p) {
+        const int c = s_cell_of[p];
+        if (c < 0 || !(s_parcel_g[p] > 0.0) || s_mix_count[c] < 2 || s_mix_q[c] == 0.0) continue;
+        particles.temperature[p] -= static_cast<float>(s_mix_q[c] / s_mix_cap[c]);
+    }
+    for (std::size_t c = 0; c < cells; ++c) {
+        if (s_mix_count[c] >= 2 && s_mix_cap[c] > 0.0) ++mixed_cells;
+    }
+    stats.in_cell_mixed_cells = mixed_cells;
+    stats.in_cell_heat_j = 0.5 * moved;
 }
 
 std::size_t applyThermalConvection(FluidParticles& particles,

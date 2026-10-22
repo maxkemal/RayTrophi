@@ -141,7 +141,14 @@ vec2 applyMaterialUVTransform(Material mat, vec2 originalUV) {
     return uv;
 }
 
+#include "volume_solid_probe.glsl"
+#include "sphere_shadow_probe.glsl"
+
 void main() {
+    if (gl_HitKindEXT == FOAM_SPHERE_HIT_KIND) {
+        sphereShadowProbe();
+        return;
+    }
     VkInstanceData inst = instances.i[gl_InstanceID];
     VkGeometryData geo  = geometries.g[inst.blasIndex];
 
@@ -224,14 +231,10 @@ void main() {
 
     // ---- Volume embedded-solid distance probe -----------------------------
     // Volume closest-hit initializes w with this exact sentinel and forces
-    // any-hit for opaque geometry via NoOpaqueEXT. Return the committed
-    // candidate distance directly so the volume shader needs ONE trace instead
-    // of an existence trace followed by 5-6 binary-search traces.
-    const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
-    if (floatBitsToUint(shadowPayload.w) == VOLUME_SOLID_PROBE) {
-        shadowPayload.x = gl_HitTEXT;
-        shadowPayload.w = 0.0; // hit; shadow miss leaves/sets w=1
-        terminateRayEXT;
+    // any-hit for opaque geometry via NoOpaqueEXT. Accept candidates without
+    // terminating so traversal resolves the nearest hit, not its first visited
+    // triangle or sphere. The shared helper retains the nearest distance.
+    if (volumeSolidProbeCandidate(shadowPayload, gl_HitTEXT)) {
         return;
     }
 

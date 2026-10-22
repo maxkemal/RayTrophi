@@ -72,6 +72,21 @@ float sampleComp(int comp, vec3 p) {
 vec3 sampleVelocity(vec3 p) {
     return vec3(sampleComp(0,p),sampleComp(1,p),sampleComp(2,p));
 }
+// ★ 2026-10-20: the grid's velocity exists only around the cells that held
+// liquid at this frame's transfer (sparse: resident pages; dense: the
+// extrapolation band), and reads 0 past them. A slab falling 4 cells per
+// frame (24 fps, 5.9 m/s, 5.7 cm voxels) carried its leading parcels out of
+// that band within the frame's substeps; they read 0, stopped mid-air and the
+// slab piled into a one-parcel sheet (user scene). Outside the frame's liquid
+// cells a parcel keeps its own (post-G2P) velocity: ballistic, as the
+// extrapolated field would have given it.
+bool liquidCellAt(vec3 p) {
+    ivec3 c = ivec3(floor((p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size));
+    return inside(c) && mask[cellIndex(c)] >= 0.5;
+}
+vec3 gridOrOwnVelocity(vec3 p, vec3 own) {
+    return liquidCellAt(p) ? sampleVelocity(p) : own;
+}
 
 
 #ifdef MATTER_INDEXED
@@ -141,7 +156,7 @@ void main() {
         // different (linear) kernel creates free-surface/grid-crossing strain
         // even in uniform free fall, which the fracture model then interprets
         // as a real opening mode.
-        vec3 vm=granularMode?v:sampleVelocity(p+sampleVelocity(p)*(0.5*sdt));
+        vec3 vm=granularMode?v:gridOrOwnVelocity(p+gridOrOwnVelocity(p,v)*(0.5*sdt),v);
         vec3 pn=p+vm*sdt;
         if(solidAt(pn)) {
             vec3 resolved=p, t=resolved; t.x=pn.x;

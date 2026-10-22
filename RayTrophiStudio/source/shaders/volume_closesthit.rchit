@@ -220,7 +220,11 @@ struct VkVolumeInstance {
     // padding is where the two are free to disagree, and a stride mismatch does
     // not fail loudly — it reads the NEXT volume's fields as this one's.
     float    _uvw_pad[1];
+    // Appended at byte 624; total record stride is now 672 bytes.
+    float density_curve[12];
 };
+#include "volume_density_curve.glsl"
+
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 
@@ -1177,8 +1181,8 @@ float denseGasEmptyBlockStep(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir,
     // would reject blocks the sampler would have kept (or worse, skip blocks it
     // would have shaded) whenever the multiplier is not 1.
     float blockMax = mg.blocks[bi];
-    float remapped = max((blockMax - vol.density_remap_low) /
-                         max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    float remapped = volumeDensityCurve(max((blockMax - vol.density_remap_low) /
+                         max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0), vol.density_curve);
     if (remapped > cutoff) return 0.0;   // block has content — march it
 
     // Slab exit of this block, in object units (== world units for a rigid
@@ -1199,69 +1203,7 @@ float denseGasEmptyBlockStep(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir,
     return tExit + blockWorld * 0.01;
 }
 
-// Conservative NanoVDB hierarchy skip. Leaf voxels cannot be skipped at this
-// hierarchy level, so avoid the second is_active lookup when dim <= 1.
-// Inactive coarse tiles advance to one voxel before their exit so trilinear
-// reconstruction still sees density across the active boundary.
-float nanoEmptyTileStep(
-    VkVolumeInstance vol,
-    vec3 worldPos,
-    vec3 worldDir,
-    float baseStep,
-    pnanovdb_buf_t buf,
-    pnanovdb_map_handle_t mapH,
-    inout pnanovdb_readaccessor_t acc,
-    out uint skipKind)
-{
-    skipKind = 0u;
-    if (buf.address == 0) return baseStep;
-
-    vec3 localP;
-    localP.x = vol.inv_transform[0]*worldPos.x + vol.inv_transform[1]*worldPos.y
-             + vol.inv_transform[2]*worldPos.z + vol.inv_transform[3] - vol.pivot_offset[0];
-    localP.y = vol.inv_transform[4]*worldPos.x + vol.inv_transform[5]*worldPos.y
-             + vol.inv_transform[6]*worldPos.z + vol.inv_transform[7] - vol.pivot_offset[1];
-    localP.z = vol.inv_transform[8]*worldPos.x + vol.inv_transform[9]*worldPos.y
-             + vol.inv_transform[10]*worldPos.z + vol.inv_transform[11] - vol.pivot_offset[2];
-
-    vec3 worldP1 = worldPos + worldDir;
-    vec3 localP1;
-    localP1.x = vol.inv_transform[0]*worldP1.x + vol.inv_transform[1]*worldP1.y
-              + vol.inv_transform[2]*worldP1.z + vol.inv_transform[3] - vol.pivot_offset[0];
-    localP1.y = vol.inv_transform[4]*worldP1.x + vol.inv_transform[5]*worldP1.y
-              + vol.inv_transform[6]*worldP1.z + vol.inv_transform[7] - vol.pivot_offset[1];
-    localP1.z = vol.inv_transform[8]*worldP1.x + vol.inv_transform[9]*worldP1.y
-              + vol.inv_transform[10]*worldP1.z + vol.inv_transform[11] - vol.pivot_offset[2];
-
-    pnanovdb_vec3_t p0 = pnanovdb_vec3_uniform(0.0);
-    p0.x = localP.x; p0.y = localP.y; p0.z = localP.z;
-    pnanovdb_vec3_t p1 = pnanovdb_vec3_uniform(0.0);
-    p1.x = localP1.x; p1.y = localP1.y; p1.z = localP1.z;
-    pnanovdb_vec3_t ip0 = pnanovdb_map_apply_inverse(buf, mapH, p0);
-    pnanovdb_vec3_t ip1 = pnanovdb_map_apply_inverse(buf, mapH, p1);
-    vec3 idx = vec3(ip0.x, ip0.y, ip0.z);
-    vec3 idxDir = vec3(ip1.x - ip0.x, ip1.y - ip0.y, ip1.z - ip0.z);
-
-    pnanovdb_coord_t ijk;
-    ijk.x = int(floor(idx.x)); ijk.y = int(floor(idx.y)); ijk.z = int(floor(idx.z));
-    uint dim = pnanovdb_readaccessor_get_dim(PNANOVDB_GRID_TYPE_FLOAT, buf, acc, ijk);
-    if (dim <= 1u) return baseStep;
-    bool regionIsActive = pnanovdb_readaccessor_is_active(
-        PNANOVDB_GRID_TYPE_FLOAT, buf, acc, ijk);
-    if (regionIsActive) return baseStep;
-
-    vec3 tileMin = floor(idx / float(dim)) * float(dim);
-    vec3 tileMax = tileMin + vec3(float(dim));
-    vec3 boundary = mix(tileMin, tileMax, greaterThan(idxDir, vec3(0.0)));
-    vec3 axisT = vec3(1e30);
-    if (abs(idxDir.x) > 1e-8) axisT.x = (boundary.x - idx.x) / idxDir.x;
-    if (abs(idxDir.y) > 1e-8) axisT.y = (boundary.y - idx.y) / idxDir.y;
-    if (abs(idxDir.z) > 1e-8) axisT.z = (boundary.z - idx.z) / idxDir.z;
-    float tileExit = min(axisT.x, min(axisT.y, axisT.z));
-    if (!(tileExit > baseStep)) return baseStep;
-    skipKind = 1u;
-    return max(baseStep, tileExit - max(vol.voxel_size, baseStep));
-}
+#include "volume_nano_optical.glsl"
 
 // Trilinear interpolation of a FloatGrid
 float sampleNanoVDBFloatTrilinear(uint64_t gridAddr, vec3 worldPos) {
@@ -1316,6 +1258,8 @@ float sampleNanoVDBFloatTrilinear(uint64_t gridAddr, vec3 worldPos) {
 // ============================================================
 // Blackbody RGB — Kim et al. approximation (matches OptiX blackbody_to_rgb)
 // ============================================================
+#include "volume_material_response.glsl"
+
 vec3 blackbodyToRGB(float kelvin) {
     kelvin = clamp(kelvin, 1000.0, 40000.0);
     float temp = kelvin / 100.0;
@@ -1489,7 +1433,10 @@ float sampleDensityAccMode(
     }
 
     density = applyMaterialDensityNoise(vol, localPos, density);
-    float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    float remappedDensity = volumeDensityCurve(
+        max((density - vol.density_remap_low) /
+            max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0),
+        vol.density_curve);
     float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
     if (remappedDensity <= densityCutoff) {
         return 0.0;
@@ -1718,7 +1665,10 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
     
     density = applyMaterialDensityNoise(vol, localPos, density);
     // Apply density remap (No upper clamp, matches OptiX fmaxf)
-    float remappedDensity = max((density - vol.density_remap_low) / max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    float remappedDensity = volumeDensityCurve(
+        max((density - vol.density_remap_low) /
+            max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0),
+        vol.density_curve);
     float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
     if (remappedDensity <= densityCutoff) {
         return 0.0;
@@ -1732,111 +1682,7 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
 
 // Accessor-aware lightMarch. Reuses the caller's density-grid accessor so the
 // shadow-march inner loop also benefits from leaf-level cache hits.
-float lightMarchAcc(
-    VkVolumeInstance vol,
-    vec3 pos,
-    vec3 lightDir,
-    float maxDist,
-    pnanovdb_buf_t buf,
-    pnanovdb_map_handle_t mapH,
-    inout pnanovdb_readaccessor_t acc,
-    float shadowStrengthOverride)
-{
-    if (vol.shadow_steps <= 0) return 1.0;
-    if (maxDist <= 1e-4) return 1.0;
-
-    vec3 shadowAbsColor = max(vol.absorption_color, vec3(0.0));
-    float shadowAbsPeak = max(
-        shadowAbsColor.r, max(shadowAbsColor.g, shadowAbsColor.b));
-    vec3 shadowAbsWeights = shadowAbsPeak > 1e-5
-        ? shadowAbsColor / shadowAbsPeak : vec3(1.0);
-    float sigma_t = vol.scatter_coefficient +
-        vol.absorption_coefficient *
-        dot(shadowAbsWeights, vec3(0.2126, 0.7152, 0.0722));
-    if (sigma_t <= EPSILON) return 1.0;
-
-    int reqSteps = clamp(vol.shadow_steps, 1, 64);
-    uint shadowMatIndex = vol._reserved[1] > 0.5 ? uint(vol._reserved[1] - 1.0) : 0u;
-    bool allowSparseTraversal = buf.address != 0 &&
-        (vol._reserved[1] <= 0.5 || matProgramOffset(shadowMatIndex) == MATPROG_NONE);
-    // Same Volume-Graph rule as the sparse path: a program may synthesize
-    // density where the source field is empty, so the block skip is only valid
-    // for unmodified density.
-    bool allowDenseBlockSkip = vol.majorant_address != 0 &&
-        (vol._reserved[1] <= 0.5 || matProgramOffset(shadowMatIndex) == MATPROG_NONE);
-    float denseBlockCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
-    // maxDist is the chord from this scatter point to the volume boundary.
-    // Integrate the whole chord; half-length marching over-lights the far side
-    // of dense gas and erases the rolling self-shadow detail.
-    float marchLength = maxDist;
-    float midpointDensity = sampleDensityAcc(
-        vol, pos + lightDir * (0.5 * marchLength), buf, mapH, acc);
-    float tauHint = max(midpointDensity, 0.0) * sigma_t * marchLength;
-    float stepScale = clamp(sqrt(max(tauHint, 0.0)), 0.20, 1.0);
-    // Dense gas needs eight buffer loads per trilinear density lookup. Twelve
-    // jittered samples over the exact exit chord retain soft self-shadow detail
-    // while avoiding the 16-sample worst case on every cached shadow update.
-    int shadowSampleCap = (vol.volume_type == 4 && vol.source_type == 5) ? 12 : 16;
-    int steps = clamp(
-        int(ceil(float(min(reqSteps, shadowSampleCap)) * stepScale)),
-        min(3, reqSteps),
-        min(reqSteps, shadowSampleCap));
-    float stepSize = marchLength / float(max(steps, 1));
-    stepSize = max(stepSize, 1e-5);
-    float jitter = fract(sin(dot(pos, vec3(12.9898, 78.233, 37.719)) +
-                             dot(lightDir, vec3(39.346, 11.135, 83.155))) * 43758.5453);
-
-    float s_trans = 0.0;
-    float distanceAlongRay = min((jitter + 0.5) * stepSize, marchLength);
-    int densitySamples = 1; // includes midpoint density used for adaptive step count
-    int traversalIters = 0;
-    int maxTraversalIters = steps * 4 + 8;
-    while (distanceAlongRay < marchLength &&
-           densitySamples < steps &&
-           traversalIters < maxTraversalIters) {
-        vec3 samplePos = pos + lightDir * distanceAlongRay;
-        // Live dense gas: same block-majorant skip the primary march uses. The
-        // shadow chord crosses the domain just like a camera ray does, so an
-        // empty region cost a full sample budget here too — and this march runs
-        // once per light per (strided) step, so it is the more expensive of the
-        // two places to walk through nothing.
-        if (vol.volume_type == 4 && vol.source_type == 5 && allowDenseBlockSkip) {
-            float denseSkip = denseGasEmptyBlockStep(
-                vol, samplePos, lightDir, denseBlockCutoff);
-            if (denseSkip > stepSize * 1.01) {
-                distanceAlongRay += min(denseSkip, marchLength - distanceAlongRay);
-                traversalIters++;
-                continue;
-            }
-        }
-        if (allowSparseTraversal) {
-            uint shadowSkipKind = 0u;
-            float sparseStep = nanoEmptyTileStep(
-                vol, samplePos, lightDir, stepSize, buf, mapH, acc,
-                shadowSkipKind);
-            if (sparseStep > stepSize * 1.01) {
-                distanceAlongRay += min(sparseStep, marchLength - distanceAlongRay);
-                traversalIters++;
-                continue;
-            }
-        }
-
-        float d = sampleDensityAcc(vol, samplePos, buf, mapH, acc);
-        s_trans += d * sigma_t * stepSize;
-        if (s_trans > 10.0) break;
-        distanceAlongRay += stepSize;
-        densitySamples++;
-        traversalIters++;
-    }
-    volumeRecordShadowSamples(uint(densitySamples));
-
-    float phys_trans = exp(-s_trans);
-
-    float shadowStrength = (shadowStrengthOverride >= 0.0)
-        ? clamp(shadowStrengthOverride, 0.0, 1.0)
-        : clamp(vol.shadow_strength * 0.92, 0.0, 1.0);
-    return 1.0 - shadowStrength * (1.0 - phys_trans);
-}
+#include "volume_rt_shadow_march.glsl"
 
 // ============================================================
 // Light March — estimate transmittance from scatter point toward light
@@ -2251,7 +2097,7 @@ float rwIdxDensity(VkVolumeInstance vol, pnanovdb_buf_t buf,
     float d = mix(mix(mix(c[0], c[1], f.x), mix(c[2], c[3], f.x), f.y),
                   mix(mix(c[4], c[5], f.x), mix(c[6], c[7], f.x), f.y), f.z);
     if (isnan(d) || isinf(d)) return 0.0;
-    float r = max((d - vol.density_remap_low) * remapScale, 0.0);
+    float r = volumeDensityCurve(max((d - vol.density_remap_low) * remapScale, 0.0), vol.density_curve);
     float cutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
     if (r <= cutoff) return 0.0;
     float fade = cutoff > 0.0 ? smoothstep(cutoff, cutoff * 2.0, r) : 1.0;
@@ -2323,7 +2169,7 @@ bool rwFreeFlightIdx(VkVolumeInstance vol, vec3 o, vec3 d, float tMax, float sig
             continue;
         }
         if (region == 2) {
-            float sigmaBar = max((leafMax - vol.density_remap_low) * remapScale, 0.0) *
+            float sigmaBar = volumeDensityCurve(max((leafMax - vol.density_remap_low) * remapScale, 0.0), vol.density_curve) *
                              vol.density_multiplier * sigmaPerDensity * 1.0001;
             // ★ Delta tracking costs ~sigmaBar per unit length, regular steps
             // 1/stepLen. In a DENSE leaf the max sits far above the typical
@@ -2741,6 +2587,9 @@ void volumeRandomWalk(VkVolumeInstance vol, vec3 rayOrigin, vec3 rayDir,
 
 #include "volume_overlap_selection.glsl"
 
+#include "volume_internal_rt.glsl"
+#include "volume_phase_cache.glsl"
+
 void shadeVolumeHit() {
     // Volume instance index from gl_InstanceCustomIndexEXT
     // (Set via TLASInstance::customIndex when building TLAS for volume objects)
@@ -3071,8 +2920,7 @@ void shadeVolumeHit() {
         // refracting past it. Tints by the water depth in front of it.
         {
             float probeFar = (hitT < 0.0) ? tFar : hitT;
-            const uint SOLID_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
-                                   | gl_RayFlagsSkipClosestHitShaderEXT
+            const uint SOLID_FLAGS = gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsNoOpaqueEXT;
             // Exclude gas/fog AABBs (0x02) and SurfaceSDF AABBs (0x08), and
             // KEEP transient simulation particles (0x04).
@@ -3108,7 +2956,7 @@ void shadeVolumeHit() {
             shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(VOLUME_SOLID_PROBE));
             traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
                         rayOrigin, max(1e-4, tNear - 0.002), rayDir, probeFar + 0.002, 1);
-            if (shadowPayload.w < 0.5) {
+            if (shadowPayload.z > 0.5) {
                 float solidT = shadowPayload.x;
                 // Absorption for the water the ray crossed before the solid.
                 if (startInside) {
@@ -4160,7 +4008,7 @@ void shadeVolumeHit() {
     // just before it and signal raygen to fire the next bounce with
     // gl_RayFlagsSkipAABBEXT so the triangle closesthit fires correctly.
     //
-    // Strategy: one any-hit distance probe. The dedicated payload sentinel makes
+    // Strategy: one nearest-hit distance probe. The dedicated payload sentinel makes
     // shadow_anyhit return gl_HitTEXT directly; the former 1 + 5/6 binary-search
     // traces multiplied catastrophically when a gas domain touched the ground.
     // ══════════════════════════════════════════════════════════════════════════
@@ -4218,8 +4066,7 @@ void shadeVolumeHit() {
         }
 
         if (needSolidProbe) {
-            const uint PROBE_FLAGS = gl_RayFlagsTerminateOnFirstHitEXT
-                                   | gl_RayFlagsSkipClosestHitShaderEXT
+            const uint PROBE_FLAGS = gl_RayFlagsSkipClosestHitShaderEXT
                                    | gl_RayFlagsNoOpaqueEXT;
             // Exclude the two VOLUME bits (0x02 gas/fog, 0x08 SurfaceSDF) and
             // keep everything else, including transient simulation particles
@@ -4250,16 +4097,16 @@ void shadeVolumeHit() {
             // why fixing the handoff first did not visibly help.
             const uint PROBE_MASK  = 0xF5;
 
-            // Initial check: any solid in [tNear, tFar]?
+            // Nearest accepted solid in [tNear, tFar].
             const uint VOLUME_SOLID_PROBE = 0xC17D5EEDu;
             shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(VOLUME_SOLID_PROBE));
             traceRayEXT(topLevelAS, PROBE_FLAGS, PROBE_MASK, 0, 1, 1,
                         rayOrigin, max(1e-4, tNear - 0.002), rayDir, tFar + 0.002, 1);
-            volumeRecordSolidProbe(shadowPayload.w < 0.5);
-            if (shadowPayload.w < 0.5) {
+            volumeRecordSolidProbe(shadowPayload.z > 0.5);
+            if (shadowPayload.z > 0.5) {
                 solidT = shadowPayload.x;
-                // Clamp march to just before the solid
-                tFar = solidT - 0.01;
+                // Integrate to the solid; handoff masking guarantees progress, not a gap.
+                tFar = min(tFar, solidT);
                 // If the solid is essentially at or before the entry point, skip AABBs on next bounce
                 if (tFar <= tNear) {
                     payload.radiance = vec3(0.0);
@@ -4401,6 +4248,8 @@ void shadeVolumeHit() {
     bool  hasEmitter = false;
     float cachedEmitterShadow = 1.0;
     bool  cachedEmitterShadowValid = false;
+    vec3 cachedInternalLight = vec3(0.0);
+    bool cachedInternalLightValid = false;
     if (vol.emissive_list_address != 0 && vol.emissive_capacity >= 1.0 &&
         vol.majorant_address != 0 && vol.emission_mode >= 2) {
         DenseGasEmissiveList elist = DenseGasEmissiveList(vol.emissive_list_address);
@@ -4457,7 +4306,9 @@ void shadeVolumeHit() {
                         // T^4 radiance - see the note in the main march below.
                         eRadiance = pow(clamp(eKelvin / rangeMax, 0.0, 1.0), 4.0);
                     }
-                    vec3 eEmis = eColor * eRadiance * ed * vol.blackbody_intensity;
+                    vec3 eEmis = volumeEmissionSource(eColor, eRadiance, ed,
+                        clamp((eKelvin - rangeMin) / max(rangeMax - rangeMin, 1.0), 0.0, 1.0),
+                        vol.blackbody_intensity, vol._retired_cloud, true);
                     float eReaction = sampleFlame(vol, emitterPos);
                     eEmis *= (1.0 + eReaction);   // matches the march's reaction boost
                     // Radiant intensity of the block: emission per unit length
@@ -4476,6 +4327,13 @@ void shadeVolumeHit() {
     // Jitter first sample to reduce banding. Mix in ray state so horizon rays do
     // not share coherent step planes across neighboring pixels.
     float rayJitter = fract(sin(dot(rayOrigin + rayDir * 17.0, vec3(12.9898, 78.233, 37.719)) + float(payload.seed) * 0.000173) * 43758.5453);
+    VolumePhaseCache phaseCache = volumePhaseCache();
+    bool nanoIndexPath = vol.volume_type == 2 && vdbBuf.address != 0 &&
+        vol._ext_reserved[7] < 0.5 && volumeProgram == MATPROG_NONE;
+    VolumeNanoRay primaryNanoRay;
+    if (nanoIndexPath) {
+        primaryNanoRay = volumeNanoRay(vol, rayOrigin, rayDir, vdbBuf, vdbMapH);
+    }
     float t = tNear + rayJitter * baseStep;
     int step = 0;
     uint measuredDensitySamples = 0u;
@@ -4508,9 +4366,12 @@ void shadeVolumeHit() {
         // Hierarchy skipping is therefore safe only for legacy/baked density.
         if (!hasCompanion && vdbBuf.address != 0 && volumeProgram == MATPROG_NONE) {
             uint skipKind = 0u;
-            float sparseStep = nanoEmptyTileStep(
-                vol, samplePos, rayDir, baseStep, vdbBuf, vdbMapH, vdbAcc,
-                skipKind);
+            float sparseStep = nanoIndexPath
+                ? nanoEmptyIndexStep(vol, primaryNanoRay.indexOrigin +
+                    primaryNanoRay.indexDirection * t, primaryNanoRay.indexDirection,
+                    baseStep, vdbBuf, vdbAcc, skipKind)
+                : nanoEmptyTileStep(vol, samplePos, rayDir, baseStep,
+                    vdbBuf, vdbMapH, vdbAcc, skipKind);
             if (sparseStep > baseStep * 1.01) {
                 int skippedSegments = max(1, int(floor(sparseStep / baseStep)));
                 measuredEmptySegments += uint(skippedSegments);
@@ -4524,8 +4385,11 @@ void shadeVolumeHit() {
             }
         }
         
-        float density = sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
+        float density = nanoIndexPath
+            ? volumeNanoDensity(vol, primaryNanoRay, t, vdbBuf, vdbAcc)
+            : sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
         measuredDensitySamples++;
+        #include "volume_rt_empty_sample.glsl"
         float temperature = needsTemperature ? sampleTemperature(vol, samplePos) : 0.0;
         vec3 stepScatterColor = vol.scatter_color;
         vec3 stepAbsorptionColor = vol.absorption_color;
@@ -4596,8 +4460,6 @@ void shadeVolumeHit() {
         // Let low-density regions survive based on scattering optical depth, not
         // raw density alone. This means increasing scatter can actually keep thin
         // edges visible instead of them being discarded by a fixed density gate.
-        float sparseCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.04;
-        float scatter_keep = clamp((sigma_s_local * baseStep) / sparseCutoff, 0.0, 1.0);
         if (sigma_t_local <= EPSILON) {
             step++;
             t = tNear + (float(step) + rayJitter) * baseStep;
@@ -4636,107 +4498,13 @@ void shadeVolumeHit() {
         // Mode 0 = none, 1 = plain color, 2 = blackbody/color-ramp via temperature grid.
         // Energy-stable integration: multiply by one_minus_sampleT (bounded by 1) instead of dt.
         vec3 emis = vec3(0.0);
-        if (vol.emission_mode >= 1) {
-            if (vol.emission_mode == 1) {
-                // Plain constant-color emission
-                emis = stepEmissionColor * stepEmissionStrength * density;
-            } else if (vol.emission_mode >= 2) {
-                // Blackbody / color-ramp — temperature grid first, density fallback for parity.
-                if (temperature <= 0.0) temperature = density;
-
-                // _ext_reserved[6] is foam opacity for Surface SDF (type 4);
-                // all other volumes receive authored minimum temperature here.
-                float rangeMin = (vol.source_type == 4)
-                    ? 0.0 : max(vol._ext_reserved[6], 0.0);
-                float rangeMax = (vol.max_temperature > rangeMin + 1.0)
-                    ? vol.max_temperature : (rangeMin + 1500.0);
-                // Simulation grids arrive as Kelvin-scaled heat. Normalized
-                // fallbacks map into the same authored temperature interval.
-                            // ***** A PER-SAMPLE MAGNITUDE TEST CANNOT GUESS UNITS.
-                //
-                // `temp > 20` is asking "is this Kelvin, or an authored 0..1 field?" - and
-                // it gets the answer wrong for exactly the cells that are nearly empty. A
-                // live gas cell with solver heat 0.005 becomes 15 after the x3000 scale,
-                // fails the test, and falls into the normalised branch, where
-                // clamp(15,0,1) saturates to 1.0 and hands back rangeMAX. The faintest gas
-                // in the domain was being reported as the hottest.
-                //
-                // It was survivable while emission carried no radiance: those cells got a
-                // blue-white hue at the same magnitude as everything else and the low
-                // density kept them dim. Under the T^4 term it inverts the image - they sit
-                // at radiance 1.0 while genuinely hot gas at 10000 K gets 0.0625, i.e. the
-                // coldest gas renders SIXTEEN TIMES brighter than the fireball. Raising the
-                // density cutoff hides it because it skips those cells entirely, which is
-                // how it was first noticed.
-                //
-                // The units are not a property of the sample, they are a property of the
-                // VOLUME - and the same flag that applied the x3000 already knows. Ask that
-                // instead of guessing per sample.
-                bool kelvinUnits = (vol.volume_type == 4 && vol.source_type == 5);
-                float authoredKelvin = (kelvinUnits || temperature > 20.0)
-                    ? clamp(temperature, rangeMin, rangeMax)
-                    : mix(rangeMin, rangeMax, clamp(temperature, 0.0, 1.0));
-                float t_ramp = clamp(
-                    (authoredKelvin - rangeMin) / max(rangeMax - rangeMin, 1.0),
-                    0.0, 1.0);
-
-                vec3 e_color;
-                float e_radiance = 1.0;
-                if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
-                    e_color = sampleColorRamp(vol, clamp(t_ramp * vol.temperature_scale, 0.0, 1.0));
-                } else {
-                    // The authored interval constrains blackbody color; Temp
-                    // Scale then provides the intentional artistic offset.
-                    e_color = blackbodyToRGB(authoredKelvin * vol.temperature_scale);
-                    // ***** BLACKBODY COLOUR IS A CHROMATICITY, NOT A RADIANCE.
-                    // blackbodyToRGB returns the Tanner Helland approximation,
-                    // where one channel is pinned at 1.0 at EVERY temperature
-                    // (red below 6600 K, blue above). Multiplied only by density
-                    // it made a 1600 K ember emit exactly as much energy as a
-                    // 5000 K fireball - just redder. Cooling could change the
-                    // hue and nothing else, so a cloud that had lost 90% of its
-                    // heat still rendered as a white slab: with the red channel
-                    // already clipped, every extra step of depth dragged green
-                    // and blue up to clip too.
-                    //
-                    // Planck-integrated radiance goes as T^4 (Stefan-Boltzmann).
-                    // Normalised against the AUTHORED max so the hottest gas
-                    // keeps exactly the brightness it has today and only the
-                    // cooler gas darkens - at rangeMin/rangeMax = 1340/5000 the
-                    // coldest visible cell is ~190x dimmer than the core.
-                    //
-                    // Applied to the blackbody branch only. An authored colour
-                    // ramp is a statement about the FINAL colour, so scaling it
-                    // by T^4 would fight the author instead of helping them.
-                    e_radiance = pow(clamp(authoredKelvin / rangeMax, 0.0, 1.0), 4.0);
-                }
-                // ── Combustion reaction boost ───────────────────────────────
-                // Temperature alone cannot tell a flame from the hot smoke
-                // sitting above it: both are hot, so the whole plume glows and
-                // the fire reads as luminous smoke rather than as a flame with
-                // a core. The gas solver already knows the difference — its
-                // bounded `interaction` field is the burn RATE, nonzero only
-                // where fuel is being consumed THIS step.
-                //
-                // Applied as an ADDITION on top of the existing temperature
-                // emission, not as a mask over it. Masking would be the more
-                // physical answer (smoke that has stopped burning should go
-                // dark) but it would also silently re-light every existing
-                // scene; the reaction zone becoming a distinct, brighter source
-                // is the signal that was missing, and it cannot dim anything.
-                // Kept density-coupled, so empty cells never emit.
-                vec3 baseEmission = e_color * e_radiance * density * vol.blackbody_intensity;
-                vec3 reactionEmission = vec3(0.0);
-                if (vol.flame_address != 0) {
-                    float reaction = sampleFlame(vol, samplePos);
-                    if (reaction > 0.0) {
-                        reactionEmission = baseEmission * reaction;
-                    }
-                }
-                emis = clampVolumeRadiance(baseEmission + reactionEmission, 64.0);
-            }
+        if (vol.emission_mode == 1) {
+            emis = volumeEmissionSource(stepEmissionColor, 1.0, density, 1.0,
+                stepEmissionStrength, vol._retired_cloud, false);
+        } else if (vol.emission_mode >= 2) {
+            emis = volumeEmissionAt(vol, samplePos, density, temperature);
         }
-        
+
         // ── In-Scattering (Direct Lighting) ──
         if (sigma_s_local > 0.0) {
             vec3 inscatter = vec3(0.0);
@@ -4793,8 +4561,10 @@ void shadeVolumeHit() {
 
                     // Phase function evaluation
                     float cosTheta = dot(rayDir, lightDir);
-                    float phase = dualLobeHG(cosTheta, stepAnisotropy,
-                                             vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                    float phase = volumeCachedPhase(phaseCache, ls,
+                        lightType == 1 && !hasCompanion && volumeProgram == MATPROG_NONE,
+                        cosTheta, stepAnisotropy,
+                        vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
                     vec3 scatteringAlbedoRGB =
                         vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
                     float scatteringAlbedo = dot(
@@ -4881,8 +4651,10 @@ void shadeVolumeHit() {
             if (worldData.w.mode == 2) {
                 vec3 sunDir = normalize(worldData.w.sunDir);
                 float cosSun = dot(rayDir, sunDir);
-                float sunPhase = dualLobeHG(cosSun, stepAnisotropy,
-                                            vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                float sunPhase = volumeCachedPhase(phaseCache, 2,
+                    !hasCompanion && volumeProgram == MATPROG_NONE,
+                    cosSun, stepAnisotropy,
+                    vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
                 vec3 scatteringAlbedoRGB =
                     vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
                 float scatteringAlbedo = dot(
@@ -4914,7 +4686,6 @@ void shadeVolumeHit() {
             }
             
             // 3. Sky/Ambient lighting (closer to CPU world.evaluate(up) behavior)
-            float thin_scatter = scatter_keep * scatter_keep;
             vec3 ambientAlbedo =
                 vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
             float ambientAlbedoLuma = dot(
@@ -4943,7 +4714,7 @@ void shadeVolumeHit() {
                 cachedAmbientShadowValid = true;
             }
             inscatter += ambientSky * stepScatterColor * ambientAlbedo
-                       * thin_scatter * cachedAmbientShadow;
+                       * cachedAmbientShadow;
 
             // Bounded higher-order sky scattering approximation. Recycle only
             // a fraction of the ambient energy blocked on the representative
@@ -4951,18 +4722,18 @@ void shadeVolumeHit() {
             // vanishes, remains density/depth dependent, and never exceeds the
             // original unoccluded ambient budget:
             //   visibility = T_sky + multi * albedo * P(2+) * (1-T_sky) <= 1.
-            float trappedSky = 1.0 - cachedAmbientShadow;
-            float localOpticalDepth = sigma_t_local * dt;
-            float higherOrderProbability = 1.0 - exp(-localOpticalDepth);
-            float multiSkyVisibility =
-                stepMultiScatter * ambientAlbedoLuma * trappedSky
-                * higherOrderProbability;
+            float multiSkyVisibility = volumeHigherOrderSkyVisibility(
+                cachedAmbientShadow, stepMultiScatter, ambientAlbedoLuma);
             inscatter += ambientSky * stepScatterColor * ambientAlbedo
-                       * thin_scatter * multiSkyVisibility;
+                       * multiSkyVisibility;
             
             // CPU parity integration:
             // step_color = source * (1 - step_transmittance)
             // accumulated += step_color * current_transparency
+            inscatter += volumeCachedInternalLighting(vol, samplePos, rayDir,
+                !hasCompanion && volumeProgram == MATPROG_NONE, step,
+                cachedInternalLight, cachedInternalLightValid) * stepScatterColor *
+                vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
             inscatter = clampVolumeRadiance(inscatter, 8.0);
             accumulated_radiance += transmittance * (inscatter + emis) * one_minus_sampleT;
         } else if (any(greaterThan(emis, vec3(0.0)))) {

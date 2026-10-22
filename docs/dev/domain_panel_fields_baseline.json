@@ -1960,7 +1960,7 @@
   "tab": ""
  },
  {
-  "label": "Enable Cooling & Freezing",
+  "label": "Enable Heat Exchange",
   "kind": "Checkbox",
   "target": "params.thermal_liquid_enabled",
   "file": "scene_ui_fluid_thermal.cpp",

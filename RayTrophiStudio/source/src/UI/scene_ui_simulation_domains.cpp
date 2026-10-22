@@ -2900,6 +2900,12 @@ void drawSimulationDomainControls(
                             break;
                         }
                     }
+                    ImGui::Checkbox("Scale Iteration Cap With Grid", &fp.pressure_iterations_grid_scaled);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Effective cap = max(Poisson Pressure Iterations, 4 x the longest grid axis).\n"
+                                          "A fine grid needs more iterations to hold a liquid column; the residual\n"
+                                          "target still ends a converged solve early.");
+                    }
                     ImGui::DragFloat("Pressure Residual Target", &fp.pressure_relative_residual, 1.0e-6f, 1.0e-8f, 1.0e-2f, "%.1e");
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Relative residual target for CPU PCG / GPU MGPCG pressure solve.\n"

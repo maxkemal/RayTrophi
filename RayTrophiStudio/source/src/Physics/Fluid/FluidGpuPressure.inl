@@ -661,7 +661,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     const double rel_tol_pre = std::clamp(static_cast<double>(fluid_params.pressure_relative_residual),
                                           1.0e-8, 1.0e-2);
     const double tol_pre     = rel_tol_pre * rel_tol_pre;             // relative on r.z
-    const int    max_iter_pre = std::max(1, fluid_params.pressure_iterations);
+    const int    max_iter_pre = Fluid::effectivePressureIterationCap(fluid_params, grid.nx, grid.ny, grid.nz);
 
     // ── GPU fast path: device-resident CG scalars ────────────────────────────
     // The generic loop below downloads a dot product TWICE per iteration —
