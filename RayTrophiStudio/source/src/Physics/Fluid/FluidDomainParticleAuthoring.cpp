@@ -11,7 +11,8 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
     int particles_per_cell,
     bool replace,
     bool persistent,
-    float fill_level) {
+    float fill_level,
+    float grain_saturation) {
     for (auto& domain : grid_domains_) {
         if (domain.name != domain_name ||
             !simulationDomainHasLiquid(domain.type)) {
@@ -30,6 +31,9 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
         domain.fluid_seed_particles_per_cell =
             std::clamp(particles_per_cell, 1, 64);
         domain.fluid_replace_on_seed = replace;
+        // Negative keeps the authored wetness (a re-seed from the panel).
+        if (grain_saturation >= 0.0f)
+            domain.fluid_seed_grain_saturation = std::clamp(grain_saturation, 0.0f, 1.0f);
         domain.fluid_reseed_on_reset = persistent;
         domain.fluid_pending_seed = true;
 

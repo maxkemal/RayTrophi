@@ -118,9 +118,18 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
         return false;
     }
     const auto load = Fluid::measureMatterGranularLoad(particles, legacy_granular);
-    const auto elastic = Fluid::Granular::elasticStepInfo(
-        params.granular_young_modulus, grid.voxel_size, frame_dt, load.strain_rate,
-        load.overburden_pressure, load.softening_min);
+    // Snow is sized for its hardening CEILING at its own density
+    // (snowSizingYoungModulus says why not for last frame's hardest parcel).
+    const bool snow = has_granular && params.granular_snow_plasticity;
+    const auto elastic = snow
+        ? Fluid::Granular::elasticStepInfo(
+              Fluid::Granular::snowSizingYoungModulus(
+                  params.granular_young_modulus, params.granular_snow_max_hardening),
+              grid.voxel_size, frame_dt, load.strain_rate, load.overburden_pressure,
+              load.softening_min, params.granular_density)
+        : Fluid::Granular::elasticStepInfo(
+              params.granular_young_modulus, grid.voxel_size, frame_dt, load.strain_rate,
+              load.overburden_pressure, load.softening_min);
     float speed = 0.0f;
     for (const auto& velocity : particles.velocity) {
         speed = std::max(speed, velocity.length());
@@ -201,8 +210,9 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
         return false;
     }
     std::vector<float> dry_volumes(count);
+    const auto* domain_substance = RayTrophiSim::tryFindSubstance(params.default_substance);
     for (std::size_t i = 0; i < count; ++i) {
-        dry_volumes[i] = Fluid::matterParticleDryVolume(particles, i);
+        dry_volumes[i] = Fluid::matterParticleDryVolume(particles, i, domain_substance);
         if (!std::isfinite(dry_volumes[i]) || dry_volumes[i] < 0.0f) {
             error = "C6 canonical dry stress volume is invalid";
             return false;
@@ -241,7 +251,10 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     models[0].granular_enabled = false;
     models[0].ghost_fluid_surface = false;
     models[1].granular_enabled = true;
-    models[1].flip_blend = 0.0f;
+    // Drucker-Prager piles stay PIC/APIC (their rest state relies on it).
+    // Snow takes its substance's FLIP blend; the baseline is captured inside
+    // P2G before the stress impulse (granularFlipSnapshotWanted).
+    models[1].flip_blend = params.granular_snow_plasticity ? params.flip_blend : 0.0f;
     models[1].substance_viscosity = nullptr;
     models[1].kinematic_viscosity = 0.0f;
     Fluid::MatterGpuParticleLease shared_particles;
@@ -450,7 +463,8 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
                 }
                 if (!runGpuFluidZeroSolidFaces(grid, compute, *lanes[lane]) ||
                     !runGpuFluidG2P(state, models[lane], transfer_dt, compute, *lanes[lane],
-                        lane == 0, false, true, true, true)) {
+                        lane == 0 || granularFlipSnapshotWanted(models[lane], *lanes[lane]),
+                        false, true, true, true)) {
                     error = "mixed GPU indexed gather/constitutive failed";
                     return false;
                 }
@@ -577,6 +591,16 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     grid.vel_x = std::move(result_velocity[0]);
     grid.vel_y = std::move(result_velocity[1]);
     grid.vel_z = std::move(result_velocity[2]);
+    // ★★★ The device state was published above every frame and never counted:
+    // a 4 m/s Snow impact read 0 yielded / 0 damaged for 120 steps. Count the
+    // granular parcels only; liquid parcels' granular sidecars are never written.
+    Fluid::Granular::countMaterialState(particles, stats, [&](std::size_t i) {
+        const auto model = i < particles.constitutive_model.size()
+            ? static_cast<Fluid::MatterConstitutiveModel>(particles.constitutive_model[i])
+            : Fluid::MatterConstitutiveModel::Auto;
+        return model == Fluid::MatterConstitutiveModel::Granular ||
+               (model == Fluid::MatterConstitutiveModel::Auto && legacy_granular);
+    });
     stats.grid_cell_count = cells;
     stats.granular_solver_substeps = grid_steps;
     stats.granular_required_substeps = elastic.required_substeps;

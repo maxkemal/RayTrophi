@@ -47,6 +47,8 @@
 #include "RtPyCommon.h" // shared binding helpers + rtpy::registerSceneBindings
 #include "RtPythonFracture.h"
 #include "RtPythonGrainGenerator.h"
+#include "RtPythonSourceSplatGeometry.h"
+#include "RtRayGpuTimingBindings.h"
 #include "RtPythonParticle.h"
 #include "RtPythonKinematicCollider.h"
 #include "RtPythonPressure.h"
@@ -289,6 +291,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             item["vertices"] = info.vertex_count;
             item["meshes"] = info.mesh_count;
             item["has_bounds"] = info.has_bounds;
+            item["visible"] = info.visible;
             if (info.has_bounds) {
                 item["world_min"] = py::make_tuple(info.world_min.x, info.world_min.y, info.world_min.z);
                 item["world_max"] = py::make_tuple(info.world_max.x, info.world_max.y, info.world_max.z);
@@ -359,6 +362,28 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return out;
     }, py::arg("u"), py::arg("v"));
     scene.def("exists", &rtapi::objectExists, py::arg("name"));
+    // Outliner eye; same core call as the panel and scene.set_visible over IPC.
+    scene.def("set_visible", [](const std::string& name, bool visible) {
+        requireResult(rtapi::setObjectVisible(name, visible));
+    }, py::arg("name"), py::arg("visible"));
+    scene.def("get_visible", [](const std::string& name) -> py::dict {
+        rtapi::ObjectVisibility v;
+        requireResult(rtapi::getObjectVisibility(name, v));
+        py::dict d;
+        d["name"] = v.name;
+        d["visible"] = v.visible;
+        d["pending_delete"] = v.pending_delete;
+        d["entries"] = v.entries;
+        d["visible_entries"] = v.visible_entries;
+        d["viewport_raster_instances"] = v.viewport_raster_instances;
+        d["viewport_raster_visible"] = v.viewport_raster_visible;
+        d["viewport_rt_instances"] = v.viewport_rt_instances;
+        d["viewport_rt_visible"] = v.viewport_rt_visible;
+        d["render_rt_instances"] = v.render_rt_instances;
+        d["render_rt_visible"] = v.render_rt_visible;
+        d["render_is_viewport"] = v.render_is_viewport;
+        return d;
+    }, py::arg("name"));
     scene.def("delete", [](const std::string& name) { requireResult(rtapi::deleteObject(name)); });
     scene.def("duplicate", [](const std::string& name) {
         std::string newName;
@@ -1503,6 +1528,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     // ── Fluid & Gas Simulation Engine (Faz 5.3b) ────────────────────────
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
+    registerSubstanceSplatGeometry(fluid);
     rtpy::registerPhaseGridBindings(fluid);
     rtpy::registerMatterModelBindings(fluid);
     auto py_create_domain = [](const std::string& name, const py::tuple& domain_min, const py::tuple& domain_max, float voxel_size, const std::string& type) -> py::dict {
@@ -1568,6 +1594,19 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_damage_rate"] = info.granular_damage_rate;
         d["granular_healing_rate"] = info.granular_healing_rate;
         d["granular_rebonding"] = info.granular_rebonding;
+        d["granular_snow_plasticity"] = info.granular_snow_plasticity;
+        d["granular_snow_critical_compression"] = info.granular_snow_critical_compression;
+        d["granular_snow_critical_stretch"] = info.granular_snow_critical_stretch;
+        d["granular_snow_hardening"] = info.granular_snow_hardening;
+        d["granular_snow_max_hardening"] = info.granular_snow_max_hardening;
+        d["granular_snow_min_hardening"] = info.granular_snow_min_hardening;
+        d["granular_snow_heterogeneity"] = info.granular_snow_heterogeneity;
+        d["granular_snow_clump_size"] = info.granular_snow_clump_size;
+        d["granular_density"] = info.granular_density;
+        d["granular_predicted_substeps"] = info.granular_predicted_substeps;
+        d["granular_wave_speed_m_s"] = info.granular_wave_speed_m_s;
+        d["granular_sizing_young_modulus"] = info.granular_sizing_young_modulus;
+        d["granular_frame_dt"] = info.granular_frame_dt;
         d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
         d["granular_softening_temperature"] = info.granular_softening_temperature;
         d["granular_softening_range"] = info.granular_softening_range;
@@ -1649,6 +1688,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["seed_min"] = vec3ToPython(info.seed_min);
         d["seed_max"] = vec3ToPython(info.seed_max);
         d["seed_particles_per_cell"] = info.seed_particles_per_cell;
+        d["seed_grain_saturation"] = info.seed_grain_saturation;
         d["seed_fill_level"] = info.seed_fill_level;
         d["seed_ran"] = info.seed_ran;
         d["seed_truncated"] = info.seed_truncated;
@@ -1707,6 +1747,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_strain_rate"] = info.granular_strain_rate;
         d["granular_strain_limited"] = info.granular_strain_limited_particles;
         d["granular_compaction_capped"] = info.granular_compaction_capped_particles;
+        d["granular_hardening_capped"] = info.granular_hardening_capped_particles;
+        d["granular_min_plastic_jacobian"] = info.granular_min_plastic_jacobian;
+        d["granular_max_plastic_jacobian"] = info.granular_max_plastic_jacobian;
+        d["granular_mean_plastic_jacobian"] = info.granular_mean_plastic_jacobian;
+        d["granular_counted"] = info.granular_counted_particles;
+        d["granular_material_measured"] = info.granular_material_measured;
         d["granular_min_softening"] = info.granular_min_softening;
         d["granular_softened"] = info.granular_softened_particles;
         d["granular_overburden_pressure"] = info.granular_overburden_pressure;
@@ -1906,6 +1952,19 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_damage_rate"] = info.granular_damage_rate;
             d["granular_healing_rate"] = info.granular_healing_rate;
             d["granular_rebonding"] = info.granular_rebonding;
+            d["granular_snow_plasticity"] = info.granular_snow_plasticity;
+            d["granular_snow_critical_compression"] = info.granular_snow_critical_compression;
+            d["granular_snow_critical_stretch"] = info.granular_snow_critical_stretch;
+            d["granular_snow_hardening"] = info.granular_snow_hardening;
+            d["granular_snow_max_hardening"] = info.granular_snow_max_hardening;
+            d["granular_snow_min_hardening"] = info.granular_snow_min_hardening;
+            d["granular_snow_heterogeneity"] = info.granular_snow_heterogeneity;
+            d["granular_snow_clump_size"] = info.granular_snow_clump_size;
+            d["granular_density"] = info.granular_density;
+            d["granular_predicted_substeps"] = info.granular_predicted_substeps;
+            d["granular_wave_speed_m_s"] = info.granular_wave_speed_m_s;
+            d["granular_sizing_young_modulus"] = info.granular_sizing_young_modulus;
+            d["granular_frame_dt"] = info.granular_frame_dt;
             d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
         d["granular_softening_temperature"] = info.granular_softening_temperature;
         d["granular_softening_range"] = info.granular_softening_range;
@@ -1987,6 +2046,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["seed_min"] = vec3ToPython(info.seed_min);
         d["seed_max"] = vec3ToPython(info.seed_max);
         d["seed_particles_per_cell"] = info.seed_particles_per_cell;
+        d["seed_grain_saturation"] = info.seed_grain_saturation;
         d["seed_fill_level"] = info.seed_fill_level;
         d["seed_ran"] = info.seed_ran;
         d["seed_truncated"] = info.seed_truncated;
@@ -2045,6 +2105,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_strain_rate"] = info.granular_strain_rate;
             d["granular_strain_limited"] = info.granular_strain_limited_particles;
         d["granular_compaction_capped"] = info.granular_compaction_capped_particles;
+        d["granular_hardening_capped"] = info.granular_hardening_capped_particles;
+        d["granular_min_plastic_jacobian"] = info.granular_min_plastic_jacobian;
+        d["granular_max_plastic_jacobian"] = info.granular_max_plastic_jacobian;
+        d["granular_mean_plastic_jacobian"] = info.granular_mean_plastic_jacobian;
+        d["granular_counted"] = info.granular_counted_particles;
+        d["granular_material_measured"] = info.granular_material_measured;
         d["granular_min_softening"] = info.granular_min_softening;
         d["granular_softened"] = info.granular_softened_particles;
             d["granular_overburden_pressure"] = info.granular_overburden_pressure;
@@ -2226,6 +2292,19 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_damage_rate"] = info.granular_damage_rate;
         d["granular_healing_rate"] = info.granular_healing_rate;
         d["granular_rebonding"] = info.granular_rebonding;
+        d["granular_snow_plasticity"] = info.granular_snow_plasticity;
+        d["granular_snow_critical_compression"] = info.granular_snow_critical_compression;
+        d["granular_snow_critical_stretch"] = info.granular_snow_critical_stretch;
+        d["granular_snow_hardening"] = info.granular_snow_hardening;
+        d["granular_snow_max_hardening"] = info.granular_snow_max_hardening;
+        d["granular_snow_min_hardening"] = info.granular_snow_min_hardening;
+        d["granular_snow_heterogeneity"] = info.granular_snow_heterogeneity;
+        d["granular_snow_clump_size"] = info.granular_snow_clump_size;
+        d["granular_density"] = info.granular_density;
+        d["granular_predicted_substeps"] = info.granular_predicted_substeps;
+        d["granular_wave_speed_m_s"] = info.granular_wave_speed_m_s;
+        d["granular_sizing_young_modulus"] = info.granular_sizing_young_modulus;
+        d["granular_frame_dt"] = info.granular_frame_dt;
         d["granular_max_solver_substeps"] = info.granular_max_solver_substeps;
         d["granular_softening_temperature"] = info.granular_softening_temperature;
         d["granular_softening_range"] = info.granular_softening_range;
@@ -2307,6 +2386,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["seed_min"] = vec3ToPython(info.seed_min);
         d["seed_max"] = vec3ToPython(info.seed_max);
         d["seed_particles_per_cell"] = info.seed_particles_per_cell;
+        d["seed_grain_saturation"] = info.seed_grain_saturation;
         d["seed_fill_level"] = info.seed_fill_level;
         d["seed_ran"] = info.seed_ran;
         d["seed_truncated"] = info.seed_truncated;
@@ -2365,6 +2445,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_strain_rate"] = info.granular_strain_rate;
         d["granular_strain_limited"] = info.granular_strain_limited_particles;
         d["granular_compaction_capped"] = info.granular_compaction_capped_particles;
+        d["granular_hardening_capped"] = info.granular_hardening_capped_particles;
+        d["granular_min_plastic_jacobian"] = info.granular_min_plastic_jacobian;
+        d["granular_max_plastic_jacobian"] = info.granular_max_plastic_jacobian;
+        d["granular_mean_plastic_jacobian"] = info.granular_mean_plastic_jacobian;
+        d["granular_counted"] = info.granular_counted_particles;
+        d["granular_material_measured"] = info.granular_material_measured;
         d["granular_min_softening"] = info.granular_min_softening;
         d["granular_softened"] = info.granular_softened_particles;
         d["granular_overburden_pressure"] = info.granular_overburden_pressure;
@@ -2491,7 +2577,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     // not contain it seeded zero particles and said so to nobody.
     fluid.def("seed", [](const std::string& domain, const py::object& seed_min,
                           const py::object& seed_max, int particles_per_cell,
-                          bool replace, bool persistent, float fill_level) {
+                          bool replace, bool persistent, float fill_level,
+                          float grain_saturation) {
         const bool has_region = !seed_min.is_none() && !seed_max.is_none();
         Vec3 smin, smax;
         if (has_region) {
@@ -2502,11 +2589,12 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                                                  has_region ? &smin : nullptr,
                                                  has_region ? &smax : nullptr,
                                                  particles_per_cell, replace,
-                                                 persistent, fill_level));
+                                                 persistent, fill_level, grain_saturation));
     }, py::arg("domain"), py::arg("seed_min") = py::none(),
        py::arg("seed_max") = py::none(),
        py::arg("particles_per_cell") = 4, py::arg("replace") = true,
        py::arg("persistent") = false, py::arg("fill_level") = -1.0f,
+       py::arg("grain_saturation") = -1.0f,
        "Fill a fluid domain with particles. Omit seed_min/seed_max to fill the "
        "bottom half of the domain; a region that does not overlap the domain is "
        "refused rather than silently creating nothing. particles_per_cell applies "
@@ -2739,6 +2827,14 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             {"granular_damage_rate", "granular_damage_rate"},
             {"granular_healing_rate", "granular_healing_rate"},
             {"granular_rebonding", "granular_rebonding"},
+            {"granular_snow_plasticity", "granular_snow_plasticity"},
+            {"granular_snow_critical_compression", "granular_snow_critical_compression"},
+            {"granular_snow_critical_stretch", "granular_snow_critical_stretch"},
+            {"granular_snow_hardening", "granular_snow_hardening"},
+            {"granular_snow_max_hardening", "granular_snow_max_hardening"},
+            {"granular_snow_min_hardening", "granular_snow_min_hardening"},
+            {"granular_snow_heterogeneity", "granular_snow_heterogeneity"},
+            {"granular_snow_clump_size", "granular_snow_clump_size"},
             {"granular_softening_temperature", "granular_softening_kelvin"},
             {"granular_softening_range", "granular_softening_range"},
             {"granular_residual_strength", "granular_residual_strength"},
@@ -3574,6 +3670,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fluid_birth_kelvin"] = s.fluid_birth_kelvin;
         d["fluid_birth_model"] = s.fluid_birth_model;
         d["fluid_birth_lowered"] = s.fluid_birth_lowered;
+        writeSourceSplatGeometry(d, s);
         d["grain_birth_saturation"] = s.grain_birth_saturation;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;
@@ -3583,6 +3680,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     };
     auto apply_flow_kwargs = [](rtapi::SimulationFlowSourceInfo& s,
                                 const py::kwargs& kw) {
+        applySourceSplatGeometry(s, kw);
 #define RT_FLOW_KW(name,type) if (kw.contains(#name)) s.name = py::cast<type>(kw[#name])
         RT_FLOW_KW(name, std::string); RT_FLOW_KW(domain, std::string);
         RT_FLOW_KW(phase, std::string);
@@ -3609,6 +3707,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     };
     py::module_ flow_source = module.def_submodule(
         "flow_source", "Gas scalar injection and APIC liquid flow emitters");
+    registerSourceSplatGeometry(flow_source);
     flow_source.def("list", [flow_to_dict] {
         std::vector<rtapi::SimulationFlowSourceInfo> sources;
         requireResult(rtapi::listSimulationFlowSources(sources));
@@ -3677,6 +3776,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["sdf_resolution_mode"] = c.sdf_resolution_mode;
         d["sdf_ready"] = c.sdf_ready;
         d["sdf_resolution"] = c.sdf_resolution;
+        d["resolved_valid"] = c.resolved_valid;
+        d["resolved_world_min"] = vec3ToPython(c.resolved_world_min);
+        d["resolved_world_max"] = vec3ToPython(c.resolved_world_max);
+        d["resolved_size"] = vec3ToPython(c.resolved_size);
         d["gas_interaction_enabled"] = c.gas_interaction_enabled;
         d["gas_density_rate"] = c.gas_density_rate;
         d["gas_temperature_rate"] = c.gas_temperature_rate;
@@ -5660,6 +5763,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     timeline.def("set_frame", [](int frame) { requireResult(rtapi::setFrame(frame)); }, py::arg("frame"));
 
     py::module_ render = module.def_submodule("render", "Asynchronous final-render jobs");
+    bindRayGpuTimingPython(render);
     render.def("optix_accum_status", []() -> py::dict {
         rtapi::OptixAccumStatus st;
         requireResult(rtapi::optixAccumStatus(st));
@@ -5728,6 +5832,65 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "opt-in: the atomics cost a little, so leave them off while measuring "
        "frame time. region=(x0, y0, x1, y1), normalized to the image, limits "
        "every counter to that pixel rectangle.");
+    render.def("volume_light_cache", [] {
+        const rtapi::VolumeLightCacheInfo c = rtapi::volumeLightCache();
+        py::dict d;
+        d["available"] = c.available;
+        d["max_cells"] = c.max_cells;
+        d["buffer_bytes"] = c.buffer_bytes;
+        d["used_bytes"] = c.used_bytes;
+        d["channels"] = c.channels;
+        d["header_publishes"] = c.header_publishes;
+        py::list slots;
+        for (const auto& s : c.slots) {
+            py::dict r;
+            r["slot"] = s.slot;
+            r["dims"] = py::make_tuple(s.dims[0], s.dims[1], s.dims[2]);
+            r["bytes"] = s.bytes;
+            r["keyed"] = s.keyed;
+            slots.append(r);
+        }
+        d["slots"] = slots;
+        return d;
+    }, "Vulkan RT volume light cache: settings, allocated/used bytes and per-slot "
+       "cell grids. buffer_bytes 0 means no TLAS yet (RT only).");
+    render.def("set_volume_light_cache", [](int max_cells) {
+        requireResult(rtapi::setVolumeLightCache(max_cells));
+    }, py::arg("max_cells"),
+       "Resolution of the volume light cache (longest-axis cells, 8..256). A change "
+       "refills every cell. Not saved with the project.");
+    render.def("volume_march_lod", [] {
+        const rtapi::VolumeMarchLodInfo l = rtapi::volumeMarchLod();
+        py::dict d;
+        d["camera_light_stride"] = l.camera_light_stride;
+        d["secondary_light_stride"] = l.secondary_light_stride;
+        d["secondary_step_scale"] = l.secondary_step_scale;
+        d["secondary_max_steps"] = l.secondary_max_steps;
+        d["secondary_radiance_cache"] = l.secondary_radiance_cache;
+        return d;
+    }, "Vulkan RT gas march LOD: in-scatter stride on the camera segment and on "
+       "later bounces, and the later-bounce step scale / step cap.");
+    render.def("set_volume_march_lod", [](py::object camera_light_stride,
+                                          py::object secondary_light_stride,
+                                          py::object secondary_step_scale,
+                                          py::object secondary_max_steps,
+                                          py::object secondary_radiance_cache) {
+        rtapi::VolumeMarchLodInfo l = rtapi::volumeMarchLod();
+        if (!camera_light_stride.is_none()) l.camera_light_stride = camera_light_stride.cast<int>();
+        if (!secondary_light_stride.is_none()) l.secondary_light_stride = secondary_light_stride.cast<int>();
+        if (!secondary_step_scale.is_none()) l.secondary_step_scale = secondary_step_scale.cast<int>();
+        if (!secondary_max_steps.is_none()) l.secondary_max_steps = secondary_max_steps.cast<int>();
+        if (!secondary_radiance_cache.is_none())
+            l.secondary_radiance_cache = secondary_radiance_cache.cast<bool>();
+        requireResult(rtapi::setVolumeMarchLod(l));
+    }, py::arg("camera_light_stride") = py::none(),
+       py::arg("secondary_light_stride") = py::none(),
+       py::arg("secondary_step_scale") = py::none(),
+       py::arg("secondary_max_steps") = py::none(),
+       py::arg("secondary_radiance_cache") = py::none(),
+       "Set the gas march LOD; omitted fields keep their value. 1/1/1/0 with the "
+       "radiance cache off is the full-quality reference march. Resets "
+       "accumulation; not saved with the project.");
     render.def("get_settings", [] {
         const rtapi::RenderBudgetInfo b = rtapi::renderBudget();
         py::dict d;
@@ -5828,6 +5991,24 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["walk_shadow_traces"] = s.walk_shadow_traces;
         d["walk_shadow_skipped"] = s.walk_shadow_skipped;
         d["walk_event_capped"] = s.walk_event_capped;
+        d["sdf_main_samples"] = s.sdf_main_samples;
+        d["sdf_main_queries"] = s.sdf_main_queries;
+        d["sdf_main_skipped"] = s.sdf_main_skipped;
+        d["sdf_arbiter_samples"] = s.sdf_arbiter_samples;
+        d["sdf_arbiter_queries"] = s.sdf_arbiter_queries;
+        d["sdf_arbiter_skipped"] = s.sdf_arbiter_skipped;
+        d["light_cache_hits"] = s.light_cache_hits;
+        d["light_cache_misses"] = s.light_cache_misses;
+        d["light_cache_fills"] = s.light_cache_fills;
+        d["light_cache_fill_samples"] = s.light_cache_fill_samples;
+        d["camera_volume_rays"] = s.camera_volume_rays;
+        d["camera_density_samples"] = s.camera_density_samples;
+        d["camera_shadow_density_samples"] = s.camera_shadow_density_samples;
+        d["secondary_volume_rays"] = s.secondary_volume_rays;
+        d["secondary_density_samples"] = s.secondary_density_samples;
+        d["secondary_shadow_density_samples"] = s.secondary_shadow_density_samples;
+        d["radiance_cache_marches"] = s.radiance_cache_marches;
+        d["radiance_cache_fallbacks"] = s.radiance_cache_fallbacks;
         py::list devices;
         for (const auto& row : s.devices) {
             py::dict r;

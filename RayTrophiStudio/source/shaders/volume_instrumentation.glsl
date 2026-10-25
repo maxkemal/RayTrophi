@@ -131,7 +131,52 @@ layout(set = 0, binding = 29, scalar) buffer VolumeInstrumentationBuffer {
     uint walkShadowTraces;
     uint walkShadowSkipped;
     uint walkEventCapped;
+    // SDF search counters are separate from optical fog samples.
+    uint sdfMainSamples;
+    uint sdfMainQueries;
+    uint sdfMainSkipped;
+    uint sdfArbiterSamples;
+    uint sdfArbiterQueries;
+    uint sdfArbiterSkipped;
+    // Volume light cache (volume_light_cache.glsl). Read hits and misses as a
+    // PAIR: a static frame should drive misses toward zero after the first
+    // samples; misses that stay high mean the tag changes every frame.
+    //   lightCacheHits        - lookups whose eight corners all carried the tag
+    //   lightCacheMisses      - lookups that fell back to the march
+    //   lightCacheFills       - cells filled (claimed) by this device
+    //   lightCacheFillSamples - density samples spent filling them
+    uint lightCacheHits;
+    uint lightCacheMisses;
+    uint lightCacheFills;
+    uint lightCacheFillSamples;
+    // Camera vs secondary split of volumeRays / densitySamples /
+    // shadowDensitySamples (docs/dev/RT_GAS_SECONDARY_MARCH.md, step 0).
+    // Camera = the trace carried PL_CAMERA_SEGMENT, secondary = it did not.
+    // ★ Both classes are counted explicitly, never derived as total - other:
+    // a shader that forgets volumeInstrumentationSetSegment counts in NEITHER,
+    // so camera + secondary < total exposes it instead of silently filing
+    // every sample under one class.
+    uint cameraVolumeRays;
+    uint cameraDensitySamples;
+    uint cameraShadowDensitySamples;
+    uint secondaryVolumeRays;
+    uint secondaryDensitySamples;
+    uint secondaryShadowDensitySamples;
+    // Radiance cache (RT_GAS_SECONDARY_MARCH.md §13): bounce rays that crossed
+    // the box on cached lookups, and those that fell back to the full march
+    // because a vertex was missing. Fallbacks should fall toward zero on a
+    // static frame; if they stay high, the radiance tag changes every frame.
+    uint radianceCacheMarches;
+    uint radianceCacheFallbacks;
 } volumeInstrumentation;
+
+// Segment class of the current invocation: 0 unknown, 1 camera, 2 secondary.
+// Set once at the top of each closest-hit main() from the INCOMING payload,
+// before shading rewrites primaryMeta.
+uint volumeInstrumentationSegment = 0u;
+void volumeInstrumentationSetSegment(bool cameraSegment) {
+    volumeInstrumentationSegment = cameraSegment ? 1u : 2u;
+}
 
 const uint VOLUME_MARCH_COMPLETED = 0u;
 const uint VOLUME_MARCH_EXTINCTION = 1u;
@@ -214,6 +259,13 @@ void volumeRecordRay(
     if (!volumeInstrumentationEnabled()) return;
     atomicAdd(volumeInstrumentation.volumeRays, 1u);
     atomicAdd(volumeInstrumentation.densitySamples, densityCount);
+    if (volumeInstrumentationSegment == 1u) {
+        atomicAdd(volumeInstrumentation.cameraVolumeRays, 1u);
+        atomicAdd(volumeInstrumentation.cameraDensitySamples, densityCount);
+    } else if (volumeInstrumentationSegment == 2u) {
+        atomicAdd(volumeInstrumentation.secondaryVolumeRays, 1u);
+        atomicAdd(volumeInstrumentation.secondaryDensitySamples, densityCount);
+    }
     atomicAdd(volumeInstrumentation.emptySegmentsSkipped, emptyCount);
     atomicAdd(volumeInstrumentation.topologySegmentsSkipped, topologyEmptyCount);
     atomicAdd(volumeInstrumentation.majorantSegmentsSkipped, densityLeafEmptyCount);
@@ -228,7 +280,25 @@ void volumeRecordRay(
 void volumeRecordShadowSamples(uint count) {
     if (volumeInstrumentationEnabled() && count != 0u) {
         atomicAdd(volumeInstrumentation.shadowDensitySamples, count);
+        if (volumeInstrumentationSegment == 1u)
+            atomicAdd(volumeInstrumentation.cameraShadowDensitySamples, count);
+        else if (volumeInstrumentationSegment == 2u)
+            atomicAdd(volumeInstrumentation.secondaryShadowDensitySamples, count);
     }
+}
+
+void volumeRecordRadianceCache(bool cached) {
+    if (!volumeInstrumentationEnabled()) return;
+    if (cached) atomicAdd(volumeInstrumentation.radianceCacheMarches, 1u);
+    else atomicAdd(volumeInstrumentation.radianceCacheFallbacks, 1u);
+}
+
+void volumeRecordLightCache(bool hit, uint fills, uint fillSamples) {
+    if (!volumeInstrumentationEnabled()) return;
+    if (hit) atomicAdd(volumeInstrumentation.lightCacheHits, 1u);
+    else atomicAdd(volumeInstrumentation.lightCacheMisses, 1u);
+    if (fills != 0u) atomicAdd(volumeInstrumentation.lightCacheFills, fills);
+    if (fillSamples != 0u) atomicAdd(volumeInstrumentation.lightCacheFillSamples, fillSamples);
 }
 
 void volumeRecordMajorantQuery(bool available) {
@@ -243,5 +313,7 @@ void volumeRecordTemporal(bool accepted) {
     if (accepted) atomicAdd(volumeInstrumentation.temporalAccepted, 1u);
     else atomicAdd(volumeInstrumentation.temporalRejected, 1u);
 }
+
+#include "surface_sdf_instrumentation.glsl"
 
 #endif

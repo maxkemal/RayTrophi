@@ -1091,11 +1091,17 @@
     </None>
     <None Include="source\shaders\volume_closesthit.rchit" />
     <None Include="source\shaders\volume_phase_cache.glsl" />
+    <None Include="source\shaders\volume_light_cache.glsl" />
+    <None Include="source\shaders\volume_light_cache_fill.glsl" />
+    <None Include="source\shaders\volume_radiance_cache.glsl" />
     <None Include="source\shaders\sphere_shadow_probe.glsl" />
     <None Include="source\shaders\volume_solid_probe.glsl" />
     <None Include="source\shaders\volume_nano_optical.glsl" />
     <None Include="source\shaders\volume_rt_shadow_march.glsl" />
     <None Include="source\shaders\volume_rt_empty_sample.glsl" />
+    <None Include="source\shaders\volume_surface_shadow.glsl" />
+    <None Include="source\shaders\volume_companion_empty.glsl" />
+    <None Include="source\shaders\volume_sun_shadow_cache.glsl" />
     <None Include="source\shaders\volume_intersection.rint" />
     <None Include="cpp.hint" />
   </ItemGroup>
@@ -1619,6 +1625,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiViewport.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiObjectVisibility.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiHair.cpp">
@@ -2935,5 +2944,22 @@
   <ItemGroup>
   </ItemGroup>
   <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\Fluid\MatterFogFields.h" />
+    <ClInclude Include="source\include\Fluid\MatterFogStreams.h" />
+    <ClInclude Include="source\include\Fluid\MatterFogSnapshot.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogFields.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogStreams.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogSnapshot.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogPublisher.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterFogInspection.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanRayGpuTiming.cpp" />
+    <ClCompile Include="source\src\Api\RtRayGpuTiming.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcRayGpuTiming.cpp" />
+    <ClInclude Include="source\include\Backend\VulkanRayGpuTiming.h" />
+    <ClInclude Include="source\include\Api\RayGpuTimingApi.h" />
+    <ClInclude Include="source\src\Api\RtRayGpuTimingBindings.h" />
+    <None Include="source\shaders\volume_mixture.glsl" />
   </ItemGroup>
 </Project>

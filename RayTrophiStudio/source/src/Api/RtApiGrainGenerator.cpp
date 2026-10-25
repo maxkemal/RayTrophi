@@ -19,27 +19,15 @@ namespace {
 class GrainLibraryCommand final : public SceneCommand {
 public:
     std::vector<std::shared_ptr<TriangleMesh>> meshes;
-    std::string domain;
-    FluidSplatGeometryPatch before;
-    FluidSplatGeometryPatch after;
 
     void execute(UIContext& ctx) override {
         for (const auto& mesh : meshes) {
             AddObjectCommand(mesh).execute(ctx);
         }
-        if (!domain.empty()) {
-            const auto result = setFluidSplatGeometry(domain, after);
-            if (!result.ok) {
-                undo(ctx);
-                throw std::runtime_error(result.error);
-            }
-        }
+
     }
 
     void undo(UIContext& ctx) override {
-        if (!domain.empty()) {
-            setFluidSplatGeometry(domain, before);
-        }
         for (auto it = meshes.rbegin(); it != meshes.rend(); ++it) {
             AddObjectCommand(*it).undo(ctx);
         }
@@ -209,31 +197,6 @@ Result generateGrains(const nlohmann::json& input, nlohmann::json& output) {
             weights.push_back(1.0);
         }
         auto command = std::make_unique<GrainLibraryCommand>();
-        command->domain = input.value("domain", std::string{});
-        if (!command->domain.empty()) {
-            const auto runtime = g_ctx->scene.getParticleSimulationSystem();
-            if (!runtime) {
-                return Result::fail("target domain runtime not found");
-            }
-            auto& domains = runtime->gridDomains();
-            const auto found = std::find_if(domains.begin(), domains.end(),
-                [&](const auto& domain) {
-                    return domain.name == command->domain &&
-                        RayTrophiSim::simulationDomainHasLiquid(domain.type);
-                });
-            if (found == domains.end()) {
-                return Result::fail("liquid/Matter domain not found");
-            }
-            if (found->fluid_particle_geometry_mode != 0) {
-                return Result::fail(
-                    "target domain must use procedural spheres (geometry icosphere)");
-            }
-            command->before.near_mesh_enabled = found->fluid_grain_mesh_near_enabled;
-            command->before.near_mesh_shape = found->fluid_grain_mesh_near_shape;
-            command->before.near_mesh_sources = found->fluid_grain_mesh_near_sources;
-            command->before.near_mesh_source_materials =
-                found->fluid_grain_mesh_near_source_materials;
-        }
         std::vector<RayTrophiSim::Fluid::GrainExemplar> shapes;
         if (!RayTrophiSim::generateGrainShapes(settings, shapes, error)) {
             return Result::fail(error);
@@ -269,17 +232,11 @@ Result generateGrains(const nlohmann::json& input, nlohmann::json& output) {
             rows.push_back({{"object", candidate}, {"diameter", diameter},
                 {"material_id", material}, {"triangles", shapes[index].faces.size()}});
         }
-        if (!command->domain.empty()) {
-            command->after.near_mesh_enabled = true;
-            command->after.near_mesh_shape = "scene";
-            command->after.near_mesh_sources = names;
-            command->after.near_mesh_source_materials = true;
-        }
         command->execute(*g_ctx);
         g_history->record(std::move(command));
         output = {{"objects", names}, {"requested_count", settings.count},
             {"count", names.size()}, {"type", settings.type}, {"seed", settings.seed},
-            {"domain", input.value("domain", std::string{})}, {"examples", rows}};
+            {"examples", rows}};
         return Result::success();
     } catch (const std::exception& exception) {
         return Result::fail(exception.what());

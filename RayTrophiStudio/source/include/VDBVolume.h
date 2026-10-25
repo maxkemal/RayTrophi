@@ -193,7 +193,73 @@ public:
         setRotation(Vec3(0.0f, 0.0f, 0.0f));
         setPosition(world_min);
     }
-    
+
+    /**
+     * @brief Shrink a live volume's local box to the cells that hold density.
+     *
+     * Call right after bindLiveVolume with the same dense field it was
+     * registered from (density[i + nx*(j + ny*k)], cell-centred). Placement is
+     * untouched, so NanoVDB sampling is unchanged; only the box shrinks - and
+     * the box is what the RT TLAS instance, the SSBO clip box and the raster
+     * interval are all derived from.
+     *
+     * ★ Measured 2026-10-25: 52 detached snow grains routed to Fog filled 384
+     * of 125 000 cells, but the published box was the whole 5 m domain. Every
+     * path entered it ~3.2 times (each entry a closest-hit, a solid probe, an
+     * empty march and a hand-off re-trace) - 130 ms of a 161 ms sample for a
+     * medium that changed no pixel. NanoVDB topology only skips SAMPLES; it
+     * cannot stop a ray from entering the box.
+     *
+     * Padded by one cell (trilinear support of a cell-centred voxel) and
+     * rounded outward to 8-cell blocks so a moving plume does not change the
+     * box - and force a TLAS update - on every frame. Leaves the box alone when
+     * no cell is occupied: callers already hide unpopulated volumes.
+     */
+    void shrinkLiveBoundsToOccupied(const std::vector<float>& density,
+                                    int nx, int ny, int nz, float voxel);
+
+    /**
+     * @brief The occupied local box of a dense live field (same rule as above).
+     *
+     * A cell is occupied when `primary` OR `secondary` (optional, e.g. the
+     * SurfaceSDF foam channel) is > 0. Returns false when nothing is occupied
+     * or the arrays do not match nx*ny*nz. Lets a caller that uploads less
+     * often than it binds keep the box and re-apply it after every
+     * bindLiveVolume (which resets the box to the full grid).
+     */
+    static bool occupiedLocalBox(const float* primary, const float* secondary,
+                                 size_t count, int nx, int ny, int nz, float voxel,
+                                 Vec3& boxMin, Vec3& boxMax);
+
+    // Occupied box remembered across frames by a producer that uploads less
+    // often than it binds (the fluid SurfaceSDF route). Re-applied by
+    // applyLiveOccupiedBounds() after each bindLiveVolume; invalid = full grid.
+    bool live_occupied_valid = false;
+    Vec3 live_occupied_min = Vec3(0.0f);
+    Vec3 live_occupied_max = Vec3(0.0f);
+    void applyLiveOccupiedBounds() {
+        if (!live_occupied_valid) return;
+        // Only inside the box bindLiveVolume just set: a stale box from a
+        // previous, differently sized grid must never extend past the field.
+        const Vec3 lo((std::max)(live_occupied_min.x, local_bbox_min.x),
+                      (std::max)(live_occupied_min.y, local_bbox_min.y),
+                      (std::max)(live_occupied_min.z, local_bbox_min.z));
+        const Vec3 hi((std::min)(live_occupied_max.x, local_bbox_max.x),
+                      (std::min)(live_occupied_max.y, local_bbox_max.y),
+                      (std::min)(live_occupied_max.z, local_bbox_max.z));
+        if (lo.x < hi.x && lo.y < hi.y && lo.z < hi.z) setLocalBounds(lo, hi);
+    }
+    // True when `box` is not inside the box last reported here (then the CPU
+    // BVH, which bakes bounds at build, must be rebuilt). Remembers `box`.
+    AABB live_bvh_box = AABB(Vec3(0.0f), Vec3(0.0f));
+    bool growsLiveBvhBox(const AABB& box) {
+        const bool grows = box.min.x < live_bvh_box.min.x || box.min.y < live_bvh_box.min.y ||
+            box.min.z < live_bvh_box.min.z || box.max.x > live_bvh_box.max.x ||
+            box.max.y > live_bvh_box.max.y || box.max.z > live_bvh_box.max.z;
+        live_bvh_box = box;
+        return grows;
+    }
+
     /**
      * @brief Get native VDB bounds (before transform)
      */
@@ -314,6 +380,7 @@ public:
     // of as fog. Set by the SurfaceSDF render route. Maps to source_type=4 in
     // GpuVDBVolume / VkVolumeInstance; shaders branch on it.
     bool render_as_isosurface = false;
+    bool render_joint_fog = false; // Simulation-owned independent Matter Fog contribution.
     // When true, this volume is kept registered + visible ONLY for the GPU SSBO
     // slot mapping (fluid Particles / splat-sphere render mode keeps the domain
     // volume alive to avoid TLAS rebuild churn) but contributes NOTHING on the CPU.

@@ -8,6 +8,7 @@
  * - Animation controls for VDB sequences
  */
 
+#include "UI/VolumeMaterialUI.h"
 #include "scene_ui.h"
 #include "UI/CloudMaterialUI.h"
 #include "VDBVolume.h"
@@ -459,13 +460,16 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     // -------------------------------------------------------------
     // MIDDLE SECTION: VDB OBJECT LIST
     // -------------------------------------------------------------
-    size_t total_vols = scene.vdb_volumes.size();
+    const auto total_vols = static_cast<size_t>(std::count_if(
+        scene.vdb_volumes.begin(), scene.vdb_volumes.end(),
+        [](const auto& volume) { return volume && !volume->render_as_isosurface; }));
     ImGui::Text("VDB Volumes (%zu)", total_vols);
     
     if (ImGui::BeginListBox("##volume_list", ImVec2(-FLT_MIN, 150))) {
         // List VDB Volumes
         for (size_t i = 0; i < scene.vdb_volumes.size(); ++i) {
             auto& vdb = scene.vdb_volumes[i];
+            if (!vdb || vdb->render_as_isosurface) continue;
             bool is_selected = (selection.selected.type == SelectableType::VDBVolume && selection.selected.vdb_volume == vdb);
             
             ImGui::PushID(("vdb_" + std::to_string(i)).c_str());
@@ -478,7 +482,7 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
             }
             
             if (ImGui::BeginPopupContextItem()) {
-                if (ImGui::MenuItem("Delete")) {
+                if (ImGui::MenuItem("Delete", nullptr, false, !vdb->transient)) {
                     // Logic from existing drawVDBVolumePanel
                     auto it = std::find(scene.vdb_volumes.begin(), scene.vdb_volumes.end(), vdb);
                     if (it != scene.vdb_volumes.end()) {
@@ -538,6 +542,7 @@ void SceneUI::drawVDBVolumeProperties(UIContext& ctx, VDBVolume* vdb) {
     
     bool changed = false;
     
+    drawMatterFogVisibility(ctx, vdb);
     // Track initial state to detect changes for Undo/Redo (if implemented) or Project Modified flag
     bool was_modified = false;
     

@@ -4,7 +4,9 @@ layout(set=0,binding=1) readonly buffer StressDiag { float stress_diag[]; };
 layout(set=0,binding=2) buffer StateFlags { uint flags[]; };
 layout(push_constant) uniform PC {
     uint count;float dt;float contact_damping;float sleep_speed;
-    float pressure_threshold;uint pad0;uint pad1;uint pad2;
+    float pressure_threshold;
+    // 0 = damp at any speed; snow damps only slower parcels (SettleParams).
+    float damping_max_speed;uint pad1;uint pad2;
 #ifdef MATTER_INDEXED
     uint matter_lane;
 #endif
@@ -24,7 +26,8 @@ void main(){
     float pressure=max(-(stress_diag[i*3]+stress_diag[i*3+1]+stress_diag[i*3+2])/3.0,0.0);
     if(pressure<=pc.pressure_threshold)return;
     vec3 v=vec3(velocity[i*3],velocity[i*3+1],velocity[i*3+2]);
-    v*=exp(-max(pc.contact_damping,0.0)*max(pc.dt,0.0));
+    if(!(pc.damping_max_speed>0.0)||length(v)<pc.damping_max_speed)
+        v*=exp(-max(pc.contact_damping,0.0)*max(pc.dt,0.0));
     if(length(v)<max(pc.sleep_speed,0.0)){v=vec3(0.0);flags[i]|=8u;}else flags[i]&=~8u;
     velocity[i*3]=v.x;velocity[i*3+1]=v.y;velocity[i*3+2]=v.z;
 }

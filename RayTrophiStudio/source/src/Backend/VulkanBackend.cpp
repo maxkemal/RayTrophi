@@ -1080,6 +1080,7 @@ void VulkanDevice::shutdown() {
             m_compactionQueryPool = VK_NULL_HANDLE;
         }
         m_pendingCompactions.clear();
+        if (m_rayGpuTiming) m_rayGpuTiming->destroy();
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
         // Whatever was still tracked went with the device.
@@ -2596,13 +2597,16 @@ void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmdBuf) {
     if (reportVulkanDeviceFailure(
             vkQueueSubmit(m_computeQueue, 1, &submitInfo, submitFence),
             "endSingleTimeCommands/vkQueueSubmit") != VK_SUCCESS) {
+        if (m_rayGpuTiming) m_rayGpuTiming->cancel(cmdBuf);
         vkDestroyFence(m_device, submitFence, nullptr);
         vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
         return;
     }
+    const uint64_t timingWait = m_rayGpuTiming ? m_rayGpuTiming->beginHostWait() : 0;
     reportVulkanDeviceFailure(
         vkWaitForFences(m_device, 1, &submitFence, VK_TRUE, UINT64_MAX),
         "endSingleTimeCommands/vkWaitForFences");
+    if (m_rayGpuTiming) m_rayGpuTiming->endHostWait(timingWait);
     vkDestroyFence(m_device, submitFence, nullptr);
     vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
 }
@@ -3795,12 +3799,14 @@ void VulkanDevice::traceRays(uint32_t w, uint32_t h, uint32_t d) {
     }
 
     // Trace rays!
+    const uint32_t timingToken = beginRayGpuTiming(cmd, w, h);
     fpCmdTraceRaysKHR(cmd,
         &m_sbtRaygenRegion,
         &m_sbtMissRegion,
         &m_sbtHitRegion,
         &m_sbtCallableRegion,
         w, h, d);
+    endRayGpuTiming(cmd, timingToken);
 
     endSingleTimeCommands(cmd);
 }
@@ -6360,8 +6366,10 @@ bool VulkanDevice::traceRaysAndReadback(uint32_t w, uint32_t h,
             0, (uint32_t)m_pushConstantData.size(), m_pushConstantData.data());
 
     // ── 2. Trace ──────────────────────────────────────────────────────────────
+    const uint32_t timingToken = beginRayGpuTiming(cmd, w, h);
     fpCmdTraceRaysKHR(cmd, &m_sbtRaygenRegion, &m_sbtMissRegion,
                       &m_sbtHitRegion, &m_sbtCallableRegion, w, h, 1);
+    endRayGpuTiming(cmd, timingToken);
 
     // ── 3. Barrier: shader write → transfer read ─────────────────────────────
     VkImageMemoryBarrier imgBarrier{};
@@ -6478,8 +6486,10 @@ bool VulkanDevice::traceRaysTonemapAndReadback(uint32_t w, uint32_t h,
             VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
             VK_SHADER_STAGE_MISS_BIT_KHR  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
             0, (uint32_t)m_pushConstantData.size(), m_pushConstantData.data());
+    const uint32_t timingToken = beginRayGpuTiming(cmd, w, h);
     fpCmdTraceRaysKHR(cmd, &m_sbtRaygenRegion, &m_sbtMissRegion,
                       &m_sbtHitRegion, &m_sbtCallableRegion, w, h, 1);
+    endRayGpuTiming(cmd, timingToken);
 
     // ── 2. Barrier: RT shader write → compute shader read on HDR image ───────
     VkImageMemoryBarrier hdrBarrier{};
@@ -6902,9 +6912,11 @@ bool VulkanDevice::waitFrameSlot(uint32_t slot, uint64_t timeoutNs) {
     if (slot >= kFrameSlotCount) return false;
     if (m_frameSlots[slot].fence == VK_NULL_HANDLE) return false;
     if (!m_frameSlots[slot].everSubmitted) return true; // nothing in flight
+    const uint64_t timingWait = m_rayGpuTiming ? m_rayGpuTiming->beginHostWait() : 0;
     VkResult res = reportVulkanDeviceFailure(
         vkWaitForFences(m_device, 1, &m_frameSlots[slot].fence, VK_TRUE, timeoutNs),
         "waitFrameSlot/vkWaitForFences");
+    if (m_rayGpuTiming) m_rayGpuTiming->endHostWait(timingWait, true);
     if (res == VK_SUCCESS) m_exposureMeter.consume(slot);
     return res == VK_SUCCESS;
 }
@@ -7090,9 +7102,11 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     // Wait for any previous use of this slot's cmd buffer + staging. At steady state
     // this fence is already signaled (we consumed the staging two frames ago).
     if (fs.everSubmitted) {
+        const uint64_t timingWait = m_rayGpuTiming ? m_rayGpuTiming->beginHostWait() : 0;
         VkResult wr = reportVulkanDeviceFailure(
             vkWaitForFences(m_device, 1, &fs.fence, VK_TRUE, UINT64_MAX),
             "submitTraceTonemapAsync/vkWaitForFences");
+        if (m_rayGpuTiming) m_rayGpuTiming->endHostWait(timingWait, true);
         if (wr != VK_SUCCESS) return false;
     }
     m_exposureMeter.consume(slot);
@@ -7134,8 +7148,10 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
                 VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                 VK_SHADER_STAGE_MISS_BIT_KHR  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                 0, (uint32_t)m_pushConstantData.size(), m_pushConstantData.data());
+        const uint32_t timingToken = beginRayGpuTiming(cmd, w, h);
         fpCmdTraceRaysKHR(cmd, &m_sbtRaygenRegion, &m_sbtMissRegion,
                           &m_sbtHitRegion, &m_sbtCallableRegion, w, h, 1);
+        endRayGpuTiming(cmd, timingToken);
     }
 
     // ── 2. RT write → compute read on HDR image ──────────────────────────────
@@ -7232,6 +7248,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
 
     if (acousticPass) acousticPass->record(cmd, fs.fence);
     if (vkEndCommandBuffer(cmd) != VK_SUCCESS) {
+        if (m_rayGpuTiming) m_rayGpuTiming->cancel(cmd);
         if (acousticPass) acousticPass->submitted(fs.fence, false);
         return false;
     }
@@ -7244,6 +7261,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     fs.acousticOnly = false;
     if (acousticPass) acousticPass->submitted(fs.fence, submitResult == VK_SUCCESS);
     if (submitResult != VK_SUCCESS) {
+        if (m_rayGpuTiming) m_rayGpuTiming->cancel(cmd);
         // Measured as a per-frame flood after a memory-pressure recreate, with
         // no result code -- the one thing needed to tell OOM from device loss.
         static uint64_t s_failures = 0;
@@ -8009,6 +8027,13 @@ void VulkanBackendAdapter::shutdown() {
     }
     m_volumeTemporal.destroy(*m_device);
     m_volumeInstrumentation.destroy(*m_device);
+    if (m_volumeLightCache.buffer) m_device->destroyBuffer(m_volumeLightCache);
+    m_volumeLightCache = {};
+    m_volumeLightCacheStatus = {};
+    m_volumeLightCacheStamps.clear();
+    m_volumeLightCacheHeader.clear();
+    m_volumeLightCacheHeaderBuffer = VK_NULL_HANDLE;
+    m_volumeLightCacheAddressUploaded = 0;
     if (m_denoiserColorStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserColorStagingBuffer);
     if (m_denoiserAlbedoStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserAlbedoStagingBuffer);
     if (m_denoiserNormalStagingBuffer.buffer) m_device->destroyBuffer(m_denoiserNormalStagingBuffer);
@@ -10599,6 +10624,36 @@ void VulkanBackendAdapter::setVisibilityByNodeName(const std::string& nodeName, 
     }
 }
 
+VulkanBackendAdapter::NodeMaskCounts
+VulkanBackendAdapter::countInstanceMasksByNodeName(const std::string& nodeName) {
+    NodeMaskCounts out;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    out.rt_instances_all = static_cast<int>(m_vkInstances.size());
+    out.raster_instances_all = static_cast<int>(m_rasterInstances.size());
+    // Same name resolution as setVisibilityByNodeName, so the read-back counts
+    // exactly the instances that setter would touch.
+    for (size_t i = 0; i < m_instanceSources.size() && i < m_vkInstances.size(); ++i) {
+        if (!m_instanceSources[i]) continue;
+        std::string instName;
+        if (auto inst = std::dynamic_pointer_cast<HittableInstance>(m_instanceSources[i])) {
+            instName = inst->node_name;
+        } else if (auto tri = std::dynamic_pointer_cast<Triangle>(m_instanceSources[i])) {
+            instName = tri->getNodeName();
+        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(m_instanceSources[i])) {
+            instName = tm->nodeName;
+        }
+        if (!matchesNodeNameForInstance(instName, nodeName)) continue;
+        ++out.rt_instances;
+        if (m_vkInstances[i].mask != 0) ++out.rt_visible;
+    }
+    for (const auto& ri : m_rasterInstances) {
+        if (!matchesNodeNameForInstance(ri.nodeName, nodeName)) continue;
+        ++out.raster_instances;
+        if (ri.mask != 0) ++out.raster_visible;
+    }
+    return out;
+}
+
 // Built-in point-sphere groups use the compact sphere-AABB BLAS path. Scene-object
 // particle geometry remains on the ordinary triangle scatter path.
 
@@ -11417,6 +11472,13 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
     // into the new order here, so the contract holds no matter who called us.
     // A later real publish simply overwrites this with fresher data.
     republishVolumeSlotsForTLASOrder();
+    // The volume light cache is allocated only once a TLAS exists, and the
+    // first volume publish of a session can precede it. Re-key the header on
+    // the stamps of the last publish (same content, so nothing refills twice).
+    {
+        const std::vector<uint64_t> lastStamps = m_volumeLightCacheStamps;
+        publishVolumeLightCache(lastStamps);
+    }
 
     // ★ Retry the rebuild once a passed-over volume has its grid. Without this a
     // transiently-unready SurfaceSDF is evicted from the TLAS by any unrelated
@@ -20345,6 +20407,13 @@ void VulkanBackendAdapter::setWorldData(const void* w) {
                                 (m_device->m_aerialFroxelBuilt || m_device->m_aerialFroxelPending);
     gw.aerialFroxelReady = froxelReadable ? 1 : 0;
     m_aerialFroxelFlagUploaded = gw.aerialFroxelReady;
+    // RT volume light cache. publishVolumeLightCache re-runs this upload when
+    // the buffer is reallocated, so the shader never holds a freed address.
+    gw.volumeLightCacheLo = static_cast<uint32_t>(m_volumeLightCache.deviceAddress & 0xffffffffull);
+    gw.volumeLightCacheHi = static_cast<uint32_t>(m_volumeLightCache.deviceAddress >> 32);
+    m_volumeLightCacheAddressUploaded = m_volumeLightCache.deviceAddress;
+    gw.volumeMarchLod = packVolumeMarchLod(volumeMarchLod());
+    m_worldUploadedOnce = true;
 
     // Multi-scatter (analytic, matches World::calculateNishitaSky)
     gw.multiScatterEnabled = wd->advanced.multi_scatter_enabled ? 1 : 0;

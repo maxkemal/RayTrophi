@@ -1,0 +1,281 @@
+{
+  "cube": "hidden_repeat",
+  "frame": 28,
+  "world": {
+    "atmosphere_intensity": 10.0,
+    "background_color": [
+      0.2240000069141388,
+      0.2240000069141388,
+      0.2240000069141388
+    ],
+    "mode": "solid",
+    "sun_azimuth": 170.0,
+    "sun_elevation": 15.0,
+    "sun_intensity": 10.0,
+    "sun_size": 0.5450000166893005
+  },
+  "lights": [
+    {
+      "index": 0,
+      "name": "Light_0",
+      "position": [
+        4.0,
+        5.0,
+        -3.0
+      ],
+      "type": "point"
+    }
+  ],
+  "camera": {
+    "aperture": 0.0,
+    "auto_exposure": true,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 2.0,
+    "focus_distance": 18.32044792175293,
+    "fov": 40.0,
+    "fstop_preset_index": 4,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "position": [
+      9.554400444030762,
+      7.847060680389404,
+      13.65479564666748
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      -0.053211212158203125,
+      -0.6074719429016113,
+      0.5455036163330078
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "fields_before": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.542210578918457,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13655,
+        "carrier_count": 78255,
+        "density_sum": 9781.874999476804,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.15008544921875,
+        "temperature_min_kelvin": 263.1497802734375,
+        "temperature_samples": 13638,
+        "vdb_id": 39,
+        "visible": true
+      },
+      {
+        "active_cells": 13879,
+        "carrier_count": 0,
+        "density_sum": 4056.4500637054443,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 732.892578125,
+        "temperature_min_kelvin": 221.93344116210938,
+        "temperature_samples": 13879,
+        "vdb_id": 40,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 80
+  },
+  "cases": [
+    {
+      "fog": "both",
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "seconds": 1.0043853000024683,
+              "observed_samples": 16
+            },
+            "64": {
+              "seconds": 2.909739599999739,
+              "observed_samples": 65
+            }
+          }
+        },
+        {
+          "thresholds": {
+            "16": {
+              "seconds": 0.9483448000028147,
+              "observed_samples": 16
+            },
+            "64": {
+              "seconds": 2.87128870000015,
+              "observed_samples": 65
+            }
+          }
+        }
+      ],
+      "instrumented": {
+        "thresholds": {
+          "16": {
+            "seconds": 1.2203934999997728,
+            "observed_samples": 16
+          },
+          "64": {
+            "seconds": 3.613855200001126,
+            "observed_samples": 64
+          }
+        },
+        "counters": {
+          "paths_traced": 7716741,
+          "volume_rays": 3905796,
+          "density_samples": 80234114,
+          "shadow_density_samples": 79568724,
+          "solid_probe_runs": 3905796,
+          "solid_probe_hits": 0,
+          "free_passes": 3999723,
+          "gas_handoffs": 0,
+          "layered_handoffs": 2532,
+          "paths_pass_capped": 0,
+          "paths_bounce_capped": 0,
+          "charged_diffuse": 0,
+          "charged_specular": 1692382,
+          "charged_transmission": 0,
+          "medium_passes": 2375607
+        }
+      },
+      "median_64_s": 2.8905141499999445
+    },
+    {
+      "fog": "none",
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "seconds": 0.25406200000361423,
+              "observed_samples": 18
+            },
+            "64": {
+              "seconds": 0.8661106000035943,
+              "observed_samples": 66
+            }
+          }
+        },
+        {
+          "thresholds": {
+            "16": {
+              "seconds": 0.2480026999983238,
+              "observed_samples": 18
+            },
+            "64": {
+              "seconds": 0.8649860000004992,
+              "observed_samples": 65
+            }
+          }
+        }
+      ],
+      "instrumented": {
+        "thresholds": {
+          "16": {
+            "seconds": 0.25828090000140946,
+            "observed_samples": 18
+          },
+          "64": {
+            "seconds": 0.8587533999998413,
+            "observed_samples": 65
+          }
+        },
+        "counters": {
+          "paths_traced": 8972610,
+          "volume_rays": 0,
+          "density_samples": 0,
+          "shadow_density_samples": 0,
+          "solid_probe_runs": 0,
+          "solid_probe_hits": 0,
+          "free_passes": 1991471,
+          "gas_handoffs": 0,
+          "layered_handoffs": 0,
+          "paths_pass_capped": 106,
+          "paths_bounce_capped": 1031193,
+          "charged_diffuse": 0,
+          "charged_specular": 19566891,
+          "charged_transmission": 0,
+          "medium_passes": 0
+        }
+      },
+      "median_64_s": 0.8655483000020467
+    }
+  ],
+  "camera_restored": true,
+  "fields_after": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.542210578918457,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13655,
+        "carrier_count": 78255,
+        "density_sum": 9781.874999476804,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.15008544921875,
+        "temperature_min_kelvin": 263.1497802734375,
+        "temperature_samples": 13638,
+        "vdb_id": 57,
+        "visible": true
+      },
+      {
+        "active_cells": 13879,
+        "carrier_count": 0,
+        "density_sum": 4056.4500637054443,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 732.892578125,
+        "temperature_min_kelvin": 221.93344116210938,
+        "temperature_samples": 13879,
+        "vdb_id": 58,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 86
+  },
+  "materials_restored": true
+}

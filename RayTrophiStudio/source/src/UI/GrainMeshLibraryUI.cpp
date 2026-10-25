@@ -31,7 +31,7 @@ void drawGrainMeshNearControls(SceneData& scene, const SimulationGridDomainDesc&
                           "This changes appearance only, not the solver or collision shape.");
     }
     if (ImGui::Button("Create Grain / Crystal Library...")) {
-        GrainGeneratorUI::requestOpen(domain.name);
+        GrainGeneratorUI::requestOpen();
     }
     if (domain.fluid_grain_mesh_near_shape != "scene") {
         ImGui::TextWrapped("This scene uses a legacy procedural library. Create an editable "

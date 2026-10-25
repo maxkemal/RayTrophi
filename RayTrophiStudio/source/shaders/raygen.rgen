@@ -118,9 +118,9 @@ struct VkWorldDataExtended {
     
     // ════════════════════════════ AERIAL FROXEL (16 bytes)
     int   aerialFroxelReady;    // 1 = atmosphereLUTs[3] holds this device's aerial froxel (aerial_froxel.glsl)
-    float _aerialPad0;
-    float _aerialPad1;
-    float _aerialPad2;
+    uint  volumeMarchLod;     // packed gas march LOD (was _aerialPad0)
+    uint  volumeLightCacheLo;  // RT volume light cache address, low word (0 = none)
+    uint  volumeLightCacheHi;
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;
@@ -820,6 +820,10 @@ void main() {
         // Consume skipVolumeAABBs flag set by previous bounce (volume solid detection)
         bool useSkipVolumeAABBs = payload.skipVolumeAABBs;
         bool useSkipGasVolumes = payload.skipGasVolumes;
+        // Only the final SDF -> solid handoff excludes ALL volume boxes.
+        // Gas -> SDF must keep its original interval for water absorption.
+        float solidHandoffTMin = useSkipVolumeAABBs
+            ? plSolidHandoffTMin(payload.volumeTraversalMask, T_MIN) : T_MIN;
 
         payload.radiance      = vec3(0.0);
         payload.attenuation   = vec3(1.0);
@@ -857,7 +861,7 @@ void main() {
             cullMask,
             0, 0, 0,
             rayOrigin,
-            T_MIN,
+            solidHandoffTMin,
             rayDir,
             T_MAX,
             0

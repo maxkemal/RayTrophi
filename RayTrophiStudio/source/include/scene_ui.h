@@ -497,6 +497,10 @@ public:
      void invalidateCache();
      void rebuildTriToIndex(const std::vector<std::shared_ptr<class Hittable>>& objects);
      void rebuildMeshCache(const std::vector<std::shared_ptr<class Hittable>>& objects);
+     // Mirror an object's visibility onto the outliner's representative
+     // facades (a flat mesh's rep facade is not in world.objects). Called by
+     // rtapi::setObjectVisible; the outliner itself holds no visibility logic.
+     void syncMeshCacheVisibility(const std::string& objectName, bool visible);
      void syncAllTransformedVertices(struct SceneData& scene);
      void updateBBoxCache(const std::string& objectName);  // Update bounding box for specific object after transform
      void moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta);

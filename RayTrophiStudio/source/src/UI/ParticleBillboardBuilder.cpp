@@ -1,6 +1,7 @@
 #include "UI/ParticleBillboardBuilder.h"
 
 #include "ParticleSimulation.h"
+#include "Fluid/SourceSplatRenderPlan.h"
 #include "Fluid/MatterPhaseGrid.h"
 #include "scene_data.h"
 #include "InstanceManager.h"
@@ -165,6 +166,7 @@ void appendFluidSphereProxies(const SceneData& scene,
             // resident position stream holds only the liquid lane's subset.
             if (!state.valid || desc.fluid_params.grain.enabled ||
                 desc.fluid_grain_mesh_near_enabled ||
+                RayTrophiSim::Fluid::hasSourceSplatMeshes(*system.runtime, d) ||
                 desc.fluid_render_mode != RayTrophiSim::Fluid::FluidRenderMode::Particles ||
                 desc.fluid_particle_geometry_mode != 0 ||
                 d >= system.domain_particle_render_group_ids.size()) {

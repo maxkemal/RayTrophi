@@ -14,6 +14,7 @@
 #extension GL_EXT_ray_tracing : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_GOOGLE_include_directive : require
 
 // Hit attributes — tNear and tFar passed to closest-hit for ray marching range
 hitAttributeEXT vec2 volumeHitAttrib; // .x = tNear, .y = tFar
@@ -103,6 +104,8 @@ struct VkVolumeInstance {
 
 layout(set = 0, binding = 9, scalar) readonly buffer VolumeBuffer { VkVolumeInstance v[]; } volumes;
 
+#include "volume_optical_activity.glsl"
+
 void main() {
     // An empty simulation domain deliberately keeps its procedural AABB in the
     // TLAS so customIndex -> volume-SSBO slots remain stable across frame 0/1
@@ -112,7 +115,7 @@ void main() {
     // camera path in raygen and paints the box black instead of revealing the
     // scene behind it.
     uint volIdx = gl_InstanceCustomIndexEXT;
-    if (volumes.v[volIdx].is_active == 0) {
+    if (volumes.v[volIdx].is_active == 0 || volumeOpticallyInert(volumes.v[volIdx])) {
         return;
     }
 

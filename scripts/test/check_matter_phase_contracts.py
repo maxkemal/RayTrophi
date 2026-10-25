@@ -2,6 +2,7 @@
 
 from pathlib import Path
 import ast
+import re
 import xml.etree.ElementTree as ET
 
 
@@ -24,7 +25,7 @@ def main():
     assert "Fluid::phaseStorageMatches(state, domain)" not in restore
     assert "const bool try_gpu_g2p =\n                fluid_gpu_requested &&" in simulation
     assert "Fluid::translateLiquidParticles(state, delta_min);" in simulation
-    assert "Fluid::seedBox(state.particles,\n                           Fluid::liquidGrid(state)" in simulation
+    assert re.search(r"Fluid::seedBox\(state\.particles,\s*Fluid::liquidGrid\(state\)", simulation)
     assert "computeFluidFillSeedAABB(Fluid::liquidGrid(state).origin," in simulation
 
     for path in ["src/Physics/ParticleRenderBridge.cpp",

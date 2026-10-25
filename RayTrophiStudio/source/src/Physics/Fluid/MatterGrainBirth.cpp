@@ -105,16 +105,36 @@ MatterGrainSeedResult seedMatterGrainBox(FluidParticles& particles,
     const Vec3 lo = Vec3::max(Vec3::min(low, high), grid_low);
     const Vec3 hi = Vec3::min(Vec3::max(low, high), grid_high);
     const float radius = matterGrainMaximumRadius(params.grain);
-    const double spacing = 2.2002 * radius;
-    const double jitter = 0.1 * radius;
+    // ★ FACE-CENTRED CUBIC, nearest neighbours 2.2002 R apart (the old margin).
+    // The simple cubic lattice this replaced packed 0.39 by volume and has no
+    // shear resistance: a seeded 0.3 x 0.5 x 0.3 m block of DAMP sand -- 8834
+    // liquid bridges active -- still fell like a cloud (mean speed 0.52 m/s
+    // after 5 steps, near free fall) and spread to a one-grain layer
+    // (2026-10-23). FCC packs 0.556 and seats every grain in a pocket of three
+    // below it, so a seed is a packed block that cohesion can hold.
+    // Points are the integer lattice of step h = d / sqrt(2) with an even
+    // coordinate sum; y-major order keeps a truncated seed filling bottom-up.
+    //
+    // ★★ BORN AT CONTACT. The first FCC still used d = 2.2002 R: a 0.2 R gap
+    // round every grain. The seed then LOOKED larger than the material it is,
+    // the gaps (which no real packing has) collapsed in the first frames as
+    // fake kinetic energy, wet bridges began ~23x weak across them, and the
+    // seed settle -- which zeroes velocity each step -- saw the same ~1.4 mm
+    // drop every step and stopped on its plateau rule before the gaps closed.
+    // Diagonal neighbours: the jitter can shorten a pair by up to
+    // 2 * jitter * (|nx| + |ny| + |nz|) <= 2.83 * jitter, so
+    // d = 2.0002 R + 2.83 * jitter keeps every pair >= 2.0002 R. jitter 0.03 R
+    // gives d = 2.0851 R, a ~0.085 R gap, and a packing of 0.653 -- the random
+    // close packing of real dense sand (0.62-0.64), not FCC's crystalline 0.74.
+    const double jitter = 0.03 * radius;
+    const double spacing = (2.0002 * radius + 2.8285 * jitter) / std::sqrt(2.0);
     if (!(radius > 0.0f) || !std::isfinite(spacing) || !(grid.voxel_size > 0.0f)) {
         return result;
     }
-    // A perfect cubic lattice forms vertical force chains with no lateral
-    // force or spin under gravity. Break that symmetry at birth, not by adding
-    // artificial solver forces. Adjacent centers remain at least 2.0002 R
-    // apart along their separating axis, including both jitter extremes.
-    // Coordinates depend on seed/candidate, never particle ID or voxel/PPC.
+    // A perfect lattice forms aligned force chains with no lateral force or
+    // spin under gravity. Break that symmetry at birth, not by adding
+    // artificial solver forces. Coordinates depend on seed/candidate, never
+    // particle ID or voxel/PPC.
     auto noise = [](uint64_t key) -> double {
         key += 0x9e3779b97f4a7c15ull;
         key = (key ^ (key >> 30)) * 0xbf58476d1ce4e5b9ull;
@@ -141,6 +161,9 @@ MatterGrainSeedResult seedMatterGrainBox(FluidParticles& particles,
     for (std::size_t y = 0; y < ny; ++y) {
         for (std::size_t z = 0; z < nz; ++z) {
             for (std::size_t x = 0; x < nx; ++x) {
+                if (((x + y + z) & 1u) != 0u) {
+                    continue;  // FCC: even coordinate sum only
+                }
                 if (++visited > limit) {
                     result.truncated = true;
                     return result;

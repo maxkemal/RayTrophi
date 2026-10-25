@@ -4,6 +4,7 @@
 #include "VolumeMaterialAuthoring.h"
 #include "VolumeMaterialService.h"
 #include "VDBVolume.h"
+#include "Fluid/MatterFogStreams.h"
 #include "ProjectManager.h"
 #include "Renderer.h"
 #include "Backend/IBackend.h"
@@ -25,6 +26,8 @@ struct Target {
     std::string name;
     std::shared_ptr<VolumeShader> shader;
     std::function<void(std::shared_ptr<VolumeShader>)> assign;
+    bool* visible = nullptr;
+    std::function<void(bool)> set_visible;
 };
 
 std::vector<Target> targets(UIContext& ctx) {
@@ -39,6 +42,25 @@ std::vector<Target> targets(UIContext& ctx) {
     auto& domains = ctx.scene.ensureParticleSimulationSystem().gridDomains();
     for (auto& domain : domains) {
         if (!RayTrophiSim::simulationDomainHasGas(domain.type)) {
+            continue;
+        }
+        if (domain.type == RayTrophiSim::SimulationDomainType::Matter) {
+            for (auto& [key, appearance] : domain.matter_fog_streams) {
+                auto* slot = &appearance;
+                const std::string name = domain.name + " / " +
+                    RayTrophiSim::Fluid::fogFieldName(key);
+                result.push_back({"matter:" + domain.name + ":" +
+                    RayTrophiSim::Fluid::fogFieldId(key), name, slot->shader,
+                    [slot](auto shader) { slot->shader = shader; }, &slot->visible,
+                    [&ctx, slot](bool visible) {
+                        slot->visible = visible;
+                        ctx.scene.requestSimulationTimelineRenderResync();
+                        g_geometry_dirty = true;
+                        g_vulkan_rebuild_pending = true;
+                        g_optix_rebuild_pending = true;
+                        g_bvh_rebuild_pending = true;
+                    }});
+            }
             continue;
         }
         auto* slot = domain.type == RayTrophiSim::SimulationDomainType::Matter
@@ -62,7 +84,8 @@ json executeMaterial(UIContext& ctx, const std::string& operation, const std::st
     }
     std::vector<Target> matches;
     for (auto& target : targets(ctx)) {
-        if (target.id == id) {
+        if (target.id == id || (id.rfind("gas:", 0) == 0 &&
+                target.id == "matter:" + id.substr(4) + ":gas")) {
             matches.push_back(std::move(target));
         }
     }
@@ -74,7 +97,11 @@ json executeMaterial(UIContext& ctx, const std::string& operation, const std::st
         if (!target.shader) {
             return {{"__error", "target material has not been initialized"}};
         }
-        return volume_material::inspect(*target.shader);
+        auto result = volume_material::inspect(*target.shader);
+        if (target.visible) {
+            result["visible"] = *target.visible;
+        }
+        return result;
     }
     if (rtapi::renderJobActive()) {
         return {{"__error", "scene is locked by the final render job"}};
@@ -82,7 +109,16 @@ json executeMaterial(UIContext& ctx, const std::string& operation, const std::st
     {
         VolumeShader next = target.shader ? *target.shader : VolumeShader{};
         std::string error;
-        if (!volume_material::configure(next, patch, error)) {
+        auto material_patch = patch;
+        bool visibility = target.visible ? *target.visible : true;
+        if (material_patch.contains("visible") && target.visible) {
+            if (!material_patch["visible"].is_boolean()) {
+                return {{"__error", "visible must be bool"}};
+            }
+            visibility = material_patch["visible"].get<bool>();
+            material_patch.erase("visible");
+        }
+        if (!volume_material::configure(next, material_patch, error)) {
             return {{"__error", error}, {"code", "invalid_parameter"}};
         }
         if (target.shader) {
@@ -91,6 +127,9 @@ json executeMaterial(UIContext& ctx, const std::string& operation, const std::st
             target.shader = std::make_shared<VolumeShader>(std::move(next));
         }
         target.assign(target.shader);
+        if (target.set_visible) {
+            target.set_visible(visibility);
+        }
     }
     SceneUI::syncVDBVolumesToGPU(ctx);
     ctx.renderer.resetCPUAccumulation();
@@ -126,7 +165,9 @@ const MethodDescriptor getDescriptor = {
 };
 const MethodDescriptor setDescriptor = {
     "volume.set_material", "volume", "Configure gas/VDB physical optics and emission response",
-    "Atomic overlay. Unknown keys and invalid values are rejected. Presets preserve density "
+    "Stable matter:<domain>:<field> targets persist independent Fog appearances; visible is "
+    "an optional boolean on these targets. Atomic overlay. Unknown keys and invalid values "
+    "are rejected. Presets preserve density "
     "scale and channel names. Vulkan RT random walk; RayFusion uses bounded approximation.",
     "write", "SceneWrite", false, "object", "volume|gas|vdb|material|scattering|emission",
     "volume.get_material", "volume.list_materials", nullptr, "volume.get_material",

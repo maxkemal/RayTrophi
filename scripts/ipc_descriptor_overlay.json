@@ -926,11 +926,26 @@
     "summary": "Report an object's triangle/vertex counts and its local and world bounding box",
     "returns": "ObjectInfo",
     "related": "scene.list_objects",
-    "notes": "has_bounds false means the object carries no geometry, and the bound fields are then ABSENT rather than zeroed - a zeroed box would read as a point at the origin. world_size/world_center are derived from the world box and are what an assembly check needs (does this leg actually reach that rail). 'meshes' counts how many meshes carry the name: a multi-material import is one object spread over several meshes, and the counts are the aggregate, not a first-hit sample."
+    "notes": "has_bounds false means the object carries no geometry, and the bound fields are then ABSENT rather than zeroed - a zeroed box would read as a point at the origin. world_size/world_center are derived from the world box and are what an assembly check needs (does this leg actually reach that rail). 'meshes' counts how many meshes carry the name: a multi-material import is one object spread over several meshes, and the counts are the aggregate, not a first-hit sample. 'visible' is the outliner eye (true only if every entry carrying the name is visible); scene.get_visible has the per-backend breakdown."
+  },
+  "scene.set_visible": {
+    "summary": "Show or hide an object without deleting it (the outliner eye)",
+    "notes": "Same path as the outliner toggle: every scene entry carrying the name (flat meshes, facades and their parentMesh, instances) flips, then the viewport AND render backend instance masks are updated. Showing a pending-delete object is refused. Not undoable; marks the project modified and resets accumulation.",
+    "tags": "visibility|hide|show|outliner|isolate|cost",
+    "related": "scene.get_visible|scene.object_info",
+    "verify_with": [
+      "scene.get_visible"
+    ]
+  },
+  "scene.get_visible": {
+    "summary": "Report an object's visibility: scene flags plus the instance masks each backend will actually draw/trace",
+    "notes": "visible/visible_entries come from the scene (Hittable flags). viewport_raster_* / viewport_rt_* / render_rt_* are read back from the Vulkan backends' raster and TLAS masks; -1 means that backend is absent or not Vulkan (no read-back), not zero instances. Hidden in the viewport but still traced in RT shows up only in these counts.",
+    "tags": "visibility|outliner|verify|measure",
+    "related": "scene.set_visible|scene.object_info"
   },
   "scene.generate_grains": {
     "summary": "Generate an editable grain or crystal mesh library in the scene",
-    "notes": "One undoable operation, canonical flat TriangleMesh/DNA SoA geometry. All inputs are validated before scene insertion. Optional domain binds the created objects as near-mesh scene exemplars with original materials; target must exist in the active particle system and use geometry icosphere. Scene object size is authoring geometry only: near meshes still match carrier volume. Generated geometry, UVs and material IDs use normal project geometry serialization. Existing libraries are not replaced or deleted. Voronoi may return fewer cells than requested. Legacy near_mesh_shape rock/voronoi remains readable but the Mesh Grains UI now links to this generator.",
+    "notes": "Independent procedural scene-object generator. Creates editable canonical flat TriangleMesh/DNA geometry as one undo step. Does not select output geometry or bind any emitter, substance or domain. Use Output per-substance geometry selection, or fluid.set_substance_splat_geometry, separately. Generated objects can be used for any scene task. Assignment parameters target_source and domain are not accepted.",
     "undoable": true,
     "returns": "objects, count, requested_count, type, seed, domain, examples[{object, diameter, material_id, triangles}]",
     "tags": "mesh|procedural|grain|sand|snow|crystal|voronoi|generator|material|library",
@@ -1039,10 +1054,6 @@
       "material_weights": {
         "type": "array",
         "description": "1..32 entries {material: existing name, weight: 0.00001..1000000}"
-      },
-      "domain": {
-        "type": "string",
-        "description": "optional existing liquid/Matter domain with geometry icosphere"
       }
     }
   },
@@ -1379,7 +1390,7 @@
   },
   "render.volume_stats": {
     "summary": "Return volume traversal and path-budget counters accumulated since render.volume_counters",
-    "notes": "paths_bounce_capped / paths_traced is the share of paths that were still scattering when the bounce budget ran out: a black surface with a high share is budget-starved, not unlit. paths_pass_capped counts the free-pass cap (maxBounces + 32) instead. charged_* partition every bounce spent by kind; medium_passes counts straight gas/fog continuations; they are FREE (inside free_passes) -- ~1 per box crossed is healthy, many per path is short-hop re-entry. arbiter_started_inside / arbiter_inside_found: the gas->liquid arbiter began inside a liquid and whether it found the exit. walk_* split the random walk cost (volume_closesthit volumeRandomWalk): walk_paths walks that scattered, walk_events scattering events (walk_events/walk_paths = mean walk length), walk_probe_traces solid probes after flights (one per event), walk_shadow_traces geometry shadow rays toward the light, walk_shadow_skipped NEE whose in-volume transmittance was ~0 so no ray was traced, walk_event_capped walks cut by random_walk_max_events. Compare traces vs density_samples/shadow_density_samples against render time to tell whether ray tracing or voxel sampling dominates.",
+    "notes": "paths_bounce_capped / paths_traced is the share of paths that were still scattering when the bounce budget ran out: a black surface with a high share is budget-starved, not unlit. paths_pass_capped counts the free-pass cap (maxBounces + 32) instead. charged_* partition every bounce spent by kind; medium_passes counts straight gas/fog continuations; they are FREE (inside free_passes) -- ~1 per box crossed is healthy, many per path is short-hop re-entry. arbiter_started_inside / arbiter_inside_found: the gas->liquid arbiter began inside a liquid and whether it found the exit. walk_* split the random walk cost (volume_closesthit volumeRandomWalk): walk_paths walks that scattered, walk_events scattering events (walk_events/walk_paths = mean walk length), walk_probe_traces solid probes after flights (one per event), walk_shadow_traces geometry shadow rays toward the light, walk_shadow_skipped NEE whose in-volume transmittance was ~0 so no ray was traced, walk_event_capped walks cut by random_walk_max_events. Compare traces vs density_samples/shadow_density_samples against render time to tell whether ray tracing or voxel sampling dominates. Metrics v9: shadow_density_samples now also includes mesh/splat BSDF participating-Fog shadow midpoint and integration samples, previously omitted; compare old/new counts with this expanded scope in mind. SurfaceSDF source_type 4 is surface geometry, excluded from this Fog shadow integral, as in RayFusion. shadow_steps <= 0 disables surface Fog shadows too. Metrics v10 adds sdf_main_samples/queries/skipped and sdf_arbiter_samples/queries/skipped: raw SDF search/refinement samples, uncached hierarchy classifications, and proven exterior sample positions omitted. These are separate from fog density/empty counters; interior exits and unsupported bounds retain normal sampling. Counters are opt-in and exclude normal/foam/shadow SDF reads. radiance_cache_marches / radiance_cache_fallbacks: bounce rays that crossed a gas box on the radiance cache vs. fell back to the full march. camera_* / secondary_* split volume_rays, density_samples and shadow_density_samples by whether the trace carried the camera-segment flag (bounce 0, free passes included); each class is counted on its own, so camera + secondary < total means a closest-hit never classified its trace.",
     "tags": "diagnostics|performance|volume|bounce|budget",
     "related": "render.volume_counters|render.get_settings"
   },
@@ -1634,7 +1645,7 @@
   },
   "fluid.seed": {
     "summary": "Fill a liquid domain with particles - a given box, or the domain's lower half",
-    "notes": "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is refused with both boxes in the error. particles_per_cell applies to this initial fill and becomes the solver's material-point density target. Point, object-bounds and mesh-surface flow sources use their independent fluid_particles_per_second rate. persistent=true re-seeds the box every reset. fill_level 0..1 = Fill Domain (the panel's resting tank up to that fraction of the domain height; a persistent FillLevel recipe, seed_min/seed_max ignored). Seeded parcels are the domain's Default Substance; a meltable solid (Snow, Ice) is born 10 K under its melt point when the ambient is warmer, as from a flow source.",
+    "notes": "Omit seed_min and seed_max to fill the bottom half of the domain; there is no fixed default box any more, because the old one was derived from nothing and seeded zero particles in any domain that did not contain it. A region that does not overlap the domain is refused with both boxes in the error. particles_per_cell applies to this initial fill and becomes the solver's material-point density target. Point, object-bounds and mesh-surface flow sources use their independent fluid_particles_per_second rate. persistent=true re-seeds the box every reset. fill_level 0..1 = Fill Domain (the panel's resting tank up to that fraction of the domain height; a persistent FillLevel recipe, seed_min/seed_max ignored). Seeded parcels are the domain's Default Substance; a meltable solid (Snow, Ice) is born 10 K under its melt point when the ambient is warmer, as from a flow source. grain_saturation 0..1: water each seeded DEM grain already holds, as a fraction of its substance's grain_water_capacity_fraction (the seed twin of flow_source grain_birth_saturation); positive makes the domain's grains wet so a damp packed block can be seeded. Omitted (-1) keeps the domain's authored value.",
     "tags": "simulation|liquid|water|fill|particles|initial",
     "related": "fluid.create_domain|fluid.clear|flow_source.create",
     "params": {
@@ -1652,6 +1663,9 @@
       },
       "persistent": {
         "description": "Re-apply this seed after every reset"
+      },
+      "grain_saturation": {
+        "description": "Seeded DEM grain wetness 0..1 of capacity; -1 keeps the authored value"
       }
     },
     "verify_with": [
@@ -1727,7 +1741,7 @@
   },
   "fluid.set_splat_geometry": {
     "summary": "Set splat geometry, size and render-only particle refinement",
-    "notes": "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'icosphere' is the procedural sphere cloud on RT (splat_triangles 0); 'icosphere_mesh' forces the triangle icosphere. Procedural granular spheres have a PPC-derived minimum radius equal to one MPM point's represented volume. granular_physical_carriers=true draws exactly one sphere per physical granular MPM carrier and disables attached virtual clusters for the primary sand body; this is the high-resolution granular default. virtual_grains 1..32 remains the low-resolution fill count and always controls procedural liquid/whitewater children. Virtual children are pulled toward a distance- and direction-weighted average of nearby stable carrier candidates; spray, foam and bubbles use the same proxy contract. grain_size_variation 0..0.75 varies deterministic child diameters while opposite pairs preserve represented volume. virtual_grain_budget 1000000..32000000 is a user-controlled domain cap. Its effective child count is derived from Max Particles plus enabled Max Foam, so live particle-count changes do not change proxy topology. Read primary_visual_children, whitewater_visual_children, virtual_grains_requested, virtual_grains_effective, virtual_grain_count, virtual_grain_budget and virtual_grain_rt_estimated_bytes with fluid.get; virtual_grain_count includes splat-routed whitewater. The memory estimate covers RT proxy inputs before acceleration-structure scratch. geometry 'scene_object' requires geometry_source naming a live scene node; its primary particles do not use virtual children, while procedural whitewater still does. near_mesh_shape=scene|rock|voronoi selects scene exemplars, 16 seeded rounded rocks, or a deterministic up-to-16-cell convex Voronoi library. near_mesh_source_materials=true preserves each scene exemplar face material, overriding the near domain/substance/wet material bindings; distant spheres keep their materials. Near-camera grain meshes (render-only, K0 of docs/dev/KUM_TANE_GEOMETRISI_VE_MINERAL_KARISIMI.md): near_mesh_enabled, near_mesh_sources (live scene nodes, e.g. physics.fracture_object shard_objects), near_mesh_distance (> 0 m from the active camera), near_mesh_budget (mesh instances). Needs geometry icosphere; when enabled it forces one primary visual shape per carrier (whitewater refinement is unchanged). Applies to DEM, MPM and fluid splat-routed primary particles. Particles inside the distance become triangle instances of an exemplar (stable per particle_id, volume-matched to the sphere), the rest stay procedural spheres. fluid.get grain_mesh_near reports status (off/active/why not), near_instances, near_over_budget, sphere_instances, mesh_slots, exemplars, exemplar_triangles, mean_volume_scale. Out-of-range values are rejected, not clamped.",
+    "notes": "Overlay semantics - keys you do not send keep their value. subdivisions 0..3 = 20/80/320/1280 triangles per splat (default 0); each level multiplies raster triangles and RT BLAS memory by four. geometry 'icosphere' is the procedural sphere cloud on RT (splat_triangles 0); 'icosphere_mesh' forces the triangle icosphere. Procedural granular spheres have a PPC-derived minimum radius equal to one MPM point's represented volume. granular_physical_carriers=true draws exactly one sphere per physical granular MPM carrier and disables attached virtual clusters for the primary sand body; this is the high-resolution granular default. virtual_grains 1..32 remains the low-resolution fill count and always controls procedural liquid/whitewater children. Virtual children are pulled toward a distance- and direction-weighted average of nearby stable carrier candidates; spray, foam and bubbles use the same proxy contract. grain_size_variation 0..0.75 varies deterministic child diameters while opposite pairs preserve represented volume. virtual_grain_budget 1000000..32000000 is a user-controlled domain cap. Its effective child count is derived from Max Particles plus enabled Max Foam, so live particle-count changes do not change proxy topology. Read primary_visual_children, whitewater_visual_children, virtual_grains_requested, virtual_grains_effective, virtual_grain_count, virtual_grain_budget and virtual_grain_rt_estimated_bytes with fluid.get; virtual_grain_count includes splat-routed whitewater. The memory estimate covers RT proxy inputs before acceleration-structure scratch. geometry 'scene_object' requires geometry_source naming a live scene node; its primary particles do not use virtual children, while procedural whitewater still does. near_mesh_shape=scene|rock|voronoi selects scene exemplars, 16 seeded rounded rocks, or a deterministic up-to-16-cell convex Voronoi library. near_mesh_source_materials=true preserves each scene exemplar face material, overriding the near domain/substance/wet material bindings; distant spheres keep their materials. Near-camera grain meshes (render-only, K0 of docs/dev/KUM_TANE_GEOMETRISI_VE_MINERAL_KARISIMI.md): near_mesh_enabled, near_mesh_sources (live scene nodes, e.g. physics.fracture_object shard_objects), near_mesh_distance (> 0 m from the active camera), near_mesh_budget (mesh instances). Needs geometry icosphere; legacy-only domains use one primary visual shape per carrier (whitewater refinement is unchanged); independent source mesh carriers bypass sphere refinement. These domain geometry/near_mesh defaults apply to initial fills and legacy domain-inheriting sources. Use fluid.set_substance_splat_geometry for canonical per-substance Splat geometry. Particles inside the distance become triangle instances of an exemplar (stable per particle_id, volume-matched to the sphere), the rest stay procedural spheres. fluid.get grain_mesh_near reports status (off/active/why not), near_instances, near_over_budget, sphere_instances, mesh_slots, exemplars, exemplar_triangles, mean_volume_scale. Out-of-range values are rejected, not clamped.",
     "params": {
       "near_mesh_shape": {
         "type": "string",
@@ -1857,7 +1871,7 @@
   },
   "flow_source.create": {
     "summary": "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
-    "notes": "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet.",
+    "notes": "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state.",
     "tags": "simulation|emitter|source|inject|pour|jet|flame|inflow",
     "related": "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     "returns": "FlowSourceInfo",
@@ -1930,18 +1944,171 @@
       "particle_pool_weight": {
         "type": "float",
         "description": "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit."
+      },
+      "splat_geometry": {
+        "type": "object",
+        "description": "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry."
+      }
+    }
+  },
+  "flow_source.set_splat_geometry": {
+    "undoable": true,
+    "returns": "object",
+    "summary": "Set one emitter's particle geometry without resetting simulation",
+    "notes": "Legacy source-geometry authoring compatibility. Substance Output geometry is canonical when a substance has an output binding/configuration; use fluid.set_substance_splat_geometry. Scene-object mode accepts multiple distinct scene objects. No connection to the procedural generator.",
+    "tags": "simulation|emitter|geometry|configure",
+    "related": "flow_source.get|flow_source.update|scene.generate_grains",
+    "verify_with": "flow_source.get",
+    "params": {
+      "name": {
+        "type": "string",
+        "required": true,
+        "description": "Existing flow-source name"
+      },
+      "mode": {
+        "type": "string",
+        "enum": "sphere|scene_object|mesh_grains|domain",
+        "description": "Source geometry; domain is legacy inheritance only"
+      },
+      "objects": {
+        "type": "array",
+        "description": "Scene object names. Exactly one for scene_object, one or more for mesh_grains. No duplicates."
+      },
+      "source_materials": {
+        "type": "bool",
+        "description": "Preserve exemplar face materials and UVs; false uses substance/domain/wet bindings"
+      },
+      "near_distance": {
+        "type": "float",
+        "description": "Finite camera distance > 0 m; applies only to mesh_grains"
+      },
+      "mesh_budget": {
+        "type": "integer",
+        "description": "Per-emitter mesh cap, 0..4294967295; applies only to mesh_grains"
+      }
+    }
+  },
+  "fluid.inspect_fog_fields": {
+    "summary": "Inspect separate carrier and aggregate gas Fog fields from live Matter state",
+    "notes": "Read-only on-demand diagnostic, shared with rt.fluid.inspect_fog_fields(domain). Does not step, reset, save, change routes or publish render volumes. Requires initialized Matter state. Carrier fields group by substance and physical phase; untagged carriers use the domain default substance. Gas stays aggregate, not per emitter. Returns density sums, active cells, physical temperature ranges and maximum per-cell carrier density error versus legacy aggregate deposition. Vulkan resident gas is downloaded on demand; failed reads reject. Matter virtual temperature is converted through the world/domain thermal scale and authoritative vapour inventory using the existing physical humidity inversion, not field times 3000. Missing temperatures return null ranges. Builder budget 128 MiB, additional snapshot/reference budget 128 MiB; at most 32 fields. Unknown parameters reject. render_connected reports whether populated fields have live VDB bindings; each field includes its stable material target, VDB ID and publication/visibility state. This reports publication, not an image-quality acceptance.",
+    "returns": "object",
+    "related": "fluid.get_phase_output|fluid.state_digest",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true
+      }
+    }
+  },
+  "fluid.get_phase_output": {
+    "summary": "Read the domain-wide solid, liquid and gas output routes",
+    "notes": "Matter domains only. Rendering state independent of substances, sources and physics. Defaults follow existing substance/label output; Eulerian gas supports Fog or Hidden.",
+    "returns": "object",
+    "related": "fluid.set_phase_output|fluid.get",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true
+      }
+    }
+  },
+  "fluid.set_phase_output": {
+    "summary": "Choose rendering by current phase for every substance in one Matter domain",
+    "notes": "Render-only undoable overlay. Solid/liquid accept follow|sdf|splat|fog|hidden. Gas is a grid field and accepts follow|fog|hidden. Explicit carrier phase overrides label routes, including spray; follow restores substance/label behavior. Frozen or granular/elastic carriers are solid; fluid carriers are liquid; unresolved state follows legacy routes. No virtual emitters, new particles, retagging, reset, physics changes or simulation-cache invalidation. Unknown fields and invalid routes reject the whole patch. Omitted fields keep their values. Both project save/load paths retain this table. Gas Hidden hides the gas-grid contribution, preserving carrier Fog. Gas visibility does not open boundaries or change atmospheric exchange.",
+    "undoable": true,
+    "returns": "object",
+    "related": "fluid.get_phase_output|fluid.set_label_views|fluid.set_substance_material",
+    "verify_with": "fluid.get_phase_output",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true
+      },
+      "solid": {
+        "type": "string",
+        "enum": "follow|sdf|splat|fog|hidden"
+      },
+      "liquid": {
+        "type": "string",
+        "enum": "follow|sdf|splat|fog|hidden"
+      },
+      "gas": {
+        "type": "string",
+        "enum": "follow|fog|hidden"
+      }
+    }
+  },
+  "fluid.set_substance_splat_geometry": {
+    "summary": "Set the scene geometry representing one substance in Splat output",
+    "notes": "Undoable render-only overlay stored per domain/substance, independent of emitters. sphere uses procedural spheres. scene_object selects one or more live flat scene meshes, chosen stably per particle at all distances. mesh_grains optionally falls back to spheres beyond near_distance or mesh_budget. Original face materials and UVs are preserved when source_materials=true. Non-Splat body output is unchanged. Empty/duplicate/missing geometry, invalid modes/distances/budgets and unknown fields are rejected atomically. Geometry does not change physics. The procedural generator only creates scene objects and is independent.",
+    "undoable": true,
+    "returns": "object",
+    "related": "fluid.get_substance_splat_geometry|fluid.set_substance_material|scene.generate_grains",
+    "verify_with": "fluid.get_substance_splat_geometry",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true,
+        "description": "Existing domain name"
+      },
+      "substance": {
+        "type": "string",
+        "required": true,
+        "description": "Substance output binding name"
+      },
+      "mode": {
+        "type": "string",
+        "enum": "sphere|scene_object|mesh_grains",
+        "description": "Sphere, scene mesh library at all distances, or optional near-camera mesh library"
+      },
+      "objects": {
+        "type": "array",
+        "description": "One or more distinct scene object names; multiple selection supported"
+      },
+      "source_materials": {
+        "type": "bool",
+        "description": "Preserve object face materials and UVs"
+      },
+      "near_distance": {
+        "type": "float",
+        "description": "Finite distance > 0 m, only used by mesh_grains"
+      },
+      "mesh_budget": {
+        "type": "integer",
+        "description": "Unsigned 32-bit mesh cap; zero uses spheres in mesh_grains mode"
+      }
+    }
+  },
+  "fluid.get_substance_splat_geometry": {
+    "summary": "Read the Splat geometry of one substance output",
+    "notes": "Returns saved per-domain/substance geometry; absent configuration returns Sphere defaults. Independent of emitter names.",
+    "returns": "object",
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true,
+        "description": "Existing domain name"
+      },
+      "substance": {
+        "type": "string",
+        "required": true,
+        "description": "Substance output binding name"
       }
     }
   },
   "flow_source.update": {
     "summary": "Update fields of an existing emitter, keeping everything you do not send",
-    "notes": "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet.",
+    "notes": "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state.",
     "tags": "simulation|emitter|configure",
     "related": "flow_source.create|flow_source.get",
     "params": {
       "particle_pool_weight": {
         "type": "float",
         "description": "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit."
+      },
+      "splat_geometry": {
+        "type": "object",
+        "description": "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry."
       }
     }
   },
@@ -1949,13 +2116,13 @@
     "summary": "Return one emitter's full settings",
     "tags": "simulation|emitter",
     "returns": "FlowSourceInfo",
-    "notes": " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics."
+    "notes": " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state."
   },
   "flow_source.list": {
     "summary": "List every emitter with its settings",
     "tags": "simulation|emitter|inventory",
     "returns": "FlowSourceInfo[]",
-    "notes": " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics."
+    "notes": " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state."
   },
   "flow_source.remove": {
     "summary": "Delete an emitter",
@@ -6854,5 +7021,46 @@
         "description": "viewport|render; explicit synchronous GPU readback"
       }
     }
+  },
+  "render.set_gpu_timing": {
+    "summary": "Arm or disable an opt-in 64-dispatch Vulkan camera RT GPU timestamp capture",
+    "notes": "Default off, transient. No queries, result polling, shader atomics or new waits in normal rendering. Enabling initializes/resets a timestamp query pool and waits once during explicit setup; frames add only two timestamp commands per captured camera dispatch. No automatic accumulation reset or simulation change. Refresh pending results before rearming. Captures every camera RT dispatch path, excluding photon, atmosphere, tonemap and copy commands. Total dispatch elapsed time is not separate solid/shadow shader timing. Volume atomic counters remain independently controlled.",
+    "tags": "diagnostics|performance|gpu|timestamp|capture",
+    "related": "render.gpu_timing_stats|reset_accumulation|render.volume_counters",
+    "params": {
+      "enabled": {
+        "description": "true arms a fresh capture; false stops recording and retains final results"
+      }
+    }
+  },
+  "render.gpu_timing_stats": {
+    "summary": "Read available GPU timestamp results without waiting for pending queries",
+    "notes": "Read-only explicit refresh; never vkDeviceWaitIdle, vkWaitForFences or QUERY_RESULT_WAIT_BIT. available=false means no initialized Vulkan render device. measured=false and null mean/max distinguish no results from zero cost. Each completed row includes zero-based progressive sample_index, width, height and GPU milliseconds. A capture ends recording at 64 dispatches; pending/failed report incomplete captures. sync_submit_host_wait_* is host wall time in existing synchronous submission fence waits only, not all async waits or GPU-exclusive time. Do not add it to gpu_ms. Timing excludes presentation and separate shader-component attribution. Camera, lighting, volume visibility and resolution should remain fixed for comparisons. async_slot_host_wait_* separately measures existing frame-slot waits; both host categories have measured/count flags and are not additive GPU stage times. capture_index records 0..63 order independently of progressive sample_index.",
+    "tags": "diagnostics|performance|gpu|timestamp|read",
+    "related": "render.set_gpu_timing|viewport.status|render.volume_stats"
+  },
+  "render.volume_light_cache": {
+    "summary": "Report the Vulkan RT volume light cache: settings, allocated/used bytes and the cell grid of every volume slot",
+    "notes": "The cache holds each volume's density integral toward the Nishita sun and scene lights 0..4 (point/spot/directional), filled lazily by the volume closest-hit and read by in-scatter and by surface shadows through gas. It is always on; a miss runs the old march. buffer_bytes 0 = no TLAS yet (RT only). Effectiveness is in render.volume_stats: light_cache_hits/misses/fills; on a static frame misses must fall toward zero. docs/dev/VOLUME_LIGHT_CACHE.md.",
+    "tags": "performance|volume|shadow|cache|diagnostics",
+    "related": "render.set_volume_light_cache|render.volume_stats"
+  },
+  "render.set_volume_light_cache": {
+    "summary": "Set the Vulkan RT volume light cache resolution (longest-axis cells, 8..256)",
+    "notes": "max_cells is also capped at one cell per two voxels per volume. A change re-keys every slot, so all cells refill and accumulation resets. Process state, not saved with the project. Out-of-range values are rejected. There is no off switch (removed after acceptance 2026-10-25).",
+    "tags": "performance|volume|shadow|cache",
+    "related": "render.volume_light_cache|render.volume_stats"
+  },
+  "render.volume_march_lod": {
+    "summary": "Report the Vulkan RT gas march LOD (in-scatter stride on camera/bounce segments, bounce step scale and cap)",
+    "notes": "Applies to the straight gas/fog march only (not random walk, fog mixture or SurfaceSDF). camera_light_stride / secondary_light_stride: in-scatter is evaluated every k density samples and held in between; density and transmittance stay per sample. secondary_step_scale / secondary_max_steps: density step multiplier and step cap after the first bounce (0 = authored budget). secondary_radiance_cache: bounce rays cross the box on cell-sized lookups of a per-vertex density + source-radiance cache stored in the light cache grid (isotropic phase, no area lights, no material program or companion); a missing vertex falls back to the full march (radiance_cache_marches / radiance_cache_fallbacks in render.volume_stats). 1/1/1/0 with the cache off is the exact full-quality march. Camera vs secondary sample counts are in render.volume_stats (camera_* / secondary_*). docs/dev/RT_GAS_SECONDARY_MARCH.md.",
+    "tags": "performance|volume|march|lod",
+    "related": "render.set_volume_march_lod|render.volume_stats"
+  },
+  "render.set_volume_march_lod": {
+    "summary": "Set the Vulkan RT gas march LOD; omitted fields keep their value",
+    "notes": "Ranges: camera_light_stride and secondary_light_stride 1..16, secondary_step_scale 1..16, secondary_max_steps 0 or 4..511, secondary_radiance_cache bool. Out-of-range values are rejected, not clamped. Resets accumulation. Process state, not saved with the project. Use 1/1/1/0 with the radiance cache off for the reference image.",
+    "tags": "performance|volume|march|lod",
+    "related": "render.volume_march_lod|render.volume_stats"
   }
 }

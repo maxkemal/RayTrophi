@@ -658,7 +658,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         if (vdb->render_as_isosurface) {
             gv.source_type = 4;
         } else {
-            gv.source_type = proceduralVolume ? 3 : 0;
+            gv.source_type = proceduralVolume ? 3 : (vdb->render_joint_fog ? 6 : 0);
         }
         gv.ior = (vdb->render_isosurface_ior > 1.0f) ? vdb->render_isosurface_ior : 1.33f;
         gv.surface_roughness = (vdb->render_isosurface_roughness > 0.0f)

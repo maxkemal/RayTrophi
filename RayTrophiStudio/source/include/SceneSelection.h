@@ -209,6 +209,12 @@ public:
     // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     
     void updatePositionFromSelection();
+    // Re-read the primary OBJECT's Pos/Rot/Scl from its live transform handle
+    // when the cached components no longer compose to it (an edit from the
+    // gizmo, IPC, undo or a script). Keeps the cached Euler while it still
+    // matches, so dragging Rot does not jump between equivalent angles.
+    // Returns true when the cache was stale and was refreshed.
+    bool syncObjectTransformFromHandle();
     void applyTransformToSelection(const Matrix4x4& transform);
     Matrix4x4 getSelectionMatrix() const;
     

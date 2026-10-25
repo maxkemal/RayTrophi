@@ -89,12 +89,13 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // 16: MSF surface water is kg per m^2 (2026-10-18). v11-v15 stored a 0..1
 //     moisture there; it is read and discarded (surfaces replay dry) rather
 //     than misread as kilograms.
-// The reader retains v11-v15 compatibility (missing pools read empty);
+// The reader retains v11-v16 compatibility (missing pools read empty);
 // other versions remain unsupported.
-constexpr uint32_t kVersion = 16u;
+// v17 adds per-particle flow-source provenance after the particle IDs.
+constexpr uint32_t kVersion = 17u;
 constexpr bool supportsVersion(uint32_t version) {
     return version == 11u || version == 12u || version == 13u || version == 14u ||
-           version == 15u || version == kVersion;
+           version == 15u || version == 16u || version == kVersion;
 }
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.

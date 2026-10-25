@@ -102,9 +102,9 @@ struct VkWorldDataExtended {
     float godRaysDensity;
     int   godRaysSamples;
     int   aerialFroxelReady;
-    float _aerialPad0;
-    float _aerialPad1;
-    float _aerialPad2;
+    uint  volumeMarchLod;     // packed gas march LOD (was _aerialPad0)
+    uint  volumeLightCacheLo;  // RT volume light cache address, low word (0 = none)
+    uint  volumeLightCacheHi;
     int   weatherEnabled;
     int   weatherType;
     float weatherIntensity;

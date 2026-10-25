@@ -132,10 +132,17 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 28: per-identity physical radii in the mass-buffer tail, variable-size pair contacts.
 // 29: runtime-sized Verlet lists; mixed sizes start wider and dry overflows retry.
 // 30: runtime-sized contact history with four mask words and matching CFL bounds.
-inline constexpr uint32_t kMatterGrainShaderRevision = 30;
+// 31: neighbour hash buckets hold 32 grains (contact-born dense seed).
+inline constexpr uint32_t kMatterGrainShaderRevision = 31;
 // Neighbour hash: one table of fixed-capacity buckets, filled only when the
 // neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
-inline constexpr uint32_t kMatterGrainBucketCapacity = 16;
+// ★ 32, not 16: the hash cell is 2r + rupture cap + skin = 3r when wet, and
+// a contact-born dense seed (packing 0.65, lattice step 1.474r) puts up to
+// ~14 centres in one cell at the worst alignment -- legitimate occupancy.
+// With 16 a single hash collision overflowed and held the step mid-air
+// (50k damp Sand grains, 2026-10-23). Index width: 2^26 buckets x 32 =
+// 2^31 slots, still 32-bit (static_assert in MatterGrainGpu.cpp).
+inline constexpr uint32_t kMatterGrainBucketCapacity = 32;
 inline constexpr uint32_t kMatterGrainBucketTables = 1;
 // Per-grain Verlet list: neighbours within 2r + bridge rupture cap + skin,
 // rebuilt once any grain has moved skin/2 since the last build. More

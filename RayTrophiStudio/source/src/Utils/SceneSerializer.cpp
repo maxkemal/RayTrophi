@@ -1,3 +1,6 @@
+#include "Fluid/MatterFogStreams.h"
+#include "Fluid/SourceSplatGeometryJson.h"
+#include "Fluid/MatterPhaseOutputJson.h"
 #include "Atmosphere/LensWeatherState.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "Fluid/MatterGrain.h"
@@ -401,6 +404,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_seed_min"] = vec3ToJson(d.fluid_seed_min);
     j["fluid_seed_max"] = vec3ToJson(d.fluid_seed_max);
     j["fluid_seed_particles_per_cell"] = d.fluid_seed_particles_per_cell;
+    j["fluid_seed_grain_saturation"] = d.fluid_seed_grain_saturation;
     j["fluid_reseed_on_reset"] = d.fluid_reseed_on_reset;
     j["fluid_max_particles"] = (int)d.fluid_max_particles;
     j["fluid_replace_on_seed"] = d.fluid_replace_on_seed;
@@ -445,6 +449,9 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_particle_subdivisions"] = d.fluid_particle_subdivisions;
     j["fluid_particle_geometry_mode"] = d.fluid_particle_geometry_mode;
     j["fluid_particle_geometry_source"] = d.fluid_particle_geometry_source;
+    j["fluid_substance_splat_geometry"] = d.fluid_substance_splat_geometry;
+    j["fluid_phase_output"] = d.fluid_phase_output;
+    j["matter_fog_streams"] = RayTrophiSim::Fluid::writeFogAppearances(d.matter_fog_streams);
     j["fluid_grain_mesh_near_enabled"] = d.fluid_grain_mesh_near_enabled;
     j["fluid_grain_mesh_near_source_materials"] = d.fluid_grain_mesh_near_source_materials;
     j["fluid_grain_mesh_near_shape"] = d.fluid_grain_mesh_near_shape;
@@ -628,6 +635,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_seed_min")) d.fluid_seed_min = jsonToVec3(j["fluid_seed_min"]);
     if (j.contains("fluid_seed_max")) d.fluid_seed_max = jsonToVec3(j["fluid_seed_max"]);
     if (j.contains("fluid_seed_particles_per_cell")) d.fluid_seed_particles_per_cell = j["fluid_seed_particles_per_cell"];
+    if (j.contains("fluid_seed_grain_saturation")) d.fluid_seed_grain_saturation = j["fluid_seed_grain_saturation"];
     if (j.contains("fluid_reseed_on_reset")) d.fluid_reseed_on_reset = j["fluid_reseed_on_reset"];
     if (j.contains("fluid_max_particles")) d.fluid_max_particles = j["fluid_max_particles"];
     if (j.contains("fluid_replace_on_seed")) d.fluid_replace_on_seed = j["fluid_replace_on_seed"];
@@ -687,6 +695,10 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_subdivisions")) d.fluid_particle_subdivisions = j["fluid_particle_subdivisions"];
     if (j.contains("fluid_particle_geometry_mode")) d.fluid_particle_geometry_mode = j["fluid_particle_geometry_mode"];
     if (j.contains("fluid_particle_geometry_source")) d.fluid_particle_geometry_source = j["fluid_particle_geometry_source"];
+    d.fluid_phase_output = RayTrophiSim::Fluid::readMatterPhaseOutput(j);
+    d.matter_fog_streams = RayTrophiSim::Fluid::readFogAppearances(j);
+    d.fluid_substance_splat_geometry =
+        RayTrophiSim::Fluid::readSubstanceSplatGeometries(j);
     if (j.contains("fluid_grain_mesh_near_shape"))
         d.fluid_grain_mesh_near_shape = j["fluid_grain_mesh_near_shape"];
     if (j.contains("fluid_grain_mesh_near_source_materials"))
@@ -822,6 +834,8 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["particle_pool_weight"] = fs.particle_pool_weight;
     j["fluid_temperature_override"] = fs.fluid_temperature_override;
     j["fluid_temperature_kelvin"] = fs.fluid_temperature_kelvin;
+    j["timeline_uid"] = fs.timeline_uid;
+    j["splat_geometry"] = fs.splat_geometry;
     j["grain_birth_saturation"] = fs.grain_birth_saturation;
     j["use_time_limit"] = fs.use_time_limit;
     j["start_time"] = fs.start_time;
@@ -856,6 +870,8 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     fs.particle_pool_weight = j.value("particle_pool_weight", 1.0f);
     if (j.contains("fluid_temperature_override")) fs.fluid_temperature_override = j["fluid_temperature_override"];
     if (j.contains("fluid_temperature_kelvin")) fs.fluid_temperature_kelvin = j["fluid_temperature_kelvin"];
+    fs.timeline_uid = j.value("timeline_uid", uint64_t{0});
+    fs.splat_geometry = RayTrophiSim::Fluid::readSourceSplatGeometry(j);
     if (j.contains("grain_birth_saturation")) fs.grain_birth_saturation = j["grain_birth_saturation"];
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
     if (j.contains("start_time")) fs.start_time = j["start_time"];

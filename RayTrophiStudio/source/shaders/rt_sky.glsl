@@ -59,9 +59,9 @@ struct VkWorldDataExtended {
     
     // ════════════════════════════ AERIAL PERSPECTIVE (16 bytes) — matches OptiX AtmosphereAdvanced
     int   aerialFroxelReady;    // 1 = raygen applies the aerial froxel (binding 8 slot 3)
-    float _aerialPad0;
-    float _aerialPad1;
-    float _aerialPad2;
+    uint  volumeMarchLod;     // packed gas march LOD (was _aerialPad0)
+    uint  volumeLightCacheLo;  // RT volume light cache address, low word (0 = none)
+    uint  volumeLightCacheHi;
 
     // Weather payload (passive until weather rendering is enabled)
     int   weatherEnabled;

@@ -289,9 +289,23 @@ void step(FluidParticles& particles,
         sp.compaction_hardening = params.granular_compaction_hardening;
         sp.compaction_limit = params.granular_compaction_limit;
         sp.max_stored_strain = G::kGranularMaxStoredStrain;
+        sp.snow_plasticity = params.granular_snow_plasticity;
+        sp.snow_critical_compression = params.granular_snow_critical_compression;
+        sp.snow_critical_stretch = params.granular_snow_critical_stretch;
+        sp.snow_hardening = params.granular_snow_hardening;
+        sp.snow_max_hardening = params.granular_snow_max_hardening;
+        sp.snow_min_hardening = params.granular_snow_min_hardening;
+        sp.snow_min_plastic_jacobian = G::snowMinPlasticJacobian(params.granular_density);
+        if (sp.snow_plasticity) {
+            // Same rule as the device path (FluidGpuTransferStages.inl).
+            sp.snow_max_young_modulus = G::waveLimitedYoungModulus(
+                grid.voxel_size, dt, params.granular_density);
+            sp.young_modulus = std::min(sp.young_modulus, sp.snow_max_young_modulus);
+        }
 
         G::SettleParams settle;
         settle.dt = dt;
+        if (sp.snow_plasticity) settle.damping_max_speed = G::kSnowSettleDampingMaxSpeed;
 
         const int64_t count = static_cast<int64_t>(particles.size());
         const int threads = solverThreadCount(params);
@@ -333,62 +347,15 @@ void step(FluidParticles& particles,
         // A backend that runs but reports nothing is indistinguishable from one
         // that never ran, and the strain/compaction rows are precisely how a
         // soft-material run is told apart from a diverging one.
-        double damage_sum = 0.0, plastic_sum = 0.0, bond_sum = 0.0;
+        G::countMaterialState(particles, out_stats);
         out_stats.granular_min_softening = 1.0f;
-        for (size_t p = 0; p < particles.size(); ++p) {
-            const uint32_t f = particles.granular_material_flags[p];
-            out_stats.granular_yielded_particles += (f & G::kFlagYielded) != 0u;
-            out_stats.granular_detached_particles += (f & G::kFlagDetached) != 0u;
-            out_stats.granular_invalid_particles += (f & G::kFlagInvalid) != 0u;
-            out_stats.granular_sleeping_particles += (f & G::kFlagSleeping) != 0u;
-            out_stats.granular_strain_limited_particles +=
-                (f & G::kFlagStrainLimited) != 0u;
-            out_stats.granular_compaction_capped_particles +=
-                (f & G::kFlagCompactionCapped) != 0u;
-            if (p < particles.granular_softening.size()) {
-                const float soft_p = particles.granular_softening[p];
-                if (std::isfinite(soft_p)) {
-                    out_stats.granular_min_softening =
-                        std::min(out_stats.granular_min_softening, soft_p);
-                    out_stats.granular_softened_particles += soft_p < 0.999f;
-                }
+        for (size_t p = 0; p < particles.granular_softening.size(); ++p) {
+            const float soft_p = particles.granular_softening[p];
+            if (std::isfinite(soft_p)) {
+                out_stats.granular_min_softening =
+                    std::min(out_stats.granular_min_softening, soft_p);
+                out_stats.granular_softened_particles += soft_p < 0.999f;
             }
-            const float dmg = particles.granular_damage[p];
-            if (std::isfinite(dmg)) {
-                out_stats.granular_max_damage = std::max(out_stats.granular_max_damage, dmg);
-                out_stats.granular_damaged_particles += dmg > 1.0e-4f;
-                out_stats.granular_damage_over_10_particles += dmg >= 0.10f;
-                out_stats.granular_damage_over_50_particles += dmg >= 0.50f;
-                out_stats.granular_damage_over_90_particles += dmg >= 0.90f;
-                damage_sum += dmg;
-            }
-            const float yv = particles.granular_yield_value[p];
-            if (std::isfinite(yv))
-                out_stats.granular_max_yield_value = std::max(out_stats.granular_max_yield_value, yv);
-            const float pi = particles.granular_plastic_increment[p];
-            if (std::isfinite(pi))
-                out_stats.granular_max_plastic_increment =
-                    std::max(out_stats.granular_max_plastic_increment, pi);
-            const float ap = particles.granular_hardening[p];
-            if (std::isfinite(ap)) {
-                out_stats.granular_max_accumulated_plastic =
-                    std::max(out_stats.granular_max_accumulated_plastic, ap);
-                plastic_sum += ap;
-            }
-            const float bo = particles.granular_fracture_history[p];
-            if (std::isfinite(bo)) {
-                out_stats.granular_max_fracture_history =
-                    std::max(out_stats.granular_max_fracture_history, bo);
-                bond_sum += bo;
-            }
-        }
-        if (!particles.empty()) {
-            const double inv_n = 1.0 / static_cast<double>(particles.size());
-            out_stats.granular_mean_damage = static_cast<float>(damage_sum * inv_n);
-            out_stats.granular_mean_accumulated_plastic =
-                static_cast<float>(plastic_sum * inv_n);
-            out_stats.granular_mean_fracture_history =
-                static_cast<float>(bond_sum * inv_n);
         }
         out_stats.granular_constitutive_ms =
             elapsedMs(granular_begin, SolverClock::now());

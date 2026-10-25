@@ -7811,6 +7811,9 @@ void SceneUI::rebuildMeshCache(const std::vector<std::shared_ptr<Hittable>>& obj
                 }
             }
             auto rep = std::make_shared<Triangle>(tmesh, repFace);
+            // The outliner eye reads this facade; a fresh one defaults to visible,
+            // which would show a hidden flat mesh as visible after every rebuild.
+            rep->visible = tmesh->visible;
             mesh_cache[name].push_back({ (int)i, rep });
             tri_to_index[rep.get()] = (int)i;
             direct_mesh_nodes[name] = DirectMeshNode{ tmesh, (int)i, rep };

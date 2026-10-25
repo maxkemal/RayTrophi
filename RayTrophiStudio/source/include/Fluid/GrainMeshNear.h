@@ -56,6 +56,9 @@ bool gatherNormalizedSceneFaces(const std::vector<std::shared_ptr<Hittable>>& ob
 
 struct GrainExemplar {
     std::string node;
+    uint64_t source_uid = 0;
+    bool source_materials = false;
+    bool random_orientation = true;
     std::vector<NormalizedSceneFace> faces;
     // Uniform scale applied on top of the particle diameter so the exemplar
     // encloses the same VOLUME as the sphere it replaces. A Voronoi shard

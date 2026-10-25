@@ -323,6 +323,28 @@ struct SubstanceProfile {
     float granular_damage_rate = 6.0f;           // 1/s
     float granular_healing_rate = 0.0f;          // 1/s
     bool  granular_rebonding = false;
+    // Stomakhin et al. 2013 snow plasticity. On: the skeleton is fixed-corotated
+    // elasticity with singular values clamped to [1 - theta_c, 1 + theta_s] and
+    // every modulus scaled by exp(xi (1 - J_P)); friction, cohesion, tensile,
+    // damage, rebonding and compaction_* above are not read. Off: Drucker-Prager.
+    bool  granular_snow_plasticity = false;
+    float granular_snow_critical_compression = 0.025f;  // theta_c
+    float granular_snow_critical_stretch = 0.0075f;     // theta_s
+    float granular_snow_hardening = 10.0f;              // xi
+    // Ceiling on exp(xi (1 - J_P)) when compacted. The COST knob: substeps
+    // grow with sqrt(it). 1 = no stiffening (cheapest; softening still works).
+    float granular_snow_max_hardening = 5.0f;
+    // Floor on the same multiplier: loosened snow keeps this share of its
+    // stiffness (compression included), so it re-compacts against an obstacle
+    // instead of flowing round it like pressureless dust. 0 = unfloored.
+    float granular_snow_min_hardening = 0.1f;
+    // Initial clump structure: ln J_P spread s (border parcels loosened by up
+    // to e^s, clump interiors random within half of it). Uniform snow has no
+    // weak surface and compacts evenly instead of cracking. 0 = off.
+    float granular_snow_heterogeneity = 0.1f;
+    // Clump size, m (Worley cell). Held to >= 3 voxels: finer structure is
+    // averaged away by the grid exactly like white noise.
+    float granular_snow_clump_size = 0.12f;
     // Thermal/burn softening of the skeleton; 0 K disables it (sand does not soften).
     float granular_softening_kelvin = 0.0f;      // K, midpoint
     float granular_softening_range = 40.0f;      // K, width

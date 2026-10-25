@@ -1,3 +1,6 @@
+#include "Fluid/MatterFogStreams.h"
+#include "Fluid/SourceSplatGeometryJson.h"
+#include "Fluid/MatterPhaseOutputJson.h"
 #include "Atmosphere/LensWeatherState.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "Fluid/MatterGrain.h"
@@ -5804,6 +5807,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["particle_pool_weight"] = source.particle_pool_weight;
         f["fluid_temperature_override"] = source.fluid_temperature_override;
         f["fluid_temperature_kelvin"] = source.fluid_temperature_kelvin;
+        f["splat_geometry"] = source.splat_geometry;
         f["grain_birth_saturation"] = source.grain_birth_saturation;
         f["use_time_limit"] = source.use_time_limit;
         f["start_time"] = source.start_time;
@@ -5875,6 +5879,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"seed_min", vec3ToJson(domain.fluid_seed_min)},
             {"seed_max", vec3ToJson(domain.fluid_seed_max)},
             {"seed_particles_per_cell", domain.fluid_seed_particles_per_cell},
+            {"seed_grain_saturation", domain.fluid_seed_grain_saturation},
             {"reseed_on_reset", domain.fluid_reseed_on_reset},
             {"max_particles", domain.fluid_max_particles},
             {"replace_on_seed", domain.fluid_replace_on_seed},
@@ -5971,6 +5976,9 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
         d["fluid_particle_geometry_mode"] = domain.fluid_particle_geometry_mode;
         d["fluid_particle_geometry_source"] = domain.fluid_particle_geometry_source;
+        d["fluid_substance_splat_geometry"] = domain.fluid_substance_splat_geometry;
+        d["fluid_phase_output"] = domain.fluid_phase_output;
+        d["matter_fog_streams"] = RayTrophiSim::Fluid::writeFogAppearances(domain.matter_fog_streams);
         d["fluid_grain_mesh_near_enabled"] = domain.fluid_grain_mesh_near_enabled;
         d["fluid_grain_mesh_near_shape"] = domain.fluid_grain_mesh_near_shape;
         d["fluid_grain_mesh_near_source_materials"] = domain.fluid_grain_mesh_near_source_materials;
@@ -6358,6 +6366,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.particle_pool_weight = item.value("particle_pool_weight", 1.0f);
         source.fluid_temperature_override = item.value("fluid_temperature_override", source.fluid_temperature_override);
         source.fluid_temperature_kelvin = std::max(1.0f, item.value("fluid_temperature_kelvin", source.fluid_temperature_kelvin));
+        source.splat_geometry = RayTrophiSim::Fluid::readSourceSplatGeometry(item);
         source.grain_birth_saturation = std::clamp(item.value("grain_birth_saturation", 0.0f), 0.0f, 1.0f);
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
         source.start_time = item.value("start_time", source.start_time);
@@ -6456,6 +6465,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             if (f.contains("seed_min")) domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
             if (f.contains("seed_max")) domain.fluid_seed_max = jsonToVec3(f["seed_max"]);
             domain.fluid_seed_particles_per_cell = f.value("seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
+            domain.fluid_seed_grain_saturation = std::clamp(
+                f.value("seed_grain_saturation", domain.fluid_seed_grain_saturation), 0.0f, 1.0f);
             domain.fluid_reseed_on_reset = f.value("reseed_on_reset", domain.fluid_reseed_on_reset);
             domain.fluid_max_particles = f.value("max_particles", domain.fluid_max_particles);
             domain.fluid_replace_on_seed = f.value("replace_on_seed", domain.fluid_replace_on_seed);
@@ -6598,6 +6609,10 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.fluid_particle_subdivisions = item.value("fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
         domain.fluid_particle_geometry_mode = item.value("fluid_particle_geometry_mode", domain.fluid_particle_geometry_mode);
         domain.fluid_particle_geometry_source = item.value("fluid_particle_geometry_source", domain.fluid_particle_geometry_source);
+        domain.fluid_phase_output = RayTrophiSim::Fluid::readMatterPhaseOutput(item);
+        domain.matter_fog_streams = RayTrophiSim::Fluid::readFogAppearances(item);
+        domain.fluid_substance_splat_geometry =
+            RayTrophiSim::Fluid::readSubstanceSplatGeometries(item);
         domain.fluid_grain_mesh_near_enabled = item.value("fluid_grain_mesh_near_enabled", domain.fluid_grain_mesh_near_enabled);
         domain.fluid_grain_mesh_near_shape = item.value("fluid_grain_mesh_near_shape", "scene");
         domain.fluid_grain_mesh_near_source_materials =

@@ -1,0 +1,2543 @@
+{
+  "domain": "Nuclear Gas",
+  "cases": [
+    {
+      "case": "authored",
+      "shadow_steps": 5,
+      "max_steps": 192,
+      "visible": true,
+      "shader_readback": {
+        "absorption_coefficient": 0.0,
+        "blackbody_intensity": 16.66699981689453,
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 0.0,
+        "max_steps": 192,
+        "ok": true,
+        "preset": "fire",
+        "random_walk": false,
+        "random_walk_exact_events": 4,
+        "random_walk_max_events": 32,
+        "scattering_coefficient": 0.0,
+        "shadow_steps": 5,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "voxel_step_multiplier": 0.699999988079071
+      },
+      "timings": {
+        "async_slot_host_wait_max_ms": 0.006,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.2609000000000001,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 73.226272,
+        "gpu_mean_ms": 16.60082900000004,
+        "gpu_sum_ms": 1062.4530560000026,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 0.134464,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 60.734752,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 60.621984,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 61.226464,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 63.603712,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 64.725728,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 68.409344,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 70.326496,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 72.405888,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 73.226272,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 72.439392,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 67.699552,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 65.809536,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 63.184704,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 63.52048,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 64.517344,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 63.549216,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 0.13328,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 0.134784,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 0.136192,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 0.133728,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 0.1344,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 0.13488,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 0.135616,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 0.134816,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 0.134368,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 0.137216,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 0.134752,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 0.13456,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 0.134848,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 0.137216,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 0.134368,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 0.134528,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 0.13488,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.1897,
+        "sync_submit_host_wait_measured": true,
+        "sync_submit_host_wait_ms": 1.2058,
+        "sync_submit_host_waits": 10,
+        "unit": "milliseconds"
+      },
+      "valid_for_comparison": false
+    },
+    {
+      "case": "shadow0",
+      "shadow_steps": 0,
+      "max_steps": 192,
+      "visible": true,
+      "shader_readback": {
+        "absorption_coefficient": 0.0,
+        "blackbody_intensity": 16.66699981689453,
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 0.0,
+        "max_steps": 192,
+        "ok": true,
+        "preset": "fire",
+        "random_walk": false,
+        "random_walk_exact_events": 4,
+        "random_walk_max_events": 32,
+        "scattering_coefficient": 0.0,
+        "shadow_steps": 0,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "voxel_step_multiplier": 0.699999988079071
+      },
+      "timings": {
+        "async_slot_host_wait_max_ms": 0.0093,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.2798000000000002,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 68.96448,
+        "gpu_mean_ms": 4.391128000000006,
+        "gpu_sum_ms": 281.0321920000004,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 67.665984,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 67.966272,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 68.96448,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 68.402016,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 0.133728,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 0.137216,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 0.1344,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 0.133664,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 0.135008,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 0.134208,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 0.133312,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 0.13328,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 0.133728,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 0.133856,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 0.134272,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 0.13408,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 0.13392,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 0.133696,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 0.133472,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 0.13424,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 0.13392,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 0.13376,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 0.135104,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 0.136192,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 0.134016,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 0.13392,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 0.13328,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 0.133248,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 0.13424,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 0.140288,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.1729,
+        "sync_submit_host_wait_measured": true,
+        "sync_submit_host_wait_ms": 0.1729,
+        "sync_submit_host_waits": 1,
+        "unit": "milliseconds"
+      },
+      "valid_for_comparison": false
+    },
+    {
+      "case": "shadow0_steps1",
+      "shadow_steps": 0,
+      "max_steps": 1,
+      "visible": true,
+      "shader_readback": {
+        "absorption_coefficient": 0.0,
+        "blackbody_intensity": 16.66699981689453,
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 0.0,
+        "max_steps": 16,
+        "ok": true,
+        "preset": "fire",
+        "random_walk": false,
+        "random_walk_exact_events": 4,
+        "random_walk_max_events": 32,
+        "scattering_coefficient": 0.0,
+        "shadow_steps": 0,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "voxel_step_multiplier": 0.699999988079071
+      },
+      "timings": {
+        "async_slot_host_wait_max_ms": 0.0052,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.33339999999999986,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 20.518432,
+        "gpu_mean_ms": 1.4270510000000012,
+        "gpu_sum_ms": 91.33126400000008,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 20.518432,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 20.355104,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 20.113184,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 20.052704,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 0.134784,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 0.134528,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 0.133952,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 0.133856,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 0.15504,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 0.154624,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 0.151552,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 0.15344,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 0.152576,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 0.15296,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 0.1536,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 0.152576,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 0.162816,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 0.16384,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 0.162816,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 0.163872,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 0.16384,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 0.162816,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 0.16384,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 0.162816,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 0.174752,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 0.177152,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 0.173056,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 0.174976,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 0.175104,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 0.175008,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 0.175136,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 0.187392,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 0.186368,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 0.186528,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 0.186368,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 0.186368,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 0.186368,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 0.185344,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 0.186368,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 0.186944,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 0.2048,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 0.206688,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 0.208256,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 0.207872,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 0.208896,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 0.207904,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 0.206848,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 0.20752,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 0.221024,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 0.22016,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 0.221696,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 0.22016,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 0.22016,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 0.22016,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.1811,
+        "sync_submit_host_wait_measured": true,
+        "sync_submit_host_wait_ms": 0.1811,
+        "sync_submit_host_waits": 1,
+        "unit": "milliseconds"
+      },
+      "valid_for_comparison": false
+    },
+    {
+      "case": "hidden",
+      "shadow_steps": 0,
+      "max_steps": 192,
+      "visible": false,
+      "shader_readback": {
+        "absorption_coefficient": 0.0,
+        "blackbody_intensity": 16.66699981689453,
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 0.0,
+        "max_steps": 192,
+        "ok": true,
+        "preset": "fire",
+        "random_walk": false,
+        "random_walk_exact_events": 4,
+        "random_walk_max_events": 32,
+        "scattering_coefficient": 0.0,
+        "shadow_steps": 0,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "voxel_step_multiplier": 0.699999988079071
+      },
+      "timings": {
+        "async_slot_host_wait_max_ms": 0.0101,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.3533000000000003,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 64.826176,
+        "gpu_mean_ms": 4.124274500000004,
+        "gpu_sum_ms": 263.95356800000025,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 0.134656,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 64.826176,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 62.64992,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 63.782304,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 64.666432,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 0.133248,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 0.134176,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 0.134176,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 0.135072,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 0.133248,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 0.133632,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 0.13456,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 0.133472,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 0.134016,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 0.13344,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 0.133824,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 0.13296,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 0.134368,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 0.133472,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 0.134496,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 0.134272,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 0.133664,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 0.133824,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 0.134016,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 0.133888,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 0.132096,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 0.135232,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 0.134176,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 0.134208,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 0.134432,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 0.133472,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 0.134368,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.2009,
+        "sync_submit_host_wait_measured": true,
+        "sync_submit_host_wait_ms": 0.2009,
+        "sync_submit_host_waits": 1,
+        "unit": "milliseconds"
+      },
+      "valid_for_comparison": false,
+      "invalid_reason": "Visibility request is a no-op for grid-only gas; excluded from conclusions."
+    },
+    {
+      "case": "authored_repeat",
+      "shadow_steps": 5,
+      "max_steps": 192,
+      "visible": true,
+      "shader_readback": {
+        "absorption_coefficient": 0.0,
+        "blackbody_intensity": 16.66699981689453,
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 0.0,
+        "max_steps": 192,
+        "ok": true,
+        "preset": "fire",
+        "random_walk": false,
+        "random_walk_exact_events": 4,
+        "random_walk_max_events": 32,
+        "scattering_coefficient": 0.0,
+        "shadow_steps": 5,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "voxel_step_multiplier": 0.699999988079071
+      },
+      "timings": {
+        "async_slot_host_wait_max_ms": 0.0073,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.26930000000000004,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 64.164896,
+        "gpu_mean_ms": 4.0795955,
+        "gpu_sum_ms": 261.094112,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 0.134432,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 62.911456,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 64.164896,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 63.242624,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 62.746944,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 0.133184,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 0.134688,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 0.133664,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 0.1344,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 0.1344,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 0.133984,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 0.134432,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 0.135168,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 0.133952,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 0.134432,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 0.134848,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 0.135072,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 0.133504,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 0.13408,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 0.134624,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 0.133952,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 0.135072,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 0.133856,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 0.1336,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 0.134144,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 0.135392,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 0.134208,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 0.134304,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 0.13392,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 0.13312,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 0.134464,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 0.13488,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 0.132096,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 0.134656,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 0.134016,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.2022,
+        "sync_submit_host_wait_measured": true,
+        "sync_submit_host_wait_ms": 0.2022,
+        "sync_submit_host_waits": 1,
+        "unit": "milliseconds"
+      },
+      "valid_for_comparison": false
+    }
+  ],
+  "frame": 129,
+  "original": {
+    "absorption_coefficient": 0.0,
+    "blackbody_intensity": 16.66699981689453,
+    "density_cutoff": 0.007000000216066837,
+    "density_multiplier": 0.0,
+    "max_steps": 192,
+    "ok": true,
+    "preset": "fire",
+    "random_walk": false,
+    "random_walk_exact_events": 4,
+    "random_walk_max_events": 32,
+    "scattering_coefficient": 0.0,
+    "shadow_steps": 5,
+    "shadow_strength": 0.8999999761581421,
+    "shadow_stride": 4,
+    "temperature_max": 20000.0,
+    "temperature_min": 1340.0,
+    "voxel_step_multiplier": 0.699999988079071
+  },
+  "visible": true,
+  "active_density_cells": 3734332,
+  "method": "64 natural camera RT dispatch GPU timestamps; counters off",
+  "shader_restored": true,
+  "visibility_restored": true,
+  "final_frame": 129,
+  "limitations": [
+    "GPU timestamps measure whole camera dispatch, not isolated shader stages.",
+    "Adaptive sampling retained; only equal sample indices 0..63 and unchanged camera are comparable.",
+    "gas.set_param visible does not hide grid-only gas; the hidden row is not a valid hiding ablation.",
+    "Exploratory run: plane changed during capture and sample indices include preceding in-flight work. All comparisons invalid."
+  ]
+}

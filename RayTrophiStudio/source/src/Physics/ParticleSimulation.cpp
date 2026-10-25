@@ -38,6 +38,7 @@
 #include "MaterialStateField.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
+#include "Fluid/GranularCounters.h"
 #include "Fluid/GranularStepPolicy.h"
 #include "Fluid/FluidGpuParticleUpload.h"
 #include "Fluid/FluidGpuFlipSnapshot.h"

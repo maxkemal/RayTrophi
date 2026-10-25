@@ -11,7 +11,8 @@
 // that was not drawn. Every consumer calls resolveFluidViews and reads the
 // answer; none may re-derive a view from fluid_render_mode or a binding.
 //
-// The key is (substance tag, state label). The substance decides a view
+// The key is (substance tag, carrier phase, state label). An explicitly
+// authored domain-wide phase route wins. Otherwise the substance decides a view
 // (binding representation, else the domain default); the parcel's state label
 // written by the simulation (body / spray / mist ..., see
 // docs/dev/BIRLESIK_MADDE_DOMAIN_TASARIMI.md §4.2) may then route it
@@ -57,6 +58,20 @@ enum class LabelRoute : uint8_t {
 };
 using LabelRoutes = std::array<LabelRoute, kParticleLabelCount>;
 
+// Carrier state, not a new substance or a solver switch. Gas lives on its grid.
+enum class MatterOutputPhase : uint8_t {
+    Unknown = 0,
+    Solid = 1,
+    Liquid = 2
+};
+struct MatterPhaseOutput {
+    LabelRoute solid = LabelRoute::Follow;
+    LabelRoute liquid = LabelRoute::Follow;
+    LabelRoute gas = LabelRoute::Follow; // Eulerian gas supports Fog or Hidden.
+};
+MatterOutputPhase particleOutputPhase(const FluidParticles& particles, std::size_t i);
+uint64_t phaseOutputSignature(const MatterPhaseOutput& output);
+
 // "follow" | "sdf" | "splat" | "fog" | "hidden".
 const char* labelRouteName(LabelRoute route);
 // false when `name` is not one of the names above.
@@ -75,11 +90,14 @@ std::vector<std::pair<std::string, std::string>> labelRoutesToNames(const LabelR
 // when `unknown` is routed anywhere but follow.
 bool setLabelRouteByName(LabelRoutes& routes, const std::string& label, const std::string& route);
 
-// One distinct (substance, label) pair present in the particles.
+// One distinct (substance, physical phase, label) tuple present in the particles.
 struct FluidViewKey {
     uint32_t      tag = 0;
     ParticleLabel label = ParticleLabel::Unknown;
-    bool operator==(const FluidViewKey& o) const { return tag == o.tag && label == o.label; }
+    MatterOutputPhase phase = MatterOutputPhase::Unknown;
+    bool operator==(const FluidViewKey& o) const {
+        return tag == o.tag && label == o.label && phase == o.phase;
+    }
 };
 
 struct FluidViewEntry {
@@ -94,7 +112,8 @@ struct FluidViewPlan {
     // One entry for untagged parcels, then one per named binding.
     std::vector<FluidViewEntry> entries;
     LabelRoutes label_routes = defaultLabelRoutes();
-    // (tag, label) pairs actually present in the particles.
+    MatterPhaseOutput phase_output;
+    // (tag, physical phase, label) tuples actually present in the particles.
     std::vector<FluidViewKey> live_keys;
     // Which view RESOURCES exist: an authored substance entry, a label route or
     // a live key resolves there. Stable across empty frames on purpose (a
@@ -105,9 +124,12 @@ struct FluidViewPlan {
     bool splat   = false;
     bool fog     = false;
 
-    // The substance's view, before any label route.
+    // Explicit phase output wins; Follow preserves the existing label/substance route.
+    // The substance's view, before any phase or label route.
     FluidView viewForTag(uint32_t tag) const;
-    FluidView viewFor(uint32_t tag, ParticleLabel label) const;
+    FluidView viewFor(uint32_t tag, ParticleLabel label,
+                      MatterOutputPhase phase = MatterOutputPhase::Unknown) const;
+    bool mayDrawSplat(uint32_t tag) const;
     FluidView viewForParticle(const FluidParticles& particles, std::size_t i) const;
     bool anyLiveIn(FluidView view) const;
     // Every live key resolves to `view` (so a whole-domain field can stand in).
@@ -133,8 +155,11 @@ struct FluidViewPlan {
 struct FluidViewSelection {
     const FluidViewPlan* plan = nullptr;
     FluidView view = FluidView::Surface;
+    // Optional render-only subset. Existing gathers leave this null.
+    const std::vector<uint8_t>* mask = nullptr;
     bool keeps(const FluidParticles& particles, std::size_t i) const {
-        return !plan || plan->viewForParticle(particles, i) == view;
+        return (!mask || (i < mask->size() && (*mask)[i] != 0u)) &&
+            (!plan || plan->viewForParticle(particles, i) == view);
     }
 };
 
@@ -150,7 +175,7 @@ FluidViewCounts countWhitewaterPerView(const FluidViewPlan& plan,
 
 FluidView defaultViewForMode(FluidRenderMode mode);
 
-// Distinct (tag, label) pairs present in `particles`. Parcels past the end of
+// Distinct (tag, phase, label) tuples present in `particles`. Parcels past the end of
 // the tag array count as untagged, exactly as the gathers treat them.
 std::vector<FluidViewKey> distinctViewKeys(const FluidParticles& particles);
 // Versioned form for per-frame consumers. SimulationGridDomainState::version

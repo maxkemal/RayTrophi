@@ -1,0 +1,4769 @@
+{
+  "frame": 28,
+  "camera": {
+    "aperture": 0.0,
+    "auto_exposure": true,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 2.0,
+    "focus_distance": 14.025510787963867,
+    "fov": 40.0,
+    "fstop_preset_index": 4,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "position": [
+      8.76862907409668,
+      7.148054122924805,
+      12.573163032531738
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      1.2736153602600098,
+      0.8586616516113281,
+      2.524120330810547
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "world": {
+    "atmosphere_intensity": 10.0,
+    "background_color": [
+      0.2240000069141388,
+      0.2240000069141388,
+      0.2240000069141388
+    ],
+    "mode": "solid",
+    "sun_azimuth": 170.0,
+    "sun_elevation": 15.0,
+    "sun_intensity": 10.0,
+    "sun_size": 0.5450000166893005
+  },
+  "lights": [
+    {
+      "index": 0,
+      "name": "Light_0",
+      "position": [
+        4.0,
+        5.0,
+        -3.0
+      ],
+      "type": "point"
+    }
+  ],
+  "materials_before": {
+    "matter:Physics Domain 1:carrier:78706450:1": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.30000001192092896,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.08585189282894135,
+          0.08585189282894135,
+          0.08585189282894135,
+          0.12156616151332855,
+          0.3001374900341034,
+          0.6751372814178467,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 10.0,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": true,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 2.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    },
+    "matter:Physics Domain 1:gas": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.30000001192092896,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.02335192821919918,
+          0.041209060698747635,
+          0.11263759434223175,
+          0.12156616151332855,
+          0.273351788520813,
+          0.48763740062713623,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 10.0,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": false,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 2.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    }
+  },
+  "original_timing": {
+    "async_slot_host_wait_max_ms": 0.0081,
+    "async_slot_host_wait_measured": true,
+    "async_slot_host_wait_ms": 0.34130000000000005,
+    "async_slot_host_waits": 127,
+    "available": true,
+    "capacity": 64,
+    "capturing": false,
+    "enabled": true,
+    "error": "",
+    "failed": 0,
+    "gpu_max_ms": 69.721952,
+    "gpu_mean_ms": 58.60663850000002,
+    "gpu_sum_ms": 3750.824864000001,
+    "measured": true,
+    "pending": 0,
+    "recorded": 64,
+    "samples": [
+      {
+        "capture_index": 0,
+        "gpu_ms": 59.852992,
+        "height": 945,
+        "sample_index": 35,
+        "width": 1680
+      },
+      {
+        "capture_index": 1,
+        "gpu_ms": 65.253568,
+        "height": 945,
+        "sample_index": 36,
+        "width": 1680
+      },
+      {
+        "capture_index": 2,
+        "gpu_ms": 64.065696,
+        "height": 945,
+        "sample_index": 37,
+        "width": 1680
+      },
+      {
+        "capture_index": 3,
+        "gpu_ms": 67.729632,
+        "height": 945,
+        "sample_index": 38,
+        "width": 1680
+      },
+      {
+        "capture_index": 4,
+        "gpu_ms": 64.444672,
+        "height": 945,
+        "sample_index": 39,
+        "width": 1680
+      },
+      {
+        "capture_index": 5,
+        "gpu_ms": 66.778848,
+        "height": 945,
+        "sample_index": 40,
+        "width": 1680
+      },
+      {
+        "capture_index": 6,
+        "gpu_ms": 68.34656,
+        "height": 945,
+        "sample_index": 41,
+        "width": 1680
+      },
+      {
+        "capture_index": 7,
+        "gpu_ms": 69.721952,
+        "height": 945,
+        "sample_index": 42,
+        "width": 1680
+      },
+      {
+        "capture_index": 8,
+        "gpu_ms": 65.138304,
+        "height": 945,
+        "sample_index": 43,
+        "width": 1680
+      },
+      {
+        "capture_index": 9,
+        "gpu_ms": 63.284544,
+        "height": 945,
+        "sample_index": 44,
+        "width": 1680
+      },
+      {
+        "capture_index": 10,
+        "gpu_ms": 62.241856,
+        "height": 945,
+        "sample_index": 45,
+        "width": 1680
+      },
+      {
+        "capture_index": 11,
+        "gpu_ms": 61.803648,
+        "height": 945,
+        "sample_index": 46,
+        "width": 1680
+      },
+      {
+        "capture_index": 12,
+        "gpu_ms": 60.924448,
+        "height": 945,
+        "sample_index": 47,
+        "width": 1680
+      },
+      {
+        "capture_index": 13,
+        "gpu_ms": 59.00048,
+        "height": 945,
+        "sample_index": 48,
+        "width": 1680
+      },
+      {
+        "capture_index": 14,
+        "gpu_ms": 62.629792,
+        "height": 945,
+        "sample_index": 49,
+        "width": 1680
+      },
+      {
+        "capture_index": 15,
+        "gpu_ms": 60.471008,
+        "height": 945,
+        "sample_index": 50,
+        "width": 1680
+      },
+      {
+        "capture_index": 16,
+        "gpu_ms": 57.850784,
+        "height": 945,
+        "sample_index": 51,
+        "width": 1680
+      },
+      {
+        "capture_index": 17,
+        "gpu_ms": 58.802752,
+        "height": 945,
+        "sample_index": 52,
+        "width": 1680
+      },
+      {
+        "capture_index": 18,
+        "gpu_ms": 58.800768,
+        "height": 945,
+        "sample_index": 53,
+        "width": 1680
+      },
+      {
+        "capture_index": 19,
+        "gpu_ms": 61.181952,
+        "height": 945,
+        "sample_index": 54,
+        "width": 1680
+      },
+      {
+        "capture_index": 20,
+        "gpu_ms": 62.243424,
+        "height": 945,
+        "sample_index": 55,
+        "width": 1680
+      },
+      {
+        "capture_index": 21,
+        "gpu_ms": 65.05824,
+        "height": 945,
+        "sample_index": 56,
+        "width": 1680
+      },
+      {
+        "capture_index": 22,
+        "gpu_ms": 58.236608,
+        "height": 945,
+        "sample_index": 57,
+        "width": 1680
+      },
+      {
+        "capture_index": 23,
+        "gpu_ms": 61.54432,
+        "height": 945,
+        "sample_index": 58,
+        "width": 1680
+      },
+      {
+        "capture_index": 24,
+        "gpu_ms": 57.944928,
+        "height": 945,
+        "sample_index": 59,
+        "width": 1680
+      },
+      {
+        "capture_index": 25,
+        "gpu_ms": 59.921088,
+        "height": 945,
+        "sample_index": 60,
+        "width": 1680
+      },
+      {
+        "capture_index": 26,
+        "gpu_ms": 59.010624,
+        "height": 945,
+        "sample_index": 61,
+        "width": 1680
+      },
+      {
+        "capture_index": 27,
+        "gpu_ms": 57.866816,
+        "height": 945,
+        "sample_index": 62,
+        "width": 1680
+      },
+      {
+        "capture_index": 28,
+        "gpu_ms": 60.154464,
+        "height": 945,
+        "sample_index": 63,
+        "width": 1680
+      },
+      {
+        "capture_index": 29,
+        "gpu_ms": 60.317568,
+        "height": 945,
+        "sample_index": 64,
+        "width": 1680
+      },
+      {
+        "capture_index": 30,
+        "gpu_ms": 57.3344,
+        "height": 945,
+        "sample_index": 65,
+        "width": 1680
+      },
+      {
+        "capture_index": 31,
+        "gpu_ms": 56.97952,
+        "height": 945,
+        "sample_index": 66,
+        "width": 1680
+      },
+      {
+        "capture_index": 32,
+        "gpu_ms": 58.24752,
+        "height": 945,
+        "sample_index": 67,
+        "width": 1680
+      },
+      {
+        "capture_index": 33,
+        "gpu_ms": 58.949952,
+        "height": 945,
+        "sample_index": 68,
+        "width": 1680
+      },
+      {
+        "capture_index": 34,
+        "gpu_ms": 58.599712,
+        "height": 945,
+        "sample_index": 69,
+        "width": 1680
+      },
+      {
+        "capture_index": 35,
+        "gpu_ms": 56.502432,
+        "height": 945,
+        "sample_index": 70,
+        "width": 1680
+      },
+      {
+        "capture_index": 36,
+        "gpu_ms": 55.820544,
+        "height": 945,
+        "sample_index": 71,
+        "width": 1680
+      },
+      {
+        "capture_index": 37,
+        "gpu_ms": 59.283616,
+        "height": 945,
+        "sample_index": 72,
+        "width": 1680
+      },
+      {
+        "capture_index": 38,
+        "gpu_ms": 56.56304,
+        "height": 945,
+        "sample_index": 73,
+        "width": 1680
+      },
+      {
+        "capture_index": 39,
+        "gpu_ms": 57.827584,
+        "height": 945,
+        "sample_index": 74,
+        "width": 1680
+      },
+      {
+        "capture_index": 40,
+        "gpu_ms": 54.685664,
+        "height": 945,
+        "sample_index": 75,
+        "width": 1680
+      },
+      {
+        "capture_index": 41,
+        "gpu_ms": 54.745984,
+        "height": 945,
+        "sample_index": 76,
+        "width": 1680
+      },
+      {
+        "capture_index": 42,
+        "gpu_ms": 57.136832,
+        "height": 945,
+        "sample_index": 77,
+        "width": 1680
+      },
+      {
+        "capture_index": 43,
+        "gpu_ms": 55.234208,
+        "height": 945,
+        "sample_index": 78,
+        "width": 1680
+      },
+      {
+        "capture_index": 44,
+        "gpu_ms": 55.559776,
+        "height": 945,
+        "sample_index": 79,
+        "width": 1680
+      },
+      {
+        "capture_index": 45,
+        "gpu_ms": 56.262304,
+        "height": 945,
+        "sample_index": 80,
+        "width": 1680
+      },
+      {
+        "capture_index": 46,
+        "gpu_ms": 57.213568,
+        "height": 945,
+        "sample_index": 81,
+        "width": 1680
+      },
+      {
+        "capture_index": 47,
+        "gpu_ms": 54.612672,
+        "height": 945,
+        "sample_index": 82,
+        "width": 1680
+      },
+      {
+        "capture_index": 48,
+        "gpu_ms": 55.15376,
+        "height": 945,
+        "sample_index": 83,
+        "width": 1680
+      },
+      {
+        "capture_index": 49,
+        "gpu_ms": 55.14432,
+        "height": 945,
+        "sample_index": 84,
+        "width": 1680
+      },
+      {
+        "capture_index": 50,
+        "gpu_ms": 54.061408,
+        "height": 945,
+        "sample_index": 85,
+        "width": 1680
+      },
+      {
+        "capture_index": 51,
+        "gpu_ms": 56.733536,
+        "height": 945,
+        "sample_index": 86,
+        "width": 1680
+      },
+      {
+        "capture_index": 52,
+        "gpu_ms": 55.895552,
+        "height": 945,
+        "sample_index": 87,
+        "width": 1680
+      },
+      {
+        "capture_index": 53,
+        "gpu_ms": 55.645344,
+        "height": 945,
+        "sample_index": 88,
+        "width": 1680
+      },
+      {
+        "capture_index": 54,
+        "gpu_ms": 53.379296,
+        "height": 945,
+        "sample_index": 89,
+        "width": 1680
+      },
+      {
+        "capture_index": 55,
+        "gpu_ms": 56.789792,
+        "height": 945,
+        "sample_index": 90,
+        "width": 1680
+      },
+      {
+        "capture_index": 56,
+        "gpu_ms": 52.150048,
+        "height": 945,
+        "sample_index": 91,
+        "width": 1680
+      },
+      {
+        "capture_index": 57,
+        "gpu_ms": 53.2392,
+        "height": 945,
+        "sample_index": 92,
+        "width": 1680
+      },
+      {
+        "capture_index": 58,
+        "gpu_ms": 51.152352,
+        "height": 945,
+        "sample_index": 93,
+        "width": 1680
+      },
+      {
+        "capture_index": 59,
+        "gpu_ms": 53.67008,
+        "height": 945,
+        "sample_index": 94,
+        "width": 1680
+      },
+      {
+        "capture_index": 60,
+        "gpu_ms": 54.789856,
+        "height": 945,
+        "sample_index": 95,
+        "width": 1680
+      },
+      {
+        "capture_index": 61,
+        "gpu_ms": 54.989568,
+        "height": 945,
+        "sample_index": 96,
+        "width": 1680
+      },
+      {
+        "capture_index": 62,
+        "gpu_ms": 51.337248,
+        "height": 945,
+        "sample_index": 97,
+        "width": 1680
+      },
+      {
+        "capture_index": 63,
+        "gpu_ms": 54.51184,
+        "height": 945,
+        "sample_index": 98,
+        "width": 1680
+      }
+    ],
+    "scope": "camera_rt_dispatch",
+    "support": "supported",
+    "sync_submit_host_wait_max_ms": 0.0,
+    "sync_submit_host_wait_measured": false,
+    "sync_submit_host_wait_ms": 0.0,
+    "sync_submit_host_waits": 0,
+    "unit": "milliseconds"
+  },
+  "original_counters": {
+    "arbiter_candidates": 15074540,
+    "arbiter_empty_range": 0,
+    "arbiter_gate_open": 15074540,
+    "arbiter_inside_found": 8062592,
+    "arbiter_no_box": 0,
+    "arbiter_no_crossing": 2330559,
+    "arbiter_rejects": 0,
+    "arbiter_started_inside": 8062592,
+    "available": true,
+    "charged_diffuse": 969219,
+    "charged_other": 0,
+    "charged_specular": 8013073,
+    "charged_transmission": 0,
+    "completed_intervals": 14499954,
+    "density_samples": 248223216,
+    "devices": [
+      {
+        "enabled": true,
+        "paths_traced": 18156622,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "role": "render",
+        "volume_rays": 14980967
+      },
+      {
+        "enabled": false,
+        "paths_traced": 0,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "role": "viewport",
+        "volume_rays": 0
+      }
+    ],
+    "empty_segments_skipped": 231541185,
+    "enabled": true,
+    "extinction_terminations": 480226,
+    "free_passes": 13595543,
+    "gas_handoffs": 7022264,
+    "layered_handoffs": 92573,
+    "majorant_available_queries": 249253853,
+    "majorant_queries": 249253853,
+    "majorant_segments_skipped": 3819092,
+    "medium_passes": 4671502,
+    "paths_bounce_capped": 1500,
+    "paths_pass_capped": 1,
+    "paths_traced": 18156622,
+    "region": [
+      0.0,
+      0.0,
+      1.0,
+      1.0
+    ],
+    "shadow_density_samples": 271270155,
+    "solid_probe_hits": 7995607,
+    "solid_probe_runs": 24824108,
+    "step_budget_exhausted": 787,
+    "teleports": 2298573,
+    "temporal_accepted": 2121577,
+    "temporal_rejected": 356610,
+    "topology_segments_skipped": 227722093,
+    "volume_rays": 14980967,
+    "walk_event_capped": 0,
+    "walk_events": 0,
+    "walk_paths": 0,
+    "walk_probe_traces": 0,
+    "walk_shadow_skipped": 0,
+    "walk_shadow_traces": 0
+  },
+  "fields_before": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.555873394012451,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13635,
+        "carrier_count": 78143,
+        "density_sum": 9767.87502709118,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.1500549316406,
+        "temperature_min_kelvin": 263.1497802734375,
+        "temperature_samples": 13622,
+        "vdb_id": 3,
+        "visible": true
+      },
+      {
+        "active_cells": 13807,
+        "carrier_count": 0,
+        "density_sum": 4012.878418803215,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 829.62109375,
+        "temperature_min_kelvin": 213.21754455566406,
+        "temperature_samples": 13807,
+        "vdb_id": 4,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 68
+  },
+  "cases": [
+    {
+      "fog": "both",
+      "shadows": true,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0222,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.4626999999999999,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 128.436192,
+        "gpu_mean_ms": 77.59272800000001,
+        "gpu_sum_ms": 4965.9345920000005,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 125.433056,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 128.436192,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 121.178912,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 121.456576,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 93.165344,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 85.870816,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 84.281152,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 80.402528,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 80.291744,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 79.014848,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 82.91088,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 79.1248,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 88.589888,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 84.090944,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 75.238784,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 85.207936,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 82.59456,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 85.412288,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 84.817024,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 76.123136,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 73.567552,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 75.505696,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 73.355584,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 75.960704,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 80.163424,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 70.900128,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 78.56176,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 74.851968,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 76.03216,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 70.76688,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 75.17088,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 74.088864,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 73.541088,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 71.9232,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 72.592736,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 72.462272,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 73.181344,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 72.843232,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 75.760704,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 76.331456,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 63.997888,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 71.10032,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 75.202784,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 76.913728,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 69.62336,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 73.081344,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 69.308384,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 68.253376,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 72.64336,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 70.987232,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 66.125664,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 70.004128,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 68.014144,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 69.995744,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 68.535712,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 70.053184,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 69.982816,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 66.280704,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 71.078656,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 65.265856,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 64.162752,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 70.315776,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 62.455008,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 61.349632,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 1494.6943999999999
+      }
+    },
+    {
+      "fog": "both",
+      "shadows": false,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0206,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.36400000000000016,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 84.150464,
+        "gpu_mean_ms": 35.09897349999999,
+        "gpu_sum_ms": 2246.3343039999995,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 80.64384,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 81.97808,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 84.150464,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 84.0352,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 41.100736,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 41.115168,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 37.742016,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 38.225376,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 40.06928,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 34.2464,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 36.444224,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 38.56016,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 33.978816,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 35.196416,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 33.745888,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 28.194944,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 31.87008,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 36.0576,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 32.118656,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 33.922752,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 32.37504,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 28.145664,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 33.992224,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 35.98752,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 32.112768,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 27.132832,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 32.88512,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 29.43024,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 33.380384,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 32.163008,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 29.085696,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 33.93392,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 35.799616,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 31.419904,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 32.836224,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 32.148,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 33.882112,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 31.801344,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 29.462112,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 32.30256,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 28.535104,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 28.970656,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 31.572864,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 30.032448,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 27.977888,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 30.607936,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 27.566496,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 26.19936,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 29.813216,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 28.030336,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 28.246464,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 27.227776,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 27.04448,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 28.825248,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 32.276896,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 31.608576,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 31.428768,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 30.070624,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 28.512832,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 31.11424,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 28.788192,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 29.508704,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 29.995968,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 28.706848,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 769.427008
+      }
+    },
+    {
+      "fog": "snow",
+      "shadows": true,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0062,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.34510000000000013,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 60.100224,
+        "gpu_mean_ms": 38.424551500000014,
+        "gpu_sum_ms": 2459.171296000001,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 59.449792,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 52.364512,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 60.100224,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 53.60688,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 43.920384,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 35.148608,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 45.71776,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 42.610272,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 39.580768,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 33.191936,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 32.955552,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 35.65296,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 44.135552,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 38.7848,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 41.755744,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 42.323072,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 41.03408,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 43.747072,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 37.990624,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 36.636,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 37.849408,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 41.198624,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 41.099712,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 39.763776,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 40.115232,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 38.896928,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 35.855968,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 37.066112,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 38.01808,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 33.86704,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 41.859552,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 38.123904,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 35.667968,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 41.064608,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 35.862176,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 36.800864,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 39.900192,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 32.114816,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 31.372192,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 37.734208,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 37.96688,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 36.971808,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 35.394368,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 36.016576,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 37.211392,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 35.001952,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 27.558688,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 38.187136,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 31.736576,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 33.774592,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 38.568256,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 32.08032,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 34.715488,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 31.691552,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 40.95696,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 36.148384,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 36.233248,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 34.93824,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 31.158272,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 38.220992,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 38.192544,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 30.045376,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 40.50336,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 30.960384,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 701.298816
+      }
+    },
+    {
+      "fog": "snow",
+      "shadows": false,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0279,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.3426999999999999,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 56.338048,
+        "gpu_mean_ms": 29.923627000000007,
+        "gpu_sum_ms": 1915.1121280000004,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 51.550464,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 48.38128,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 49.1872,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 56.338048,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 33.386912,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 32.98016,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 32.575712,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 33.041632,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 32.596768,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 30.878048,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 34.716448,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 31.018816,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 34.558336,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 24.463136,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 31.976352,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 25.537312,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 27.043328,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 30.12608,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 29.146688,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 23.551168,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 30.201312,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 30.148,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 30.749984,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 26.393984,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 26.203008,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 29.965088,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 23.284864,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 29.565856,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 30.023712,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 32.263008,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 26.557664,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 30.517408,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 25.063904,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 23.288832,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 32.015456,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 32.827616,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 28.705952,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 28.877696,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 27.402624,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 30.092,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 23.20576,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 23.16224,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 25.922048,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 23.150112,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 22.491136,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 29.440768,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 29.522208,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 29.441184,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 30.351744,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 25.673312,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 22.653408,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 25.808736,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 30.123072,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 28.96704,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 29.235712,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 30.838496,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 29.730752,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 26.323264,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 23.020576,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 28.76048,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 30.454304,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 25.199328,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 28.505888,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 25.928704,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 583.186624
+      }
+    },
+    {
+      "fog": "vapor",
+      "shadows": true,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0074,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.4084000000000004,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 63.326528,
+        "gpu_mean_ms": 39.145426500000006,
+        "gpu_sum_ms": 2505.3072960000004,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 63.326528,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 62.929664,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 63.077408,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 54.654528,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 44.306336,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 42.9176,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 41.961024,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 43.1488,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 49.220992,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 44.16864,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 44.450944,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 46.149504,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 45.32784,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 42.520672,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 41.11376,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 43.76896,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 34.788192,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 40.850176,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 46.309632,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 38.096832,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 40.385536,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 40.71904,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 38.223648,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 43.361696,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 37.922208,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 34.289824,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 40.48144,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 37.986176,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 40.710976,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 39.137792,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 39.489152,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 35.988384,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 34.43456,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 33.172672,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 41.62496,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 37.518112,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 33.666944,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 35.96,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 36.531264,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 37.503008,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 36.355712,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 37.266784,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 35.002432,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 34.569888,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 35.449088,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 35.193248,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 40.101056,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 36.554912,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 35.402656,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 32.83424,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 34.330304,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 33.510016,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 31.287584,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 30.890144,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 29.61824,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 35.025952,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 37.054816,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 33.0072,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 31.456512,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 29.744576,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 29.589344,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 33.470144,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 34.436512,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 30.960512,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 773.0432
+      }
+    },
+    {
+      "fog": "vapor",
+      "shadows": false,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0054,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.2983000000000001,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 53.296704,
+        "gpu_mean_ms": 27.075777000000006,
+        "gpu_sum_ms": 1732.8497280000004,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 48.86704,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 46.533728,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 47.370688,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 53.296704,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 30.861632,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 26.982304,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 28.534656,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 33.580512,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 30.0808,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 33.139072,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 26.978048,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 28.503712,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 29.266016,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 29.248128,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 26.250592,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 31.29232,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 27.5512,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 27.100608,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 26.137856,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 25.744672,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 26.229056,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 25.555264,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 25.771168,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 25.81808,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 28.202336,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 27.116256,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 30.211616,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 21.919744,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 24.022016,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 27.599648,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 24.633664,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 21.02704,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 24.626528,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 27.089536,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 25.463072,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 27.343328,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 21.30672,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 24.030368,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 24.823168,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 24.041856,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 29.83856,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 25.344,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 23.000384,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 19.980992,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 28.023328,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 24.628224,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 19.756032,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 23.33568,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 22.800032,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 26.348416,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 22.39904,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 21.841664,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 27.773056,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 23.44672,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 19.47088,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 22.944768,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 20.887552,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 26.170144,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 22.703136,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 24.829216,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 23.244288,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 25.064256,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 22.808352,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 22.060256,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 550.7859520000001
+      }
+    },
+    {
+      "fog": "none",
+      "shadows": true,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0066,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.28460000000000013,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 18.890816,
+        "gpu_mean_ms": 12.944791,
+        "gpu_sum_ms": 828.466624,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 17.896288,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 18.890816,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 17.720032,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 15.221856,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 13.334592,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 13.536256,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 13.60464,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 13.881312,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 15.728288,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 12.887872,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 11.368448,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 14.419456,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 13.05728,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 11.73392,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 13.963264,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 15.507968,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 11.560352,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 11.43808,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 13.120128,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 15.907232,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 11.386432,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 11.430912,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 13.073952,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 14.586656,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 12.991264,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 11.7424,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 13.23616,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 11.270144,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 12.656576,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 13.128256,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 11.44496,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 12.660832,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 13.063008,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 12.760032,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 13.019392,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 11.309056,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 12.449728,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 12.74544,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 11.29472,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 11.451392,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 11.578368,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 13.031104,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 12.766176,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 12.632352,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 11.390272,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 13.543424,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 13.219872,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 11.476992,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 12.289824,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 11.325088,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 15.671648,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 11.78112,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 12.65568,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 11.269888,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 12.963552,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 12.409568,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 11.558944,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 11.265536,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 11.601472,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 12.649248,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 12.352896,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 11.204512,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 12.665952,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 12.683744,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 232.752288
+      }
+    },
+    {
+      "fog": "both",
+      "shadows": true,
+      "timing": {
+        "async_slot_host_wait_max_ms": 0.0261,
+        "async_slot_host_wait_measured": true,
+        "async_slot_host_wait_ms": 0.35589999999999994,
+        "async_slot_host_waits": 127,
+        "available": true,
+        "capacity": 64,
+        "capturing": false,
+        "enabled": true,
+        "error": "",
+        "failed": 0,
+        "gpu_max_ms": 104.7672,
+        "gpu_mean_ms": 74.08690550000001,
+        "gpu_sum_ms": 4741.561952000001,
+        "measured": true,
+        "pending": 0,
+        "recorded": 64,
+        "samples": [
+          {
+            "capture_index": 0,
+            "gpu_ms": 103.32928,
+            "height": 945,
+            "sample_index": 0,
+            "width": 1680
+          },
+          {
+            "capture_index": 1,
+            "gpu_ms": 103.902912,
+            "height": 945,
+            "sample_index": 1,
+            "width": 1680
+          },
+          {
+            "capture_index": 2,
+            "gpu_ms": 104.7672,
+            "height": 945,
+            "sample_index": 2,
+            "width": 1680
+          },
+          {
+            "capture_index": 3,
+            "gpu_ms": 104.010016,
+            "height": 945,
+            "sample_index": 3,
+            "width": 1680
+          },
+          {
+            "capture_index": 4,
+            "gpu_ms": 83.166304,
+            "height": 945,
+            "sample_index": 4,
+            "width": 1680
+          },
+          {
+            "capture_index": 5,
+            "gpu_ms": 82.4328,
+            "height": 945,
+            "sample_index": 5,
+            "width": 1680
+          },
+          {
+            "capture_index": 6,
+            "gpu_ms": 79.655104,
+            "height": 945,
+            "sample_index": 6,
+            "width": 1680
+          },
+          {
+            "capture_index": 7,
+            "gpu_ms": 77.554048,
+            "height": 945,
+            "sample_index": 7,
+            "width": 1680
+          },
+          {
+            "capture_index": 8,
+            "gpu_ms": 82.184064,
+            "height": 945,
+            "sample_index": 8,
+            "width": 1680
+          },
+          {
+            "capture_index": 9,
+            "gpu_ms": 77.66336,
+            "height": 945,
+            "sample_index": 9,
+            "width": 1680
+          },
+          {
+            "capture_index": 10,
+            "gpu_ms": 80.902144,
+            "height": 945,
+            "sample_index": 10,
+            "width": 1680
+          },
+          {
+            "capture_index": 11,
+            "gpu_ms": 74.687552,
+            "height": 945,
+            "sample_index": 11,
+            "width": 1680
+          },
+          {
+            "capture_index": 12,
+            "gpu_ms": 79.158336,
+            "height": 945,
+            "sample_index": 12,
+            "width": 1680
+          },
+          {
+            "capture_index": 13,
+            "gpu_ms": 74.4344,
+            "height": 945,
+            "sample_index": 13,
+            "width": 1680
+          },
+          {
+            "capture_index": 14,
+            "gpu_ms": 78.467808,
+            "height": 945,
+            "sample_index": 14,
+            "width": 1680
+          },
+          {
+            "capture_index": 15,
+            "gpu_ms": 72.453024,
+            "height": 945,
+            "sample_index": 15,
+            "width": 1680
+          },
+          {
+            "capture_index": 16,
+            "gpu_ms": 76.302816,
+            "height": 945,
+            "sample_index": 16,
+            "width": 1680
+          },
+          {
+            "capture_index": 17,
+            "gpu_ms": 72.049856,
+            "height": 945,
+            "sample_index": 17,
+            "width": 1680
+          },
+          {
+            "capture_index": 18,
+            "gpu_ms": 77.550784,
+            "height": 945,
+            "sample_index": 18,
+            "width": 1680
+          },
+          {
+            "capture_index": 19,
+            "gpu_ms": 69.828416,
+            "height": 945,
+            "sample_index": 19,
+            "width": 1680
+          },
+          {
+            "capture_index": 20,
+            "gpu_ms": 78.674592,
+            "height": 945,
+            "sample_index": 20,
+            "width": 1680
+          },
+          {
+            "capture_index": 21,
+            "gpu_ms": 70.084064,
+            "height": 945,
+            "sample_index": 21,
+            "width": 1680
+          },
+          {
+            "capture_index": 22,
+            "gpu_ms": 75.760928,
+            "height": 945,
+            "sample_index": 22,
+            "width": 1680
+          },
+          {
+            "capture_index": 23,
+            "gpu_ms": 76.015872,
+            "height": 945,
+            "sample_index": 23,
+            "width": 1680
+          },
+          {
+            "capture_index": 24,
+            "gpu_ms": 74.965888,
+            "height": 945,
+            "sample_index": 24,
+            "width": 1680
+          },
+          {
+            "capture_index": 25,
+            "gpu_ms": 70.508448,
+            "height": 945,
+            "sample_index": 25,
+            "width": 1680
+          },
+          {
+            "capture_index": 26,
+            "gpu_ms": 73.9096,
+            "height": 945,
+            "sample_index": 26,
+            "width": 1680
+          },
+          {
+            "capture_index": 27,
+            "gpu_ms": 74.537312,
+            "height": 945,
+            "sample_index": 27,
+            "width": 1680
+          },
+          {
+            "capture_index": 28,
+            "gpu_ms": 76.008896,
+            "height": 945,
+            "sample_index": 28,
+            "width": 1680
+          },
+          {
+            "capture_index": 29,
+            "gpu_ms": 68.639776,
+            "height": 945,
+            "sample_index": 29,
+            "width": 1680
+          },
+          {
+            "capture_index": 30,
+            "gpu_ms": 74.305088,
+            "height": 945,
+            "sample_index": 30,
+            "width": 1680
+          },
+          {
+            "capture_index": 31,
+            "gpu_ms": 69.16544,
+            "height": 945,
+            "sample_index": 31,
+            "width": 1680
+          },
+          {
+            "capture_index": 32,
+            "gpu_ms": 75.499968,
+            "height": 945,
+            "sample_index": 32,
+            "width": 1680
+          },
+          {
+            "capture_index": 33,
+            "gpu_ms": 72.91456,
+            "height": 945,
+            "sample_index": 33,
+            "width": 1680
+          },
+          {
+            "capture_index": 34,
+            "gpu_ms": 74.6888,
+            "height": 945,
+            "sample_index": 34,
+            "width": 1680
+          },
+          {
+            "capture_index": 35,
+            "gpu_ms": 67.930368,
+            "height": 945,
+            "sample_index": 35,
+            "width": 1680
+          },
+          {
+            "capture_index": 36,
+            "gpu_ms": 71.923584,
+            "height": 945,
+            "sample_index": 36,
+            "width": 1680
+          },
+          {
+            "capture_index": 37,
+            "gpu_ms": 68.259872,
+            "height": 945,
+            "sample_index": 37,
+            "width": 1680
+          },
+          {
+            "capture_index": 38,
+            "gpu_ms": 73.264736,
+            "height": 945,
+            "sample_index": 38,
+            "width": 1680
+          },
+          {
+            "capture_index": 39,
+            "gpu_ms": 72.207104,
+            "height": 945,
+            "sample_index": 39,
+            "width": 1680
+          },
+          {
+            "capture_index": 40,
+            "gpu_ms": 70.630656,
+            "height": 945,
+            "sample_index": 40,
+            "width": 1680
+          },
+          {
+            "capture_index": 41,
+            "gpu_ms": 66.918688,
+            "height": 945,
+            "sample_index": 41,
+            "width": 1680
+          },
+          {
+            "capture_index": 42,
+            "gpu_ms": 71.300736,
+            "height": 945,
+            "sample_index": 42,
+            "width": 1680
+          },
+          {
+            "capture_index": 43,
+            "gpu_ms": 65.675168,
+            "height": 945,
+            "sample_index": 43,
+            "width": 1680
+          },
+          {
+            "capture_index": 44,
+            "gpu_ms": 68.858016,
+            "height": 945,
+            "sample_index": 44,
+            "width": 1680
+          },
+          {
+            "capture_index": 45,
+            "gpu_ms": 70.710528,
+            "height": 945,
+            "sample_index": 45,
+            "width": 1680
+          },
+          {
+            "capture_index": 46,
+            "gpu_ms": 69.851904,
+            "height": 945,
+            "sample_index": 46,
+            "width": 1680
+          },
+          {
+            "capture_index": 47,
+            "gpu_ms": 65.235008,
+            "height": 945,
+            "sample_index": 47,
+            "width": 1680
+          },
+          {
+            "capture_index": 48,
+            "gpu_ms": 68.997728,
+            "height": 945,
+            "sample_index": 48,
+            "width": 1680
+          },
+          {
+            "capture_index": 49,
+            "gpu_ms": 63.870048,
+            "height": 945,
+            "sample_index": 49,
+            "width": 1680
+          },
+          {
+            "capture_index": 50,
+            "gpu_ms": 70.772864,
+            "height": 945,
+            "sample_index": 50,
+            "width": 1680
+          },
+          {
+            "capture_index": 51,
+            "gpu_ms": 65.050496,
+            "height": 945,
+            "sample_index": 51,
+            "width": 1680
+          },
+          {
+            "capture_index": 52,
+            "gpu_ms": 67.74496,
+            "height": 945,
+            "sample_index": 52,
+            "width": 1680
+          },
+          {
+            "capture_index": 53,
+            "gpu_ms": 65.321344,
+            "height": 945,
+            "sample_index": 53,
+            "width": 1680
+          },
+          {
+            "capture_index": 54,
+            "gpu_ms": 66.845216,
+            "height": 945,
+            "sample_index": 54,
+            "width": 1680
+          },
+          {
+            "capture_index": 55,
+            "gpu_ms": 65.654784,
+            "height": 945,
+            "sample_index": 55,
+            "width": 1680
+          },
+          {
+            "capture_index": 56,
+            "gpu_ms": 68.2992,
+            "height": 945,
+            "sample_index": 56,
+            "width": 1680
+          },
+          {
+            "capture_index": 57,
+            "gpu_ms": 68.395072,
+            "height": 945,
+            "sample_index": 57,
+            "width": 1680
+          },
+          {
+            "capture_index": 58,
+            "gpu_ms": 71.514976,
+            "height": 945,
+            "sample_index": 58,
+            "width": 1680
+          },
+          {
+            "capture_index": 59,
+            "gpu_ms": 66.1968,
+            "height": 945,
+            "sample_index": 59,
+            "width": 1680
+          },
+          {
+            "capture_index": 60,
+            "gpu_ms": 67.972224,
+            "height": 945,
+            "sample_index": 60,
+            "width": 1680
+          },
+          {
+            "capture_index": 61,
+            "gpu_ms": 68.88128,
+            "height": 945,
+            "sample_index": 61,
+            "width": 1680
+          },
+          {
+            "capture_index": 62,
+            "gpu_ms": 68.760256,
+            "height": 945,
+            "sample_index": 62,
+            "width": 1680
+          },
+          {
+            "capture_index": 63,
+            "gpu_ms": 64.33888,
+            "height": 945,
+            "sample_index": 63,
+            "width": 1680
+          }
+        ],
+        "scope": "camera_rt_dispatch",
+        "support": "supported",
+        "sync_submit_host_wait_max_ms": 0.0,
+        "sync_submit_host_wait_measured": false,
+        "sync_submit_host_wait_ms": 0.0,
+        "sync_submit_host_waits": 0,
+        "unit": "milliseconds",
+        "first16_gpu_ms": 1358.768352
+      }
+    }
+  ],
+  "camera_restored": true,
+  "frame_restored": true,
+  "materials_restored": true,
+  "world_restored": true,
+  "fields_after": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.555873394012451,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13635,
+        "carrier_count": 78143,
+        "density_sum": 9767.87502709118,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.1500549316406,
+        "temperature_min_kelvin": 263.1497802734375,
+        "temperature_samples": 13622,
+        "vdb_id": 57,
+        "visible": true
+      },
+      {
+        "active_cells": 13807,
+        "carrier_count": 0,
+        "density_sum": 4012.878418803215,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 829.62109375,
+        "temperature_min_kelvin": 213.21754455566406,
+        "temperature_samples": 13807,
+        "vdb_id": 58,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 86
+  },
+  "physical_fields_restored": true,
+  "lights_restored": true,
+  "diagnostics_left_disabled": true,
+  "limitations": [
+    "Cube visibility, geometry, point light and solid world were held fixed; no UI geometry toggle was performed.",
+    "Adaptive sampling unchanged. Shadow-off and volume hiding are diagnostic ablations, not proposed rendering settings or isolated stage timers.",
+    "Every capture was validated as exactly sample indices 0 through 63 at 1680x945; volume atomic counters were OFF throughout timing captures.",
+    "GPU timing/counters were disabled at the end for normal use; original reports are retained in this file."
+  ]
+}

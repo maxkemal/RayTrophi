@@ -87,9 +87,15 @@ struct VkWorldDataExtended {
     // AERIAL FROXEL (16 bytes) -- raygen reads the froxel atlas in binding 8 slot 3
     // ═══════════════════════════════════════════════════════════════════════════════
     int   aerialFroxelReady;  // 1 = binding 8 slot 3 holds a froxel built for this frame's air/fog state
-    float _aerialPad0;        // (was aerial_min_distance: the artistic distance ramp is gone)
-    float _aerialPad1;
-    float _aerialPad2;
+    // Gas march LOD, packed (docs/dev/RT_GAS_SECONDARY_MARCH.md §8; layout in
+    // Backend::packVolumeMarchLod). Was _aerialPad0, an unused float, so every
+    // shader copy keeps its offset. 0 = legacy full-quality march everywhere.
+    uint32_t volumeMarchLod;
+    // Device address of the RT volume light cache (docs/dev/VOLUME_LIGHT_CACHE.md),
+    // split in two words: 0 = no cache. Were _aerialPad1/_aerialPad2 (unused
+    // floats), so every shader copy keeps its layout; only the readers rename.
+    uint32_t volumeLightCacheLo;
+    uint32_t volumeLightCacheHi;
 
     // Surface-weather payload. Retired overlay padding now carries climate;
     // offsets/types stay fixed in every shader copy of this block.

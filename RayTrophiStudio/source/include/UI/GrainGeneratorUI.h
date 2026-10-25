@@ -5,7 +5,7 @@
 struct UIContext;
 
 namespace GrainGeneratorUI {
-void requestOpen(const std::string& domain = {});
+void requestOpen();
 bool consumeOpenRequest();
 void drawPanel(UIContext& context);
 }

@@ -1,0 +1,555 @@
+{
+  "frame": 28,
+  "world_before": {
+    "atmosphere_intensity": 10.0,
+    "background_color": [
+      0.19471949338912964,
+      0.19471949338912964,
+      0.19471949338912964
+    ],
+    "mode": "solid",
+    "sun_azimuth": 170.0,
+    "sun_elevation": 15.0,
+    "sun_intensity": 10.0,
+    "sun_size": 0.5450000166893005
+  },
+  "lights_before": [
+    {
+      "index": 0,
+      "name": "Light_0",
+      "position": [
+        4.0,
+        5.0,
+        -3.0
+      ],
+      "type": "point"
+    }
+  ],
+  "fields_before": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.5728373527526855,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13596,
+        "carrier_count": 78279,
+        "density_sum": 9784.875036789923,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.1500549316406,
+        "temperature_min_kelvin": 263.1497802734375,
+        "temperature_samples": 13583,
+        "vdb_id": 78,
+        "visible": true
+      },
+      {
+        "active_cells": 13721,
+        "carrier_count": 0,
+        "density_sum": 3996.469082772732,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 798.17578125,
+        "temperature_min_kelvin": 220.23670959472656,
+        "temperature_samples": 13721,
+        "vdb_id": 79,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 93
+  },
+  "cases": [
+    {
+      "mode": "solid",
+      "directional_present": false,
+      "fog": "both",
+      "elapsed_s": 4.1616603000002215,
+      "samples_before": 2,
+      "samples_after": 65,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 6596306,
+        "volume_rays": 6277769,
+        "density_samples": 147892142,
+        "shadow_density_samples": 119932910,
+        "solid_probe_runs": 6278242,
+        "paths_pass_capped": 2,
+        "paths_bounce_capped": 668,
+        "empty_segments_skipped": 16033156
+      },
+      "per_path": {
+        "density_samples": 22.42044896037267,
+        "shadow_density_samples": 18.181829345091025,
+        "solid_probe_runs": 0.9517814970985276
+      },
+      "progressive_samples_per_second": 15.138188957901404
+    },
+    {
+      "mode": "solid",
+      "directional_present": false,
+      "fog": "snow",
+      "elapsed_s": 4.125363799999832,
+      "samples_before": 2,
+      "samples_after": 90,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 7096405,
+        "volume_rays": 9936700,
+        "density_samples": 113899367,
+        "shadow_density_samples": 29325931,
+        "solid_probe_runs": 9937605,
+        "paths_pass_capped": 8,
+        "paths_bounce_capped": 33640,
+        "empty_segments_skipped": 1194812191
+      },
+      "per_path": {
+        "density_samples": 16.050291239014683,
+        "shadow_density_samples": 4.132505261466898,
+        "solid_probe_runs": 1.400371737520618
+      },
+      "progressive_samples_per_second": 21.331452028546813
+    },
+    {
+      "mode": "solid",
+      "directional_present": true,
+      "fog": "both",
+      "elapsed_s": 4.306065200000376,
+      "samples_before": 2,
+      "samples_after": 39,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        },
+        {
+          "index": 1,
+          "name": "Sun",
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "type": "directional"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 6316538,
+        "volume_rays": 4965001,
+        "density_samples": 126227661,
+        "shadow_density_samples": 162092784,
+        "solid_probe_runs": 4965263,
+        "paths_pass_capped": 1,
+        "paths_bounce_capped": 417,
+        "empty_segments_skipped": 164429899
+      },
+      "per_path": {
+        "density_samples": 19.98367792610446,
+        "shadow_density_samples": 25.661649466844022,
+        "solid_probe_runs": 0.7860734788581973
+      },
+      "progressive_samples_per_second": 8.592531297481694
+    },
+    {
+      "mode": "solid",
+      "directional_present": true,
+      "fog": "snow",
+      "elapsed_s": 4.126884799999971,
+      "samples_before": 2,
+      "samples_after": 69,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        },
+        {
+          "index": 1,
+          "name": "Sun",
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "type": "directional"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 6933484,
+        "volume_rays": 8625197,
+        "density_samples": 103694795,
+        "shadow_density_samples": 43356423,
+        "solid_probe_runs": 8625922,
+        "paths_pass_capped": 12,
+        "paths_bounce_capped": 25922,
+        "empty_segments_skipped": 1355842337
+      },
+      "per_path": {
+        "density_samples": 14.955655050188332,
+        "shadow_density_samples": 6.2531943536611605,
+        "solid_probe_runs": 1.2440963302143626
+      },
+      "progressive_samples_per_second": 16.2350061237475
+    },
+    {
+      "mode": "nishita",
+      "directional_present": true,
+      "fog": "both",
+      "elapsed_s": 4.338659100001678,
+      "samples_before": 2,
+      "samples_after": 31,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        },
+        {
+          "index": 1,
+          "name": "Sun",
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "type": "directional"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 5964649,
+        "volume_rays": 4133384,
+        "density_samples": 102905784,
+        "shadow_density_samples": 188307912,
+        "solid_probe_runs": 4133592,
+        "paths_pass_capped": 1,
+        "paths_bounce_capped": 321,
+        "empty_segments_skipped": 164356942
+      },
+      "per_path": {
+        "density_samples": 17.25261352344455,
+        "shadow_density_samples": 31.570661073266844,
+        "solid_probe_runs": 0.6930151296413251
+      },
+      "progressive_samples_per_second": 6.684092788020332
+    },
+    {
+      "mode": "nishita",
+      "directional_present": true,
+      "fog": "snow",
+      "elapsed_s": 4.1739550000002055,
+      "samples_before": 2,
+      "samples_after": 60,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        },
+        {
+          "index": 1,
+          "name": "Sun",
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "type": "directional"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 7079399,
+        "volume_rays": 9254224,
+        "density_samples": 100674631,
+        "shadow_density_samples": 52325089,
+        "solid_probe_runs": 9255098,
+        "paths_pass_capped": 11,
+        "paths_bounce_capped": 20147,
+        "empty_segments_skipped": 1574521266
+      },
+      "per_path": {
+        "density_samples": 14.22078780981267,
+        "shadow_density_samples": 7.391176708644336,
+        "solid_probe_runs": 1.307328206815296
+      },
+      "progressive_samples_per_second": 13.895693652662079
+    },
+    {
+      "mode": "nishita",
+      "directional_present": false,
+      "fog": "both",
+      "elapsed_s": 4.222605800001475,
+      "samples_before": 2,
+      "samples_after": 40,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 6371071,
+        "volume_rays": 5275594,
+        "density_samples": 128697822,
+        "shadow_density_samples": 171314151,
+        "solid_probe_runs": 5275897,
+        "paths_pass_capped": 2,
+        "paths_bounce_capped": 434,
+        "empty_segments_skipped": 45518287
+      },
+      "per_path": {
+        "density_samples": 20.200343395953364,
+        "shadow_density_samples": 26.88938029414521,
+        "solid_probe_runs": 0.8281020569383075
+      },
+      "progressive_samples_per_second": 8.999182447953519
+    },
+    {
+      "mode": "nishita",
+      "directional_present": false,
+      "fog": "snow",
+      "elapsed_s": 4.181041300000288,
+      "samples_before": 2,
+      "samples_after": 69,
+      "lights": [
+        {
+          "index": 0,
+          "name": "Light_0",
+          "position": [
+            4.0,
+            5.0,
+            -3.0
+          ],
+          "type": "point"
+        }
+      ],
+      "display": {
+        "display_available": true,
+        "display_frames": 6255,
+        "display_loop_period_ms": 17.3614,
+        "display_post_ms": 0.0,
+        "display_post_was_noop_copy": false,
+        "display_texture_upload_ms": 0.0
+      },
+      "counters": {
+        "paths_traced": 7418615,
+        "volume_rays": 10584292,
+        "density_samples": 115640666,
+        "shadow_density_samples": 42623405,
+        "solid_probe_runs": 10585338,
+        "paths_pass_capped": 15,
+        "paths_bounce_capped": 22807,
+        "empty_segments_skipped": 1598330383
+      },
+      "per_path": {
+        "density_samples": 15.587905020007105,
+        "shadow_density_samples": 5.745466640336505,
+        "solid_probe_runs": 1.4268617524969283
+      },
+      "progressive_samples_per_second": 16.02471613949266
+    }
+  ],
+  "method": "natural Vulkan display loop; no viewport.render_frames/CPU rendering",
+  "world_after": {
+    "atmosphere_intensity": 10.0,
+    "background_color": [
+      0.19471949338912964,
+      0.19471949338912964,
+      0.19471949338912964
+    ],
+    "mode": "solid",
+    "sun_azimuth": 170.0,
+    "sun_elevation": 15.0,
+    "sun_intensity": 10.0,
+    "sun_size": 0.5450000166893005
+  },
+  "lights_after": [
+    {
+      "index": 0,
+      "name": "Light_0",
+      "position": [
+        4.0,
+        5.0,
+        -3.0
+      ],
+      "type": "point"
+    }
+  ],
+  "frame_after": 28,
+  "fields_after": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.5728373527526855,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13596,
+        "carrier_count": 78279,
+        "density_sum": 9784.875036789923,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.1500549316406,
+        "temperature_min_kelvin": 263.1497802734375,
+        "temperature_samples": 13583,
+        "vdb_id": 132,
+        "visible": true
+      },
+      {
+        "active_cells": 13721,
+        "carrier_count": 0,
+        "density_sum": 3996.469082772732,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 798.17578125,
+        "temperature_min_kelvin": 220.23670959472656,
+        "temperature_samples": 13721,
+        "vdb_id": 133,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 111
+  },
+  "restored": true,
+  "limitations": [
+    "Volume instrumentation enabled: throughput is not uninstrumented UI FPS.",
+    "Short natural-loop windows with adaptive sampling; per-path values include differing surviving path populations.",
+    "Display telemetry frame counter stayed unchanged and was not used for timing.",
+    "viewport.render_frames was excluded: its current implementation invokes Renderer::render_progressive_pass (CPU), even with Vulkan selected.",
+    "Live VDB IDs/state_version changed on authoring resync; restoration compares authored world/lights, frame and physical field statistics excluding those transient identifiers."
+  ]
+}

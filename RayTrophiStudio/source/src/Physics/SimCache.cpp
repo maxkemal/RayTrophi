@@ -466,6 +466,10 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
             }
             writePod(os, d.particles.particle_id[i]);
         }
+        for (uint64_t i = 0; i < pcount; ++i) {
+            writePod(os, i < d.particles.birth_source_uid.size()
+                ? d.particles.birth_source_uid[i] : uint64_t{0});
+        }
         // ── Physical parcel mass (v7) ────────────────────────────────────────
         // Both values are required: rest_mass_kg identifies the parcel's kg at
         // birth, while mass_fraction records how much survives phase exchange.
@@ -685,6 +689,10 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.particle_id.resize(static_cast<size_t>(pcount));
         if (!readParticleIdentities(is, d.particles.particle_id,
                                     d.particles.next_particle_id)) {
+            return false;
+        }
+        d.particles.birth_source_uid.assign(static_cast<std::size_t>(pcount), 0);
+        if (version >= 17u && !readPodArray(is, d.particles.birth_source_uid)) {
             return false;
         }
         if (!readParticleFloatColumns<2>(is, static_cast<std::size_t>(pcount),

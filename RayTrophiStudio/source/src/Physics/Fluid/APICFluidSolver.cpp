@@ -17,6 +17,7 @@
 #include "SimulationWorld.h"
 #include "ForceField.h"
 #include "Fluid/GranularConstitutive.h"
+#include "Fluid/GranularCounters.h"
 #include "MaterialStateField.h"
 
 #include <algorithm>
@@ -499,9 +500,12 @@ void seedBox(FluidParticles& particles,
 // Expressing the force per unit particle mass makes V_p cancel against
 // m_p = rho*V_p and leaves 1/rho -- independent of voxel size and particles per
 // cell. Do not "fix" this into h^3/ppc.
+// ★★ rho is the Default Substance's density. It was the constant 1600 (Sand),
+// so every lighter skeleton was pushed by its stress 1600/rho times too weakly:
+// Snow (400 kg/m^3) carried a quarter of its stiffness and slumped.
 static void granularStressToGrid(const FluidParticles& parts,
                                  const FluidSim::FluidGrid& grid,
-                                 int comp, float dt,
+                                 int comp, float dt, float density,
                                  std::vector<float>& vfield) {
     const float h = grid.voxel_size;
     if (!(h > 1.0e-6f) || dt == 0.0f) return;
@@ -509,7 +513,7 @@ static void granularStressToGrid(const FluidParticles& parts,
     if (parts.granular_stress_diag.size() != n ||
         parts.granular_stress_shear.size() != n) return;
     const float invH = 1.0f / h;
-    const float inv_density = 1.0f / RayTrophiSim::Fluid::Granular::kGranularDensity;
+    const float inv_density = 1.0f / std::max(density, 1.0f);
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
     const int xmax = (comp == 0) ? nx : nx - 1;
     const int ymax = (comp == 1) ? ny : ny - 1;
@@ -705,7 +709,7 @@ static void particleToGrid(const FluidParticles& parts,
         // as the Vulkan path, where the granular kernel is dispatched between
         // sim_fluid_p2g_scatter and sim_fluid_p2g_normalize.
         if (params.granular_enabled)
-            granularStressToGrid(parts, grid, comp, dt, vfield);
+            granularStressToGrid(parts, grid, comp, dt, params.granular_density, vfield);
 
         // Weight normalization: per-index, no cross-cell dependency, so
         // safe to parallelize over the whole field.

@@ -58,6 +58,15 @@ bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
     params.granular_damage_rate = s->granular_damage_rate;
     params.granular_healing_rate = s->granular_healing_rate;
     params.granular_rebonding = s->granular_rebonding;
+    params.granular_snow_plasticity = s->granular_snow_plasticity;
+    params.granular_snow_critical_compression = s->granular_snow_critical_compression;
+    params.granular_snow_critical_stretch = s->granular_snow_critical_stretch;
+    params.granular_snow_hardening = s->granular_snow_hardening;
+    params.granular_snow_max_hardening = s->granular_snow_max_hardening;
+    params.granular_snow_min_hardening = s->granular_snow_min_hardening;
+    params.granular_snow_heterogeneity = s->granular_snow_heterogeneity;
+    params.granular_snow_clump_size = s->granular_snow_clump_size;
+    params.granular_density = s->density;
     params.granular_softening_temperature = s->granular_softening_kelvin;
     params.granular_softening_range = s->granular_softening_range;
     params.granular_residual_strength = s->granular_residual_strength;

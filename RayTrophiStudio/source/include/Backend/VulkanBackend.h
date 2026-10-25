@@ -24,6 +24,7 @@
 #define VULKAN_BACKEND_H
 
 #include <vulkan/vulkan.h>
+#include "VulkanRayGpuTiming.h"
 #include <vector>
 #include <cstdint>
 #include <limits>
@@ -1045,6 +1046,13 @@ public:
      * @brief Trace rays (ray tracing pipeline)
      */
     void traceRays(uint32_t width, uint32_t height, uint32_t depth = 1);
+    bool setRayGpuTiming(bool enabled, std::string& error);
+    RayGpuTimingSnapshot rayGpuTimingStats();
+    bool rayGpuTimingEnabled() const {
+        return m_rayGpuTiming && m_rayGpuTiming->enabled();
+    }
+    uint32_t beginRayGpuTiming(VkCommandBuffer command, uint32_t width, uint32_t height);
+    void endRayGpuTiming(VkCommandBuffer command, uint32_t token);
     // Trace rays + image→buffer copy in a single command buffer (1 GPU sync instead of 4)
     bool traceRaysAndReadback(uint32_t width, uint32_t height, const ImageHandle& outputImage, const BufferHandle& stagingBuffer);
     
@@ -1273,6 +1281,7 @@ public:
     VkBuffer m_instancePrepareBoundOutputs[2]{};
     uint32_t findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties);
     bool m_rtPipelineReady = false;
+    std::unique_ptr<VulkanRayGpuTiming> m_rayGpuTiming;
     bool m_hasVolumeShaders = false; // Whether pipeline includes volume procedural hit group
     bool m_hasHairShaders = false; // Whether pipeline includes hair procedural hit group
     bool m_hasSphereShaders = false; // Whether pipeline includes foam point-sphere procedural hit group
@@ -1859,6 +1868,42 @@ class RayFusionBounceResources;
 class MaterialPreviewSdfSurfaceResources;
 class MaterialPreviewVolumeResources;
 
+// Vulkan RT volume light cache resolution (docs/dev/VOLUME_LIGHT_CACHE.md):
+// longest-axis cells, [8, 256]. Process state shared by every adapter; only an
+// adapter that builds a TLAS allocates a cache. The cache is always on - its
+// A/B switch was removed after acceptance (2026-10-25).
+int volumeLightCacheMaxCells();
+void setVolumeLightCacheMaxCells(int maxCells);
+
+// Vulkan RT gas march LOD (docs/dev/RT_GAS_SECONDARY_MARCH.md §8). Process
+// state shared by every adapter, uploaded in the world buffer.
+//   *_light_stride       in-scatter evaluated every k density samples, held
+//                        in between (1 = every sample, the legacy march)
+//   secondary_step_scale density step multiplier off the camera segment
+//   secondary_max_steps  step budget off the camera segment (0 = authored)
+//   secondary_radiance_cache  bounce rays cross the box on the radiance cache
+//                        (cell-sized lookups) instead of the full march (§13)
+// 1 / 1 / 1 / 0 without the radiance cache reproduces the march before this
+// setting existed.
+struct VolumeMarchLod {
+    // 1 since the 2026-10-25 A/B: a camera stride of 2 bought nothing on the
+    // full scene (368 -> 374 ms) and drew horizontal bands in shadowed gas.
+    int camera_light_stride = 1;
+    int secondary_light_stride = 4;
+    // 2 / 128 since the nuclear-scene A/B (2026-10-25): a 32-step cap cut a
+    // long bounce chord into ~0.7 m steps and brightened the ground +8/255
+    // through fiery gas; 2 / 128 kept -30% for +1/255.
+    int secondary_step_scale = 2;
+    int secondary_max_steps = 128;
+    bool secondary_radiance_cache = true;
+};
+VolumeMarchLod volumeMarchLod();
+void setVolumeMarchLod(const VolumeMarchLod& lod);
+// bits 0-3 camera stride-1, 4-7 secondary stride-1, 8-11 step scale-1,
+// 12-20 secondary max steps (0 = no cap), 21 secondary radiance cache.
+// Mirrors volume_closesthit.rchit.
+uint32_t packVolumeMarchLod(const VolumeMarchLod& lod);
+
 // Maximum number of texture descriptor slots available to shaders.
 // Both the RT (binding 6) and raster-preview (binding 1) descriptor arrays
 // are sized to this value. Shaders declare runtime arrays ([]) so no shader
@@ -2321,6 +2366,21 @@ public:
     void resetVolumePerformanceStats(bool enabled = true,
                                      const VulkanRT::VolumeInstrumentationRegion& region = {});
     VulkanRT::InstancePreparationStats getInstancePreparationStats() const;
+    // Volume light cache (docs/dev/VOLUME_LIGHT_CACHE.md).
+    struct VolumeLightCacheStatus {
+        struct Slot { int slot = -1; int dims[3] = {0, 0, 0}; uint64_t bytes = 0; bool keyed = false; };
+        uint64_t buffer_bytes = 0;
+        uint64_t used_bytes = 0;
+        uint32_t channels = 0;
+        uint64_t header_publishes = 0;
+        std::vector<Slot> slots;
+    };
+    VolumeLightCacheStatus volumeLightCacheStatus() const;
+    // Re-derive the cache header from the last published volume slots (after a
+    // settings change). Forces every slot to refill.
+    void refreshVolumeLightCache();
+    // Re-upload the world buffer after a volume march LOD change.
+    void refreshVolumeMarchLod();
     // Procedural sphere cloud (one AABB BLAS): live records and pool capacity.
     uint64_t proceduralSphereRecordCount() const { return m_foamSphereRecords.size(); }
     uint32_t proceduralSpherePoolCapacity() const { return m_foamSpherePoolCapacity; }
@@ -2330,6 +2390,9 @@ public:
     // Vulkan-specific access
     // ========================================================================
     VulkanRT::VulkanDevice* getVulkanDevice() { return m_device.get(); }
+    bool setRayGpuTimingCapture(bool enabled, std::string& error);
+    VulkanRT::RayGpuTimingSnapshot rayGpuTimingCaptureStats();
+    bool rayGpuTimingCaptureEnabled();
     // Live dense-gas grids this backend holds its OWN copy of, because it does
     // not own the simulation compute device. See m_denseGasBuffers.
     std::size_t denseGasMirrorBufferCount() const { return m_denseGasBuffers.size(); }
@@ -3083,6 +3146,23 @@ public:
     bool pickObjectAtNormalized(float u, float v, ObjectPickResult& out);
     bool pickObjectAtPixel(int x, int y, ObjectPickResult& out);
     void destroyObjectPick();
+
+    // Read-back of the visibility masks this backend will actually trace/draw
+    // for one node name. Hittable::visible is the scene's INTENT; these masks
+    // are what setVisibilityByNodeName wrote into the TLAS and raster instance
+    // buffers. A disagreement between the two (hidden in the viewport, still
+    // traced in RT) is only measurable from here.
+    struct NodeMaskCounts {
+        int rt_instances = 0;
+        int rt_visible = 0;
+        int raster_instances = 0;
+        int raster_visible = 0;
+        // Whole-backend totals: "0 instances of this name" only means "dropped
+        // by a rebuild while hidden" when the backend holds instances at all.
+        int rt_instances_all = 0;
+        int raster_instances_all = 0;
+    };
+    NodeMaskCounts countInstanceMasksByNodeName(const std::string& nodeName);
 protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapanmali
     uint32_t m_taaHistoryParity = 0;   // bu karenin yazdigi history slotu
     Matrix4x4 m_taaPrevViewProj;       // JITTERSIZ, yeniden izdusum icin
@@ -3821,6 +3901,25 @@ private:
     // Re-lay the cached slots into the current TLAS order. No-op when the order
     // is unchanged or nothing has been published yet.
     void republishVolumeSlotsForTLASOrder();
+
+    // ── Volume light cache (docs/dev/VOLUME_LIGHT_CACHE.md) ─────────────────
+    // One GPU_ONLY buffer: a 512-byte header (slot table) followed by entries
+    // the volume closest-hit fills lazily. The shader finds it through the world
+    // buffer (volumeLightCacheLo/Hi), so a reallocation must re-upload the world.
+    //
+    // `stamps` carries one content stamp per published slot (NanoVDB/dense
+    // versions). A publish path that cannot know the versions passes an empty
+    // vector, and every slot gets a fresh epoch instead: refilling is the safe
+    // answer to "did the density change?", reusing is not.
+    void publishVolumeLightCache(const std::vector<uint64_t>& stamps);
+    VulkanRT::BufferHandle m_volumeLightCache{};
+    VolumeLightCacheStatus m_volumeLightCacheStatus;
+    std::vector<uint64_t> m_volumeLightCacheStamps;   // last stamps, slot order
+    std::vector<uint32_t> m_volumeLightCacheHeader;   // last uploaded header words
+    VkBuffer m_volumeLightCacheHeaderBuffer = VK_NULL_HANDLE;  // buffer it went to
+    uint64_t m_volumeLightCacheEpoch = 0;
+    uint64_t m_volumeLightCacheAddressUploaded = 0;   // address in the last world upload
+    bool m_worldUploadedOnce = false;
     // Cached lights when device not yet ready
     std::vector<std::shared_ptr<Light>> m_cachedLights;
     // Cached world data when device not yet ready

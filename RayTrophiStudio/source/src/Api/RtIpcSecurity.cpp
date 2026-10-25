@@ -308,6 +308,11 @@ uint32_t requiredCapabilities(const std::string& method) {
     // changes nothing, and a Read-only agent must be able to tell "compiling"
     // from "broken" before it trusts samples == 0.
     if (method == "render.rt_pipeline_status") return Read;
+    if (method == "render.gpu_timing_stats") return Read;
+    // Cache size/slot report only; render.set_volume_light_cache stays Render.
+    if (method == "render.volume_light_cache") return Read;
+    // LOD report only; render.set_volume_march_lod stays Render.
+    if (method == "render.volume_march_lod") return Read;
     if (method.rfind("render.", 0) == 0) {
         if (method == "render.start" || method == "render.start_sequence")
             return Render | FilesWrite;
@@ -324,6 +329,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // would make the honest path the privileged one.
     if (method == "sim.control_state") return Read;
     if (method == "fluid.matter_models") return Read;
+    if (method == "fluid.inspect_fog_fields") return Read;
     if (method == "fluid.grain_reference") return Read;
     if (method == "fluid.grain_settings") return Read;
     if (method == "fluid.particle_extremes") return Read;
@@ -411,6 +417,10 @@ uint32_t requiredCapabilities(const std::string& method) {
     // GPU secimi de yalnizca OKUR: bir obje-ID hedefi cizip tek piksel geri
     // okur, secimi DEGISTIRMEZ.
     if (method == "scene.pick_gpu") return Read;
+    // Outliner eye. get_visible only reads flags and backend masks; set_visible
+    // changes what renders and marks the project modified.
+    if (method == "scene.get_visible") return Read;
+    if (method == "scene.set_visible") return SceneWrite;
     // scene.export_estimate writes NOTHING - not the scene, not a file. It only
     // reports what an export WOULD cost, so it must not demand FilesWrite the
     // way scene.export_gltf does, and must not fall through to SceneWrite.

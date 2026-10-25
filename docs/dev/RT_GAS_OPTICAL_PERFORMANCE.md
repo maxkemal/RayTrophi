@@ -1,6 +1,6 @@
 # RT gas optical traversal performance
 
-> **Durum:** AKTİF — 2026-10-22; tek materyalli NanoVDB yolu, kullanıcı build/ölçümü bekliyor.
+> **Durum:** AKTİF — 2026-10-25; kutu daraltması canlı doğrulandı; iç içe katı izi (Seçenek A) ölçüldü, gaz march'ını ~2.8× yavaşlattı ve GERİ ALINDI. Gaz içi splat maliyetinin asıl kaynağı devir izi değil march'ın kendisi. Sıradaki: ince/geniş içerik için blok başına çoklu AABB.
 
 Kaynak başına materyal sistemi geri alındı ve kullanıcı eski davranışı doğruladı.
 Bu parti yalnız mevcut RT maliyetini azaltır. Fog'un gas emitter blackbody
@@ -326,3 +326,258 @@ build A/B. Her iki SPIR-V hash/boyut/opcode sayısı, ilk pipeline total ve vars
 stage feedback, aynı sahne RT kontrol süreleri saklanmalı. Çalışan shader/cache
 silinmemeli; app'i yeniden açıp aynı binary/SPIR-V ile warm pipeline süresi de
 ayrı ölçülmeli. Phase-cache kodunu kaldırma veya -O kapatma bu partide yapılmadı.
+
+## 2026-10-25 — Çoklu emitterli domain sahnesi: maliyet katmanları
+
+Kare 28, rendered, `gas:Physics Domain 1` (authored scatter 2, density x10,
+shadow_steps 8/stride 4). Aynı araç (`rt_probe_gas_cost_ipc.py --apply`) +
+ayrı bir `visible=false` koşusu; materyal restore true, kare 28 korundu.
+Wall ms/RT örnek; authored tekrarları 237–292 oynadı (±25 ms gürültü).
+
+| Durum | ms | density/vr | SDF arbiter/vr | shadow/vr | probe/vr |
+|---|---:|---:|---:|---:|---:|
+| gaz gizli (`visible=false`) | 125 | – | – | – | – |
+| scatter1 density0 | 160 | 22.8 | 31.1 | 3.1 | 1.60 |
+| scatter0 | 247 | 24.5 | 31.1 | 6.6 | 1.59 |
+| scatter1 | 266 | 25.8 | 32.4 | 15.4 | 1.50 |
+| scatter1 shadow_steps0 | 259 | 25.9 | 32.4 | 7.4 | 1.50 |
+| authored (scatter2) | 291 | 26.4 | 33.0 | 16.1 | 1.48 |
+
+Okuma (22 Ekim sahnesinden FARKLI):
+- Gazın toplam payı ~125→~290 ms. Içeriden ışığa march (scatter0→scatter1/2,
+  shadow_steps0) bu sahnede yalnız ~20–45 ms, gürültü sınırında. 22 Ekim'deki
+  "scatter 2.5x" bulgusu bu sahneye genellenemez.
+- density0 bile +35 ms: kutu girişi, march iskeleti, solid probe ve **SDF
+  arbiter**. Arbiter bu sahnede her volume ışınında açık (gate_open =
+  volume_rays) ve ışın başına ~31 örnekle gaz density örneğinden FAZLA iş
+  yapıyor (280M vs 224M). 22 Ekim'de 0'dı; SurfaceSDF+gaz örtüşmesi yeni aday.
+- Görünür gazın kendisi +87 ms (density0→scatter0). scatter0'da da 6.6
+  shadow/vr var; bunlar in-scatter değil, yüzey NEE gölgesinin gazı march
+  etmesi (`computeVolumeShadowTransmittance`, density0'da `continue`).
+  "Çevreden seken ışığın domaine tekrar girmesi" bu kalemdir; ayrı zaman
+  ölçümü yok.
+- ★ Ölçüm aracı açığı: stride16 satırının sayaçları scatter1 ile 15 haneye
+  kadar AYNI. Enstrümanlı pencere tazelenmemiş olmalı; o satırın sayaçları
+  geçersiz (ms değeri ayrı ölçüldüğü için geçerli).
+
+Sonuç: ışık geçirgenlik hacmi doğru ilk adım, çünkü hem in-scatter hem yüzey
+gölgesi kalemlerini tek okumaya indirir; ama bu sahnede beklenen kazanç
+~2x değil, onlarca ms. SDF arbiter ayrı ve aynı büyüklükte bir kalem.
+
+RT pipeline cache (aynı gün): disk cache SİLİNMEMİŞ. Açılışta 11 199 KB blob
+aynı shader damgası ve driver UUID ile yüklendi, driver yine 168.4 s derledi,
+kaydedilen blob birebir aynı boyutta (driver yeni girdi eklemedi). Yani
+VkPipelineCache tasarlandığı gibi çalışıyor ama NVIDIA RT pipeline'ın bir
+kısmını (muhtemelen link/stage-arası optimizasyon) her açılışta yeniden
+yapıyor; soğuk derleme 313–495 s idi. Aynı gün ikinci açılışta da ~168 s
+çıkıp çıkmadığı ölçülmedi.
+
+## 2026-10-25 — Yalnız splat sahnesi: görünmeyen sis akışı karenin %80'i
+
+Kullanıcı: domain içinde yalnız splat ve bir collider küp varken bile, kamera
+domain'e yakınsa RT çok pahalı. Ölçüm aracı: `scripts/test/rt_domain_layer_cost_ipc.py`
+(her hacim hedefini tek tek gizler / yoğunluğu 0 yapar; `vdb:` kimlikleri her
+yayında değiştiği için yalnız kalıcı `matter:` hedeflerini kullanır).
+
+| Durum (kare 28) | ms/örnek |
+|---|---:|
+| hepsi görünür | 161–189 |
+| "Snow [Solid]" taşıyıcı Fog akışı gizli | **31** |
+| aynı akış yoğunluk 0 (metadata ile etkisiz) | **31** |
+| hepsi gizli | 23 |
+
+Baseline sayaçları: yol başına 3.2 hacim ışını, 2.42 devir (handoff), hacim
+ışını başına 1 solid probe (%76 isabet), 16.7 yoğunluk örneği, 18.8 boş atlama.
+Görüntü A/B (64 spp): akış açık/kapalı farkı (ortalama |Δ| 0.0009) aynı ayarla
+iki çekim arasındaki gürültüden (0.0034) küçük. Yani akış görüntüye bir şey
+katmıyor.
+
+Kök (iki ayrı şey):
+1. **Rota:** `label_routes.spray = fog`. Sınıflandırıcı kümeden kopan 217
+   parçacığı "spray" etiketliyor; 52'si katı kar ve Fog'a gidiyor
+   (`fluid.inspect_fog_fields`: 384 dolu hücre, en yüksek yoğunluk 0.10).
+   Kullanıcının "Hidden" seçimi GAZ fazının rotası; etiket rotasını kapsamıyor.
+   Karar kullanıcıda (katı faz spray/mist rotasını izlemeli mi).
+2. **Yapı:** Matter Fog akışı tam ızgara kutusuyla bağlanıyordu (`bindLiveVolume`).
+   Yoğun gazda "dolu kutu" daraltması vardı, ama yalnız SSBO kırpma kutusunu
+   daraltıyordu; TLAS kutusu `getWorldBounds()` = tam ızgara. NanoVDB topolojisi
+   yalnız ÖRNEK atlatır. Işının kutuya girmesini, yani closest-hit + probe +
+   boş march + devir izini engelleyemez. Kameraya yakın domain'de bu her yolda
+   her sekmede tekrarlanıyor.
+
+Düzeltme (yazıldı, derlenmedi): `VDBVolume::shrinkLiveBoundsToOccupied`. Yerleşim
+aynı, yerel kutu dolu hücrelere daralıyor (+1 hücre trilinear payı, 8 hücrelik
+bloğa dışa yuvarlama ki kutu her karede değişip TLAS güncellemesi istemesin).
+TLAS kutusu, SSBO kırpma kutusu, raster aralığı ve OptiX paket kutusu aynı
+kaynaktan türediği için hepsi birlikte daralıyor. Yalnız Matter Fog akışlarına
+uygulandı. CPU Embree BVH kutuyu kurulumda okuduğu için kutu BÜYÜDÜĞÜNDE
+`g_bvh_rebuild_pending` kalkıyor. Sonra (takip): eski domain sis yolu
+(`FluidDomainFogVolume.cpp`, adımlı güncelleme) aynı daraltmayı almadı.
+
+### Devam: ilk sahne, faz rotalarıyla ölçüm (Fog daraltması derlenmiş build)
+
+Fog akışı kutuları daralmış geldi ("Snow [Solid]" [0.8–4.8]×[0.8–4.0]×[0–4.8],
+gaz [0–5]×[0–2.4]×[0–5]). Ama içerik domain'in çoğunu kaplıyor, kazanç küçük.
+Kullanıcının şikâyeti: "her şey splat / hidden yapınca maliyet düşmüyor".
+`fluid.set_phase_output` ile ölçüldü (sonunda geri yüklendi):
+
+| solid / liquid / gas | ms/örnek | kalan hacim slotu |
+|---|---:|---|
+| follow / sdf / fog (kayıtlı hali) | 253–303 | kar Fog, gaz, sıvı SDF |
+| splat / **sdf** / hidden | **135** | yalnız sıvı SurfaceSDF, kutu [0,5]³ |
+| splat / splat / hidden | **26** | yok |
+| splat / hidden / hidden | 25 | yok |
+| hidden / hidden / hidden | 25 | yok |
+| splat / splat / fog | 262 | gaz |
+| hidden / hidden / fog | 84 | gaz |
+
+- Rotalar maliyeti kapatıyor, ama ÜÇ faz için de seçilince. Kayıtlı sahnede
+  sıvı = sdf: eriyen kar (9 301 parsel) bir SurfaceSDF hacmi yayınlıyor ve kutusu
+  tüm domain. Katı splat + gaz hidden durumunda kalan 111 ms'nin tamamı bu.
+  Kullanıcının "hidden maliyeti kapatmıyor" gözlemi buydu.
+- Splat'lar bir gaz kutusunun içindeyse gazın maliyeti ~3 katına çıkıyor
+  (84 → 262): her splat sekmesi kutunun içinden başlıyor, probe + devir izi ödüyor.
+- ★ Önceki "hepsi gizli = 46 ms" yanıltıcıydı: `visible=false` karı Fog'a
+  yönlendirilmiş halde gizliyordu, yani splat de çizilmiyordu.
+
+Düzeltme (yazıldı, derlenmedi): SurfaceSDF / host gaz yayın yolunda
+(`scene_data.h`, yükleme bloğu) dolu kutu yüklemede hesaplanıyor (köpük kanalı
+da dolu sayılıyor), `VDBVolume::live_occupied_*` üzerinde saklanıyor ve her
+`bindLiveVolume`'dan sonra `applyLiveOccupiedBounds()` ile uygulanıyor.
+(Yükleme imza kapılı, bağlama her karede ve kutuyu tam ızgaraya sıfırlıyor.)
+Canlı GPU gazında uygulanmıyor: o yol cihazdaki yoğun tamponu okur, host
+kopyasından türetilen kutu canlı dumanı kırpabilir.
+
+### Canlı doğrulama: SurfaceSDF kutu daraltması (derlenmiş build)
+
+| solid / liquid / gas | önce | sonra |
+|---|---:|---:|
+| follow / sdf / fog | 253–303 | 301 |
+| splat / sdf / hidden | 135 | **77** |
+| splat / splat / hidden | 26 | 31 |
+| hidden / hidden / hidden | 25 | 31 |
+
+SDF slotu [0,5]³ → [0,5]×[0,2.4]×[0,5]. x/z tam kalıyor, çünkü erime suyu küpü
+sarıyor ve zeminde düzensiz birikintilerle domain zemininin çoğuna yayılıyor.
+Görüntüde kırpılma ya da düz kesik yok (yalnız su rotası, 48 spp, göz kontrolü).
+Kalan ~46 ms suyun gerçek yüzeyi artı tek kutunun üst kısmındaki hava: ince ve
+geniş bir birikinti, tek AABB'nin en kötü durumu. Sonraki yapısal adım (yazılmadı):
+dolu bloklara bölünmüş çoklu AABB (BLAS'ta blok başına bir kutu). Tam kare
+(follow / sdf / fog) değişmedi, çünkü kar Fog'u ve buhar gerçekten domain'i
+kaplıyor.
+
+Kullanıcı kabulü (aynı gün): buhar Hidden maliyeti kapatıyor; yalnız splat
+(katı/sıvı splat, gaz hidden) sahnesinde hiçbir hacim slotu yayınlanmıyor,
+kare 28'de 25–27 ms/örnek (önceki şikâyette 135–161 ms).
+
+## 2026-10-25 — Gaz kutusu içindeki splat'lar gazı ~3 kat pahalılaştırıyor: kök
+
+Aynı sahne, kare 28, `fluid.set_phase_output` ile (geri yüklendi). Yol başına:
+
+| | yalnız splat | yalnız gaz | splat + gaz |
+|---|---:|---:|---:|
+| ms/örnek | 31 | 94 | **311** |
+| sekme izi (diffuse+specular) | 2.48 | 0.77 | 2.07 |
+| hacim girişi | 0 | 1.74 | 2.53 |
+| probe izi | 0 | 1.74 | 2.54 |
+| probe isabeti = devir izi | 0 | 0.74 | **1.92** |
+| teleport (boş kutu → yeniden iz) | 0 | 1.01 | 0.62 |
+| yoğunluk örneği | 0 | 57 | 39 |
+| ışık önbelleği isabet / kaçırma | – | 19.3 / 0.01 | 7.7 / 0.11 |
+
+Gaz tek başına ucuz, çünkü ışınların çoğu kutuyu boş geçiyor. Splat kutunun
+içindeyse HER sekme: kutu girişi + closest-hit → splat'ı bulan probe izi →
+splat'a kadar march → aynı splat'ı gölgelemek için raygen'den devir izi →
+gölgeleme. Yol başına iz ~2.5'ten ~7'ye çıkıyor; bu tam olarak gözlenen ~3 kat.
+March/gölge örneği payı küçük; yüzey gölgeleri önbellekten okunuyor.
+
+Probe ve devir AYNI yüzeyi iki kez buluyor: probe en yakın mesafeyi bulur
+(`shadow_anyhit` sentinel'i, `NoOpaque` yüzünden her aday için any-hit), devir
+aynı ışını orijinden tekrar izler. Seçenekler (karar bekliyor):
+- **A (yapısal):** probe'u gölgeleyen iz yap. Hacim closest-hit'i katıyı ana
+  yük tipinde (ikinci bir yük konumu) iç içe izler; yüzey closest-hit'i
+  gölgelemeyi orada yapar; gaz katının mesafesine kadar march edilir; sonuç
+  `T·yüzey + gaz` olarak birleşir. Devir izi ve raygen'deki ikinci geçiş kalkar
+  (yol başına −1.9 iz). Bedel: özyineleme derinliği +1, büyük bir yük yığında,
+  ıskalama durumunda miss shader'ının kısaltılması gerekir, ve çekirdek iz
+  döngüsünün sekme bütçesi/AOV sözleşmesine dokunulur.
+- **B (ucuz):** gaz devrine SDF devrinin kullandığı `plSolidHandoffWord` tMin
+  ipucunu ver (yalnız tMin; tMax değil, çünkü alfa kesiği probe'un kabul ettiği
+  yüzeyi reddedebilir). Devir izi kalır ama solidT'den önceki BVH düğümlerini
+  atlar. Kazanç sınırlı.
+
+### Seçenek A yazıldı (2026-10-25, derlenmedi; shader + C++): iç içe katı izi
+
+Hacim closest-hit'i (düz march yolu) artık probe yerine katıyı ANA yük tipinde
+(konum 2, `solidPayload`) iç içe izliyor. Yüzey closest-hit'i onu orada
+gölgeliyor, dönüşte `volumeTraversalMask`'a `gl_HitTEXT` yazıyor
+(`PL_NESTED_SOLID`, `primaryMeta` bit 23). Gaz o mesafeye kadar march ediliyor
+ve `volumeAdoptNestedSolid` sonucu `gaz + T·yüzey`, verim `T·yüzey_verimi`,
+saçılma ise yüzeyinki olarak döndürüyor. Raygen'deki devir izi bu yolda yok.
+
+- Miss: bayrak varsa gökyüzü hesaplanmadan döner (maske 0 = katı yok).
+- Fog karışımı ve random walk eski mesafe probe'unu kullanmaya devam ediyor:
+  kendi devirlerini solidT'den yapıyorlar, iç içe gölgeleme orada boşa giderdi.
+  SDF (izoyüzey) dalının probe'una dokunulmadı.
+- Alfa kesiği iç içe izde kamera ışınındaki gibi any-hit'te çözülüyor.
+  Eski probe `NoOpaque` ile her adayı kabul ediyordu.
+- Özyineleme derinliği 2 → 3 (raygen → hacim CH → iç içe yüzey CH → gölge).
+  Yığın dinamik değil; driver varsayılan yığını derinliğe göre büyütür.
+- ★ Davranış farkı: eski yolda katının önündeki gaz geçişi BOUNCE_SPECULAR
+  olarak bir sekme harcıyordu ("Specular includes the gas march continuation").
+  Artık tek iz = yüzeyin sekmesi. Gaz içindeki yollar bir sekme daha derine
+  gidebilir, görüntü bazı yerlerde hafifçe parlaklaşabilir. Bu hata değil,
+  eski yolun fazladan sekme harcamasının kalkmasıdır.
+- Sayaç: `gas_handoffs` artık "katı bulundu ve çözüldü" anlamında (iç içe
+  gölgeleme dahil). Raygen'deki ikinci iz yok, bu yüzden `charged_specular`
+  ve `free_passes` düşmeli.
+- Kaynak kontrolü: `scripts/test/check_nested_solid_contracts.py` → OK.
+
+### Seçenek A ölçüldü: gerileme, geri alındı (2026-10-25)
+
+Aynı sahne, kare 28, `fluid.set_phase_output` (geri yüklendi). Kullanıcı
+gözlemi "maliyet arttı gibi" doğru çıktı. Yol başına:
+
+| | yalnız splat | yalnız gaz | splat + gaz |
+|---|---:|---:|---:|
+| ms/örnek, A'dan önce | 31 | 94 | 311 |
+| ms/örnek, A ile | 24.7 | **265.3** | **405.6** |
+| hacim girişi | 0 | 1.74 | 2.27 |
+| probe = iç içe iz | 0 | 1.74 | 2.27 |
+| katı bulundu | 0 | 0.73 | 1.74 |
+| teleport | 0 | 1.01 | 0.53 |
+| yoğunluk örneği | 0 | 58.4 | 34.5 |
+| sekme izi (diffuse+specular) | 2.40 | 0.77 | 2.07 |
+
+Okuma:
+- **İş miktarı değişmedi, iş başına süre değişti.** gas_only'de giriş, probe,
+  isabet, teleport ve yoğunluk örneği A'dan önceki değerlerle aynı. Kare süresi
+  2.8 kat. Aynı sayıda işin pahalılaşması iz sayısıyla değil, shader'ın kendi
+  hızıyla ilgili.
+- **Artış yoğunluk örneğiyle orantılı.** gas_only +171 ms / 58 örnek ≈ 2.9 ms
+  örnek başına. Aynı oran splat_gas'ın 34.5 örneğine ~+100 ms verir. Ölçülen
+  +94 ms; yani devir izinin kalkması en fazla ~10 ms kazandırdı. Aday kök:
+  march döngüsü yavaşladı. Hacim closest-hit'i içine ikinci bir 22 dword'lük
+  ana yük konumu ve tam yüzey gölgelendiricisini çağıran bir iz eklemek,
+  register baskısını ya da yığın kullanımını march döngüsünün tamamına yaydı.
+  Kanıt dolaylı: sürücünün shader istatistiği okunmadı.
+- **splat_only etkilenmedi** (hacim slotu yok, kod yolu hiç çalışmıyor). Bu da
+  maliyetin özyineleme derinliği ya da pipeline geneli değil, hacim
+  closest-hit'inin kendisi olduğunu destekliyor.
+- **Teşhisin düzeltmesi:** önceki bölümdeki "yol başına ~7 iz, tam olarak ~3
+  kat" okuması yanlıştı. Devir izi ucuzdu: kalkınca ~10 ms kazanıldı. Gaz
+  içindeki splat'ların maliyeti, her sekmenin gaza YENİDEN girip march etmesi
+  (yol başına 2.3–2.5 giriş). Hedef iz sayısı değil, ikincil sekmelerdeki
+  march'ın fiyatı.
+
+Geri alındı (shader + özyineleme 2; `check_nested_solid_contracts.py` silindi).
+Ders: hacim closest-hit'ine yeni bir iz ya da büyük yük eklemek march'ın
+fiyatını değiştirir. Ekleme ucuz görünse bile önce yalnız gaz durumunu ölç.
+
+Sıradaki aday (karar bekliyor): ikincil sekmelerde (bounce ≥ 1) march'ı
+ucuzlatmak. Seçenekler: daha seyrek adım, ya da in-scatter'ı ışık
+önbelleğinden okuyup yalnız geçirgenliği march etmek.
+
+Geri alma canlı doğrulandı (aynı gün, aynı sahne/kare): splat_only 27.4,
+gas_only 97.0, splat_gas 294.5 ms/örnek. Sayaçlar A'dan önceki değerlerde
+(giriş 1.75 / 2.29, yoğunluk örneği 58 / 33). Gerileme tamamen A'dandı.

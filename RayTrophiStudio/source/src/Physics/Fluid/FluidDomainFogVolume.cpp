@@ -57,6 +57,15 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     if (d >= system.domain_fog_vdb_ids.size() || d >= system.domain_fog_volumes.size()) return;
     const bool matter_gas =
         desc.type == RayTrophiSim::SimulationDomainType::Matter;
+    if (matter_gas) {
+        if (system.domain_fog_vdb_ids[d] >= 0 || system.domain_fog_volumes[d]) {
+            removeFogDomainVolume(system, d);
+        }
+        syncMatterFogStreams(system, d, state, desc, mgr, render_enabled, force_sync);
+        return;
+    }
+    const bool draw_gas = matter_gas &&
+        desc.fluid_phase_output.gas != RayTrophiSim::Fluid::LabelRoute::Hidden;
 
     // No fog view (or the domain is not rendered at all): the resource goes.
     // plan.fog is stable across empty frames by construction, so this is a
@@ -94,7 +103,7 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     const bool ww_fog_routed = desc.fluid_foam_params.enabled && !state.foam.empty() &&
         (ww_fog_types[0] || ww_fog_types[1] || ww_fog_types[2]);
     const bool parcels_live = plan.anyLiveIn(FluidView::Fog);
-    if (!matter_gas && !parcels_live && !ww_fog_routed) {
+    if (!draw_gas && !parcels_live && !ww_fog_routed) {
         hide();
         return;
     }
@@ -126,7 +135,7 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     std::vector<float> subset;
     const float* raw = nullptr;
     if (matter_gas) {
-        if (state.active_density_cells > 0 && grid.density.size() == cells) {
+        if (draw_gas && state.active_density_cells > 0 && grid.density.size() == cells) {
             raw = grid.density.data();
         }
         if (parcels_live) {
@@ -231,7 +240,7 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
         const bool wants_temperature =
             shader->emission.mode == VolumeEmissionMode::Blackbody ||
             shader->emission.mode == VolumeEmissionMode::ChannelDriven;
-        if (matter_gas && wants_temperature && grid.temperature.size() == cells) {
+        if (draw_gas && wants_temperature && grid.temperature.size() == cells) {
             kelvin.resize(cells);
             constexpr float kHeatToKelvin = 3000.0f;
             for (std::size_t c = 0; c < cells; ++c) {
