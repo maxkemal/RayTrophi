@@ -81,9 +81,35 @@ struct VolumePerformanceStats {
     uint32_t walkShadowTraces = 0;
     uint32_t walkShadowSkipped = 0;
     uint32_t walkEventCapped = 0;
+    uint32_t sdfMainSamples = 0;
+    uint32_t sdfMainQueries = 0;
+    uint32_t sdfMainSkipped = 0;
+    uint32_t sdfArbiterSamples = 0;
+    uint32_t sdfArbiterQueries = 0;
+    uint32_t sdfArbiterSkipped = 0;
+    // Volume light cache (docs/dev/VOLUME_LIGHT_CACHE.md). Hits and misses are a
+    // pair: misses that do not fall toward zero on a static frame mean the
+    // cache tag changes every frame.
+    uint32_t lightCacheHits = 0;
+    uint32_t lightCacheMisses = 0;
+    uint32_t lightCacheFills = 0;
+    uint32_t lightCacheFillSamples = 0;
+    // Camera vs secondary split (docs/dev/RT_GAS_SECONDARY_MARCH.md, step 0).
+    // Counted explicitly per class: camera + secondary < total means a
+    // closest-hit never set its segment class, not that the rest is camera.
+    uint32_t cameraVolumeRays = 0;
+    uint32_t cameraDensitySamples = 0;
+    uint32_t cameraShadowDensitySamples = 0;
+    uint32_t secondaryVolumeRays = 0;
+    uint32_t secondaryDensitySamples = 0;
+    uint32_t secondaryShadowDensitySamples = 0;
+    // Radiance cache (RT_GAS_SECONDARY_MARCH.md §13): bounce rays on cached
+    // lookups vs. fallbacks to the full march.
+    uint32_t radianceCacheMarches = 0;
+    uint32_t radianceCacheFallbacks = 0;
 };
-static_assert(sizeof(VolumePerformanceStats) == 184,
-              "Volume instrumentation ABI must remain 46 x 4-byte words "
+static_assert(sizeof(VolumePerformanceStats) == 256,
+              "Volume instrumentation ABI must remain 64 x 4-byte words "
               "and must match volume_instrumentation.glsl exactly.");
 
 // Normalized [min, max) pixel rectangle the counters are restricted to.

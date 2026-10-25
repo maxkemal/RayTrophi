@@ -31,7 +31,7 @@ MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain
         return result;
     }
     bool wet_birth = false;
-    const auto consider = [&](const std::string& name) {
+    const auto consider = [&](const std::string& name, const std::string& origin) {
         if (name.empty()) {
             return;
         }
@@ -52,6 +52,7 @@ MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain
         }
         if (result.substance.empty()) {
             result.substance = name;
+            result.origin = origin;
         } else if (name != result.substance) {
             result.notes.push_back(name + " also asks for grains; one grain material per domain: " +
                 result.substance + "'s is used.");
@@ -64,16 +65,18 @@ MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain
     for (const auto& source : sources) {
         if (source.domain_index == domain_index &&
             source.phase != SimulationFlowSourceDesc::Phase::Gas) {
-            consider(source.fluid_substance);
+            consider(source.fluid_substance, "flow source '" + source.name + "'");
             wet_birth |= source.grain_birth_saturation > 0.0f;
         }
     }
     for (const auto& binding : domain.fluid_substance_materials) {
         if (binding.phase != SubstancePhase::Solid) {
-            consider(binding.substance);
+            consider(binding.substance, "substance binding");
         }
     }
-    consider(domain.fluid_params.default_substance);
+    consider(domain.fluid_params.default_substance, "default substance");
+    // A damp seed is a wet birth exactly like a damp flow source.
+    wet_birth |= domain.fluid_seed_grain_saturation > 0.0f;
     result.wanted = !result.substance.empty();
     if (result.wanted) {
         const auto* grain = tryFindSubstance(result.substance);

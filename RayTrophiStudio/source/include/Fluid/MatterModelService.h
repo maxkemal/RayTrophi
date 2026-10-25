@@ -1,5 +1,7 @@
 #pragma once
 
+struct SceneData;
+
 #include "MatterTransfer.h"
 
 namespace RayTrophiSim {
@@ -20,7 +22,7 @@ void drawMatterModelSummary(const SimulationGridDomainDesc& domain,
 // Uses the existing domain-substance service; no separate seed material authority.
 bool drawMatterSeedSubstanceControls(const SimulationGridDomainDesc& domain);
 
-void drawMatterOutputControls(const SimulationGridDomainDesc& domain);
+void drawMatterOutputControls(::SceneData& scene, const SimulationGridDomainDesc& domain);
 
 void drawMatterPoolControls(const SimulationGridDomainDesc& domain,
                            const SimulationGridDomainState* state);

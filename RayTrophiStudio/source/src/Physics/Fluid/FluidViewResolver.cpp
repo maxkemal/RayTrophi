@@ -3,6 +3,7 @@
 #include "Fluid/FluidParticles.h"
 #include "Fluid/FluidRenderMode.h"
 #include "Fluid/SubstanceTag.h"
+#include "Fluid/MatterConstitutive.h"
 #include "ParticleSimulation.h"
 
 #include <algorithm>
@@ -98,9 +99,47 @@ FluidView FluidViewPlan::viewForTag(uint32_t tag) const {
     return default_view;
 }
 
-FluidView FluidViewPlan::viewFor(uint32_t tag, ParticleLabel label) const {
-    // Unclassified parcels follow their substance whatever the table says; see
-    // defaultLabelRoutes. Enforced here, not only in the setters.
+uint64_t phaseOutputSignature(const MatterPhaseOutput& output) {
+    return static_cast<uint64_t>(output.solid) |
+        (static_cast<uint64_t>(output.liquid) << 8) |
+        (static_cast<uint64_t>(output.gas) << 16);
+}
+
+MatterOutputPhase particleOutputPhase(const FluidParticles& particles, std::size_t i) {
+    if (i < particles.flags.size() && (particles.flags[i] & kParticleFlagFrozen) != 0u) {
+        return MatterOutputPhase::Solid;
+    }
+    if (i >= particles.constitutive_model.size()) {
+        return MatterOutputPhase::Unknown;
+    }
+    switch (static_cast<MatterConstitutiveModel>(particles.constitutive_model[i])) {
+        case MatterConstitutiveModel::Fluid: return MatterOutputPhase::Liquid;
+        case MatterConstitutiveModel::Granular:
+        case MatterConstitutiveModel::Elastic: return MatterOutputPhase::Solid;
+        default: return MatterOutputPhase::Unknown;
+    }
+}
+
+bool FluidViewPlan::mayDrawSplat(uint32_t tag) const {
+    return viewForTag(tag) == FluidView::Splat ||
+        phase_output.solid == LabelRoute::Splat || phase_output.liquid == LabelRoute::Splat;
+}
+
+FluidView FluidViewPlan::viewFor(uint32_t tag, ParticleLabel label,
+                                MatterOutputPhase phase) const {
+    {
+        const auto route = phase == MatterOutputPhase::Solid ? phase_output.solid :
+            phase == MatterOutputPhase::Liquid ? phase_output.liquid : LabelRoute::Follow;
+        switch (route) {
+            case LabelRoute::Surface: return FluidView::Surface;
+            case LabelRoute::Splat: return FluidView::Splat;
+            case LabelRoute::Fog: return FluidView::Fog;
+            case LabelRoute::Hidden: return FluidView::Hidden;
+            default: break;
+        }
+    }
+    // Without an explicit phase choice, unclassified labels follow their
+    // substance. Label state must not be invented from missing data.
     if (label == ParticleLabel::Unknown) return viewForTag(tag);
     const std::size_t li = static_cast<std::size_t>(label);
     const LabelRoute route = li < label_routes.size() ? label_routes[li] : LabelRoute::Follow;
@@ -122,26 +161,26 @@ FluidView FluidViewPlan::viewForParticle(const FluidParticles& particles,
         ? particles.substance_tag[i] : kSubstanceUntagged;
     const ParticleLabel label = i < particles.flags.size()
         ? particleLabel(particles.flags[i]) : ParticleLabel::Unknown;
-    return viewFor(tag, label);
+    return viewFor(tag, label, particleOutputPhase(particles, i));
 }
 
 bool FluidViewPlan::anyLiveIn(FluidView view) const {
     for (const auto& k : live_keys)
-        if (viewFor(k.tag, k.label) == view) return true;
+        if (viewFor(k.tag, k.label, k.phase) == view) return true;
     return false;
 }
 
 bool FluidViewPlan::allLiveIn(FluidView view) const {
     if (live_keys.empty()) return false;
     for (const auto& k : live_keys)
-        if (viewFor(k.tag, k.label) != view) return false;
+        if (viewFor(k.tag, k.label, k.phase) != view) return false;
     return true;
 }
 
 std::vector<FluidViewKey> FluidViewPlan::liveKeysIn(FluidView view) const {
     std::vector<FluidViewKey> out;
     for (const auto& k : live_keys)
-        if (viewFor(k.tag, k.label) == view) out.push_back(k);
+        if (viewFor(k.tag, k.label, k.phase) == view) out.push_back(k);
     return out;
 }
 
@@ -202,6 +241,7 @@ std::vector<FluidViewKey> distinctViewKeys(const FluidParticles& particles) {
             ? particles.substance_tag[i] : kSubstanceUntagged;
         k.label = i < particles.flags.size()
             ? particleLabel(particles.flags[i]) : ParticleLabel::Unknown;
+        k.phase = particleOutputPhase(particles, i);
         if (std::find(keys.begin(), keys.end(), k) == keys.end()) keys.push_back(k);
     }
     return keys;
@@ -214,6 +254,7 @@ std::vector<FluidViewKey> cachedDistinctViewKeys(
         std::size_t particle_count = 0;
         const uint32_t* tag_data = nullptr;
         const uint32_t* flag_data = nullptr;
+        const uint8_t* model_data = nullptr;
         std::vector<FluidViewKey> keys;
     };
     static std::mutex cache_mutex;
@@ -224,12 +265,14 @@ std::vector<FluidViewKey> cachedDistinctViewKeys(
     const bool valid = entry.version == state_version &&
         entry.particle_count == particles.position.size() &&
         entry.tag_data == particles.substance_tag.data() &&
-        entry.flag_data == particles.flags.data();
+        entry.flag_data == particles.flags.data() &&
+        entry.model_data == particles.constitutive_model.data();
     if (!valid) {
         entry.version = state_version;
         entry.particle_count = particles.position.size();
         entry.tag_data = particles.substance_tag.data();
         entry.flag_data = particles.flags.data();
+        entry.model_data = particles.constitutive_model.data();
         entry.keys = distinctViewKeys(particles);
     }
     // Scene reloads can leave old FluidParticles addresses in this process-wide
@@ -248,6 +291,7 @@ FluidViewPlan resolveFluidViews(const SimulationGridDomainDesc& desc,
     plan.default_view = defaultViewForMode(desc.fluid_render_mode);
     plan.label_routes = desc.fluid_label_routes;
     plan.live_keys = live_keys;
+    plan.phase_output = desc.fluid_phase_output;
 
     FluidViewEntry untagged;
     untagged.tag = kSubstanceUntagged;
@@ -312,7 +356,17 @@ FluidViewPlan resolveFluidViews(const SimulationGridDomainDesc& desc,
             default: break;
         }
     }
-    for (const auto& k : live_keys) mark(plan.viewFor(k.tag, k.label));
+    {
+        for (const auto route : {plan.phase_output.solid, plan.phase_output.liquid}) {
+            switch (route) {
+                case LabelRoute::Surface: mark(FluidView::Surface); break;
+                case LabelRoute::Splat: mark(FluidView::Splat); break;
+                case LabelRoute::Fog: mark(FluidView::Fog); break;
+                default: break;
+            }
+        }
+    }
+    for (const auto& k : live_keys) mark(plan.viewFor(k.tag, k.label, k.phase));
     return plan;
 }
 

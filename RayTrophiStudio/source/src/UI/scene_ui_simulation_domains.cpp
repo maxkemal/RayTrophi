@@ -1,4 +1,7 @@
+#include "UI/VolumeMaterialUI.h"
 #include "UI/GrainMeshLibraryUI.h"
+#include "UI/SourceSplatGeometryUI.h"
+#include "Fluid/SourceSplatRenderPlan.h"
 #include "DomainPanelWidgets.h"
 #include "Fluid/MatterPoreAuthoring.h"
 #include "scene_ui_forcefield.hpp"
@@ -19,6 +22,7 @@
 #include "Fluid/GrainMeshNear.h"
 #include "Fluid/FluidViewResolver.h"
 #include "Fluid/FluidActiveWindow.h"
+#include "Fluid/GranularGpuDispatch.h"
 
 namespace ForceFieldUI {
 
@@ -396,7 +400,22 @@ void drawSimulationDomainControls(
                 const bool backend_changed =
                     ImGui::Combo("##DomainBackend", &current_backend, backends, 3);
                 ImGui::EndDisabled();
-                if (grain_locked) DomainUi::Reason("Grains need the Vulkan backend.");
+                if (grain_locked) {
+                    // Name the cause: a material binding of a DEM substance
+                    // (e.g. Sand bound only for its look) turns grains on with
+                    // zero grains present, and the bare lock read as arbitrary.
+                    const auto owner = particles
+                        ? RayTrophiSim::Fluid::matterGrainOwnership(*particles,
+                              static_cast<std::size_t>(selected_domain_index))
+                        : RayTrophiSim::Fluid::MatterGrainOwnership{};
+                    const std::string why = owner.substance.empty()
+                        ? std::string("Grains need the Vulkan backend.")
+                        : "Grains need the Vulkan backend. DEM is on because " +
+                          owner.substance + " (" + owner.origin +
+                          ") uses granular transport 'dem'; remove it or set its "
+                          "transport to continuum to choose CPU.";
+                    DomainUi::Reason(why.c_str());
+                }
                 if (backend_changed) {
                     domain.backend = backend_values[current_backend];
                     scene.requestSimulationTimelineRenderResync();
@@ -961,6 +980,20 @@ void drawSimulationDomainControls(
                                           "budget knob: at 1 ppc the cells can't build internal pressure and the\n"
                                           "liquid just collapses / settles slowly. Keep 4-8 for standard water.\n"
                                           "To fit a budget, change Voxel Size or Max Particles \xE2\x80\x94 not this.");
+                    }
+                    if (domain.fluid_params.grain.enabled) {
+                        // Seed twin of a flow source's grain_birth_saturation:
+                        // without it a damp, packed sand block cannot be authored.
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
+                        ImGui::SliderFloat("Seed Grain Wetness",
+                                           &domain.fluid_seed_grain_saturation, 0.0f, 1.0f, "%.2f");
+                        seed_settled |= ImGui::IsItemDeactivatedAfterEdit();
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Water each seeded grain already holds, as a fraction of its\n"
+                                              "substance's grain water capacity (0 = dry). Positive makes the\n"
+                                              "domain's grains wet: liquid bridges hold the seeded block together.\n"
+                                              "The substance needs grain_water_capacity_fraction > 0.");
+                        }
                     }
 
                     ImGui::SetNextItemWidth(DomainUi::itemWidth());
@@ -2098,6 +2131,18 @@ void drawSimulationDomainControls(
                                                            ImGuiTreeNodeFlags_DefaultOpen)) {
                         // Read-only: these are the default substance's granular
                         // fields (edit them in the Substance tree above).
+                        if (fp.granular_snow_plasticity) {
+                            // The Drucker-Prager rows below are not read by this law.
+                            ImGui::TextDisabled("Law: Stomakhin 2013 snow (Drucker-Prager fields inert)");
+                            ImGui::TextDisabled("theta_c %.4f | theta_s %.4f | xi %.1f | density %.0f kg/m^3",
+                                fp.granular_snow_critical_compression,
+                                fp.granular_snow_critical_stretch,
+                                fp.granular_snow_hardening, fp.granular_density);
+                            ImGui::TextDisabled("Hardening ceiling %.1fx (substeps x%.1f) | clump spread %.3f, size %.3f m (>= 3 voxels)",
+                                fp.granular_snow_max_hardening,
+                                std::sqrt(std::max(fp.granular_snow_max_hardening, 1.0f)),
+                                fp.granular_snow_heterogeneity, fp.granular_snow_clump_size);
+                        }
                         ImGui::TextDisabled("Friction %.1f deg | cohesion %.0f Pa | dilatancy %.1f deg",
                             fp.granular_friction_angle_degrees, fp.granular_cohesion,
                             fp.granular_dilatancy_degrees);
@@ -2110,7 +2155,41 @@ void drawSimulationDomainControls(
                         ImGui::TextDisabled("Softening %.0f K over %.0f K, residual %.3f, tack peak %.2f",
                             fp.granular_softening_temperature, fp.granular_softening_range,
                             fp.granular_residual_strength, fp.granular_tack_peak);
-                        ImGui::TextDisabled("Granular substeps: adaptive (stiffness preserved)");
+                        {
+                            // The number this material costs, and what sets it.
+                            // Same arithmetic as the step planner; the live
+                            // value adds strain-rate and velocity CFL terms.
+                            const float fps = static_cast<float>(
+                                std::max(1, ui_ctx.render_settings.animation_fps));
+                            const auto plan = RayTrophiSim::Fluid::Granular::planGranularSubsteps(
+                                fp.granular_young_modulus, fp.granular_snow_plasticity,
+                                fp.granular_snow_max_hardening, fp.granular_density,
+                                domain.voxel_size, 1.0f / fps);
+                            int ran = 0;
+                            if (particles && selected_domain_index >= 0 &&
+                                selected_domain_index <
+                                    static_cast<int>(particles->gridDomainStates().size())) {
+                                const auto& st = particles->gridDomainStates()
+                                    [static_cast<std::size_t>(selected_domain_index)];
+                                ran = std::max(st.fluid_stats.granular_solver_substeps,
+                                               st.fluid_stats.mixed_common_substeps);
+                            }
+                            ImGui::Text("Solver substeps per frame: %d at rest%s", plan.wave_substeps,
+                                ran > 0 ? "" : " (not run yet)");
+                            if (ran > 0) {
+                                ImGui::SameLine();
+                                ImGui::Text("| last frame: %d", ran);
+                            }
+                            ImGui::TextDisabled(
+                                "= frame %.4f s / (0.35 x voxel %.3f m / wave speed %.1f m/s)",
+                                plan.frame_dt, domain.voxel_size, plan.wave_speed_m_s);
+                            ImGui::TextDisabled(
+                                "wave speed = sqrt(E %.3g Pa%s / density %.0f). Cost ~ substeps x cells: "
+                                "halving the voxel costs ~16x.",
+                                plan.sizing_young_modulus,
+                                fp.granular_snow_plasticity ? " incl. hardening ceiling" : "",
+                                plan.density);
+                        }
                         ImGui::TextDisabled(
                             "Material edits rewind to frame 0 and drop the bake automatically.");
                     }
@@ -2874,6 +2953,13 @@ void drawSimulationDomainControls(
                     // the solver already sub-steps itself and looks elsewhere. The
                     // name was doing the hiding.
                     ImGui::DragInt("Max Advection Substeps", &fp.max_substeps,  1.0f,   1, 64);
+                    // ★ This was the only substep number on screen for a Snow
+                    // domain that actually ran 200 (elastic wave CFL); "12"
+                    // read as the solver's count. Say which number is real.
+                    if (fp.granular_enabled) {
+                        DomainUi::Reason("Granular material: the solver substep count is set by "
+                                         "its stiffness (see Granular Skeleton), not by this limit.");
+                    }
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip("Substeps for PARTICLE ADVECTION only.\n\n"
                                           "The transfer (P2G/G2P) and the pressure solve run ONCE per\n"
@@ -3139,7 +3225,8 @@ void drawSimulationDomainControls(
                         ImGui::SetTooltip("Draws raw simulation particle coordinates as lightweight blue viewport overlays.");
                     }
 
-                    RayTrophiSim::Fluid::drawMatterOutputControls(domain);
+                    RayTrophiSim::Fluid::drawMatterOutputControls(scene, domain);
+                    drawMatterFogLinks(ui_ctx, ui, domain);
 
                         // Per-substance LOOK. The physics half of each binding (phase,
                         // viscosity, miscibility) is edited in the Matter tab.
@@ -3159,7 +3246,7 @@ void drawSimulationDomainControls(
                                 ImGui::SeparatorText("Look (repaints this frame)");
 
                                 int rep = static_cast<int>(binding.representation);
-                                const char* reps[] = { "Inherit Domain Default", "Splat Spheres", "Surface SDF", "Fog" };
+                                const char* reps[] = { "Inherit Domain Default", "Splat", "Surface SDF", "Fog" };
                                 ImGui::SetNextItemWidth(-FLT_MIN);
                                 if (ImGui::Combo("Drawn as", &rep, reps, IM_ARRAYSIZE(reps))) {
                                     binding.representation = static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(rep);
@@ -3189,6 +3276,10 @@ void drawSimulationDomainControls(
                                 const bool binding_draws_splat =
                                     view_plan.viewForTag(RayTrophiSim::Fluid::substanceTag(binding.substance)) ==
                                     RayTrophiSim::Fluid::FluidView::Splat;
+                                if (binding_draws_splat) {
+                                    RayTrophiSim::Fluid::drawSubstanceSplatGeometry(
+                                        scene, domain.name, binding.substance);
+                                }
                                 const char* unset_label = binding_draws_splat
                                     ? "Domain Splat Material" : "Built-in Dielectric";
                                 const char* mat_label = unset_label;
@@ -3274,59 +3365,11 @@ void drawSimulationDomainControls(
                                          "and size variation.");
                     }
                     if (view_plan.splat &&
-                        UIWidgets::CollapsingHeader("Splat Geometry & Preview",
+                        UIWidgets::CollapsingHeader("Shared Splat Preview",
                             current_mode_idx == 0 ? ImGuiTreeNodeFlags_DefaultOpen : 0)) {
-                        const char* geometry_modes[] = { "Procedural Spheres (RT)", "Scene Object / Mesh Group", "Icosphere Mesh (triangles)" };
-                        int geometry_mode = std::clamp(domain.fluid_particle_geometry_mode, 0, 2);
-                        if (ImGui::Combo("Geometry Source", &geometry_mode, geometry_modes, 3)) {
-                            domain.fluid_particle_geometry_mode = geometry_mode;
-                            scene.requestSimulationTimelineRenderResync();
-                            ui_ctx.start_render = true;
-                        }
-                        if (geometry_mode == 1) {
-                            std::vector<std::string> scene_nodes;
-                            for (const auto& object : scene.world.objects) {
-                                if (!object) continue;
-                                const auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
-                                if (!mesh || !mesh->geometry) continue;
-                                const std::string name = mesh->nodeName;
-                                if (name.empty() || name.front() == '[') continue;
-                                if (scene.isEditorPendingDeleteObjectName(name)) continue;
-                                if (std::find(scene_nodes.begin(), scene_nodes.end(), name) == scene_nodes.end())
-                                    scene_nodes.push_back(name);
-                            }
-                            std::sort(scene_nodes.begin(), scene_nodes.end());
-                            const bool source_is_live =
-                                std::binary_search(scene_nodes.begin(), scene_nodes.end(),
-                                                   domain.fluid_particle_geometry_source);
-                            const std::string missing_source_label =
-                                domain.fluid_particle_geometry_source.empty()
-                                    ? std::string("Select scene object")
-                                    : std::string("Missing: ") + domain.fluid_particle_geometry_source;
-                            const char* source_label = source_is_live
-                                ? domain.fluid_particle_geometry_source.c_str()
-                                : missing_source_label.c_str();
-                            if (ImGui::BeginCombo("Scene Geometry", source_label)) {
-                                for (const auto& name : scene_nodes) {
-                                    if (ImGui::Selectable(name.c_str(),
-                                            domain.fluid_particle_geometry_source == name)) {
-                                        domain.fluid_particle_geometry_source = name;
-                                        scene.requestSimulationTimelineRenderResync();
-                                        ui_ctx.start_render = true;
-                                    }
-                                }
-                                ImGui::EndCombo();
-                            }
-                            if (scene_nodes.empty()) ImGui::TextDisabled("No scene mesh groups available.");
-                            if (!domain.fluid_particle_geometry_source.empty() && !source_is_live) {
-                                ImGui::TextDisabled("Selected source is deleted or unavailable; using icosphere fallback.");
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Instances the selected scene node at every splat position.\n"
-                                                  "Its triangles are centered and normalized once, while original per-face materials are preserved.\n"
-                                                  "Only an explicitly assigned domain or substance material overrides them.");
-                            }
-                        }
+                        ImGui::TextWrapped("Set geometry per substance in Output above. "
+                            "These controls set shared sphere preview and material defaults.");
+                        const int geometry_mode = 0;
                         {
                             auto& material_mgr = MaterialManager::getInstance();
                             const auto& scene_materials = material_mgr.getAllMaterials();
@@ -3471,7 +3514,7 @@ void drawSimulationDomainControls(
                                     static_cast<uint64_t>(budget_millions) *
                                         1000000ull);
                             const uint32_t primary_children = std::min(effective_grains,
-                                RayTrophiSim::Fluid::primarySplatVisualChildren(domain));
+                                RayTrophiSim::Fluid::sourceSplatVisualChildren(*particles, domain));
                             const uint64_t visual_count =
                                 primary_count * primary_children +
                                 whitewater_count * effective_grains;
@@ -3479,7 +3522,7 @@ void drawSimulationDomainControls(
                                 RayTrophiSim::Fluid::
                                     kFluidRenderProxyRtBytesPerSphereEstimate;
                             ImGui::TextDisabled(
-                                "Visual spheres: %llu (primary %u, whitewater %u), RT input ~%.1f MiB",
+                                "Sphere-only estimate: %llu (primary %u, whitewater %u), RT input ~%.1f MiB",
                                 static_cast<unsigned long long>(visual_count),
                                 primary_children,
                                 effective_grains,
@@ -3492,9 +3535,6 @@ void drawSimulationDomainControls(
                                     "estimate covers proxy inputs before acceleration-structure scratch.\n"
                                     "Diameter variation is deterministic and volume-normalized.");
                             }
-                        }
-                        if (geometry_mode == 0) {
-                            RayTrophiSim::Fluid::drawGrainMeshNearControls(scene, domain);
                         }
                         const RayTrophiSim::Fluid::FluidParticleVisualRadius visual_radius =
                             RayTrophiSim::Fluid::resolveFluidParticleVisualRadius(
@@ -4115,7 +4155,7 @@ void drawSimulationDomainControls(
                     // NanoVDB shader UI
                     // Fog view: its medium lives on the fog volume and is edited
                     // there; this panel keeps only the domain-level spread.
-                    if (view_plan.fog &&
+                    if (domain.type != RayTrophiSim::SimulationDomainType::Matter && view_plan.fog &&
                         UIWidgets::CollapsingHeader("Fog View##LiquidFogView",
                                                     ImGuiTreeNodeFlags_DefaultOpen)) {
                         // Same field and range as fluid.set_fog spread_voxels.
@@ -4286,7 +4326,7 @@ void drawSimulationDomainControls(
                 if (is_gas_domain) {
                     // Volume shader
                     auto& gas_shader = domain.type == RayTrophiSim::SimulationDomainType::Matter
-                        ? domain.fluid_fog_shader
+                        ? RayTrophiSim::Fluid::matterGasFogShader(domain)
                         : domain.shader;
                     if (!gas_shader) {
                         gas_shader = VolumeShader::createSmokePreset();
@@ -4706,6 +4746,18 @@ void drawSimulationDomainControls(
                     }
                     blk.Time("G2P", fs.g2p_ms, fs.g2p_on_gpu ? "GPU" : "CPU", 1);
                     if (domain.fluid_params.granular_enabled) {
+                        if (!fs.granular_material_measured) {
+                            blk.Value("Granular counters", "%s", "NOT MEASURED this step");
+                        }
+                        blk.Value("Granular counted", "%zu", fs.granular_counted_particles);
+                        blk.Value("Granular J_P min / mean / max", "%.3f / %.3f / %.3f",
+                                  fs.granular_min_plastic_jacobian,
+                                  fs.granular_mean_plastic_jacobian,
+                                  fs.granular_max_plastic_jacobian);
+                        if (fs.granular_hardening_capped_particles > 0) {
+                            blk.Value("Snow hardening CLAMPED", "%zu particles",
+                                      fs.granular_hardening_capped_particles);
+                        }
                         blk.Value("Granular yielded", "%zu", fs.granular_yielded_particles);
                         blk.Value("Granular detached", "%zu", fs.granular_detached_particles);
                         blk.Value("Granular invalid", "%zu", fs.granular_invalid_particles);

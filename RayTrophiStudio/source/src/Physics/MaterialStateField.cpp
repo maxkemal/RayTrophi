@@ -537,6 +537,16 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // these: heat films see their surface (0 left hot sand in water
             // at 599 K after 5 s, 2026-10-21) and wet bridges scale by R/r.
             p.grain_real_radius_m = 0.00025f;
+            // ★ Sand is ANGULAR. The profile default 0.02 is the round-grain
+            // value: poured dry it made an 8 deg pile and a seeded block spread
+            // to a one-grain layer, rolling like bearings (2026-10-23). 0.2
+            // measured a 30 deg dry pile (and 47 deg damp at wetness 0.5),
+            // the real angles of repose.
+            p.grain_rolling_friction = 0.2f;
+            // Sand holds pore water (damp beach sand is a few % by volume).
+            // 0 meant Sand could never wet: no bridges from a damp seed, a damp
+            // source or liquid. 0.1 of the grain volume, as measured above.
+            p.grain_water_capacity_fraction = 0.1f;
             add(p);
         }
         {
@@ -565,6 +575,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // 40, not 32: at 5 cm / 24 fps this E needs 33 substeps.
             p.solver_granular_max_substeps = 40.0f;
             p.grain_real_radius_m = 0.004f;  // fine gravel, 8 mm across
+            // Crushed gravel is angular too (see Sand); not measured here.
+            p.grain_rolling_friction = 0.25f;
             add(p);
         }
         {
@@ -607,23 +619,42 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.liquid_density = 997.0f;
             p.liquid_kinematic_viscosity = 0.0f;
             p.latent_heat_vaporization = 2.26e6f;
-            // ★ PROVISIONAL until the three snow scenes are measured (compression,
-            // snowball, slope release). Stomakhin et al. 2013: E0 = 1.4e5 Pa,
-            // nu = 0.2, xi = 10, theta_c = 2.5e-2, theta_s = 7.5e-3. theta_s maps
-            // onto the bond fracture strain; small cohesion and tensile strength
-            // hold a snowball, rebonding sinters a compacted pack.
+            // Stomakhin et al. 2013, the paper's own constitutive model and its
+            // reference values: E0 = 1.4e5 Pa, nu = 0.2, xi = 10,
+            // theta_c = 2.5e-2, theta_s = 7.5e-3.
+            // ★ This preset used to map those numbers onto Drucker-Prager
+            // (cohesion 500 Pa, Rankine damage, rebonding). A 1 m block of it
+            // yielded under its own weight below ~16 cm and flowed like molten
+            // chocolate: perfect plasticity never weakens, so nothing localised
+            // and healed cracks re-merged. The snow branch is a different law,
+            // not different numbers (GranularConstitutive.h).
+            p.granular_snow_plasticity = true;
+            p.granular_snow_critical_compression = 0.025f;
+            p.granular_snow_critical_stretch = 0.0075f;
+            p.granular_snow_hardening = 10.0f;
+            // Not in the paper: a stiffness ceiling (cost: substeps x sqrt(5))
+            // and a clump structure (12 cm cells, weak borders) so an impact
+            // has connected weak surfaces to crack along.
+            p.granular_snow_max_hardening = 5.0f;
+            p.granular_snow_min_hardening = 0.1f;
+            p.granular_snow_heterogeneity = 0.1f;
+            p.granular_snow_clump_size = 0.12f;
             p.granular_young_modulus = 1.4e5f;
             p.granular_poisson_ratio = 0.2f;
-            p.granular_compaction_hardening = 10.0f;
-            p.granular_compaction_limit = 0.025f;
+            // Not read by the snow law; the matter contact still takes its
+            // friction from here.
             p.granular_friction_degrees = 30.0f;
             p.granular_dilatancy_degrees = 0.0f;
-            p.granular_cohesion = 500.0f;
-            p.granular_tensile_cutoff = 500.0f;
-            p.granular_fracture_strain = 0.0075f; p.granular_damage_rate = 8.0f;
-            p.granular_rebonding = true; p.granular_healing_rate = 0.5f;
-            p.solver_flip_blend = 0.0f; p.solver_viscosity_wall_slip = 0.0f;
+            // The paper's alpha = 0.95. Read only on the Matter path, where the
+            // granular lane captures a pre-stress FLIP baseline for snow.
+            p.solver_flip_blend = 0.95f; p.solver_viscosity_wall_slip = 0.0f;
             p.solver_wall_damping = 0.40f;
+            // ONE snow preset (fresh powder: theta_s * E ~ 1 kPa). A packed /
+            // snowball pack is the same law with a higher E and density -- derive
+            // Snow and raise granular_young_modulus (0.5-5 MPa) and density
+            // (450-600). A second built-in "Packed Snow" existed briefly
+            // (2026-10-23) and was removed: two snow presets read as two
+            // different materials. Substeps grow with sqrt(E / rho).
             add(p);
         }
         {

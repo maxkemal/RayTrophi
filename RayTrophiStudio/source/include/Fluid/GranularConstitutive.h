@@ -214,6 +214,14 @@ struct Parameters {
     // Snow compaction (stress update): xi and the permanent-compression limit.
     float compaction_hardening = 0.0f;
     float compaction_limit = 0.0f;
+    // Stomakhin et al. 2013 snow plasticity (replaces Drucker-Prager when on).
+    bool  snow_plasticity = false;
+    float snow_critical_compression = 0.025f;  // theta_c
+    float snow_critical_stretch = 0.0075f;     // theta_s
+    float snow_hardening = 10.0f;              // xi
+    float snow_max_hardening = 5.0f;           // ceiling of exp(xi (1 - J_P))
+    float snow_min_hardening = 0.1f;           // floor of exp(xi (1 - J_P))
+    float snow_min_plastic_jacobian = 0.436f;  // rho_snow / rho_ice
 };
 
 // Field-for-field mirror of the shader's push constant block. Angles arrive
@@ -234,6 +242,17 @@ struct StressUpdateParams {
     float max_stored_strain = kGranularMaxStoredStrain;
     float compaction_hardening = 0.0f;
     float compaction_limit = 0.0f;
+    // Stomakhin snow branch. snow_max_young_modulus is the elastic-wave limit
+    // of THIS substep (rho (0.35 h / dt)^2): the hardened modulus is clamped to
+    // it and the clamp is flagged, never silently absorbed. 0 = no limit.
+    bool  snow_plasticity = false;
+    float snow_critical_compression = 0.025f;
+    float snow_critical_stretch = 0.0075f;
+    float snow_hardening = 10.0f;
+    float snow_max_young_modulus = 0.0f;
+    float snow_max_hardening = 5.0f;
+    float snow_min_plastic_jacobian = 0.436f;
+    float snow_min_hardening = 0.1f;
 };
 
 // Flag bits. Shared vocabulary with the shader and with the stats/IPC readout.
@@ -244,6 +263,7 @@ enum : uint32_t {
     kFlagSleeping         = 8u,   // written by the settle stage
     kFlagStrainLimited    = 16u,  // dt*C had to be clamped: step was coarse
     kFlagCompactionCapped = 32u,  // stored strain capped: compaction went plastic
+    kFlagHardeningCapped  = 64u,  // snow: hardened E clamped to the wave limit
 };
 
 // ── Column-major 3x3, matching GLSL mat3 exactly ─────────────────────────────
@@ -365,6 +385,304 @@ inline Mat3 polarRotation(const Mat3& F) {
     return R;
 }
 
+// Column `col`, row `row`, as GLSL m[col][row] = value.
+inline void setEntry(Mat3& m, int col, int row, float value) {
+    Vec3& v = m.c[col];
+    if (row == 0) v.x = value; else if (row == 1) v.y = value; else v.z = value;
+}
+
+// Cyclic Jacobi (Numerical Recipes 11.1) on a symmetric 3x3: A -> V^T A V
+// diagonal, eigenvectors in V's columns. Six sweeps is far past convergence for
+// the matrices it sees (F^T F of an elastic gradient within a few percent of a
+// rotation); the count is fixed so the shader port runs the same arithmetic.
+inline void symmetricEigen(Mat3 A, Mat3& V, Vec3& eigenvalues) {
+    V = Mat3::identity();
+    for (int sweep = 0; sweep < 6; ++sweep) {
+        for (int pair = 0; pair < 3; ++pair) {
+            const int p = pair == 2 ? 1 : 0;
+            const int q = pair == 0 ? 1 : 2;
+            const float apq = A.at(q, p);
+            if (std::fabs(apq) < 1.0e-12f) continue;
+            const float theta = (A.at(q, q) - A.at(p, p)) / (2.0f * apq);
+            const float t = (theta >= 0.0f ? 1.0f : -1.0f) /
+                            (std::fabs(theta) + std::sqrt(theta * theta + 1.0f));
+            const float c = 1.0f / std::sqrt(t * t + 1.0f);
+            const float s = t * c;
+            Mat3 J = Mat3::identity();
+            setEntry(J, p, p, c);
+            setEntry(J, q, q, c);
+            setEntry(J, q, p, s);   // row p, column q
+            setEntry(J, p, q, -s);  // row q, column p
+            A = transpose(J) * A * J;
+            V = V * J;
+        }
+    }
+    eigenvalues = Vec3(A.at(0, 0), A.at(1, 1), A.at(2, 2));
+}
+
+// ── Stomakhin et al. 2013, "A Material Point Method for Snow Simulation" ─────
+//
+// ★★★ WHY THIS IS A SEPARATE BRANCH AND NOT DRUCKER-PRAGER WITH SNOW NUMBERS.
+// The Snow preset used to be exactly that, and it read as molten chocolate. A
+// pressure-dependent shear cap (c + p tan phi, c = 500 Pa) lets any column
+// taller than ~16 cm of 400 kg/m^3 snow yield under its own weight, and the
+// flow is PERFECTLY plastic: shear and stretch never weaken the material, so
+// deformation spreads smoothly everywhere instead of localising. What makes
+// snow clump and break is the asymmetry below:
+//   - elastic F_E is limited per SINGULAR VALUE to [1 - theta_c, 1 + theta_s];
+//     the excess becomes permanent and goes into J_P = det(F_P);
+//   - every modulus is multiplied by exp(xi (1 - J_P)), so a compressed region
+//     (J_P < 1) hardens into a clump while a stretched or sheared one
+//     (J_P > 1) softens -- the crack localises, and the pieces separate.
+// There is no friction angle, cohesion, tensile cutoff, damage or rebonding
+// here; Drucker-Prager's fields are inert in this branch.
+//
+// State reuse, same arrays, documented meaning:
+//   deformation_col* = F_E (the full elastic gradient, not a projected strain)
+//   plastic_volume   = 1 / J_P  (compactness, > 1 compacted: same direction as
+//                                the Drucker-Prager compaction branch)
+//   stress_*         = Kirchhoff stress tau = J sigma. The stress P2G multiplies
+//                      by the REST volume, and V0 tau is the MPM force density.
+//   damage           = 1 - min(exp(xi (1 - J_P)), 1): stiffness lost to
+//                      loosening, so existing damage readers (stats, audio)
+//                      see snow tear without a second vocabulary
+//   fracture_history = max(J_P - 1, 0): volumetric loosening
+//   hardening        = accumulated plastic strain sum |ln(sigma / sigma_c)|
+//
+// Mirrors snowStressUpdate() in sim_fluid_granular_stress_update.glsl.
+inline void snowStressUpdateParticle(const AffineC& affine,
+                                     const StressUpdateParams& pc,
+                                     float softening,
+                                     Vec3& deformation_col0,
+                                     Vec3& deformation_col1,
+                                     Vec3& deformation_col2,
+                                     Vec3& stress_diag,
+                                     Vec3& stress_shear,
+                                     float& plastic_volume,
+                                     float& damage_state,
+                                     float& hardening_state,
+                                     float& fracture_history,
+                                     float& out_yield_value,
+                                     float& out_plastic_increment,
+                                     uint32_t& out_flags) {
+    const Mat3 C(affine.col0, affine.col1, affine.col2);
+    const float nu = std::clamp(pc.poisson_ratio, -0.49f, 0.49f);
+    const float soft = std::isfinite(softening) ? std::clamp(softening, 0.0f, 1.0f) : 1.0f;
+    Mat3 F(deformation_col0, deformation_col1, deformation_col2);
+
+    Mat3 dC = C * pc.dt;
+    const float strain_increment = frobenius(dC);
+    bool strain_limited = false;
+    if (!(strain_increment < 1.0e30f)) { dC = Mat3(); strain_limited = true; }
+    else if (strain_increment > kGranularStrainIncrementCeiling) {
+        dC = dC * (kGranularStrainIncrementCeiling / strain_increment);
+        strain_limited = true;
+    }
+    Mat3 F_trial = (Mat3::identity() + dC) * F;
+    float pv = std::isfinite(plastic_volume) ? std::clamp(plastic_volume, 0.25f, 4.0f) : 1.0f;
+    const float det_trial = determinant(F_trial);
+    if (!isFiniteMat(F_trial) || !(det_trial > 1.0e-6f)) {
+        // Unrecoverable kinematics: restart the elastic state, keep J_P.
+        stress_diag = Vec3(0, 0, 0); stress_shear = Vec3(0, 0, 0);
+        deformation_col0 = Vec3(1, 0, 0); deformation_col1 = Vec3(0, 1, 0);
+        deformation_col2 = Vec3(0, 0, 1);
+        plastic_volume = pv;
+        out_yield_value = 0.0f; out_plastic_increment = 0.0f;
+        out_flags = kFlagInvalid | (strain_limited ? kFlagStrainLimited : 0u);
+        return;
+    }
+
+    Mat3 V; Vec3 eig;
+    symmetricEigen(transpose(F_trial) * F_trial, V, eig);
+    if (determinant(V) < 0.0f) V.c[2] = V.c[2] * -1.0f;
+    const float sigma[3] = { std::sqrt(std::max(eig.x, 1.0e-12f)),
+                             std::sqrt(std::max(eig.y, 1.0e-12f)),
+                             std::sqrt(std::max(eig.z, 1.0e-12f)) };
+    // U from F V / sigma, re-orthonormalised; det F > 0 and det V = +1 make U
+    // a proper rotation, so its third column is the cross product.
+    Vec3 u0 = (F_trial * V.c[0]) * (1.0f / sigma[0]);
+    Vec3 u1 = (F_trial * V.c[1]) * (1.0f / sigma[1]);
+    u0 = u0 * (1.0f / std::sqrt(std::max(u0.length_squared(), 1.0e-20f)));
+    u1 = u1 - u0 * u0.dot(u1);
+    u1 = u1 * (1.0f / std::sqrt(std::max(u1.length_squared(), 1.0e-20f)));
+    const Vec3 u[3] = { u0, u1, u0.cross(u1) };
+
+    const float lo = 1.0f - std::clamp(pc.snow_critical_compression, 0.0f, 0.9f);
+    const float hi = 1.0f + std::max(pc.snow_critical_stretch, 0.0f);
+    float clamped[3];
+    float overshoot = 0.0f, plastic_increment = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        clamped[k] = std::clamp(sigma[k], lo, hi);
+        overshoot = std::max(overshoot, std::max(sigma[k] - hi, lo - sigma[k]));
+        plastic_increment += std::fabs(std::log(sigma[k] / clamped[k]));
+    }
+    const bool yielded = overshoot > 0.0f;
+    const float je_trial = sigma[0] * sigma[1] * sigma[2];
+    const float je = clamped[0] * clamped[1] * clamped[2];
+    // J = J_E J_P is conserved across the clamp: J_P picks up what F_E sheds.
+    // ★ J_P cannot go below rho_snow / rho_ice: past that the pore space is gone
+    // and the pack IS ice. The old 0.25 floor let a 7 m/s impact crush parcels
+    // to J_P 0.395 (denser than ice), whose exp(xi (1 - J_P)) = 420x modulus
+    // then sized the subcycle at 184 substeps for the rest of the shot.
+    const float jp_min = std::clamp(pc.snow_min_plastic_jacobian, 0.05f, 1.0f);
+    pv = std::clamp(pv * je / je_trial, 0.25f, 1.0f / jp_min);
+    const float jp = 1.0f / pv;
+    // Ceiling = the cost knob (substeps grow with sqrt of it; the subcycle is
+    // sized for it). ★ Floor: exp(xi (1 - J_P)) scales EVERY modulus, bulk
+    // included, so unfloored loosened snow (J_P 3..4 -> e^-20..-30) had no
+    // compressive resistance either. Measured 2026-10-23: a 30 cm block on a
+    // 24 cm rock let the rock punch straight through -- the shear zone round
+    // the rock became pressureless dust and the block sank around it to the
+    // floor, still looking like an intact cube. With a floor a crack still
+    // opens (10 % of the stiffness is far below the load) but loose snow
+    // re-compacts against an obstacle instead of flowing round it.
+    const float min_h = std::clamp(pc.snow_min_hardening, 0.0f, 1.0f);
+    const float hardening = std::clamp(
+        std::exp(std::clamp(pc.snow_hardening * (1.0f - jp), -80.0f, 80.0f)),
+        min_h, std::max(pc.snow_max_hardening, 1.0f));
+
+    float young = std::max(pc.young_modulus * soft, 1.0f) * hardening;
+    bool hardening_capped = false;
+    if (pc.snow_max_young_modulus > 0.0f && young > pc.snow_max_young_modulus) {
+        young = pc.snow_max_young_modulus;
+        hardening_capped = true;
+    }
+    const float mu = young / (2.0f * (1.0f + nu));
+    const float lambda = young * nu / ((1.0f + nu) * (1.0f - 2.0f * nu));
+
+    // tau = 2 mu (F_E - R_E) F_E^T + lambda (J_E - 1) J_E I
+    //     = U diag(2 mu (s - 1) s + lambda (J_E - 1) J_E) U^T
+    Mat3 S;
+    Mat3 F_elastic;
+    for (int k = 0; k < 3; ++k) {
+        const float tau = 2.0f * mu * (clamped[k] - 1.0f) * clamped[k] +
+                          lambda * (je - 1.0f) * je;
+        S = S + outerProduct(u[k], u[k]) * tau;
+        F_elastic = F_elastic + outerProduct(u[k], V.c[k]) * clamped[k];
+    }
+    if (!isFiniteMat(S) || !isFiniteMat(F_elastic)) {
+        S = Mat3(); F_elastic = Mat3::identity();
+    }
+
+    stress_diag  = Vec3(S.at(0,0), S.at(1,1), S.at(2,2));
+    stress_shear = Vec3(S.at(0,1), S.at(0,2), S.at(1,2));
+    deformation_col0 = F_elastic.c[0];
+    deformation_col1 = F_elastic.c[1];
+    deformation_col2 = F_elastic.c[2];
+    plastic_volume = pv;
+    const float lost = std::clamp(1.0f - hardening, 0.0f, 1.0f);
+    damage_state = lost;
+    fracture_history = std::clamp(jp - 1.0f, 0.0f, 1000.0f);
+    hardening_state = std::clamp(std::max(hardening_state, 0.0f) + plastic_increment,
+                                 0.0f, 1000.0f);
+    out_yield_value = overshoot;
+    out_plastic_increment = plastic_increment;
+    // Detached = fully loosened: at the floor (or 99 % lost without one).
+    const bool loose = min_h > 0.0f ? hardening <= min_h * 1.001f : lost >= 0.99f;
+    out_flags = (yielded ? kFlagYielded : 0u) |
+                (loose ? kFlagDetached : 0u) |
+                (strain_limited ? kFlagStrainLimited : 0u) |
+                (hardening_capped ? kFlagHardeningCapped : 0u);
+}
+
+// Ice is the end of compaction: J_P bottoms out at rho_snow / rho_ice.
+constexpr float kIceDensity = 917.0f;
+inline float snowMinPlasticJacobian(float density) {
+    return std::clamp(density / kIceDensity, 0.05f, 1.0f);
+}
+
+// ★ The subcycle is sized for the hardening CEILING, not for the hardest parcel
+// measured last frame. Measuring was one frame stale exactly where it matters:
+// the impact frame ran at the virgin pack's substeps, the kernel had to clamp
+// 7646 parcels' modulus, the under-stiff pack over-compacted (mean J_P 0.74),
+// and only then did the count jump. Sizing for the ceiling makes the cost
+// constant and predictable (sqrt(ceiling) x the virgin count).
+inline float snowSizingYoungModulus(float young_modulus, float max_hardening) {
+    return young_modulus * std::max(max_hardening, 1.0f);
+}
+
+inline uint64_t snowHash(uint64_t h) {
+    h *= 0x9E3779B97F4A7C15ull;
+    h ^= h >> 31; h *= 0xBF58476D1CE4E5B9ull; h ^= h >> 27;
+    h *= 0x94D049BB133111EBull; h ^= h >> 31;
+    return h;
+}
+inline float snowHashUnit(uint64_t h) {  // [0, 1)
+    return static_cast<float>(h >> 40) / 16777216.0f;
+}
+
+// Clump structure of a snowpack, in [-1, 1]: Worley cells of size `cell` (m).
+// Inside a cell the value is the cell's own random strength (-1 strong ..
+// +1 weak, halved); toward a cell boundary it rises to +1 (loosened). A
+// crack then has a connected weak surface to run along, and the cells
+// between survive as clumps.
+inline float snowClumpField(const Vec3& p, float cell, float border_width) {
+    const float inv = 1.0f / std::max(cell, 1.0e-4f);
+    const float x = p.x * inv, y = p.y * inv, z = p.z * inv;
+    const int cx = static_cast<int>(std::floor(x));
+    const int cy = static_cast<int>(std::floor(y));
+    const int cz = static_cast<int>(std::floor(z));
+    float f1 = 1.0e30f, f2 = 1.0e30f;
+    uint64_t nearest = 0;
+    for (int dz = -1; dz <= 1; ++dz)
+    for (int dy = -1; dy <= 1; ++dy)
+    for (int dx = -1; dx <= 1; ++dx) {
+        const int ix = cx + dx, iy = cy + dy, iz = cz + dz;
+        const uint64_t key = snowHash((static_cast<uint64_t>(static_cast<uint32_t>(ix)) << 42) ^
+                                      (static_cast<uint64_t>(static_cast<uint32_t>(iy)) << 21) ^
+                                      static_cast<uint64_t>(static_cast<uint32_t>(iz)));
+        const float fx = ix + snowHashUnit(snowHash(key + 1)) - x;
+        const float fy = iy + snowHashUnit(snowHash(key + 2)) - y;
+        const float fz = iz + snowHashUnit(snowHash(key + 3)) - z;
+        const float d = std::sqrt(fx * fx + fy * fy + fz * fz);
+        if (d < f1) { f2 = f1; f1 = d; nearest = key; }
+        else if (d < f2) { f2 = d; }
+    }
+    const float cell_strength = snowHashUnit(snowHash(nearest + 4)) * 2.0f - 1.0f;
+    const float edge = std::clamp((f2 - f1) * cell / std::max(border_width, 1.0e-5f), 0.0f, 1.0f);
+    const float border = 1.0f - edge * edge * (3.0f - 2.0f * edge);  // 1 on the boundary
+    return std::clamp(0.5f * cell_strength * (1.0f - border) + border, -1.0f, 1.0f);
+}
+
+// Initial structure of a snowpack. A perfectly uniform seed has no weak spot,
+// so an impact compacts it evenly and nothing cracks; real snow is never
+// uniform. Each VIRGIN parcel (never plastic: compactness exactly 1 and no
+// accumulated plastic strain) gets J_P = exp(spread * u) once, afterwards
+// pv != 1.
+//
+// ★★ u is SPATIALLY CORRELATED (snowClumpField at the parcel's birth
+// position), not drawn per parcel. The first version hashed the particle id:
+// white noise. P2G averages ~50 parcels per node and every parcel in a cell
+// deforms with the same grid velocity, so a lone weak parcel cannot localise.
+// Measured at voxel 0.025: spread 0.05 and 0.3 of white noise gave the same
+// result (floor: dead stop, mean J_P 0.68; rock: 65 % of the block past 50 %
+// stiffness loss -- powder, no clumps). A weak zone has to span cells.
+//
+// The clump size is physical (m) but a structure finer than the grid is
+// averaged away just the same, so cells and borders are held to >= 3 and >= 1
+// voxel. The draw uses the BIRTH position: deterministic per seed, and a
+// parcel's strength never changes when particles are reordered.
+inline void assignSnowHeterogeneity(FluidParticles& particles, float spread,
+                                    float clump_size, float voxel_size) {
+    if (!(spread > 0.0f)) return;
+    const float h = std::max(voxel_size, 1.0e-4f);
+    const float cell = std::max(clump_size, 3.0f * h);
+    const float border = std::max(0.2f * cell, h);
+    const std::size_t n = std::min({particles.size(), particles.position.size(),
+        particles.granular_plastic_volume.size(), particles.granular_hardening.size()});
+    for (std::size_t i = 0; i < n; ++i) {
+        float& pv = particles.granular_plastic_volume[i];
+        if (pv != 1.0f || particles.granular_hardening[i] != 0.0f) continue;
+        pv = std::exp(-spread * snowClumpField(particles.position[i], cell, border));
+    }
+}
+
+// Elastic-wave stiffness limit for one substep: E < rho (0.35 h / dt)^2.
+inline float waveLimitedYoungModulus(float voxel_size, float dt, float density) {
+    const float speed = 0.35f * std::max(voxel_size, 1.0e-6f) / std::max(dt, 1.0e-6f);
+    return std::max(density, 1.0f) * speed * speed;
+}
+
 // ── Per-particle constitutive update ─────────────────────────────────────────
 // Mirrors sim_fluid_granular_stress_update.comp line for line. `affine` is the
 // APIC velocity gradient C; everything else is read-modify-write particle state.
@@ -384,6 +702,14 @@ inline void stressUpdateParticle(const AffineC& affine,
                                  float& out_yield_value,
                                  float& out_plastic_increment,
                                  uint32_t& out_flags) {
+    if (pc.snow_plasticity) {
+        snowStressUpdateParticle(affine, pc, softening, deformation_col0,
+                                 deformation_col1, deformation_col2, stress_diag,
+                                 stress_shear, plastic_volume, damage_state,
+                                 hardening_state, fracture_history, out_yield_value,
+                                 out_plastic_increment, out_flags);
+        return;
+    }
     const Mat3 C(affine.col0, affine.col1, affine.col2);
     const float nu = std::clamp(pc.poisson_ratio, -0.49f, 0.49f);
     // Stiffness falls linearly with softening; bond strength follows its OWN
@@ -596,15 +922,26 @@ struct SettleParams {
     float contact_damping = 8.0f;
     float sleep_speed = 0.03f;
     float pressure_threshold = 0.1f;
+    // 0 = damp at any speed (Drucker-Prager). Snow damps only parcels slower
+    // than this: undamped, a resting pack kept a 0.2 m/s elastic jitter whose
+    // stretch half re-crossed theta_s every cycle and ratcheted J_P upward
+    // (measured 1.06 -> 1.17 over 60 steps at rest); damping every speed
+    // instead ate the impact energy that breaks a snowball.
+    float damping_max_speed = 0.0f;
 };
+
+// Snow's damping ceiling: well above the measured rest jitter (0.23 m/s),
+// well below an impact (metres per second).
+constexpr float kSnowSettleDampingMaxSpeed = 0.5f;
 
 inline void settleParticle(const Vec3& stress_diag, const SettleParams& sp,
                            Vec3& velocity, uint32_t& flags) {
     const float pressure =
         std::max(-(stress_diag.x + stress_diag.y + stress_diag.z) / 3.0f, 0.0f);
     if (pressure <= sp.pressure_threshold) return;
-    velocity = velocity * std::exp(-std::max(sp.contact_damping, 0.0f) *
-                                    std::max(sp.dt, 0.0f));
+    if (!(sp.damping_max_speed > 0.0f) || velocity.length() < sp.damping_max_speed)
+        velocity = velocity * std::exp(-std::max(sp.contact_damping, 0.0f) *
+                                        std::max(sp.dt, 0.0f));
     if (velocity.length() < std::max(sp.sleep_speed, 0.0f)) {
         velocity = Vec3(0, 0, 0);
         flags |= kFlagSleeping;

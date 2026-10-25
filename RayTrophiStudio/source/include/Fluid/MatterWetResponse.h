@@ -5,6 +5,10 @@
 #include <string>
 #include <vector>
 
+namespace RayTrophiSim {
+struct SubstanceProfile;
+}
+
 namespace RayTrophiSim::Fluid {
 class FluidParticles;
 struct MatterPoreParams;
@@ -13,7 +17,12 @@ struct MatterPoreParams;
 // local positive pore pressure Pa. Zero saturation is exactly the dry model.
 using MatterWetResponse = std::array<float, 4>;
 static_assert(sizeof(MatterWetResponse) == 16);
-float matterParticleDryVolume(const FluidParticles& particles, std::size_t index);
+// Rest skeleton volume m / rho. An untagged parcel IS the domain's Default
+// Substance (that is what its rest mass was computed from), so pass it: the
+// old 1600 kg/m^3 fallback gave seeded 400 kg/m^3 Snow a quarter of its volume
+// and therefore a quarter of its stress force.
+float matterParticleDryVolume(const FluidParticles& particles, std::size_t index,
+                              const SubstanceProfile* domain_substance = nullptr);
 float matterParticleSaturation(const FluidParticles& particles, std::size_t index);
 // Upper-edge quantization: exactly dry stays band 0; positive saturation reaches
 // a wet band. The error in normalized appearance response is at most 1/7.

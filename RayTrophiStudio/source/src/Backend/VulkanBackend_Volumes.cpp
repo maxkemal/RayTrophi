@@ -38,6 +38,7 @@
 #include <cmath>
 #include <cstring>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -203,6 +204,8 @@ void VulkanBackendAdapter::republishVolumeSlotsForTLASOrder() {
     m_device->updateVolumeBuffer(instances.data(),
                                  instances.size() * sizeof(VulkanRT::VkVolumeInstance),
                                  (uint32_t)instances.size());
+    // Content versions are not known on this path: fresh epochs, full refill.
+    publishVolumeLightCache({});
     m_publishedVolumeKeyOrder = keys;
     m_publishedVolumeByKey.clear();
     for (size_t i = 0; i < keys.size(); ++i) {
@@ -302,6 +305,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 inactive.size() * sizeof(VulkanRT::VkVolumeInstance),
                 (uint32_t)inactive.size());
         }
+        publishVolumeLightCache({});
         m_volumeTemporal.invalidate();
         // Nothing is published, so there is nothing for a reorder to preserve.
         // Dropping the cache keeps republishVolumeSlotsForTLASOrder from
@@ -497,6 +501,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     // zeroing the count and leaving the previous frame's data resident.
     if (orderedVols.empty()) {
         m_device->updateVolumeBuffer(nullptr, 0, 0);
+        publishVolumeLightCache({});
         // The stale-buffer sweep above may have destroyed buffers the cached
         // slots point at, and nothing rewrites the cache on this path.
         m_publishedVolumeByKey.clear();
@@ -507,6 +512,10 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
 
     // Convert GpuVDBVolume (OptiX/CUDA struct) → VkVolumeInstance (Vulkan SSBO)
     std::vector<VulkanRT::VkVolumeInstance> instances(orderedVols.size());
+    // One density content stamp per slot for the volume light cache key. The
+    // slot bytes alone cannot see a content change: a NanoVDB re-upload or a
+    // live sim step keeps the same device address.
+    std::vector<uint64_t> lightCacheStamps(orderedVols.size(), 0);
     auto& vdbManager = VDBVolumeManager::getInstance();
     auto hostGridLease = vdbManager.lockHostGridAccess();
     // ★★ A TLAS-mapped volume with no packet entry this frame is AMBIGUOUS: it
@@ -784,6 +793,15 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         const auto* opticalSource = vdbManager.getVolume(vdb_id);
         dst._uvw_pad[0] = opticalSource && opticalSource->filepath == "[LIVE SIMULATION]"
             ? 1.0f : 0.0f;
+        // Every version that can move density without moving a slot byte:
+        // NanoVDB host grid, device-resident live gas, and its host mirror.
+        if (opticalSource) {
+            uint64_t stamp = opticalSource->content_version;
+            stamp = (stamp * 1099511628211ull) ^ opticalSource->dense_version;
+            stamp = (stamp * 1099511628211ull) ^ opticalSource->dense_mirror_version;
+            lightCacheStamps[i] = stamp;
+        }
+        lightCacheStamps[i] = (lightCacheStamps[i] * 1099511628211ull) ^ src.dense_host_version;
         if (!liveDenseGas && vdb_id >= 0) {
             void* hostGrid = vdbManager.getHostGrid(vdb_id);
             const size_t gridSize = vdbManager.getHostGridSize(vdb_id);
@@ -1097,7 +1115,8 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // band, so it needs a grid too), 5 = live dense gas. Only source_type 3
         // is authored procedural, and it never reaches volume_type 1.
         const bool wantedAGrid =
-            (src.source_type == 0 || src.source_type == 4 || src.source_type == 5);
+            (src.source_type == 0 || src.source_type == 4 || src.source_type == 5 ||
+             src.source_type == 6);
         if (dst.volume_type == 1 && wantedAGrid) {
             dst.is_active = 0;
             anyMappedVolumeMissingContent = true;
@@ -1201,6 +1220,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
     m_device->updateVolumeBuffer(instances.data(),
                                   instances.size() * sizeof(VulkanRT::VkVolumeInstance),
                                   (uint32_t)instances.size());
+    publishVolumeLightCache(lightCacheStamps);
 
     // Remember what each volume slot HOLDS, keyed by identity. Only valid when
     // the mapping was used (the fallback branch above publishes in arbitrary
@@ -1362,8 +1382,255 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
         m_device->updateVolumeBuffer(instances.data(),
                                       instances.size() * sizeof(VulkanRT::VkVolumeInstance),
                                       (uint32_t)instances.size());
+        // Homogeneous: the published bytes ARE the whole density description,
+        // so a zero content stamp is exact here, not a guess.
+        publishVolumeLightCache(std::vector<uint64_t>(instances.size(), 0));
     }
     resetAccumulation();
+}
+
+// ============================================================================
+// Volume light cache (docs/dev/VOLUME_LIGHT_CACHE.md)
+// ============================================================================
+//
+// Layout shared with volume_light_cache.glsl:
+//   [0..15]    uint slotCount, uint channelCount, uint, uint
+//   [16..271]  16 x uvec4 { entryOffset, dims 10:10:10, volumeKey, 0 }
+//   [512..]    uint64 entries (tag | integral bits << 32)
+//
+// The host only ever writes the header. Entries are written by the volume
+// closest-hit, and a stale entry can never be read as valid: its tag hashes
+// the volume key, which hashes the slot's bytes, content versions, dims and
+// entry offset. Changing any of those is therefore a complete invalidation
+// without touching the entries at all.
+
+namespace {
+// 6 light channels + 4 radiance cache channels (density, source RGB;
+// RT_GAS_SECONDARY_MARCH.md §13).
+constexpr uint32_t kVlcChannels = 10;       // VLC_CHANNELS
+constexpr uint32_t kVlcMaxSlots = 16;       // VLC_MAX_SLOTS (the shaders' volume loop bound)
+constexpr uint32_t kVlcEntryBaseBytes = 512;
+constexpr uint64_t kVlcBudgetBytes = 512ull << 20;
+
+std::mutex g_volumeLightCacheMutex;
+int g_volumeLightCacheMaxCells = 64;
+
+uint64_t vlcHash(uint64_t h, const void* data, size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    for (size_t i = 0; i < size; ++i) {
+        h ^= bytes[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+// Cells per axis: the longest axis gets min(max_cells, extent / 2 voxels), the
+// others follow the box aspect. Never fewer than 4 (the shader needs >= 2 for a
+// trilinear pair; 4 keeps a thin slab from collapsing to one shadow value).
+void vlcDims(const VulkanRT::VkVolumeInstance& v, int maxCells, int out[3]) {
+    float extent[3];
+    float longest = 0.0f;
+    for (int a = 0; a < 3; ++a) {
+        extent[a] = (std::max)(v.aabb_max[a] - v.aabb_min[a], 1e-6f);
+        longest = (std::max)(longest, extent[a]);
+    }
+    int cellsLong = maxCells;
+    if (v.voxel_size > 0.0f) {
+        const float byVoxel = std::ceil(longest / (2.0f * v.voxel_size));
+        if (byVoxel < static_cast<float>(cellsLong)) cellsLong = static_cast<int>(byVoxel);
+    }
+    cellsLong = (std::max)(cellsLong, 4);
+    for (int a = 0; a < 3; ++a) {
+        const int c = static_cast<int>(std::ceil(cellsLong * extent[a] / longest));
+        out[a] = (std::min)((std::max)(c, 4), 1023);
+    }
+}
+} // namespace
+
+int volumeLightCacheMaxCells() {
+    std::lock_guard<std::mutex> lock(g_volumeLightCacheMutex);
+    return g_volumeLightCacheMaxCells;
+}
+
+void setVolumeLightCacheMaxCells(int maxCells) {
+    std::lock_guard<std::mutex> lock(g_volumeLightCacheMutex);
+    g_volumeLightCacheMaxCells = maxCells;
+}
+
+VulkanBackendAdapter::VolumeLightCacheStatus VulkanBackendAdapter::volumeLightCacheStatus() const {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    return m_volumeLightCacheStatus;
+}
+
+namespace {
+std::mutex g_volumeMarchLodMutex;
+VolumeMarchLod g_volumeMarchLod;
+} // namespace
+
+VolumeMarchLod volumeMarchLod() {
+    std::lock_guard<std::mutex> lock(g_volumeMarchLodMutex);
+    return g_volumeMarchLod;
+}
+
+void setVolumeMarchLod(const VolumeMarchLod& lod) {
+    std::lock_guard<std::mutex> lock(g_volumeMarchLodMutex);
+    g_volumeMarchLod = lod;
+}
+
+uint32_t packVolumeMarchLod(const VolumeMarchLod& lod) {
+    auto field = [](int v, int lo, int hi) {
+        return static_cast<uint32_t>((std::min)((std::max)(v, lo), hi));
+    };
+    return (field(lod.camera_light_stride, 1, 16) - 1u) |
+           ((field(lod.secondary_light_stride, 1, 16) - 1u) << 4) |
+           ((field(lod.secondary_step_scale, 1, 16) - 1u) << 8) |
+           (field(lod.secondary_max_steps, 0, 511) << 12) |
+           ((lod.secondary_radiance_cache ? 1u : 0u) << 21);
+}
+
+void VulkanBackendAdapter::refreshVolumeMarchLod() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // setWorldData packs the current setting; before the first upload there
+    // is nothing to refresh, the first one will carry it.
+    if (m_worldUploadedOnce) setWorldData(&m_cachedWorld);
+    resetAccumulation();
+}
+
+void VulkanBackendAdapter::refreshVolumeLightCache() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    // Empty stamps = fresh epoch per slot: a settings change refills everything.
+    publishVolumeLightCache({});
+    resetAccumulation();
+}
+
+void VulkanBackendAdapter::publishVolumeLightCache(const std::vector<uint64_t>& stamps) {
+    if (!m_device || !m_device->isInitialized()) return;
+    const int maxCellsSetting = volumeLightCacheMaxCells();
+    const auto& slots = m_device->m_volumeShadow;   // exactly what binding 9 now holds
+
+    // Only an adapter that traces RT reads the cache. The raster viewport
+    // adapter publishes the same volume table but never builds a TLAS.
+    const bool wanted = m_tlasVolumeSlotCount != 0 && !slots.empty();
+
+    struct Row { uint32_t offset = 0; uint32_t dims = 0; uint32_t key = 0; int d[3] = {0, 0, 0}; uint64_t entries = 0; };
+    std::vector<Row> rows((std::min)(slots.size(), static_cast<size_t>(kVlcMaxSlots)));
+    uint64_t totalEntries = 0;
+    if (wanted) {
+        // Shrink the resolution until the whole table fits the budget. A scene
+        // with many large domains gets coarser shadows, never a failed allocation.
+        for (int maxCells = maxCellsSetting; ; maxCells = (std::max)(8, maxCells * 3 / 4)) {
+            totalEntries = 0;
+            for (size_t i = 0; i < rows.size(); ++i) {
+                const auto& v = slots[i];
+                rows[i] = Row{};
+                // Same membership as the surface shadow and the scatter march:
+                // SurfaceSDF (4) is a surface, procedural sky cloud (3) is not here.
+                if (!v.is_active || v.source_type == 4 || v.source_type == 3 ||
+                    v.volume_type == 3) continue;
+                vlcDims(v, maxCells, rows[i].d);
+                rows[i].entries = static_cast<uint64_t>(rows[i].d[0]) * rows[i].d[1] *
+                                  rows[i].d[2] * kVlcChannels;
+                rows[i].offset = static_cast<uint32_t>(totalEntries);
+                totalEntries += rows[i].entries;
+            }
+            if (totalEntries * 8ull + kVlcEntryBaseBytes <= kVlcBudgetBytes || maxCells <= 8) break;
+        }
+    }
+
+    const uint64_t neededBytes = kVlcEntryBaseBytes + totalEntries * 8ull;
+    if (wanted && totalEntries > 0 && m_volumeLightCache.size < neededBytes) {
+        // The previous buffer may still be read by an in-flight trace; the world
+        // buffer holds its address until the re-upload below.
+        if (m_volumeLightCache.buffer) {
+            m_device->waitIdle();
+            m_device->destroyBuffer(m_volumeLightCache);
+            m_volumeLightCache = {};
+        }
+        VulkanRT::BufferCreateInfo ci;
+        ci.size = neededBytes + neededBytes / 4;   // headroom: a growing domain must not realloc per frame
+        ci.usage = (VulkanRT::BufferUsage)(
+            (uint32_t)VulkanRT::BufferUsage::STORAGE |
+            (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST);
+        ci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+        m_volumeLightCache = m_device->createBuffer(ci);
+        // A new buffer may reuse the old VkBuffer handle value; the header must
+        // be uploaded into it regardless of what the last upload looked like.
+        m_volumeLightCacheHeader.clear();
+        if (m_volumeLightCache.buffer && m_volumeLightCache.deviceAddress != 0) {
+            // ★ Zero, not "whatever the allocator returned": a stale word that
+            // happened to equal a live tag would be read as a valid shadow.
+            // Zero can never match (tags carry bit 1).
+            VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+            if (cmd) {
+                vkCmdFillBuffer(cmd, m_volumeLightCache.buffer, 0, VK_WHOLE_SIZE, 0u);
+                m_device->endSingleTimeCommands(cmd);
+            }
+        } else {
+            if (m_volumeLightCache.buffer) m_device->destroyBuffer(m_volumeLightCache);
+            m_volumeLightCache = {};
+            SCENE_LOG_ON_CHANGE("vlc.alloc", (long long)neededBytes,
+                "[VolumeLightCache] allocation of " + std::to_string(neededBytes) +
+                " bytes failed or has no device address; the march runs uncached.");
+        }
+    }
+
+    std::vector<uint32_t> header(kVlcEntryBaseBytes / 4, 0u);
+    const bool active = wanted && totalEntries > 0 && m_volumeLightCache.buffer &&
+                        m_volumeLightCache.size >= neededBytes;
+    header[0] = active ? static_cast<uint32_t>(rows.size()) : 0u;
+    header[1] = kVlcChannels;
+    // Remembered even while inactive: the TLAS may be built after this publish,
+    // and the follow-up publish must key the slots on the same content.
+    m_volumeLightCacheStamps.assign(slots.size(), 0);
+    for (size_t i = 0; i < slots.size(); ++i)
+        m_volumeLightCacheStamps[i] = i < stamps.size() ? stamps[i] : ++m_volumeLightCacheEpoch;
+    for (size_t i = 0; i < rows.size() && active; ++i) {
+        Row& r = rows[i];
+        if (r.entries == 0) continue;
+        r.dims = static_cast<uint32_t>(r.d[0]) | (static_cast<uint32_t>(r.d[1]) << 10) |
+                 (static_cast<uint32_t>(r.d[2]) << 20);
+        const uint64_t stamp = m_volumeLightCacheStamps[i];
+        uint64_t h = 1469598103934665603ull;
+        h = vlcHash(h, &slots[i], sizeof(VulkanRT::VkVolumeInstance));
+        h = vlcHash(h, &stamp, sizeof(stamp));
+        h = vlcHash(h, &r.dims, sizeof(r.dims));
+        h = vlcHash(h, &r.offset, sizeof(r.offset));
+        r.key = static_cast<uint32_t>(h ^ (h >> 32));
+        if (r.key == 0) r.key = 1;   // 0 = slot disabled
+        header[4 + i * 4 + 0] = r.offset;
+        header[4 + i * 4 + 1] = r.dims;
+        header[4 + i * 4 + 2] = r.key;
+    }
+    // updateGeometry re-keys on every rebuild (skinning, file animation); an
+    // unchanged header must not cost a transfer submission each time.
+    if (m_volumeLightCache.buffer &&
+        (header != m_volumeLightCacheHeader || m_volumeLightCache.buffer != m_volumeLightCacheHeaderBuffer)) {
+        m_device->uploadBuffer(m_volumeLightCache, header.data(), kVlcEntryBaseBytes, 0);
+        m_volumeLightCacheHeader = header;
+        m_volumeLightCacheHeaderBuffer = m_volumeLightCache.buffer;
+        ++m_volumeLightCacheStatus.header_publishes;
+    }
+
+    // The world buffer carries the address. Re-upload it whenever the address
+    // it holds is not this buffer's (first allocation, reallocation, teardown);
+    // before the first world upload there is nothing to correct, and that
+    // upload reads m_volumeLightCache itself.
+    if (m_worldUploadedOnce && m_volumeLightCache.deviceAddress != m_volumeLightCacheAddressUploaded) {
+        setWorldData(&m_cachedWorld);
+    }
+
+    m_volumeLightCacheStatus.buffer_bytes = m_volumeLightCache.buffer ? m_volumeLightCache.size : 0;
+    m_volumeLightCacheStatus.used_bytes = active ? neededBytes : 0;
+    m_volumeLightCacheStatus.channels = kVlcChannels;
+    m_volumeLightCacheStatus.slots.clear();
+    for (size_t i = 0; i < rows.size(); ++i) {
+        VolumeLightCacheStatus::Slot s;
+        s.slot = static_cast<int>(i);
+        s.dims[0] = rows[i].d[0]; s.dims[1] = rows[i].d[1]; s.dims[2] = rows[i].d[2];
+        s.bytes = active ? rows[i].entries * 8ull : 0;
+        s.keyed = active && rows[i].key != 0;
+        m_volumeLightCacheStatus.slots.push_back(s);
+    }
 }
 
 } // namespace Backend

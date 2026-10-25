@@ -152,8 +152,14 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
     }
     const double h = grid.voxel_size;
     const double cfl = std::clamp(static_cast<double>(params.cfl), 0.05, 1.0);
-    const auto elastic = Granular::elasticStepInfo(params.granular_young_modulus,
-        grid.voxel_size, dt, static_cast<float>(strain));
+    // Snow: the hardening ceiling at the substance's density (runMatterGpuStep).
+    const auto elastic = params.granular_snow_plasticity
+        ? Granular::elasticStepInfo(Granular::snowSizingYoungModulus(
+              params.granular_young_modulus, params.granular_snow_max_hardening),
+              grid.voxel_size, dt, static_cast<float>(strain), 0.0f, 1.0f,
+              params.granular_density)
+        : Granular::elasticStepInfo(params.granular_young_modulus,
+              grid.voxel_size, dt, static_cast<float>(strain));
     // Include acceleration over the whole frame rather than measuring only
     // the initially stationary pile. Never reduce authored stiffness to fit.
     const double acceleration = params.gravity.length();

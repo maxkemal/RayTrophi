@@ -149,6 +149,13 @@ void main() {
         sphereShadowProbe();
         return;
     }
+    // Distance-only volume probes need neither triangle instance records nor
+    // geometry/material buffers. Check the incoming flags first: camera rays
+    // use location 0, so their aliased location-1 payload must never be read.
+    if ((gl_IncomingRayFlagsEXT & gl_RayFlagsSkipClosestHitShaderEXT) != 0u &&
+        volumeSolidProbeCandidate(shadowPayload, gl_HitTEXT)) {
+        return;
+    }
     VkInstanceData inst = instances.i[gl_InstanceID];
     VkGeometryData geo  = geometries.g[inst.blasIndex];
 
@@ -227,15 +234,6 @@ void main() {
         float arnd = float((aword >> 22u) ^ aword) * (1.0 / 4294967296.0);
         if (arnd >= alpha) ignoreIntersectionEXT;
         return;                                  // accept — closesthit shades it opaque
-    }
-
-    // ---- Volume embedded-solid distance probe -----------------------------
-    // Volume closest-hit initializes w with this exact sentinel and forces
-    // any-hit for opaque geometry via NoOpaqueEXT. Accept candidates without
-    // terminating so traversal resolves the nearest hit, not its first visited
-    // triangle or sphere. The shared helper retains the nearest distance.
-    if (volumeSolidProbeCandidate(shadowPayload, gl_HitTEXT)) {
-        return;
     }
 
     // ---- SSS subsurface random-walk exit probe ----------------------------

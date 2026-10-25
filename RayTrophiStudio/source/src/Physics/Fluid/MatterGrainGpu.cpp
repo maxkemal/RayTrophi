@@ -68,7 +68,7 @@ void setLinearGroups(ComputeDispatch& command, std::size_t threads) {
 }
 
 // The one ceiling left is 32-bit index width in the shader, a correctness
-// limit: the widest index is bucket_slots (tables * buckets * 16 slots), and
+// limit: the widest index is bucket_slots (tables * buckets * 32 slots), and
 // 2^24 grains give 2^26 buckets. Memory runs out first in practice;
 // the domain budget and the device storage-buffer limit report that below.
 constexpr std::size_t kMaxGrains = std::size_t{1} << 24;
@@ -978,8 +978,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         return rerun;
     }
     if (!ok || overflow) {
-        error = (overflow & 4u) ? "grain neighbour bucket overflow (more than 16 grains hashed "
-                "to one bucket); reduce packing or the physical size ratio" :
+        error = (overflow & 4u) ? "grain neighbour bucket overflow (more than " +
+                std::to_string(kMatterGrainBucketCapacity) + " grains hashed to one bucket); "
+                "reduce packing or the physical size ratio" :
             (overflow & 2u) ? "grain collider BVH traversal stack exceeded (64)" :
             (overflow & 8u) ? "grain neighbour list full at the allocated capacity; "
                 "reduce packing or the physical size ratio" :

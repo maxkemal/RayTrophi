@@ -577,6 +577,50 @@ void VDBVolume::updateBoundsFromVDB() {
 // BOUNDS HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
 
+void VDBVolume::shrinkLiveBoundsToOccupied(const std::vector<float>& density,
+                                           int nx, int ny, int nz, float voxel) {
+    Vec3 boxMin, boxMax;
+    if (occupiedLocalBox(density.data(), nullptr, density.size(), nx, ny, nz, voxel,
+                         boxMin, boxMax)) {
+        setLocalBounds(boxMin, boxMax);
+    }
+}
+
+bool VDBVolume::occupiedLocalBox(const float* primary, const float* secondary,
+                                 size_t count, int nx, int ny, int nz, float voxel,
+                                 Vec3& outMin, Vec3& outMax) {
+    if (!primary || nx <= 0 || ny <= 0 || nz <= 0 || !(voxel > 0.0f)) return false;
+    const size_t cells = static_cast<size_t>(nx) * static_cast<size_t>(ny) * static_cast<size_t>(nz);
+    if (count != cells) return false;
+    int lo[3] = {nx, ny, nz};
+    int hi[3] = {-1, -1, -1};
+    size_t c = 0;
+    for (int k = 0; k < nz; ++k) {
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 0; i < nx; ++i, ++c) {
+                if (!(primary[c] > 0.0f) && !(secondary && secondary[c] > 0.0f)) continue;
+                lo[0] = (std::min)(lo[0], i); hi[0] = (std::max)(hi[0], i);
+                lo[1] = (std::min)(lo[1], j); hi[1] = (std::max)(hi[1], j);
+                lo[2] = (std::min)(lo[2], k); hi[2] = (std::max)(hi[2], k);
+            }
+        }
+    }
+    if (hi[0] < 0) return false;
+    constexpr int kBlock = 8;
+    const int n[3] = {nx, ny, nz};
+    float boxMin[3], boxMax[3];
+    for (int a = 0; a < 3; ++a) {
+        // Cells [lo-1, hi+1] padded, then [floor, ceil) to whole blocks.
+        const int first = (std::max)(0, ((lo[a] - 1) / kBlock) * kBlock);
+        const int endCell = (std::min)(n[a], ((hi[a] + 2 + kBlock - 1) / kBlock) * kBlock);
+        boxMin[a] = static_cast<float>(first) * voxel;
+        boxMax[a] = static_cast<float>(endCell) * voxel;
+    }
+    outMin = Vec3(boxMin[0], boxMin[1], boxMin[2]);
+    outMax = Vec3(boxMax[0], boxMax[1], boxMax[2]);
+    return true;
+}
+
 AABB VDBVolume::getWorldBounds() const {
     if (world_bounds_dirty) {
         AABB local_box(local_bbox_min, local_bbox_max);

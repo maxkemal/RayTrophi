@@ -1,8 +1,71 @@
 #include "UI/VolumeMaterialUI.h"
 #include "VolumeMaterialAuthoring.h"
+#include "VolumeMaterialService.h"
+#include "scene_data.h"
+#include "scene_ui.h"
 #include "imgui.h"
 #include <algorithm>
 #include <cmath>
+
+void drawMatterFogLinks(UIContext& context, SceneUI& ui,
+    const RayTrophiSim::SimulationGridDomainDesc& domain) {
+    if (domain.type != RayTrophiSim::SimulationDomainType::Matter) {
+        return;
+    }
+    for (const auto& system : context.scene.particle_systems) {
+        if (!system.runtime) {
+            continue;
+        }
+        const auto& domains = system.runtime->gridDomains();
+        for (std::size_t d = 0; d < domains.size() &&
+                d < system.matter_fog_streams.size(); ++d) {
+            if (&domains[d] != &domain) {
+                continue;
+            }
+            for (const auto& [key, stream] : system.matter_fog_streams[d]) {
+                if (!stream.volume) {
+                    continue;
+                }
+                ImGui::PushID(RayTrophiSim::Fluid::fogFieldId(key).c_str());
+                if (ImGui::SmallButton(("Edit " +
+                        RayTrophiSim::Fluid::fogFieldName(key) + " Fog...").c_str())) {
+                    context.selection.selectVDBVolume(stream.volume, -1, stream.volume->name);
+                    ui.tab_to_focus = "VDB";
+                }
+                ImGui::PopID();
+            }
+        }
+    }
+}
+
+bool drawMatterFogVisibility(UIContext& context, VDBVolume* volume) {
+    for (auto& system : context.scene.particle_systems) {
+        if (!system.runtime) {
+            continue;
+        }
+        auto& domains = system.runtime->gridDomains();
+        for (std::size_t d = 0; d < system.matter_fog_streams.size() &&
+                d < domains.size(); ++d) {
+            for (const auto& [key, stream] : system.matter_fog_streams[d]) {
+                if (stream.volume.get() != volume) {
+                    continue;
+                }
+                auto& appearance = domains[d].matter_fog_streams.at(key);
+                bool visible = appearance.visible;
+                ImGui::TextDisabled("Live Matter field: %s",
+                    RayTrophiSim::Fluid::fogFieldName(key).c_str());
+                if (ImGui::Checkbox("Visible##MatterFog", &visible)) {
+                    const auto result = volume_material::execute(context, "set",
+                        "matter:" + domains[d].name + ":" +
+                            RayTrophiSim::Fluid::fogFieldId(key), {{"visible", visible}});
+                    return !result.contains("__error");
+                }
+                return false;
+            }
+        }
+    }
+    return false;
+}
 
 namespace {
 

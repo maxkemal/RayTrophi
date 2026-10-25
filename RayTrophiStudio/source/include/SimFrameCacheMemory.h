@@ -30,6 +30,7 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
 
     const auto& particles = state.particles;
     bytes += allocationBytes(particles.particle_id);
+    bytes += allocationBytes(particles.birth_source_uid);
     bytes += allocationBytes(particles.position);
     bytes += allocationBytes(particles.velocity);
     bytes += allocationBytes(particles.affine);

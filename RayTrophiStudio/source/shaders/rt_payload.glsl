@@ -31,7 +31,9 @@ struct RayPayload {
     bool  skipVolumeAABBs;
     uint  bounceType;
     bool  skipGasVolumes; // one-shot handoff from a gas segment to a SurfaceSDF
-    uint  volumeTraversalMask; // input: actual cull mask of this trace, not next-pass flags
+    // Input low byte: actual cull mask. A completed solid probe may return
+    // a conservative handoff tMin in the upper bits; raygen consumes it once.
+    uint  volumeTraversalMask;
     // ── Primary-hit AOV block, packed ───────────────────────────────────────
     uint  primaryARG;     // packHalf2x16(primaryAlbedo.r, primaryAlbedo.g)
     uint  primaryABT;     // packHalf2x16(primaryAlbedo.b, primaryTransmission)
@@ -43,6 +45,25 @@ struct RayPayload {
                           //              (0 = unset, 1/2/3 = R/G/B; persists across
                           //               bounces — per-bounce resets must preserve it)
 };
+
+// Reuse the traversal word on return rather than growing the RT payload. The
+// next trace restores its actual mask before any closest-hit shader sees it.
+// Positive IEEE floats order by their uint bits. Round DOWN by at least one
+// 256-ULP bin: the known nearest surface stays inside the next trace interval,
+// including when its distance was exactly at a bin boundary. Never move origin.
+uint plSolidHandoffWord(uint traversalWord, float nearestDistance) {
+    if (!(nearestDistance > 0.0) || isnan(nearestDistance) || isinf(nearestDistance)) {
+        return traversalWord;
+    }
+    uint bound = floatBitsToUint(nearestDistance) & 0xFFFFFF00u;
+    bound = bound >= 0x100u ? bound - 0x100u : 0u;
+    return (traversalWord & 0xFFu) | bound;
+}
+
+float plSolidHandoffTMin(uint traversalWord, float fallback) {
+    float bound = uintBitsToFloat(traversalWord & 0xFFFFFF00u);
+    return bound > fallback && !isinf(bound) && !isnan(bound) ? bound : fallback;
+}
 
 const uint PL_MATID_MASK   = 0xFFFFu;
 const uint PL_PRIMARY_DONE = 1u << 16;

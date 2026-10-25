@@ -195,6 +195,22 @@ struct APICSolverParams {
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
     bool  granular_rebonding = false;
+    // Stomakhin 2013 snow plasticity (from the Default Substance). When on, the
+    // Drucker-Prager fields above are inert; see snowStressUpdateParticle.
+    bool  granular_snow_plasticity = false;
+    float granular_snow_critical_compression = 0.025f;
+    float granular_snow_critical_stretch = 0.0075f;
+    float granular_snow_hardening = 10.0f;
+    float granular_snow_max_hardening = 5.0f;
+    float granular_snow_min_hardening = 0.1f;
+    float granular_snow_heterogeneity = 0.1f;
+    float granular_snow_clump_size = 0.12f;
+    // The Default Substance's bulk density, kg/m^3: the rho the stress
+    // divergence divides by (force per unit mass = div(tau)/rho) and the snow
+    // branch's elastic-wave limit. Until 2026-10-23 the divergence used a fixed
+    // 1600 (Sand), so Snow at 400 felt a quarter of its own stress. The
+    // Drucker-Prager substep planner still sizes against kGranularDensity.
+    float granular_density = 1600.0f;
     // Legacy serialized/API field, clamped to 1..64 for compatibility only.
     // Adaptive subcycling always grants the full CFL request; this cannot lower E.
     int   granular_max_solver_substeps = 32;
@@ -293,6 +309,15 @@ struct APICSolverParams {
         granular_fracture_strain = std::clamp(granular_fracture_strain, 1.0e-4f, 1.0f);
         granular_damage_rate = std::clamp(granular_damage_rate, 0.0f, 100.0f);
         granular_healing_rate = std::clamp(granular_healing_rate, 0.0f, 20.0f);
+        granular_snow_critical_compression =
+            std::clamp(granular_snow_critical_compression, 0.0f, 0.9f);
+        granular_snow_critical_stretch = std::clamp(granular_snow_critical_stretch, 0.0f, 0.5f);
+        granular_snow_hardening = std::clamp(granular_snow_hardening, 0.0f, 50.0f);
+        granular_snow_max_hardening = std::clamp(granular_snow_max_hardening, 1.0f, 1000.0f);
+        granular_snow_min_hardening = std::clamp(granular_snow_min_hardening, 0.0f, 1.0f);
+        granular_snow_heterogeneity = std::clamp(granular_snow_heterogeneity, 0.0f, 0.5f);
+        granular_snow_clump_size = std::clamp(granular_snow_clump_size, 0.001f, 10.0f);
+        granular_density = std::clamp(granular_density, 1.0f, 30000.0f);
         granular_max_solver_substeps = std::clamp(granular_max_solver_substeps, 1, 64);
         granular_softening_temperature = std::max(granular_softening_temperature, 0.0f);
         // A zero range would make the transition a step function at one exact
@@ -608,6 +633,19 @@ struct APICSolverStats {
     // PLASTICITY on soft material, not an error -- it replaces the det(F)
     // reset that used to dump such a particle's whole stress in one step.
     size_t granular_compaction_capped_particles = 0;
+    // Snow plasticity: parcels whose hardened modulus E*exp(xi(1-J_P)) had to
+    // be clamped to the substep's elastic-wave limit (the substep is too coarse
+    // for how compacted the pack is).
+    size_t granular_hardening_capped_particles = 0;
+    // Plastic volume ratio J_P = det(F_P) over the counted granular parcels.
+    // < 1 compacted (harder), > 1 loosened/torn (softer). 1 = virgin material.
+    float granular_min_plastic_jacobian = 1.0f;
+    float granular_max_plastic_jacobian = 1.0f;
+    float granular_mean_plastic_jacobian = 1.0f;
+    size_t granular_counted_particles = 0;
+    // False = no backend counted the constitutive state this step, so every
+    // granular_* counter above is a default, not a measured zero.
+    bool granular_material_measured = false;
     float granular_min_softening = 1.0f;
     size_t granular_softened_particles = 0;
     // Material validity, not stability: the load the domain puts on its own

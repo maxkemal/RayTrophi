@@ -19,8 +19,15 @@ struct alignas(16) StressUpdateConstants {
     float hardening_coefficient=0.0f;
     float max_stored_strain=kGranularMaxStoredStrain;
     float compaction_hardening=0.0f,compaction_limit=0.0f;
+    // Stomakhin snow branch. The GLSL block carries the same fields and pad:
+    // the Matter dispatcher appends matter_lane at sizeof(this), so both must
+    // end at 96 bytes or the indexed variant reads its lane from a pad.
+    uint32_t snow_plasticity=0;
+    float snow_critical_compression=0.025f,snow_critical_stretch=0.0075f;
+    float snow_hardening=10.0f,snow_max_young_modulus=0.0f;
+    float snow_max_hardening=5.0f,snow_min_plastic_jacobian=0.436f,snow_min_hardening=0.1f;
 };
-static_assert(sizeof(StressUpdateConstants)==64);
+static_assert(sizeof(StressUpdateConstants)==96);
 
 struct alignas(16) StressP2GConstants {
     int nx=0,ny=0,nz=0,count=0,component=0;
@@ -31,7 +38,7 @@ static_assert(sizeof(StressP2GConstants)==48);
 
 struct alignas(16) SettleConstants {
     uint32_t count=0;float dt=0;float contact_damping=8.0f;float sleep_speed=0.03f;
-    float pressure_threshold=0.1f;uint32_t pad0=0,pad1=0,pad2=0;
+    float pressure_threshold=0.1f;float damping_max_speed=0.0f;uint32_t pad1=0,pad2=0;
 };
 static_assert(sizeof(SettleConstants)==32);
 
@@ -107,6 +114,36 @@ inline ElasticStepInfo elasticStepInfo(float requested_young_modulus,
     out.below_load = out.overburden_pressure > 0.0f &&
                      out.effective_young_for_load < out.young_modulus_for_load;
     return out;
+}
+
+// ★★★ What the panel and IPC report as "the substeps this material costs".
+// The domain panel used to show only "Max Advection Substeps = 12" next to a
+// line saying "adaptive", while a Snow domain at voxel 0.025 and 24 fps ran
+// 200: a different, unrelated limit was the only number on screen. This is the
+// same arithmetic the step planner runs (elasticStepInfo with the snow sizing
+// rule), so the prediction can only differ from the run by the strain-rate and
+// velocity CFL terms, which depend on motion and are reported separately.
+struct GranularSubstepPlan {
+    int wave_substeps = 1;            // elastic wave CFL at rest
+    float sizing_young_modulus = 0.0f; // Pa, E the planner sizes for
+    float density = 0.0f;             // kg/m^3 it divides by
+    float wave_speed_m_s = 0.0f;      // sqrt(E / rho)
+    float frame_dt = 0.0f;            // s
+};
+inline GranularSubstepPlan planGranularSubsteps(float young_modulus, bool snow,
+                                                float snow_max_hardening,
+                                                float granular_density,
+                                                float voxel_size, float frame_dt) {
+    GranularSubstepPlan plan;
+    plan.sizing_young_modulus = snow
+        ? snowSizingYoungModulus(young_modulus, snow_max_hardening)
+        : std::max(young_modulus, 1.0f);
+    plan.density = snow ? std::max(granular_density, 1.0f) : kGranularDensity;
+    plan.frame_dt = std::max(frame_dt, 1.0e-6f);
+    plan.wave_speed_m_s = std::sqrt(plan.sizing_young_modulus / plan.density);
+    plan.wave_substeps = elasticStepInfo(plan.sizing_young_modulus, voxel_size,
+        plan.frame_dt, 0.0f, 0.0f, 1.0f, plan.density).wave_substeps;
+    return plan;
 }
 
 struct LoadMeasurement {
@@ -249,7 +286,8 @@ inline bool dispatchStressUpdate(SimulationComputeContext& compute,
                                  const Parameters& params,
                                  float young_modulus, float poisson_ratio,
                                  float fracture_strain, float damage_rate,
-                                 float healing_rate, bool rebonding) {
+                                 float healing_rate, bool rebonding,
+                                 float snow_max_young_modulus = 0.0f) {
     if(count==0)return true;if(!b.valid()||!affine.valid())return false;
     StressUpdateConstants c;
     c.count=static_cast<uint32_t>(std::min<std::size_t>(count,0xffffffffu));c.dt=dt;
@@ -261,6 +299,14 @@ inline bool dispatchStressUpdate(SimulationComputeContext& compute,
     c.hardening_coefficient=std::max(params.hardening,0.0f);
     c.compaction_hardening=std::max(params.compaction_hardening,0.0f);
     c.compaction_limit=std::max(params.compaction_limit,0.0f);
+    c.snow_plasticity=params.snow_plasticity?1u:0u;
+    c.snow_critical_compression=std::clamp(params.snow_critical_compression,0.0f,0.9f);
+    c.snow_critical_stretch=std::max(params.snow_critical_stretch,0.0f);
+    c.snow_hardening=std::max(params.snow_hardening,0.0f);
+    c.snow_max_young_modulus=std::max(snow_max_young_modulus,0.0f);
+    c.snow_max_hardening=std::max(params.snow_max_hardening,1.0f);
+    c.snow_min_plastic_jacobian=std::clamp(params.snow_min_plastic_jacobian,0.05f,1.0f);
+    c.snow_min_hardening=std::clamp(params.snow_min_hardening,0.0f,1.0f);
     ComputeBufferHandle bufs[]={affine,b.stress_diag,b.stress_shear,b.plastic_volume,b.state_flags,
                                 b.yield_value,b.plastic_increment,b.damage,b.hardening,
                                 b.fracture_history,b.deformation_col0,
@@ -284,9 +330,11 @@ inline bool dispatchStressP2G(SimulationComputeContext& compute,const GpuBuffers
 }
 
 inline bool dispatchSettle(SimulationComputeContext& compute,const GpuBuffers& b,
-                           ComputeBufferHandle velocities,std::size_t count,float dt){
+                           ComputeBufferHandle velocities,std::size_t count,float dt,
+                           float damping_max_speed=0.0f){
     if(count==0)return true;if(!b.valid()||!velocities.valid())return false;
     SettleConstants c;c.count=static_cast<uint32_t>(std::min<std::size_t>(count,0xffffffffu));c.dt=dt;
+    c.damping_max_speed=std::max(damping_max_speed,0.0f);
     ComputeBufferHandle bufs[]={velocities,b.stress_diag,b.state_flags};
     ComputeDispatch cmd;cmd.kernel="sim_fluid_granular_settle";cmd.groups={(c.count+255u)/256u,1u,1u};
     cmd.buffers=bufs;cmd.buffer_count=3;cmd.constants=&c;cmd.constants_size=sizeof(c);

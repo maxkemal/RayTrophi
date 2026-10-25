@@ -1,3 +1,20 @@
+// ★ Snow's FLIP baseline (Stomakhin 2013 runs 95 % FLIP). The granular lane
+// was pure PIC/APIC: the grid average smoothed away the velocity differences
+// a crack opens from, and the affine modes of an elastic body never decayed.
+// The baseline must be the transferred particle velocity field WITHOUT the
+// stress impulse, which P2G adds into the same accumulator before the
+// normalisation -- so it is copied out between the scatter and the stress
+// pass, and normalised by the same weights. Matter path only (the single-model
+// granular path keeps FLIP off, see FluidDomainStep.inl); both this capture
+// and the G2P consumer ask this one predicate.
+bool granularFlipSnapshotWanted(const Fluid::APICSolverParams& params,
+                                const SimulationGridDomainComputeBuffers& buffers) {
+    return params.granular_enabled && params.granular_snow_plasticity &&
+        params.flip_blend > 0.0f && buffers.matter_model.enabled &&
+        buffers.scratch_vel_x.valid() && buffers.scratch_vel_y.valid() &&
+        buffers.scratch_vel_z.valid();
+}
+
 bool runGpuFluidP2G(SimulationGridDomainState& state,
                     SimulationComputeContext* compute,
                     SimulationGridDomainComputeBuffers& gpu_buffers,
@@ -94,6 +111,9 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         }
     }
     bool ok = true;
+    const bool flip_snapshot = granularFlipSnapshotWanted(fluid_params, gpu_buffers);
+    const ComputeBufferHandle flip_fields[3] = {
+        gpu_buffers.scratch_vel_x, gpu_buffers.scratch_vel_y, gpu_buffers.scratch_vel_z};
     for (int comp = 0; comp < 3 && ok && !sparse_transfer; ++comp) {
         constants.component = comp;
         const uint32_t field_count = static_cast<uint32_t>(
@@ -126,11 +146,17 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         cmd.groups = groupsFor(static_cast<uint32_t>(constants.particle_count));
         ok = ok && Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
 
+        if (flip_snapshot) {
+            ok = ok && Fluid::copyMatterGpuFloat(*compute, velocity_fields[comp],
+                                                 flip_fields[comp], field_count);
+        }
+
         if (granular) {
             ok = ok && Fluid::Granular::dispatchStressP2G(
                 *compute, gpu_buffers.granular, gpu_buffers.fluid_positions,
                 velocity_fields[comp], grid.nx, grid.ny, grid.nz, comp,
-                grid.origin, grid.voxel_size, dt, 1600.0f, particle_count);
+                grid.origin, grid.voxel_size, dt, fluid_params.granular_density,
+                particle_count);
         }
 
         cmd.kernel = "sim_fluid_p2g_normalize";
@@ -140,6 +166,15 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
                                             grid.nz, comp, velocity_fields[comp],
                                             weight_fields[comp])
             : Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model));
+        if (flip_snapshot) {
+            // Same normalize kernel and 5-slot layout, pointed at the baseline.
+            ComputeBufferHandle baseline_buffers[5] = {
+                gpu_buffers.fluid_positions, gpu_buffers.fluid_velocities,
+                gpu_buffers.fluid_affine, flip_fields[comp], weight_fields[comp]};
+            cmd.buffers = baseline_buffers;
+            cmd.buffer_count = 5;
+            ok = ok && compute->dispatch(cmd);
+        }
     }
     if (sparse_transfer) {
         gpu_buffers.fluid_normalize_window_used = false;

@@ -580,17 +580,36 @@
                 softening_params.residual_strength =
                     fluid_params.granular_residual_strength;
                 Fluid::Granular::updateSoftening(state.particles, softening_params);
+                // Every backend uploads host state each frame after this, so
+                // newly born snow parcels get their density draw here once.
+                if (fluid_params.granular_snow_plasticity) {
+                    Fluid::Granular::assignSnowHeterogeneity(
+                        state.particles, fluid_params.granular_snow_heterogeneity,
+                        fluid_params.granular_snow_clump_size, state.grid.voxel_size);
+                }
             }
             const auto granular_load = fluid_params.granular_enabled
                 ? Fluid::Granular::measureLoad(state.particles)
                 : Fluid::Granular::LoadMeasurement{};
             const float granular_strain_rate = granular_load.strain_rate;
             const float granular_overburden = granular_load.overburden_pressure;
-            const auto granular_frame_elastic = Fluid::Granular::elasticStepInfo(
-                fluid_params.granular_young_modulus,
-                state.grid.voxel_size, granular_frame_dt,
-                granular_strain_rate, granular_overburden,
-                granular_load.softening_min);
+            // Snow: size for the hardening ceiling at the substance's density
+            // (same rule as runMatterGpuStep).
+            const bool granular_snow =
+                fluid_params.granular_enabled && fluid_params.granular_snow_plasticity;
+            const auto granular_frame_elastic = granular_snow
+                ? Fluid::Granular::elasticStepInfo(
+                      Fluid::Granular::snowSizingYoungModulus(
+                          fluid_params.granular_young_modulus,
+                          fluid_params.granular_snow_max_hardening),
+                      state.grid.voxel_size, granular_frame_dt,
+                      granular_strain_rate, granular_overburden,
+                      granular_load.softening_min, fluid_params.granular_density)
+                : Fluid::Granular::elasticStepInfo(
+                      fluid_params.granular_young_modulus,
+                      state.grid.voxel_size, granular_frame_dt,
+                      granular_strain_rate, granular_overburden,
+                      granular_load.softening_min);
             const int granular_solver_substeps = fluid_params.granular_enabled
                 ? Fluid::Granular::solverSubsteps(granular_frame_elastic)
                 : 1;
@@ -600,7 +619,11 @@
             // load that strain exceeds one. It stays stable for a while, then
             // discharges. Say so once per parameter change rather than letting
             // it read as a mysterious explosion.
-            if (fluid_params.granular_enabled && granular_frame_elastic.below_load) {
+            // Not for snow: its compression past theta_c is meant to be
+            // permanent (J_P) and hardens the pack, it is not a small-strain
+            // predictor running out of range.
+            if (fluid_params.granular_enabled && !granular_snow &&
+                granular_frame_elastic.below_load) {
                 static float s_last_warned_young = -1.0f;
                 if (s_last_warned_young != fluid_params.granular_young_modulus) {
                     s_last_warned_young = fluid_params.granular_young_modulus;
@@ -1248,79 +1271,7 @@
                     gpu_mgpcg_stats.pressure_sparse_resident_bytes;
                 if (fluid_params.granular_enabled &&
                     granular_substep + 1 == granular_solver_substeps) {
-                    std::size_t yielded = 0, detached = 0, invalid = 0, sleeping = 0, damaged = 0;
-                    std::size_t damage_over_10 = 0, damage_over_50 = 0, damage_over_90 = 0;
-                    std::size_t strain_limited = 0, compaction_capped = 0;
-                    for (uint32_t f : state.particles.granular_material_flags) {
-                        yielded += (f & 1u) != 0u;
-                        detached += (f & 2u) != 0u;
-                        invalid += (f & 4u) != 0u;
-                        sleeping += (f & 8u) != 0u;
-                        strain_limited += (f & 16u) != 0u;
-                        compaction_capped += (f & 32u) != 0u;
-                    }
-                    float max_yield = 0.0f, max_plastic = 0.0f;
-                    float max_accumulated_plastic = 0.0f, max_damage = 0.0f;
-                    float max_fracture_history = 0.0f;
-                    double accumulated_plastic_sum = 0.0, damage_sum = 0.0;
-                    double fracture_history_sum = 0.0;
-                    std::size_t accumulated_plastic_samples = 0, damage_samples = 0;
-                    std::size_t fracture_history_samples = 0;
-                    for (float v : state.particles.granular_yield_value)
-                        if (std::isfinite(v)) max_yield = std::max(max_yield, v);
-                    for (float v : state.particles.granular_plastic_increment)
-                        if (std::isfinite(v)) max_plastic = std::max(max_plastic, v);
-                    for (float v : state.particles.granular_hardening) {
-                        if (!std::isfinite(v)) continue;
-                        max_accumulated_plastic = std::max(max_accumulated_plastic, v);
-                        accumulated_plastic_sum += static_cast<double>(v);
-                        ++accumulated_plastic_samples;
-                    }
-                    for (float v : state.particles.granular_damage) {
-                        if (!std::isfinite(v)) continue;
-                        max_damage = std::max(max_damage, v);
-                        damaged += v > 1.0e-4f;
-                        damage_over_10 += v >= 0.10f;
-                        damage_over_50 += v >= 0.50f;
-                        damage_over_90 += v >= 0.90f;
-                        damage_sum += static_cast<double>(v);
-                        ++damage_samples;
-                    }
-                    for (float v : state.particles.granular_fracture_history) {
-                        if (!std::isfinite(v)) continue;
-                        max_fracture_history = std::max(max_fracture_history, v);
-                        fracture_history_sum += static_cast<double>(v);
-                        ++fracture_history_samples;
-                    }
-                    state.fluid_stats.granular_yielded_particles = yielded;
-                    state.fluid_stats.granular_detached_particles = detached;
-                    state.fluid_stats.granular_invalid_particles = invalid;
-                    state.fluid_stats.granular_sleeping_particles = sleeping;
-                    state.fluid_stats.granular_strain_limited_particles = strain_limited;
-                    state.fluid_stats.granular_compaction_capped_particles = compaction_capped;
-                    state.fluid_stats.granular_damaged_particles = damaged;
-                    state.fluid_stats.granular_damage_over_10_particles = damage_over_10;
-                    state.fluid_stats.granular_damage_over_50_particles = damage_over_50;
-                    state.fluid_stats.granular_damage_over_90_particles = damage_over_90;
-                    state.fluid_stats.granular_max_yield_value = max_yield;
-                    state.fluid_stats.granular_max_plastic_increment = max_plastic;
-                    state.fluid_stats.granular_max_accumulated_plastic = max_accumulated_plastic;
-                    state.fluid_stats.granular_mean_accumulated_plastic =
-                        accumulated_plastic_samples > 0
-                            ? static_cast<float>(accumulated_plastic_sum /
-                                                 static_cast<double>(accumulated_plastic_samples))
-                            : 0.0f;
-                    state.fluid_stats.granular_max_fracture_history = max_fracture_history;
-                    state.fluid_stats.granular_mean_fracture_history =
-                        fracture_history_samples > 0
-                            ? static_cast<float>(fracture_history_sum /
-                                                 static_cast<double>(fracture_history_samples))
-                            : 0.0f;
-                    state.fluid_stats.granular_max_damage = max_damage;
-                    state.fluid_stats.granular_mean_damage =
-                        damage_samples > 0
-                            ? static_cast<float>(damage_sum / static_cast<double>(damage_samples))
-                            : 0.0f;
+                    Fluid::Granular::countMaterialState(state.particles, state.fluid_stats);
                     const auto elastic_step = Fluid::Granular::elasticStepInfo(
                         fluid_params.granular_young_modulus,
                         state.grid.voxel_size, dt,

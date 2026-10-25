@@ -1033,7 +1033,7 @@ private:
             // fracture-history telemetry remains permanently zero.
             { "sim_matter_p2g", "sim_matter_p2g.spv", 10, 40 },
             { "sim_matter_g2p", "sim_matter_g2p.spv", 12, 72 },
-            { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 68 },
+            { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 100 },
             { "sim_matter_stress_p2g", "sim_matter_stress_p2g.spv", 9, 52 },
             { "sim_matter_settle", "sim_matter_settle.spv", 5, 36 },
             { "sim_matter_advect", "sim_matter_advect.spv", 11, 84 },
@@ -1076,7 +1076,7 @@ private:
             { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 17, 128 },
             { "sim_matter_grain_list_build", "sim_matter_grain_list_build.spv", 17, 128 },
             { "sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128 },
-            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 64 },
+            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 96 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 80 },

@@ -8,6 +8,7 @@
  */
 
 #include "RtApiInternal.h"
+#include "Api/SourceSplatGeometryApi.h"
 #include "Fluid/MatterGrain.h"
 #include "Fluid/GasInventoryGpu.h"
 #include <exception>
@@ -19,6 +20,7 @@
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/FluidViewResolver.h"
 #include "Fluid/APICFluidSolver.h"
+#include "Fluid/GranularGpuDispatch.h"
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "Fluid/FluidRenderProxy.h"
@@ -96,6 +98,28 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.granular_damage_rate = params.granular_damage_rate;
     info.granular_healing_rate = params.granular_healing_rate;
     info.granular_rebonding = params.granular_rebonding;
+    info.granular_snow_plasticity = params.granular_snow_plasticity;
+    info.granular_snow_critical_compression = params.granular_snow_critical_compression;
+    info.granular_snow_critical_stretch = params.granular_snow_critical_stretch;
+    info.granular_snow_hardening = params.granular_snow_hardening;
+    info.granular_snow_max_hardening = params.granular_snow_max_hardening;
+    info.granular_snow_min_hardening = params.granular_snow_min_hardening;
+    info.granular_snow_heterogeneity = params.granular_snow_heterogeneity;
+    info.granular_snow_clump_size = params.granular_snow_clump_size;
+    info.granular_density = params.granular_density;
+    if (params.granular_enabled && info.voxel_size > 0.0f) {
+        // Same plan the domain panel draws; info.voxel_size is filled first by
+        // every caller of this function.
+        const int fps = g_ctx ? std::max(1, g_ctx->render_settings.animation_fps) : 24;
+        const auto plan = RayTrophiSim::Fluid::Granular::planGranularSubsteps(
+            params.granular_young_modulus, params.granular_snow_plasticity,
+            params.granular_snow_max_hardening, params.granular_density,
+            info.voxel_size, 1.0f / static_cast<float>(fps));
+        info.granular_predicted_substeps = plan.wave_substeps;
+        info.granular_wave_speed_m_s = plan.wave_speed_m_s;
+        info.granular_sizing_young_modulus = plan.sizing_young_modulus;
+        info.granular_frame_dt = plan.frame_dt;
+    }
     info.granular_max_solver_substeps = params.granular_max_solver_substeps;
     info.granular_softening_temperature = params.granular_softening_temperature;
     info.granular_softening_range = params.granular_softening_range;
@@ -172,6 +196,7 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.seed_min = d.fluid_seed_min;
     info.seed_max = d.fluid_seed_max;
     info.seed_particles_per_cell = d.fluid_seed_particles_per_cell;
+    info.seed_grain_saturation = d.fluid_seed_grain_saturation;
     info.seed_fill_level = d.fluid_fill_level;
     info.settle_max_steps = d.fluid_settle_max_steps;
     info.settle_displacement_m = d.fluid_settle_displacement_m;
@@ -496,6 +521,14 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
         static_cast<uint64_t>(state.fluid_stats.granular_strain_limited_particles);
     info.granular_compaction_capped_particles =
         static_cast<uint64_t>(state.fluid_stats.granular_compaction_capped_particles);
+    info.granular_hardening_capped_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_hardening_capped_particles);
+    info.granular_min_plastic_jacobian = state.fluid_stats.granular_min_plastic_jacobian;
+    info.granular_max_plastic_jacobian = state.fluid_stats.granular_max_plastic_jacobian;
+    info.granular_mean_plastic_jacobian = state.fluid_stats.granular_mean_plastic_jacobian;
+    info.granular_counted_particles =
+        static_cast<uint64_t>(state.fluid_stats.granular_counted_particles);
+    info.granular_material_measured = state.fluid_stats.granular_material_measured;
     info.granular_min_softening = state.fluid_stats.granular_min_softening;
     info.granular_softened_particles =
         static_cast<uint64_t>(state.fluid_stats.granular_softened_particles);
@@ -1140,7 +1173,7 @@ Result getGasShaderSettings(const std::string& domain_id_or_name,
     auto* domain = findGasDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
     const auto& gas_shader = domain->type == RayTrophiSim::SimulationDomainType::Matter
-        ? domain->fluid_fog_shader
+        ? RayTrophiSim::Fluid::matterGasFogShader(*domain)
         : domain->shader;
     if (!gas_shader) {
         // Not an error: the render bridge creates the shader lazily on the
@@ -1207,7 +1240,7 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
     auto* domain = findGasDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
     auto& gas_shader = domain->type == RayTrophiSim::SimulationDomainType::Matter
-        ? domain->fluid_fog_shader
+        ? RayTrophiSim::Fluid::matterGasFogShader(*domain)
         : domain->shader;
 
     std::string preset = settings.preset;
@@ -1378,6 +1411,9 @@ Result getFluidFogShaderSettings(const std::string& domain_id_or_name,
     Result error;
     auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
+    if (domain->type == RayTrophiSim::SimulationDomainType::Matter) {
+        return Result::fail("Matter Fog uses independent volume.get_material/set_material targets");
+    }
     out_settings = FluidFogShaderSettings{};
     out_settings.created = static_cast<bool>(domain->fluid_fog_shader);
     // Before the first fog draw there is no shader; report the recipe the sync
@@ -1395,6 +1431,9 @@ Result updateFluidFogShaderSettings(const std::string& domain_id_or_name,
     Result error;
     auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
+    if (domain->type == RayTrophiSim::SimulationDomainType::Matter) {
+        return Result::fail("Matter Fog uses independent volume.get_material/set_material targets");
+    }
     if (!domain->fluid_fog_shader)
         domain->fluid_fog_shader = RayTrophiSim::Fluid::makeLiquidFogShader();
     // Edited IN PLACE: the fog VDB volume holds this same shared_ptr
@@ -2116,9 +2155,10 @@ Result removeFluidDomain(const std::string& domain_id_or_name) {
 Result seedFluidParticles(const std::string& domain_id_or_name,
                            const Vec3* in_seed_min, const Vec3* in_seed_max,
                            int particles_per_cell, bool replace, bool persistent,
-                           float fill_level) {
+                           float fill_level, float grain_saturation) {
     if (!g_ctx) return notBound();
     if (fill_level > 1.0f) return Result::fail("fill_level must be 0..1");
+    if (grain_saturation > 1.0f) return Result::fail("grain_saturation must be 0..1");
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
 
     rtapi::FluidDomainInfo info;
@@ -2198,13 +2238,13 @@ Result seedFluidParticles(const std::string& domain_id_or_name,
     bool grid_seeded = active_runtime &&
         active_runtime->seedFluidDomainParticles(
             info.name, seed_min, seed_max, particles_per_cell, replace,
-            persistent, fill_level);
+            persistent, fill_level, grain_saturation);
     for (auto& system : g_ctx->scene.particle_systems) {
         if (!grid_seeded && system.runtime &&
             system.runtime != active_runtime &&
             system.runtime->seedFluidDomainParticles(
                 info.name, seed_min, seed_max, particles_per_cell, replace,
-                persistent, fill_level)) {
+                persistent, fill_level, grain_saturation)) {
             grid_seeded = true;
             break;
         }
@@ -3206,43 +3246,7 @@ std::string flowModeToString(RayTrophiSim::SimulationFlowSourceMode mode) {
 void finalizeFluidRenderProxyStats(
     const RayTrophiSim::SimulationGridDomainDesc& d,
     FluidDomainInfo& info) {
-    const bool refines_primary = d.fluid_particle_geometry_mode == 0;
-    const bool refines_whitewater = d.fluid_foam_params.enabled;
-    info.virtual_grains_effective = refines_primary || refines_whitewater
-        ? static_cast<int>(RayTrophiSim::Fluid::limitFluidRenderProxyChildren(
-              static_cast<uint32_t>(info.virtual_grains_requested),
-              RayTrophiSim::Fluid::fluidRenderProxyCarrierCapacity(
-                  d.fluid_max_particles,
-                  d.fluid_foam_params.enabled
-                      ? d.fluid_foam_params.max_foam
-                      : 0u),
-              info.virtual_grain_budget))
-        : 1;
-    info.primary_visual_children = refines_primary
-        ? std::min(info.virtual_grains_effective, static_cast<int>(
-              RayTrophiSim::Fluid::primarySplatVisualChildren(d)))
-        : 1;
-    info.whitewater_visual_children = refines_whitewater
-        ? info.virtual_grains_effective
-        : 1;
-    uint64_t rendered_spheres = refines_primary
-        ? static_cast<uint64_t>(info.particle_count) *
-              static_cast<uint64_t>(info.primary_visual_children)
-        : static_cast<uint64_t>(info.particle_count);
-    if (info.views_measured) {
-        rendered_spheres = 0;
-        for (const auto& view : info.views) {
-            if (view.view == "splat") {
-                rendered_spheres += view.particles *
-                    static_cast<uint64_t>(info.primary_visual_children);
-                rendered_spheres += view.whitewater *
-                    static_cast<uint64_t>(info.whitewater_visual_children);
-            }
-        }
-    }
-    info.virtual_grain_count = rendered_spheres;
-    info.virtual_grain_rt_estimated_bytes = info.virtual_grain_count *
-        RayTrophiSim::Fluid::kFluidRenderProxyRtBytesPerSphereEstimate;
+    finalizeSourceSplatProxyStats(d, info);
 }
 
 SimulationFlowSourceInfo flowInfoFromDesc(
@@ -3315,6 +3319,7 @@ SimulationFlowSourceInfo flowInfoFromDesc(
                 RayTrophiSim::Fluid::substanceTag(source.fluid_substance),
                 birth_domain->fluid_params, out.fluid_birth_kelvin));
     }
+    out.splat_geometry = source.splat_geometry;
     out.grain_birth_saturation = source.grain_birth_saturation;
     out.use_time_limit = source.use_time_limit;
     out.start_time = source.start_time;
@@ -3379,6 +3384,9 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     out.fluid_temperature_kelvin = info.fluid_temperature_kelvin;
     if (!(info.grain_birth_saturation >= 0.0f && info.grain_birth_saturation <= 1.0f))
         return Result::fail("grain_birth_saturation must be in [0, 1] of the grain water capacity");
+    const auto geometry_status = validateSourceSplatGeometry(info.splat_geometry);
+    if (!geometry_status.ok) return geometry_status;
+    out.splat_geometry = info.splat_geometry;
     out.grain_birth_saturation = info.grain_birth_saturation;
     out.use_time_limit = info.use_time_limit;
     out.start_time = info.start_time;
@@ -3464,6 +3472,47 @@ SimulationColliderInfo colliderInfoFromDesc(const RayTrophiSim::ParticleCollider
     out.msf_melt_sdf_refresh = c.msf_melt_sdf_refresh;
     out.msf_melt_sdf_revision_interval = c.msf_melt_sdf_revision_interval;
     out.msf_melt_sdf_change_threshold = c.msf_melt_sdf_change_threshold;
+
+    // Resolve the live shape through the SAME scene resolvers the solvers use,
+    // so this reports what the simulation sees, not what was authored.
+    if (g_ctx && !c.source_name.empty()) {
+        using Mode = RayTrophiSim::ParticleColliderSourceMode;
+        if (c.source_mode == Mode::ObjectOBB || c.source_mode == Mode::ObjectMeshSDF ||
+            c.source_mode == Mode::ObjectConvexDecomp || c.source_mode == Mode::ObjectMeshBVH) {
+            RayTrophiSim::ParticleColliderOBB obb;
+            if (g_ctx->scene.resolveObjectOBBForSimulation(c.source_name, obb)) {
+                const Vec3& lo = obb.local_bounds_min;
+                const Vec3& hi = obb.local_bounds_max;
+                Vec3 world_min(std::numeric_limits<float>::max());
+                Vec3 world_max(-std::numeric_limits<float>::max());
+                for (int corner = 0; corner < 8; ++corner) {
+                    const Vec3 local((corner & 1) ? hi.x : lo.x,
+                                     (corner & 2) ? hi.y : lo.y,
+                                     (corner & 4) ? hi.z : lo.z);
+                    const Vec3 world = obb.local_to_world.transform_point(local);
+                    world_min = Vec3::min(world_min, world);
+                    world_max = Vec3::max(world_max, world);
+                }
+                const Matrix4x4& m = obb.local_to_world;
+                const Vec3 axis_scale(
+                    Vec3(m.m[0][0], m.m[1][0], m.m[2][0]).length(),
+                    Vec3(m.m[0][1], m.m[1][1], m.m[2][1]).length(),
+                    Vec3(m.m[0][2], m.m[1][2], m.m[2][2]).length());
+                out.resolved_valid = true;
+                out.resolved_world_min = world_min;
+                out.resolved_world_max = world_max;
+                out.resolved_size = (hi - lo) * axis_scale;
+            }
+        } else if (c.source_mode == Mode::ObjectAABB) {
+            Vec3 mn, mx;
+            if (g_ctx->scene.resolveObjectBoundsForSimulation(c.source_name, mn, mx)) {
+                out.resolved_valid = true;
+                out.resolved_world_min = Vec3::min(mn, mx);
+                out.resolved_world_max = Vec3::max(mn, mx);
+                out.resolved_size = out.resolved_world_max - out.resolved_world_min;
+            }
+        }
+    }
     return out;
 }
 

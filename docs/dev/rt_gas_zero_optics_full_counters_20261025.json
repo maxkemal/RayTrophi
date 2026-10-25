@@ -1,0 +1,233 @@
+{
+  "frame": 129,
+  "camera": {
+    "aperture": 0.6885108947753906,
+    "auto_exposure": true,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 4.039999961853027,
+    "focus_distance": 61.564308166503906,
+    "fov": 30.799999237060547,
+    "fstop_preset_index": 0,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "position": [
+      71.50930786132812,
+      9.14066219329834,
+      7.1181182861328125
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      10.052955627441406,
+      9.0772705078125,
+      3.472722291946411
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "render_settings": {
+    "debug_view": 0,
+    "debug_view_name": "off",
+    "diffuse_bounces": 4,
+    "max_bounces": 10,
+    "transmission_bounces": 8
+  },
+  "shader": {
+    "absorption_coefficient": 0.0,
+    "blackbody_intensity": 16.66699981689453,
+    "density_cutoff": 0.007000000216066837,
+    "density_multiplier": 0.0,
+    "max_steps": 192,
+    "ok": true,
+    "preset": "fire",
+    "random_walk": false,
+    "random_walk_exact_events": 4,
+    "random_walk_max_events": 32,
+    "scattering_coefficient": 0.0,
+    "shadow_steps": 5,
+    "shadow_strength": 0.8999999761581421,
+    "shadow_stride": 4,
+    "temperature_max": 20000.0,
+    "temperature_min": 1340.0,
+    "voxel_step_multiplier": 0.699999988079071
+  },
+  "cases": [],
+  "counter_cases": [
+    {
+      "case": "one_bounce",
+      "counts": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 1026765,
+        "charged_other": 0,
+        "charged_specular": 812952,
+        "charged_transmission": 0,
+        "completed_intervals": 1353617,
+        "density_samples": 135424455,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 4762800,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 1353617
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 1014629972,
+        "enabled": true,
+        "extinction_terminations": 0,
+        "free_passes": 1353617,
+        "gas_handoffs": 111220,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 73760026,
+        "majorant_queries": 73760026,
+        "majorant_segments_skipped": 32107239,
+        "medium_passes": 0,
+        "paths_bounce_capped": 1839717,
+        "paths_pass_capped": 0,
+        "paths_traced": 4762800,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 0,
+        "solid_probe_hits": 111220,
+        "solid_probe_runs": 1353617,
+        "step_budget_exhausted": 0,
+        "teleports": 1242397,
+        "temporal_accepted": 0,
+        "temporal_rejected": 0,
+        "topology_segments_skipped": 982522733,
+        "volume_rays": 1353617,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_path": 28.433789997480474,
+      "volume_rays_per_path": 0.2842061392458218,
+      "probes_per_path": 0.2842061392458218
+    },
+    {
+      "case": "authored_bounces",
+      "counts": {
+        "arbiter_candidates": 0,
+        "arbiter_empty_range": 0,
+        "arbiter_gate_open": 0,
+        "arbiter_inside_found": 0,
+        "arbiter_no_box": 0,
+        "arbiter_no_crossing": 0,
+        "arbiter_rejects": 0,
+        "arbiter_started_inside": 0,
+        "available": true,
+        "charged_diffuse": 1732190,
+        "charged_other": 0,
+        "charged_specular": 1388888,
+        "charged_transmission": 0,
+        "completed_intervals": 2840047,
+        "density_samples": 278864998,
+        "devices": [
+          {
+            "enabled": true,
+            "paths_traced": 7938000,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "render",
+            "volume_rays": 2840145
+          },
+          {
+            "enabled": true,
+            "paths_traced": 0,
+            "region": [
+              0.0,
+              0.0,
+              1.0,
+              1.0
+            ],
+            "role": "viewport",
+            "volume_rays": 0
+          }
+        ],
+        "empty_segments_skipped": 2327434344,
+        "enabled": true,
+        "extinction_terminations": 0,
+        "free_passes": 2840010,
+        "gas_handoffs": 188626,
+        "layered_handoffs": 0,
+        "majorant_available_queries": 151778330,
+        "majorant_queries": 151778330,
+        "majorant_segments_skipped": 66159572,
+        "medium_passes": 0,
+        "paths_bounce_capped": 0,
+        "paths_pass_capped": 0,
+        "paths_traced": 7938000,
+        "region": [
+          0.0,
+          0.0,
+          1.0,
+          1.0
+        ],
+        "shadow_density_samples": 0,
+        "solid_probe_hits": 188626,
+        "solid_probe_runs": 2840145,
+        "step_budget_exhausted": 98,
+        "teleports": 2651519,
+        "temporal_accepted": 0,
+        "temporal_rejected": 0,
+        "topology_segments_skipped": 2261274772,
+        "volume_rays": 2840145,
+        "walk_event_capped": 0,
+        "walk_events": 0,
+        "walk_paths": 0,
+        "walk_probe_traces": 0,
+        "walk_shadow_skipped": 0,
+        "walk_shadow_traces": 0
+      },
+      "density_per_path": 35.13038523557571,
+      "volume_rays_per_path": 0.35779100529100527,
+      "probes_per_path": 0.35779100529100527
+    }
+  ],
+  "render_restored": true,
+  "shader_restored": true,
+  "counters_restored": true
+}

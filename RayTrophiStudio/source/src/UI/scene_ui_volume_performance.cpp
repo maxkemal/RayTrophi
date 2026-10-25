@@ -1,4 +1,6 @@
 #include "UI/scene_ui_volume_performance.hpp"
+#include "Api/RayGpuTimingApi.h"
+#include "Api/RtApi.h"
 
 #include "scene_ui.h"
 #include "Backend/VulkanBackend.h"
@@ -41,10 +43,11 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         stats.densitySamples + stats.emptySegmentsSkipped;
     const uint32_t temporalTotal =
         stats.temporalAccepted + stats.temporalRejected;
-    char report[1800];
+    char report[2304];
     std::snprintf(
         report, sizeof(report),
-        "RayTrophi Vulkan Volume Metrics v8\n"
+        "RayTrophi Vulkan Volume Metrics v9\n"
+        "shadow_samples_scope: volume march + mesh/splat BSDF fog shadows\n"
         "volume_rays: %u\n"
         "density_samples: %u\n"
         "shadow_density_samples: %u\n"
@@ -118,7 +121,7 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
 
     // Path budget accounting (v9). Kept in a second buffer so the v8 block
     // above stays byte-identical for anyone diffing old reports.
-    char budget[900];
+    char budget[2560];
     std::snprintf(
         budget, sizeof(budget),
         "paths_traced: %u\n"
@@ -132,8 +135,15 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         "medium_passes: %u\n"
         "arbiter_started_inside: %u\n"
         "arbiter_inside_found: %u\n"
+        "sdf_main_samples: %u  sdf_main_queries: %u  sdf_main_skipped: %u\n"
+        "sdf_arbiter_samples: %u  sdf_arbiter_queries: %u  sdf_arbiter_skipped: %u\n"
         "walk_paths: %u  walk_events: %u  walk_event_capped: %u\n"
         "walk_probe_traces: %u  walk_shadow_traces: %u  walk_shadow_skipped: %u\n"
+        "light_cache_hits: %u  light_cache_misses: %u\n"
+        "light_cache_fills: %u  light_cache_fill_samples: %u\n"
+        "camera_volume_rays: %u  camera_density_samples: %u  camera_shadow_density_samples: %u\n"
+        "secondary_volume_rays: %u  secondary_density_samples: %u  secondary_shadow_density_samples: %u\n"
+        "radiance_cache_marches: %u  radiance_cache_fallbacks: %u\n"
         "bounce_capped_percent: %.3f\n"
         "region: %.3f %.3f %.3f %.3f\n",
         stats.pathsTraced,
@@ -147,8 +157,16 @@ std::string buildMetricsReport(const VulkanRT::VolumePerformanceStats& stats) {
         stats.mediumPasses,
         stats.arbiterStartedInside,
         stats.arbiterInsideFound,
+        stats.sdfMainSamples, stats.sdfMainQueries, stats.sdfMainSkipped,
+        stats.sdfArbiterSamples, stats.sdfArbiterQueries, stats.sdfArbiterSkipped,
         stats.walkPaths, stats.walkEvents, stats.walkEventCapped,
         stats.walkProbeTraces, stats.walkShadowTraces, stats.walkShadowSkipped,
+        stats.lightCacheHits, stats.lightCacheMisses,
+        stats.lightCacheFills, stats.lightCacheFillSamples,
+        stats.cameraVolumeRays, stats.cameraDensitySamples, stats.cameraShadowDensitySamples,
+        stats.secondaryVolumeRays, stats.secondaryDensitySamples,
+        stats.secondaryShadowDensitySamples,
+        stats.radianceCacheMarches, stats.radianceCacheFallbacks,
         100.0f * safeRatio(stats.pathsBounceCapped, stats.pathsTraced),
         stats.regionMinX, stats.regionMinY, stats.regionMaxX, stats.regionMaxY);
     return std::string(report) + budget;
@@ -346,6 +364,75 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
     }
     ImGui::Separator();
 
+    drawRayGpuTimingCapture();
+
+    // Volume light cache (docs/dev/VOLUME_LIGHT_CACHE.md). Same core settings
+    // as render.set_volume_light_cache; the panel holds no copy of them.
+    {
+        const rtapi::VolumeLightCacheInfo cache = rtapi::volumeLightCache();
+        // Edit buffer only while the slider is held: applying every drag tick
+        // would refill (and maybe reallocate) the cache on every frame.
+        static int s_cacheCellsEdit = 64;
+        static bool s_cacheCellsHeld = false;
+        if (!s_cacheCellsHeld) s_cacheCellsEdit = cache.max_cells;
+        ImGui::SliderInt("Light Cache Cells", &s_cacheCellsEdit, 8, 256);
+        s_cacheCellsHeld = ImGui::IsItemActive();
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            rtapi::setVolumeLightCache(s_cacheCellsEdit);
+        }
+        UIWidgets::HelpMarker(
+            "Vulkan RT volume light cache: each volume's density integral toward "
+            "the sun and the first five scene lights, for in-scatter and for "
+            "surface shadows through gas. Cells along the longest axis (also "
+            "capped at one cell per two voxels). Not saved with the project.");
+        ImGui::Text("Light cache: %.1f MiB used / %.1f MiB allocated",
+                    double(cache.used_bytes) / (1024.0 * 1024.0),
+                    double(cache.buffer_bytes) / (1024.0 * 1024.0));
+    }
+    // Gas march LOD (docs/dev/RT_GAS_SECONDARY_MARCH.md §8). Same core setting
+    // as render.set_volume_march_lod; applied on release, like the cache.
+    {
+        const rtapi::VolumeMarchLodInfo lod = rtapi::volumeMarchLod();
+        static int s_lodEdit[4] = {1, 4, 2, 128};
+        static bool s_lodHeld = false;
+        if (!s_lodHeld) {
+            s_lodEdit[0] = lod.camera_light_stride;
+            s_lodEdit[1] = lod.secondary_light_stride;
+            s_lodEdit[2] = lod.secondary_step_scale;
+            s_lodEdit[3] = lod.secondary_max_steps;
+        }
+        bool radianceCache = lod.secondary_radiance_cache;
+        bool cacheToggled = ImGui::Checkbox("Bounce Radiance Cache", &radianceCache);
+        bool held = false, released = false;
+        ImGui::SliderInt("Camera Light Stride", &s_lodEdit[0], 1, 16);
+        held |= ImGui::IsItemActive(); released |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderInt("Bounce Light Stride", &s_lodEdit[1], 1, 16);
+        held |= ImGui::IsItemActive(); released |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderInt("Bounce Step Scale", &s_lodEdit[2], 1, 16);
+        held |= ImGui::IsItemActive(); released |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderInt("Bounce Max Steps", &s_lodEdit[3], 0, 511);
+        held |= ImGui::IsItemActive(); released |= ImGui::IsItemDeactivatedAfterEdit();
+        s_lodHeld = held;
+        if (released || cacheToggled) {
+            rtapi::VolumeMarchLodInfo next;
+            next.camera_light_stride = s_lodEdit[0];
+            next.secondary_light_stride = s_lodEdit[1];
+            next.secondary_step_scale = s_lodEdit[2];
+            // 1..3 are rejected by the core; snap them to the nearest valid.
+            next.secondary_max_steps = (s_lodEdit[3] > 0 && s_lodEdit[3] < 4) ? 4 : s_lodEdit[3];
+            next.secondary_radiance_cache = radianceCache;
+            rtapi::setVolumeMarchLod(next);
+        }
+        UIWidgets::HelpMarker(
+            "Vulkan RT gas march LOD. Light stride: in-scatter is evaluated every "
+            "k density samples and held in between (1 = every sample). Bounce "
+            "step scale / max steps coarsen the march only after the first "
+            "bounce. Bounce radiance cache: bounce rays read a per-cell density "
+            "+ lighting cache instead of marching. 1 / 1 / 1 / 0 with the cache "
+            "off is the full-quality reference. Not saved with the project.");
+    }
+    ImGui::Separator();
+
     if (ImGui::Checkbox("Enable GPU Counters", &g_instrumentationEnabled)) {
         backend->resetVolumePerformanceStats(g_instrumentationEnabled);
         g_cachedStats = {};
@@ -395,6 +482,14 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
 
     ImGui::Separator();
     ImGui::Text("Volume rays: %u", g_cachedStats.volumeRays);
+
+    ImGui::Text("SDF search samples: %u main / %u ordering",
+                g_cachedStats.sdfMainSamples, g_cachedStats.sdfArbiterSamples);
+    ImGui::Text("SDF hierarchy queries: %u main / %u ordering",
+                g_cachedStats.sdfMainQueries, g_cachedStats.sdfArbiterQueries);
+    ImGui::Text("SDF samples skipped: %u main / %u ordering",
+                g_cachedStats.sdfMainSkipped, g_cachedStats.sdfArbiterSkipped);
+
     ImGui::Text("Density samples: %u", g_cachedStats.densitySamples);
     ImGui::Text("Shadow samples: %u", g_cachedStats.shadowDensitySamples);
     ImGui::Text("Skipped empty segments: %u", g_cachedStats.emptySegmentsSkipped);
@@ -416,6 +511,14 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
     }
     ImGui::Text("Arbiter rejects: %u", g_cachedStats.arbiterRejects);
     ImGui::Text("Teleports past box: %u", g_cachedStats.teleports);
+    ImGui::Text("Light cache hits / misses: %u / %u",
+                g_cachedStats.lightCacheHits, g_cachedStats.lightCacheMisses);
+    ImGui::Text("Light cache fills: %u (%u samples)",
+                g_cachedStats.lightCacheFills, g_cachedStats.lightCacheFillSamples);
+    ImGui::Text("Volume rays camera / secondary: %u / %u",
+                g_cachedStats.cameraVolumeRays, g_cachedStats.secondaryVolumeRays);
+    ImGui::Text("Density samples camera / secondary: %u / %u",
+                g_cachedStats.cameraDensitySamples, g_cachedStats.secondaryDensitySamples);
     if (g_cachedStats.teleports > g_cachedStats.volumeRays / 4u &&
         g_cachedStats.volumeRays > 0u) {
         ImGui::TextDisabled("  (a quarter of gas rays jump past everything "

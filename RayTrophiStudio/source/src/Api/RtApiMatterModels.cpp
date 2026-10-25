@@ -168,6 +168,7 @@ nlohmann::json getMatterModels(const std::string& domain, bool include_transfer)
                 const auto& g = domains[index].fluid_params.grain;
                 return nlohmann::json{{"wanted", o.wanted}, {"enabled", o.enabled},
                     {"reset_pending", o.reset_pending}, {"substance", o.substance},
+                    {"origin", o.origin},
                     {"blockers", o.blockers}, {"liquid", o.liquid},
                     {"wet_grains", o.wet_grains}, {"notes", o.notes},
                     // What the grain solver runs, copied from the substance

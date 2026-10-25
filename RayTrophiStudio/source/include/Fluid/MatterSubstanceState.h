@@ -37,6 +37,11 @@ struct MatterGrainOwnership {
     bool enabled = false;         // what the step runs (grain.enabled)
     bool reset_pending = false;   // live particles keep the old owner until reset
     std::string substance;        // the DEM substance whose grain material runs
+    // WHERE that substance entered the domain: "flow source '<name>'",
+    // "substance binding" or "default substance". A material binding of a
+    // DEM substance turns grains on (and locks the backend to Vulkan) with
+    // zero particles of it present; without this the lock had no visible cause.
+    std::string origin;
     std::vector<std::string> blockers;  // why a wanted DEM runs as MPM instead
     // Liquid in reach (its surface tension feeds the bridges); empty = none.
     std::string liquid;

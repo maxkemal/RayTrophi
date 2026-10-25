@@ -9,6 +9,7 @@
 * =========================================================================
 */
 #pragma once
+#include "Fluid/MatterFogStreams.h"
 #include "Audio/AudioService.h"
 #include "ObjectSubstance.h"
 #include <HittableList.h>
@@ -150,6 +151,18 @@ struct SceneData {
     // resolves once for the whole bake instead of N times per frame.
     mutable std::unordered_set<std::string> surface_cache_epoch_done_;
     mutable uint64_t surface_cache_epoch_gen_ = ~0ull;
+    // Raw transform-handle matrix each surface_mesh_cache entry was built from.
+    // ★ The epoch above only ends on a geometry-generation bump or a keyframe
+    // re-pose. A plain TRANSFORM edit bumps neither: the inspector Pos/Rot/Scl
+    // fields, the viewport gizmo, TransformCommand (scene.set_transform over IPC,
+    // undo/redo) and scripts all move the handle and leave the memo "done". The
+    // collider then kept resolving the object's OLD pose for the rest of the
+    // epoch ("collider stays in its old state, never rebinds" — 2026-10-23).
+    // Patching every editor to invalidate was tried in spirit (the gizmo-only
+    // refreshSimSourceGizmoBounds, selected object + paused timeline only) and
+    // missed the other paths, so the CONSUMER checks freshness instead: a memo
+    // hit is honoured only while the handle still reads this matrix.
+    mutable std::unordered_map<std::string, Matrix4x4> surface_cache_source_matrix_;
     // OBB memo for resolveObjectOBBForSimulation, dropped whenever the node's
     // surface_mesh_cache entry is rebuilt or erased. The OBB is a pure function
     // of that entry's triangles, yet it was re-derived from EVERY triangle
@@ -2131,6 +2144,7 @@ struct SceneData {
         // TLAS mask split makes the pair a solved layering case
         // (VULKAN_GAS_FLUID_LAYERING.md). These slots once held a separate foam
         // volume that was never allocated; foam rides the surface volume.
+        std::vector<RayTrophiSim::Fluid::MatterFogLiveStreams> matter_fog_streams;
         std::vector<int> domain_fog_vdb_ids;
         std::vector<std::shared_ptr<VDBVolume>> domain_fog_volumes;
         // Foam splat scratch for the SURFACE volume's temperature channel.
@@ -2743,6 +2757,7 @@ struct SceneData {
             system.domain_volumes.resize(live_domain_count);
             system.domain_fog_vdb_ids.resize(live_domain_count, -1);
             system.domain_fog_volumes.resize(live_domain_count);
+            system.matter_fog_streams.resize(live_domain_count);
             system.domain_sdf_buffers.resize(live_domain_count);
             system.domain_uvw_buffers.resize(live_domain_count);
             system.domain_composition_buffers.resize(live_domain_count);
@@ -3142,9 +3157,13 @@ struct SceneData {
                     // exactly like a binding's representation above.
                     for (const auto route : domains[d].fluid_label_routes)
                         sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(route));
+                    sdf_sig = hash_combine_local(sdf_sig,
+                        RayTrophiSim::Fluid::phaseOutputSignature(domains[d].fluid_phase_output));
                     for (std::size_t particle_index = 0;
                          particle_index < state.particles.position.size(); ++particle_index) {
                         const auto& p = state.particles.position[particle_index];
+                        sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(
+                            RayTrophiSim::Fluid::particleOutputPhase(state.particles, particle_index)));
                         // ★ The STATE LABEL too: a parcel that turns from body to
                         // spray leaves the surface without moving, so positions
                         // alone would keep the stale surface on a paused frame.
@@ -3369,6 +3388,12 @@ struct SceneData {
                     (density_ptr_override
                         ? (upload_changed && ((frame % stride) == 0))
                         : ((frame % stride) == 0)));
+                // Occupied box of THIS frame's upload (SurfaceSDF route). Kept
+                // on the volume below, because uploads are signature-gated and
+                // bindLiveVolume resets the box to the full grid every frame.
+                bool sdf_occupied_computed = false;
+                bool sdf_occupied_valid = false;
+                Vec3 sdf_occupied_min(0.0f), sdf_occupied_max(0.0f);
                 if (do_update) {
                     // Upload temperature too when the shader maps it to emission
                     // (blackbody / channel-driven fire). The shader reads it as
@@ -3460,6 +3485,24 @@ struct SceneData {
                     // update it in place.
                     if (new_id >= 0) {
                         system.domain_vdb_ids[d] = new_id;
+                        // ★ Measured 2026-10-25: a little melt water (9301
+                        // parcels) published this volume with the full 5 m
+                        // domain box and cost 111 of 135 ms with every other
+                        // phase splat/hidden - each ray in the domain paid the
+                        // SDF arbiter and the hand-off. Foam rides the
+                        // temperature channel and may sit outside the liquid,
+                        // so it counts as occupied too. Not for live GPU gas:
+                        // that shader reads the device buffer, and a box from
+                        // the host copy could clip live smoke.
+                        sdf_occupied_computed = true;
+                        sdf_occupied_valid = !use_live_dense_gpu &&
+                            VDBVolume::occupiedLocalBox(
+                                density_ptr,
+                                up_temp == foam_density.data() ? up_temp : nullptr,
+                                static_cast<size_t>(up_nx) * static_cast<size_t>(up_ny) *
+                                    static_cast<size_t>(up_nz),
+                                up_nx, up_ny, up_nz, up_voxel,
+                                sdf_occupied_min, sdf_occupied_max);
                         if (density_ptr_override &&
                             d < system.domain_vdb_upload_signatures.size()) {
                             system.domain_vdb_upload_signatures[d] = upload_sig;
@@ -3680,6 +3723,20 @@ struct SceneData {
                     vol->setShader(domain_shader);  // pick up live shader edits
                 }
                 vol->bindLiveVolume(id, render_grid.voxel_size, world_min, world_max);
+                if (sdf_occupied_computed) {
+                    vol->live_occupied_valid = sdf_occupied_valid;
+                    vol->live_occupied_min = sdf_occupied_min;
+                    vol->live_occupied_max = sdf_occupied_max;
+                }
+                if (use_live_dense_gpu) vol->live_occupied_valid = false;
+                {
+                    // Vulkan refreshes its TLAS box per publish and OptiX reads
+                    // it per ray; the CPU Embree BVH bakes it at build, so a box
+                    // that GROWS past the last one must rebuild it.
+                    vol->applyLiveOccupiedBounds();
+                    const AABB box = vol->getWorldBounds();
+                    if (vol->growsLiveBvhBox(box)) g_bvh_rebuild_pending = true;
+                }
 
                 if (created) {
                     // New hittable added to world.objects: rebuild GPU TLAS so it
@@ -4112,6 +4169,17 @@ struct SceneData {
         h = mix(h, fb(fp.granular_damage_rate));
         h = mix(h, fb(fp.granular_healing_rate));
         h = mix(h, fp.granular_rebonding ? 1ull : 0ull);
+        h = mix(h, fb(fp.granular_compaction_hardening));
+        h = mix(h, fb(fp.granular_compaction_limit));
+        h = mix(h, fp.granular_snow_plasticity ? 1ull : 0ull);
+        h = mix(h, fb(fp.granular_snow_critical_compression));
+        h = mix(h, fb(fp.granular_snow_critical_stretch));
+        h = mix(h, fb(fp.granular_snow_hardening));
+        h = mix(h, fb(fp.granular_snow_max_hardening));
+        h = mix(h, fb(fp.granular_snow_min_hardening));
+        h = mix(h, fb(fp.granular_snow_heterogeneity));
+        h = mix(h, fb(fp.granular_snow_clump_size));
+        h = mix(h, fb(fp.granular_density));
         // The substep ceiling is not cosmetic: it decides how much of the
         // authored stiffness the solver can actually deliver (measured -- at
         // h = 0.05 m and 24 fps, E = 2e5 Pa needs 27 substeps, so a ceiling of
@@ -4167,6 +4235,7 @@ struct SceneData {
         // the panel's seed-settled auto-reseed, which reseeds and snaps the
         // playhead to start once the drag is released.
         h = mix(h, static_cast<uint64_t>(d.fluid_seed_particles_per_cell));
+        h = mix(h, fb(d.fluid_seed_grain_saturation));
         h = mix(h, static_cast<uint64_t>(d.fluid_max_particles));
         h = mix(h, d.fluid_reseed_on_reset ? 1ull : 0ull);
         h = mix(h, fb(d.fluid_fill_level));
@@ -7672,6 +7741,12 @@ private:
                                            std::size_t domain_index);
     // Publishes (or retires) a liquid domain's FOG view on its own volume slot,
     // from the same FluidViewPlan the surface slot uses. FluidDomainFogVolume.cpp.
+    void removeMatterFogStreams(ParticleSystemObject& system, std::size_t d);
+    void invalidateMatterFogStreams(ParticleSystemObject& system);
+    void syncMatterFogStreams(ParticleSystemObject& system, std::size_t d,
+        const RayTrophiSim::SimulationGridDomainState& state,
+        RayTrophiSim::SimulationGridDomainDesc& desc, VDBVolumeManager& manager,
+        bool render_enabled, bool force_sync);
     void syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
                              const RayTrophiSim::SimulationGridDomainState& state,
                              RayTrophiSim::SimulationGridDomainDesc& desc,
@@ -7721,6 +7796,7 @@ private:
                 system.domain_vdb_upload_signatures[d] = 0;
             }
         }
+        invalidateMatterFogStreams(system);
         // The fog view's volume follows the same rule, for the same reason: the
         // id at -1 is what forces its next publish to upload the restored frame.
         for (std::size_t d = 0; d < system.domain_fog_vdb_ids.size(); ++d) {
@@ -7771,6 +7847,7 @@ private:
 
     // Tears down a domain's liquid FOG view (its second live volume).
     void removeFogDomainVolume(ParticleSystemObject& system, std::size_t d) {
+        removeMatterFogStreams(system, d);
         auto& mgr = VDBVolumeManager::getInstance();
         if (d < system.domain_fog_vdb_ids.size() && system.domain_fog_vdb_ids[d] >= 0) {
             mgr.unloadVDB(system.domain_fog_vdb_ids[d]);
@@ -7800,6 +7877,7 @@ private:
         }
         system.domain_vdb_ids.clear();
         system.domain_volumes.clear();
+        system.matter_fog_streams.clear();
         system.domain_fog_vdb_ids.clear();
         system.domain_fog_volumes.clear();
         system.domain_foam_density.clear();
@@ -8392,9 +8470,12 @@ public:
     // edits them on the volume is overwritten on the next frame. Edits go here.
     // `is_fog_view` (optional) tells which of the domain's two volumes this is:
     // the surface slot or the fog slot (FluidDomainFogVolume.cpp).
+    RayTrophiSim::SimulationGridDomainDesc* matterFogDomainOwningVolume(
+        const VDBVolume* volume, bool* fog_view);
     RayTrophiSim::SimulationGridDomainDesc* fluidDomainOwningVolume(const VDBVolume* vol,
                                                                     bool* is_fog_view = nullptr) {
         if (!vol) return nullptr;
+        if (auto* owner = matterFogDomainOwningVolume(vol, is_fog_view)) return owner;
         for (auto& system : particle_systems) {
             if (!system.runtime) continue;
             auto& domains = system.runtime->gridDomains();
@@ -8558,11 +8639,13 @@ public:
     void invalidateSurfaceMeshCache(const std::string& node_name = std::string()) const {
         if (node_name.empty()) {
             surface_mesh_cache.clear();
+            surface_cache_source_matrix_.clear();
             sim_obb_memo_.clear();
             simulation_local_bounds_.clear();
             last_sim_pose_applied_.clear();  // drop stale sim-pose memo on full reset/reload
         } else {
             surface_mesh_cache.erase(node_name);
+            surface_cache_source_matrix_.erase(node_name);
             sim_obb_memo_.erase(node_name);
             simulation_local_bounds_.erase(node_name);
             last_sim_pose_applied_.erase(node_name);
@@ -8576,6 +8659,15 @@ public:
     // without bumping the geometry generation (manual gizmo drag mid-edit).
     void refreshSimSourceGizmoBounds(const std::string& node_name) const {
         if (!node_name.empty()) surface_cache_epoch_done_.erase(node_name);
+    }
+
+    // Exact compare on purpose: any edit to the handle must rebuild, and an
+    // untouched handle reads back bit-identical.
+    static bool simSourceMatrixEqual(const Matrix4x4& a, const Matrix4x4& b) {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+                if (a.m[r][c] != b.m[r][c]) return false;
+        return true;
     }
 
     const RayTrophiSim::SurfaceMeshCache* getSurfaceMeshCacheForObject(const std::string& node_name,
@@ -8603,7 +8695,28 @@ public:
             if (existing != surface_mesh_cache.end() &&
                 !existing->second.empty() &&
                 surface_cache_epoch_done_.find(node_name) != surface_cache_epoch_done_.end()) {
-                return &existing->second; // already rebuilt this epoch
+                // Same epoch, but a transform edit does not end an epoch: only
+                // reuse the entry while the handle still reads the matrix it was
+                // built from (see surface_cache_source_matrix_).
+                Matrix4x4 live_matrix;
+                const auto built_from = surface_cache_source_matrix_.find(node_name);
+                if (built_from != surface_cache_source_matrix_.end() &&
+                    resolveObjectTransformForSimulation(node_name, live_matrix, false) &&
+                    simSourceMatrixEqual(live_matrix, built_from->second)) {
+                    return &existing->second; // already rebuilt this epoch, same pose
+                }
+                surface_cache_epoch_done_.erase(node_name);
+            }
+        }
+
+        // Record the pose this rebuild reads, so the next memo hit can tell a
+        // transform edit apart from an unchanged object.
+        {
+            Matrix4x4 build_matrix;
+            if (resolveObjectTransformForSimulation(node_name, build_matrix, false)) {
+                surface_cache_source_matrix_[node_name] = build_matrix;
+            } else {
+                surface_cache_source_matrix_.erase(node_name);
             }
         }
 
@@ -8799,8 +8912,13 @@ public:
     // including under physics — so we cache only the object handle and re-read
     // its live transform every call. A stale/renamed/deleted entry is detected
     // by the expiry + name re-check below and falls back to a fresh scan.
+    // include_rigid_delta=false reads the raw transform handle only. The surface
+    // cache freshness key uses that form: it rebuilds from P_orig x getFinal()
+    // and must not churn every step on a rigid body whose delta is baked into
+    // the vertices instead of the handle (see the note below).
     bool resolveObjectTransformForSimulation(const std::string& node_name,
-                                             Matrix4x4& out_matrix) const {
+                                             Matrix4x4& out_matrix,
+                                             bool include_rigid_delta = true) const {
         if (node_name.empty()) return false;
 
         // ★★ A Jolt-driven object's motion is NOT in its transform handle.
@@ -8823,7 +8941,7 @@ public:
         // The frozen handle IS the spawn pose, so the live world pose is simply
         // the rigid delta applied to it. Resolve the handle first, then compose.
         const Matrix4x4* rigid_delta = nullptr;
-        for (const auto& rb : rigid_bodies) {
+        if (include_rigid_delta) for (const auto& rb : rigid_bodies) {
             if (rb.source_name != node_name) continue;
             if (rb.has_written) rigid_delta = &rb.last_rigid_delta;
             break;
@@ -9575,6 +9693,7 @@ public:
         };
         erase_index(system.domain_vdb_ids);
         erase_index(system.domain_volumes);
+        erase_index(system.matter_fog_streams);
         erase_index(system.domain_fog_vdb_ids);
         erase_index(system.domain_fog_volumes);
         erase_index(system.domain_foam_density);

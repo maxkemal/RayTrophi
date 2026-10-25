@@ -67,12 +67,12 @@ layout(push_constant) uniform Constants {
 uint historyCapacity() { return uint(masses[2u * pc.meta.x + 3u]); }
 #define SLOTS historyCapacity()
 #define BUDGET float(historyCapacity())
-// Shared with the host (kMatterGrainBucketCapacity).
-const uint BUCKET = 16u;
+// Shared with the host (kMatterGrainBucketCapacity); see its note for 32.
+const uint BUCKET = 32u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 30u;
+const uint REVISION = 31u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;

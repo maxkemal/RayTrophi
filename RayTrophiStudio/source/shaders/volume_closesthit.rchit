@@ -245,7 +245,7 @@ struct VkWorldDataExtended {
     int   fogEnabled;   float fogDensity; float fogHeight; float fogFalloff;
     float fogDistance;  float fogAnisotropy; vec3 fogAlbedo; float _pad4;
     int   godRaysEnabled; float godRaysIntensity; float godRaysDensity; int godRaysSamples;
-    int   aerialFroxelReady; float _aerialPad0; float _aerialPad1; float _aerialPad2;
+    int   aerialFroxelReady; uint volumeMarchLod; uint volumeLightCacheLo; uint volumeLightCacheHi;
     int   weatherEnabled; int weatherType; float weatherIntensity; float weatherDensity;
     vec3  weatherWindDirection; float weatherWindSpeed;
     float weatherPrecipitationScale; float _weatherPad0; float weatherSurfaceWetness; float weatherSurfaceAccumulation;
@@ -285,7 +285,8 @@ float rnd(inout uint seed) {
 // shadowed by a SEPARATE volume (a smoke plume over a pool). It is not a
 // regression — this path had no volumetric shadowing at all before — but it is
 // the one place the two shaders do not yet agree.
-float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist) {
+float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist,
+                                       int lightIndex) {
     return 1.0;
 }
 
@@ -1382,6 +1383,7 @@ float sampleDensityAccMode(
     inout pnanovdb_readaccessor_t acc,
     bool applyOpticalControls)
 {
+    #include "volume_density_read_gate.glsl"
     vec3 localPos;
     localPos.x = vol.inv_transform[0] * worldPos.x + vol.inv_transform[1] * worldPos.y
                + vol.inv_transform[2] * worldPos.z + vol.inv_transform[3];
@@ -1604,6 +1606,8 @@ float sampleIsoField(VkVolumeInstance vol, vec3 worldPos, pnanovdb_buf_t buf,
          - isoPoreOffset(vol, worldPos)
          - isoAlphaOffset(vol, worldPos);
 }
+
+#include "surface_sdf_empty.glsl"
 
 // ============================================================
 // Density Sampling — supports homogeneous and procedural noise
@@ -1884,31 +1888,8 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
             surface, rayOrigin + rayDir * t0s, surfaceBuf, mapH, acc);
         bool startedInside = d0 > ISO;
         bool foundCrossing = false;
-        for (int s = 0; s < steps; ++s) {
-            float t1s = min(t0s + step, endT);
-            float d1 = sampleIsoField(
-                surface, rayOrigin + rayDir * t1s, surfaceBuf, mapH, acc);
-            bool crossed = startedInside
-                ? (d0 >= ISO && d1 < ISO)
-                : (d0 < ISO && d1 >= ISO);
-            if (crossed) {
-                float a = t0s;
-                float b = t1s;
-                for (int refine = 0; refine < 4; ++refine) {
-                    float mid = 0.5 * (a + b);
-                    float dm = sampleIsoField(
-                        surface, rayOrigin + rayDir * mid, surfaceBuf, mapH, acc);
-                    if ((dm > ISO) == startedInside) a = mid;
-                    else b = mid;
-                }
-                nearestHit = min(nearestHit, 0.5 * (a + b));
-                foundCrossing = true;
-                break;
-            }
-            t0s = t1s;
-            d0 = d1;
-            if (t0s >= endT) break;
-        }
+        #include "surface_sdf_arbiter_search.glsl"
+
         if (!foundCrossing) volumeRecordArbiterNoCrossing();
         if (startedInside) volumeRecordArbiterStartedInside(foundCrossing);
     }
@@ -2586,9 +2567,28 @@ void volumeRandomWalk(VkVolumeInstance vol, vec3 rayOrigin, vec3 rayDir,
 }
 
 #include "volume_overlap_selection.glsl"
+#include "volume_sun_shadow_cache.glsl"
+#include "volume_light_cache.glsl"
+#include "volume_light_cache_fill.glsl"
 
 #include "volume_internal_rt.glsl"
+#include "volume_radiance_cache.glsl"
 #include "volume_phase_cache.glsl"
+#include "volume_mixture.glsl"
+
+// Whether this trace belongs to the camera segment (PL_CAMERA_SEGMENT on the
+// INCOMING payload, read in main() before shading rewrites primaryMeta). The
+// gas march LOD below coarsens only the other, later-bounce segments.
+bool volumeCameraSegment = true;
+
+// A cached shadow refreshes once per `stride` samples. With an in-scatter
+// stride k > 1 lighting runs only on every k-th sample, and `step % stride == 0`
+// could fall between evaluations for the whole ray. Refresh on the evaluated
+// sample inside each window instead; k = 1 is exactly `step % stride == 0`.
+bool volumeShadowDue(int step, int stride, int lightStride) {
+    int window = max(stride, lightStride);
+    return (step % window) < lightStride;
+}
 
 void shadeVolumeHit() {
     // Volume instance index from gl_InstanceCustomIndexEXT
@@ -2776,41 +2776,7 @@ void shadeVolumeHit() {
         float prevD  = startInside ? startD : min(startD, ISO_THRESH - 1e-4);
         float hitT   = -1.0;
 
-        for (int s = 0; s < maxSteps; ++s) {
-            float nextT = min(t + step, tFar);
-            float curD = sampleIsoField(vol, rayOrigin + rayDir * nextT, vdbBuf, vdbMapH, vdbAcc);
-            bool crossed = startInside
-                ? (prevD >= ISO_THRESH && curD < ISO_THRESH)   // exit
-                : (prevD <  ISO_THRESH && curD >= ISO_THRESH); // enter
-            if (crossed) {
-                // Precise binary search (bisection) refinement to find the exact isosurface intersection.
-                // Eliminates sawtooth / staircasing / wood-grain aliasing artifacts completely!
-                float t0 = t;
-                float t1 = nextT;
-                float d0 = prevD;
-                float d1 = curD;
-                for (int it = 0; it < 4; ++it) {
-                    float tMid = 0.5 * (t0 + t1);
-                    float dMid = sampleIsoField(vol, rayOrigin + rayDir * tMid, vdbBuf, vdbMapH, vdbAcc);
-                    bool midInside = dMid > ISO_THRESH;
-                    if (startInside == midInside) {
-                        t0 = tMid;
-                        d0 = dMid;
-                    } else {
-                        t1 = tMid;
-                        d1 = dMid;
-                    }
-                }
-                float denom = d1 - d0;
-                float frac = (ISO_THRESH - d0) / ((abs(denom) > EPSILON) ? denom : EPSILON);
-                frac = clamp(frac, 0.0, 1.0);
-                hitT = t0 + frac * (t1 - t0);
-                break;
-            }
-            prevD = curD;
-            t = nextT;
-            if (t >= tFar) break;
-        }
+        #include "surface_sdf_main_search.glsl"
 
         // ── Whitewater foam composited in FRONT of the surface ──────────────
         // Foam rides this same volume's TEMPERATURE channel (scaled by
@@ -2956,6 +2922,7 @@ void shadeVolumeHit() {
             shadowPayload = vec4(0.0, 0.0, 0.0, uintBitsToFloat(VOLUME_SOLID_PROBE));
             traceRayEXT(topLevelAS, SOLID_FLAGS, SOLID_MASK, 0, 1, 1,
                         rayOrigin, max(1e-4, tNear - 0.002), rayDir, probeFar + 0.002, 1);
+            volumeRecordSolidProbe(shadowPayload.z > 0.5);
             if (shadowPayload.z > 0.5) {
                 float solidT = shadowPayload.x;
                 // Absorption for the water the ray crossed before the solid.
@@ -2993,6 +2960,7 @@ void shadeVolumeHit() {
                 payload.skipVolumeAABBs     = true;
                 payload.scattered     = true;
                 payload.bounceType    = 0u;
+                payload.volumeTraversalMask = plSolidHandoffWord(payload.volumeTraversalMask, solidT);
                 return;
             }
         }
@@ -4032,7 +4000,7 @@ void shadeVolumeHit() {
         // secondary bounces a genuinely thick medium really does hide what is
         // behind it, so the gate keeps earning its keep there.
         bool primarySegment = (payload.primaryMeta & PL_PRIMARY_DONE) == 0u;
-        if (!primarySegment && sigmaTCoeff > EPSILON && marchDistProbe > 1e-4) {
+        if (!primarySegment && !hasCompanion && sigmaTCoeff > EPSILON && marchDistProbe > 1e-4) {
             float tA = tNear + min(0.05 * marchDistProbe, 0.25);
             float tB = tNear + 0.5 * marchDistProbe;
             float dA = sampleDensityAcc(vol, rayOrigin + rayDir * tA, vdbBuf, vdbMapH, vdbAcc);
@@ -4125,6 +4093,14 @@ void shadeVolumeHit() {
         }
     }
 
+    if ((hasCompanion && matterFogOverlap(rayOrigin, rayDir, tNear, volCount) &&
+            matterFogNeedsGeneralMixture(volIdx, companionIdx, volCount)) ||
+        (vol.random_walk_enabled > 0.5 && matterFogJointWalk(volIdx, volCount))) {
+        shadeFogMixture(rayOrigin, rayDir, tNear, tFar,
+            solidT >= 0.0 || layeredSurfaceT > 0.0, volIdx, volCount);
+        return;
+    }
+
     // Path-traced multiple scattering replaces the march below when the volume
     // asks for it. The march stays for what the walk does not model: emission,
     // Volume Graph programs (they may rewrite density per sample, which the
@@ -4145,11 +4121,25 @@ void shadeVolumeHit() {
     // RAY MARCH through volume (Regular stepping with jitter)
     // Matches OptiX volumetric ray march approach
     // ══════════════════════════════════════════════════════════════════════════
-    float stepSize = max(vol.step_size, 1e-4);
+    // ── March LOD (docs/dev/RT_GAS_SECONDARY_MARCH.md §8) ───────────────────
+    // worldData.w.volumeMarchLod, packed by Backend::packVolumeMarchLod:
+    // bits 0-3 camera light stride-1, 4-7 bounce light stride-1, 8-11 bounce
+    // step scale-1, 12-20 bounce step cap (0 = authored). A zero word is the
+    // legacy march. Measured 2026-10-25 (splat inside gas): in-scatter is half
+    // the march cost and bounce rays hold 45% of the density samples.
+    uint marchLod = worldData.w.volumeMarchLod;
+    int lightStride = volumeCameraSegment
+        ? int(marchLod & 15u) + 1 : int((marchLod >> 4) & 15u) + 1;
+    float lodStepScale = volumeCameraSegment ? 1.0 : float(((marchLod >> 8) & 15u) + 1u);
+    int lodStepCap = volumeCameraSegment ? 0 : int((marchLod >> 12) & 511u);
+    // Bit 21: bounce rays read the radiance cache (§13).
+    bool radianceCacheOn = !volumeCameraSegment && ((marchLod >> 21) & 1u) != 0u;
+    float stepSize = max(vol.step_size, 1e-4) * lodStepScale;
     float marchDist = tFar - tNear;
     const int hardStepCeiling = 2048;
     int authoredStepBudget = max(vol.max_steps, 1);
     int effectiveStepBudget = min(hardStepCeiling, authoredStepBudget);
+    if (lodStepCap > 0) effectiveStepBudget = min(effectiveStepBudget, lodStepCap);
     int requiredSteps = max(1, int(ceil(marchDist / stepSize)));
     int maxSteps = min(requiredSteps, effectiveStepBudget);
     // Canonical Vulkan baseline: divide the complete interval into a fixed,
@@ -4193,6 +4183,9 @@ void shadeVolumeHit() {
     bool cachedSunShadowValid = false;
     float cachedAmbientShadow = 1.0;
     bool cachedAmbientShadowValid = false;
+    // In-scatter held between light-stride evaluations (-1 = none yet).
+    vec3 heldInscatter = vec3(0.0);
+    int heldInscatterStep = -1;
 
     // ── Scene-light subset for this ray ───────────────────────────────────────
     // At most two lights are evaluated per volume sample. The old code took
@@ -4334,12 +4327,28 @@ void shadeVolumeHit() {
     if (nanoIndexPath) {
         primaryNanoRay = volumeNanoRay(vol, rayOrigin, rayDir, vdbBuf, vdbMapH);
     }
+    bool compNanoIndexPath = hasCompanion && volumeNanoIndexEligible(comp, compBuf);
+    VolumeNanoRay companionNanoRay;
+    if (compNanoIndexPath) {
+        companionNanoRay = volumeNanoRay(comp, rayOrigin, rayDir, compBuf, compMapH);
+    }
     float t = tNear + rayJitter * baseStep;
     int step = 0;
     uint measuredDensitySamples = 0u;
     uint measuredEmptySegments = 0u;
     uint measuredTopologySegments = 0u;
     uint measuredDensityLeafSegments = 0u;
+    // Bounce rays: cross the box on radiance cache lookups (§13). Same
+    // eligibility as the plain march's own shortcuts: no companion medium, no
+    // material program, not the procedural sky cloud. A missing vertex leaves
+    // radiance and transmittance untouched and the march below runs as before.
+    if (radianceCacheOn && !hasCompanion && volumeProgram == MATPROG_NONE &&
+        !(worldData.w.mode == 2 && (vol.volume_type == 3 || vol.source_type == 3))) {
+        bool cached = volumeRadianceCacheMarch(volIdx, vol, rayOrigin, rayDir, tNear, tFar,
+            rayJitter, vdbBuf, vdbMapH, vdbAcc, accumulated_radiance, transmittance);
+        volumeRecordRadianceCache(cached);
+        if (cached) t = tFar;
+    }
     while (t < tFar && step < maxSteps) {
         vec3  samplePos = rayOrigin + rayDir * t;
 
@@ -4385,6 +4394,7 @@ void shadeVolumeHit() {
             }
         }
         
+        #include "volume_companion_empty.glsl"
         float density = nanoIndexPath
             ? volumeNanoDensity(vol, primaryNanoRay, t, vdbBuf, vdbAcc)
             : sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
@@ -4431,7 +4441,9 @@ void shadeVolumeHit() {
         float compDensity = 0.0;
         float compSigmaS = 0.0;
         if (hasCompanion) {
-            compDensity = sampleDensityAcc(comp, samplePos, compBuf, compMapH, compAcc);
+            compDensity = compNanoIndexPath
+                ? volumeNanoDensity(comp, companionNanoRay, t, compBuf, compAcc)
+                : sampleDensityAcc(comp, samplePos, compBuf, compMapH, compAcc);
             compSigmaS = compDensity * comp.scatter_coefficient;
             float scatterSum = sigma_s_local + compSigmaS;
             if (compSigmaS > 0.0 && scatterSum > EPSILON) {
@@ -4467,8 +4479,14 @@ void shadeVolumeHit() {
         }
         
         // Fixed coverage segment. Beer-Lambert remains analytic over the full
-        // segment; adaptive optical substeps will return only with a separate
-        // substep budget.
+        // segment. Two variable strides were tried and removed (2026-10-25,
+        // RT_GAS_SECONDARY_MARCH.md §12, §14):
+        //   * from the density at the segment START: entering dense gas from a
+        //     thin fringe it skipped the onset - more samples, brighter edges;
+        //   * from the transmittance already spent (the cloud's deepGrow): in
+        //     dense gas T falls from 0.35 to 0.001 within a few steps, so it
+        //     saved no samples and still darkened the fireball cap.
+        // A future attempt must bound the stride by a majorant.
         float dt = min(baseStep, tFar - t);
         if (dt <= 1e-6) break;
 
@@ -4507,234 +4525,275 @@ void shadeVolumeHit() {
 
         // ── In-Scattering (Direct Lighting) ──
         if (sigma_s_local > 0.0) {
-            vec3 inscatter = vec3(0.0);
+            // Light stride (§8): in-scatter on every k-th sample, held in
+            // between; density, opacity and transmittance stay per sample. A
+            // gap of k or more (an empty-space skip) re-evaluates, so a held
+            // value never crosses a skipped region.
+            bool evaluateLight = heldInscatterStep < 0 ||
+                (step % lightStride) == 0 || step - heldInscatterStep >= lightStride;
+            vec3 inscatter = heldInscatter;
+            if (evaluateLight) {
+                inscatter = vec3(0.0);
             
-            // Sample scene lights for object volumes. For the procedural sky cloud,
-            // Nishita already provides the sun/sky block below; sampling the default
-            // directional light here doubles the light march cost and shifts parity
-            // away from the OptiX sky-cloud path.
-            bool useSceneLights = !(worldData.w.mode == 2 && (vol.volume_type == 3 || vol.source_type == 3));
-            if (useSceneLights && cam.lightCount > 0u) {
-                for (int ls = 0; ls < sampledLightCount; ls++) {
-                    int li = (ls == 0) ? sampledLight0 : sampledLight1;
-                    LightData light = lights.l[li];
-                    int lightType = int(light.position.w + 0.5);
+                // Sample scene lights for object volumes. For the procedural sky cloud,
+                // Nishita already provides the sun/sky block below; sampling the default
+                // directional light here doubles the light march cost and shifts parity
+                // away from the OptiX sky-cloud path.
+                bool useSceneLights = !(worldData.w.mode == 2 && (vol.volume_type == 3 || vol.source_type == 3));
+                if (useSceneLights && cam.lightCount > 0u) {
+                    for (int ls = 0; ls < sampledLightCount; ls++) {
+                        int li = (ls == 0) ? sampledLight0 : sampledLight1;
+                        LightData light = lights.l[li];
+                        int lightType = int(light.position.w + 0.5);
 
-                    vec3  lightDir;
-                    float lightDist;
-                    float lightAtten = 1.0;
-                    bool  lightInverseSquare = true;
-                    // Only an area light consumes randoms: point/spot/directional
-                    // are delta sources, and drawing for them would churn the RNG
-                    // stream every step for nothing.
-                    //
-                    // The area sample varies per step while the shadow-march
-                    // result is cached across `shadow_stride` steps, so a cached
-                    // transmittance can belong to a slightly different point on
-                    // the light. The offset is bounded by the light's own extent
-                    // and decorrelates the noise; pinning the sample per ray
-                    // instead would trade that for visible banding.
-                    float ru = 0.5, rv = 0.5;
-                    if (lightType == 2) {
-                        ru = rnd(payload.seed);
-                        rv = rnd(payload.seed);
-                    }
-                    if (!volSampleLight(light, samplePos, ru, rv,
-                                        lightDir, lightDist, lightAtten,
-                                        lightInverseSquare)) {
-                        continue;   // outside the cone / behind an area light
-                    }
-                    if (lightInverseSquare) {
-                        // Analytic 1/r^2 across the whole segment instead of a
-                        // point sample at its start. Without this the width and
-                        // brightness of a light shaft track the step size rather
-                        // than the light.
+                        vec3  lightDir;
+                        float lightDist;
+                        float lightAtten = 1.0;
+                        bool  lightInverseSquare = true;
+                        // Only an area light consumes randoms: point/spot/directional
+                        // are delta sources, and drawing for them would churn the RNG
+                        // stream every step for nothing.
                         //
-                        // Area lights sample a point on the shape, so their
-                        // closest-approach geometry is that sample's, not the
-                        // light origin's — reconstruct the sampled position from
-                        // the direction and distance already returned.
-                        vec3 sampledLightPos = samplePos + lightDir * lightDist;
-                        lightAtten *= volSegmentInvSqAverage(
-                            rayOrigin, rayDir, sampledLightPos, t, t + dt);
-                    }
+                        // The area sample varies per step while the shadow-march
+                        // result is cached across `shadow_stride` steps, so a cached
+                        // transmittance can belong to a slightly different point on
+                        // the light. The offset is bounded by the light's own extent
+                        // and decorrelates the noise; pinning the sample per ray
+                        // instead would trade that for visible banding.
+                        float ru = 0.5, rv = 0.5;
+                        if (lightType == 2) {
+                            ru = rnd(payload.seed);
+                            rv = rnd(payload.seed);
+                        }
+                        if (!volSampleLight(light, samplePos, ru, rv,
+                                            lightDir, lightDist, lightAtten,
+                                            lightInverseSquare)) {
+                            continue;   // outside the cone / behind an area light
+                        }
+                        if (lightInverseSquare) {
+                            // Analytic 1/r^2 across the whole segment instead of a
+                            // point sample at its start. Without this the width and
+                            // brightness of a light shaft track the step size rather
+                            // than the light.
+                            //
+                            // Area lights sample a point on the shape, so their
+                            // closest-approach geometry is that sample's, not the
+                            // light origin's — reconstruct the sampled position from
+                            // the direction and distance already returned.
+                            vec3 sampledLightPos = samplePos + lightDir * lightDist;
+                            lightAtten *= volSegmentInvSqAverage(
+                                rayOrigin, rayDir, sampledLightPos, t, t + dt);
+                        }
 
-                    // Phase function evaluation
-                    float cosTheta = dot(rayDir, lightDir);
-                    float phase = volumeCachedPhase(phaseCache, ls,
-                        lightType == 1 && !hasCompanion && volumeProgram == MATPROG_NONE,
-                        cosTheta, stepAnisotropy,
+                        // Phase function evaluation
+                        float cosTheta = dot(rayDir, lightDir);
+                        float phase = volumeCachedPhase(phaseCache, ls,
+                            lightType == 1 && !hasCompanion && volumeProgram == MATPROG_NONE,
+                            cosTheta, stepAnisotropy,
+                            vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                        vec3 scatteringAlbedoRGB =
+                            vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
+                        float scatteringAlbedo = dot(
+                            scatteringAlbedoRGB, vec3(0.2126, 0.7152, 0.0722));
+                        phase = mix(
+                            phase, 1.0 / (4.0 * PI),
+                            clamp(stepMultiScatter * scatteringAlbedo, 0.0, 1.0));
+                    
+                        // Light march transmittance through volume toward light.
+                        // Geometry occlusion is NOT checked per-step (matching OptiX raymarch_volumetric_object
+                        // behavior): solid objects are handled by TLAS traversal order, not per-sample rays.
+                        // This prevents hard black shadows from solids inside the volume.
+                        float shadowTr = 1.0;
+                        float cachedLightIntegral;
+                        float cachedCompLightIntegral = 0.0;
+                        // Volume light cache: read every step, no stride - a lookup
+                        // costs less than the strided march it replaces. A companion
+                        // medium reads ITS OWN slot, exactly as companionLightMarch
+                        // marches its own grid; the two transmittances multiply.
+                        if (sigma_t_local * dt > 0.02 && vol.shadow_steps > 0 &&
+                            volumeLightCacheFetch(volIdx, vol, li, samplePos,
+                                                  vdbBuf, vdbMapH, vdbAcc, cachedLightIntegral) &&
+                            (!hasCompanion || comp.shadow_steps <= 0 ||
+                             volumeLightCacheFetch(uint(companionIdx), comp, li, samplePos,
+                                                   compBuf, compMapH, compAcc, cachedCompLightIntegral))) {
+                            shadowTr = volumeShadowFromIntegral(vol, cachedLightIntegral) *
+                                (hasCompanion ? volumeShadowFromIntegral(comp, cachedCompLightIntegral) : 1.0);
+                        } else if (sigma_t_local * dt > 0.02) {
+                            bool shadowValid = (ls == 0)
+                                ? cachedSceneShadow0Valid : cachedSceneShadow1Valid;
+                            bool updateShadow = !shadowValid || volumeShadowDue(step, shadowStride, lightStride);
+                            if (updateShadow) {
+                                float shadowMaxDist = min(
+                                    lightDist,
+                                    max(baseStep, volumeExitDistance(vol, samplePos, lightDir)));
+                                float evaluatedShadow = lightMarchAcc(
+                                    vol, samplePos, lightDir, shadowMaxDist,
+                                    vdbBuf, vdbMapH, vdbAcc, -1.0)
+                                    * companionLightMarch(
+                                        hasCompanion, comp, samplePos, lightDir, lightDist,
+                                        baseStep, compBuf, compMapH, compAcc, -1.0);
+                                volumeRememberSunShadow(lightType, vol, hasCompanion, comp,
+                                    samplePos, lightDir, lightDist, shadowMaxDist, baseStep,
+                                    step, evaluatedShadow);
+                                if (ls == 0) {
+                                    cachedSceneShadow0 = evaluatedShadow;
+                                    cachedSceneShadow0Valid = true;
+                                } else {
+                                    cachedSceneShadow1 = evaluatedShadow;
+                                    cachedSceneShadow1Valid = true;
+                                }
+                            }
+                            shadowTr = (ls == 0) ? cachedSceneShadow0 : cachedSceneShadow1;
+                        }
+                    
+                        vec3 lightColor = light.color.rgb * light.color.a;
+                        inscatter += lightWeight * lightColor * lightAtten * phase * shadowTr
+                                   * stepScatterColor * scatteringAlbedoRGB;
+                    }
+                }
+            
+                // ── Fire (volume emission) NEE ──────────────────────────────
+                // Same estimator shape as a scene light: analytic 1/r^2 across the
+                // segment, phase toward the emitter, and the medium's own
+                // transmittance in between. Without this the fire only reaches the
+                // surrounding smoke through random bounces, which is exactly the
+                // noise the user sees.
+                if (hasEmitter) {
+                    vec3 toEmitter = emitterPos - samplePos;
+                    float emitterDist = length(toEmitter);
+                    if (emitterDist > emitterMinRadius * 0.5) {
+                        vec3 emitterDir = toEmitter / max(emitterDist, 1e-4);
+                        float ePhase = dualLobeHG(dot(rayDir, emitterDir), stepAnisotropy,
+                                                  vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
+                        vec3 eAlbedoRGB = vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
+                        ePhase = mix(ePhase, 1.0 / (4.0 * PI),
+                                     clamp(stepMultiScatter *
+                                           dot(eAlbedoRGB, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0));
+                        // Strided like the other shadow terms; the emitter is
+                        // ray-constant so the cached value stays valid for it.
+                        if (!cachedEmitterShadowValid || volumeShadowDue(step, shadowStride, lightStride)) {
+                            cachedEmitterShadow = lightMarchAcc(
+                                vol, samplePos, emitterDir,
+                                min(emitterDist, max(baseStep,
+                                    volumeExitDistance(vol, samplePos, emitterDir))),
+                                vdbBuf, vdbMapH, vdbAcc, -1.0)
+                                * companionLightMarch(
+                                    hasCompanion, comp, samplePos, emitterDir, emitterDist,
+                                    baseStep, compBuf, compMapH, compAcc, -1.0);
+                            cachedEmitterShadowValid = true;
+                        }
+                        float eFalloff = volSegmentInvSqAverageExt(
+                            rayOrigin, rayDir, emitterPos, t, t + dt, emitterMinRadius);
+                        float selfFade = clamp(emitterDist / max(emitterMinRadius * 2.0, 1e-3), 0.0, 1.0);
+                        inscatter += emitterRadiance * eFalloff * ePhase * selfFade
+                                   * cachedEmitterShadow * stepScatterColor * eAlbedoRGB;
+                    }
+                }
+
+                // Sun/sky light contribution (if Nishita sky active)
+                if (worldData.w.mode == 2) {
+                    vec3 sunDir = normalize(worldData.w.sunDir);
+                    float cosSun = dot(rayDir, sunDir);
+                    float sunPhase = volumeCachedPhase(phaseCache, 2,
+                        !hasCompanion && volumeProgram == MATPROG_NONE,
+                        cosSun, stepAnisotropy,
                         vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
                     vec3 scatteringAlbedoRGB =
                         vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
                     float scatteringAlbedo = dot(
                         scatteringAlbedoRGB, vec3(0.2126, 0.7152, 0.0722));
-                    phase = mix(
-                        phase, 1.0 / (4.0 * PI),
+                    sunPhase = mix(
+                        sunPhase, 1.0 / (4.0 * PI),
                         clamp(stepMultiScatter * scatteringAlbedo, 0.0, 1.0));
-                    
-                    // Light march transmittance through volume toward light.
-                    // Geometry occlusion is NOT checked per-step (matching OptiX raymarch_volumetric_object
-                    // behavior): solid objects are handled by TLAS traversal order, not per-sample rays.
-                    // This prevents hard black shadows from solids inside the volume.
-                    float shadowTr = 1.0;
-                    if (sigma_t_local * dt > 0.02) {
-                        bool shadowValid = (ls == 0)
-                            ? cachedSceneShadow0Valid : cachedSceneShadow1Valid;
-                        bool updateShadow = !shadowValid || (step % shadowStride) == 0;
-                        if (updateShadow) {
-                            float shadowMaxDist = min(
-                                lightDist,
-                                max(baseStep, volumeExitDistance(vol, samplePos, lightDir)));
-                            float evaluatedShadow = lightMarchAcc(
-                                vol, samplePos, lightDir, shadowMaxDist,
-                                vdbBuf, vdbMapH, vdbAcc, -1.0)
-                                * companionLightMarch(
-                                    hasCompanion, comp, samplePos, lightDir, lightDist,
-                                    baseStep, compBuf, compMapH, compAcc, -1.0);
-                            if (ls == 0) {
-                                cachedSceneShadow0 = evaluatedShadow;
-                                cachedSceneShadow0Valid = true;
-                            } else {
-                                cachedSceneShadow1 = evaluatedShadow;
-                                cachedSceneShadow1Valid = true;
+                
+                    float sunShadowTr = 1.0;
+                    float cachedSunIntegral;
+                    float cachedCompSunIntegral = 0.0;
+                    if (sigma_t_local * dt > 0.02 && vol.shadow_steps > 0 &&
+                        volumeLightCacheFetch(volIdx, vol, -1, samplePos,
+                                              vdbBuf, vdbMapH, vdbAcc, cachedSunIntegral) &&
+                        (!hasCompanion || comp.shadow_steps <= 0 ||
+                         volumeLightCacheFetch(uint(companionIdx), comp, -1, samplePos,
+                                               compBuf, compMapH, compAcc, cachedCompSunIntegral))) {
+                        sunShadowTr = volumeShadowFromIntegral(vol, cachedSunIntegral) *
+                            (hasCompanion ? volumeShadowFromIntegral(comp, cachedCompSunIntegral) : 1.0);
+                    } else if (sigma_t_local * dt > 0.02) {
+                        bool updateSunShadow = !cachedSunShadowValid || volumeShadowDue(step, shadowStride, lightStride);
+                        if (updateSunShadow) {
+                            float sunShadowMaxDist = max(
+                                baseStep, volumeExitDistance(vol, samplePos, sunDir));
+                            if (!volumeReuseSunShadow(samplePos, sunDir, sunShadowMaxDist,
+                                    step, cachedSunShadow)) {
+                                cachedSunShadow = lightMarchAcc(
+                                    vol, samplePos, sunDir, sunShadowMaxDist,
+                                    vdbBuf, vdbMapH, vdbAcc, -1.0)
+                                    * companionLightMarch(
+                                        hasCompanion, comp, samplePos, sunDir, 1e30,
+                                        baseStep, compBuf, compMapH, compAcc, -1.0);
                             }
+                            cachedSunShadowValid = true;
                         }
-                        shadowTr = (ls == 0) ? cachedSceneShadow0 : cachedSceneShadow1;
+                        sunShadowTr = cachedSunShadow;
                     }
-                    
-                    vec3 lightColor = light.color.rgb * light.color.a;
-                    inscatter += lightWeight * lightColor * lightAtten * phase * shadowTr
+                
+                    vec3 sunLi = sampleTransmittanceLUT(samplePos, sunDir) * worldData.w.sunColor * worldData.w.sunIntensity;
+                    inscatter += sunLi * sunPhase * sunShadowTr
                                * stepScatterColor * scatteringAlbedoRGB;
                 }
-            }
             
-            // ── Fire (volume emission) NEE ──────────────────────────────
-            // Same estimator shape as a scene light: analytic 1/r^2 across the
-            // segment, phase toward the emitter, and the medium's own
-            // transmittance in between. Without this the fire only reaches the
-            // surrounding smoke through random bounces, which is exactly the
-            // noise the user sees.
-            if (hasEmitter) {
-                vec3 toEmitter = emitterPos - samplePos;
-                float emitterDist = length(toEmitter);
-                if (emitterDist > emitterMinRadius * 0.5) {
-                    vec3 emitterDir = toEmitter / max(emitterDist, 1e-4);
-                    float ePhase = dualLobeHG(dot(rayDir, emitterDir), stepAnisotropy,
-                                              vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
-                    vec3 eAlbedoRGB = vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
-                    ePhase = mix(ePhase, 1.0 / (4.0 * PI),
-                                 clamp(stepMultiScatter *
-                                       dot(eAlbedoRGB, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0));
-                    // Strided like the other shadow terms; the emitter is
-                    // ray-constant so the cached value stays valid for it.
-                    if (!cachedEmitterShadowValid || (step % shadowStride) == 0) {
-                        cachedEmitterShadow = lightMarchAcc(
-                            vol, samplePos, emitterDir,
-                            min(emitterDist, max(baseStep,
-                                volumeExitDistance(vol, samplePos, emitterDir))),
-                            vdbBuf, vdbMapH, vdbAcc, -1.0)
-                            * companionLightMarch(
-                                hasCompanion, comp, samplePos, emitterDir, emitterDist,
-                                baseStep, compBuf, compMapH, compAcc, -1.0);
-                        cachedEmitterShadowValid = true;
-                    }
-                    float eFalloff = volSegmentInvSqAverageExt(
-                        rayOrigin, rayDir, emitterPos, t, t + dt, emitterMinRadius);
-                    float selfFade = clamp(emitterDist / max(emitterMinRadius * 2.0, 1e-3), 0.0, 1.0);
-                    inscatter += emitterRadiance * eFalloff * ePhase * selfFade
-                               * cachedEmitterShadow * stepScatterColor * eAlbedoRGB;
-                }
-            }
-
-            // Sun/sky light contribution (if Nishita sky active)
-            if (worldData.w.mode == 2) {
-                vec3 sunDir = normalize(worldData.w.sunDir);
-                float cosSun = dot(rayDir, sunDir);
-                float sunPhase = volumeCachedPhase(phaseCache, 2,
-                    !hasCompanion && volumeProgram == MATPROG_NONE,
-                    cosSun, stepAnisotropy,
-                    vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
-                vec3 scatteringAlbedoRGB =
+                // 3. Sky/Ambient lighting (closer to CPU world.evaluate(up) behavior)
+                vec3 ambientAlbedo =
                     vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
-                float scatteringAlbedo = dot(
-                    scatteringAlbedoRGB, vec3(0.2126, 0.7152, 0.0722));
-                sunPhase = mix(
-                    sunPhase, 1.0 / (4.0 * PI),
-                    clamp(stepMultiScatter * scatteringAlbedo, 0.0, 1.0));
-                
-                float sunShadowTr = 1.0;
-                if (sigma_t_local * dt > 0.02) {
-                    bool updateSunShadow = !cachedSunShadowValid || (step % shadowStride) == 0;
-                    if (updateSunShadow) {
-                        float sunShadowMaxDist = max(
-                            baseStep, volumeExitDistance(vol, samplePos, sunDir));
-                        cachedSunShadow = lightMarchAcc(
-                            vol, samplePos, sunDir, sunShadowMaxDist,
-                            vdbBuf, vdbMapH, vdbAcc, -1.0)
-                            * companionLightMarch(
-                                hasCompanion, comp, samplePos, sunDir, 1e30,
-                                baseStep, compBuf, compMapH, compAcc, -1.0);
-                        cachedSunShadowValid = true;
-                    }
-                    sunShadowTr = cachedSunShadow;
+                float ambientAlbedoLuma = dot(
+                    ambientAlbedo, vec3(0.2126, 0.7152, 0.0722));
+                // Ambient is incident radiance too: letting it reach every dense
+                // sample unattenuated fills the entire cloud with a flat white
+                // source and erases density/depth cues. Use a cached representative
+                // sky-hemisphere march so cores darken while sky-facing lobes remain
+                // lit. A minimum stride of four bounds the Vulkan RT cost.
+                // Hemispherical ambient changes slowly along a primary ray. Eight
+                // samples of reuse removes a major nested NanoVDB-march cost without
+                // altering its Beer-Lambert visibility.
+                int ambientShadowStride = max(shadowStride, 8);
+                bool updateAmbientShadow =
+                    !cachedAmbientShadowValid || volumeShadowDue(step, ambientShadowStride, lightStride);
+                if (updateAmbientShadow && sigma_t_local * dt > 0.01) {
+                    float ambientShadowMaxDist = max(
+                        baseStep,
+                        volumeExitDistance(vol, samplePos, ambientLightDir));
+                    cachedAmbientShadow = lightMarchAcc(
+                        vol, samplePos, ambientLightDir, ambientShadowMaxDist,
+                        vdbBuf, vdbMapH, vdbAcc, 1.0)
+                        * companionLightMarch(
+                            hasCompanion, comp, samplePos, ambientLightDir, 1e30,
+                            baseStep, compBuf, compMapH, compAcc, 1.0);
+                    cachedAmbientShadowValid = true;
                 }
-                
-                vec3 sunLi = sampleTransmittanceLUT(samplePos, sunDir) * worldData.w.sunColor * worldData.w.sunIntensity;
-                inscatter += sunLi * sunPhase * sunShadowTr
-                           * stepScatterColor * scatteringAlbedoRGB;
-            }
-            
-            // 3. Sky/Ambient lighting (closer to CPU world.evaluate(up) behavior)
-            vec3 ambientAlbedo =
-                vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
-            float ambientAlbedoLuma = dot(
-                ambientAlbedo, vec3(0.2126, 0.7152, 0.0722));
-            // Ambient is incident radiance too: letting it reach every dense
-            // sample unattenuated fills the entire cloud with a flat white
-            // source and erases density/depth cues. Use a cached representative
-            // sky-hemisphere march so cores darken while sky-facing lobes remain
-            // lit. A minimum stride of four bounds the Vulkan RT cost.
-            // Hemispherical ambient changes slowly along a primary ray. Eight
-            // samples of reuse removes a major nested NanoVDB-march cost without
-            // altering its Beer-Lambert visibility.
-            int ambientShadowStride = max(shadowStride, 8);
-            bool updateAmbientShadow =
-                !cachedAmbientShadowValid || (step % ambientShadowStride) == 0;
-            if (updateAmbientShadow && sigma_t_local * dt > 0.01) {
-                float ambientShadowMaxDist = max(
-                    baseStep,
-                    volumeExitDistance(vol, samplePos, ambientLightDir));
-                cachedAmbientShadow = lightMarchAcc(
-                    vol, samplePos, ambientLightDir, ambientShadowMaxDist,
-                    vdbBuf, vdbMapH, vdbAcc, 1.0)
-                    * companionLightMarch(
-                        hasCompanion, comp, samplePos, ambientLightDir, 1e30,
-                        baseStep, compBuf, compMapH, compAcc, 1.0);
-                cachedAmbientShadowValid = true;
-            }
-            inscatter += ambientSky * stepScatterColor * ambientAlbedo
-                       * cachedAmbientShadow;
+                inscatter += ambientSky * stepScatterColor * ambientAlbedo
+                           * cachedAmbientShadow;
 
-            // Bounded higher-order sky scattering approximation. Recycle only
-            // a fraction of the ambient energy blocked on the representative
-            // sky path; unlike emission this vanishes when external sky light
-            // vanishes, remains density/depth dependent, and never exceeds the
-            // original unoccluded ambient budget:
-            //   visibility = T_sky + multi * albedo * P(2+) * (1-T_sky) <= 1.
-            float multiSkyVisibility = volumeHigherOrderSkyVisibility(
-                cachedAmbientShadow, stepMultiScatter, ambientAlbedoLuma);
-            inscatter += ambientSky * stepScatterColor * ambientAlbedo
-                       * multiSkyVisibility;
+                // Bounded higher-order sky scattering approximation. Recycle only
+                // a fraction of the ambient energy blocked on the representative
+                // sky path; unlike emission this vanishes when external sky light
+                // vanishes, remains density/depth dependent, and never exceeds the
+                // original unoccluded ambient budget:
+                //   visibility = T_sky + multi * albedo * P(2+) * (1-T_sky) <= 1.
+                float multiSkyVisibility = volumeHigherOrderSkyVisibility(
+                    cachedAmbientShadow, stepMultiScatter, ambientAlbedoLuma);
+                inscatter += ambientSky * stepScatterColor * ambientAlbedo
+                           * multiSkyVisibility;
             
-            // CPU parity integration:
-            // step_color = source * (1 - step_transmittance)
-            // accumulated += step_color * current_transparency
-            inscatter += volumeCachedInternalLighting(vol, samplePos, rayDir,
-                !hasCompanion && volumeProgram == MATPROG_NONE, step,
-                cachedInternalLight, cachedInternalLightValid) * stepScatterColor *
-                vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
-            inscatter = clampVolumeRadiance(inscatter, 8.0);
+                // CPU parity integration:
+                // step_color = source * (1 - step_transmittance)
+                // accumulated += step_color * current_transparency
+                inscatter += volumeCachedInternalLighting(vol, samplePos, rayDir,
+                    !hasCompanion && volumeProgram == MATPROG_NONE, step,
+                    cachedInternalLight, cachedInternalLightValid) * stepScatterColor *
+                    vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
+                inscatter = clampVolumeRadiance(inscatter, 8.0);
+                heldInscatter = inscatter;
+                heldInscatterStep = step;
+            }
             accumulated_radiance += transmittance * (inscatter + emis) * one_minus_sampleT;
         } else if (any(greaterThan(emis, vec3(0.0)))) {
             // Emission-only medium segment
@@ -4981,6 +5040,8 @@ void shadeVolumeHit() {
 
 void main() {
     uint pathFlags = payload.primaryMeta & (PL_CAMERA_SEGMENT | PL_NO_SKY_RADIANCE);
+    volumeInstrumentationSetSegment((pathFlags & PL_CAMERA_SEGMENT) != 0u);
+    volumeCameraSegment = (pathFlags & PL_CAMERA_SEGMENT) != 0u;
     shadeVolumeHit();
     payload.primaryMeta |= pathFlags;
     cloudApplyVolumeSegment();

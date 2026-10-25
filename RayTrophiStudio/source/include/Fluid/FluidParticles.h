@@ -65,6 +65,7 @@ public:
 
     void ensureParticleIdentities() {
         extendMatterParticleIds(particle_id, next_particle_id, position.size());
+        birth_source_uid.resize(position.size(), 0);
     }
 
     std::vector<Vec3>     position;   // world space
@@ -115,6 +116,9 @@ public:
     // of every snow parcel in a mixed domain reset each step.
     std::vector<float>    fusion_solid_fraction;
     std::vector<uint32_t> substance_tag;
+    // Stable flow-source timeline identity, independent of substance and array order.
+    // Zero denotes initial fills and non-emitter births.
+    std::vector<uint64_t> birth_source_uid;
     // Per-parcel solver regime. Auto exists only for legacy/unresolved data;
     // emitters resolve it from the substance before creating new matter.
     std::vector<uint8_t> constitutive_model;
@@ -260,6 +264,7 @@ public:
         combustible_fraction.clear();
         fusion_solid_fraction.clear();
         substance_tag.clear();
+        birth_source_uid.clear();
         constitutive_model.clear();
         granular_deformation_col0.clear(); granular_deformation_col1.clear();
         granular_deformation_col2.clear(); granular_plastic_volume.clear();
@@ -311,6 +316,7 @@ public:
         combustible_fraction.reserve(n);
         fusion_solid_fraction.reserve(n);
         substance_tag.reserve(n);
+        birth_source_uid.reserve(n);
         constitutive_model.reserve(n);
         granular_deformation_col0.reserve(n); granular_deformation_col1.reserve(n);
         granular_deformation_col2.reserve(n); granular_plastic_volume.reserve(n);
@@ -368,6 +374,7 @@ public:
             fusion_solid_fraction.push_back(std::numeric_limits<float>::quiet_NaN());
         }
         substance_tag.push_back(material);
+        birth_source_uid.resize(position.size(), 0);
         constitutive_model.push_back(static_cast<uint8_t>(model));
         granular_deformation_col0.emplace_back(1,0,0);
         granular_deformation_col1.emplace_back(0,1,0);
@@ -413,6 +420,9 @@ public:
                 fusion_solid_fraction[i] = fusion_solid_fraction[last];
             }
             substance_tag[i] = substance_tag[last];
+            if (last < birth_source_uid.size()) {
+                birth_source_uid[i] = birth_source_uid[last];
+            }
             constitutive_model[i] = constitutive_model[last];
             granular_deformation_col0[i] = granular_deformation_col0[last];
             granular_deformation_col1[i] = granular_deformation_col1[last];
@@ -446,6 +456,9 @@ public:
         combustible_fraction.pop_back();
         if (fusion_aligned) fusion_solid_fraction.pop_back();
         substance_tag.pop_back();
+        if (!birth_source_uid.empty()) {
+            birth_source_uid.pop_back();
+        }
         constitutive_model.pop_back();
         granular_deformation_col0.pop_back(); granular_deformation_col1.pop_back();
         granular_deformation_col2.pop_back(); granular_plastic_volume.pop_back();
@@ -556,6 +569,7 @@ private:
         fn(a.combustible_fraction, b.combustible_fraction);
         fn(a.fusion_solid_fraction, b.fusion_solid_fraction);
         fn(a.substance_tag, b.substance_tag);
+        fn(a.birth_source_uid, b.birth_source_uid);
         fn(a.constitutive_model, b.constitutive_model);
         fn(a.uvw, b.uvw);
         fn(a.uvw_b, b.uvw_b);
@@ -600,6 +614,7 @@ private:
         temperature.resize(n);
         combustible_fraction.resize(n);
         substance_tag.resize(n);
+        birth_source_uid.resize(n);
         constitutive_model.resize(n);
         uvw.resize(n);
         auto shrink = [&](auto& v) { if (!v.empty()) v.resize(n); };

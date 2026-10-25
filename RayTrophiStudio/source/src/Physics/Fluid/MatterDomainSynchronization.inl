@@ -367,6 +367,13 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 grain_seed = Fluid::seedMatterGrainBox(state.particles,
                     Fluid::liquidGrid(state), seed_lo, seed_hi, domain.fluid_params,
                     birth_kelvin, seed_budget);
+                // Same birth water as a damp flow source (initMatterGrainBirthWater).
+                if (domain.fluid_seed_grain_saturation > 0.0f) {
+                    for (std::size_t g = seed_begin; g < state.particles.size(); ++g) {
+                        Fluid::initMatterGrainBirthWater(state.particles, g,
+                            domain.fluid_seed_grain_saturation, domain.fluid_params.grain);
+                    }
+                }
             } else {
                 Fluid::seedBox(state.particles, Fluid::liquidGrid(state),
                     seed_lo, seed_hi, ppc,

@@ -19,12 +19,14 @@ int matterWetAppearanceBand(float saturation, float full_wet_saturation) {
         appearance * 7.0f)), 1, 7);
 }
 
-float matterParticleDryVolume(const FluidParticles& particles, std::size_t index) {
+float matterParticleDryVolume(const FluidParticles& particles, std::size_t index,
+                              const SubstanceProfile* domain_substance) {
     if (index >= particles.rest_mass_kg.size() || index >= particles.mass_fraction.size()) {
         return -1.0f;
     }
     const auto* profile = index < particles.substance_tag.size()
         ? tryFindSubstanceByTag(particles.substance_tag[index]) : nullptr;
+    if (!profile) profile = domain_substance;
     const float density = profile && std::isfinite(profile->density) && profile->density > 0.0f
         ? profile->density : 1600.0f; // Untagged legacy stress used the Sand density.
     const float mass = particles.rest_mass_kg[index] * particles.mass_fraction[index];

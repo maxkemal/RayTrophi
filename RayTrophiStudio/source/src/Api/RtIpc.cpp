@@ -1,3 +1,4 @@
+#include "Fluid/SourceSplatGeometryJson.h"
 #include "RtLensWeatherBindings.h"
 #include "RtObjectSubstanceBindings.h"
 #include "RtPostBindings.h"
@@ -43,6 +44,8 @@
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
 #include "RtIpcGrainGenerator.h"
+#include "RtIpcSourceSplatGeometry.h"
+#include "RtRayGpuTimingBindings.h"
 #include "RtIpcParticle.h"
 #include "RtIpcKinematicCollider.h"
 #include "RtIpcSecurity.h"
@@ -380,6 +383,7 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"fluid_birth_kelvin", s.fluid_birth_kelvin},
         {"fluid_birth_model", s.fluid_birth_model},
         {"fluid_birth_lowered", s.fluid_birth_lowered},
+        {"splat_geometry", s.splat_geometry},
         {"grain_birth_saturation", s.grain_birth_saturation},
         {"use_time_limit", s.use_time_limit},
         {"start_time", s.start_time}, {"end_time", s.end_time},
@@ -415,6 +419,9 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("fluid_substance", fluid_substance);
     RT_FS_FIELD("fluid_temperature_override", fluid_temperature_override);
     RT_FS_FIELD("fluid_temperature_kelvin", fluid_temperature_kelvin);
+    if (p.contains("splat_geometry")) {
+        p.at("splat_geometry").get_to(s.splat_geometry);
+    }
     RT_FS_FIELD("grain_birth_saturation", grain_birth_saturation);
     RT_FS_FIELD("use_time_limit", use_time_limit);
     RT_FS_FIELD("start_time", start_time);
@@ -503,6 +510,10 @@ json simulationColliderToJson(const rtapi::SimulationColliderInfo& c) {
         {"thickness", c.thickness},
         {"sdf_resolution_mode", c.sdf_resolution_mode},
         {"sdf_ready", c.sdf_ready}, {"sdf_resolution", c.sdf_resolution},
+        {"resolved_valid", c.resolved_valid},
+        {"resolved_world_min", vec3ToJson(c.resolved_world_min)},
+        {"resolved_world_max", vec3ToJson(c.resolved_world_max)},
+        {"resolved_size", vec3ToJson(c.resolved_size)},
         {"gas_interaction_enabled", c.gas_interaction_enabled},
         {"gas_density_rate", c.gas_density_rate},
         {"gas_temperature_rate", c.gas_temperature_rate},
@@ -790,6 +801,19 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
             {"granular_damage_rate", info.granular_damage_rate},
             {"granular_healing_rate", info.granular_healing_rate},
             {"granular_rebonding", info.granular_rebonding},
+            {"granular_snow_plasticity", info.granular_snow_plasticity},
+            {"granular_snow_critical_compression", info.granular_snow_critical_compression},
+            {"granular_snow_critical_stretch", info.granular_snow_critical_stretch},
+            {"granular_snow_hardening", info.granular_snow_hardening},
+            {"granular_snow_max_hardening", info.granular_snow_max_hardening},
+            {"granular_snow_min_hardening", info.granular_snow_min_hardening},
+            {"granular_snow_heterogeneity", info.granular_snow_heterogeneity},
+            {"granular_snow_clump_size", info.granular_snow_clump_size},
+            {"granular_density", info.granular_density},
+            {"granular_predicted_substeps", info.granular_predicted_substeps},
+            {"granular_wave_speed_m_s", info.granular_wave_speed_m_s},
+            {"granular_sizing_young_modulus", info.granular_sizing_young_modulus},
+            {"granular_frame_dt", info.granular_frame_dt},
             {"granular_max_solver_substeps", info.granular_max_solver_substeps},
                 {"granular_softening_temperature", info.granular_softening_temperature},
                 {"granular_softening_range", info.granular_softening_range},
@@ -872,6 +896,7 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
                 {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
                 {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
                 {"seed_particles_per_cell", info.seed_particles_per_cell},
+                {"seed_grain_saturation", info.seed_grain_saturation},
                 {"seed_fill_level", info.seed_fill_level},
                 {"seed_ran", info.seed_ran},
                 {"seed_truncated", info.seed_truncated},
@@ -929,6 +954,12 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
             {"granular_strain_rate", info.granular_strain_rate},
             {"granular_strain_limited", info.granular_strain_limited_particles},
                 {"granular_compaction_capped", info.granular_compaction_capped_particles},
+                {"granular_hardening_capped", info.granular_hardening_capped_particles},
+                {"granular_min_plastic_jacobian", info.granular_min_plastic_jacobian},
+                {"granular_max_plastic_jacobian", info.granular_max_plastic_jacobian},
+                {"granular_mean_plastic_jacobian", info.granular_mean_plastic_jacobian},
+                {"granular_counted", info.granular_counted_particles},
+                {"granular_material_measured", info.granular_material_measured},
                 {"granular_min_softening", info.granular_min_softening},
                 {"granular_softened", info.granular_softened_particles},
             {"granular_overburden_pressure", info.granular_overburden_pressure},
@@ -1737,7 +1768,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                      {"triangles", info.triangle_count},
                      {"vertices", info.vertex_count},
                      {"meshes", info.mesh_count},
-                     {"has_bounds", info.has_bounds}};
+                     {"has_bounds", info.has_bounds},
+                     {"visible", info.visible}};
             // ★ Bounds are what lets an automated caller MEASURE an assembly
             // instead of eyeballing a screenshot. They are absent -- not
             // zeroed -- when the object carries no geometry, so "no bounds"
@@ -1753,6 +1785,37 @@ json dispatchMethod(const std::string& method, const json& params) {
                 out["world_center"] = vec3ToJson(center);
             }
             return out;
+        });
+    }
+
+    // ── Visibility (outliner eye) ───────────────────────────────────────
+    if (method == "scene.set_visible") {
+        std::string name = requireString(params, "name");
+        const bool visible = requireBool(params, "visible");
+        return enqueueResult([name, visible](UIContext&) {
+            return rtapi::setObjectVisible(name, visible);
+        });
+    }
+    if (method == "scene.get_visible") {
+        std::string name = requireString(params, "name");
+        return enqueueQuery([name](UIContext&) {
+            rtapi::ObjectVisibility v;
+            rtapi::Result r = rtapi::getObjectVisibility(name, v);
+            if (!r.ok) return json{{"__error", r.error}};
+            // -1 = that backend is absent or not Vulkan; there is no read-back,
+            // which is not the same as "zero instances".
+            return json{{"name", v.name},
+                        {"visible", v.visible},
+                        {"pending_delete", v.pending_delete},
+                        {"entries", v.entries},
+                        {"visible_entries", v.visible_entries},
+                        {"viewport_raster_instances", v.viewport_raster_instances},
+                        {"viewport_raster_visible", v.viewport_raster_visible},
+                        {"viewport_rt_instances", v.viewport_rt_instances},
+                        {"viewport_rt_visible", v.viewport_rt_visible},
+                        {"render_rt_instances", v.render_rt_instances},
+                        {"render_rt_visible", v.render_rt_visible},
+                        {"render_is_viewport", v.render_is_viewport}};
         });
     }
 
@@ -1924,6 +1987,12 @@ json dispatchMethod(const std::string& method, const json& params) {
         });
     }
     json grain_generator_result;
+    if (dispatchRayGpuTimingIpc(method, params,
+            [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
+            grain_generator_result)) return grain_generator_result;
+    if (dispatchSourceSplatGeometryIpc(method, params,
+            [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
+            grain_generator_result)) return grain_generator_result;
     if (dispatchGrainGeneratorIpc(method, params,
             [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
             grain_generator_result)) {
@@ -3218,6 +3287,19 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_damage_rate", info.granular_damage_rate},
                         {"granular_healing_rate", info.granular_healing_rate},
                         {"granular_rebonding", info.granular_rebonding},
+                        {"granular_snow_plasticity", info.granular_snow_plasticity},
+                        {"granular_snow_critical_compression", info.granular_snow_critical_compression},
+                        {"granular_snow_critical_stretch", info.granular_snow_critical_stretch},
+                        {"granular_snow_hardening", info.granular_snow_hardening},
+                        {"granular_snow_max_hardening", info.granular_snow_max_hardening},
+                        {"granular_snow_min_hardening", info.granular_snow_min_hardening},
+                        {"granular_snow_heterogeneity", info.granular_snow_heterogeneity},
+                        {"granular_snow_clump_size", info.granular_snow_clump_size},
+                        {"granular_density", info.granular_density},
+                        {"granular_predicted_substeps", info.granular_predicted_substeps},
+                        {"granular_wave_speed_m_s", info.granular_wave_speed_m_s},
+                        {"granular_sizing_young_modulus", info.granular_sizing_young_modulus},
+                        {"granular_frame_dt", info.granular_frame_dt},
                         {"granular_max_solver_substeps", info.granular_max_solver_substeps},
                         {"granular_softening_temperature", info.granular_softening_temperature},
                         {"granular_softening_range", info.granular_softening_range},
@@ -3300,6 +3382,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
                         {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
                         {"seed_particles_per_cell", info.seed_particles_per_cell},
+                        {"seed_grain_saturation", info.seed_grain_saturation},
                         {"seed_fill_level", info.seed_fill_level},
                         {"seed_ran", info.seed_ran},
                         {"seed_truncated", info.seed_truncated},
@@ -3357,6 +3440,12 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_strain_rate", info.granular_strain_rate},
                         {"granular_strain_limited", info.granular_strain_limited_particles},
                         {"granular_compaction_capped", info.granular_compaction_capped_particles},
+                        {"granular_hardening_capped", info.granular_hardening_capped_particles},
+                        {"granular_min_plastic_jacobian", info.granular_min_plastic_jacobian},
+                        {"granular_max_plastic_jacobian", info.granular_max_plastic_jacobian},
+                        {"granular_mean_plastic_jacobian", info.granular_mean_plastic_jacobian},
+                        {"granular_counted", info.granular_counted_particles},
+                        {"granular_material_measured", info.granular_material_measured},
                         {"granular_min_softening", info.granular_min_softening},
                         {"granular_softened", info.granular_softened_particles},
                         {"granular_overburden_pressure", info.granular_overburden_pressure},
@@ -3453,12 +3542,15 @@ json dispatchMethod(const std::string& method, const json& params) {
         bool persistent = optionalBool(params, "persistent", false);
         // fill_level (0..1) = Fill Domain, the panel's resting tank.
         const float fill_level = optionalFloat(params, "fill_level", -1.0f);
+        // Water each seeded DEM grain holds, 0..1 of capacity; omitted keeps it.
+        const float grain_saturation = optionalFloat(params, "grain_saturation", -1.0f);
         return enqueueResult([domain, smin, smax, has_region, ppc, replace, persistent,
-                              fill_level](UIContext&) {
+                              fill_level, grain_saturation](UIContext&) {
             return rtapi::seedFluidParticles(domain,
                                              has_region ? &smin : nullptr,
                                              has_region ? &smax : nullptr,
-                                             ppc, replace, persistent, fill_level);
+                                             ppc, replace, persistent, fill_level,
+                                             grain_saturation);
         });
     }
     if (method == "fluid.clear" || method == "gas.clear") {
@@ -3545,6 +3637,14 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"granular_damage_rate", "granular_damage_rate"},
                 {"granular_healing_rate", "granular_healing_rate"},
                 {"granular_rebonding", "granular_rebonding"},
+                {"granular_snow_plasticity", "granular_snow_plasticity"},
+                {"granular_snow_critical_compression", "granular_snow_critical_compression"},
+                {"granular_snow_critical_stretch", "granular_snow_critical_stretch"},
+                {"granular_snow_hardening", "granular_snow_hardening"},
+                {"granular_snow_max_hardening", "granular_snow_max_hardening"},
+                {"granular_snow_min_hardening", "granular_snow_min_hardening"},
+                {"granular_snow_heterogeneity", "granular_snow_heterogeneity"},
+                {"granular_snow_clump_size", "granular_snow_clump_size"},
                 {"granular_softening_temperature", "granular_softening_kelvin"},
                 {"granular_softening_range", "granular_softening_range"},
                 {"granular_residual_strength", "granular_residual_strength"},
@@ -5199,6 +5299,65 @@ json dispatchMethod(const std::string& method, const json& params) {
             return rtapi::setVolumeInstrumentation(on, region);
         });
     }
+    if (method == "render.volume_light_cache") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::VolumeLightCacheInfo c = rtapi::volumeLightCache();
+            json slots = json::array();
+            for (const auto& s : c.slots) {
+                slots.push_back(json{{"slot", s.slot},
+                                     {"dims", json::array({s.dims[0], s.dims[1], s.dims[2]})},
+                                     {"bytes", s.bytes},
+                                     {"keyed", s.keyed}});
+            }
+            // `available` false = no Vulkan RT backend; `buffer_bytes` 0 = no
+            // TLAS yet (the cache is RT-only). There is no off state.
+            return json{{"available", c.available},
+                        {"max_cells", c.max_cells},
+                        {"buffer_bytes", c.buffer_bytes},
+                        {"used_bytes", c.used_bytes},
+                        {"channels", c.channels},
+                        {"header_publishes", c.header_publishes},
+                        {"slots", slots}};
+        });
+    }
+    if (method == "render.volume_march_lod") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::VolumeMarchLodInfo l = rtapi::volumeMarchLod();
+            return json{{"camera_light_stride", l.camera_light_stride},
+                        {"secondary_light_stride", l.secondary_light_stride},
+                        {"secondary_step_scale", l.secondary_step_scale},
+                        {"secondary_max_steps", l.secondary_max_steps},
+                        {"secondary_radiance_cache", l.secondary_radiance_cache}};
+        });
+    }
+    if (method == "render.set_volume_march_lod") {
+        // Every field optional: omitted ones keep their current value.
+        const bool hasCam = params.contains("camera_light_stride");
+        const bool hasSec = params.contains("secondary_light_stride");
+        const bool hasScale = params.contains("secondary_step_scale");
+        const bool hasMax = params.contains("secondary_max_steps");
+        const int cam = optionalInt(params, "camera_light_stride", 0);
+        const int sec = optionalInt(params, "secondary_light_stride", 0);
+        const int scale = optionalInt(params, "secondary_step_scale", 0);
+        const int maxSteps = optionalInt(params, "secondary_max_steps", 0);
+        const bool hasCache = params.contains("secondary_radiance_cache");
+        const bool cache = hasCache ? requireBool(params, "secondary_radiance_cache") : true;
+        return enqueueResult([=](UIContext&) {
+            rtapi::VolumeMarchLodInfo l = rtapi::volumeMarchLod();
+            if (hasCam) l.camera_light_stride = cam;
+            if (hasSec) l.secondary_light_stride = sec;
+            if (hasScale) l.secondary_step_scale = scale;
+            if (hasMax) l.secondary_max_steps = maxSteps;
+            if (hasCache) l.secondary_radiance_cache = cache;
+            return rtapi::setVolumeMarchLod(l);
+        });
+    }
+    if (method == "render.set_volume_light_cache") {
+        const int maxCells = requireInt(params, "max_cells");
+        return enqueueResult([maxCells](UIContext&) {
+            return rtapi::setVolumeLightCache(maxCells);
+        });
+    }
     if (method == "render.get_settings") {
         return enqueueQuery([](UIContext&) {
             const rtapi::RenderBudgetInfo b = rtapi::renderBudget();
@@ -5306,6 +5465,24 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"walk_shadow_traces", s.walk_shadow_traces},
                 {"walk_shadow_skipped", s.walk_shadow_skipped},
                 {"walk_event_capped", s.walk_event_capped},
+                {"sdf_main_samples", s.sdf_main_samples},
+                {"sdf_main_queries", s.sdf_main_queries},
+                {"sdf_main_skipped", s.sdf_main_skipped},
+                {"sdf_arbiter_samples", s.sdf_arbiter_samples},
+                {"sdf_arbiter_queries", s.sdf_arbiter_queries},
+                {"sdf_arbiter_skipped", s.sdf_arbiter_skipped},
+                {"light_cache_hits", s.light_cache_hits},
+                {"light_cache_misses", s.light_cache_misses},
+                {"light_cache_fills", s.light_cache_fills},
+                {"light_cache_fill_samples", s.light_cache_fill_samples},
+                {"camera_volume_rays", s.camera_volume_rays},
+                {"camera_density_samples", s.camera_density_samples},
+                {"camera_shadow_density_samples", s.camera_shadow_density_samples},
+                {"secondary_volume_rays", s.secondary_volume_rays},
+                {"secondary_density_samples", s.secondary_density_samples},
+                {"secondary_shadow_density_samples", s.secondary_shadow_density_samples},
+                {"radiance_cache_marches", s.radiance_cache_marches},
+                {"radiance_cache_fallbacks", s.radiance_cache_fallbacks},
                 {"devices", devices}};
         });
     }

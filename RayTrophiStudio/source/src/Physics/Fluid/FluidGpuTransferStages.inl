@@ -364,20 +364,40 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
         gp.compaction_hardening = fluid_params.granular_compaction_hardening;
         gp.compaction_limit = fluid_params.granular_compaction_limit;
         gp.tensile_cutoff = fluid_params.granular_tensile_cutoff;
+        gp.snow_plasticity = fluid_params.granular_snow_plasticity;
+        gp.snow_critical_compression = fluid_params.granular_snow_critical_compression;
+        gp.snow_critical_stretch = fluid_params.granular_snow_critical_stretch;
+        gp.snow_hardening = fluid_params.granular_snow_hardening;
+        gp.snow_max_hardening = fluid_params.granular_snow_max_hardening;
+        gp.snow_min_hardening = fluid_params.granular_snow_min_hardening;
+        gp.snow_min_plastic_jacobian =
+            Fluid::Granular::snowMinPlasticJacobian(fluid_params.granular_density);
         const auto elastic_step = Fluid::Granular::elasticStepInfo(
             fluid_params.granular_young_modulus, state.grid.voxel_size, dt);
+        // Snow hardens per particle, so its wave limit is enforced in the
+        // kernel against the substance's real density (and flagged when hit).
+        const float snow_max_young = fluid_params.granular_snow_plasticity
+            ? Fluid::Granular::waveLimitedYoungModulus(
+                  state.grid.voxel_size, dt, fluid_params.granular_density)
+            : 0.0f;
         ok = Fluid::Granular::dispatchStressUpdate(
             *compute, gpu_buffers.granular, gpu_buffers.fluid_affine, n, dt, gp,
-            elastic_step.effective_young_modulus,
+            fluid_params.granular_snow_plasticity
+                ? std::min(fluid_params.granular_young_modulus, snow_max_young)
+                : elastic_step.effective_young_modulus,
             fluid_params.granular_poisson_ratio,
             fluid_params.granular_fracture_strain,
             fluid_params.granular_damage_rate,
             fluid_params.granular_healing_rate,
-            fluid_params.granular_rebonding);
+            fluid_params.granular_rebonding, snow_max_young);
         if (ok) {
+            // Snow: damp only slow parcels (rest jitter), never an impact
+            // (SettleParams::damping_max_speed says why).
             ok = Fluid::Granular::dispatchSettle(
                 *compute, gpu_buffers.granular,
-                gpu_buffers.fluid_velocities, n, dt);
+                gpu_buffers.fluid_velocities, n, dt,
+                fluid_params.granular_snow_plasticity
+                    ? Fluid::Granular::kSnowSettleDampingMaxSpeed : 0.0f);
         }
     }
 

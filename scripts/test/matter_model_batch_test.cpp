@@ -13,6 +13,7 @@ int main() {
             ? F::MatterConstitutiveModel::Granular : F::MatterConstitutiveModel::Fluid);
         particles.rest_mass_kg[i] = 1.0f;
         particles.substance_tag[i] = static_cast<uint32_t>(i + 1);
+        particles.birth_source_uid[i] = static_cast<uint64_t>(100 + i % 3);
     }
     const auto original = particles;
     const auto original_velocity = grid.vel_x;
@@ -37,6 +38,7 @@ int main() {
             for (std::size_t i = 0; i < lane->size(); ++i) {
                 const auto source = lane->substance_tag[i] - 1;
                 assert(lane->particle_id[i] == original.particle_id[source]);
+                assert(lane->birth_source_uid[i] == original.birth_source_uid[source]);
                 assert(lane->position[i].x == original.position[source].x);
                 assert(lane->rest_mass_kg[i] == original.rest_mass_kg[source]);
             }
@@ -52,6 +54,7 @@ int main() {
     assert(error == "injected contact failure");
     assert(particles.particle_id == original.particle_id);
     assert(particles.substance_tag == original.substance_tag);
+    assert(particles.birth_source_uid == original.birth_source_uid);
     assert(particles.next_particle_id == original.next_particle_id);
     assert(particles.uvw_step == original.uvw_step);
     assert(grid.vel_x == original_velocity);

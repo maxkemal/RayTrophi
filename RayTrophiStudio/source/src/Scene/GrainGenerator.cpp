@@ -447,7 +447,7 @@ bool parseGrainGeneratorSettings(const nlohmann::json& input,
         const std::vector<std::string> keys = {"type", "count", "seed", "resolution",
             "roundness", "roughness", "aspect", "arms", "branches", "branch_length",
             "thickness", "crystal_sides", "tip_height", "name", "material",
-            "material_weights", "domain", "origin", "diameter_min", "diameter_max",
+            "material_weights", "origin", "diameter_min", "diameter_max",
             "size_distribution"};
         for (auto it = input.begin(); it != input.end(); ++it) {
             if (std::find(keys.begin(), keys.end(), it.key()) == keys.end()) {

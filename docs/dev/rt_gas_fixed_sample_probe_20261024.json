@@ -1,0 +1,1386 @@
+{
+  "method": "natural Vulkan loop; reset accumulation; polling thresholds 16/64; no CPU render_frames",
+  "frame": 28,
+  "world_before": {
+    "atmosphere_intensity": 10.0,
+    "background_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "mode": "nishita",
+    "sun_azimuth": 170.0,
+    "sun_elevation": 15.0,
+    "sun_intensity": 10.0,
+    "sun_size": 0.5450000166893005
+  },
+  "camera_before": {
+    "aperture": 0.0,
+    "auto_exposure": true,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 2.0,
+    "focus_distance": 15.649341583251953,
+    "fov": 40.0,
+    "fstop_preset_index": 4,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "position": [
+      9.554400444030762,
+      7.847060680389404,
+      13.65479564666748
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      1.203054428100586,
+      0.4224367141723633,
+      2.6988887786865234
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "lights_before": [
+    {
+      "color": [
+        0.5773502588272095,
+        0.5773502588272095,
+        0.5773502588272095
+      ],
+      "direction": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "height": 0.0,
+      "index": 0,
+      "intensity": 100.0,
+      "name": "Light_0",
+      "position": [
+        4.0,
+        5.0,
+        -3.0
+      ],
+      "radius": 0.25,
+      "spot_angle": 0.0,
+      "spot_falloff": 0.0,
+      "type": "point",
+      "visible": true,
+      "width": 0.0
+    },
+    {
+      "color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "direction": [
+        -0.167731374502182,
+        -0.258819043636322,
+        0.951251208782196
+      ],
+      "height": 0.0,
+      "index": 1,
+      "intensity": 10.0,
+      "name": "Sun",
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius": 0.004756058566272259,
+      "spot_angle": 0.0,
+      "spot_falloff": 0.0,
+      "type": "directional",
+      "visible": true,
+      "width": 0.0
+    }
+  ],
+  "materials_before": {
+    "matter:Physics Domain 1:carrier:78706450:1": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.30000001192092896,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.08585189282894135,
+          0.08585189282894135,
+          0.08585189282894135,
+          0.12156616151332855,
+          0.3001374900341034,
+          0.6751372814178467,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 10.0,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": true,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 2.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    },
+    "matter:Physics Domain 1:gas": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.30000001192092896,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.02335192821919918,
+          0.041209060698747635,
+          0.11263759434223175,
+          0.12156616151332855,
+          0.273351788520813,
+          0.48763740062713623,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 10.0,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": false,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 2.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    }
+  },
+  "fields_before": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.5390357971191406,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13803,
+        "carrier_count": 78056,
+        "density_sum": 9756.999996063209,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.1500549316406,
+        "temperature_min_kelvin": 263.1497497558594,
+        "temperature_samples": 13786,
+        "vdb_id": 3,
+        "visible": true
+      },
+      {
+        "active_cells": 13913,
+        "carrier_count": 0,
+        "density_sum": 4018.9121307730675,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 857.990234375,
+        "temperature_min_kelvin": 223.2355194091797,
+        "temperature_samples": 13913,
+        "vdb_id": 4,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 68
+  },
+  "cases": [
+    {
+      "mode": "nishita",
+      "directional": true,
+      "fog": "both",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 2.2924702999989677,
+              "lower_s": 2.0887717999976303,
+              "poll_width_s": 0.20369850000133738
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 7.277079399998911,
+              "lower_s": 7.144487300000037,
+              "poll_width_s": 0.1325920999988739
+            }
+          },
+          "reset_return_s": 0.16825389999939944,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.1593953000010515
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 1.9893018000002485,
+              "lower_s": 1.7950261999976647,
+              "poll_width_s": 0.19427560000258381
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 6.883342500001163,
+              "lower_s": 6.734551699999429,
+              "poll_width_s": 0.14879080000173417
+            }
+          },
+          "reset_return_s": 0.09942729999966105,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.11391609999918728
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 1.909226799998578,
+              "lower_s": 1.7169649999996182,
+              "poll_width_s": 0.19226179999895976
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 6.803195599997707,
+              "lower_s": 6.6387300999995205,
+              "poll_width_s": 0.16446549999818671
+            }
+          },
+          "reset_return_s": 0.08764079999673413,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.10809629999857862
+        }
+      ],
+      "median_16_s": 1.9893018000002485,
+      "median_64_s": 6.883342500001163,
+      "instrumented": {
+        "thresholds": {
+          "16": {
+            "observed_samples": 16,
+            "upper_s": 2.610876599999756,
+            "lower_s": 2.347232399999484,
+            "poll_width_s": 0.26364420000027167
+          },
+          "64": {
+            "observed_samples": 64,
+            "upper_s": 9.00833910000074,
+            "lower_s": 8.788492899999255,
+            "poll_width_s": 0.21984620000148425
+          }
+        },
+        "reset_return_s": 0.1263403000011749,
+        "counters": {
+          "arbiter_candidates": 7872554,
+          "arbiter_empty_range": 0,
+          "arbiter_gate_open": 7872554,
+          "arbiter_inside_found": 4244495,
+          "arbiter_no_box": 1,
+          "arbiter_no_crossing": 1091304,
+          "arbiter_rejects": 0,
+          "arbiter_started_inside": 4244495,
+          "available": true,
+          "charged_diffuse": 476072,
+          "charged_other": 0,
+          "charged_specular": 4242199,
+          "charged_transmission": 0,
+          "completed_intervals": 7459727,
+          "density_samples": 123019164,
+          "empty_segments_skipped": 82448939,
+          "enabled": true,
+          "extinction_terminations": 368989,
+          "free_passes": 7198211,
+          "gas_handoffs": 3364077,
+          "layered_handoffs": 42999,
+          "majorant_available_queries": 148885403,
+          "majorant_queries": 148885403,
+          "majorant_segments_skipped": 8997634,
+          "medium_passes": 2849947,
+          "paths_bounce_capped": 863,
+          "paths_pass_capped": 2,
+          "paths_traced": 8700366,
+          "shadow_density_samples": 250206387,
+          "solid_probe_hits": 3364553,
+          "solid_probe_runs": 7829555,
+          "step_budget_exhausted": 363,
+          "teleports": 1066393,
+          "temporal_accepted": 1520739,
+          "temporal_rejected": 62150,
+          "topology_segments_skipped": 73451305,
+          "volume_rays": 7829079,
+          "walk_event_capped": 0,
+          "walk_events": 0,
+          "walk_paths": 0,
+          "walk_probe_traces": 0,
+          "walk_shadow_skipped": 0,
+          "walk_shadow_traces": 0
+        },
+        "poll_count": 64,
+        "max_status_rpc_s": 0.16595050000250922
+      }
+    },
+    {
+      "mode": "nishita",
+      "directional": true,
+      "fog": "snow",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.919227200000023,
+              "lower_s": 0.8401465999995708,
+              "poll_width_s": 0.07908060000045225
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 3.2968018999999913,
+              "lower_s": 3.23791710000296,
+              "poll_width_s": 0.05888479999703122
+            }
+          },
+          "reset_return_s": 0.05748130000210949,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.037506099997699494
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.9003875000016706,
+              "lower_s": 0.8167150000008405,
+              "poll_width_s": 0.08367250000083004
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 3.267157500002213,
+              "lower_s": 3.2121755000007397,
+              "poll_width_s": 0.05498200000147335
+            }
+          },
+          "reset_return_s": 0.05284610000308021,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.03886499999862281
+        }
+      ],
+      "median_16_s": 0.9098073500008468,
+      "median_64_s": 3.281979700001102
+    },
+    {
+      "mode": "nishita",
+      "directional": true,
+      "fog": "none",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 17,
+              "upper_s": 0.28878549999717507,
+              "lower_s": 0.23627859999760403,
+              "poll_width_s": 0.05250689999957103
+            },
+            "64": {
+              "observed_samples": 65,
+              "upper_s": 1.0470267999990028,
+              "lower_s": 0.9994713999985834,
+              "poll_width_s": 0.04755540000041947
+            }
+          },
+          "reset_return_s": 0.016857999999047024,
+          "poll_count": 25,
+          "max_status_rpc_s": 0.016610800001217285
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.2726796999995713,
+              "lower_s": 0.23872530000153347,
+              "poll_width_s": 0.03395439999803784
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 1.0342767000001913,
+              "lower_s": 0.9975340999990294,
+              "poll_width_s": 0.03674260000116192
+            }
+          },
+          "reset_return_s": 0.016422199998487486,
+          "poll_count": 27,
+          "max_status_rpc_s": 0.015796199997566873
+        }
+      ],
+      "median_16_s": 0.2807325999983732,
+      "median_64_s": 1.040651749999597
+    },
+    {
+      "mode": "nishita",
+      "directional": true,
+      "fog": "both",
+      "shadows": false,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.9060493000033603,
+              "lower_s": 0.8542425000014191,
+              "poll_width_s": 0.051806800001941156
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 2.9033393999998225,
+              "lower_s": 2.863500900002691,
+              "poll_width_s": 0.039838499997131294
+            }
+          },
+          "reset_return_s": 0.051470700000209035,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.05370080000284361
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.9047807000024477,
+              "lower_s": 0.8430890000017826,
+              "poll_width_s": 0.06169170000066515
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 2.9019845000002533,
+              "lower_s": 2.8582485000006272,
+              "poll_width_s": 0.043735999999626074
+            }
+          },
+          "reset_return_s": 0.040859100001398474,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.056892999997216975
+        }
+      ],
+      "median_16_s": 0.905415000002904,
+      "median_64_s": 2.902661950000038
+    },
+    {
+      "mode": "solid",
+      "directional": true,
+      "fog": "both",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 2.0599657999991905,
+              "lower_s": 1.8669927999981155,
+              "poll_width_s": 0.19297300000107498
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 6.995858099999168,
+              "lower_s": 6.856788599998254,
+              "poll_width_s": 0.13906950000091456
+            }
+          },
+          "reset_return_s": 0.12870509999993374,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.1195201000009547
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 2.2384216000027664,
+              "lower_s": 2.018098700002156,
+              "poll_width_s": 0.2203229000006104
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 7.034672200003115,
+              "lower_s": 6.88570510000136,
+              "poll_width_s": 0.14896710000175517
+            }
+          },
+          "reset_return_s": 0.08311870000034105,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.1420034000002488
+        }
+      ],
+      "median_16_s": 2.1491937000009784,
+      "median_64_s": 7.015265150001142,
+      "instrumented": {
+        "thresholds": {
+          "16": {
+            "observed_samples": 16,
+            "upper_s": 2.9143855000002077,
+            "lower_s": 2.6016539000011107,
+            "poll_width_s": 0.31273159999909694
+          },
+          "64": {
+            "observed_samples": 64,
+            "upper_s": 9.220283099999506,
+            "lower_s": 9.025665500001196,
+            "poll_width_s": 0.19461759999830974
+          }
+        },
+        "reset_return_s": 0.11563509999905364,
+        "counters": {
+          "arbiter_candidates": 11087757,
+          "arbiter_empty_range": 0,
+          "arbiter_gate_open": 11087757,
+          "arbiter_inside_found": 3870882,
+          "arbiter_no_box": 1,
+          "arbiter_no_crossing": 4946929,
+          "arbiter_rejects": 0,
+          "arbiter_started_inside": 3870882,
+          "available": true,
+          "charged_diffuse": 436657,
+          "charged_other": 0,
+          "charged_specular": 3851194,
+          "charged_transmission": 0,
+          "completed_intervals": 10777143,
+          "density_samples": 183340260,
+          "empty_segments_skipped": 203681918,
+          "enabled": true,
+          "extinction_terminations": 269565,
+          "free_passes": 10348516,
+          "gas_handoffs": 3296223,
+          "layered_handoffs": 40233,
+          "majorant_available_queries": 150054805,
+          "majorant_queries": 150054805,
+          "majorant_segments_skipped": 8789929,
+          "medium_passes": 2398382,
+          "paths_bounce_capped": 858,
+          "paths_pass_capped": 2,
+          "paths_traced": 53587506,
+          "shadow_density_samples": 227895867,
+          "solid_probe_hits": 3296691,
+          "solid_probe_runs": 11047524,
+          "step_budget_exhausted": 348,
+          "teleports": 4923822,
+          "temporal_accepted": 1251656,
+          "temporal_rejected": 62221,
+          "topology_segments_skipped": 194891989,
+          "volume_rays": 11047056,
+          "walk_event_capped": 0,
+          "walk_events": 0,
+          "walk_paths": 0,
+          "walk_probe_traces": 0,
+          "walk_shadow_skipped": 0,
+          "walk_shadow_traces": 0
+        },
+        "poll_count": 64,
+        "max_status_rpc_s": 0.18057860000044457
+      }
+    },
+    {
+      "mode": "solid",
+      "directional": false,
+      "fog": "both",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 1.6714023999993515,
+              "lower_s": 1.4976808999999776,
+              "poll_width_s": 0.17372149999937392
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 5.252843400001439,
+              "lower_s": 5.157986800000799,
+              "poll_width_s": 0.09485660000063945
+            }
+          },
+          "reset_return_s": 0.11435379999966244,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.0990946999991138
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 1.3312576999996963,
+              "lower_s": 1.2061868000018876,
+              "poll_width_s": 0.12507089999780874
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 4.256003599999531,
+              "lower_s": 4.1790676999989955,
+              "poll_width_s": 0.07693590000053518
+            }
+          },
+          "reset_return_s": 0.06278119999842602,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.06390230000033625
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 1.3239420000027167,
+              "lower_s": 1.1987564000010025,
+              "poll_width_s": 0.1251856000017142
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 4.289066000001185,
+              "lower_s": 4.211761000002298,
+              "poll_width_s": 0.07730499999888707
+            }
+          },
+          "reset_return_s": 0.05104370000117342,
+          "poll_count": 64,
+          "max_status_rpc_s": 0.07875409999905969
+        }
+      ],
+      "median_16_s": 1.3312576999996963,
+      "median_64_s": 4.289066000001185,
+      "instrumented": {
+        "thresholds": {
+          "16": {
+            "observed_samples": 16,
+            "upper_s": 1.7647514999989653,
+            "lower_s": 1.5940942000015639,
+            "poll_width_s": 0.17065729999740142
+          },
+          "64": {
+            "observed_samples": 64,
+            "upper_s": 5.74569960000008,
+            "lower_s": 5.635995299999195,
+            "poll_width_s": 0.10970430000088527
+          }
+        },
+        "reset_return_s": 0.07367200000226148,
+        "counters": {
+          "arbiter_candidates": 10491315,
+          "arbiter_empty_range": 0,
+          "arbiter_gate_open": 10491315,
+          "arbiter_inside_found": 3484906,
+          "arbiter_no_box": 1,
+          "arbiter_no_crossing": 4933804,
+          "arbiter_rejects": 0,
+          "arbiter_started_inside": 3484906,
+          "available": true,
+          "charged_diffuse": 434874,
+          "charged_other": 0,
+          "charged_specular": 3457933,
+          "charged_transmission": 0,
+          "completed_intervals": 10199304,
+          "density_samples": 174534957,
+          "empty_segments_skipped": 238099758,
+          "enabled": true,
+          "extinction_terminations": 252445,
+          "free_passes": 9939665,
+          "gas_handoffs": 2903458,
+          "layered_handoffs": 38754,
+          "majorant_available_queries": 114557720,
+          "majorant_queries": 114557720,
+          "majorant_segments_skipped": 7601292,
+          "medium_passes": 2378843,
+          "paths_bounce_capped": 850,
+          "paths_pass_capped": 6,
+          "paths_traced": 53386956,
+          "shadow_density_samples": 123404876,
+          "solid_probe_hits": 2903954,
+          "solid_probe_runs": 10452561,
+          "step_budget_exhausted": 316,
+          "teleports": 4912676,
+          "temporal_accepted": 1273469,
+          "temporal_rejected": 62004,
+          "topology_segments_skipped": 230498466,
+          "volume_rays": 10452065,
+          "walk_event_capped": 0,
+          "walk_events": 0,
+          "walk_paths": 0,
+          "walk_probe_traces": 0,
+          "walk_shadow_skipped": 0,
+          "walk_shadow_traces": 0
+        },
+        "poll_count": 64,
+        "max_status_rpc_s": 0.11093050000272342
+      }
+    },
+    {
+      "mode": "solid",
+      "directional": false,
+      "fog": "snow",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 17,
+              "upper_s": 0.6810794999983045,
+              "lower_s": 0.5734431999990193,
+              "poll_width_s": 0.10763629999928526
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 2.208657899998798,
+              "lower_s": 2.1152848999990965,
+              "poll_width_s": 0.09337299999970128
+            }
+          },
+          "reset_return_s": 0.04576420000012149,
+          "poll_count": 37,
+          "max_status_rpc_s": 0.046405599998252
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 17,
+              "upper_s": 0.6697194000007585,
+              "lower_s": 0.5923344999973779,
+              "poll_width_s": 0.07738490000338061
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 2.1990684999982477,
+              "lower_s": 2.1059841999995115,
+              "poll_width_s": 0.09308429999873624
+            }
+          },
+          "reset_return_s": 0.031633599999622675,
+          "poll_count": 37,
+          "max_status_rpc_s": 0.04758469999796944
+        }
+      ],
+      "median_16_s": 0.6753994499995315,
+      "median_64_s": 2.2038631999985228
+    },
+    {
+      "mode": "solid",
+      "directional": false,
+      "fog": "none",
+      "shadows": true,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 17,
+              "upper_s": 0.5644484000004013,
+              "lower_s": 0.47112360000028275,
+              "poll_width_s": 0.09332480000011856
+            },
+            "64": {
+              "observed_samples": 65,
+              "upper_s": 2.065374600002542,
+              "lower_s": 1.971552500002872,
+              "poll_width_s": 0.09382209999967017
+            }
+          },
+          "reset_return_s": 0.03196340000067721,
+          "poll_count": 33,
+          "max_status_rpc_s": 0.03235990000030142
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 17,
+              "upper_s": 0.5634374000001117,
+              "lower_s": 0.46845589999793447,
+              "poll_width_s": 0.0949815000021772
+            },
+            "64": {
+              "observed_samples": 65,
+              "upper_s": 2.059650099999999,
+              "lower_s": 1.9646495999986655,
+              "poll_width_s": 0.09500050000133342
+            }
+          },
+          "reset_return_s": 0.03240839999853051,
+          "poll_count": 33,
+          "max_status_rpc_s": 0.03237280000030296
+        }
+      ],
+      "median_16_s": 0.5639429000002565,
+      "median_64_s": 2.0625123500012705
+    },
+    {
+      "mode": "solid",
+      "directional": false,
+      "fog": "both",
+      "shadows": false,
+      "runs": [
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.7974149000001489,
+              "lower_s": 0.6719255999996676,
+              "poll_width_s": 0.1254893000004813
+            },
+            "64": {
+              "observed_samples": 64,
+              "upper_s": 2.4335143999996944,
+              "lower_s": 2.3396290999990015,
+              "poll_width_s": 0.09388530000069295
+            }
+          },
+          "reset_return_s": 0.042392899998958455,
+          "poll_count": 39,
+          "max_status_rpc_s": 0.04804069999954663
+        },
+        {
+          "thresholds": {
+            "16": {
+              "observed_samples": 16,
+              "upper_s": 0.7857399999993504,
+              "lower_s": 0.6600476999992679,
+              "poll_width_s": 0.12569230000008247
+            },
+            "64": {
+              "observed_samples": 65,
+              "upper_s": 2.4573309000006702,
+              "lower_s": 2.362747600000148,
+              "poll_width_s": 0.09458330000052229
+            }
+          },
+          "reset_return_s": 0.032187500000873115,
+          "poll_count": 39,
+          "max_status_rpc_s": 0.048371699998824624
+        }
+      ],
+      "median_16_s": 0.7915774499997497,
+      "median_64_s": 2.4454226500001823
+    }
+  ],
+  "world_after": {
+    "atmosphere_intensity": 10.0,
+    "background_color": [
+      1.0,
+      1.0,
+      1.0
+    ],
+    "mode": "nishita",
+    "sun_azimuth": 170.0,
+    "sun_elevation": 15.0,
+    "sun_intensity": 10.0,
+    "sun_size": 0.5450000166893005
+  },
+  "camera_after": {
+    "aperture": 0.0,
+    "auto_exposure": true,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 2.0,
+    "focus_distance": 15.649341583251953,
+    "fov": 40.0,
+    "fstop_preset_index": 4,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "position": [
+      9.554400444030762,
+      7.847060680389404,
+      13.65479564666748
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      1.203054428100586,
+      0.4224367141723633,
+      2.6988887786865234
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "frame_after": 28,
+  "lights_after": [
+    {
+      "color": [
+        0.5773502588272095,
+        0.5773502588272095,
+        0.5773502588272095
+      ],
+      "direction": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "height": 0.0,
+      "index": 0,
+      "intensity": 100.0,
+      "name": "Light_0",
+      "position": [
+        4.0,
+        5.0,
+        -3.0
+      ],
+      "radius": 0.25,
+      "spot_angle": 0.0,
+      "spot_falloff": 0.0,
+      "type": "point",
+      "visible": true,
+      "width": 0.0
+    },
+    {
+      "color": [
+        1.0,
+        1.0,
+        1.0
+      ],
+      "direction": [
+        -0.167731374502182,
+        -0.258819043636322,
+        0.951251208782196
+      ],
+      "height": 0.0,
+      "index": 1,
+      "intensity": 10.0,
+      "name": "Sun",
+      "position": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "radius": 0.004756058566272259,
+      "spot_angle": 0.0,
+      "spot_falloff": 0.0,
+      "type": "directional",
+      "visible": true,
+      "width": 0.0
+    }
+  ],
+  "materials_after": {
+    "matter:Physics Domain 1:carrier:78706450:1": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.30000001192092896,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.08585189282894135,
+          0.08585189282894135,
+          0.08585189282894135,
+          0.12156616151332855,
+          0.3001374900341034,
+          0.6751372814178467,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 10.0,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": true,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 2.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    },
+    "matter:Physics Domain 1:gas": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.30000001192092896,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.02335192821919918,
+          0.041209060698747635,
+          0.11263759434223175,
+          0.12156616151332855,
+          0.273351788520813,
+          0.48763740062713623,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 10.0,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": false,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 2.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    }
+  },
+  "fields_after": {
+    "builder_peak_dense_bytes_bound": 3087552,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 2.5390357971191406,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 13803,
+        "carrier_count": 78056,
+        "density_sum": 9756.999996063209,
+        "kind": "carrier",
+        "material_target": "matter:Physics Domain 1:carrier:78706450:1",
+        "name": "Physics Domain 1 / Snow [Solid]",
+        "phase": "solid",
+        "published": true,
+        "substance": "Snow",
+        "substance_tag": 78706450,
+        "temperature_max_kelvin": 273.1500549316406,
+        "temperature_min_kelvin": 263.1497497558594,
+        "temperature_samples": 13786,
+        "vdb_id": 63,
+        "visible": true
+      },
+      {
+        "active_cells": 13913,
+        "carrier_count": 0,
+        "density_sum": 4018.9121307730675,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Gas",
+        "phase": "gas",
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 857.990234375,
+        "temperature_min_kelvin": 223.2355194091797,
+        "temperature_samples": 13913,
+        "vdb_id": 64,
+        "visible": true
+      }
+    ],
+    "gas_snapshot": "host",
+    "grid": [
+      50,
+      50,
+      50
+    ],
+    "render_connected": true,
+    "state_version": 88
+  },
+  "restored": true,
+  "physical_fields_restored": true,
+  "limitations": [
+    "Wall-clock threshold observations over external IPC, not isolated GPU timestamp queries. Each threshold has a polling bracket.",
+    "Counters disabled for timing runs and enabled only in separate diagnostic runs.",
+    "Adaptive sampling unchanged: 64 progressive passes do not guarantee identical numbers of active pixels between different lighting/visibility configurations.",
+    "Shadow-off is a diagnostic ablation which changes lighting/secondary paths; its speedup is not an exact isolated shadow-stage percentage.",
+    "No previous shader binary A/B was measured, so these results do not establish before/after optimization speedup."
+  ]
+}

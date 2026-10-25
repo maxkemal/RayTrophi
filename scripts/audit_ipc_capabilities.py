@@ -88,6 +88,7 @@ def required(method, namespaces):
             return "SceneWrite|FilesRead"
         return "SceneWrite"
     if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings",
+                  "fluid.inspect_fog_fields",
                   "fluid.particle_extremes", "fluid.gas_cell_extremes"):
         return "Read"
     if method == "ipc.admin.audit.export":
@@ -116,6 +117,12 @@ def required(method, namespaces):
     # Read-only RT pipeline compile state; mirrors the explicit line ahead of
     # the render. namespace in RtIpcSecurity.cpp.
     if method == "render.rt_pipeline_status":
+        return "Read"
+    if method == "render.gpu_timing_stats":
+        return "Read"
+    if method == "render.volume_light_cache":
+        return "Read"
+    if method == "render.volume_march_lod":
         return "Read"
     if method.startswith("render."):
         # These two write an image file; the C++ says Render|FilesWrite and a

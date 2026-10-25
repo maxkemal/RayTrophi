@@ -14,6 +14,7 @@
 #include "GasVolume.h"
 #include "ForceField.h" 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -138,6 +139,43 @@ void SceneSelection::updatePositionFromSelection() {
         default:
             break;
     }
+}
+
+bool SceneSelection::syncObjectTransformFromHandle() {
+    if (!selected.is_valid() || selected.type != SelectableType::Object) return false;
+    Transform* transform = selectedObjectTransform(selected);
+    if (!transform) return false;
+
+    // ★ The inspector writes fromTRS(position, rotation, scale) back to the
+    // handle on ANY field edit. These components are a copy taken at selection
+    // time; only the inspector itself and a lagging gizmo readback refreshed
+    // them. After a scale from scene.set_transform / undo / a script (or the
+    // gizmo's last drag frame), nudging Pos wrote the stale scale back: "the
+    // scaled cube returns to its old size when moved" (2026-10-23).
+    const Matrix4x4 live = transform->getPivotMatrix();
+    // Compose in the handle's own convention (Transform::getPivotMatrix:
+    // T * Rz * Ry * Rx * S); fromTRS builds rotation differently and would
+    // flag every rotated object as stale.
+    Transform probe;
+    probe.position = selected.position;
+    probe.rotation = selected.rotation;
+    probe.scale = selected.scale;
+    const Matrix4x4 cached = probe.getPivotMatrix();
+    bool matches = true;
+    for (int r = 0; r < 4 && matches; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            const float tolerance = 1e-4f * std::max(1.0f, std::abs(live.m[r][c]));
+            if (std::abs(live.m[r][c] - cached.m[r][c]) > tolerance) {
+                matches = false;
+                break;
+            }
+        }
+    }
+    if (matches) return false;
+    // Handle values only, no bounding-box fallback: whatever is shown here is
+    // written straight back into the handle by the next field edit.
+    live.decompose(selected.position, selected.rotation, selected.scale);
+    return true;
 }
 
 // Helper to apply transform to a single item

@@ -51,6 +51,9 @@ SOURCES.append(os.path.join(API, "RtApiMatterGrain.cpp"))
 SOURCES.append(os.path.join(API, "RtApiGrainGenerator.cpp"))
 SOURCES.append(os.path.join(API, "../Scene/GrainGenerator.cpp"))
 SOURCES.append(os.path.join(API, "../Physics/Fluid/MatterGrainParams.cpp"))
+# The source-geometry dispatcher delegates its JSON overlay to this shared reader.
+SOURCES.append(os.path.join(API, "../../include/Fluid/SourceSplatGeometryJson.h"))
+SOURCES.append(os.path.join(API, "../../include/Fluid/MatterPhaseOutputJson.h"))
 
 
 # ---------------------------------------------------------------------------

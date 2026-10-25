@@ -40,39 +40,25 @@ extern std::unique_ptr<Backend::IBackend> g_backend;
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 
 namespace {
-Backend::IBackend* getHierarchyRenderBackend(UIContext& ctx) {
-    if (g_backend) {
-        return g_backend.get();
-    }
-    if (ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr) {
-        return ctx.backend_ptr;
-    }
-    return nullptr;
-}
-
-Backend::IViewportBackend* getHierarchyViewportBackend(UIContext& ctx) {
-    if (g_viewport_backend) {
-        return g_viewport_backend.get();
-    }
-    return dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
-}
-
-void setHierarchyObjectVisibility(UIContext& ctx, const std::string& nodeName, bool visible) {
+// The eye toggle is a thin caller: rtapi::setObjectVisible owns the semantics
+// (every entry + parentMesh, both backends, pending-delete stays hidden, mark
+// modified, reset accumulation), so a script and the panel cannot diverge.
+// A refusal here is a stale group member or a pending-delete object; the eye
+// simply does not change, as before.
+void setHierarchyObjectVisibility(const std::string& nodeName, bool visible) {
     if (nodeName.empty()) return;
-    if (ctx.scene.isEditorPendingDeleteObjectName(nodeName)) {
-        visible = false;
-    }
-
-    if (Backend::IViewportBackend* viewportBackend = getHierarchyViewportBackend(ctx)) {
-        viewportBackend->setVisibilityByNodeName(nodeName, visible);
-    }
-
-    if (Backend::IBackend* renderBackend = getHierarchyRenderBackend(ctx)) {
-        if (renderBackend != getHierarchyViewportBackend(ctx)) {
-            renderBackend->setVisibilityByNodeName(nodeName, visible);
-        }
-    }
+    (void)rtapi::setObjectVisible(nodeName, visible);
 }
+}
+
+void SceneUI::syncMeshCacheVisibility(const std::string& objectName, bool visible) {
+    auto it = mesh_cache.find(objectName);
+    if (it == mesh_cache.end()) return;
+    for (auto& pair : it->second) {
+        if (!pair.second) continue;
+        pair.second->visible = visible;
+        if (pair.second->parentMesh) pair.second->parentMesh->visible = visible;
+    }
 }
 
 
@@ -451,9 +437,21 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 if (ImGui::Button(mctx.visible ? "(o)" : "( )")) {
                     mctx.visible = !mctx.visible;
-                    // Apply visibility to all mesh members belonging to this model
+                    // Route every member object through the core setter. Flipping
+                    // member->visible alone never reached the backends' instance
+                    // masks, so the model stayed drawn until the next rebuild.
+                    std::unordered_set<std::string> memberNames;
                     for (auto& member : mctx.members) {
-                        if (member) member->visible = mctx.visible;
+                        if (!member) continue;
+                        std::string memberName;
+                        if (auto tri = std::dynamic_pointer_cast<Triangle>(member)) memberName = tri->getNodeName();
+                        else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(member)) memberName = tm->nodeName;
+                        if (memberName.empty()) {
+                            member->visible = mctx.visible;
+                            continue;
+                        }
+                        if (memberNames.insert(memberName).second)
+                            setHierarchyObjectVisibility(memberName, mctx.visible);
                     }
                     ctx.renderer.resetCPUAccumulation();
                     if (ctx.backend_ptr) ctx.backend_ptr->resetAccumulation();
@@ -1035,13 +1033,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 if (ImGui::Button(group_visible ? "(o)" : "( )")) {
                     for (const auto& member : grp.member_names) {
                         if (ctx.scene.isEditorPendingDeleteObjectName(member)) continue;
-                        auto it = mesh_cache.find(member);
-                        if (it != mesh_cache.end()) {
-                            for (auto& pair : it->second) pair.second->visible = !group_visible;
-                        }
-                        setHierarchyObjectVisibility(ctx, member, !group_visible);
+                        setHierarchyObjectVisibility(member, !group_visible);
                     }
-                    ctx.renderer.resetCPUAccumulation();
                 }
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
@@ -1095,13 +1088,8 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     if (ImGui::MenuItem("Toggle Visibility", nullptr, group_visible)) {
                         for (const auto& member : grp.member_names) {
                             if (ctx.scene.isEditorPendingDeleteObjectName(member)) continue;
-                            auto it = mesh_cache.find(member);
-                            if (it != mesh_cache.end()) {
-                                for (auto& pair : it->second) pair.second->visible = !group_visible;
-                            }
-                            setHierarchyObjectVisibility(ctx, member, !group_visible);
+                            setHierarchyObjectVisibility(member, !group_visible);
                         }
-                        ctx.renderer.resetCPUAccumulation();
                     }
                     ImGui::Separator();
                     if (ImGui::MenuItem("Delete Group")) {
@@ -1228,17 +1216,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0, 0, 0, 0));
                 if (ImGui::Button(all_visible ? "(o)" : "( )")) {
                     bool new_visible = !all_visible && !ctx.scene.isEditorPendingDeleteObjectName(name);
-                    // A multi-material import shares one nodeName across several TriangleMesh
-                    // objects (one per material); flip the rep facade AND its parentMesh so every
-                    // material's real geometry (not just the throwaway UI-handle facade) toggles.
-                    for (auto& pair : kv.second) {
-                        pair.second->visible = new_visible;
-                        if (pair.second->parentMesh) pair.second->parentMesh->visible = new_visible;
-                    }
-                    setHierarchyObjectVisibility(ctx, name, new_visible);
-                    
-                    ProjectManager::getInstance().markModified();
-                    ctx.renderer.resetCPUAccumulation();
+                    // Multi-material imports (one nodeName over several meshes) are
+                    // handled by the core setter: every entry and its parentMesh flip.
+                    setHierarchyObjectVisibility(name, new_visible);
                 }
                 ImGui::PopStyleColor();
                 ImGui::SameLine();
@@ -1338,9 +1318,7 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::Separator();
                     if (ImGui::MenuItem("Toggle Visibility", nullptr, all_visible)) {
                         bool new_visible = !all_visible && !ctx.scene.isEditorPendingDeleteObjectName(name);
-                        for (auto& pair : kv.second) pair.second->visible = new_visible;
-                        setHierarchyObjectVisibility(ctx, name, new_visible);
-                        ctx.renderer.resetCPUAccumulation();
+                        setHierarchyObjectVisibility(name, new_visible);
                     }
                     ImGui::EndPopup();
                 }
@@ -1576,6 +1554,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), "Transform");
 
                     static bool lock_scale = false;
+
+                    // The fields below are written back whole (pos+rot+scale) on any
+                    // edit, so they must show the object's live transform, not the
+                    // copy taken at selection time.
+                    if (sel.selected.type == SelectableType::Object) {
+                        sel.syncObjectTransformFromHandle();
+                    }
 
                     bool transform_changed = false;
                     ImGui::PushItemWidth(std::max(100.0f, ImGui::GetContentRegionAvail().x - 60.0f));

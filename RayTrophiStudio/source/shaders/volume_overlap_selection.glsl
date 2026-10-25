@@ -1,3 +1,5 @@
+#include "volume_optical_activity.glsl"
+
 // A SurfaceSDF AABB is a search domain, not an opaque surface. If it wins
 // traversal before an overlapping gas AABB, integrate the foreground gas
 // through the existing gas branch instead of jumping over it in the SDF walk.
@@ -20,7 +22,7 @@ void selectForegroundGas(vec3 origin, vec3 direction, uint count,
     for (uint candidate = 0u; candidate < min(count, 16u); ++candidate) {
         if (candidate == index) continue;
         VkVolumeInstance gas = volumes.v[candidate];
-        if (gas.is_active == 0 || gas.source_type == 4 ||
+        if (gas.is_active == 0 || volumeOpticallyInert(gas) || gas.source_type == 4 ||
             gas.source_type == 3 || gas.volume_type == 3) continue;
         float gasNear, gasFar;
         if (!volumeRayInterval(gas, origin, direction, gasNear, gasFar)) continue;
@@ -80,7 +82,7 @@ void selectForegroundGas(vec3 origin, vec3 direction, uint count,
 // the emissive / programmed volume is always chosen as primary.
 bool gasOverlapCandidate(VkVolumeInstance v) {
     return v.is_active != 0 && v.source_type != 4 &&
-           v.source_type != 3 && v.volume_type != 3;
+           v.source_type != 3 && v.volume_type != 3 && !volumeOpticallyInert(v);
 }
 
 int gasOverlapPriority(VkVolumeInstance v) {

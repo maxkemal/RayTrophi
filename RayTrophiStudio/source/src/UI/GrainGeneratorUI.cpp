@@ -23,8 +23,6 @@ struct Editor {
     std::string material;
     bool weighted = false;
     std::vector<std::pair<std::string, float>> palette;
-    std::string domain;
-    bool assign = false;
     std::string message;
     bool failed = false;
 };
@@ -49,10 +47,9 @@ void materialPicker(const char* label, std::string& selected) {
 
 } // namespace
 
-void requestOpen(const std::string& domain) {
+void requestOpen() {
     editor.requested = true;
-    editor.domain = domain;
-    editor.assign = !domain.empty();
+    editor.message.clear();
 }
 
 bool consumeOpenRequest() {
@@ -143,10 +140,6 @@ void drawPanel(UIContext&) {
             editor.palette.emplace_back(editor.material, 1.0f);
         }
     }
-    if (!editor.domain.empty()) {
-        ImGui::Checkbox("Use Library in Mesh Grains", &editor.assign);
-        ImGui::TextWrapped("Target: %s", editor.domain.c_str());
-    }
     if (ImGui::Button("Generate Grain / Crystal Library")) {
         nlohmann::json input = {{"type", settings.type}, {"name", editor.name},
             {"count", settings.count}, {"seed", settings.seed}, {"resolution", settings.resolution},
@@ -166,9 +159,6 @@ void drawPanel(UIContext&) {
             }
         } else {
             input["material"] = editor.material;
-        }
-        if (editor.assign) {
-            input["domain"] = editor.domain;
         }
         nlohmann::json output;
         const auto result = rtapi::generateGrains(input, output);

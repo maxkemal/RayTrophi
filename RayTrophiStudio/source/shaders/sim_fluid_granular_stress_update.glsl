@@ -42,6 +42,17 @@ layout(push_constant) uniform PC {
     // past which compression becomes permanent. 0 = off (every other material).
     float compaction_hardening;
     float compaction_limit;
+    // Stomakhin 2013 snow branch (GranularConstitutive.h snowStressUpdateParticle).
+    // Padded to 96 bytes: the Matter dispatcher appends matter_lane at the C++
+    // struct size, so this block and StressUpdateConstants must end together.
+    uint snow_plasticity;
+    float snow_critical_compression;
+    float snow_critical_stretch;
+    float snow_hardening;
+    float snow_max_young_modulus;
+    float snow_max_hardening;
+    float snow_min_plastic_jacobian;
+    float snow_min_hardening;
 #ifdef MATTER_INDEXED
     uint matter_lane;
 #endif
@@ -102,6 +113,124 @@ mat3 polarRotation(mat3 F){
 }
 
 
+// Cyclic Jacobi (Numerical Recipes 11.1), the CPU reference's symmetricEigen:
+// A -> V^T A V diagonal, eigenvectors in V's columns, fixed six sweeps.
+void symmetricEigen(mat3 A,out mat3 V,out vec3 eigenvalues){
+    V=mat3(1.0);
+    for(int sweep=0;sweep<6;++sweep){
+        for(int pair=0;pair<3;++pair){
+            int p=pair==2?1:0;
+            int q=pair==0?1:2;
+            float apq=A[q][p];
+            if(abs(apq)<1.0e-12)continue;
+            float theta=(A[q][q]-A[p][p])/(2.0*apq);
+            float t=(theta>=0.0?1.0:-1.0)/(abs(theta)+sqrt(theta*theta+1.0));
+            float c=1.0/sqrt(t*t+1.0);
+            float s=t*c;
+            mat3 J=mat3(1.0);
+            J[p][p]=c;J[q][q]=c;
+            J[q][p]=s;   // row p, column q
+            J[p][q]=-s;  // row q, column p
+            A=transpose(J)*A*J;
+            V=V*J;
+        }
+    }
+    eigenvalues=vec3(A[0][0],A[1][1],A[2][2]);
+}
+
+// Stomakhin et al. 2013 snow. Port of snowStressUpdateParticle; read the CPU
+// reference's header comment for why this is not Drucker-Prager and for the
+// meaning each reused state array takes in this branch.
+void snowStressUpdate(uint i,mat3 C){
+    float nu=clamp(pc.poisson_ratio,-0.49,0.49);
+    float soft=clamp(softening[i],0.0,1.0);
+    if(isnan(soft)||isinf(soft))soft=1.0;
+    mat3 F=mat3(vec3(f0[i*3],f0[i*3+1],f0[i*3+2]),
+                vec3(f1[i*3],f1[i*3+1],f1[i*3+2]),
+                vec3(f2[i*3],f2[i*3+1],f2[i*3+2]));
+    mat3 dC=pc.dt*C;
+    float strain_increment=sqrt(dot(dC[0],dC[0])+dot(dC[1],dC[1])+dot(dC[2],dC[2]));
+    bool strain_limited=false;
+    if(!(strain_increment<1.0e30)){dC=mat3(0.0);strain_limited=true;}
+    else if(strain_increment>0.25){dC*=0.25/strain_increment;strain_limited=true;}
+    mat3 F_trial=(mat3(1.0)+dC)*F;
+    float p_v=pv[i];
+    p_v=(isnan(p_v)||isinf(p_v))?1.0:clamp(p_v,0.25,4.0);
+    float det_trial=determinant(F_trial);
+    if(!finiteMat3(F_trial)||!(det_trial>1.0e-6)){
+        sd[i*3]=0.0;sd[i*3+1]=0.0;sd[i*3+2]=0.0;
+        ss[i*3]=0.0;ss[i*3+1]=0.0;ss[i*3+2]=0.0;
+        f0[i*3]=1.0;f0[i*3+1]=0.0;f0[i*3+2]=0.0;
+        f1[i*3]=0.0;f1[i*3+1]=1.0;f1[i*3+2]=0.0;
+        f2[i*3]=0.0;f2[i*3+1]=0.0;f2[i*3+2]=1.0;
+        pv[i]=p_v;
+        yield_values[i]=0.0;plastic_increments[i]=0.0;
+        flags[i]=4u|(strain_limited?16u:0u);
+        return;
+    }
+    mat3 V;vec3 eig;
+    symmetricEigen(transpose(F_trial)*F_trial,V,eig);
+    if(determinant(V)<0.0)V[2]=-V[2];
+    vec3 sigma=sqrt(max(eig,vec3(1.0e-12)));
+    vec3 u0=(F_trial*V[0])/sigma.x;
+    vec3 u1=(F_trial*V[1])/sigma.y;
+    u0*=inversesqrt(max(dot(u0,u0),1.0e-20));
+    u1-=u0*dot(u0,u1);
+    u1*=inversesqrt(max(dot(u1,u1),1.0e-20));
+    mat3 U=mat3(u0,u1,cross(u0,u1));
+    float lo=1.0-clamp(pc.snow_critical_compression,0.0,0.9);
+    float hi=1.0+max(pc.snow_critical_stretch,0.0);
+    vec3 clamped=clamp(sigma,vec3(lo),vec3(hi));
+    float overshoot=0.0;
+    float plastic_increment=0.0;
+    for(int k=0;k<3;++k){
+        overshoot=max(overshoot,max(sigma[k]-hi,lo-sigma[k]));
+        plastic_increment+=abs(log(sigma[k]/clamped[k]));
+    }
+    bool yielded=overshoot>0.0;
+    float je_trial=sigma.x*sigma.y*sigma.z;
+    float je=clamped.x*clamped.y*clamped.z;
+    // J_P floor = rho_snow/rho_ice; hardening ceiling on the stiffening side
+    // only (see the CPU reference for both).
+    float jp_min=clamp(pc.snow_min_plastic_jacobian,0.05,1.0);
+    p_v=clamp(p_v*je/je_trial,0.25,1.0/jp_min);
+    float jp=1.0/p_v;
+    float min_h=clamp(pc.snow_min_hardening,0.0,1.0);
+    float hardening=clamp(exp(clamp(pc.snow_hardening*(1.0-jp),-80.0,80.0)),
+                          min_h,max(pc.snow_max_hardening,1.0));
+    float young=max(pc.young_modulus*soft,1.0)*hardening;
+    bool hardening_capped=false;
+    if(pc.snow_max_young_modulus>0.0&&young>pc.snow_max_young_modulus){
+        young=pc.snow_max_young_modulus;
+        hardening_capped=true;
+    }
+    float mu=young/(2.0*(1.0+nu));
+    float lambda=young*nu/((1.0+nu)*(1.0-2.0*nu));
+    mat3 S=mat3(0.0);
+    mat3 F_elastic=mat3(0.0);
+    for(int k=0;k<3;++k){
+        float tau=2.0*mu*(clamped[k]-1.0)*clamped[k]+lambda*(je-1.0)*je;
+        S+=tau*outerProduct(U[k],U[k]);
+        F_elastic+=clamped[k]*outerProduct(U[k],V[k]);
+    }
+    if(!finiteMat3(S)||!finiteMat3(F_elastic)){S=mat3(0.0);F_elastic=mat3(1.0);}
+    sd[i*3]=S[0][0];sd[i*3+1]=S[1][1];sd[i*3+2]=S[2][2];
+    ss[i*3]=S[0][1];ss[i*3+1]=S[0][2];ss[i*3+2]=S[1][2];
+    f0[i*3]=F_elastic[0][0];f0[i*3+1]=F_elastic[0][1];f0[i*3+2]=F_elastic[0][2];
+    f1[i*3]=F_elastic[1][0];f1[i*3+1]=F_elastic[1][1];f1[i*3+2]=F_elastic[1][2];
+    f2[i*3]=F_elastic[2][0];f2[i*3+1]=F_elastic[2][1];f2[i*3+2]=F_elastic[2][2];
+    pv[i]=p_v;
+    float lost=clamp(1.0-hardening,0.0,1.0);
+    damage[i]=lost;
+    fracture_history[i]=clamp(jp-1.0,0.0,1000.0);
+    hardening_state[i]=clamp(max(hardening_state[i],0.0)+plastic_increment,0.0,1000.0);
+    yield_values[i]=overshoot;
+    plastic_increments[i]=plastic_increment;
+    bool loose=min_h>0.0?hardening<=min_h*1.001:lost>=0.99;
+    flags[i]=(yielded?1u:0u)|(loose?2u:0u)|(strain_limited?16u:0u)|
+             (hardening_capped?64u:0u);
+}
+
 #ifdef MATTER_INDEXED
 layout(set = 0, binding = 15) readonly buffer MatterIndices { uint matter_index[]; };
 layout(set = 0, binding = 16) readonly buffer MatterCounts { uint matter_count[]; };
@@ -118,6 +247,7 @@ void main() {
     mat3 C=mat3(vec3(c_data[a],c_data[a+1],c_data[a+2]),
                 vec3(c_data[a+3],c_data[a+4],c_data[a+5]),
                 vec3(c_data[a+6],c_data[a+7],c_data[a+8]));
+    if(pc.snow_plasticity!=0u){snowStressUpdate(i,C);return;}
     float nu=clamp(pc.poisson_ratio,-0.49,0.49);
     // ★★ BOND STRENGTH FALLS QUADRATICALLY, STIFFNESS LINEARLY, and that
     // asymmetry is what makes a melt read as a melt: the block stops holding

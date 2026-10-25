@@ -1,4 +1,6 @@
 #pragma once
+#include "Fluid/MatterFogStreams.h"
+#include "Fluid/SourceSplatGeometry.h"
 #include "Fluid/MatterAudioTelemetry.h"
 
 #include "Matrix4x4.h"
@@ -372,6 +374,14 @@ struct SimulationGridDomainDesc {
     Vec3 fluid_seed_min = Vec3(-0.5f, 1.0f, -0.5f);
     Vec3 fluid_seed_max = Vec3(0.5f, 1.5f, 0.5f);
     int  fluid_seed_particles_per_cell = 8;
+    // Water a SEEDED grain already holds, as a fraction (0..1) of its
+    // substance's grain_water_capacity_fraction -- the seed twin of a flow
+    // source's grain_birth_saturation. Until 2026-10-23 a seed was always dry,
+    // so a damp, packed sand block could not be authored at all: it had to be
+    // poured, and any edit that let it stand (removing a mold) rewound the
+    // sim to frame 0. Positive also turns the domain's grains wet
+    // (matterGrainOwnership). DEM grains only; MPM parcels ignore it.
+    float fluid_seed_grain_saturation = 0.0f;
     std::size_t fluid_max_particles = 100000;
     bool fluid_replace_on_seed = true;
     bool fluid_pending_seed = false;
@@ -612,6 +622,7 @@ struct SimulationGridDomainDesc {
     // wrong and vice versa. Created lazily by the fog volume sync; edited in
     // the fog volume's panel.
     std::shared_ptr<VolumeShader> fluid_fog_shader;
+    Fluid::MatterFogAppearances matter_fog_streams;
     // Which preset recipe the shader above was built from ("fire" | "smoke"),
     // empty when it was never chosen explicitly.
     //
@@ -813,12 +824,14 @@ struct SimulationGridDomainDesc {
         Fluid::SubstancePhase phase = Fluid::SubstancePhase::Liquid;
     };
     std::vector<SubstanceMaterial> fluid_substance_materials;
+    std::map<std::string, Fluid::SourceSplatGeometry> fluid_substance_splat_geometry;
 
     // Where parcels of each STATE label are drawn (FluidViewResolver). Indexed
     // by Fluid::ParticleLabel. Follow = the substance's view; the default is the
     // design table (spray/foam/bubble -> splat, mist -> fog). Per label, never
     // per domain: the substance still decides where its body goes.
     Fluid::LabelRoutes fluid_label_routes = Fluid::defaultLabelRoutes();
+    Fluid::MatterPhaseOutput fluid_phase_output;
 
     // ── Solid-phase coupling (domain-wide) ──────────────────────────────────
     // Master switch for the whole solid-phase path: with this off, a substance
@@ -1786,6 +1799,7 @@ struct SimulationFlowSourceDesc {
     // Water a grain this source pours already holds, as a fraction of its
     // substance's grain_water_capacity_fraction (an emitter of damp sand).
     // A state of what is poured, so it lives on the source, not the material.
+    Fluid::SourceSplatGeometry splat_geometry;
     float grain_birth_saturation = 0.0f;
     float fluid_emit_accumulator = 0.0f;
     uint64_t fluid_emit_sample_serial = 0;
@@ -2524,7 +2538,8 @@ public:
                                   int particles_per_cell,
                                   bool replace,
                                   bool persistent,
-                                  float fill_level = -1.0f);
+                                  float fill_level = -1.0f,
+                                  float grain_saturation = -1.0f);
     /// Clear the authoritative live particles. With `clear_seed_recipe`, also
     /// disarm reset-time SeedBox/FillLevel reproduction so emitter-only domains
     /// stay emitter-only after a rewind.

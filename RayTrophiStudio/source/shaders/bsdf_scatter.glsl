@@ -25,7 +25,8 @@
 // volume shader's volume-density sampler is the better one for its own grids.
 //   uint  pcgNext(inout uint state);
 //   float rnd(inout uint seed);
-//   float computeVolumeShadowTransmittance(vec3 origin, vec3 dir, float maxDist);
+//   float computeVolumeShadowTransmittance(vec3 origin, vec3 dir, float maxDist,
+//                                          int lightIndex);  // -1 = Nishita sun
 // plus the bindings the lobes read: payload, cam, lights, worldData, topLevelAS,
 // and the Material/MaterialExt structs (material_struct.glsl) and water_v3.glsl.
 
@@ -34,7 +35,8 @@
 
 // Provided by the including shader — see ENVIRONMENT INTERFACE above.
 float rnd(inout uint seed);
-float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist);
+float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist,
+                                       int lightIndex);
 
 // Result of one interior resin march. Moved with the code that fills it;
 // LightData deliberately did NOT move — each shader declares its own
@@ -1166,7 +1168,7 @@ void addDielectricDirectLighting(vec3 hitPos,
         estimatorWeight = power_heuristic(lightPdf, bsdfPdf) / max(lightPdf, 1e-6);
     }
 
-    float volumeTransmittance = computeVolumeShadowTransmittance(shadowOrigin, L, tMax);
+    float volumeTransmittance = computeVolumeShadowTransmittance(shadowOrigin, L, tMax, lightIndex);
     vec3 contribution = brdf * Li * NdotL * estimatorWeight
                       * visibility * volumeTransmittance;
     contribution = clamp(max(contribution, vec3(0.0)), vec3(0.0), vec3(1e4));

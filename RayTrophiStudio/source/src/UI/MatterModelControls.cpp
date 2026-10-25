@@ -1,3 +1,5 @@
+#include "UI/SourceSplatGeometryUI.h"
+#include "Api/MatterPhaseOutputApi.h"
 #include "Fluid/MatterModelService.h"
 #include "Fluid/MatterSubstanceState.h"
 #include "Api/RtApi.h"
@@ -60,6 +62,47 @@ bool drawMatterSeedSubstanceControls(const SimulationGridDomainDesc& domain) {
     return changed;
 }
 
+static void drawPhaseOutputControls(const SimulationGridDomainDesc& domain) {
+    ImGui::PushID("PhaseOutput");
+    static std::map<std::string, std::string> phase_errors;
+    auto phase_output = domain.fluid_phase_output;
+    ImGui::TextUnformatted("Phase output (all substances)");
+    const char* phase_names[] = {"Follow substance / labels", "SDF", "Splat", "Fog", "Hidden"};
+    for (int phase = 0; phase < 2; ++phase) {
+        auto& route = phase == 0 ? phase_output.solid : phase_output.liquid;
+        int selected = static_cast<int>(route);
+        ImGui::SetNextItemWidth(DomainUi::itemWidth());
+        if (ImGui::Combo(phase == 0 ? "Solid phase" : "Liquid phase",
+                         &selected, phase_names, 5)) {
+            route = static_cast<LabelRoute>(selected);
+            const auto result = rtapi::setPhaseOutput(domain.name, phase_output);
+            phase_errors[domain.name] = result.ok ? "" : result.error;
+        }
+        DomainUi::tooltip("Applies to every substance in this domain, including untagged seeds.\n"
+            "Uses current solid/liquid state; never changes substance, mass or solver.\n"
+            "An explicit phase overrides label routes (including spray).\n"
+            "Follow preserves the existing substance and label choices.");
+    }
+    const char* gas_names[] = {"Fog", "Hidden"};
+    int gas_selected = phase_output.gas == LabelRoute::Hidden ? 1 : 0;
+    ImGui::SetNextItemWidth(DomainUi::itemWidth());
+    if (ImGui::Combo("Gas / vapor phase", &gas_selected, gas_names, 2)) {
+        phase_output.gas = gas_selected == 0 ? LabelRoute::Fog : LabelRoute::Hidden;
+        const auto result = rtapi::setPhaseOutput(domain.name, phase_output);
+        phase_errors[domain.name] = result.ok ? "" : result.error;
+    }
+    DomainUi::tooltip("Gas is a grid field: Fog or Hidden. Hiding it changes rendering only.\n"
+        "Gas appearance remains in Gas Output / Shader; physical boundaries are independent.");
+    if (domain.boundary_mode == SimulationGridDomainBoundaryMode::Closed) {
+        ImGui::TextDisabled("Gas boundary: Closed (retains vapor at the domain ceiling)");
+    }
+    if (!phase_errors[domain.name].empty()) {
+        ImGui::TextWrapped("%s", phase_errors[domain.name].c_str());
+    }
+    ImGui::Separator();
+    ImGui::PopID();
+}
+
 void drawMatterPoolControls(const SimulationGridDomainDesc& domain,
                            const SimulationGridDomainState* state) {
     if (domain.type != SimulationDomainType::Matter ||
@@ -110,12 +153,13 @@ void drawMatterPoolControls(const SimulationGridDomainDesc& domain,
     ImGui::PopID();
 }
 
-void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
+void drawMatterOutputControls(SceneData& scene, const SimulationGridDomainDesc& domain) {
     if (domain.type != SimulationDomainType::Matter ||
         !ImGui::CollapsingHeader("Matter Output")) {
         return;
     }
     ImGui::PushID(domain.name.c_str());
+    drawPhaseOutputControls(domain);
     ImGui::TextWrapped(
         "Each substance chooses its appearance independently. "
         "Changing output or scene material does not change physics or combustion.");
@@ -145,6 +189,16 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
         ImGui::TextWrapped("%s", source_result.error.c_str());
     }
 
+    for (const auto& entry : domain.fluid_substance_splat_geometry) {
+        if (std::find(substances.begin(), substances.end(), entry.first) == substances.end()) {
+            substances.push_back(entry.first);
+        }
+    }
+    const auto& fallback_substance = domain.fluid_params.default_substance;
+    if (!fallback_substance.empty() &&
+        std::find(substances.begin(), substances.end(), fallback_substance) == substances.end()) {
+        substances.push_back(fallback_substance);
+    }
     const auto materials = rtapi::listMaterials();
     const auto plan = resolveFluidViews(domain, {});
     // Last authoring error, per domain (transient feedback, not domain state).
@@ -173,10 +227,13 @@ void drawMatterOutputControls(const SimulationGridDomainDesc& domain) {
                 domain.name, substance, "", &route, nullptr, nullptr, nullptr);
             error = result.ok ? "" : result.error;
         }
-        DomainUi::tooltip("How this substance is drawn: the domain's view, splat spheres, SDF\n"
+        DomainUi::tooltip("How this substance is drawn: the domain's view, splat geometry, SDF\n"
             "surface or fog. Binding only; the material itself is edited in Material Properties.\n"
             "Script: fluid.set_substance_material(domain, substance, representation=...)");
 
+        if (selected == 1 || plan.mayDrawSplat(substanceTag(substance))) {
+            drawSubstanceSplatGeometry(scene, domain.name, substance);
+        }
         std::string current = "Domain material";
         for (const auto& material : materials) {
             if (static_cast<int>(material.id) == material_id) {

@@ -40,6 +40,7 @@ int main() {
             static_cast<uint8_t>(MatterConstitutiveModel::Granular));
         for (std::size_t j = 0; j < i; ++j) {
             const Vec3 d = seeded.position[i] - seeded.position[j];
+            // >= 2 R (0.1 m): d = 2.0002 R + 2.83 jitter bounds the diagonal case.
             assert(d.x * d.x + d.y * d.y + d.z * d.z >= .1f * .1f);
         }
     }
@@ -64,9 +65,11 @@ int main() {
         }
     }
     assert(x_varies && z_varies);
-    // Five centers per axis for this box: index 25 is directly above index 0
-    // in the candidate lattice, but jitter must break that vertical alignment.
-    assert(seeded.size() == 125);
+    // FCC born at contact (even-sum points of a 7^3 lattice, step 2.0851 R /
+    // sqrt 2, jitter 0.03 R) for this box: 172 grains, packing ~0.65. The
+    // simple cubic lattice gave 125 (0.39) and a seeded damp block fell apart
+    // like a cloud (2026-10-23).
+    assert(seeded.size() == 172);
     const Vec3 column = seeded.position[25] - seeded.position[0];
     assert(std::abs(column.x) > 1e-6f || std::abs(column.z) > 1e-6f);
     FluidParticles changed_seed;

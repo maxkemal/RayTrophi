@@ -95,6 +95,15 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
     } | Sort-Object Name) {
         if ($shader.Name -eq 'shadow_anyhit.rchit') { continue }
         $flags = @('--target-env=vulkan1.3', '-O')
+        if ($shader.Name -eq 'volume_closesthit.rchit') {
+            # The joint Fog integrator nests NanoVDB and material evaluation.
+            # glslc -O has crashed with Windows stack overflow (0xC00000FD)
+            # on this module. Bypass aggressive SPIR-V optimization and leave
+            # the implementation available
+            # for the Vulkan driver instead of expanding them with glslc -O.
+            # This is module-specific; do not disable optimization globally.
+            $flags = @('--target-env=vulkan1.3', '-O0')
+        }
         if ($extension -in @('rgen', 'rmiss', 'rchit', 'rahit', 'rint', 'rcall')) {
             $flags += '--target-spv=spv1.4'
         }
@@ -154,7 +163,7 @@ try {
         Compile-Shader $item.Source $item.Target $item.Flags
     }
     # sphere_closesthit.spv: the foam-sphere hit group reuses closesthit.spv (2026-10-13).
-    $staleNames = @('gradient_test.spv', 'miss.rmiss.spv', 'raygen.rgen.spv', 'rgen.spv', 'sphere_closesthit.spv')
+    $staleNames = @('gradient_test.spv', 'miss.rmiss.spv', 'raygen.rgen.spv', 'rgen.spv', 'sphere_closesthit.spv', 'volume_closesthit_rayquery.spv')
     foreach ($name in $staleNames) {
         $path = Join-Path $shaderRoot $name
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }

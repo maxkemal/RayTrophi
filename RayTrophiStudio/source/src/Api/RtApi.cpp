@@ -689,6 +689,10 @@ Result getObjectInfo(const std::string& name, ObjectInfo& out) {
 
     out = {};
     out.name = name;
+    {
+        ObjectVisibility vis;
+        out.visible = getObjectVisibility(name, vis).ok && vis.visible;
+    }
 
     // ★ Walk EVERY mesh carrying this name, not just the first hit. A
     // multi-material import is one object spread over several flat meshes,
@@ -1783,7 +1787,91 @@ VolumeInstrumentationInfo volumeStats() {
     out.walk_shadow_traces = s.walkShadowTraces;
     out.walk_shadow_skipped = s.walkShadowSkipped;
     out.walk_event_capped = s.walkEventCapped;
+    out.sdf_main_samples = s.sdfMainSamples;
+    out.sdf_main_queries = s.sdfMainQueries;
+    out.sdf_main_skipped = s.sdfMainSkipped;
+    out.sdf_arbiter_samples = s.sdfArbiterSamples;
+    out.sdf_arbiter_queries = s.sdfArbiterQueries;
+    out.sdf_arbiter_skipped = s.sdfArbiterSkipped;
+    out.light_cache_hits = s.lightCacheHits;
+    out.light_cache_misses = s.lightCacheMisses;
+    out.light_cache_fills = s.lightCacheFills;
+    out.light_cache_fill_samples = s.lightCacheFillSamples;
+    out.camera_volume_rays = s.cameraVolumeRays;
+    out.camera_density_samples = s.cameraDensitySamples;
+    out.camera_shadow_density_samples = s.cameraShadowDensitySamples;
+    out.secondary_volume_rays = s.secondaryVolumeRays;
+    out.secondary_density_samples = s.secondaryDensitySamples;
+    out.secondary_shadow_density_samples = s.secondaryShadowDensitySamples;
+    out.radiance_cache_marches = s.radianceCacheMarches;
+    out.radiance_cache_fallbacks = s.radianceCacheFallbacks;
     return out;
+}
+
+VolumeLightCacheInfo volumeLightCache() {
+    VolumeLightCacheInfo out;
+    out.max_cells = Backend::volumeLightCacheMaxCells();
+    // Only the render backend traces RT; the raster viewport adapter never
+    // allocates a cache, so reporting it would only add an empty row.
+    auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(::g_backend.get());
+    if (!vk) return out;
+    const Backend::VulkanBackendAdapter::VolumeLightCacheStatus st = vk->volumeLightCacheStatus();
+    out.available = true;
+    out.buffer_bytes = st.buffer_bytes;
+    out.used_bytes = st.used_bytes;
+    out.channels = st.channels;
+    out.header_publishes = st.header_publishes;
+    for (const auto& s : st.slots) {
+        VolumeLightCacheSlotInfo row;
+        row.slot = s.slot;
+        row.dims[0] = s.dims[0]; row.dims[1] = s.dims[1]; row.dims[2] = s.dims[2];
+        row.bytes = s.bytes;
+        row.keyed = s.keyed;
+        out.slots.push_back(row);
+    }
+    return out;
+}
+
+Result setVolumeLightCache(int max_cells) {
+    if (max_cells < 8 || max_cells > 256)
+        return Result::fail("max_cells must be in [8, 256]");
+    Backend::setVolumeLightCacheMaxCells(max_cells);
+    // Every Vulkan adapter re-derives its header from the slots it last
+    // published; the raster viewport adapter has no cache and ignores it.
+    for (auto* backend : vulkanBackendsForStats()) backend->refreshVolumeLightCache();
+    return Result::success();
+}
+
+VolumeMarchLodInfo volumeMarchLod() {
+    const Backend::VolumeMarchLod lod = Backend::volumeMarchLod();
+    VolumeMarchLodInfo out;
+    out.camera_light_stride = lod.camera_light_stride;
+    out.secondary_light_stride = lod.secondary_light_stride;
+    out.secondary_step_scale = lod.secondary_step_scale;
+    out.secondary_max_steps = lod.secondary_max_steps;
+    out.secondary_radiance_cache = lod.secondary_radiance_cache;
+    return out;
+}
+
+Result setVolumeMarchLod(const VolumeMarchLodInfo& lod) {
+    auto in = [](int v, int lo, int hi) { return v >= lo && v <= hi; };
+    if (!in(lod.camera_light_stride, 1, 16))
+        return Result::fail("camera_light_stride must be in [1, 16]");
+    if (!in(lod.secondary_light_stride, 1, 16))
+        return Result::fail("secondary_light_stride must be in [1, 16]");
+    if (!in(lod.secondary_step_scale, 1, 16))
+        return Result::fail("secondary_step_scale must be in [1, 16]");
+    if (lod.secondary_max_steps != 0 && !in(lod.secondary_max_steps, 4, 511))
+        return Result::fail("secondary_max_steps must be 0 or in [4, 511]");
+    Backend::VolumeMarchLod b;
+    b.camera_light_stride = lod.camera_light_stride;
+    b.secondary_light_stride = lod.secondary_light_stride;
+    b.secondary_step_scale = lod.secondary_step_scale;
+    b.secondary_max_steps = lod.secondary_max_steps;
+    b.secondary_radiance_cache = lod.secondary_radiance_cache;
+    Backend::setVolumeMarchLod(b);
+    for (auto* backend : vulkanBackendsForStats()) backend->refreshVolumeMarchLod();
+    return Result::success();
 }
 
 Result setVolumeInstrumentation(bool enabled, const std::array<float, 4>& region) {

@@ -357,6 +357,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     nullptr, nullptr, grain_birth ? grain_rest_mass * std::pow(
                         birth_radius / fluid_domain.fluid_params.grain.radius_m, 3.0f) : 0.0f,
                     emit_model);
+                state.particles.birth_source_uid.back() = source.timeline_uid;
                 if (grain_birth) {
                     Fluid::initMatterGrainBirthWater(state.particles,
                         state.particles.size() - 1, source.grain_birth_saturation,

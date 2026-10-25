@@ -21,6 +21,7 @@
 *  - Keep this header light: forward declarations only, no heavy includes.
 */
 #pragma once
+#include "Fluid/SourceSplatGeometry.h"
 #include "Api/RtApiRayFusion.h"
 #include "Api/RtApiRasterDiagnostics.h"
 #include "Api/RtApiScreenGi.h"
@@ -154,6 +155,9 @@ struct ObjectInfo {
     // the object as if it were the whole. A caller seeing mesh_count > 1
     // knows the aggregate is real rather than a first-hit sample.
     size_t mesh_count = 0;
+    // Outliner eye state: true only when EVERY scene entry carrying the name
+    // is visible. See getObjectVisibility for the per-backend breakdown.
+    bool visible = true;
 };
 
 // ★★★★★ SECIM TESHISI. Bu depoda secim IPC'de HIC YOKTU, ve kuralin kendi
@@ -275,6 +279,38 @@ Result pickObjectGpu(float u, float v, GpuPickResult& out);
 std::vector<std::string> listObjects();
 bool objectExists(const std::string& name);
 Result getObjectInfo(const std::string& name, ObjectInfo& out);
+
+// ---------------------------------------------------------------------------
+// Object visibility (the outliner eye). The outliner calls setObjectVisible;
+// it holds no visibility logic of its own.
+// Semantics: every scene entry carrying the name is flipped -- flat
+// TriangleMeshes, Triangle facades AND their parentMesh, HittableInstances --
+// plus the outliner's representative facades, then BOTH the viewport and the
+// render backend get setVisibilityByNodeName. Pending-delete objects stay
+// hidden: a show request on one is refused rather than silently ignored.
+// Not undoable (the outliner toggle never was); marks the project modified.
+// ---------------------------------------------------------------------------
+Result setObjectVisible(const std::string& name, bool visible);
+
+struct ObjectVisibility {
+    std::string name;
+    bool visible = false;          // every entry visible and not pending delete
+    bool pending_delete = false;
+    int entries = 0;               // scene entries carrying the name
+    int visible_entries = 0;       // ...of which Hittable::visible is true
+    // ★★ Backend read-back: the masks the backends will actually draw/trace.
+    // -1 means that backend is absent or not Vulkan (no read-back exists).
+    // Hidden in the viewport but still traced in RT (or the reverse) shows up
+    // ONLY here -- the Hittable flags above can agree with both.
+    int viewport_raster_instances = -1;
+    int viewport_raster_visible = -1;
+    int viewport_rt_instances = -1;
+    int viewport_rt_visible = -1;
+    int render_rt_instances = -1;
+    int render_rt_visible = -1;
+    bool render_is_viewport = false; // one backend serves both roles
+};
+Result getObjectVisibility(const std::string& name, ObjectVisibility& out);
 
 // ---------------------------------------------------------------------------
 // 2D Spline authoring. The JSON payload is versioned by SplineSerialization
@@ -1439,6 +1475,33 @@ struct VolumeInstrumentationInfo {
     uint32_t walk_shadow_traces = 0;
     uint32_t walk_shadow_skipped = 0;
     uint32_t walk_event_capped = 0;
+    uint32_t sdf_main_samples = 0;
+    uint32_t sdf_main_queries = 0;
+    uint32_t sdf_main_skipped = 0;
+    uint32_t sdf_arbiter_samples = 0;
+    uint32_t sdf_arbiter_queries = 0;
+    uint32_t sdf_arbiter_skipped = 0;
+    // Volume light cache (render.volume_light_cache). Read hits WITH misses:
+    // on a static frame misses must fall toward zero after the first samples.
+    uint32_t light_cache_hits = 0;
+    uint32_t light_cache_misses = 0;
+    uint32_t light_cache_fills = 0;
+    uint32_t light_cache_fill_samples = 0;
+    // Camera vs secondary split of volume_rays / density_samples /
+    // shadow_density_samples (docs/dev/RT_GAS_SECONDARY_MARCH.md). Each class
+    // is counted on its own: camera + secondary < total means a closest-hit
+    // never classified its trace.
+    uint32_t camera_volume_rays = 0;
+    uint32_t camera_density_samples = 0;
+    uint32_t camera_shadow_density_samples = 0;
+    uint32_t secondary_volume_rays = 0;
+    uint32_t secondary_density_samples = 0;
+    uint32_t secondary_shadow_density_samples = 0;
+    // Bounce rays that crossed a box on the radiance cache vs. fell back to the
+    // full march (a vertex was missing). Fallbacks should fall toward zero on a
+    // static frame.
+    uint32_t radiance_cache_marches = 0;
+    uint32_t radiance_cache_fallbacks = 0;
     // Per-device breakdown behind the summed numbers above. Diagnostic for the
     // instrument itself: a region that is written before a render and reads
     // back as 0,0,1,1 after it is visible here as WHICH device lost it.
@@ -1456,6 +1519,68 @@ VolumeInstrumentationInfo volumeStats();
 // rectangle; counters count only launches inside it (default: whole image).
 Result setVolumeInstrumentation(bool enabled,
                                 const std::array<float, 4>& region = {0.0f, 0.0f, 1.0f, 1.0f});
+
+// ---------------------------------------------------------------------------
+// Vulkan RT volume light cache (render.volume_light_cache /
+// render.set_volume_light_cache). docs/dev/VOLUME_LIGHT_CACHE.md.
+//
+// Per-cell density integral toward each cached light, filled lazily by the
+// volume closest-hit and read by in-scatter and by surface shadows through gas.
+// Always on (accepted 2026-10-25); max_cells is process state and is NOT saved
+// with the project.
+//
+// ★ "Turning it off" for a comparison is not an option any more: a miss
+// already runs the old march, so a broken cache shows as misses in
+// render.volume_stats, never as a different image path to toggle.
+//
+// ★ `slots[].bytes == 0` means that slot is not cached
+// (inactive, or the backend has not published a TLAS yet) - it is not "free".
+struct VolumeLightCacheSlotInfo {
+    int      slot = -1;
+    int      dims[3] = {0, 0, 0};
+    uint64_t bytes = 0;
+    bool     keyed = false;        // header carries a non-zero volume key
+};
+struct VolumeLightCacheInfo {
+    bool     available = false;    // false = no Vulkan RT backend
+    int      max_cells = 64;
+    uint64_t buffer_bytes = 0;     // allocated on the RT device (0 = none yet)
+    uint64_t used_bytes = 0;
+    uint32_t channels = 0;
+    uint64_t header_publishes = 0; // header uploads since start (proves refresh)
+    std::vector<VolumeLightCacheSlotInfo> slots;
+};
+VolumeLightCacheInfo volumeLightCache();
+// max_cells is the longest-axis cell count and must be in [8, 256]; a value
+// outside that range is rejected, not clamped. A change refills every cell.
+Result setVolumeLightCache(int max_cells);
+
+// ---------------------------------------------------------------------------
+// Vulkan RT gas march LOD (render.volume_march_lod /
+// render.set_volume_march_lod). docs/dev/RT_GAS_SECONDARY_MARCH.md §8.
+//
+// The straight gas march evaluates in-scatter every `*_light_stride` density
+// samples and holds it in between; density and transmittance stay per sample.
+// Off the camera segment (bounce >= 1) the density step is also scaled and
+// capped. Random-walk, fog-mixture and SurfaceSDF marches are unaffected.
+// Process state, NOT saved with the project.
+//
+// secondary_radiance_cache: bounce rays cross the box on cell-sized lookups of
+// a per-vertex density + source-radiance cache (isotropic phase, no area
+// lights) instead of the full march; a missing vertex falls back to the march.
+//
+// ★ 1 / 1 / 1 / 0 with the radiance cache off is the exact march before this
+// setting existed - use it as the reference image, not a separate code path.
+struct VolumeMarchLodInfo {
+    int camera_light_stride = 1;     // 1..16 (2 banded shadowed gas, no gain)
+    int secondary_light_stride = 4;  // 1..16
+    int secondary_step_scale = 2;    // 1..16
+    int secondary_max_steps = 128;   // 0 (authored budget) or 4..511
+    bool secondary_radiance_cache = true;
+};
+VolumeMarchLodInfo volumeMarchLod();
+// Out-of-range values are rejected, not clamped. Resets accumulation.
+Result setVolumeMarchLod(const VolumeMarchLodInfo& lod);
 
 // ---------------------------------------------------------------------------
 // Path tracer budget + Debug Visualizer (render.get_settings / set_settings).
@@ -4350,6 +4475,25 @@ struct FluidDomainInfo {
     float granular_damage_rate = 6.0f;
     float granular_healing_rate = 0.0f;
     bool  granular_rebonding = false;
+    // Stomakhin 2013 snow plasticity from the Default Substance; when true the
+    // Drucker-Prager fields above are inert.
+    bool  granular_snow_plasticity = false;
+    float granular_snow_critical_compression = 0.025f;
+    float granular_snow_critical_stretch = 0.0075f;
+    float granular_snow_hardening = 10.0f;
+    float granular_snow_max_hardening = 5.0f;
+    float granular_snow_min_hardening = 0.1f;
+    float granular_snow_heterogeneity = 0.1f;
+    float granular_snow_clump_size = 0.12f;
+    float granular_density = 1600.0f;
+    // What this material costs per frame at rest, from the same arithmetic the
+    // planner runs (Granular::planGranularSubsteps): the elastic wave CFL at the
+    // timeline fps. The live run adds strain-rate/velocity terms
+    // (granular_solver_substeps). The panel shows the same numbers.
+    int   granular_predicted_substeps = 0;
+    float granular_wave_speed_m_s = 0.0f;
+    float granular_sizing_young_modulus = 0.0f;
+    float granular_frame_dt = 0.0f;
     int   granular_max_solver_substeps = 32;
     // Thermal/burn softening of the skeleton. 0 K disables it.
     float granular_softening_temperature = 0.0f;
@@ -4602,6 +4746,16 @@ struct FluidDomainInfo {
     float granular_strain_rate = 0.0f;
     uint64_t granular_strain_limited_particles = 0;
     uint64_t granular_compaction_capped_particles = 0;
+    // Snow: parcels whose hardened modulus hit the substep's wave limit.
+    uint64_t granular_hardening_capped_particles = 0;
+    // J_P = det(F_P): < 1 compacted (harder), > 1 loosened/torn (softer).
+    float granular_min_plastic_jacobian = 1.0f;
+    float granular_max_plastic_jacobian = 1.0f;
+    float granular_mean_plastic_jacobian = 1.0f;
+    uint64_t granular_counted_particles = 0;
+    // False = no backend counted the constitutive state: every granular_*
+    // counter is then a default, not a measured zero.
+    bool granular_material_measured = false;
     // Melt readout: how far the weakest particle has softened, and how many
     // have softened at all. below_load is judged on the SOFTENED stiffness.
     float granular_min_softening = 1.0f;
@@ -4749,6 +4903,8 @@ struct FluidDomainInfo {
     Vec3     seed_min = Vec3(0.0f);
     Vec3     seed_max = Vec3(0.0f);
     int      seed_particles_per_cell = 8;
+    // Birth water of seeded DEM grains, 0..1 of their capacity (0 = dry).
+    float    seed_grain_saturation = 0.0f;
     float    seed_fill_level = 0.5f;
     bool     seed_ran = false;
     bool     seed_truncated = false;
@@ -4975,6 +5131,7 @@ struct SimulationFlowSourceInfo {
     std::string fluid_birth_model;
     std::string fluid_birth_lowered;
     // Wet-at-birth fraction of the grain substance's water capacity (0..1).
+    RayTrophiSim::Fluid::SourceSplatGeometry splat_geometry;
     float grain_birth_saturation = 0.0f;
     bool use_time_limit = false;
     float start_time = 0.0f;
@@ -5003,6 +5160,16 @@ struct SimulationColliderInfo {
     int sdf_resolution_mode = 1; // 0=32^3, 1=64^3, 2=128^3
     bool sdf_ready = false;      // read-only asynchronous cook status
     int sdf_resolution = 0;      // read-only cooked cubic resolution
+    // Read-only: the shape the solvers actually resolve THIS frame. For an
+    // object-bound collider bounds_min/max above are only the authored fallback
+    // box; the live shape comes from the source object, and a reader that only
+    // saw bounds_min/max could not tell a collider that follows its object from
+    // one stuck at an old pose. resolved_size is the oriented box edge lengths
+    // (OBB-family modes) or the world AABB size (aabb).
+    bool resolved_valid = false;
+    Vec3 resolved_world_min = Vec3(0.0f);
+    Vec3 resolved_world_max = Vec3(0.0f);
+    Vec3 resolved_size = Vec3(0.0f);
     bool gas_interaction_enabled = false;
     float gas_density_rate = 0.0f;
     float gas_temperature_rate = 0.0f;
@@ -5436,7 +5603,8 @@ Result listFluidDomains(std::vector<FluidDomainInfo>& out_domains);
 Result seedFluidParticles(const std::string& domain_id_or_name,
                            const Vec3* seed_min, const Vec3* seed_max,
                            int particles_per_cell = 4, bool replace = true,
-                           bool persistent = false, float fill_level = -1.0f);
+                           bool persistent = false, float fill_level = -1.0f,
+                           float grain_saturation = -1.0f);
 // fill_level >= 0: Fill Domain (resting tank up to that fraction of the domain
 // height, a persistent FillLevel recipe; seed_min/max ignored). Seeded parcels
 // are the domain's Default Substance in either mode.
