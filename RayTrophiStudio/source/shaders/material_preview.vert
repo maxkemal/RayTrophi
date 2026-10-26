@@ -13,6 +13,10 @@ layout(location = 6) in vec4 inModelCol3;
 
 // UV coordinates (binding 4)
 layout(location = 7) in vec2 inTexCoord;
+layout(location = 8) in vec4 inPreviousModel0;
+layout(location = 9) in vec4 inPreviousModel1;
+layout(location = 10) in vec4 inPreviousModel2;
+layout(location = 11) in vec4 inPreviousModel3;
 
 // Derinlik on gecisi (material_preview_shadow.vert) AYNI ifadeyi kullanir ve o
 // da invariant; ikisinin derinligi bit bazinda esit olmak ZORUNDA.
@@ -28,6 +32,7 @@ layout(location = 6) flat out vec3 vWorldToObject0;
 layout(location = 7) flat out vec3 vWorldToObject1;
 layout(location = 8) flat out vec3 vWorldToObject2;
 layout(location = 9) flat out float vObjectRandom;
+layout(location = 10) out vec4 vPreviousClip;
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
@@ -46,6 +51,12 @@ void main() {
     mat4 model = mat4(modelCol0, inModelCol1, inModelCol2, inModelCol3);
     vec4 worldPos = model * vec4(inPosition, 1.0);
     gl_Position = pc.viewProj * worldPos;
+    vec4 previous0 = inPreviousModel0;
+    previous0.w = 0.0;
+    mat4 previousModel = mat4(previous0, inPreviousModel1,
+        inPreviousModel2, inPreviousModel3);
+    vPreviousClip = pc.cameraPos.w > 0.5 ?
+        pc.viewProj * previousModel * vec4(inPosition, 1.0) : vec4(0.0);
 
     mat3 worldToObject = inverse(mat3(model));
     mat3 normalMatrix = transpose(worldToObject);

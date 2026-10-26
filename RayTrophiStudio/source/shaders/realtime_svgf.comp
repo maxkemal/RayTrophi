@@ -1,0 +1,420 @@
+#version 460
+
+// All images stay GENERAL. Dispatch boundaries carry shader-write/read barriers.
+layout(local_size_x = 8, local_size_y = 8) in;
+#ifdef RAW32
+layout(binding = 0, rgba32f) uniform image2D rawImage;
+layout(binding = 11, rgba32f) uniform readonly image2D backupImage;
+#else
+layout(binding = 0, rgba16f) uniform image2D rawImage;
+layout(binding = 11, rgba16f) uniform readonly image2D backupImage;
+#endif
+layout(binding = 1, rgba32f) uniform readonly image2D albedoImage;
+layout(binding = 2, rgba32f) uniform readonly image2D normalImage;
+layout(binding = 3, rgba32f) uniform readonly image2D positionImage;
+layout(binding = 4, rgba16f) uniform readonly image2D motionImage;
+layout(binding = 5, rgba32f) uniform readonly image2D previousColor;
+layout(binding = 6, rgba32f) uniform image2D nextColor;
+layout(binding = 7, rgba32f) uniform readonly image2D previousMoments;
+layout(binding = 8, rgba32f) uniform writeonly image2D nextMoments;
+layout(binding = 9, rgba32f) uniform readonly image2D inputWork;
+layout(binding = 10, rgba32f) uniform writeonly image2D outputWork;
+layout(std430, binding = 12) buffer Statistics {
+    uint historySum;
+    uint pixelCount;
+} statistics;
+// RT primary-hit records (raygen motionHistory0/1, B2): xyz = world position
+// bits, w = material id (bits 0-15, 0xFFFF = miss) | octahedral normal (16-31).
+// One slot holds THIS dispatch, the other the previous one.
+layout(binding = 13, rgba32ui) uniform readonly uimage2D motionHistory0;
+layout(binding = 14, rgba32ui) uniform readonly uimage2D motionHistory1;
+
+layout(push_constant) uniform Push {
+    uint width;
+    uint height;
+    uint stage;
+    uint stepWidth;
+    uint historyFlags;
+    uint historyMax;
+    // Firefly clamp for pixels WITHOUT usable history only: luminance above
+    // neighbourhood mean + fireflyClip * sigma is scaled down. Never applied
+    // to reprojected history (that clamp darkened the image, B3 live test).
+    float fireflyClip;
+    float rawBlend;
+    vec4 camera;   // origin xyz, pixel size per unit distance (w)
+    uint sampleCount;   // samples in the accumulation this dispatch shows
+    uint pad0, pad1, pad2;
+} pc;
+
+const uint SVGF_HISTORY = 1u;     // previous SVGF dispatch = previous RT dispatch
+const uint SVGF_RT_HISTORY = 2u;  // the other RT record slot holds the previous dispatch
+const uint SVGF_RT_SLOT1 = 4u;    // this dispatch's RT record is motionHistory1
+const uint SVGF_STATIC = 8u;      // still camera: input is the accumulated mean
+const uint SVGF_DEBUG_HISTORY = 16u;  // compose shows history length, not the image
+const uint MISS_MATERIAL = 0xFFFFu;
+
+const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
+ivec2 bounded(ivec2 p) {
+    return clamp(p, ivec2(0), ivec2(pc.width, pc.height) - 1);
+}
+vec3 albedo(ivec2 p) {
+    // Dark texels need a floor; division by zero creates fireflies.
+    return max(imageLoad(albedoImage, p).rgb, vec3(0.04));
+}
+vec3 illumination(ivec2 p) {
+    return max(imageLoad(backupImage, p).rgb, vec3(0.0)) / albedo(p);
+}
+vec3 normal(ivec2 p) {
+    vec3 n = imageLoad(normalImage, p).xyz * 2.0 - 1.0;
+    return n / max(length(n), 1e-6);
+}
+float edgeWeight(ivec2 p, ivec2 q, int stride) {
+    if (p == q) {
+        return 1.0;
+    }
+    vec4 a = imageLoad(positionImage, p);
+    vec4 b = imageLoad(positionImage, q);
+    // Material identity is carried in position.w; never blend across it.
+    if (a.w != b.w) {
+        return 0.0;
+    }
+    vec3 np = normal(p);
+    vec3 delta = b.xyz - a.xyz;
+    float plane = abs(dot(delta, np));
+    float scale = max(length(delta) * 0.05, 0.002 * float(stride));
+    vec3 nq = normal(q);
+    float nw = (dot(np, np) < 0.5 && dot(nq, nq) < 0.5) ? 1.0 :
+        pow(max(dot(np, nq), 0.0), 32.0);
+    float aw = exp(-length(albedo(p) - albedo(q)) * 4.0);
+    return nw * aw * exp(-plane / scale);
+}
+
+shared uint historyCounts[64];
+
+uvec4 currentRecord(ivec2 p) {
+    return (pc.historyFlags & SVGF_RT_SLOT1) != 0u ? imageLoad(motionHistory1, p)
+                                                    : imageLoad(motionHistory0, p);
+}
+uvec4 previousRecord(ivec2 p) {
+    return (pc.historyFlags & SVGF_RT_SLOT1) != 0u ? imageLoad(motionHistory0, p)
+                                                    : imageLoad(motionHistory1, p);
+}
+vec3 recordNormal(uint meta) {
+    vec2 o = vec2(float((meta >> 16) & 0xFFu), float(meta >> 24)) / 255.0 * 2.0 - 1.0;
+    vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
+    if (n.z < 0.0) {
+        n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    }
+    return normalize(n);
+}
+bool onScreen(ivec2 q) {
+    return all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, ivec2(pc.width, pc.height)));
+}
+
+// World size of one pixel at this pixel's hit. Preferably the smallest step to
+// a same-material neighbour of THIS dispatch (across a silhouette the
+// neighbour is another material and is skipped). An isolated pixel - a hole in
+// rattan, a thin wire, a moulding edge - has no such neighbour; it falls back
+// to the camera pitch at its distance, widened at grazing angles. Without the
+// fallback those pixels never found history and stayed as dark 1 spp dots
+// (B3b live test).
+float pixelFootprint(ivec2 p, uvec4 cur, vec3 n) {
+    vec3 P = uintBitsToFloat(cur.xyz);
+    float best = 0.0;
+    const ivec2 steps[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+    for (int i = 0; i < 4; ++i) {
+        ivec2 q = p + steps[i];
+        if (!onScreen(q)) continue;
+        uvec4 r = currentRecord(q);
+        if ((r.w & 0xFFFFu) != (cur.w & 0xFFFFu)) continue;
+        float d = distance(uintBitsToFloat(r.xyz), P);
+        if (d > 0.0 && (best == 0.0 || d < best)) best = d;
+    }
+    if (best == 0.0 && pc.camera.w > 0.0) {
+        vec3 toHit = P - pc.camera.xyz;
+        float dist = length(toHit);
+        float facing = dist > 0.0 ? abs(dot(toHit / dist, n)) : 1.0;
+        best = dist * pc.camera.w / max(facing, 0.2);
+    }
+    return best;
+}
+
+// Static-surface consistency of a previous-dispatch record with this pixel's
+// hit: same material, same facing, on the same tangent plane and within a few
+// pixels of it. Unlike raygen's single-tap test this accepts the NEIGHBOUR
+// pixel of a jittered silhouette or grazing plane, which is the whole point:
+// those pixels used to be rejected every dispatch and stayed at 1 spp.
+// Rigidly moving objects fail it; their tap comes from raygen's own test.
+bool consistentTap(uvec4 cur, vec3 curN, float footprint, uvec4 prev) {
+    uint material = cur.w & 0xFFFFu;
+    if ((prev.w & 0xFFFFu) != material) return false;
+    if (material == MISS_MATERIAL) return true;   // sky to sky
+    if (footprint <= 0.0) return false;
+    if (dot(recordNormal(prev.w), curN) < 0.8) return false;
+    vec3 P = uintBitsToFloat(cur.xyz);
+    vec3 d = uintBitsToFloat(prev.xyz) - P;
+    float floatEps = 1e-5 * max(max(abs(P.x), abs(P.y)), abs(P.z));
+    return abs(dot(d, curN)) < 0.5 * footprint + floatEps &&
+           length(d) < 3.0 * footprint + floatEps;
+}
+
+// Firefly clamp for a sample that starts a new history: luminance above the
+// neighbourhood mean + k sigma is scaled down (hue kept). Same-material
+// neighbours when there are enough, so a silhouette pixel is not judged
+// against the sky behind it. Centre excluded: the outlier must not widen its
+// own window.
+vec3 clampFirefly(ivec2 p, vec3 c, uint material) {
+    float m1 = 0.0, m2 = 0.0, count = 0.0;
+    float a1 = 0.0, a2 = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
+            ivec2 q = bounded(p + ivec2(x, y));
+            float l = dot(illumination(q), LUMA);
+            a1 += l;
+            a2 += l * l;
+            if ((currentRecord(q).w & 0xFFFFu) == material) {
+                m1 += l;
+                m2 += l * l;
+                count += 1.0;
+            }
+        }
+    }
+    if (count < 2.0) {
+        m1 = a1;
+        m2 = a2;
+        count = 8.0;
+    }
+    float mean = m1 / count;
+    float sigma = sqrt(max(m2 / count - mean * mean, 0.0));
+    float limit = mean + pc.fireflyClip * sigma;
+    float lum = dot(c, LUMA);
+    return lum > limit && lum > 0.0 ? c * (limit / lum) : c;
+}
+
+void temporal(ivec2 p) {
+    vec3 current = illumination(p);
+    if ((pc.historyFlags & SVGF_STATIC) != 0u) {
+        // Still camera: the accumulation IS the temporal filter, and an
+        // unbounded unbiased one. Reprojecting our own history on top of it
+        // would count samples twice. Pass the mean through; stage 1 gives it
+        // a spatial variance that shrinks as the accumulation converges.
+        //
+        // Right after the camera stops the accumulation holds 1-4 samples while
+        // the motion history holds ~20: dropping the history made the stop
+        // visibly darker and noisier for a moment (B3e live: 0.487 -> 0.465,
+        // noise 0.023 -> 0.039). The history is FROZEN (carried forward
+        // unchanged, never fed the accumulation) and blended by sample count,
+        // so its weight nh / (nh + N) fades by itself as samples arrive.
+        float N = float(max(pc.sampleCount, 1u));
+        vec3 color = current;
+        float nh = 0.0;
+        vec4 mvStill = imageLoad(motionImage, p);
+        if ((pc.historyFlags & SVGF_HISTORY) != 0u && mvStill.z < 0.9) {
+            vec4 hc = imageLoad(previousColor, p);
+            vec4 hm = imageLoad(previousMoments, p);
+            nh = hc.a;
+            imageStore(nextColor, p, hc);
+            imageStore(nextMoments, p, hm);
+            color = (hc.rgb * nh + current * N) / max(nh + N, 1.0);
+        } else {
+            float sl = dot(current, LUMA);
+            imageStore(nextColor, p, vec4(current, 0.0));
+            imageStore(nextMoments, p, vec4(sl, sl * sl, 0.0, 0.0));
+        }
+        imageStore(outputWork, p, vec4(color, 0.0));
+        historyCounts[gl_LocalInvocationIndex] = uint(nh + N);
+        return;
+    }
+    vec4 mv = imageLoad(motionImage, p);
+    // Previous-frame position of this pixel's centre, in pixel units.
+    vec2 previous = vec2(p) + 0.5 + mv.xy;
+    bool tryHistory = (pc.historyFlags & SVGF_HISTORY) != 0u &&
+                      (pc.historyFlags & SVGF_RT_HISTORY) != 0u && mv.z < 0.9;
+    uvec4 cur = currentRecord(p);
+    uint material = cur.w & 0xFFFFu;
+
+    vec3 history = vec3(0.0);
+    vec4 old = vec4(0.0);
+    bool found = false;
+    if (tryHistory) {
+        vec3 curN = recordNormal(cur.w);
+        float footprint = pixelFootprint(p, cur, curN);
+        // Raygen's own test (exact previous position, object transforms
+        // included) accepted the tap it looked at: that tap is always valid.
+        ivec2 raygenTap = ivec2(floor(previous));
+        bool raygenAccepted = mv.w < 0.5;
+
+        // 1. Bilinear 2x2 footprint, per-tap consistency, renormalised.
+        vec2 b = floor(previous - 0.5);
+        vec2 f = previous - 0.5 - b;
+        const ivec2 corner[4] = ivec2[4](ivec2(0, 0), ivec2(1, 0), ivec2(0, 1), ivec2(1, 1));
+        float weightSum = 0.0;
+        for (int i = 0; i < 4; ++i) {
+            ivec2 q = ivec2(b) + corner[i];
+            if (!onScreen(q)) continue;
+            bool ok = (raygenAccepted && q == raygenTap) ||
+                      consistentTap(cur, curN, footprint, previousRecord(q));
+            if (!ok) continue;
+            float w = (corner[i].x == 1 ? f.x : 1.0 - f.x) * (corner[i].y == 1 ? f.y : 1.0 - f.y);
+            history += imageLoad(previousColor, q).rgb * w;
+            old += imageLoad(previousMoments, q) * w;
+            weightSum += w;
+        }
+        if (weightSum > 1e-3) {
+            history /= weightSum;
+            old /= weightSum;
+            found = true;
+        } else {
+            // 2. 3x3 search around the nearest tap, equal weights.
+            history = vec3(0.0);
+            old = vec4(0.0);
+            float hits = 0.0;
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    ivec2 q = raygenTap + ivec2(x, y);
+                    if (!onScreen(q)) continue;
+                    if (!(raygenAccepted && q == raygenTap) &&
+                        !consistentTap(cur, curN, footprint, previousRecord(q))) continue;
+                    history += imageLoad(previousColor, q).rgb;
+                    old += imageLoad(previousMoments, q);
+                    hits += 1.0;
+                }
+            }
+            if (hits > 0.0) {
+                history /= hits;
+                old /= hits;
+                found = true;
+            }
+        }
+    }
+
+    float lengthMax = mix(float(pc.historyMax), 2.0, clamp(mv.z, 0.0, 1.0));
+    float n = found ? min(old.z + 1.0, lengthMax) : 1.0;
+    // A sample that starts (or nearly starts) a history is a raw 1 spp value.
+    // The a-trous luminance edge stop keeps a bright outlier apart from its
+    // neighbours, so without this it survives as a bright dot on silhouettes.
+    if (n < 4.0) {
+        current = clampFirefly(p, current, material);
+    }
+    float lum = dot(current, LUMA);
+    vec4 moments = vec4(lum, lum * lum, 1.0, 0.0);
+    vec3 color = current;
+    if (found) {
+        float alpha = max(1.0 / n, mv.z);
+        color = mix(history, current, alpha);
+        moments.xy = mix(old.xy, vec2(lum, lum * lum), alpha);
+        moments.z = n;
+    }
+    moments.w = max(moments.y - moments.x * moments.x, 0.0);
+    imageStore(nextColor, p, vec4(color, moments.z));
+    imageStore(nextMoments, p, moments);
+    imageStore(outputWork, p, vec4(color, moments.w));
+    historyCounts[gl_LocalInvocationIndex] = uint(moments.z);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    bool inside = p.x < int(pc.width) && p.y < int(pc.height);
+    if (pc.stage == 0u) {
+        historyCounts[gl_LocalInvocationIndex] = 0u;
+        if (inside) {
+            temporal(p);
+        }
+        barrier();
+        if (gl_LocalInvocationIndex == 0u) {
+            uint sum = 0u;
+            for (uint i = 0u; i < 64u; ++i) {
+                sum += historyCounts[i];
+            }
+            uvec2 base = gl_WorkGroupID.xy * 8u;
+            uint count = min(8u, pc.width - base.x) * min(8u, pc.height - base.y);
+            atomicAdd(statistics.historySum, sum);
+            atomicAdd(statistics.pixelCount, count);
+        }
+        return;
+    }
+    if (!inside) {
+        return;
+    }
+    if (pc.stage == 1u) {
+        // Spatial variance bootstraps newly uncovered pixels. Reprojection's
+        // rejected pixels start with zero temporal variance otherwise.
+        vec4 center = imageLoad(inputWork, p);
+        float m1 = 0.0, m2 = 0.0, weights = 0.0;
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                ivec2 q = bounded(p + ivec2(x, y));
+                float w = edgeWeight(p, q, 1);
+                float l = dot(imageLoad(inputWork, q).rgb, LUMA);
+                m1 += l * w;
+                m2 += l * l * w;
+                weights += w;
+            }
+        }
+        float spatial = max(m2 / max(weights, 1e-6) -
+            pow(m1 / max(weights, 1e-6), 2.0), 0.0);
+        float historyLength = imageLoad(nextColor, p).a;
+        // Still frame: the spatial spread of the accumulated mean is its noise
+        // (plus real lighting detail, which the edge stops keep).
+        float variance = (pc.historyFlags & SVGF_STATIC) != 0u ? spatial :
+            historyLength < 4.0 ?
+            max(center.a, spatial * 4.0 / max(historyLength, 1.0)) : center.a;
+        imageStore(outputWork, p, vec4(center.rgb, variance));
+        return;
+    }
+    if (pc.stage == 2u) {
+        vec4 center = imageLoad(inputWork, p);
+        if (imageLoad(motionImage, p).z > 0.5) {
+            imageStore(outputWork, p, center);
+            return;
+        }
+        float lc = dot(center.rgb, LUMA);
+        // Variance prefiltered with a 3x3 Gaussian before it sets the luminance
+        // edge stop (Schied 2017 does this). The per-pixel estimate is noisy at
+        // short history, so neighbours on a 1 px line got very different
+        // thresholds - some blended into the wall, some stayed apart - and thin
+        // lines broke into dark dots (B3d live test).
+        float varSum = 0.0, varWeight = 0.0;
+        for (int vy = -1; vy <= 1; ++vy) {
+            for (int vx = -1; vx <= 1; ++vx) {
+                float k = (vx == 0 ? 0.5 : 0.25) * (vy == 0 ? 0.5 : 0.25);
+                varSum += max(imageLoad(inputWork, bounded(p + ivec2(vx, vy))).a, 0.0) * k;
+                varWeight += k;
+            }
+        }
+        float phi = max(4.0 * sqrt(varSum / varWeight), 0.01);
+        const float kernel[5] = float[5](1.0, 4.0, 6.0, 4.0, 1.0);
+        vec3 sum = vec3(0.0);
+        float weights = 0.0, variance = 0.0;
+        for (int y = -2; y <= 2; ++y) {
+            for (int x = -2; x <= 2; ++x) {
+                ivec2 q = bounded(p + ivec2(x, y) * int(pc.stepWidth));
+                vec4 c = imageLoad(inputWork, q);
+                float w = kernel[x + 2] * kernel[y + 2] *
+                    edgeWeight(p, q, int(pc.stepWidth)) *
+                    exp(-abs(dot(c.rgb, LUMA) - lc) / phi);
+                sum += c.rgb * w;
+                variance += c.a * w * w;
+                weights += w;
+            }
+        }
+        imageStore(outputWork, p, vec4(sum / max(weights, 1e-6),
+            variance / max(weights * weights, 1e-6)));
+        return;
+    }
+    vec4 raw = imageLoad(backupImage, p);
+    vec3 filtered = imageLoad(inputWork, p).rgb * albedo(p);
+    if ((pc.historyFlags & SVGF_DEBUG_HISTORY) != 0u) {
+        // red: no history (n = 1), yellow: short (n < 4), green ramp: n / historyMax.
+        float n = imageLoad(nextColor, p).a;
+        vec3 heat = n < 1.5 ? vec3(1.0, 0.0, 0.0) :
+                    n < 4.0 ? vec3(1.0, 0.8, 0.0) :
+                    vec3(0.0, 0.25 + 0.75 * clamp(n / float(pc.historyMax), 0.0, 1.0), 0.1);
+        imageStore(rawImage, p, vec4(heat, raw.a));
+        return;
+    }
+    // Blend out on the display only. At sample 8 the original accumulator is
+    // displayed exactly; the converged estimator remains entirely unmodified.
+    imageStore(rawImage, p, vec4(mix(filtered, raw.rgb, pc.rawBlend), raw.a));
+}

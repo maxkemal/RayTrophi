@@ -33,7 +33,7 @@ struct alignas(16) RasterTaaPush {
     uint32_t width;
     uint32_t height;
     float blend;
-    uint32_t historyValid;
+    uint32_t historyFlags;   // bit 0 colour history, bit 1 previous camera (raster_taa.comp)
 };
 static_assert(sizeof(RasterTaaPush) == 80, "raster_taa.comp push ABI");
 
@@ -120,17 +120,19 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
         bool ok = vkCreateShaderModule(vkDevice, &smci, nullptr, &module) == VK_SUCCESS;
 
         if (ok) {
-            VkDescriptorSetLayoutBinding binds[4]{};
-            for (uint32_t i = 0; i < 4; ++i) {
+            // 0 HDR, 1 depth, 2 history (sampled), 3 resolved, 4 motion AOV (storage).
+            VkDescriptorSetLayoutBinding binds[6]{};
+            for (uint32_t i = 0; i < 6; ++i) {
                 binds[i].binding = i;
                 binds[i].descriptorCount = 1;
                 binds[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
                 binds[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             }
             binds[3].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            binds[4].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
             VkDescriptorSetLayoutCreateInfo dslci{};
             dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            dslci.bindingCount = 4;
+            dslci.bindingCount = 6;
             dslci.pBindings = binds;
             ok = vkCreateDescriptorSetLayout(vkDevice, &dslci, nullptr,
                                              &m_interactiveViewport.taaDescLayout) == VK_SUCCESS;
@@ -139,9 +141,9 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
             // Iki set: ping-pong'un iki parite durumu.
             VkDescriptorPoolSize sizes[2]{};
             sizes[0].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            sizes[0].descriptorCount = 6;
+            sizes[0].descriptorCount = 8;
             sizes[1].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            sizes[1].descriptorCount = 2;
+            sizes[1].descriptorCount = 4;
             VkDescriptorPoolCreateInfo dpci{};
             dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
             dpci.maxSets = 2;
@@ -215,6 +217,21 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
     for (auto& img : m_interactiveViewport.taaHistoryImage) {
         if (img.image) { m_device->destroyImage(img); img = {}; }
     }
+    if (m_interactiveViewport.taaMotionImage.image) {
+        m_device->destroyImage(m_interactiveViewport.taaMotionImage);
+        m_interactiveViewport.taaMotionImage = {};
+    }
+    // Motion AOV (B2): same contract as the RT motion image. TRANSFER_SRC for
+    // render.motion_stats readback.
+    m_interactiveViewport.taaMotionImage = m_device->createImage2D(
+        width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
+        VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        VK_IMAGE_ASPECT_COLOR_BIT);
+    if (!m_interactiveViewport.taaMotionImage.image) {
+        SCENE_LOG_WARN("[Viewport] TAA motion image allocation failed; anti-aliasing is off.");
+        destroyRasterTaaResources(true);
+        return false;
+    }
     for (auto& img : m_interactiveViewport.taaHistoryImage) {
         img = m_device->createImage2D(
             width, height, VK_FORMAT_R16G16B16A16_SFLOAT,
@@ -243,6 +260,10 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
                             0, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         }
+        taaImageBarrier(init, m_interactiveViewport.taaMotionImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                        VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                        0, VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
         m_device->endSingleTimeCommands(init);
     }
 
@@ -260,18 +281,23 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
         VkDescriptorImageInfo out{VK_NULL_HANDLE,
                                   m_interactiveViewport.taaHistoryImage[i].view,
                                   VK_IMAGE_LAYOUT_GENERAL};
-        VkDescriptorImageInfo infos[4] = {hdr, depth, history, out};
-        VkWriteDescriptorSet writes[4]{};
-        for (uint32_t b = 0; b < 4; ++b) {
+        VkDescriptorImageInfo motion{VK_NULL_HANDLE,
+                                     m_interactiveViewport.taaMotionImage.view,
+                                     VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo previous{m_interactiveViewport.postSampler,
+            m_interactiveViewport.objectPreviousClipImage.view, VK_IMAGE_LAYOUT_GENERAL};
+        VkDescriptorImageInfo infos[6] = {hdr, depth, history, out, motion, previous};
+        VkWriteDescriptorSet writes[6]{};
+        for (uint32_t b = 0; b < 6; ++b) {
             writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[b].dstSet = m_interactiveViewport.taaDescSet[i];
             writes[b].dstBinding = b;
             writes[b].descriptorCount = 1;
-            writes[b].descriptorType = (b == 3) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
+            writes[b].descriptorType = (b == 3 || b == 4) ? VK_DESCRIPTOR_TYPE_STORAGE_IMAGE
                                                 : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             writes[b].pImageInfo = &infos[b];
         }
-        vkUpdateDescriptorSets(vkDevice, 4, writes, 0, nullptr);
+        vkUpdateDescriptorSets(vkDevice, 6, writes, 0, nullptr);
     }
     return true;
 }
@@ -281,6 +307,10 @@ void VulkanViewportBackend::destroyRasterTaaResources(bool keepPipeline) {
     VkDevice vkDevice = m_device->getDevice();
     for (auto& img : m_interactiveViewport.taaHistoryImage) {
         if (img.image) { m_device->destroyImage(img); img = {}; }
+    }
+    if (m_interactiveViewport.taaMotionImage.image) {
+        m_device->destroyImage(m_interactiveViewport.taaMotionImage);
+        m_interactiveViewport.taaMotionImage = {};
     }
     m_taaFrameIndex = 0;
     m_taaHasPrevViewProj = false;
@@ -346,6 +376,18 @@ void VulkanViewportBackend::recordRasterTaaPass(VkCommandBuffer cmd,
     taaImageBarrier(cmd, dst.image, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
                     VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
                     VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    if (m_interactiveViewport.taaMotionImage.image) {
+        taaImageBarrier(cmd, m_interactiveViewport.taaMotionImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                        VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                        VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
+
+    taaImageBarrier(cmd, m_interactiveViewport.objectPreviousClipImage.image,
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     RasterTaaPush pc{};
     // ★★★★★ ANALİTİK DOUBLE-PRECISION REPROJEKSIYON
@@ -423,7 +465,7 @@ void VulkanViewportBackend::recordRasterTaaPass(VkCommandBuffer cmd,
                 pc.reprojection[col * 4 + row] = static_cast<float>(val);
             }
     } else {
-        // Henüz geçmiş yok: birim matris (historyValid=0 ile gelmez,
+        // Henüz geçmiş yok: birim matris (historyFlags=0 ile gelmez,
         // güvenli başlangıç değeri olarak ayarlanır).
         pc.reprojection[0]  = 1.0f;
         pc.reprojection[5]  = 1.0f;
@@ -441,7 +483,9 @@ void VulkanViewportBackend::recordRasterTaaPass(VkCommandBuffer cmd,
     const uint32_t n = m_taaFrameIndex < m_taaTargetSamples ? m_taaFrameIndex
                                                             : m_taaTargetSamples;
     pc.blend = 1.0f / static_cast<float>(n + 1u);
-    pc.historyValid = (m_taaFrameIndex > 0u && m_taaHasPrevViewProj && m_taaPrevDValid) ? 1u : 0u;
+    const bool prevCamera = m_taaHasPrevViewProj && m_taaPrevDValid;
+    pc.historyFlags = ((m_taaFrameIndex > 0u && prevCamera) ? 1u : 0u) |
+                      (prevCamera ? 2u : 0u) | (m_rasterUseGlobalInstBuffer ? 4u : 0u);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_interactiveViewport.taaPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
@@ -489,6 +533,13 @@ void VulkanViewportBackend::recordRasterTaaPass(VkCommandBuffer cmd,
 //   sessizce kapanabilir (shader yok / pipeline kurulamadi / gecmis tahsisi
 //   basarisiz / mod raster degil) ve dordu de `enabled = true` ile birlikte
 //   yasar. Tek bir bayrak bunlari ayirt edemezdi; sebep ADIYLA doner.
+bool VulkanBackendAdapter::rasterTaaPending() const {
+    return m_viewportMode == ViewportMode::MaterialPreview && m_taaEnabled &&
+           m_interactiveViewport.taaPipeline != VK_NULL_HANDLE &&
+           m_interactiveViewport.taaHistoryImage[0].image != VK_NULL_HANDLE &&
+           m_taaFrameIndex < m_taaTargetSamples;
+}
+
 bool VulkanBackendAdapter::getRasterTaaStatus(RasterTaaStatus& out) const {
     out = {};
     out.enabled = m_taaEnabled;
@@ -498,6 +549,7 @@ bool VulkanBackendAdapter::getRasterTaaStatus(RasterTaaStatus& out) const {
     out.supported = m_interactiveViewport.taaPipeline != VK_NULL_HANDLE &&
                     m_interactiveViewport.taaHistoryImage[0].image != VK_NULL_HANDLE;
     out.converged = out.supported && m_taaEnabled &&
+                    m_viewportMode == ViewportMode::MaterialPreview &&
                     m_taaFrameIndex >= m_taaTargetSamples;
     if (!out.supported) {
         out.inactive_reason = m_interactiveViewport.taaPipeline == VK_NULL_HANDLE
@@ -505,10 +557,8 @@ bool VulkanBackendAdapter::getRasterTaaStatus(RasterTaaStatus& out) const {
             : "TAA history images are not allocated";
     } else if (!m_taaEnabled) {
         out.inactive_reason = "disabled by viewport.set_taa";
-    } else if (m_viewportMode != ViewportMode::MaterialPreview &&
-               m_viewportMode != ViewportMode::Solid &&
-               m_viewportMode != ViewportMode::Matcap) {
-        out.inactive_reason = "the raster viewport is not the mode on screen";
+    } else if (m_viewportMode != ViewportMode::MaterialPreview) {
+        out.inactive_reason = "TAA runs in Material/RayFusion mode";
     }
     return true;
 }

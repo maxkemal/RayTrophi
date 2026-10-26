@@ -995,6 +995,13 @@ void VulkanDevice::shutdown() {
             vkDestroyBuffer(m_device, m_tlas.buffer.buffer, nullptr);
             freeTrackedMemory(m_tlas.buffer.memory);
         }
+        if (m_motionPrevInstances.buffer) {
+            destroyBuffer(m_motionPrevInstances);
+            m_motionPrevInstances = {};
+        }
+        m_motionLastCpuInstances.clear();
+        m_motionLastSource = -1;
+        m_motionPrevValid = false;
         if (m_tlasInstanceBuffer.buffer) {
             destroyBuffer(m_tlasInstanceBuffer);
         }
@@ -1732,7 +1739,7 @@ bool VulkanDevice::createCommandPool() {
 bool VulkanDevice::createDescriptorPool() {
     VkDescriptorPoolSize poolSizes[] = {
         { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,              256 },
-        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                32 },
+        { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,                48 },   // RT set alone uses 14 (B2 motion AOV +3)
         { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,     Backend::VULKAN_TEXTURE_CAPACITY + 64 },  // + RT LUT/cloud singles
         { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,               32 },
         { VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,   8 },
@@ -3488,6 +3495,24 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     // The build range must count what was uploaded, not what was requested.
     instanceCount = (uint32_t)vkInstances.size();
 
+    // Motion AOV: the previous build's array becomes "previous transforms" when
+    // the instance order can be trusted (same count, same CPU build path). It is
+    // written from the CPU copy: reading back host-visible (write-combined)
+    // memory is slow. A frame still in flight may read the old contents mid-write;
+    // that only affects its motion vectors, never the trace.
+    bool motionPrevOk = false;
+    if (m_motionLastSource == 0 && m_motionLastCount == instanceCount && instanceCount > 0 &&
+        m_motionLastCpuInstances.size() == vkInstances.size()) {
+        const VkDeviceSize bytes = (VkDeviceSize)vkInstances.size() * sizeof(VkAccelerationStructureInstanceKHR);
+        if (ensureMotionPrevInstances(bytes)) {
+            if (void* dst = mapBuffer(m_motionPrevInstances)) {
+                memcpy(dst, m_motionLastCpuInstances.data(), (size_t)bytes);
+                unmapBuffer(m_motionPrevInstances);
+                motionPrevOk = true;
+            }
+        }
+    }
+
     // --- 2) Upload instance data to GPU ---
     // PERF: reuse the persistent instance buffer in place when it is large enough.
     // createTLAS runs EVERY frame a live instance (foam/particle) moves; the old
@@ -3520,6 +3545,12 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
             uploadBuffer(m_tlasInstanceBuffer, vkInstances.data(), neededInstBytes, 0);
     }
     const BufferHandle& instanceBuffer = m_tlasInstanceBuffer;
+    m_motionLastCpuInstances = vkInstances;
+    m_motionActiveInstances = m_tlasInstanceBuffer.deviceAddress;
+    m_motionPrevValid = motionPrevOk;
+    m_motionLastCount = instanceCount;
+    m_motionLastSource = 0;
+    ++m_motionInstanceSerial;
 
     // --- 3) Build geometry info ---
     VkAccelerationStructureGeometryInstancesDataKHR instancesData{};
@@ -3666,6 +3697,12 @@ bool VulkanDevice::recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
     const VkDeviceSize sourceBytes = sources.size() * sizeof(GpuTLASInstanceSource);
     const VkDeviceSize outputBytes = sources.size() * sizeof(VkAccelerationStructureInstanceKHR);
 
+    // Motion AOV: same instance order as the previous GPU build, and the output
+    // buffer is not about to be reallocated (that would lose its contents).
+    const bool motionSameOrder =
+        m_motionLastSource == 1 && m_motionLastCount == sources.size() &&
+        m_gpuTlasInstanceBuffer.buffer && m_gpuTlasInstanceBuffer.size >= outputBytes;
+
     auto& source = m_gpuTlasSourceBuffers[frameSlot];
     if (!source.buffer || source.size < sourceBytes) {
         if (source.buffer) destroyBuffer(source);
@@ -3674,7 +3711,7 @@ bool VulkanDevice::recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
     }
     if (!m_gpuTlasInstanceBuffer.buffer || m_gpuTlasInstanceBuffer.size < outputBytes) {
         if (m_gpuTlasInstanceBuffer.buffer) destroyBuffer(m_gpuTlasInstanceBuffer);
-        BufferCreateInfo ci{}; ci.size=outputBytes; ci.usage=BufferUsage::STORAGE|BufferUsage::ACCELERATION; ci.location=MemoryLocation::GPU_ONLY;
+        BufferCreateInfo ci{}; ci.size=outputBytes; ci.usage=BufferUsage::STORAGE|BufferUsage::ACCELERATION|BufferUsage::TRANSFER_SRC; ci.location=MemoryLocation::GPU_ONLY;
         m_gpuTlasInstanceBuffer=createBuffer(ci); m_instancePrepareBoundOutputs[0]=m_instancePrepareBoundOutputs[1]=VK_NULL_HANDLE;
         m_instancePrepareBoundSources[0]=m_instancePrepareBoundSources[1]=VK_NULL_HANDLE;
     }
@@ -3693,6 +3730,35 @@ bool VulkanDevice::recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
         vkUpdateDescriptorSets(m_device,2,w,0,nullptr);
         m_instancePrepareBoundSources[frameSlot]=source.buffer; m_instancePrepareBoundOutputs[frameSlot]=m_gpuTlasInstanceBuffer.buffer;
     }
+
+    // Motion AOV: copy the previous build's array out before the prepare pass
+    // overwrites it. Same command buffer, so the order is the record order.
+    bool motionPrevOk = false;
+    if (motionSameOrder && ensureMotionPrevInstances(outputBytes)) {
+        // The previous submission's prepare pass wrote this buffer and its
+        // trace read the previous array: order both before the copy.
+        VkMemoryBarrier pre{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        pre.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
+        pre.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0, nullptr, 0, nullptr);
+        VkBufferCopy region{0, 0, outputBytes};
+        vkCmdCopyBuffer(cmd, m_gpuTlasInstanceBuffer.buffer, m_motionPrevInstances.buffer, 1, &region);
+        VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        motionPrevOk = true;
+    }
+    m_motionActiveInstances = m_gpuTlasInstanceBuffer.deviceAddress;
+    m_motionPrevValid = motionPrevOk;
+    m_motionLastCount = static_cast<uint32_t>(sources.size());
+    m_motionLastSource = 1;
+    m_motionLastCpuInstances.clear();
+    ++m_motionInstanceSerial;
 
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,m_instancePreparePipeline);
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,m_instancePreparePipelineLayout,0,1,&m_instancePrepareDescSets[frameSlot],0,nullptr);
@@ -3720,6 +3786,19 @@ bool VulkanDevice::recordGpuTLASUpdate(VkCommandBuffer cmd, uint32_t frameSlot,
     VkMemoryBarrier ab{VK_STRUCTURE_TYPE_MEMORY_BARRIER}; ab.srcAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR; ab.dstAccessMask=VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
     vkCmdPipelineBarrier(cmd,VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,0,1,&ab,0,nullptr,0,nullptr);
     return true;
+}
+
+bool VulkanDevice::ensureMotionPrevInstances(VkDeviceSize bytes) {
+    if (bytes == 0) return false;
+    if (m_motionPrevInstances.buffer && m_motionPrevInstances.size >= bytes) return true;
+    if (m_motionPrevInstances.buffer) destroyBuffer(m_motionPrevInstances);
+    BufferCreateInfo ci{};
+    ci.size = bytes + bytes / 4;   // headroom against per-frame regrowth
+    ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+    ci.location = MemoryLocation::CPU_TO_GPU;   // CPU path writes it directly
+    ci.category = VramCategory::AccelStruct;
+    m_motionPrevInstances = createBuffer(ci);
+    return m_motionPrevInstances.buffer != VK_NULL_HANDLE && m_motionPrevInstances.deviceAddress != 0;
 }
 
 bool VulkanDevice::createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sources) {
@@ -3957,7 +4036,10 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                                      const ImageHandle* volumeTemporalColor1,
                                      const ImageHandle* volumeTemporalMetadata0,
                                      const ImageHandle* volumeTemporalMetadata1,
-                                     const BufferHandle* volumeInstrumentation) {
+                                     const BufferHandle* volumeInstrumentation,
+                                     const ImageHandle* motionImage,
+                                     const ImageHandle* motionHistory0,
+                                     const ImageHandle* motionHistory1) {
     if (!m_rtDescriptorSetLayout || !m_tlas.accel) {
         VK_ERROR() << "[VulkanDevice] Cannot bind RT descriptors: missing layout or TLAS" << std::endl;
         return;
@@ -4363,6 +4445,26 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
         temporalWrites[i].descriptorCount = 1;
         temporalWrites[i].pImageInfo = &temporalInfos[i];
         writes.push_back(temporalWrites[i]);
+    }
+
+    // Bindings 38-40: motion AOV. Unallocated slots fall back to images of the
+    // SAME format class only where raygen never touches them: raygen skips the
+    // whole block when the motion params address is 0, which the adapter sends
+    // whenever these images are missing.
+    const ImageHandle* motionImages[3] = { motionImage, motionHistory0, motionHistory1 };
+    VkDescriptorImageInfo motionInfos[3]{};
+    VkWriteDescriptorSet motionWrites[3]{};
+    for (uint32_t i = 0; i < 3; ++i) {
+        motionInfos[i].imageView =
+            (motionImages[i] && motionImages[i]->view) ? motionImages[i]->view : outputImage.view;
+        motionInfos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+        motionWrites[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        motionWrites[i].dstSet = m_rtDescriptorSet;
+        motionWrites[i].dstBinding = 38u + i;
+        motionWrites[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        motionWrites[i].descriptorCount = 1;
+        motionWrites[i].pImageInfo = &motionInfos[i];
+        writes.push_back(motionWrites[i]);
     }
 
     VkDescriptorBufferInfo volumeInstrumentationInfo{};
@@ -7084,7 +7186,9 @@ bool VulkanDevice::submitDenoiserCopyAsync(const ImageHandle* srcs, const Buffer
 bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h,
     const VulkanRT::ImageHandle& hdrImage, const VulkanRT::ImageHandle& ldrImage,
     const VulkanRT::BufferHandle& ldrStaging, bool doTrace,
-    const std::function<void(VkCommandBuffer)>& prepass) {
+    const std::function<void(VkCommandBuffer)>& prepass,
+    const std::function<void(VkCommandBuffer)>& beforeTonemap,
+    const std::function<void(VkCommandBuffer)>& afterTonemap) {
     if (slot >= kFrameSlotCount) return false;
     if (!m_rtPipelineReady || !fpCmdTraceRaysKHR || !m_tlas.accel) return false;
     if (m_tonemapPipeline == VK_NULL_HANDLE || m_tonemapDescSet == VK_NULL_HANDLE) return false;
@@ -7176,6 +7280,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
         VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &aovBarrier, 0, nullptr, 1, &hdrBarrier);
 
+    if (beforeTonemap) beforeTonemap(cmd);
     // ── 3. Tonemap compute ───────────────────────────────────────────────────
     m_exposureMeter.record(cmd, hdrImage.view, slot);
     recordLensWeather(cmd, m_tonemapPipelineLayout, w, h);
@@ -7209,6 +7314,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     const uint32_t gy = (h + 7) / 8;
     vkCmdDispatch(cmd, gx, gy, 1);
 
+    if (afterTonemap) afterTonemap(cmd);
     recordAcousticSurface(cmd, slot, w, h, ldrImage.view);
 
     // ── 4. Compute write → transfer read on LDR image ────────────────────────
@@ -8026,6 +8132,8 @@ void VulkanBackendAdapter::shutdown() {
         m_pathStatsImage = {};
     }
     m_volumeTemporal.destroy(*m_device);
+    m_motionHistory.destroy(*m_device);
+    m_realtimeDenoiser.destroy(*m_device);
     m_volumeInstrumentation.destroy(*m_device);
     if (m_volumeLightCache.buffer) m_device->destroyBuffer(m_volumeLightCache);
     m_volumeLightCache = {};
@@ -14589,6 +14697,7 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
         m_maxBounces != nextMaxBounces ||
         m_diffuseBounces != nextDiffuseBounces ||
         m_transmissionBounces != nextTransmissionBounces ||
+        m_rrStartBounce != std::max(1, p.rrStartBounce) ||
         m_causticsEnabled != p.causticsEnabled ||
         m_causticsDebug != p.causticsDebug ||
         m_causticsPhotons != p.causticsPhotons ||
@@ -14636,6 +14745,7 @@ void VulkanBackendAdapter::setRenderParams(const RenderParams& p) {
     m_maxBounces = nextMaxBounces; // 0 = UI henüz set etmedi, mevcut değeri koru
     m_diffuseBounces = nextDiffuseBounces;
     m_transmissionBounces = nextTransmissionBounces;
+    m_rrStartBounce = std::max(1, p.rrStartBounce);
     m_causticsEnabled = p.causticsEnabled;
     m_causticsDebug = p.causticsDebug;
     m_causticsPhotons = p.causticsPhotons;
@@ -17090,7 +17200,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpBindings[2].binding = 2; mpBindings[2].stride = sizeof(uint32_t);  mpBindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
                     mpBindings[3].binding = 3; mpBindings[3].stride = sizeof(float) * 16; mpBindings[3].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
 
-                    VkVertexInputAttributeDescription mpAttribs[7]{};
+                    VkVertexInputAttributeDescription mpAttribs[11]{};
                     // location 0: position
                     mpAttribs[0].location = 0; mpAttribs[0].binding = 0; mpAttribs[0].format = VK_FORMAT_R32G32B32_SFLOAT; mpAttribs[0].offset = 0;
                     // location 1: normal
@@ -17103,11 +17213,15 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpAttribs[5].location = 5; mpAttribs[5].binding = 3; mpAttribs[5].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[5].offset = sizeof(float) * 8;
                     mpAttribs[6].location = 6; mpAttribs[6].binding = 3; mpAttribs[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[6].offset = sizeof(float) * 12;
 
+                    for (uint32_t i = 0; i < 4; ++i) {
+                        mpAttribs[7 + i] = {8 + i, 3, VK_FORMAT_R32G32B32A32_SFLOAT,
+                            static_cast<uint32_t>(i * sizeof(float) * 4)};
+                    }
                     VkPipelineVertexInputStateCreateInfo mpVertInput{};
                     mpVertInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
                     mpVertInput.vertexBindingDescriptionCount = 4;
                     mpVertInput.pVertexBindingDescriptions = mpBindings;
-                    mpVertInput.vertexAttributeDescriptionCount = 7;
+                    mpVertInput.vertexAttributeDescriptionCount = 11;
                     mpVertInput.pVertexAttributeDescriptions = mpAttribs;
 
                     VkPipelineInputAssemblyStateCreateInfo mpIA{};
@@ -18453,6 +18567,9 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         if (!m_volumeTemporal.ensure(*m_device, width, height)) {
             SCENE_LOG_WARN("[Vulkan] Volume temporal history allocation failed; temporal filtering will stay disabled.");
         }
+        if (!m_motionHistory.ensure(*m_device, width, height)) {
+            SCENE_LOG_WARN("[Vulkan] Motion AOV allocation failed; motion vectors stay off.");
+        }
         if (!m_volumeInstrumentation.ensure(*m_device)) {
             SCENE_LOG_WARN("[Vulkan] Volume instrumentation buffer allocation failed.");
         }
@@ -18861,9 +18978,13 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         float    debugExposure; // false-color / energy gain
         uint32_t debugFlags;    // reserved
         float    debugParam;    // overlay: 0 = pure debug … 1 = pure beauty
+        uint32_t rrStartBounce; // first bounce Russian roulette may terminate (raygen only)
+        uint32_t motionParamsLo; // motion AOV record address (0 = off), raygen only
+        uint32_t motionParamsHi;
+        uint32_t motionInfo;     // bit 0: motion history write slot
     };
 
-    static_assert(sizeof(CameraPushConstants) == 196, "CameraPC acoustic debug ABI");
+    static_assert(sizeof(CameraPushConstants) == 212, "CameraPC motion AOV ABI");
     CameraPushConstants pushConst{};
     
     // Camera image plane from m_camera. ★ ONE formula (AerialFroxelParams.h),
@@ -18942,6 +19063,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     pushConst.debugFlags = m_volumeTemporal.writeIndex()
                          | (m_volumeTemporal.hasValidHistory() ? 2u : 0u);
     pushConst.debugParam = std::clamp(m_debugOverlay, 0.0f, 1.0f);
+    pushConst.rrStartBounce = (uint32_t)std::max(1, m_rrStartBounce);
 
     pushConst.shakeEnabled = this->m_camera.shake_enabled ? 1 : 0;
     if (pushConst.shakeEnabled) {
@@ -19045,6 +19167,26 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     this->m_prevViewDir = viewDir;
     this->m_hasPrevView = true;
 
+    // Motion AOV record for this dispatch: previous camera = previous dispatch's,
+    // previous instance transforms only on the first dispatch after a TLAS build.
+    {
+        const float cameraVectors[4][4] = {
+            { pushConst.origin[0], pushConst.origin[1], pushConst.origin[2], pushConst.origin[3] },
+            { pushConst.lowerLeft[0], pushConst.lowerLeft[1], pushConst.lowerLeft[2], pushConst.lowerLeft[3] },
+            { pushConst.horizontal[0], pushConst.horizontal[1], pushConst.horizontal[2], pushConst.horizontal[3] },
+            { pushConst.vertical[0], pushConst.vertical[1], pushConst.vertical[2], pushConst.vertical[3] } };
+        const uint64_t serial = m_device->motionInstanceSerial();
+        const bool newBuild = serial != m_motionSeenInstanceSerial;
+        m_motionSeenInstanceSerial = serial;
+        const uint64_t addr = m_motionHistory.prepareDispatch(
+            *m_device, cameraVectors,
+            m_device->motionActiveInstancesAddress(), m_device->motionPrevInstancesAddress(),
+            m_device->motionInstanceCount(), newBuild && m_device->motionPrevInstancesValid());
+        pushConst.motionParamsLo = static_cast<uint32_t>(addr & 0xffffffffull);
+        pushConst.motionParamsHi = static_cast<uint32_t>(addr >> 32);
+        pushConst.motionInfo = m_motionHistory.writeIndex() & 1u;
+    }
+
     m_device->setPushConstants(&pushConst, sizeof(CameraPushConstants));
 
     // Aerial froxel: rebuilt only when the plane or the medium changed; the
@@ -19080,7 +19222,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             m_volumeTemporal.colorSlot(1),
             m_volumeTemporal.metadataSlot(0),
             m_volumeTemporal.metadataSlot(1),
-            m_volumeInstrumentation.buffer());
+            m_volumeInstrumentation.buffer(),
+            m_motionHistory.motionImage(),
+            m_motionHistory.historySlot(0),
+            m_motionHistory.historySlot(1));
         // Tonemap-side debug views (6/7/8 = path stats, 10-13 = first-hit AOVs,
         // 14 = sample heatmap) resolve at display time from persistent AOVs so
         // beauty accumulation + adaptive statistics keep running undisturbed.
@@ -19250,11 +19395,11 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             }
 
             // 1. Submit current frame's work asynchronously (no host wait).
-            const bool submitted = m_device->submitTraceTonemapAsync(submitSlot, width, height,
-                m_outputImage, m_tonemappedImage, m_tonemappedStagings[submitSlot], true, hairPrepass);
+            const bool submitted = submitRealtimeTrace(submitSlot, width, height, hairPrepass);
             if (submitted) {
                 m_tonemappedSlotInFlight[submitSlot] = true;
                 m_volumeTemporal.advance();
+                m_motionHistory.advance();
             }
 
             // 2. Consume the previously-submitted slot's staging if any. This is where
@@ -19309,6 +19454,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             return;
         }
         m_volumeTemporal.advance();
+        m_motionHistory.advance();
 
         // If the output image is float/half-float RGBA, download HDR and tonemap on CPU
         if (m_outputImage.format == VK_FORMAT_R32G32B32A32_SFLOAT ||
@@ -19962,12 +20108,27 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
     const VulkanRT::BufferHandle* dstsPtr = useAuxiliary ? dstsAux  : dstsPerf;
     const size_t copyCount             = useAuxiliary ? 3 : 1;
 
-    if (firstCall) {
-        // Seed the pipeline. We block on this one submit so the CPU/GPU state
-        // settles before steady-state ping-pong begins — small one-time stall,
-        // not part of the hot path.
+    // ★★★ The ping-pong returns the copy submitted by the PREVIOUS call. That
+    // is one sample old when the caller denoises every sample, but the viewport
+    // denoise schedule (progressive / converged_only) calls sparsely, and then
+    // "the previous call" can be another accumulation: measured 2026-10-26, a
+    // converged_only image showed the camera pose from before a 0.25-unit move,
+    // 6 px off ("the camera turned slightly"). The copy is tagged; anything
+    // other than this accumulation at most one sample back is re-copied now,
+    // synchronously (queued after the in-flight trace, so it holds this sample).
+    const bool stagedIsCurrent =
+        !firstCall &&
+        m_denoiserCopyEpoch == m_accumulationEpoch &&
+        m_denoiserCopySamples >= 0 &&
+        m_currentSamples - m_denoiserCopySamples <= 1;
+    if (firstCall || !stagedIsCurrent) {
+        // Seed the pipeline (first call) or replace a stale staged copy. Blocks
+        // on this one submit; the steady every-sample path never comes here.
+        if (!firstCall) m_device->waitDenoiserCopy();
         m_device->submitDenoiserCopyAsync(srcsPtr, dstsPtr, copyCount);
         m_device->waitDenoiserCopy();
+        m_denoiserCopyEpoch = m_accumulationEpoch;
+        m_denoiserCopySamples = m_currentSamples;
         // Resubmit isn't needed — the data is already in staging. But we have
         // no prep'd dst yet, so we'd still have to do prep + return. To keep
         // first-call logic uniform with the steady state, fall through to the
@@ -20026,6 +20187,8 @@ bool VulkanBackendAdapter::getDenoiserFrameGPU(DenoiserFrameDataGPU& frame, bool
     const auto profSubmitStart = std::chrono::high_resolution_clock::now();
 #endif
     m_device->submitDenoiserCopyAsync(srcsPtr, dstsPtr, copyCount);
+    m_denoiserCopyEpoch = m_accumulationEpoch;
+    m_denoiserCopySamples = m_currentSamples;
 #if RT_OIDN_PROFILING
     const auto profSubmitEnd = std::chrono::high_resolution_clock::now();
     const float profSubmitMs = std::chrono::duration<float, std::milli>(profSubmitEnd - profSubmitStart).count();
@@ -20507,6 +20670,7 @@ void VulkanBackendAdapter::resetAccumulation() {
     // old gas positions into newly advected frames, leaving stationary smoke
     // and particle-driven explosion trails even though the grid had moved.
     m_volumeTemporal.invalidate();
+    ++m_accumulationEpoch;
     // [PERF] Skip GPU image clears if already at sample 0 — images were already
     // cleared by a prior resetAccumulation() this frame.  This eliminates 10-25
     // redundant synchronous GPU round-trips during camera movement.

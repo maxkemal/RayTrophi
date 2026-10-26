@@ -124,6 +124,9 @@ def required(method, namespaces):
         return "Read"
     if method == "render.volume_march_lod":
         return "Read"
+    if method in ("render.get_denoiser", "render.denoiser_stats", "render.get_motion_profile",
+                  "render.motion_stats", "render.realtime_denoiser_stats"):
+        return "Read"
     if method.startswith("render."):
         # These two write an image file; the C++ says Render|FilesWrite and a
         # token without FilesWrite is refused at call time, so reporting plain

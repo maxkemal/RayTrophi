@@ -202,7 +202,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
                               uint32_t colorAttachmentCount,
                               bool depthTest,
                               VkPipeline& pipeline) {
-        VkPipelineColorBlendAttachmentState attachments[3]{};
+        VkPipelineColorBlendAttachmentState attachments[4]{};
         attachments[0] = attachment;
         attachments[1].colorWriteMask = 0;
         attachments[2].colorWriteMask = 0;
@@ -223,7 +223,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
         ? m_interactiveViewport.hdrRenderPass
         : m_interactiveViewport.renderPass;
     const VkResult previewResult = createPipeline(
-        previewRenderPass, hasHdrPass ? 3u : 1u, false,
+        previewRenderPass, hasHdrPass ? 4u : 1u, false,
         state.previewPipeline);
     const VkResult solidResult = createPipeline(
         m_interactiveViewport.renderPass, 1u, true, state.solidPipeline);

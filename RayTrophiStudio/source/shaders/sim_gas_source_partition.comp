@@ -1,0 +1,44 @@
+#version 450
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    uint cells;
+    uint phase;
+    uint residual;
+    uint policy;
+} pc;
+layout(set = 0, binding = 0) buffer SourceDensity { float source_d[]; };
+layout(set = 0, binding = 1) buffer SourceFuel { float source_f[]; };
+layout(set = 0, binding = 2) readonly buffer Density { float actual_d[]; };
+layout(set = 0, binding = 3) readonly buffer Fuel { float actual_f[]; };
+layout(set = 0, binding = 4) buffer Totals { vec2 totals[]; };
+layout(set = 0, binding = 5) readonly buffer DepositDensity { float deposit_d[]; };
+layout(set = 0, binding = 6) readonly buffer DepositFuel { float deposit_f[]; };
+
+void main() {
+    uint cell = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * gl_WorkGroupSize.x;
+    if (cell >= pc.cells) {
+        return;
+    }
+    if (pc.phase == 0) {
+        totals[cell] = vec2(0.0);
+    } else if (pc.phase == 1) {
+        // Dispatches are ordered per source; one invocation owns each cell.
+        totals[cell] += max(vec2(source_d[cell], source_f[cell]), vec2(0.0));
+    } else if (pc.phase == 3) {
+        source_d[cell] += deposit_d[cell];
+        source_f[cell] += deposit_f[cell];
+    } else {
+        vec2 sum = totals[cell];
+        vec2 target = max(vec2(actual_d[cell], actual_f[cell]), vec2(0.0));
+        vec2 value = max(vec2(source_d[cell], source_f[cell]), vec2(0.0));
+        float fallback = pc.residual != 0 ? 1.0 : 0.0;
+        float smoke_share = pc.policy == 1 && sum.y > 0.0 ? value.y / sum.y : fallback;
+        source_d[cell] = sum.x > target.x || pc.policy == 2
+            ? (sum.x > 0.0 ? value.x * target.x / sum.x : fallback * target.x)
+            : value.x + max(0.0, target.x - sum.x) * smoke_share;
+        source_f[cell] = sum.y > target.y || pc.policy == 2
+            ? (sum.y > 0.0 ? value.y * target.y / sum.y : fallback * target.y)
+            : value.y + max(0.0, target.y - sum.y) * fallback;
+    }
+}

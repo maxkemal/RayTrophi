@@ -48,7 +48,8 @@ bool prepareMatterFogSnapshot(ParticleSimulationSystem& runtime, std::size_t ind
         cells *= static_cast<std::size_t>(dimension);
     }
     // Up to six inventory sidecars, two gas snapshot fields and one reference.
-    constexpr std::size_t snapshot_bytes_per_cell = 9u * sizeof(float);
+    const std::size_t snapshot_bytes_per_cell =
+        (9u + 2u * state.gas_source_images.size()) * sizeof(float);
     if (cells > budget / snapshot_bytes_per_cell) {
         return refuse("Fog inspection snapshot exceeds diagnostic memory budget");
     }
@@ -59,6 +60,7 @@ bool prepareMatterFogSnapshot(ParticleSimulationSystem& runtime, std::size_t ind
         cachedDistinctViewKeys(state.particles, state.version));
     std::vector<float> density;
     std::vector<float> temperature;
+    SimulationGridDomainState source_snapshot;
     GasFogFieldView gas;
     gas.grid = fogGrid(grid);
     gas.temperature_units = GasFogTemperatureUnits::Kelvin;
@@ -119,6 +121,21 @@ bool prepareMatterFogSnapshot(ParticleSimulationSystem& runtime, std::size_t ind
             gas.temperature = &temperature;
         }
         gas.authoritative = true;
+        if (!state.gas_source_images.empty()) {
+            source_snapshot.gas_source_images = state.gas_source_images;
+            source_snapshot.gas_source_device = state.gas_source_device;
+            source_snapshot.gas_source_device_current = state.gas_source_device_current;
+            if (!snapshotGasSources(source_snapshot)) {
+                return refuse("Cannot read authoritative gas source contributions");
+            }
+            for (const auto& source : runtime.flowSources()) {
+                auto found = source_snapshot.gas_source_images.find(source.timeline_uid);
+                if (found != source_snapshot.gas_source_images.end()) {
+                    found->second.name = source.name;
+                }
+            }
+            gas.sources = &source_snapshot.gas_source_images;
+        }
     }
     MatterFogFieldInput input;
     input.particles = &state.particles;

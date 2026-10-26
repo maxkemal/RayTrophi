@@ -155,11 +155,13 @@ public:
     // srcInstanceBuffer: global instance matris buffer'i (VkBuffer). Her kare
     // ayni olmayabilir (buyume ile yeniden olusur), degistiginde descriptor
     // kendiliginden guncellenir.
-    void record(void* commandBuffer, void* srcInstanceBuffer, uint32_t meshCount);
+    void record(void* commandBuffer, void* srcInstanceBuffer, uint32_t meshCount,
+                void* previousInstanceBuffer = nullptr);
 
     // --- cizim tarafinin ihtiyaci -----------------------------------------
 
     void* compactedInstanceBuffer() const;   // VkBuffer
+    void* compactedPreviousBuffer() const;
     void* commandBuffer() const;             // VkBuffer (indirect)
     static uint64_t commandOffset(uint32_t drawSlot) {
         return static_cast<uint64_t>(drawSlot) * kCommandStride;

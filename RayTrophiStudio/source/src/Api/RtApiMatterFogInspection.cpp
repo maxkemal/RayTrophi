@@ -45,9 +45,11 @@ nlohmann::json fieldStats(const MatterFogField& field) {
             ++temperature_samples;
         }
     }
-    const bool gas = field.key.kind == FogFieldKind::GasAggregate;
+    const bool gas = field.key.kind != FogFieldKind::Carrier;
     nlohmann::json result = {
-        {"kind", gas ? "gas_aggregate" : "carrier"},
+        {"kind", field.key.kind == FogFieldKind::GasSource ? "gas_source" :
+            gas ? "gas_aggregate" : "carrier"},
+        {"producer_uid", field.key.producer_uid}, {"producer_name", field.producer_name},
         {"substance_tag", field.key.substance_tag},
         {"phase", gas ? "gas" : phaseName(field.key.phase)},
         {"carrier_count", field.carrier_count},
@@ -148,6 +150,7 @@ Result inspectDomain(RayTrophiSim::ParticleSimulationSystem& runtime,
         {"grid", {grid.nx, grid.ny, grid.nz}},
         {"builder_peak_dense_bytes_bound", fields.peak_dense_bytes_bound},
         {"carrier_max_abs_density_error", maximum_error},
+        {"gas_max_abs_density_error", fields.gas_max_abs_density_error},
         {"carrier_reference_max_density", maximum_density}, {"fields", std::move(rows)}};
     return Result::success();
 }

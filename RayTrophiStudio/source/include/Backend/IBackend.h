@@ -279,6 +279,9 @@ struct RenderParams {
     int maxBounces;
     int diffuseBounces = 4;
     int transmissionBounces = 8;
+    // First bounce at which Russian roulette may end a path (Vulkan RT only;
+    // OptiX is frozen and keeps its own fixed rule).
+    int rrStartBounce = 3;
     int currentPass;
     int frameNumber;
     bool useAdaptiveSampling;
@@ -1095,6 +1098,23 @@ public:
      * @brief Check if target sample count is reached
      */
     virtual bool isAccumulationComplete() const = 0;
+
+    /**
+     * @brief Re-tonemap and re-present the EXISTING accumulation on the next
+     * render call, even when accumulation is complete. Adds no sample and does
+     * not reset. A converged backend otherwise re-presents nothing, so a
+     * display-side change (e.g. turning the denoiser off) never reaches the
+     * screen. Default no-op for backends that repaint every call.
+     */
+    virtual void requestPresentRefresh() {}
+
+    /**
+     * @brief Counts accumulation resets. The sample count alone cannot show a
+     * reset while the camera moves (every frame resets and renders sample 1
+     * again), so a consumer that caches per-accumulation results compares
+     * this instead. 0 = backend does not count (treat every frame as new).
+     */
+    virtual uint64_t accumulationEpoch() const { return 0; }
 
     /**
      * @brief Returns true when the backend wants another viewport render pass

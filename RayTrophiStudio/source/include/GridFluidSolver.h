@@ -32,6 +32,7 @@
 namespace RayTrophiSim {
 
 class SimulationForceFieldSnapshot;
+struct SimulationGridDomainState;
 
 namespace GridFluid {
 
@@ -93,6 +94,7 @@ struct CombustionStats {
 inline constexpr double kCombustionFuelQuantum = 1.0e-4;
 
 struct SolverParams {
+    SimulationGridDomainState* source_provenance = nullptr;
     Boundary boundary = Boundary::Open;
     Advection advection = Advection::SemiLagrange;
 

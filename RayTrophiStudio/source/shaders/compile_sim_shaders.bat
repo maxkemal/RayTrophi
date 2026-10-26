@@ -71,6 +71,7 @@ glslc "%SHADER_DIR%sim_grid_sor.comp"                 -o "%SHADER_DIR%sim_grid_s
 glslc "%SHADER_DIR%sim_grid_subtract_gradient.comp"   -o "%SHADER_DIR%sim_grid_subtract_gradient.spv"   --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_grid_advect_scalar.comp"       -o "%SHADER_DIR%sim_grid_advect_scalar.spv"       --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_inventory_advect_scalar.comp" -o "%SHADER_DIR%sim_inventory_advect_scalar.spv" --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_gas_source_partition.comp" -o "%SHADER_DIR%sim_gas_source_partition.spv" --target-env=vulkan1.2
 if errorlevel 1 exit /b 1
 glslc "%SHADER_DIR%sim_inventory_maccormack_scalar.comp" -o "%SHADER_DIR%sim_inventory_maccormack_scalar.spv" --target-env=vulkan1.2
 if errorlevel 1 exit /b 1

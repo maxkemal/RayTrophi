@@ -56,6 +56,10 @@ public:
     // The underlying VkBuffer (as void* to avoid vulkan.h include here).
     // Cast to VkBuffer at the call site.
     void* vkBuffer() const;
+    void* previousBuffer() const;
+    bool previousValid() const;
+    void invalidatePrevious();
+    void recordPrevious(void* commandBuffer);
     uint32_t capacity() const;
     bool isReady() const;
 

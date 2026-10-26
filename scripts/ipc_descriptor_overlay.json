@@ -1989,8 +1989,8 @@
     }
   },
   "fluid.inspect_fog_fields": {
-    "summary": "Inspect separate carrier and aggregate gas Fog fields from live Matter state",
-    "notes": "Read-only on-demand diagnostic, shared with rt.fluid.inspect_fog_fields(domain). Does not step, reset, save, change routes or publish render volumes. Requires initialized Matter state. Carrier fields group by substance and physical phase; untagged carriers use the domain default substance. Gas stays aggregate, not per emitter. Returns density sums, active cells, physical temperature ranges and maximum per-cell carrier density error versus legacy aggregate deposition. Vulkan resident gas is downloaded on demand; failed reads reject. Matter virtual temperature is converted through the world/domain thermal scale and authoritative vapour inventory using the existing physical humidity inversion, not field times 3000. Missing temperatures return null ranges. Builder budget 128 MiB, additional snapshot/reference budget 128 MiB; at most 32 fields. Unknown parameters reject. render_connected reports whether populated fields have live VDB bindings; each field includes its stable material target, VDB ID and publication/visibility state. This reports publication, not an image-quality acceptance.",
+    "summary": "Inspect carrier, vapor and per-source gas Fog fields from live Matter state",
+    "notes": "Read-only on-demand diagnostic, shared with rt.fluid.inspect_fog_fields(domain). Does not step, reset, save, change routes or publish render volumes. Requires initialized Matter state. Carrier fields group by substance and physical phase; untagged carriers use the domain default substance. Matter gas flow sources retain passive density/fuel ownership under stable producer_uid; gas_source fields use material targets matter:<domain>:gas_source:<uid>. Vapor and unattributed producers remain in matter:<domain>:gas. Gas fields share the physical temperature; gas_max_abs_density_error measures their partition against authoritative density. Up to eight source identities plus the residual stream, with a 256 MiB provenance budget. Old aggregate caches require resimulation for historical source attribution. Returns density sums, active cells, physical temperature ranges and maximum per-cell carrier density error versus legacy aggregate deposition. Vulkan resident gas is downloaded on demand; failed reads reject. Matter virtual temperature is converted through the world/domain thermal scale and authoritative vapour inventory using the existing physical humidity inversion, not field times 3000. Missing temperatures return null ranges. Builder budget 128 MiB, additional snapshot/reference budget 128 MiB; at most 32 fields. Unknown parameters reject. render_connected reports whether populated fields have live VDB bindings; each field includes its stable material target, VDB ID and publication/visibility state. This reports publication, not an image-quality acceptance.",
     "returns": "object",
     "related": "fluid.get_phase_output|fluid.state_digest",
     "params": {
@@ -6416,13 +6416,65 @@
     ]
   },
   "render.get_settings": {
-    "summary": "Read the path tracer bounce budget and the active Debug Visualizer view",
+    "summary": "Read the path tracer bounce budget (authored and effective under the motion profile), the Russian roulette start and the active Debug Visualizer view",
     "tags": "render|bounces|budget|debug|visualizer",
     "related": "render.set_settings|render.volume_stats"
   },
+  "render.get_denoiser": {
+    "summary": "Read OIDN denoiser settings: viewport, final render and timeline switches, AOV mode, viewport model tier and blend",
+    "tags": "render|denoiser|denoise|oidn|settings|read",
+    "related": "render.set_denoiser|render.denoiser_stats",
+    "notes": "mode fast = beauty only, quality = beauty + albedo + normal AOVs. quality is the VIEWPORT OIDN model tier; final renders always run high regardless. The panel edits the same RenderSettings fields."
+  },
+  "render.set_denoiser": {
+    "summary": "Set denoiser switches, AOV mode, viewport OIDN model tier and blend; omitted fields keep their value",
+    "tags": "render|denoiser|denoise|oidn|settings|set|quality",
+    "related": "render.get_denoiser|render.denoiser_stats|render.reset_denoiser_stats",
+    "notes": "mode: fast|quality. quality: fast|balanced|high. schedule (viewport only): every_sample | progressive (default: denoise at samples 1, 2, 4, 8, ... and completion, re-show the last denoised image in between) | converged_only. blend in [0, 1]. Invalid values are rejected, not clamped, and nothing is written. Does not reset accumulation; an edit on a converged frame is re-presented.",
+    "verify_with": "render.get_denoiser"
+  },
+  "render.denoiser_stats": {
+    "summary": "Viewport denoise cost since the last reset: calls per path, wall milliseconds and repeat/converged call counts",
+    "tags": "render|denoiser|denoise|oidn|cost|timing|performance|stats|read",
+    "related": "render.reset_denoiser_stats|render.gpu_timing_stats|perf.get",
+    "notes": "Wall time of the whole viewport denoise block: frame fetch, OIDN, tonemap and copy into the display surface. The GPU (CUDA zero-copy) path ends in a synchronous D2H copy, so its wall time is its GPU cost; it is NOT included in render.gpu_timing_stats, which covers the camera RT dispatch only. mean_ms is null, not 0, when nothing was denoised. repeat_sample_calls counts denoises of a sample count already denoised at the same size, i.e. identical input; converged_calls counts calls after accumulation completed. Read them as a rate against calls before calling the denoiser expensive. Same block also feeds perf.get('loop.denoise'). skipped_by_schedule counts samples the schedule did not denoise; cache_presents is the subset that re-showed the last denoised image (the rest showed the raw frame, converged_only before completion).",
+    "requires": "render.reset_denoiser_stats"
+  },
+  "render.reset_denoiser_stats": {
+    "summary": "Zero the viewport denoiser cost counters",
+    "tags": "render|denoiser|stats|reset",
+    "related": "render.denoiser_stats"
+  },
+  "render.get_motion_profile": {
+    "summary": "Read the motion bounce profile and whether it is in use right now",
+    "tags": "render|bounces|motion|profile|interactive|performance|read",
+    "related": "render.set_motion_profile|render.get_settings",
+    "notes": "active is true while the camera pose changed within settle_ms and the profile is enabled. render.get_settings reports the authored budget and the effective_* budget separately."
+  },
+  "render.set_motion_profile": {
+    "summary": "Set the bounce budget traced while the camera moves; the authored budget is never overwritten",
+    "tags": "render|bounces|motion|profile|interactive|performance|set",
+    "related": "render.get_motion_profile|render.get_settings|render.gpu_timing_stats",
+    "notes": "Bounces 1..64 (sub-budgets clamped to max_bounces), settle_ms 0..5000; out-of-range values are rejected. Motion is detected from the camera pose each frame, so camera.set_position counts. Entering and leaving the profile changes the effective budget and resets accumulation. Measured 2026-10-26 (interior, 1680x945): 10/4/8 = 96 ms/sample, 2/2/2 = 31 ms. Saved with the project.",
+    "verify_with": "render.get_motion_profile"
+  },
+  "render.motion_stats": {
+    "summary": "Motion AOV state per Vulkan device, and optionally one read-back summary of the RT or raster motion image",
+    "tags": "render|motion|vectors|velocity|temporal|reprojection|disocclusion|history|stats|read",
+    "related": "render.set_motion|render.set_settings|viewport.taa",
+    "notes": "Contract (RT raygen and raster TAA alike): xy = previous-frame pixel position minus this pixel's centre, in pixels, y down; z = reactive (1 volume primary, 0.5 mostly transmissive primary, 0 otherwise; always 0 on raster); w = 1 when the history was rejected (first frame, off-screen, material/normal/position mismatch). RT: every dispatch is a frame; previous instance transforms apply only to the first dispatch after a TLAS build (object_motion_dispatches counts those). Raster: CAMERA motion only, written by the TAA pass, so it exists only while viewport TAA is on (raster_reason says why not). sample='rt'|'raster' does one synchronous GPU readback of the full image (stalls a frame) and returns rejected_fraction, reactive_fraction, mean_dx/mean_dy and mean/max motion over accepted pixels; those keys are ABSENT, not zero, when nothing was read. Expected on a still camera: mean_motion_px ~0 and rejected_fraction ~0 once history_valid. The motion of a sample includes only what moved between the last two dispatches - after the camera stops it returns to 0 within one dispatch. B3: raster is active only in Material/RayFusion with TAA; other modes refuse stale raster samples. raster_objects_available reports the global instance previous-model path, including GPU culling compaction. Per-mesh fallback is camera-only. B2 live stationary RT rejection was about 4 percent at thin jittered geometry edges; a zero-rejection threshold is not an acceptance criterion.",
+    "verify_with": "render.set_settings"
+  },
+  "render.set_motion": {
+    "summary": "Turn the Vulkan RT motion AOV on or off and switch Halton sub-pixel jitter",
+    "tags": "render|motion|vectors|jitter|halton|temporal|set",
+    "related": "render.motion_stats",
+    "notes": "Both optional. halton_jitter replaces the random primary-ray AA offset with a known 8-phase Halton(2,3) pattern (what a temporal upscaler needs); it resets accumulation and makes converged AA coarser, so it is off by default. Re-enabling the AOV drops its history. Process state: not saved with the project. The raster motion follows viewport.set_taa instead. Disabling the RT motion AOV while realtime mode is svgf is rejected atomically; set_realtime_denoiser mode=off first.",
+    "verify_with": "render.motion_stats"
+  },
   "render.set_settings": {
-    "summary": "Set the path tracer bounce budget (total, diffuse, transmission; 1..64) and/or the Debug Visualizer view (0..15, 6 = Bounce Count, 15 = Acoustic Surface)",
-    "notes": "Writes the same settings the panel edits; the main loop resets accumulation on change. diffuse/transmission are clamped to max_bounces like the panel does. Raising max_bounces also raises the free-pass cap (max_bounces + 32), so a fix by 'more bounces' does not by itself tell which budget was short -- read render.volume_stats paths_bounce_capped vs paths_pass_capped.",
+    "summary": "Set the path tracer bounce budget (total, diffuse, transmission; 1..64), the Russian roulette start bounce and/or the Debug Visualizer view (0..17, 6 = Bounce Count, 15 = Acoustic Surface, 16 = Motion Vectors, 17 = Motion History)",
+    "notes": "Writes the same settings the panel edits; the main loop resets accumulation on change. diffuse/transmission are clamped to max_bounces like the panel does. Raising max_bounces also raises the free-pass cap (max_bounces + 32), so a fix by 'more bounces' does not by itself tell which budget was short -- read render.volume_stats paths_bounce_capped vs paths_pass_capped. rr_start_bounce (1..64, default 3, Vulkan RT only) is the first bounce Russian roulette may end a path; a change resets accumulation. Any edit wakes a converged viewport.",
     "tags": "render|bounces|budget|debug|visualizer|quality",
     "related": "render.get_settings|render.volume_counters"
   },
@@ -7062,5 +7114,49 @@
     "notes": "Ranges: camera_light_stride and secondary_light_stride 1..16, secondary_step_scale 1..16, secondary_max_steps 0 or 4..511, secondary_radiance_cache bool. Out-of-range values are rejected, not clamped. Resets accumulation. Process state, not saved with the project. Use 1/1/1/0 with the radiance cache off for the reference image.",
     "tags": "performance|volume|march|lod",
     "related": "render.volume_march_lod|render.volume_stats"
+  },
+
+  "render.set_realtime_denoiser": {
+    "summary": "Configure session-only Vulkan SVGF during motion with atomic validation",
+    "params": {
+      "mode": {
+        "type": "string",
+        "enum": [
+          "off",
+          "svgf"
+        ]
+      },
+      "atrous_iterations": {
+        "type": "integer",
+        "description": "Inclusive range 1..5; invalid values are rejected."
+      },
+      "history_max": {
+        "type": "integer",
+        "description": "Inclusive range 1..64; invalid values are rejected."
+      },
+      "firefly_clip": {
+        "type": "number",
+        "description": "Firefly clamp in sigmas, applied only to pixels that start a new history (no reprojected tap passed the 2x2/3x3 consistency test). Inclusive range 0.1..10; invalid values are rejected."
+      },
+      "static_samples": {
+        "type": "integer",
+        "description": "0 = off; default 64. Still camera with viewport OIDN OFF: spatial-only SVGF over the accumulated image until this many samples, fading linearly to the raw accumulation; capped one below the target sample count so the frame left on screen at convergence is never filtered. Range 0..1024. realtime_denoiser_stats.static_active reports a still-frame dispatch."
+      },
+      "debug_history": {
+        "type": "boolean",
+        "description": "Diagnostic: SVGF frames show per-pixel temporal history length instead of the image (red = none, yellow = under 4 frames, green ramp = long). Capture with viewport.get_screenshot while moving. Session only, default false."
+      }
+    },
+    "notes": "Requires motion AOV enabled. Defaults: svgf (on since B3b), 4 iterations, 24 history, firefly clip 3, static_samples 64. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera or a rigid object moves; timeline playback alone does not trigger it. Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged."
+  },
+  "render.realtime_denoiser_stats": {
+    "summary": "Read SVGF settings, last completed GPU costs and measured history length",
+    "params": {
+      "synchronize": {
+        "type": "boolean",
+        "default": true
+      }
+    },
+    "notes": "synchronize=true waits for the render GPU; use false for polling. GPU costs are last completed timestamps, not CPU recording times. total_ms includes backup/composition/tonemap/restore; history_length_mean requires synchronization. available does not imply active: moving and presenting describe the last policy/frame."
   }
 }

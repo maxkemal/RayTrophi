@@ -3253,6 +3253,7 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     const RayTrophiSim::SimulationFlowSourceDesc& source,
     const std::vector<RayTrophiSim::SimulationGridDomainDesc>& domains) {
     SimulationFlowSourceInfo out;
+    out.producer_uid = source.timeline_uid;
     out.name = source.name;
     if (source.domain_index >= 0 &&
         source.domain_index < static_cast<int>(domains.size()))

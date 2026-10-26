@@ -25,6 +25,9 @@
 #include "Api/RtApiRayFusion.h"
 #include "Api/RtApiRasterDiagnostics.h"
 #include "Api/RtApiScreenGi.h"
+#include "Api/RtApiDenoiser.h"
+#include "Api/RtApiMotion.h"
+#include "Api/RtApiRealtimeDenoiser.h"
 #include "Api/RtApiReflection.h"
 #include "Api/RtApiRig.h"
 #include "Api/RtApiRigMotion.h"
@@ -1591,19 +1594,50 @@ Result setVolumeMarchLod(const VolumeMarchLodInfo& lod);
 // Writes go to the same RenderSettings the panel edits; the main loop's change
 // detection resets accumulation, exactly as for a panel edit.
 struct RenderBudgetInfo {
-    int max_bounces = 0;
+    int max_bounces = 0;          // AUTHORED budget (what the panel shows)
     int diffuse_bounces = 0;
     int transmission_bounces = 0;
+    int rr_start_bounce = 3;      // first bounce Russian roulette may end a path (Vulkan RT)
     int debug_view = 0;           // 0 = off, 6 = Bounce Count, 15 = Acoustic Surface; see globals.h
     std::string debug_view_name;
+    // What the backend is told to trace right now: equals the authored budget
+    // unless the motion profile is active. Reported separately so a reader
+    // never mistakes the motion budget for the authored one.
+    bool motion_profile_active = false;
+    int effective_max_bounces = 0;
+    int effective_diffuse_bounces = 0;
+    int effective_transmission_bounces = 0;
 };
 RenderBudgetInfo renderBudget();
 // Unset optionals are left alone. diffuse/transmission are clamped to
-// [1, max_bounces] the same way the panel clamps them.
+// [1, max_bounces] the same way the panel clamps them. rr_start_bounce in
+// [1, 64]; a change resets accumulation.
 Result setRenderBudget(std::optional<int> max_bounces,
                        std::optional<int> diffuse_bounces,
                        std::optional<int> transmission_bounces,
-                       std::optional<int> debug_view);
+                       std::optional<int> debug_view,
+                       std::optional<int> rr_start_bounce = std::nullopt);
+
+// Motion bounce profile (render.get_motion_profile / set_motion_profile).
+// While the camera pose changes, and for settle_ms after, the backend traces
+// with these budgets; the authored budget is never overwritten. Measured
+// 2026-10-26 (interior, 1680x945): 10/4/8 = 96 ms/sample, 2/2/2 = 31 ms.
+struct MotionProfileInfo {
+    bool enabled = false;
+    int max_bounces = 2;           // 1..64
+    int diffuse_bounces = 2;       // clamped to [1, max_bounces]
+    int transmission_bounces = 2;  // clamped to [1, max_bounces]
+    int settle_ms = 150;           // 0..5000
+    bool active = false;           // read-only: profile budget in use right now
+};
+MotionProfileInfo motionProfile();
+// Out-of-range values are rejected, not clamped (sub-budgets are clamped to
+// max_bounces like the panel). Saved with the project.
+Result setMotionProfile(std::optional<bool> enabled,
+                        std::optional<int> max_bounces,
+                        std::optional<int> diffuse_bounces,
+                        std::optional<int> transmission_bounces,
+                        std::optional<int> settle_ms);
 
 // ---------------------------------------------------------------------------
 // Per-backend volume TABLE state (render.volume_tables).
@@ -5090,6 +5124,7 @@ Result moveSimulationDomain(const std::string& domain_name, const Vec3& delta,
                             SimulationDomainMoveResult& out);
 
 struct SimulationFlowSourceInfo {
+    uint64_t producer_uid = 0; // Read-only stable timeline identity.
     std::string name;
     std::string domain;
     std::string phase = "gas";

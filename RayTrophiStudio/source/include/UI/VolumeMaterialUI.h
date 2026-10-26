@@ -1,6 +1,9 @@
 #pragma once
 
 class VolumeShader;
+bool drawVolumeAdaptiveStepping(VolumeShader& shader);
+
+class VolumeShader;
 class VDBVolume;
 struct UIContext;
 class SceneUI;

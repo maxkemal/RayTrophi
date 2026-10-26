@@ -20,6 +20,7 @@ layout(location = 6) flat in vec3 vWorldToObject0;
 layout(location = 7) flat in vec3 vWorldToObject1;
 layout(location = 8) flat in vec3 vWorldToObject2;
 layout(location = 9) flat in float vObjectRandom;
+layout(location = 10) in vec4 vPreviousClip;
 
 layout(location = 0) out vec4 outColor;
 // ★★★ RayFusion reflection G-buffer. Bu iki cikis, yansima compute gecisinin
@@ -31,6 +32,7 @@ layout(location = 0) out vec4 outColor;
 //   rayfusion_reflection_gbuffer.glsl icinde, TEK yerde.
 layout(location = 1) out vec2 outRfNormal;
 layout(location = 2) out vec4 outRfSpecular;
+layout(location = 3) out vec4 outPreviousClip;
 
 // Material buffer struct — single source of truth shared by every material-reading
 // shader. This shader historically called the type `GpuMaterial`; alias it so the
@@ -652,6 +654,8 @@ vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strengt
 #include "material_preview_opacity.glsl"
 
 void main() {
+    outPreviousClip = vPreviousClip.w > 1e-9 ?
+        vec4(vPreviousClip.xyz / vPreviousClip.w, 1.0) : vec4(0.0, 0.0, 0.0, -1.0);
     vec3 N = normalize(vWorldNormal);
     uint qualityMode = previewQualityMode();
     uint lightingPreset = pc.materialMeta.z;

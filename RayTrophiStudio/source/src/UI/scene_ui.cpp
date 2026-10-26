@@ -1395,6 +1395,122 @@ void SceneUI::drawResolutionPanel(UIContext& ctx)
 
 static void DrawRenderWindowToneMapControls(UIContext& ctx) { rtpost::drawPanel(ctx); }
 
+// Russian roulette start + motion bounce profile. Same RenderSettings fields as
+// render.set_settings / render.set_motion_profile; any edit wakes the render
+// block so a converged viewport picks it up.
+static void DrawPathCostControls(UIContext& ctx) {
+    auto& rs = ctx.render_settings;
+    bool changed = false;
+    changed |= ImGui::SliderInt("Roulette From Bounce", &rs.rr_start_bounce, 1, 16);
+    rs.rr_start_bounce = std::clamp(rs.rr_start_bounce, 1, 64);
+    UIWidgets::HelpMarker("First bounce at which Russian roulette may end a path (Vulkan RT). "
+                          "Lower is faster and noisier. Default 3.");
+
+    changed |= ImGui::Checkbox("Fewer Bounces While Moving", &rs.motion_profile_enabled);
+    UIWidgets::HelpMarker("While the camera moves (and briefly after), trace with the budget below. "
+                          "The bounce settings above are kept; when the camera stops, accumulation "
+                          "restarts at full quality.");
+    if (rs.motion_profile_enabled) {
+        ImGui::Indent();
+        changed |= ImGui::DragInt("Moving Total", &rs.motion_max_bounces, 1, 1, 64);
+        changed |= ImGui::DragInt("Moving Diffuse", &rs.motion_diffuse_bounces, 1, 1, 64);
+        changed |= ImGui::DragInt("Moving Transmission", &rs.motion_transmission_bounces, 1, 1, 64);
+        changed |= ImGui::DragInt("Settle (ms)", &rs.motion_settle_ms, 10, 0, 5000);
+        rs.motion_max_bounces = std::clamp(rs.motion_max_bounces, 1, 64);
+        rs.motion_diffuse_bounces = std::clamp(rs.motion_diffuse_bounces, 1, rs.motion_max_bounces);
+        rs.motion_transmission_bounces = std::clamp(rs.motion_transmission_bounces, 1, rs.motion_max_bounces);
+        rs.motion_settle_ms = std::clamp(rs.motion_settle_ms, 0, 5000);
+        ImGui::TextDisabled(rs.motion_profile_active ? "Moving budget in use" : "Full budget in use");
+        ImGui::Unindent();
+    }
+
+    // Through the API: SVGF depends on motion vectors and setMotion refuses to
+    // turn them off under it. Writing the flag here would bypass that check.
+    static std::string motionError;
+    bool motionVectors = rs.motion_aov_enabled;
+    if (ImGui::Checkbox("Motion Vectors", &motionVectors)) {
+        const auto r = rtapi::setMotion(motionVectors, std::nullopt);
+        motionError = r.ok ? std::string() : r.error;
+    }
+    UIWidgets::HelpMarker("Per-pixel motion to the previous frame (Vulkan RT), the input of "
+                          "temporal denoising/upscaling. See Debug View > Motion Vectors.");
+    if (!motionError.empty()) ImGui::TextWrapped("%s", motionError.c_str());
+    if (rs.motion_aov_enabled) {
+        ImGui::Indent();
+        changed |= ImGui::Checkbox("Halton Jitter", &rs.motion_halton_jitter);
+        UIWidgets::HelpMarker("Known 8-phase sub-pixel jitter for a temporal upscaler. Restarts "
+                              "accumulation; converged anti-aliasing is coarser than random jitter.");
+        ImGui::Unindent();
+    }
+    if (changed) ctx.start_render = true;
+}
+
+static void DrawDenoiserScheduleControl(UIContext& ctx) {
+    const char* items[] = {"Every sample", "Progressive (1, 2, 4, 8...)", "When converged"};
+    int schedule = static_cast<int>(ctx.render_settings.denoiser_schedule);
+    if (ImGui::Combo("Viewport Schedule", &schedule, items, IM_ARRAYSIZE(items)))
+        ctx.render_settings.denoiser_schedule = static_cast<DenoiserSchedule>(schedule);
+    UIWidgets::HelpMarker("When the viewport denoiser runs while samples accumulate. Progressive "
+                          "re-shows the last denoised image between runs; moving the camera always "
+                          "denoises the first new sample. Final renders are unaffected.");
+}
+
+// Bounce budget + path-cost controls. Shared by both render panels and placed
+// right under the sample counts: these three groups are what decides how fast
+// and how clean the viewport is, so they sit together at the top.
+static void DrawBounceControls(UIContext& ctx) {
+    bool bouncesChanged = false;
+    bouncesChanged |= ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 1, 64);
+    bouncesChanged |= ImGui::DragInt("Diffuse Bounces", &ctx.render_settings.diffuse_bounces, 1, 1, 64);
+    bouncesChanged |= ImGui::DragInt("Transmission Bounces", &ctx.render_settings.transmission_bounces, 1, 1, 64);
+    ctx.render_settings.diffuse_bounces = std::clamp(ctx.render_settings.diffuse_bounces, 1, ctx.render_settings.max_bounces);
+    ctx.render_settings.transmission_bounces = std::clamp(ctx.render_settings.transmission_bounces, 1, ctx.render_settings.max_bounces);
+    // Wake the render block so a converged viewport picks up the new budget
+    // (same rule as rtapi::setRenderBudget).
+    if (bouncesChanged) ctx.start_render = true;
+    UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
+    DrawPathCostControls(ctx);
+}
+
+// SVGF (moving / still frames) first, then OIDN. SVGF does not depend on the
+// OIDN switch, so it is never hidden behind it.
+static void DrawDenoiseControls(UIContext& ctx) {
+    rtapi::drawRealtimeDenoiserControls();
+    UIWidgets::Divider();
+    if (ImGui::Checkbox("Enable Denoiser (OIDN)", &ctx.render_settings.use_denoiser)) {
+        // Mirror to legacy 'render_use_denoiser' so the final single-frame
+        // render path stays in sync without exposing a separate checkbox.
+        ctx.render_settings.render_use_denoiser = ctx.render_settings.use_denoiser;
+    }
+    UIWidgets::HelpMarker("Applies to interactive viewport, single-frame final render, "
+                          "AND sequence render output. Sequence frames are denoised "
+                          "before being saved to disk.");
+    if (ctx.render_settings.use_denoiser) {
+        const char* denoiser_mode_items[] = {
+            "Beauty only",
+            "Beauty + Albedo + Normal"
+        };
+        int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
+        if (ImGui::Combo("Input Buffers", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
+            ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
+        }
+        const char* denoiser_quality_items[] = {
+            "Fast (viewport)",
+            "Balanced",
+            "High (final)"
+        };
+        int denoiser_quality = static_cast<int>(ctx.render_settings.denoiser_quality);
+        if (ImGui::Combo("Denoiser Quality", &denoiser_quality, denoiser_quality_items, IM_ARRAYSIZE(denoiser_quality_items))) {
+            ctx.render_settings.denoiser_quality = static_cast<DenoiserQuality>(denoiser_quality);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("OIDN model tier for the viewport. Fast is the cheapest\n(dominant cost on the GPU). Final renders always use High.");
+        }
+        ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
+        DrawDenoiserScheduleControl(ctx);
+    }
+}
+
 void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 {
     extern bool g_hasOptix;
@@ -1595,6 +1711,14 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
         }
 
         UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Light Paths", ImVec4(1.0f, 0.88f, 0.54f, 1.0f));
+        DrawBounceControls(ctx);
+
+        UIWidgets::Divider();
+        UIWidgets::ColoredHeader("Denoise", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
+        DrawDenoiseControls(ctx);
+
+        UIWidgets::Divider();
         UIWidgets::ColoredHeader("Viewport HUD", ImVec4(0.70f, 0.86f, 1.0f, 1.0f));
         ImGui::Checkbox("Show Scene Stats HUD", &ctx.render_settings.show_scene_stats_hud);
 
@@ -1767,16 +1891,7 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
 
     DrawVolumePerformancePanel(ctx);
 
-    if (UIWidgets::BeginSection("Light Transport & Denoise", ImVec4(0.95f, 0.68f, 0.34f, 1.0f))) {
-        UIWidgets::ColoredHeader("Light Paths", ImVec4(1.0f, 0.88f, 0.54f, 1.0f));
-        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 1, 64);
-        ImGui::DragInt("Diffuse Bounces", &ctx.render_settings.diffuse_bounces, 1, 1, 64);
-        ImGui::DragInt("Transmission Bounces", &ctx.render_settings.transmission_bounces, 1, 1, 64);
-        ctx.render_settings.diffuse_bounces = std::clamp(ctx.render_settings.diffuse_bounces, 1, ctx.render_settings.max_bounces);
-        ctx.render_settings.transmission_bounces = std::clamp(ctx.render_settings.transmission_bounces, 1, ctx.render_settings.max_bounces);
-        UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
-
-        UIWidgets::Divider();
+    if (UIWidgets::BeginSection("Light Transport", ImVec4(0.95f, 0.68f, 0.34f, 1.0f))) {
         UIWidgets::ColoredHeader("Caustics (Photon, Vulkan RT)", ImVec4(0.55f, 0.85f, 1.0f, 1.0f));
         ImGui::Checkbox("Enable Caustics##caustics", &ctx.render_settings.caustics_enabled);
         UIWidgets::HelpMarker("Light-traced photon caustics for glass/water (Vulkan RT + CPU).\n"
@@ -1830,7 +1945,8 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
                 "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
                 "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
-                "Sample Heatmap", "Acoustic Energy (six-band)"
+                "Sample Heatmap", "Acoustic Energy (six-band)",
+                "Motion Vectors", "Motion History"
             };
             const char* dv_tips[] = {
                 "Normal beauty render — debug visualizer off.",
@@ -1865,11 +1981,15 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
                 "Per-pixel ACCUMULATED SAMPLE COUNT, read at display time — the beauty "
                 "render keeps accumulating underneath and toggling never resets it. Best "
                 "with Adaptive Sampling on; Exposure scales the ramp.",
-                "Six-band material transmission, up to four sources, and sampled first diffuse bounce."
+                "Six-band material transmission, up to four sources, and sampled first diffuse bounce.",
+                "Per-pixel motion to the previous frame: grey = still, red/green = horizontal/"
+                "vertical motion. Exposure scales the vectors; darkened where history was rejected.",
+                "Red = history rejected (disocclusion, off-screen, material/normal change), "
+                "green = reactive (volume / transmissive primary), dark blue = history reused."
             };
-            int dv = std::clamp(ctx.render_settings.debug_view, 0, 15);
+            int dv = std::clamp(ctx.render_settings.debug_view, 0, 17);
             if (ImGui::BeginCombo("View Mode##dbgview", dv_items[dv])) {
-                for (int i = 0; i < 16; ++i) {
+                for (int i = 0; i < 18; ++i) {
                     const bool unavailable = false; // all registered views live
                     if (unavailable) ImGui::BeginDisabled();
                     if (ImGui::Selectable(dv_items[i], dv == i)) {
@@ -1910,42 +2030,6 @@ void SceneUI::drawRenderInspectorContent(UIContext& ctx)
             }
         }
 
-        UIWidgets::Divider();
-        UIWidgets::ColoredHeader("Denoiser (Viewport + Final + Sequence)", ImVec4(0.90f, 0.76f, 1.0f, 1.0f));
-        if (ImGui::Checkbox("Enable Denoiser", &ctx.render_settings.use_denoiser)) {
-            // Mirror to legacy 'render_use_denoiser' so the final single-frame
-            // render path (Main.cpp ~4049 / 4382) stays in sync without
-            // exposing a separate checkbox.
-            ctx.render_settings.render_use_denoiser = ctx.render_settings.use_denoiser;
-        }
-        UIWidgets::HelpMarker("Applies to interactive viewport, single-frame final render, "
-                              "AND sequence render output. Sequence frames are denoised "
-                              "before being saved to disk.");
-        if (ctx.render_settings.use_denoiser) {
-            const char* denoiser_mode_items[] = {
-                "Beauty only",
-                "Beauty + Albedo + Normal"
-            };
-            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
-            if (ImGui::Combo("Input Buffers", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
-                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
-            }
-            const char* denoiser_quality_items[] = {
-                "Fast (viewport)",
-                "Balanced",
-                "High (final)"
-            };
-            int denoiser_quality = static_cast<int>(ctx.render_settings.denoiser_quality);
-            if (ImGui::Combo("Denoiser Quality", &denoiser_quality, denoiser_quality_items, IM_ARRAYSIZE(denoiser_quality_items))) {
-                ctx.render_settings.denoiser_quality = static_cast<DenoiserQuality>(denoiser_quality);
-            }
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("OIDN model tier for the viewport. Fast is the cheapest\n(dominant cost on the GPU). Final renders always use High.");
-            }
-            ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
-        } else {
-            ImGui::TextDisabled("Denoiser is disabled.");
-        }
         UIWidgets::EndSection();
     }
 
@@ -3083,6 +3167,14 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
 
                         UIWidgets::Divider();
+                        UIWidgets::ColoredHeader("Light Paths", ImVec4(1.0f, 0.8f, 0.3f, 1.0f));
+                        DrawBounceControls(ctx);
+
+                        UIWidgets::Divider();
+                        UIWidgets::ColoredHeader("Denoise", ImVec4(0.8f, 0.5f, 1.0f, 1.0f));
+                        DrawDenoiseControls(ctx);
+
+                        UIWidgets::Divider();
                         ImGui::Checkbox("Show Scene Stats HUD", &ctx.render_settings.show_scene_stats_hud);
                         UIWidgets::Divider();
                         DrawRealtimeQualitySettingsSection(
@@ -3092,18 +3184,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                     }
 
                     // ─────────────────────────────────────────────────────────────────────────
-                    // LIGHT PATHS (Bounces)
+                    // LIGHT TRANSPORT (caustics, debug views; bounces and denoise sit under Sampling)
                     // ─────────────────────────────────────────────────────────────────────────
-                    if (UIWidgets::BeginSection("Light Paths", ImVec4(1.0f, 0.8f, 0.3f, 1.0f))) {
-                        ImGui::DragInt("Total Bounces", &ctx.render_settings.max_bounces, 1, 1, 64);
-                        ImGui::DragInt("Diffuse Bounces", &ctx.render_settings.diffuse_bounces, 1, 1, 64);
-                        ImGui::DragInt("Transmission Bounces", &ctx.render_settings.transmission_bounces, 1, 1, 64);
-                        ctx.render_settings.diffuse_bounces = std::clamp(ctx.render_settings.diffuse_bounces, 1, ctx.render_settings.max_bounces);
-                        ctx.render_settings.transmission_bounces = std::clamp(ctx.render_settings.transmission_bounces, 1, ctx.render_settings.max_bounces);
-
-                        UIWidgets::HelpMarker("Total is the global path limit. Diffuse limits indirect diffuse/SSS/translucent paths; Transmission limits glass and water continuation.");
-
-                        UIWidgets::Divider();
+                    if (UIWidgets::BeginSection("Light Transport", ImVec4(1.0f, 0.8f, 0.3f, 1.0f))) {
                         ImGui::Checkbox("Photon Caustics (Vulkan RT)##caustics2", &ctx.render_settings.caustics_enabled);
                         if (ctx.render_settings.caustics_enabled && ctx.render_settings.use_optix) {
                             UIWidgets::StatusIndicator("Caustics are not supported on the OptiX backend yet (Vulkan RT / CPU only)",
@@ -3131,7 +3214,8 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 "Photon Energy (surface)", "Caustic Cells", "Photon Directions",
                                 "Bounce Count", "Transmission", "Absorption", "Medium Density (interior)",
                                 "Normal (first hit)", "Albedo (first hit)", "Depth", "Material ID",
-                                "Sample Heatmap", "Acoustic Energy (six-band)"
+                                "Sample Heatmap", "Acoustic Energy (six-band)",
+                                "Motion Vectors", "Motion History"
                             };
                             const char* dv_tips2[] = {
                                 "Normal beauty render — debug visualizer off.",
@@ -3160,11 +3244,13 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                                 "Per-pixel accumulated sample count at display time — beauty "
                                 "keeps accumulating; toggling never resets. Best with Adaptive "
                                 "Sampling on.",
-                                "Six-band transmission, source sum and sampled first diffuse reflection."
+                                "Six-band transmission, source sum and sampled first diffuse reflection.",
+                                "Motion to the previous frame; grey = still. Darkened where history was rejected.",
+                                "Red = history rejected, green = reactive, dark blue = history reused."
                             };
-                            int dv = std::clamp(ctx.render_settings.debug_view, 0, 15);
+                            int dv = std::clamp(ctx.render_settings.debug_view, 0, 17);
                             if (ImGui::BeginCombo("Debug View##dbgview2", dv_items2[dv])) {
-                                for (int i = 0; i < 16; ++i) {
+                                for (int i = 0; i < 18; ++i) {
                                     const bool unavailable = false; // all registered views live
                                     if (unavailable) ImGui::BeginDisabled();
                                     if (ImGui::Selectable(dv_items2[i], dv == i)) {
@@ -3195,44 +3281,6 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
                         }
                         UIWidgets::EndSection();
                     }
-
-                    // ─────────────────────────────────────────────────────────────────────────
-                    // DENOISING
-                    // ─────────────────────────────────────────────────────────────────────────
-                    if (UIWidgets::BeginSection("Denoising", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
-                        if (ImGui::Checkbox("Enable Denoiser (Viewport + Final + Sequence)", &ctx.render_settings.use_denoiser)) {
-                            // Mirror to legacy 'render_use_denoiser' so the single-frame final render
-                            // path stays in sync without a separate checkbox.
-                            ctx.render_settings.render_use_denoiser = ctx.render_settings.use_denoiser;
-                        }
-                        UIWidgets::HelpMarker("Applies to interactive viewport, single-frame final render, "
-                                              "AND sequence render output.");
-                        if (ctx.render_settings.use_denoiser) {
-                            const char* denoiser_mode_items[] = {
-                                "Beauty only",
-                                "Beauty + Albedo + Normal"
-                            };
-                            int denoiser_mode = static_cast<int>(ctx.render_settings.denoiser_mode);
-                            if (ImGui::Combo("Input Buffers", &denoiser_mode, denoiser_mode_items, IM_ARRAYSIZE(denoiser_mode_items))) {
-                                ctx.render_settings.denoiser_mode = static_cast<DenoiserMode>(denoiser_mode);
-                            }
-                            const char* denoiser_quality_items[] = {
-                                "Fast (viewport)",
-                                "Balanced",
-                                "High (final)"
-                            };
-                            int denoiser_quality = static_cast<int>(ctx.render_settings.denoiser_quality);
-                            if (ImGui::Combo("Denoiser Quality", &denoiser_quality, denoiser_quality_items, IM_ARRAYSIZE(denoiser_quality_items))) {
-                                ctx.render_settings.denoiser_quality = static_cast<DenoiserQuality>(denoiser_quality);
-                            }
-                            if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("OIDN model tier for the viewport. Fast is the cheapest\n(dominant cost on the GPU). Final renders always use High.");
-                            }
-                            ImGui::SliderFloat("Blend Factor", &ctx.render_settings.denoiser_blend_factor, 0.0f, 1.0f);
-                        }
-                        UIWidgets::EndSection();
-                    }
-
 
                     // Resolution & Output controls moved to the System panel.
 
@@ -9445,6 +9493,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     // ─────────────────────────────────────────────────────────────────────────
     if (UIWidgets::BeginSection("Ray Marching Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
         ImGui::Indent();
+        changed |= drawVolumeAdaptiveStepping(*shader);
         // ★ THE PRESET COMBO WAS REMOVED 2026-09-20, and rule 5 is why.
         // It only wrote these same four sliders, so it duplicated the authority
         // without adding any — and one of the values it wrote (Voxels/Sample)

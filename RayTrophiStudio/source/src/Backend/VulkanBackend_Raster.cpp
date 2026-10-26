@@ -1976,6 +1976,7 @@ bool VulkanBackendAdapter::setRasterGpuInstancing(bool enabled) {
 }
 
 void VulkanBackendAdapter::rebuildRasterInstanceLayout() {
+    if (m_rasterGlobalInstBuf) m_rasterGlobalInstBuf->invalidatePrevious();
     if (!m_device || !m_device->isInitialized() || !m_rasterGpuInstancingAllowed) {
         m_rasterUseGlobalInstBuffer = false;
         return;

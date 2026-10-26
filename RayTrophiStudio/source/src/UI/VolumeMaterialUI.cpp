@@ -7,6 +7,20 @@
 #include <algorithm>
 #include <cmath>
 
+bool drawVolumeAdaptiveStepping(VolumeShader& shader) {
+    bool adaptive = shader.quality.adaptive_stepping;
+    if (!ImGui::Checkbox("Adaptive Volume Steps", &adaptive)) {
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("RT mixtures adapt to all density fields and stop at voxel "
+                "boundaries. Noise/graphs use fixed steps; emissive fields do not coarsen. "
+                "Voxels / Sample remains the base resolution.");
+        }
+        return false;
+    }
+    std::string error;
+    return volume_material::configure(shader, {{"adaptive_stepping", adaptive}}, error);
+}
+
 void drawMatterFogLinks(UIContext& context, SceneUI& ui,
     const RayTrophiSim::SimulationGridDomainDesc& domain) {
     if (domain.type != RayTrophiSim::SimulationDomainType::Matter) {
@@ -28,7 +42,7 @@ void drawMatterFogLinks(UIContext& context, SceneUI& ui,
                 }
                 ImGui::PushID(RayTrophiSim::Fluid::fogFieldId(key).c_str());
                 if (ImGui::SmallButton(("Edit " +
-                        RayTrophiSim::Fluid::fogFieldName(key) + " Fog...").c_str())) {
+                        stream.volume->name + " Fog...").c_str())) {
                     context.selection.selectVDBVolume(stream.volume, -1, stream.volume->name);
                     ui.tab_to_focus = "VDB";
                 }
@@ -53,7 +67,7 @@ bool drawMatterFogVisibility(UIContext& context, VDBVolume* volume) {
                 auto& appearance = domains[d].matter_fog_streams.at(key);
                 bool visible = appearance.visible;
                 ImGui::TextDisabled("Live Matter field: %s",
-                    RayTrophiSim::Fluid::fogFieldName(key).c_str());
+                    volume->name.c_str());
                 if (ImGui::Checkbox("Visible##MatterFog", &visible)) {
                     const auto result = volume_material::execute(context, "set",
                         "matter:" + domains[d].name + ":" +
@@ -223,8 +237,9 @@ bool drawPhysicalVolumeMaterialUI(VolumeShader& shader) {
         "Density power 0 keeps positive thin cells luminous; empty cells stay dark. "
         "Response off restores the legacy emission equation. The radiance limiter remains.");
     if (shader.scattering.random_walk) {
-        ImGui::TextWrapped("The RT walk requires emission off and no spatial Volume Graph "
-            "or overlapping companion. Dense clouds need sufficient event and sample budgets.");
+        ImGui::TextWrapped("RT mixtures support overlapping contributors and independent "
+            "emission. Density noise and spatial Volume Graph fields retain fixed steps. "
+            "Dense clouds need sufficient event and sample budgets.");
     }
     static std::string error;
     bool changed = false;

@@ -39,6 +39,8 @@
 // ===========================================================================
 
 layout(local_size_x = 256) in;
+layout(binding = 8, std430) readonly buffer PreviousMatrices { vec4 previousMat[]; };
+layout(binding = 9, std430) writeonly buffer PreviousCompacted { vec4 previousOut[]; };
 
 // --- pass 0 icin mesh basina, pass 1 icin tum mesh'ler uzerinde ------------
 layout(push_constant) uniform PC {
@@ -197,6 +199,9 @@ void classify(uint meshIndex) {
     dstMat[d0 + 1u] = srcMat[s + 1u];
     dstMat[d0 + 2u] = srcMat[s + 2u];
     dstMat[d0 + 3u] = srcMat[s + 3u];
+    for (uint k = 0u; k < 4u; ++k) {
+        previousOut[d0 + k] = previousMat[s + k];
+    }
 }
 
 // cmds[] tek bir 5-uint kayit dizisidir (20 bayt adim).

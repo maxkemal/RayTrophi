@@ -169,7 +169,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
     //   G-buffer: oct normal, ve speküler agirlik + roughness) ve blend eklenti SAYISI gecisle uyusmak zorunda. Bu gecis
     //   G-buffer'a YAZMAZ -- yazsaydi arkasindaki opak yuzeyin normalini
     //   silerdi. LDR'ye dusuldugunde tek eklentiye geri doner.
-    VkPipelineColorBlendAttachmentState attachments[3]{};
+    VkPipelineColorBlendAttachmentState attachments[4]{};
     attachments[0] = attachment;
     attachments[1].colorWriteMask = 0;
     attachments[1].blendEnable = VK_FALSE;
@@ -220,7 +220,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewSdfSurfaceResources(
             ? m_interactiveViewport.hdrRenderPass
             : m_interactiveViewport.renderPass;
     const uint32_t previewAttachmentCount =
-        m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE ? 3u : 1u;
+        m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE ? 4u : 1u;
     const VkResult previewResult = createPipeline(
         previewRenderPass, previewAttachmentCount, state.previewPipeline);
     const VkResult solidResult = createPipeline(

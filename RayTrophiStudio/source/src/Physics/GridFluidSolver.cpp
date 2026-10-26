@@ -8,6 +8,7 @@
 * =========================================================================
 */
 #include "GridFluidSolver.h"
+#include "Fluid/GasSourceProvenance.h"
 #include "GridAdvectionTrace.h"
 
 #include "SimulationWorld.h" // SimulationForceFieldSnapshot, SimulationSystemKind
@@ -1298,6 +1299,12 @@ void step(FluidGrid& grid,
         advectVelocity(grid, params, dt);
         mark(cursor, stats ? &stats->advect_velocity_ms : nullptr);
     }
+    if (params.source_provenance && !params.skip_scalar_advection) {
+        Fluid::gasSourceStage(*params.source_provenance, params, dt,
+            Fluid::GasSourceStage::Prepare);
+        Fluid::gasSourceStage(*params.source_provenance, params, dt,
+            Fluid::GasSourceStage::Advect);
+    }
     if (params.channel_density && !params.skip_scalar_advection) {
         advectScalar(grid, params, grid.density, 0.0f, dt,
                      0, 0, 0, grid.nx - 1, grid.ny - 1, grid.nz - 1);
@@ -1319,6 +1326,10 @@ void step(FluidGrid& grid,
     if (params.channel_velocity) enforceSolidBoundaries(grid);
     mark(cursor, stats ? &stats->boundary_ms : nullptr);
 
+    if (params.source_provenance && !params.skip_scalar_advection) {
+        Fluid::gasSourceStage(*params.source_provenance, params, dt,
+            Fluid::GasSourceStage::Transported);
+    }
     // 1b) Surface dust. A source, and it runs BEFORE buoyancy so the dust this
     // step's wind lifted is part of what this step's buoyancy sorts out. After
     // the boundary pass, so a wind that has just been zeroed at a wall does not
@@ -1331,7 +1342,15 @@ void step(FluidGrid& grid,
     // 2) Combustion: burn fuel -> heat + smoke (before buoyancy so released heat
     // lifts this step). Opt-in; no-op when fire is disabled.
     if (!params.skip_combustion) {
+        if (params.source_provenance) {
+            Fluid::gasSourceStage(*params.source_provenance, params, dt,
+                Fluid::GasSourceStage::Prepare);
+        }
         processCombustion(grid, params, dt);
+        if (params.source_provenance) {
+            Fluid::gasSourceStage(*params.source_provenance, params, dt,
+                Fluid::GasSourceStage::Reacted);
+        }
         mark(cursor, stats ? &stats->combustion_ms : nullptr);
     }
 

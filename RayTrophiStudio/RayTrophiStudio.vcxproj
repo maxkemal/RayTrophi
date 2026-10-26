@@ -730,6 +730,7 @@
     <ClInclude Include="source\src\Backend\VulkanBackend_Internal.h" />
     <ClInclude Include="source\include\Backend\VulkanVolumeInstrumentation.h" />
     <ClInclude Include="source\include\Backend\VulkanVolumeTemporal.h" />
+    <ClInclude Include="source\include\Backend\VulkanMotionHistory.h" />
     <ClInclude Include="source\include\UI\scene_ui_volume_performance.hpp" />
     <ClInclude Include="source\include\UI\CloudMaterialUI.h" />
     <ClInclude Include="source\include\UI\StormGizmoUI.h" />
@@ -1615,6 +1616,8 @@
     <ClInclude Include="source\include\Api\RayGpuTimingApi.h" />
     <ClInclude Include="source\src\Api\RtRayGpuTimingBindings.h" />
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanMotionHistory.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
@@ -1655,6 +1658,8 @@
     <ClCompile Include="source\src\Viewport\MaterialPreviewReflection.cpp" />
     <ClInclude Include="source\include\RayFusion\ScreenGi.h" />
     <ClInclude Include="source\include\Api\RtApiScreenGi.h" />
+    <ClInclude Include="source\include\Api\RtApiDenoiser.h" />
+    <ClInclude Include="source\include\Api\RtApiMotion.h" />
     <ClInclude Include="source\include\UI\ScreenGiUI.h" />
     <ClInclude Include="source\src\Api\RtScreenGiBindings.h" />
     <ClInclude Include="source\src\Api\RtIpcScreenGi.h" />
@@ -1816,6 +1821,8 @@
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiLights.cpp" />
     <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp" />
+    <ClCompile Include="source\src\Api\RtApiDenoiser.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMotion.cpp" />
     <ClCompile Include="source\src\Api\RtApiClouds.cpp" />
     <ClCompile Include="source\src\Api\RtVolumeMaterialBindings.cpp" />
     <ClCompile Include="source\src\Scene\VolumeMaterialAuthoring.cpp" />
@@ -1878,6 +1885,10 @@
     <ClCompile Include="source\src\Physics\Fluid\MatterFogStreams.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterFogSnapshot.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterFogPublisher.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasSourceProvenance.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasSourceCache.cpp" />
+    <ClInclude Include="source\include\Fluid\GasSourceCache.h" />
+    <ClInclude Include="source\include\Fluid\GasSourceProvenance.h" />
     <ClCompile Include="source\src\Api\RtPythonSourceSplatGeometry.cpp" />
     <ClCompile Include="source\src\Api\RtIpcSourceSplatGeometry.cpp" />
     <ClCompile Include="source\src\UI\SourceSplatGeometryUI.cpp" />
@@ -2915,5 +2926,21 @@
   <ItemGroup>
   </ItemGroup>
   <ItemGroup>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiser.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiserAdapter.cpp" />
+    <ClCompile Include="source\src\Api\RtApiRealtimeDenoiser.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcRealtimeDenoiser.cpp" />
+    <ClCompile Include="source\src\Api\RtRealtimeDenoiserBindings.cpp" />
+    <ClCompile Include="source\src\UI\RealtimeDenoiserControls.cpp" />
+    <ClInclude Include="source\include\Backend\VulkanRealtimeDenoiser.h" />
+    <ClInclude Include="source\include\Backend\RealtimeDenoiserTypes.h" />
+    <ClInclude Include="source\include\Api\RtApiRealtimeDenoiser.h" />
+    <ClInclude Include="source\src\Api\RtIpcRealtimeDenoiser.h" />
+    <ClInclude Include="source\src\Api\RtRealtimeDenoiserBindings.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Viewport\RasterObjectMotion.cpp" />
   </ItemGroup>
 </Project>

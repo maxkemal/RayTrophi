@@ -10,6 +10,8 @@ namespace Backend {
 struct RasterGlobalInstanceBuffer::Impl {
     VulkanRT::VulkanDevice* device = nullptr;
     VulkanRT::BufferHandle  buffer;
+    VulkanRT::BufferHandle previous;
+    bool previousValid = false;
     uint32_t                capacity = 0;   // in instances
     void*                   mapped   = nullptr;
 };
@@ -42,6 +44,11 @@ bool RasterGlobalInstanceBuffer::ensure(VulkanRT::VulkanDevice& device,
         static_cast<VkDeviceSize>(newCapacity) * kInstanceStride;
 
     // Tear down old buffer first.
+    if (impl_->previous.buffer) {
+        device.destroyBuffer(impl_->previous);
+        impl_->previous = {};
+    }
+    impl_->previousValid = false;
     if (impl_->buffer.buffer) {
         if (impl_->mapped) {
             device.unmapBuffer(impl_->buffer);
@@ -58,6 +65,7 @@ bool RasterGlobalInstanceBuffer::ensure(VulkanRT::VulkanDevice& device,
     //   yazimi gecersiz olur ve culling sessizce kurulamaz.
     ci.usage       = VulkanRT::BufferUsage::VERTEX |
                      VulkanRT::BufferUsage::STORAGE |
+                     VulkanRT::BufferUsage::TRANSFER_SRC |
                      VulkanRT::BufferUsage::TRANSFER_DST;
     // ★ CPU_TO_GPU = HOST_VISIBLE | HOST_COHERENT: the whole point is to write
     // directly through a persistently mapped pointer and avoid staging +
@@ -86,7 +94,45 @@ bool RasterGlobalInstanceBuffer::ensure(VulkanRT::VulkanDevice& device,
 
     impl_->capacity = newCapacity;
     impl_->device   = &device;
+    ci.usage = VulkanRT::BufferUsage::VERTEX | VulkanRT::BufferUsage::STORAGE |
+        VulkanRT::BufferUsage::TRANSFER_DST;
+    ci.location = VulkanRT::MemoryLocation::GPU_ONLY;
+    impl_->previous = device.createBuffer(ci);
     return true;
+}
+
+void* RasterGlobalInstanceBuffer::previousBuffer() const {
+    return impl_->previousValid && impl_->previous.buffer ?
+        impl_->previous.buffer : impl_->buffer.buffer;
+}
+
+bool RasterGlobalInstanceBuffer::previousValid() const {
+    return impl_->previousValid && impl_->previous.buffer;
+}
+
+void RasterGlobalInstanceBuffer::invalidatePrevious() {
+    impl_->previousValid = false;
+}
+
+void RasterGlobalInstanceBuffer::recordPrevious(void* commandBuffer) {
+    if (!impl_->previous.buffer || !impl_->buffer.buffer || !commandBuffer) {
+        return;
+    }
+    const auto cmd = static_cast<VkCommandBuffer>(commandBuffer);
+    VkMemoryBarrier barrier{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    barrier.srcAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT |
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &barrier, 0, nullptr, 0, nullptr);
+    VkBufferCopy copy{0, 0, impl_->buffer.size};
+    vkCmdCopyBuffer(cmd, impl_->buffer.buffer, impl_->previous.buffer, 1, &copy);
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        0, 1, &barrier, 0, nullptr, 0, nullptr);
+    impl_->previousValid = true;
 }
 
 void RasterGlobalInstanceBuffer::write(uint32_t instanceOffset,
@@ -125,6 +171,11 @@ bool RasterGlobalInstanceBuffer::isReady() const {
 
 void RasterGlobalInstanceBuffer::destroy() {
     if (!impl_) return;
+    if (impl_->previous.buffer && impl_->device) {
+        impl_->device->destroyBuffer(impl_->previous);
+        impl_->previous = {};
+    }
+    impl_->previousValid = false;
     if (impl_->buffer.buffer && impl_->device) {
         if (impl_->mapped) {
             impl_->device->unmapBuffer(impl_->buffer);

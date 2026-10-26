@@ -1895,8 +1895,8 @@ const char* debugViewName(int v) {
         "off", "photon_grid", "light_shafts", "photon_energy", "caustic_cells",
         "photon_directions", "bounce_count", "transmission", "absorption",
         "medium_density", "normal", "albedo", "depth", "material_id",
-        "sample_heatmap", "acoustic_surface"};
-    return (v >= 0 && v < 16) ? names[v] : "unknown";
+        "sample_heatmap", "acoustic_surface", "motion_vectors", "motion_history"};
+    return (v >= 0 && v < 18) ? names[v] : "unknown";
 }
 } // namespace
 
@@ -1907,33 +1907,86 @@ RenderBudgetInfo renderBudget() {
     out.max_bounces = rs.max_bounces;
     out.diffuse_bounces = rs.diffuse_bounces;
     out.transmission_bounces = rs.transmission_bounces;
+    out.rr_start_bounce = rs.rr_start_bounce;
     out.debug_view = rs.debug_view;
     out.debug_view_name = debugViewName(rs.debug_view);
+    // Mirrors the effective-budget selection in the main loop.
+    out.motion_profile_active = rs.motion_profile_active;
+    out.effective_max_bounces = rs.motion_profile_active ? rs.motion_max_bounces : rs.max_bounces;
+    out.effective_diffuse_bounces = rs.motion_profile_active ? rs.motion_diffuse_bounces : rs.diffuse_bounces;
+    out.effective_transmission_bounces =
+        rs.motion_profile_active ? rs.motion_transmission_bounces : rs.transmission_bounces;
     return out;
 }
 
 Result setRenderBudget(std::optional<int> max_bounces,
                        std::optional<int> diffuse_bounces,
                        std::optional<int> transmission_bounces,
-                       std::optional<int> debug_view) {
+                       std::optional<int> debug_view,
+                       std::optional<int> rr_start_bounce) {
     if (!g_ctx) return Result::fail("no UI context");
     // Same range as the panel's DragInt (1..64).
     auto inRange = [](const std::optional<int>& v) { return !v || (*v >= 1 && *v <= 64); };
     if (!inRange(max_bounces) || !inRange(diffuse_bounces) || !inRange(transmission_bounces))
         return Result::fail("bounce counts must be in [1, 64]");
-    if (debug_view && (*debug_view < 0 || *debug_view > 15))
-        return Result::fail("debug_view must be in [0, 15]");
+    if (debug_view && (*debug_view < 0 || *debug_view > 17))
+        return Result::fail("debug_view must be in [0, 17]");
+    if (!inRange(rr_start_bounce))
+        return Result::fail("rr_start_bounce must be in [1, 64]");
     auto& rs = g_ctx->render_settings;
     if (max_bounces) rs.max_bounces = *max_bounces;
     if (diffuse_bounces) rs.diffuse_bounces = *diffuse_bounces;
     if (transmission_bounces) rs.transmission_bounces = *transmission_bounces;
-    if (debug_view) {
-        rs.debug_view = *debug_view;
-        g_ctx->start_render = true;
-    }
+    if (debug_view) rs.debug_view = *debug_view;
+    if (rr_start_bounce) rs.rr_start_bounce = *rr_start_bounce;
     // The panel clamps the sub-budgets to the total after every edit.
     rs.diffuse_bounces = std::clamp(rs.diffuse_bounces, 1, rs.max_bounces);
     rs.transmission_bounces = std::clamp(rs.transmission_bounces, 1, rs.max_bounces);
+    // ★ The main loop's render-param change detection (which resets
+    // accumulation) only runs inside the start_render block. Raising it only
+    // for debug_view left a CONVERGED viewport showing the old bounce budget
+    // after a bounce edit - measured 2026-10-26: samples stayed 128, no RT
+    // dispatch for 3 s, while render.get_settings already reported the new value.
+    if (max_bounces || diffuse_bounces || transmission_bounces || debug_view || rr_start_bounce)
+        g_ctx->start_render = true;
+    return Result::success();
+}
+
+MotionProfileInfo motionProfile() {
+    MotionProfileInfo out;
+    if (!g_ctx) return out;
+    const auto& rs = g_ctx->render_settings;
+    out.enabled = rs.motion_profile_enabled;
+    out.max_bounces = rs.motion_max_bounces;
+    out.diffuse_bounces = rs.motion_diffuse_bounces;
+    out.transmission_bounces = rs.motion_transmission_bounces;
+    out.settle_ms = rs.motion_settle_ms;
+    out.active = rs.motion_profile_active;
+    return out;
+}
+
+Result setMotionProfile(std::optional<bool> enabled,
+                        std::optional<int> max_bounces,
+                        std::optional<int> diffuse_bounces,
+                        std::optional<int> transmission_bounces,
+                        std::optional<int> settle_ms) {
+    if (!g_ctx) return Result::fail("no UI context");
+    auto inRange = [](const std::optional<int>& v) { return !v || (*v >= 1 && *v <= 64); };
+    if (!inRange(max_bounces) || !inRange(diffuse_bounces) || !inRange(transmission_bounces))
+        return Result::fail("bounce counts must be in [1, 64]");
+    if (settle_ms && (*settle_ms < 0 || *settle_ms > 5000))
+        return Result::fail("settle_ms must be in [0, 5000]");
+    auto& rs = g_ctx->render_settings;
+    if (enabled) rs.motion_profile_enabled = *enabled;
+    if (max_bounces) rs.motion_max_bounces = *max_bounces;
+    if (diffuse_bounces) rs.motion_diffuse_bounces = *diffuse_bounces;
+    if (transmission_bounces) rs.motion_transmission_bounces = *transmission_bounces;
+    if (settle_ms) rs.motion_settle_ms = *settle_ms;
+    rs.motion_diffuse_bounces = std::clamp(rs.motion_diffuse_bounces, 1, rs.motion_max_bounces);
+    rs.motion_transmission_bounces = std::clamp(rs.motion_transmission_bounces, 1, rs.motion_max_bounces);
+    // The main loop flips motion_profile_active on the next frame (disabling
+    // drops it at once) and applies the effective budget from there.
+    g_ctx->start_render = true;
     return Result::success();
 }
 
