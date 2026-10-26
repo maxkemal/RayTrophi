@@ -12,6 +12,7 @@
 #include "Fluid/FluidLevelSet.h"
 #include "Fluid/FluidThermalLiquid.h"
 #include "Fluid/GasInventoryGpu.h"
+#include "Fluid/GasSourceProvenance.h"
 #include "Fluid/WhitewaterRuntime.h"
 #include "Fluid/FluidFoam.h"
 #include "Fluid/FluidRenderMode.h"
@@ -1206,6 +1207,9 @@ struct SimulationGridDomainState {
     // carried by the wind like the vapour. Its energy is in gas_phase_energy_j.
     // The saturation adjustment never touches it (it is not the domain's water).
     std::vector<float> gas_phase_foreign_kg;
+    Fluid::GasSourceImages gas_source_images;
+    std::weak_ptr<Fluid::GasSourceDevice> gas_source_device;
+    bool gas_source_device_current = false;
     // Fog or rain water may be present (set by a condensate deposit, refreshed
     // by the saturation pass). Gates the pass on gas domains without a
     // thermal chain.
@@ -1591,6 +1595,7 @@ struct SimulationGridDomainComputeBuffers {
     // (0=open, 1=solid) plus moving-wall linear velocity components.
     ComputeBufferHandle gas_solid_mask;
     Fluid::GasInventoryGpuBuffers gas_inventory;
+    std::shared_ptr<Fluid::GasSourceDevice> gas_source_owner;
     ComputeBufferHandle gas_solid_vel_x;
     ComputeBufferHandle gas_solid_vel_y;
     ComputeBufferHandle gas_solid_vel_z;

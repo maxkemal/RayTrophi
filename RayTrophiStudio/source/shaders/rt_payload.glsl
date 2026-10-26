@@ -44,6 +44,9 @@ struct RayPayload {
                           // bits 17-18 : spectral dispersion hero channel
                           //              (0 = unset, 1/2/3 = R/G/B; persists across
                           //               bounces — per-bounce resets must preserve it)
+    uint  primaryInst;    // TLAS instance index (gl_InstanceID) of the primary
+                          // surface record; 0xFFFFFFFF = not a triangle surface.
+                          // Read by raygen's motion AOV for rigid object motion.
 };
 
 // Reuse the traversal word on return rather than growing the RT payload. The

@@ -1328,6 +1328,7 @@ void reset_render_resolution(int w, int h)
         rp.maxBounces = std::max(1, render_settings.max_bounces); // min 1: sıfır = primary ray only
         rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
         rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
+        rp.rrStartBounce = render_settings.rr_start_bounce;
         rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
         rp.adaptiveThreshold = render_settings.variance_threshold;
         rp.causticsEnabled = render_settings.caustics_enabled;
@@ -5175,6 +5176,95 @@ int main(int argc, char* argv[]) try {
                 start_render = true;
             }
 
+            // ★★★ A denoiser edit must reach a CONVERGED frame too - same failure
+            // as the post edit above. The denoise block runs only inside the
+            // start_render block, and a converged backend re-presents nothing, so
+            // an edit landed in RenderSettings while the screen kept the old
+            // image. Measured 2026-10-26 over IPC: quality change on a converged
+            // frame -> 0 denoise calls in 2.5 s. Turning the denoiser OFF is the
+            // worse half: the surface still holds the denoised pixels, so it
+            // looks like the switch does nothing. Detected here, not in the
+            // panel or the API, so every writer gets it.
+            {
+                static uint64_t s_lastDenoiserSig = 0;
+                static bool s_haveDenoiserSig = false;
+                uint32_t blendBits = 0;
+                std::memcpy(&blendBits, &render_settings.denoiser_blend_factor, sizeof(blendBits));
+                const uint64_t sig =
+                    (uint64_t(render_settings.use_denoiser) << 0) |
+                    (uint64_t(render_settings.render_use_denoiser) << 1) |
+                    (uint64_t(render_settings.timeline_use_denoiser) << 2) |
+                    (uint64_t(render_settings.denoiser_mode) << 3) |
+                    (uint64_t(render_settings.denoiser_quality) << 5) |
+                    (uint64_t(blendBits) << 32);
+                if (s_haveDenoiserSig && sig != s_lastDenoiserSig && isActiveRenderBackendGpu()) {
+                    start_render = true;
+                    if (g_backend) g_backend->requestPresentRefresh();
+                }
+                s_lastDenoiserSig = sig;
+                s_haveDenoiserSig = true;
+            }
+
+            // Motion bounce profile. Camera motion is detected from the pose
+            // itself, not from g_camera_dirty: that flag has several consumers
+            // and whichever runs first clears it. Active = enabled and the pose
+            // changed within motion_settle_ms. A flip wakes the render block,
+            // whose change detection then applies the effective budget (and
+            // resets accumulation) - including the flip back to the authored
+            // budget after the camera stops on an otherwise idle viewport.
+            {
+                static Vec3 s_lastFrom, s_lastAt;
+                static float s_lastFov = -1.0f;
+                static auto s_lastMotion = std::chrono::steady_clock::time_point{};
+                const auto now = std::chrono::steady_clock::now();
+                if (scene.camera) {
+                    const Camera& c = *scene.camera;
+                    const bool moved = s_lastFov >= 0.0f &&
+                        (c.lookfrom.x != s_lastFrom.x || c.lookfrom.y != s_lastFrom.y ||
+                         c.lookfrom.z != s_lastFrom.z || c.lookat.x != s_lastAt.x ||
+                         c.lookat.y != s_lastAt.y || c.lookat.z != s_lastAt.z ||
+                         c.vfov != s_lastFov);
+                    if (moved) s_lastMotion = now;
+                    s_lastFrom = c.lookfrom;
+                    s_lastAt = c.lookat;
+                    s_lastFov = c.vfov;
+                }
+                rtapi::updateRealtimeDenoiserPolicy(
+                    s_lastMotion != std::chrono::steady_clock::time_point{} &&
+                    now - s_lastMotion < std::chrono::milliseconds(150),
+                    render_settings.is_final_render_mode);
+                const bool active = render_settings.motion_profile_enabled &&
+                    s_lastMotion != std::chrono::steady_clock::time_point{} &&
+                    now - s_lastMotion < std::chrono::milliseconds(std::max(0, render_settings.motion_settle_ms));
+                if (active != render_settings.motion_profile_active) {
+                    render_settings.motion_profile_active = active;
+                    if (isActiveRenderBackendGpu()) start_render = true;
+                }
+            }
+
+            // Motion AOV options -> every Vulkan device. Pushed on change and
+            // whenever a backend object is replaced (rebuild, device recovery).
+            {
+                static Backend::IBackend* s_motionRender = nullptr;
+                static Backend::IBackend* s_motionViewport = nullptr;
+                static int s_motionSig = -1;
+                const int sig = (render_settings.motion_aov_enabled ? 1 : 0) |
+                                (render_settings.motion_halton_jitter ? 2 : 0);
+                Backend::IBackend* rb = g_backend.get();
+                Backend::IBackend* vb = g_viewport_backend.get();
+                if (sig != s_motionSig || rb != s_motionRender || vb != s_motionViewport) {
+                    for (Backend::IBackend* b : {rb, vb}) {
+                        if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(b))
+                            vk->setMotionAovOptions(render_settings.motion_aov_enabled,
+                                                    render_settings.motion_halton_jitter);
+                    }
+                    if (sig != s_motionSig && s_motionSig >= 0 && isActiveRenderBackendGpu()) start_render = true;
+                    s_motionSig = sig;
+                    s_motionRender = rb;
+                    s_motionViewport = vb;
+                }
+            }
+
             // 2. Handle Interactive Render (One Frame / Progressive)
             // ONLY if no background rendering is happening
             if (start_render && Viewport::allowGpuWork(
@@ -5557,15 +5647,28 @@ int main(int argc, char* argv[]) try {
                             static bool last_dof = true;
                             static float last_dof_max_coc = -1.0f;
                             static int last_dof_max_taps = -1;
+                            static int last_rr_start_bounce = -1;
                             int current_max = render_settings.is_final_render_mode ? render_settings.final_render_samples : render_settings.max_samples;
+                            // Effective bounce budget: the motion profile replaces the
+                            // authored one while active (render_settings.max_bounces etc.
+                            // are never overwritten). A flip of motion_profile_active is
+                            // a budget change here, so the backend resets accumulation.
+                            const bool motion_budget = render_settings.motion_profile_active;
+                            const int eff_max_bounces = motion_budget ? render_settings.motion_max_bounces
+                                                                      : render_settings.max_bounces;
+                            const int eff_diffuse_bounces = motion_budget ? render_settings.motion_diffuse_bounces
+                                                                          : render_settings.diffuse_bounces;
+                            const int eff_transmission_bounces = motion_budget ? render_settings.motion_transmission_bounces
+                                                                               : render_settings.transmission_bounces;
 
                             if (activeViewportBackend != last_backend ||
                                 image_width != last_w || image_height != last_h ||
                                 current_max != last_max ||
                                 render_settings.min_samples != last_min ||
-                                render_settings.max_bounces != last_bounces ||
-                                render_settings.diffuse_bounces != last_diffuse_bounces ||
-                                render_settings.transmission_bounces != last_transmission_bounces ||
+                                eff_max_bounces != last_bounces ||
+                                eff_diffuse_bounces != last_diffuse_bounces ||
+                                eff_transmission_bounces != last_transmission_bounces ||
+                                render_settings.rr_start_bounce != last_rr_start_bounce ||
                                 render_settings.use_adaptive_sampling != last_adaptive ||
                                 std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f ||
                                 render_settings.caustics_enabled != last_caustics ||
@@ -5592,9 +5695,10 @@ int main(int argc, char* argv[]) try {
                                 rp.imageHeight = image_height;
                                 rp.samplesPerPixel = current_max;
                                 rp.minSamples = render_settings.min_samples;
-                                rp.maxBounces = std::max(1, render_settings.max_bounces);
-                                rp.diffuseBounces = std::clamp(render_settings.diffuse_bounces, 1, rp.maxBounces);
-                                rp.transmissionBounces = std::clamp(render_settings.transmission_bounces, 1, rp.maxBounces);
+                                rp.maxBounces = std::max(1, eff_max_bounces);
+                                rp.diffuseBounces = std::clamp(eff_diffuse_bounces, 1, rp.maxBounces);
+                                rp.transmissionBounces = std::clamp(eff_transmission_bounces, 1, rp.maxBounces);
+                                rp.rrStartBounce = render_settings.rr_start_bounce;
                                 rp.useAdaptiveSampling = render_settings.use_adaptive_sampling;
                                 rp.adaptiveThreshold = render_settings.variance_threshold;
                                 rp.causticsEnabled = render_settings.caustics_enabled;
@@ -5624,9 +5728,10 @@ int main(int argc, char* argv[]) try {
                                     if (image_width != last_w || image_height != last_h) add("size");
                                     if (current_max != last_max) add("max_samples");
                                     if (render_settings.min_samples != last_min) add("min_samples");
-                                    if (render_settings.max_bounces != last_bounces) add("max_bounces");
-                                    if (render_settings.diffuse_bounces != last_diffuse_bounces) add("diffuse_bounces");
-                                    if (render_settings.transmission_bounces != last_transmission_bounces) add("transmission_bounces");
+                                    if (eff_max_bounces != last_bounces) add("max_bounces");
+                                    if (eff_diffuse_bounces != last_diffuse_bounces) add("diffuse_bounces");
+                                    if (eff_transmission_bounces != last_transmission_bounces) add("transmission_bounces");
+                                    if (render_settings.rr_start_bounce != last_rr_start_bounce) add("rr_start_bounce");
                                     if (render_settings.use_adaptive_sampling != last_adaptive) add("adaptive");
                                     if (std::abs(render_settings.variance_threshold - last_threshold) > 0.0001f) add("variance_threshold");
                                     if (render_settings.caustics_enabled != last_caustics) add("caustics");
@@ -5649,9 +5754,10 @@ int main(int argc, char* argv[]) try {
                                 last_h = image_height;
                                 last_max = current_max;
                                 last_min = render_settings.min_samples;
-                                last_bounces = render_settings.max_bounces;
-                                last_diffuse_bounces = render_settings.diffuse_bounces;
-                                last_transmission_bounces = render_settings.transmission_bounces;
+                                last_bounces = eff_max_bounces;
+                                last_diffuse_bounces = eff_diffuse_bounces;
+                                last_transmission_bounces = eff_transmission_bounces;
+                                last_rr_start_bounce = render_settings.rr_start_bounce;
                                 last_adaptive = render_settings.use_adaptive_sampling;
                                 last_threshold = render_settings.variance_threshold;
                                 last_caustics = render_settings.caustics_enabled;
@@ -6075,13 +6181,88 @@ int main(int argc, char* argv[]) try {
                         const bool use_denoiser_aux = (ui_ctx.render_settings.denoiser_mode == DenoiserMode::Quality);
                         const int denoiser_sample_count = (g_backend ? g_backend->getCurrentSampleCount() : 0);
                         const bool allow_vulkan_viewport_denoiser = true;
-                        
-                        if (effective_denoiser &&
+                        const bool denoise_possible =
+                            effective_denoiser &&
+                            !rtapi::realtimeDenoiserOwnsViewport(g_backend.get()) &&
                             g_backend &&
                             denoiser_sample_count > 0 &&
                             allow_vulkan_viewport_denoiser &&
                             !g_viewport_rebuild_in_progress.load(std::memory_order_acquire) &&
-                            !g_optix_rebuild_in_progress.load(std::memory_order_acquire)) {
+                            !g_optix_rebuild_in_progress.load(std::memory_order_acquire);
+                        const bool denoise_converged = denoise_possible && g_backend->isAccumulationComplete();
+
+                        // ===== DENOISE SCHEDULE (viewport only) =====
+                        // The last denoised display image is kept so a skipped sample can
+                        // re-show it: the backend repaints original_surface with the raw
+                        // tonemap on every sample. The cache is dropped on an accumulation
+                        // reset, a size change, a denoiser-setting change or a pending
+                        // post edit (apply_tonemap), so it never shows a stale look.
+                        static std::vector<uint32_t> s_denoiseCache;
+                        static int s_denoiseCacheW = 0, s_denoiseCacheH = 0, s_denoiseCacheSample = 0;
+                        static uint64_t s_denoiseCacheKey = 0;
+                        static uint64_t s_denoiseCacheEpoch = 0;
+                        const uint64_t denoise_epoch = g_backend ? g_backend->accumulationEpoch() : 0;
+                        const int denoise_w = original_surface ? original_surface->w : 0;
+                        const int denoise_h = original_surface ? original_surface->h : 0;
+                        uint64_t denoise_key = 0;
+                        {
+                            uint32_t blendBits = 0;
+                            std::memcpy(&blendBits, &render_settings.denoiser_blend_factor, sizeof(blendBits));
+                            denoise_key = uint64_t(render_settings.denoiser_mode) |
+                                          (uint64_t(render_settings.denoiser_quality) << 2) |
+                                          (uint64_t(blendBits) << 32);
+                        }
+                        // Epoch 0 = backend does not count resets: never trust the cache.
+                        if (denoise_epoch == 0 || denoise_epoch != s_denoiseCacheEpoch || apply_tonemap ||
+                            denoise_w != s_denoiseCacheW || denoise_h != s_denoiseCacheH ||
+                            denoise_key != s_denoiseCacheKey) {
+                            s_denoiseCacheSample = 0;   // invalid
+                        }
+                        const bool denoise_cache_usable =
+                            s_denoiseCacheSample > 0 &&
+                            s_denoiseCache.size() == size_t(denoise_w) * size_t(denoise_h);
+
+                        bool denoise_run = true;
+                        if (denoise_possible && !render_settings.is_final_render_mode && !timeline_playing) {
+                            switch (render_settings.denoiser_schedule) {
+                                case DenoiserSchedule::Progressive:
+                                    // 1, 2, 4, 8, ... and completion. ">= 2x" rather than
+                                    // "is a power of two": several samples can land per frame.
+                                    denoise_run = !denoise_cache_usable || denoise_converged ||
+                                                  denoiser_sample_count >= 2 * s_denoiseCacheSample;
+                                    if (denoise_converged && denoise_cache_usable &&
+                                        denoiser_sample_count == s_denoiseCacheSample)
+                                        denoise_run = false;
+                                    break;
+                                case DenoiserSchedule::ConvergedOnly:
+                                    denoise_run = denoise_converged &&
+                                                  !(denoise_cache_usable && denoiser_sample_count == s_denoiseCacheSample);
+                                    break;
+                                case DenoiserSchedule::EverySample:
+                                default:
+                                    denoise_run = true;
+                                    break;
+                            }
+                            if (!denoise_run) {
+                                // Re-show the last denoised image; with nothing cached
+                                // (ConvergedOnly before completion) the raw frame stays.
+                                const bool reuse = denoise_cache_usable && original_surface && original_surface->pixels;
+                                if (reuse) {
+                                    const int row_stride = original_surface->pitch / 4;
+                                    Uint32* dst = static_cast<Uint32*>(original_surface->pixels);
+                                    for (int y = 0; y < denoise_h; ++y)
+                                        std::memcpy(dst + size_t(y) * row_stride,
+                                                    s_denoiseCache.data() + size_t(y) * denoise_w,
+                                                    size_t(denoise_w) * sizeof(uint32_t));
+                                }
+                                rtapi::recordDenoiserSkip(reuse);
+                            }
+                        }
+
+                        if (denoise_possible && denoise_run) {
+                            RTPERF_FRAME_SCOPE("loop.denoise");
+                            const auto denoise_t0 = std::chrono::high_resolution_clock::now();
+                            bool surfacePathUsed = false;
                             bool gpuPathSucceeded = false;
                             bool cpuPathSucceeded = false;
                             bool anyFrameProvided = false;
@@ -6262,7 +6443,37 @@ int main(int argc, char* argv[]) try {
                             if (!gpuPathSucceeded && !cpuPathSucceeded && !anyFrameProvided) {
                                 // Backend supplied no denoiser frame at all — fall back to SDL surface OIDN.
                                 ray_renderer.applyOIDNDenoising(original_surface, 0, true, ui_ctx.render_settings.denoiser_blend_factor);
+                                surfacePathUsed = true;
                             }
+
+                            // Keep the denoised display image for the schedule above.
+                            if ((gpuPathSucceeded || cpuPathSucceeded || surfacePathUsed) &&
+                                original_surface && original_surface->pixels && denoise_w > 0 && denoise_h > 0) {
+                                s_denoiseCache.resize(size_t(denoise_w) * size_t(denoise_h));
+                                const int row_stride = original_surface->pitch / 4;
+                                const Uint32* src = static_cast<const Uint32*>(original_surface->pixels);
+                                for (int y = 0; y < denoise_h; ++y)
+                                    std::memcpy(s_denoiseCache.data() + size_t(y) * denoise_w,
+                                                src + size_t(y) * row_stride,
+                                                size_t(denoise_w) * sizeof(uint32_t));
+                                s_denoiseCacheW = denoise_w;
+                                s_denoiseCacheH = denoise_h;
+                                s_denoiseCacheSample = denoiser_sample_count;
+                                s_denoiseCacheKey = denoise_key;
+                                s_denoiseCacheEpoch = denoise_epoch;
+                            }
+
+                            // Includes frame fetch, OIDN, tonemap and the copy into the
+                            // display surface; the GPU path ends in a synchronous D2H copy.
+                            const double denoise_ms = std::chrono::duration<double, std::milli>(
+                                std::chrono::high_resolution_clock::now() - denoise_t0).count();
+                            const char* denoise_path = gpuPathSucceeded ? "gpu"
+                                                     : cpuPathSucceeded ? "cpu"
+                                                     : surfacePathUsed ? "surface" : "failed";
+                            rtapi::recordDenoiserCall(denoise_ms, denoise_path,
+                                                      original_surface ? original_surface->w : 0,
+                                                      original_surface ? original_surface->h : 0,
+                                                      denoiser_sample_count, denoise_converged);
                         }
 
                         if (render_settings.render_current_samples > prev_samples) {

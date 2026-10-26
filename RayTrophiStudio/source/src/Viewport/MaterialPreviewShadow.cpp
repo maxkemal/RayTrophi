@@ -410,7 +410,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
         //   zorunda. Gokyuzu G-buffer'a YAZMAZ: yansiyacak bir yuzey degil,
         //   yansimanin kendisinin fallback'i.
         const bool rfHdrPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE;
-        VkPipelineColorBlendAttachmentState skyAttachments[3]{};
+        VkPipelineColorBlendAttachmentState skyAttachments[4]{};
         skyAttachments[0] = attachmentBlend;
         skyAttachments[1].colorWriteMask = 0;
         skyAttachments[1].blendEnable = VK_FALSE;
@@ -418,7 +418,7 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
         skyAttachments[2].blendEnable = VK_FALSE;
         VkPipelineColorBlendStateCreateInfo cb{};
         cb.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        cb.attachmentCount = rfHdrPass ? 3u : 1u;
+        cb.attachmentCount = rfHdrPass ? 4u : 1u;
         cb.pAttachments = skyAttachments;
         VkDynamicState dynStates[] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
         VkPipelineDynamicStateCreateInfo dyn{};

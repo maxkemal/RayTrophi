@@ -14,6 +14,9 @@ std::shared_ptr<VolumeShader>& matterGasFogShader(SimulationGridDomainDesc& doma
 }
 
 std::string fogFieldId(const FogFieldKey& key) {
+    if (key.kind == FogFieldKind::GasSource) {
+        return "gas_source:" + std::to_string(key.producer_uid);
+    }
     if (key.kind == FogFieldKind::GasAggregate) {
         return "gas";
     }
@@ -22,6 +25,9 @@ std::string fogFieldId(const FogFieldKey& key) {
 }
 
 std::string fogFieldName(const FogFieldKey& key) {
+    if (key.kind == FogFieldKind::GasSource) {
+        return "Gas Source " + std::to_string(key.producer_uid);
+    }
     if (key.kind == FogFieldKind::GasAggregate) {
         return "Vapor / Gas";
     }
@@ -51,6 +57,7 @@ nlohmann::json writeFogAppearances(const MatterFogAppearances& appearances) {
     auto rows = nlohmann::json::array();
     for (const auto& [key, appearance] : appearances) {
         nlohmann::json row = {{"kind", static_cast<unsigned>(key.kind)},
+            {"producer_uid", key.producer_uid}, {"producer_name", appearance.producer_name},
             {"substance_tag", key.substance_tag},
             {"phase", static_cast<unsigned>(key.phase)}, {"visible", appearance.visible}};
         if (appearance.shader) {
@@ -73,17 +80,27 @@ MatterFogAppearances readFogAppearances(const nlohmann::json& domain) {
     for (const auto& row : rows) {
         const auto kind = row.at("kind").get<unsigned>();
         const auto phase = row.at("phase").get<unsigned>();
-        if (kind > static_cast<unsigned>(FogFieldKind::GasAggregate) ||
+        if (kind > static_cast<unsigned>(FogFieldKind::GasSource) ||
             phase > static_cast<unsigned>(MatterOutputPhase::Liquid)) {
             throw std::invalid_argument("invalid Matter Fog stream key");
         }
         FogFieldKey key{static_cast<FogFieldKind>(kind),
             row.at("substance_tag").get<uint32_t>(), static_cast<MatterOutputPhase>(phase)};
+        if (row.contains("producer_uid") && !row.at("producer_uid").is_number_unsigned()) {
+            throw std::invalid_argument("producer_uid must be an unsigned integer");
+        }
+        key.producer_uid = row.value("producer_uid", uint64_t{0});
+        if ((key.kind == FogFieldKind::GasSource) != (key.producer_uid != 0) ||
+            (key.kind == FogFieldKind::GasSource &&
+             (key.substance_tag != 0 || key.phase != MatterOutputPhase::Unknown))) {
+            throw std::invalid_argument("invalid gas source stream identity");
+        }
         if (key.kind == FogFieldKind::GasAggregate &&
             (key.substance_tag != 0 || key.phase != MatterOutputPhase::Unknown)) {
             throw std::invalid_argument("aggregate gas must have an anonymous gas key");
         }
         MatterFogAppearance appearance;
+        appearance.producer_name = row.value("producer_name", std::string());
         appearance.visible = row.value("visible", true);
         if (row.contains("material")) {
             appearance.shader = std::make_shared<VolumeShader>();

@@ -12,6 +12,7 @@ namespace RayTrophiSim { struct SimulationGridDomainDesc; }
 namespace RayTrophiSim::Fluid {
 
 struct MatterFogAppearance {
+    std::string producer_name;
     bool visible = true;
     std::shared_ptr<VolumeShader> shader;
 };

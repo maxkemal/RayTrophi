@@ -4427,6 +4427,12 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["max_bounces"] = settings.max_bounces;
     j["diffuse_bounces"] = settings.diffuse_bounces;
     j["transmission_bounces"] = settings.transmission_bounces;
+    j["rr_start_bounce"] = settings.rr_start_bounce;
+    j["motion_profile_enabled"] = settings.motion_profile_enabled;
+    j["motion_max_bounces"] = settings.motion_max_bounces;
+    j["motion_diffuse_bounces"] = settings.motion_diffuse_bounces;
+    j["motion_transmission_bounces"] = settings.motion_transmission_bounces;
+    j["motion_settle_ms"] = settings.motion_settle_ms;
     j["final_render_width"] = settings.final_render_width;
     j["final_render_height"] = settings.final_render_height;
     j["use_embree"] = settings.UI_use_embree;
@@ -4436,6 +4442,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     j["render_use_denoiser"] = settings.render_use_denoiser;
     j["denoiser_mode"] = static_cast<int>(settings.denoiser_mode);
     j["denoiser_quality"] = static_cast<int>(settings.denoiser_quality);
+    j["denoiser_schedule"] = static_cast<int>(settings.denoiser_schedule);
     j["max_samples"] = settings.max_samples;
     j["min_samples"] = settings.min_samples;
     j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
@@ -4479,6 +4486,12 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.max_bounces = std::max(1, settings.max_bounces);
     settings.diffuse_bounces = std::clamp(j.value("diffuse_bounces", 4), 1, settings.max_bounces);
     settings.transmission_bounces = std::clamp(j.value("transmission_bounces", 8), 1, settings.max_bounces);
+    settings.rr_start_bounce = std::clamp(j.value("rr_start_bounce", 3), 1, 64);
+    settings.motion_profile_enabled = j.value("motion_profile_enabled", false);
+    settings.motion_max_bounces = std::clamp(j.value("motion_max_bounces", 2), 1, 64);
+    settings.motion_diffuse_bounces = std::clamp(j.value("motion_diffuse_bounces", 2), 1, settings.motion_max_bounces);
+    settings.motion_transmission_bounces = std::clamp(j.value("motion_transmission_bounces", 2), 1, settings.motion_max_bounces);
+    settings.motion_settle_ms = std::clamp(j.value("motion_settle_ms", 150), 0, 5000);
     settings.final_render_width = j.value("final_render_width", 1280);
     settings.final_render_height = j.value("final_render_height", 720);
     // Backend/device selection is no longer serialized with project files.
@@ -4489,6 +4502,8 @@ void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& se
     settings.render_use_denoiser = j.value("render_use_denoiser", true);
     settings.denoiser_mode = static_cast<DenoiserMode>(j.value("denoiser_mode", static_cast<int>(DenoiserMode::Quality)));
     settings.denoiser_quality = static_cast<DenoiserQuality>(j.value("denoiser_quality", static_cast<int>(DenoiserQuality::Fast)));
+    settings.denoiser_schedule = static_cast<DenoiserSchedule>(std::clamp(
+        j.value("denoiser_schedule", static_cast<int>(DenoiserSchedule::Progressive)), 0, 2));
     settings.max_samples = j.value("max_samples", 32);
     settings.min_samples = j.value("min_samples", 1);
     settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);

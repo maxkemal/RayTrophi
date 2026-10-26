@@ -1,5 +1,10 @@
 # Independent live volume outputs: implementation boundary and render audit
 
+2026-10-26: Matter gas flow-source provenance and separate VDB publication have
+been added in source. See [gas-source implementation and acceptance checklist](GAS_SOURCE_VOLUME_STREAMS.md).
+The original audit below is historical; user compilation and live acceptance
+of the new source path remain pending.
+
 Requested outcome: one physical Matter domain, separate named live VDB records
 for solid Fog, vapor and individual gas-source contributions. Independent volume
 materials control density/scattering/emission and multiple scattering. Physical

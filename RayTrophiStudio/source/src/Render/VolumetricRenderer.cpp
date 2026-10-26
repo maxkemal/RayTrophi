@@ -798,6 +798,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             GpuVolumeShaderData gs = shader->toGPU();
             shader->emission_response.pack(gv.emission_response);
             shader->density.curve.pack(gv.density_curve);
+            shader->quality.packSamplingPolicy(gv.density_curve);
             gv.internal_light_steps = shader->quality.internal_light_steps;
             gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier * vdb->density_scale;
@@ -916,6 +917,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             const GpuVolumeShaderData gs = shader->toGPU();
             shader->emission_response.pack(gv.emission_response);
             shader->density.curve.pack(gv.density_curve);
+            shader->quality.packSamplingPolicy(gv.density_curve);
             gv.internal_light_steps = shader->quality.internal_light_steps;
             gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier;
@@ -1004,6 +1006,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             const GpuVolumeShaderData gs = shader->toGPU();
             shader->emission_response.pack(gv.emission_response);
             shader->density.curve.pack(gv.density_curve);
+            shader->quality.packSamplingPolicy(gv.density_curve);
             gv.internal_light_steps = shader->quality.internal_light_steps;
             gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier;

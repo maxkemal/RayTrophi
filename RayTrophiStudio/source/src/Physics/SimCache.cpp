@@ -8,6 +8,7 @@
 * =========================================================================
 */
 #include "SimCache.h"
+#include "Fluid/GasSourceCache.h"
 #include "PerfProfile.h"
 
 #include "Fluid/SubstanceTag.h"
@@ -404,6 +405,9 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         writeFloatArray(os, inventory.rain);
         writeFloatArray(os, inventory.rain_energy);
         writeFloatArray(os, inventory.foreign);
+        if (!Fluid::writeGasSourceCache(os, d)) {
+            return false;
+        }
 
         // Fluid particles — position + material coordinate. Both are render
         // source of truth: position places the surface, uvw anchors what is
@@ -634,6 +638,9 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.gas_phase_rain_kg = std::move(gas_phase_rain_kg);
         d.gas_phase_rain_energy_j = std::move(gas_phase_rain_energy_j);
         d.gas_phase_foreign_kg = std::move(gas_phase_foreign_kg);
+        if (version >= 18u && !Fluid::readGasSourceCache(is, d)) {
+            return false;
+        }
 
         // Fluid particles — positions restored; velocity/affine/flags zeroed to
         // match the count so any consumer iterating them in lockstep stays valid.

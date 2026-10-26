@@ -10,6 +10,7 @@
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
 #include "RtScreenGiBindings.h"
+#include "RtIpcRealtimeDenoiser.h"
 #include "RtReflectionBindings.h"
 #include "RtRigBindings.h"
 #include "RtClipBindingBindings.h"
@@ -358,6 +359,7 @@ Vec3 vec3FromJson(const json& j, const Vec3& fallback) {
 // ported from rt.flow_source to remote IPC keeps working verbatim.
 json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
     return json{
+        {"producer_uid", s.producer_uid},
         {"name", s.name}, {"domain", s.domain}, {"phase", s.phase},
         {"source_mode", s.source_mode}, {"source_object", s.source_object},
         {"enabled", s.enabled},
@@ -1030,6 +1032,10 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json realtime_denoiser_result;
+    if (dispatchRealtimeDenoiserIpc(method, params,
+            [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+            realtime_denoiser_result)) return realtime_denoiser_result;
     json volume_material_result;
     if (dispatchVolumeMaterialIpc(method, params,
             [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
@@ -5364,8 +5370,13 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"max_bounces", b.max_bounces},
                         {"diffuse_bounces", b.diffuse_bounces},
                         {"transmission_bounces", b.transmission_bounces},
+                        {"rr_start_bounce", b.rr_start_bounce},
                         {"debug_view", b.debug_view},
-                        {"debug_view_name", b.debug_view_name}};
+                        {"debug_view_name", b.debug_view_name},
+                        {"motion_profile_active", b.motion_profile_active},
+                        {"effective_max_bounces", b.effective_max_bounces},
+                        {"effective_diffuse_bounces", b.effective_diffuse_bounces},
+                        {"effective_transmission_bounces", b.effective_transmission_bounces}};
         });
     }
     if (method == "render.rt_pipeline_status") {
@@ -5395,13 +5406,148 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "render.set_settings") {
         // Keys written inline so the descriptor generator can read them.
-        std::optional<int> maxB, diffB, transB, dv;
+        std::optional<int> maxB, diffB, transB, dv, rr;
         if (params.contains("max_bounces")) maxB = requireInt(params, "max_bounces");
         if (params.contains("diffuse_bounces")) diffB = requireInt(params, "diffuse_bounces");
         if (params.contains("transmission_bounces")) transB = requireInt(params, "transmission_bounces");
         if (params.contains("debug_view")) dv = requireInt(params, "debug_view");
-        return enqueueResult([maxB, diffB, transB, dv](UIContext&) {
-            return rtapi::setRenderBudget(maxB, diffB, transB, dv);
+        if (params.contains("rr_start_bounce")) rr = requireInt(params, "rr_start_bounce");
+        return enqueueResult([maxB, diffB, transB, dv, rr](UIContext&) {
+            return rtapi::setRenderBudget(maxB, diffB, transB, dv, rr);
+        });
+    }
+    if (method == "render.motion_stats") {
+        const std::string sample = optionalString(params, "sample", "");
+        return enqueueQuery([sample](UIContext&) {
+            const rtapi::MotionStatsInfo s = rtapi::motionStats(sample);
+            json devices = json::array();
+            for (const auto& d : s.devices) {
+                devices.push_back(json{
+                    {"role", d.role},
+                    {"rt_available", d.rt_available},
+                    {"rt_enabled", d.rt_enabled},
+                    {"rt_history_valid", d.rt_history_valid},
+                    {"halton_jitter", d.halton_jitter},
+                    {"jitter", json::array({d.jitter_x, d.jitter_y})},
+                    {"width", d.width},
+                    {"height", d.height},
+                    {"dispatches", d.dispatches},
+                    {"object_motion_dispatches", d.object_motion_dispatches},
+                    {"history_resets", d.history_resets},
+                    {"raster_available", d.raster_available},
+                    {"raster_objects_available", d.raster_objects_available},
+                    {"raster_reason", d.raster_reason}});
+            }
+            json out{{"enabled", s.enabled},
+                     {"halton_jitter", s.halton_jitter},
+                     {"devices", devices},
+                     {"sampled", s.sampled}};
+            if (!sample.empty()) {
+                out["sample_source"] = s.sample_source;
+                out["sample_role"] = s.sample_role;
+                out["sample_reason"] = s.sample_reason;
+                // Absent, not zero, when nothing was read back.
+                if (s.sampled) {
+                    out["pixels"] = s.pixels;
+                    out["rejected_fraction"] = s.rejected_fraction;
+                    out["reactive_fraction"] = s.reactive_fraction;
+                    out["mean_dx"] = s.mean_dx;
+                    out["mean_dy"] = s.mean_dy;
+                    out["mean_motion_px"] = s.mean_motion_px;
+                    out["max_motion_px"] = s.max_motion_px;
+                }
+            }
+            return out;
+        });
+    }
+    if (method == "render.set_motion") {
+        // Keys written inline so the descriptor generator can read them.
+        std::optional<bool> en, halton;
+        if (params.contains("enabled")) en = requireBool(params, "enabled");
+        if (params.contains("halton_jitter")) halton = requireBool(params, "halton_jitter");
+        return enqueueResult([=](UIContext&) {
+            return rtapi::setMotion(en, halton);
+        });
+    }
+    if (method == "render.get_motion_profile") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::MotionProfileInfo m = rtapi::motionProfile();
+            return json{{"enabled", m.enabled},
+                        {"max_bounces", m.max_bounces},
+                        {"diffuse_bounces", m.diffuse_bounces},
+                        {"transmission_bounces", m.transmission_bounces},
+                        {"settle_ms", m.settle_ms},
+                        {"active", m.active}};
+        });
+    }
+    if (method == "render.set_motion_profile") {
+        // Keys written inline so the descriptor generator can read them.
+        std::optional<bool> en;
+        std::optional<int> maxB, diffB, transB, settle;
+        if (params.contains("enabled")) en = requireBool(params, "enabled");
+        if (params.contains("max_bounces")) maxB = requireInt(params, "max_bounces");
+        if (params.contains("diffuse_bounces")) diffB = requireInt(params, "diffuse_bounces");
+        if (params.contains("transmission_bounces")) transB = requireInt(params, "transmission_bounces");
+        if (params.contains("settle_ms")) settle = requireInt(params, "settle_ms");
+        return enqueueResult([=](UIContext&) {
+            return rtapi::setMotionProfile(en, maxB, diffB, transB, settle);
+        });
+    }
+    if (method == "render.get_denoiser") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::DenoiserInfo d = rtapi::denoiser();
+            return json{{"viewport_enabled", d.viewport_enabled},
+                        {"render_enabled", d.render_enabled},
+                        {"timeline_enabled", d.timeline_enabled},
+                        {"mode", d.mode},
+                        {"quality", d.quality},
+                        {"schedule", d.schedule},
+                        {"blend", d.blend}};
+        });
+    }
+    if (method == "render.set_denoiser") {
+        // Keys written inline so the descriptor generator can read them.
+        std::optional<bool> vp, rn, tl;
+        std::optional<std::string> mode, quality, schedule;
+        std::optional<float> blend;
+        if (params.contains("viewport_enabled")) vp = requireBool(params, "viewport_enabled");
+        if (params.contains("render_enabled")) rn = requireBool(params, "render_enabled");
+        if (params.contains("timeline_enabled")) tl = requireBool(params, "timeline_enabled");
+        if (params.contains("mode")) mode = requireString(params, "mode");
+        if (params.contains("quality")) quality = requireString(params, "quality");
+        if (params.contains("blend")) blend = requireFloat(params, "blend");
+        if (params.contains("schedule")) schedule = requireString(params, "schedule");
+        return enqueueResult([=](UIContext&) {
+            return rtapi::setDenoiser(vp, rn, tl, mode, quality, blend, schedule);
+        });
+    }
+    if (method == "render.denoiser_stats") {
+        return enqueueQuery([](UIContext&) {
+            const rtapi::DenoiserStatsInfo s = rtapi::denoiserStats();
+            // mean is null (not 0) when nothing was denoised: no call is not a free call.
+            return json{{"calls", s.calls},
+                        {"succeeded", s.succeeded},
+                        {"gpu_path", s.gpu_path},
+                        {"cpu_path", s.cpu_path},
+                        {"surface_path", s.surface_path},
+                        {"repeat_sample_calls", s.repeat_sample_calls},
+                        {"converged_calls", s.converged_calls},
+                        {"skipped_by_schedule", s.skipped_by_schedule},
+                        {"cache_presents", s.cache_presents},
+                        {"total_ms", s.total_ms},
+                        {"mean_ms", s.calls ? json(s.total_ms / double(s.calls)) : json(nullptr)},
+                        {"max_ms", s.max_ms},
+                        {"last_ms", s.last_ms},
+                        {"last_width", s.last_width},
+                        {"last_height", s.last_height},
+                        {"last_sample_count", s.last_sample_count},
+                        {"last_path", s.last_path}};
+        });
+    }
+    if (method == "render.reset_denoiser_stats") {
+        return enqueueResult([](UIContext&) {
+            rtapi::resetDenoiserStats();
+            return rtapi::Result::success();
         });
     }
     if (method == "render.volume_stats") {

@@ -5837,6 +5837,9 @@ void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext&
     releaseResidentBuffers(compute);
 
     for (auto& state : grid_domain_states_) {
+        if (preserve_inventory) {
+            Fluid::materializeGasSources(state);
+        }
         if (preserve_inventory && !Fluid::materializeGasInventoryForBackendChange(state)) {
             throw std::runtime_error("cannot release current gas inventory device state");
         }
@@ -6047,7 +6050,7 @@ ParticleSimulationSystem::captureGridDomainStatesForCache(
     for (std::size_t i = 0; i < count; ++i) {
         auto& state = snapshot[i];
         const auto& buffers = grid_domain_compute_buffers_[i];
-        if (!Fluid::snapshotGasInventory(state)) {
+        if (!Fluid::snapshotGasInventory(state) || !Fluid::snapshotGasSources(state)) {
             throw std::runtime_error("cannot capture current gas inventory for cache");
         }
         // ***** THE GATE ASKS THE LEDGER NOW, NOT gpu_resident_fields_valid.
@@ -6484,6 +6487,9 @@ bool ParticleSimulationSystem::removeGridDomain(
 }
 
 void ParticleSimulationSystem::clearGridDomains() {
+    for (auto& buffers : grid_domain_compute_buffers_) {
+        Fluid::releaseGasSources(buffers);
+    }
     grid_domains_.clear();
     grid_domain_states_.clear();
     flow_sources_.clear();
@@ -6501,6 +6507,7 @@ void ParticleSimulationSystem::resetGridDomainStates() {
     // solve. Any dense Vulkan fields still contain the last solved frame and
     // must not remain visible to the RT bridge.
     for (auto& buffers : grid_domain_compute_buffers_) {
+        Fluid::releaseGasSources(buffers);
         buffers.gpu_resident_fields_valid = false;
         buffers.invalidateDeviceCopies();
         if (buffers.matter_runtime) {
@@ -8216,8 +8223,18 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
         }
         if (gpu_velocity_advection_pre_run && (params.channel_density || params.channel_temperature || params.channel_fuel)) {
+            Fluid::gasSourceStage(state, params, dt, Fluid::GasSourceStage::Prepare,
+                context.compute, gpu_buffers);
+            Fluid::gasSourceStage(state, params, dt, Fluid::GasSourceStage::Advect,
+                context.compute, gpu_buffers);
             gpu_scalar_advection_ok = runGpuScalarAdvection(
                 state.grid,params,dt,context.compute,*gpu_buffers);
+            if (!state.gas_source_images.empty() && !gpu_scalar_advection_ok) {
+                Fluid::holdGasInventory(state, "gas source scalar transport failed; reset required");
+                throw std::runtime_error("Gas source scalar transport failed; reset required");
+            }
+            Fluid::gasSourceStage(state, params, dt, Fluid::GasSourceStage::Transported,
+                context.compute, gpu_buffers);
             gas_gpu_mark(state.gas_stats.gpu_scalar_advect_ms);
             if (!gpu_scalar_advection_ok) {
                 static bool logged_gpu_advection_fallback = false;
@@ -8241,9 +8258,15 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 runGpuGasSurfaceDust(state.grid, params, dt, context.compute,
                                      *gpu_buffers);
             gas_gpu_mark(state.gas_stats.gpu_surface_dust_ms);
+            Fluid::gasSourceStage(state, params, dt, Fluid::GasSourceStage::Prepare,
+                context.compute, gpu_buffers);
             gas_combustion_pre_run =
                 runGpuCombustion(state.grid, params, dt, context.compute, *gpu_buffers,
                                  Fluid::gasCombustionVapourBuffer(state));
+            if (gas_combustion_pre_run) {
+                Fluid::gasSourceStage(state, params, dt, Fluid::GasSourceStage::Reacted,
+                    context.compute, gpu_buffers);
+            }
             gas_gpu_mark(state.gas_stats.gpu_combustion_ms);
             // One host -> device velocity publication feeds every body-force
             // stage. The old path uploaded and read back the full MAC field
@@ -8336,12 +8359,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         params.skip_turbulence = gas_turbulence_pre_run;
         params.skip_velocity_dissipation_clamp = gpu_grid_ready;
         params.skip_pressure_projection = gpu_grid_ready;
+        params.source_provenance = &state;
 
         // stepSparseVDB doesn't honour grid.solid yet, so a sparse-backend domain
         // that contains a collider runs on the dense (solid-aware) step instead.
         const bool is_sparse_vdb = (i < grid_domains_.size()) &&
                                    (grid_domains_[i].backend == SimulationDomainBackend::CPU_SparseVDB) &&
-                                   !domain_has_solid;
+                                   !domain_has_solid && state.gas_source_images.empty();
 
         // ***** THE ONE STRUCTURAL READBACK, AND THE SAFETY NET FOR ALL THE
         // OTHERS. GridFluid::step reads and writes the HOST grid, so anything a
@@ -8572,6 +8596,8 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             Fluid::holdGasInventory(state, "gas carrier readback failed; reset required");
             continue;
         }
+        Fluid::gasSourceStage(state, params, dt, Fluid::GasSourceStage::Finish,
+            gpu_grid_ready ? context.compute : nullptr, gpu_grid_ready ? gpu_buffers : nullptr);
         state.gas_stats.inventory_advection_ms = elapsedMilliseconds(
             inventory_advection_begin, SimulationClock::now());
         if (const auto inventory = Fluid::gasInventoryDevice(state)) {
@@ -9878,6 +9904,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     buffers.gas_majorant_valid = false;
     destroy(buffers.gas_solid_mask);
     Fluid::releaseGasInventoryGpu(compute, buffers.gas_inventory);
+    Fluid::releaseGasSources(buffers);
     destroy(buffers.gas_solid_vel_x);
     destroy(buffers.gas_solid_vel_y);
     destroy(buffers.gas_solid_vel_z);

@@ -1,4 +1,4 @@
-#include "Backend/LensWeatherGpu.h"
+﻿#include "Backend/LensWeatherGpu.h"
 #include "Audio/AcousticRenderDebug.h"
 #include "PostProcess/VulkanExposure.h"
 /*
@@ -55,6 +55,8 @@
 #include "RayFusion/ProbeOverlay.h"
 #include "Backend/VulkanVolumeInstrumentation.h"
 #include "Backend/VulkanVolumeTemporal.h"
+#include "Backend/VulkanMotionHistory.h"
+#include "Backend/VulkanRealtimeDenoiser.h"
 #include "AtmosphereLUT.h"
 
 // Facade-mesh SoA database (DNA::GeometryDetail) — used by the indexed-BLAS upload path.
@@ -650,6 +652,17 @@ public:
 
     bool isRTReady() const { return m_rtPipelineReady; }
     bool hasTLAS() const { return m_tlas.accel != VK_NULL_HANDLE; }
+
+    // ── Motion AOV support (RT_REALTIME_DENOISE_UPSCALE_PLAN.md B2) ─────────
+    // Every TLAS build keeps the instance array of the PREVIOUS build, so raygen
+    // can move a hit point from this build's transform to the previous one.
+    // serial: ++ per build. prevValid: the previous array has the same instance
+    // order (same count, same build path) and was captured.
+    uint64_t motionInstanceSerial() const { return m_motionInstanceSerial; }
+    bool motionPrevInstancesValid() const { return m_motionPrevValid; }
+    uint64_t motionActiveInstancesAddress() const { return m_motionActiveInstances; }
+    uint64_t motionPrevInstancesAddress() const { return m_motionPrevInstances.deviceAddress; }
+    uint32_t motionInstanceCount() const { return m_motionLastCount; }
     // Needed by ray-query consumers that bind the TLAS into their own descriptor
     // set. Returned as a VALUE that the caller must re-check every dispatch: a
     // rebuild produces a NEW handle, and a descriptor still pointing at the old
@@ -1010,7 +1023,10 @@ public:
                            const ImageHandle* volumeTemporalColor1 = nullptr,
                            const ImageHandle* volumeTemporalMetadata0 = nullptr,
                            const ImageHandle* volumeTemporalMetadata1 = nullptr,
-                           const BufferHandle* volumeInstrumentation = nullptr);
+                           const BufferHandle* volumeInstrumentation = nullptr,
+                           const ImageHandle* motionImage = nullptr,
+                           const ImageHandle* motionHistory0 = nullptr,
+                           const ImageHandle* motionHistory1 = nullptr);
     void updateRTTextureDescriptor(uint32_t slot, const ImageHandle& image);
     void clearImage(const ImageHandle& image, float r, float g, float b, float a);
 
@@ -1185,6 +1201,15 @@ public:
     VulkanRT::BufferHandle m_tlasInstanceBuffer; // Buffer containing VkAccelerationStructureInstanceKHR for TLAS building
     VulkanRT::BufferHandle m_tlasScratchBuffer;  // Persistent TLAS build/update scratch (reused across frames; grows on demand)
     VulkanRT::BufferHandle m_gpuTlasInstanceBuffer;
+    // Motion AOV: previous build's instance array (see motionInstanceSerial()).
+    VulkanRT::BufferHandle m_motionPrevInstances;
+    std::vector<VkAccelerationStructureInstanceKHR> m_motionLastCpuInstances;
+    uint64_t m_motionInstanceSerial = 0;
+    uint64_t m_motionActiveInstances = 0;
+    uint32_t m_motionLastCount = 0;
+    int m_motionLastSource = -1;          // 0 = CPU upload, 1 = GPU prepare
+    bool m_motionPrevValid = false;
+    bool ensureMotionPrevInstances(VkDeviceSize bytes);
     VulkanRT::BufferHandle m_gpuTlasSourceBuffers[2];
     VulkanRT::BufferHandle m_worldBuffer; // SSBO containing complete Nishita parameters
     VulkanRT::BufferHandle m_volumeBuffer; // SSBO containing VkVolumeInstance array (binding 9)
@@ -1389,7 +1414,9 @@ public:
                                  const ImageHandle& ldrImage,
                                  const BufferHandle& ldrStaging,
                                  bool doTrace = true,
-                                 const std::function<void(VkCommandBuffer)>& prepass = {});
+                                 const std::function<void(VkCommandBuffer)>& prepass = {},
+                                 const std::function<void(VkCommandBuffer)>& beforeTonemap = {},
+                                 const std::function<void(VkCommandBuffer)>& afterTonemap = {});
     bool waitFrameSlot(uint32_t slot, uint64_t timeoutNs = UINT64_MAX);
     // Updates the persistent tonemap descriptor set with new image views. Caller MUST
     // ensure no in-flight submission references the previous binding (drain fences first).
@@ -2339,7 +2366,8 @@ public:
     bool needsViewportRender() const override {
         if (shouldUseInteractiveViewport()) {
             return m_interactiveViewport.dirty || rayFusionProbeUpdatesPending() ||
-                   m_interactiveViewport.presentationPending || acousticGpuPending();
+                   m_interactiveViewport.presentationPending || rasterTaaPending() ||
+                   acousticGpuPending();
         }
         return m_currentSamples < m_targetSamples || acousticGpuPending();
     }
@@ -2362,6 +2390,9 @@ public:
     // ========================================================================
     void waitForCompletion() override;
     void resetAccumulation() override;
+    // Same flag the debug-view and acoustic-surface edits already raise.
+    void requestPresentRefresh() override { m_tonemapRefreshPending = true; }
+    uint64_t accumulationEpoch() const override { return m_accumulationEpoch; }
     VulkanRT::VolumePerformanceStats getVolumePerformanceStats(bool synchronize = true);
     void resetVolumePerformanceStats(bool enabled = true,
                                      const VulkanRT::VolumeInstrumentationRegion& region = {});
@@ -2586,6 +2617,15 @@ protected:
 public:
     void recordCloudRasterPass(VkCommandBuffer cmd, uint32_t width, uint32_t height);
     bool cloudRasterWritten() const { return m_cloudRasterWritten; }
+    void setMotionAovOptions(bool enabled, bool haltonJitter);
+    // Synchronous readback of the RT (raster=false) or raster TAA motion image.
+    bool sampleMotionImage(bool raster, VulkanRT::MotionImageSummary& out);
+    // Motion AOV (RT_REALTIME_DENOISE_UPSCALE_PLAN.md B2), VulkanMotionAov.cpp.
+    void getMotionAovStatus(VulkanRT::MotionAovStatus& out) const;
+    VulkanRT::RealtimeDenoiserStats realtimeDenoiserStats(bool synchronize = true);
+    void configureRealtimeDenoiser(const VulkanRT::RealtimeDenoiserSettings& settings,
+        bool moving);
+    bool realtimeDenoiserOwnsViewport() const;
 protected:
     uint64_t m_aerialFroxelInputHash = 0;    // inputs of the last scheduled build, 0 = none
     bool m_aerialFroxelActive = false;       // last syncAerialFroxel() answer
@@ -2623,6 +2663,16 @@ protected:
                                            const VulkanRT::ImageHandle& fallback);
     bool getMaterialPreviewIblStatus(MaterialPreviewIblStatus& out) const override;
     bool getRasterTaaStatus(RasterTaaStatus& out) const override;
+    bool rasterTaaPending() const;
+    bool ensureRasterObjectMotionImage(uint32_t width, uint32_t height);
+    void destroyRasterObjectMotionImage();
+
+
+
+    bool prepareRealtimeDenoiser();
+    bool submitRealtimeTrace(uint32_t slot, uint32_t width, uint32_t height,
+        const std::function<void(VkCommandBuffer)>& prepass);
+
     // RayFusion probe field, step 1a. The producer is still the sky bake; only
     // the pipe the ambient value travels through has changed.
     bool ensureMaterialPreviewProbeResources();
@@ -2817,6 +2867,7 @@ protected:
         //   sebebi de tek: altinin yansimasi altin rengindedir.
         VulkanRT::ImageHandle reflectionNormalImage;
         VulkanRT::ImageHandle reflectionSpecularImage;
+        VulkanRT::ImageHandle objectPreviousClipImage;
         VkRenderPass hdrRenderPassLoad = VK_NULL_HANDLE; // HDR continuation after RT compute
         VkRenderPass hdrRenderPass = VK_NULL_HANDLE;   // RGBA16F + depth + 2 gbuffer (CLEAR)
         VkFramebuffer hdrFramebuffer = VK_NULL_HANDLE;
@@ -2844,6 +2895,9 @@ protected:
         //   TAA kapaliyken/ilk karede iki ayri descriptor durumu demek olurdu;
         //   kopyanin maliyeti olculebilir ve tek yerde.
         VulkanRT::ImageHandle taaHistoryImage[2];
+        // Motion AOV written by the TAA pass (raster_taa.comp binding 4):
+        // same contract as RT; Material/RayFusion includes previous instance models.
+        VulkanRT::ImageHandle taaMotionImage;
         VkPipeline taaPipeline = VK_NULL_HANDLE;
         VkPipelineLayout taaPipelineLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout taaDescLayout = VK_NULL_HANDLE;
@@ -3064,6 +3118,12 @@ protected:
     int m_maxBounces = 12;
     int m_diffuseBounces = 4;
     int m_transmissionBounces = 8;
+    int m_rrStartBounce = 3;
+    uint64_t m_accumulationEpoch = 1;   // ++ on every resetAccumulation()
+    // What the denoiser staging copy in flight holds: the accumulation epoch
+    // and sample count when it was submitted (getDenoiserFrameGPU ping-pong).
+    uint64_t m_denoiserCopyEpoch = 0;
+    int m_denoiserCopySamples = -1;
     // Photon caustics (Faz 2 / Dilim 1)
     bool  m_causticsEnabled = false;
     bool  m_causticsDebug = false;
@@ -3260,6 +3320,9 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     // Transmission / Absorption / Bounce Count views.
     VulkanRT::ImageHandle m_pathStatsImage;
     VulkanRT::VulkanVolumeTemporal m_volumeTemporal;
+    VulkanRT::VulkanMotionHistory m_motionHistory;   // B2 motion AOV
+    VulkanRT::VulkanRealtimeDenoiser m_realtimeDenoiser;
+    uint64_t m_motionSeenInstanceSerial = 0;
     VulkanRT::VulkanVolumeInstrumentation m_volumeInstrumentation;
 
     // GPU stylize: host-visible color SSBO (graded surface round-trip) + params SSBO.

@@ -2,6 +2,7 @@
 #include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidParticles.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -13,12 +14,13 @@
 namespace RayTrophiSim::Fluid {
 
 bool FogFieldKey::operator<(const FogFieldKey& other) const {
-    return std::tie(kind, substance_tag, phase) <
-        std::tie(other.kind, other.substance_tag, other.phase);
+    return std::tie(kind, substance_tag, phase, producer_uid) <
+        std::tie(other.kind, other.substance_tag, other.phase, other.producer_uid);
 }
 
 bool FogFieldKey::operator==(const FogFieldKey& other) const {
-    return kind == other.kind && substance_tag == other.substance_tag && phase == other.phase;
+    return kind == other.kind && substance_tag == other.substance_tag && phase == other.phase &&
+        producer_uid == other.producer_uid;
 }
 
 namespace {
@@ -93,7 +95,10 @@ bool prepare(const MatterFogFieldInput& input, MatterFogFields& result, std::str
         }
     }
     const bool gas_enabled = input.gas && input.plan->phase_output.gas != LabelRoute::Hidden;
-    if (groups.size() + std::size_t(gas_enabled) > input.max_streams) {
+    const auto* sources = gas_enabled ? input.gas->sources : nullptr;
+    const std::size_t gas_streams = !gas_enabled ? 0u :
+        (sources && !sources->empty() ? sources->size() : 1u);
+    if (groups.size() + gas_streams > input.max_streams) {
         return refuse("Fog stream budget exceeded");
     }
     std::size_t carrier_cells = 0;
@@ -119,7 +124,8 @@ bool prepare(const MatterFogFieldInput& input, MatterFogFields& result, std::str
             return refuse("Fog dense field budget exceeded");
         }
     }
-    if (!charge(gas_cells, 2 * sizeof(float), input.max_dense_bytes, bytes) ||
+    const std::size_t gas_floats = gas_streams * 2 + (sources ? 4u : 0u);
+    if (!charge(gas_cells, gas_floats * sizeof(float), input.max_dense_bytes, bytes) ||
         (!groups.empty() &&
          (!charge(carrier_cells, 2 * sizeof(float), input.max_dense_bytes, bytes) ||
           !charge(particles.size(), sizeof(uint8_t), input.max_dense_bytes, bytes)))) {
@@ -171,7 +177,62 @@ bool prepare(const MatterFogFieldInput& input, MatterFogFields& result, std::str
                 }
             }
         }
-        result.fields.push_back(std::move(field));
+        if (!sources || sources->empty()) {
+            result.fields.push_back(std::move(field));
+        } else {
+            // Reconcile a late/unattributed producer to UID 0. Source ownership
+            // never takes a second copy of the complete gas density field.
+            if (!sources->count(0)) {
+                return refuse("Gas source partition requires an unattributed stream");
+            }
+            for (const auto& [uid, image] : *sources) {
+                if (image.density.size() != gas_cells || !image.pending_density.empty()) {
+                    return refuse("Gas source partition has invalid or uncommitted state");
+                }
+                for (float value : image.density) {
+                    if (!std::isfinite(value) || value < 0.0f) {
+                        return refuse("Gas source contribution must be finite and nonnegative");
+                    }
+                }
+            }
+            // Move the aggregate storage into the first component, then reuse
+            // its temperature image for all streams (one physical temperature).
+            const auto aggregate_density = std::move(field.density);
+            const auto temperature = std::move(field.temperature_kelvin);
+            std::vector<double> totals(gas_cells, 0.0);
+            for (const auto& [uid, image] : *sources) {
+                for (std::size_t cell = 0; cell < gas_cells; ++cell) {
+                    totals[cell] += image.density[cell];
+                }
+            }
+            for (const auto& [uid, image] : *sources) {
+                MatterFogField component;
+                component.key.kind = uid == 0 ? FogFieldKind::GasAggregate : FogFieldKind::GasSource;
+                component.key.producer_uid = uid;
+                component.producer_name = image.name;
+                component.grid = field.grid;
+                component.density.resize(gas_cells);
+                component.temperature_kelvin = temperature;
+                for (std::size_t cell = 0; cell < gas_cells; ++cell) {
+                    const double sum = totals[cell];
+                    const float target = aggregate_density[cell];
+                    component.density[cell] = sum > target
+                        ? float(image.density[cell] * target / sum)
+                        : image.density[cell] + (uid == 0 ? float(target - sum) : 0.0f);
+                }
+                result.fields.push_back(std::move(component));
+            }
+            for (std::size_t cell = 0; cell < gas_cells; ++cell) {
+                double sum = 0.0;
+                for (const auto& component : result.fields) {
+                    if (component.key.kind != FogFieldKind::Carrier) {
+                        sum += component.density[cell];
+                    }
+                }
+                result.gas_max_abs_density_error = std::max(result.gas_max_abs_density_error,
+                    std::abs(sum - aggregate_density[cell]));
+            }
+        }
     }
     return true;
 }

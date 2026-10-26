@@ -10,6 +10,7 @@
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
 #include "RtScreenGiBindings.h"
+#include "RtRealtimeDenoiserBindings.h"
 #include "RtReflectionBindings.h"
 #include "RtRigBindings.h"
 #include "RtClipBindingBindings.h"
@@ -3648,6 +3649,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     auto flow_to_dict = [](const rtapi::SimulationFlowSourceInfo& s) {
         py::dict d;
+        d["producer_uid"] = s.producer_uid;
         d["name"] = s.name; d["domain"] = s.domain; d["phase"] = s.phase;
         d["source_mode"] = s.source_mode; d["source_object"] = s.source_object;
         d["enabled"] = s.enabled; d["parent_object"] = s.parent_object;
@@ -5764,6 +5766,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     py::module_ render = module.def_submodule("render", "Asynchronous final-render jobs");
     bindRayGpuTimingPython(render);
+    bindRealtimeDenoiser(render);
     render.def("optix_accum_status", []() -> py::dict {
         rtapi::OptixAccumStatus st;
         requireResult(rtapi::optixAccumStatus(st));
@@ -5897,10 +5900,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["max_bounces"] = b.max_bounces;
         d["diffuse_bounces"] = b.diffuse_bounces;
         d["transmission_bounces"] = b.transmission_bounces;
+        d["rr_start_bounce"] = b.rr_start_bounce;
         d["debug_view"] = b.debug_view;
         d["debug_view_name"] = b.debug_view_name;
+        d["motion_profile_active"] = b.motion_profile_active;
+        d["effective_max_bounces"] = b.effective_max_bounces;
+        d["effective_diffuse_bounces"] = b.effective_diffuse_bounces;
+        d["effective_transmission_bounces"] = b.effective_transmission_bounces;
         return d;
-    }, "Path tracer bounce budget and the active Debug Visualizer view.");
+    }, "Path tracer bounce budget (authored and effective), Russian roulette start "
+       "and the active Debug Visualizer view.");
     render.def("rt_pipeline_status", [] {
         const rtapi::RtPipelineStatusInfo s = rtapi::rtPipelineStatus();
         py::dict d;
@@ -5931,18 +5940,167 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "while the viewport shows a raster mode; samples stay 0 until 'ready'. "
        "cache_hit is None when the driver gave no creation feedback.");
     render.def("set_settings", [](const py::object& max_bounces, const py::object& diffuse_bounces,
-                                  const py::object& transmission_bounces, const py::object& debug_view) {
+                                  const py::object& transmission_bounces, const py::object& debug_view,
+                                  const py::object& rr_start_bounce) {
         auto opt = [](const py::object& o) -> std::optional<int> {
             if (o.is_none()) return std::nullopt;
             return py::cast<int>(o);
         };
         requireResult(rtapi::setRenderBudget(opt(max_bounces), opt(diffuse_bounces),
-                                             opt(transmission_bounces), opt(debug_view)));
+                                             opt(transmission_bounces), opt(debug_view),
+                                             opt(rr_start_bounce)));
     }, py::arg("max_bounces") = py::none(), py::arg("diffuse_bounces") = py::none(),
        py::arg("transmission_bounces") = py::none(), py::arg("debug_view") = py::none(),
-       "Set the bounce budget (1..64) and/or the Debug Visualizer view (0..15, "
+       py::arg("rr_start_bounce") = py::none(),
+       "Set the bounce budget (1..64) and/or the Debug Visualizer view (0..17, "
        "6 = Bounce Count, 15 = Acoustic Surface). Omitted arguments are unchanged; sub-budgets are "
-       "clamped to max_bounces like the panel does.");
+       "clamped to max_bounces like the panel does. rr_start_bounce (1..64, Vulkan RT) is "
+       "the first bounce Russian roulette may end a path.");
+    render.def("motion_stats", [](const std::string& sample) {
+        const rtapi::MotionStatsInfo s = rtapi::motionStats(sample);
+        py::dict out;
+        out["enabled"] = s.enabled;
+        out["halton_jitter"] = s.halton_jitter;
+        py::list devices;
+        for (const auto& d : s.devices) {
+            py::dict e;
+            e["role"] = d.role;
+            e["rt_available"] = d.rt_available;
+            e["rt_enabled"] = d.rt_enabled;
+            e["rt_history_valid"] = d.rt_history_valid;
+            e["halton_jitter"] = d.halton_jitter;
+            e["jitter"] = py::make_tuple(d.jitter_x, d.jitter_y);
+            e["width"] = d.width;
+            e["height"] = d.height;
+            e["dispatches"] = d.dispatches;
+            e["object_motion_dispatches"] = d.object_motion_dispatches;
+            e["history_resets"] = d.history_resets;
+            e["raster_available"] = d.raster_available;
+            e["raster_objects_available"] = d.raster_objects_available;
+            e["raster_reason"] = d.raster_reason;
+            devices.append(e);
+        }
+        out["devices"] = devices;
+        out["sampled"] = s.sampled;
+        if (!sample.empty()) {
+            out["sample_source"] = s.sample_source;
+            out["sample_role"] = s.sample_role;
+            out["sample_reason"] = s.sample_reason;
+            if (s.sampled) {
+                out["pixels"] = s.pixels;
+                out["rejected_fraction"] = s.rejected_fraction;
+                out["reactive_fraction"] = s.reactive_fraction;
+                out["mean_dx"] = s.mean_dx;
+                out["mean_dy"] = s.mean_dy;
+                out["mean_motion_px"] = s.mean_motion_px;
+                out["max_motion_px"] = s.max_motion_px;
+            }
+        }
+        return out;
+    }, py::arg("sample") = std::string(),
+       "Motion AOV state per Vulkan device; sample='rt' or 'raster' also reads the motion "
+       "image back once (stalls a frame) and summarises it: rejected/reactive fractions and "
+       "mean/max motion in pixels.");
+    render.def("set_motion", [](const py::object& enabled, const py::object& halton_jitter) {
+        std::optional<bool> en, halton;
+        if (!enabled.is_none()) en = py::cast<bool>(enabled);
+        if (!halton_jitter.is_none()) halton = py::cast<bool>(halton_jitter);
+        requireResult(rtapi::setMotion(en, halton));
+    }, py::arg("enabled") = py::none(), py::arg("halton_jitter") = py::none(),
+       "Turn the RT motion AOV on/off and switch Halton sub-pixel jitter (resets "
+       "accumulation; lowers converged AA quality). Not saved with the project.");
+    render.def("get_motion_profile", [] {
+        const rtapi::MotionProfileInfo m = rtapi::motionProfile();
+        py::dict d;
+        d["enabled"] = m.enabled;
+        d["max_bounces"] = m.max_bounces;
+        d["diffuse_bounces"] = m.diffuse_bounces;
+        d["transmission_bounces"] = m.transmission_bounces;
+        d["settle_ms"] = m.settle_ms;
+        d["active"] = m.active;
+        return d;
+    }, "Motion bounce profile: budgets traced while the camera moves and for "
+       "settle_ms after; active says whether it is in use right now.");
+    render.def("set_motion_profile", [](const py::object& enabled, const py::object& max_bounces,
+                                        const py::object& diffuse_bounces,
+                                        const py::object& transmission_bounces,
+                                        const py::object& settle_ms) {
+        auto opt = [](const py::object& o) -> std::optional<int> {
+            if (o.is_none()) return std::nullopt;
+            return py::cast<int>(o);
+        };
+        std::optional<bool> en;
+        if (!enabled.is_none()) en = py::cast<bool>(enabled);
+        requireResult(rtapi::setMotionProfile(en, opt(max_bounces), opt(diffuse_bounces),
+                                              opt(transmission_bounces), opt(settle_ms)));
+    }, py::arg("enabled") = py::none(), py::arg("max_bounces") = py::none(),
+       py::arg("diffuse_bounces") = py::none(), py::arg("transmission_bounces") = py::none(),
+       py::arg("settle_ms") = py::none(),
+       "Set the motion bounce profile; omitted arguments are unchanged. Bounces 1..64, "
+       "settle_ms 0..5000. The authored budget is never overwritten.");
+    render.def("get_denoiser", [] {
+        const rtapi::DenoiserInfo d = rtapi::denoiser();
+        py::dict out;
+        out["viewport_enabled"] = d.viewport_enabled;
+        out["render_enabled"] = d.render_enabled;
+        out["timeline_enabled"] = d.timeline_enabled;
+        out["mode"] = d.mode;
+        out["quality"] = d.quality;
+        out["schedule"] = d.schedule;
+        out["blend"] = d.blend;
+        return out;
+    }, "OIDN denoiser settings: viewport/final render/timeline switches, AOV mode "
+       "(fast|quality), viewport model tier (fast|balanced|high) and blend.");
+    render.def("set_denoiser", [](const py::object& viewport_enabled, const py::object& render_enabled,
+                                  const py::object& timeline_enabled, const py::object& mode,
+                                  const py::object& quality, const py::object& blend,
+                                  const py::object& schedule) {
+        auto optBool = [](const py::object& o) -> std::optional<bool> {
+            if (o.is_none()) return std::nullopt;
+            return py::cast<bool>(o);
+        };
+        auto optStr = [](const py::object& o) -> std::optional<std::string> {
+            if (o.is_none()) return std::nullopt;
+            return py::cast<std::string>(o);
+        };
+        std::optional<float> b;
+        if (!blend.is_none()) b = py::cast<float>(blend);
+        requireResult(rtapi::setDenoiser(optBool(viewport_enabled), optBool(render_enabled),
+                                         optBool(timeline_enabled), optStr(mode), optStr(quality), b,
+                                         optStr(schedule)));
+    }, py::arg("viewport_enabled") = py::none(), py::arg("render_enabled") = py::none(),
+       py::arg("timeline_enabled") = py::none(), py::arg("mode") = py::none(),
+       py::arg("quality") = py::none(), py::arg("blend") = py::none(),
+       py::arg("schedule") = py::none(),
+       "Set denoiser settings; omitted arguments are unchanged. mode: fast|quality, "
+       "quality: fast|balanced|high (final renders always use high), blend in [0, 1], "
+       "schedule: every_sample|progressive|converged_only (viewport only).");
+    render.def("denoiser_stats", [] {
+        const rtapi::DenoiserStatsInfo s = rtapi::denoiserStats();
+        py::dict d;
+        d["calls"] = s.calls;
+        d["succeeded"] = s.succeeded;
+        d["gpu_path"] = s.gpu_path;
+        d["cpu_path"] = s.cpu_path;
+        d["surface_path"] = s.surface_path;
+        d["repeat_sample_calls"] = s.repeat_sample_calls;
+        d["converged_calls"] = s.converged_calls;
+        d["skipped_by_schedule"] = s.skipped_by_schedule;
+        d["cache_presents"] = s.cache_presents;
+        d["total_ms"] = s.total_ms;
+        d["mean_ms"] = s.calls ? py::object(py::float_(s.total_ms / double(s.calls))) : py::object(py::none());
+        d["max_ms"] = s.max_ms;
+        d["last_ms"] = s.last_ms;
+        d["last_width"] = s.last_width;
+        d["last_height"] = s.last_height;
+        d["last_sample_count"] = s.last_sample_count;
+        d["last_path"] = s.last_path;
+        return d;
+    }, "Viewport denoise cost since the last reset: call counts per path, wall ms "
+       "(fetch + OIDN + tonemap + copy) and how many calls re-denoised an "
+       "unchanged sample (repeat_sample_calls) or a converged image.");
+    render.def("reset_denoiser_stats", [] { rtapi::resetDenoiserStats(); },
+               "Zero the denoiser cost counters.");
     render.def("volume_stats", [] {
         const rtapi::VolumeInstrumentationInfo s = rtapi::volumeStats();
         py::dict d;

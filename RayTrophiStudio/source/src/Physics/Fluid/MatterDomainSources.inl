@@ -545,6 +545,8 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 : std::pow(std::max(0.0f, 1.0f - normalized_distance), falloff);
         };
 
+        auto* provenance = Fluid::prepareGasSourceDeposit(state,
+            source.timeline_uid, source.name);
         #pragma omp parallel for collapse(2) schedule(static)
         for (int z = min_z; z <= max_z; ++z) {
             for (int y = min_y; y <= max_y; ++y) {
@@ -568,6 +570,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     if (weight <= 0.0f) continue;
                     const std::size_t cell = grid.cellIndex(x, y, z);
 
+                    if (provenance) {
+                        provenance->pending_density[cell] += write_density
+                            ? std::max(0.0f, density_amount * weight) : 0.0f;
+                        provenance->pending_fuel[cell] += write_fuel
+                            ? std::max(0.0f, fuel_amount * weight) : 0.0f;
+                    }
                     if (write_density) {
                         grid.density[cell] += density_amount * weight;
                     }

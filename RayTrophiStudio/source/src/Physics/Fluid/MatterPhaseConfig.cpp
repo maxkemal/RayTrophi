@@ -259,6 +259,9 @@ void synchronizePhaseStorage(SimulationGridDomainState& state,
         state.gas_phase_rain_kg.clear();
         state.gas_phase_rain_energy_j.clear();
         state.gas_phase_foreign_kg.clear();
+        state.gas_source_images.clear();
+        state.gas_source_device.reset();
+        state.gas_source_device_current = false;
         state.gas_rain_landing.clear();
         state.gas_rain_absorbed_pending_kg = 0.0;
         state.gas_liquid_water_present = false;

@@ -47,6 +47,14 @@ layout(set = 0, binding = 0) uniform sampler2D inHDR;      // bu kare, jitterli
 layout(set = 0, binding = 1) uniform sampler2D inDepth;    // D32, [0,1]
 layout(set = 0, binding = 2) uniform sampler2D inHistory;  // onceki cozum
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D outResolved;
+// Motion AOV (RT_REALTIME_DENOISE_UPSCALE_PLAN.md B2), SAME contract as the RT
+// path's raygen motionImage: xy = previous-frame pixel minus this pixel's
+// centre (pixels, y down), z = reactive (0 here), w = 1 when there is no
+// history (first frame, off-screen). CAMERA motion only: the raster pass has
+// per-instance previous models are supplied by the material vertex path.
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D outMotion;
+// xyz: previous model point projected by CURRENT camera; w: 1 valid, -1 new, 0 sky/fallback.
+layout(set = 0, binding = 5) uniform sampler2D inPreviousClip;
 
 layout(push_constant) uniform Push {
     // ★★★★ TEK matris: `prevViewProj * inverse(viewProjUnjittered)`. Iki ayri
@@ -61,12 +69,23 @@ layout(push_constant) uniform Push {
     // 1/orneksayisi olarak surer, yani ilk kare TAM, sonrakiler giderek
     // daha az agirlik alir -- hareketsiz kamerada gercek bir ortalama.
     float blend;
-    // 0 = gecmis gecersiz (kamera atladi, boyut degisti, ilk kare).
+    // Bit 0 (TAA_COLOR_HISTORY): colour history is valid (0 = camera moved,
+    //   size changed, first frame).
     // ★ Bu bir DEGER degil KONTROL durumu: blend=1.0 ile kodlamak,
     //   "gecmis yok" ile "gecmis var ama agirligi 1" durumlarini ayni
     //   sayiya katlardi ve ikincisi mesru bir durumdur.
-    uint  historyValid;
+    // Bit 1 (TAA_PREV_CAMERA): the previous frame's camera is known, so
+    //   `reprojection` is real. INDEPENDENT of bit 0: a camera move clears
+    //   the colour history, and that is exactly the frame whose motion
+    //   vectors matter. Gating motion on bit 0 wrote "no history" on every
+    //   moving frame (B2 live test: 100 % rejected).
+    // Bit 2: binding 5 contains global-instance previous-model positions.
+    uint  historyFlags;
 } pc;
+
+const uint TAA_COLOR_HISTORY = 1u;
+const uint TAA_PREV_CAMERA = 2u;
+const uint TAA_OBJECT_MODELS = 4u;
 
 vec3 rgbToYCoCg(vec3 c) {
     return vec3(0.25 * c.r + 0.5 * c.g + 0.25 * c.b,
@@ -91,6 +110,33 @@ void main() {
     const vec2 uv = (vec2(p) + 0.5) * texel;
 
     const vec3 current = max(texture(inHDR, uv).rgb, vec3(0.0));
+    const float currentDepth = texture(inDepth, uv).r;
+    const vec4 objectPrevious = (pc.historyFlags & TAA_OBJECT_MODELS) != 0u ?
+        texelFetch(inPreviousClip, p, 0) : vec4(0.0);
+    vec4 reprojectInput = objectPrevious.w > 0.5 ?
+        vec4(objectPrevious.xyz, 1.0) : vec4(uv * 2.0 - 1.0, currentDepth, 1.0);
+
+    {
+        vec4 motion = vec4(0.0, 0.0, 0.0, 1.0);
+        if ((pc.historyFlags & TAA_PREV_CAMERA) != 0u) {
+            // Sky (depth 1) reprojects at the far plane: rotation only, which
+            // is what a point at infinity does.
+            const float d = texture(inDepth, uv).r;
+            vec4 pc4 = pc.reprojection * reprojectInput;
+            if (pc4.w > 1e-9) {
+                vec2 prevUv = (pc4.xy / pc4.w) * 0.5 + 0.5;
+                bool onScreen = all(greaterThanEqual(prevUv, vec2(0.0))) &&
+                                all(lessThanEqual(prevUv, vec2(1.0)));
+                float oldDepth = texelFetch(inHistory,
+                    clamp(ivec2(prevUv * vec2(pc.width, pc.height)), ivec2(0),
+                        ivec2(pc.width, pc.height) - 1), 0).a;
+                bool depthValid = abs(pc4.z / pc4.w - oldDepth) < 0.001;
+                bool valid = onScreen && depthValid && objectPrevious.w > -0.5;
+                motion = vec4((prevUv - uv) * vec2(pc.width, pc.height), 0.0, valid ? 0.0 : 1.0);
+            }
+        }
+        imageStore(outMotion, p, motion);
+    }
 
     // ── Komsuluk kutusu (YCoCg) ────────────────────────────────────────────
     // Ayni dongude hem kutuyu hem de "gecmis yoksa ne yazariz"i uretiyoruz.
@@ -103,8 +149,8 @@ void main() {
         }
     }
 
-    if (pc.historyValid == 0u) {
-        imageStore(outResolved, p, vec4(current, 1.0));
+    if ((pc.historyFlags & TAA_COLOR_HISTORY) == 0u) {
+        imageStore(outResolved, p, vec4(current, currentDepth));
         return;
     }
 
@@ -123,19 +169,19 @@ void main() {
         hist = max(yCoCgToRgb(h), vec3(0.0));
         float wc = karisWeight(current), wh = karisWeight(hist);
         float a = pc.blend * wc, b = (1.0 - pc.blend) * wh;
-        imageStore(outResolved, p, vec4((current * a + hist * b) / max(a + b, 1e-6), 1.0));
+        imageStore(outResolved, p, vec4((current * a + hist * b) / max(a + b, 1e-6), currentDepth));
         return;
     }
 
     const vec3 ndc = vec3(uv * 2.0 - 1.0, depth);
-    vec4 prevClip = pc.reprojection * vec4(ndc, 1.0);
-    if (prevClip.w <= 1e-9) { imageStore(outResolved, p, vec4(current, 1.0)); return; }
+    vec4 prevClip = pc.reprojection * reprojectInput;
+    if (prevClip.w <= 1e-9) { imageStore(outResolved, p, vec4(current, currentDepth)); return; }
     const vec2 prevUv = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
     if (any(lessThan(prevUv, vec2(0.0))) || any(greaterThan(prevUv, vec2(1.0)))) {
         // Ekran disindan geldi: gecmis YOK. Kirpmak degil, atmak dogru --
         // kenardaki pikseli komsusuna kirpmak, ekran kenari boyunca bir
         // surunme izi uretir.
-        imageStore(outResolved, p, vec4(current, 1.0));
+        imageStore(outResolved, p, vec4(current, currentDepth));
         return;
     }
 
@@ -147,5 +193,5 @@ void main() {
     const float wh = karisWeight(hist);
     const float a = pc.blend * wc;
     const float b = (1.0 - pc.blend) * wh;
-    imageStore(outResolved, p, vec4((current * a + hist * b) / max(a + b, 1e-6), 1.0));
+    imageStore(outResolved, p, vec4((current * a + hist * b) / max(a + b, 1e-6), currentDepth));
 }

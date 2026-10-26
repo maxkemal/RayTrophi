@@ -1561,6 +1561,12 @@
     <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDenoiser.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMotion.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiClouds.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
@@ -2006,6 +2012,12 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMotionHistory.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp">
@@ -2953,6 +2965,10 @@
     <ClCompile Include="source\src\Physics\Fluid\MatterFogStreams.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterFogSnapshot.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterFogPublisher.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasSourceProvenance.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\GasSourceCache.cpp" />
+    <ClInclude Include="source\include\Fluid\GasSourceProvenance.h" />
+    <ClInclude Include="source\include\Fluid\GasSourceCache.h" />
     <ClCompile Include="source\src\Api\RtApiMatterFogInspection.cpp" />
     <ClCompile Include="source\src\Backend\VulkanRayGpuTiming.cpp" />
     <ClCompile Include="source\src\Api\RtRayGpuTiming.cpp" />
@@ -2961,5 +2977,21 @@
     <ClInclude Include="source\include\Api\RayGpuTimingApi.h" />
     <ClInclude Include="source\src\Api\RtRayGpuTimingBindings.h" />
     <None Include="source\shaders\volume_mixture.glsl" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiser.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiserAdapter.cpp" />
+    <ClCompile Include="source\src\Api\RtApiRealtimeDenoiser.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcRealtimeDenoiser.cpp" />
+    <ClCompile Include="source\src\Api\RtRealtimeDenoiserBindings.cpp" />
+    <ClCompile Include="source\src\UI\RealtimeDenoiserControls.cpp" />
+    <ClInclude Include="source\include\Backend\VulkanRealtimeDenoiser.h" />
+    <ClInclude Include="source\include\Backend\RealtimeDenoiserTypes.h" />
+    <ClInclude Include="source\include\Api\RtApiRealtimeDenoiser.h" />
+    <ClInclude Include="source\src\Api\RtIpcRealtimeDenoiser.h" />
+    <ClInclude Include="source\src\Api\RtRealtimeDenoiserBindings.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Viewport\RasterObjectMotion.cpp" />
   </ItemGroup>
 </Project>

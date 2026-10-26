@@ -319,7 +319,45 @@ layout(push_constant) uniform CameraPC {
     float debugExposure;  // false-color / energy gain
     uint  debugFlags;     // reserved
     float debugParam;     // overlay: 0 = pure debug … 1 = pure beauty
+    uint  rrStartBounce;  // first bounce Russian roulette may terminate (default 3)
+    // Motion AOV (RT_REALTIME_DENOISE_UPSCALE_PLAN.md B2). Address of this
+    // dispatch's MotionParams record, 0 = motion AOV off.
+    uint  motionParamsLo;
+    uint  motionParamsHi;
+    uint  motionInfo;     // bit 0: history write slot
 } cam;
+
+// ── Motion AOV (B2) ─────────────────────────────────────────────────────────
+// motionImage: xy = where this pixel's primary point projected in the previous
+// dispatch minus where it projects now (pixels, y down; jitter cancels),
+// z = reactive (1 = no reliable vector: volume primary;
+// 0.5 = mostly transmissive primary), w = 1 when the reprojected history was
+// rejected (disocclusion, material/normal/position mismatch, off-screen).
+// motionHistory0/1: ping-pong primary-hit record of the previous dispatch:
+// xyz = world position bits, w = material id (bits 0-15, 0xFFFF = miss) |
+// octahedral normal (bits 16-31, 8+8 unorm).
+layout(set = 0, binding = 38, rgba16f) uniform image2D motionImage;
+layout(set = 0, binding = 39, rgba32ui) uniform uimage2D motionHistory0;
+layout(set = 0, binding = 40, rgba32ui) uniform uimage2D motionHistory1;
+
+// Mirrors MotionParamsGPU in Backend/VulkanMotionHistory.h (112 bytes).
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer MotionParamsRef {
+    vec4  prevOrigin;
+    vec4  prevLowerLeft;
+    vec4  prevHorizontal;
+    vec4  prevVertical;
+    vec4  jitter;     // xy: this dispatch's sub-pixel jitter in pixels ([-0.5, 0.5))
+    uvec4 instAddr;   // current instance array lo/hi, previous lo/hi
+    uvec4 info;       // x: instance count, y: flags, z: dispatch index, w: unused
+};
+// VkAccelerationStructureInstanceKHR = 4 uvec4: rows 0-2 of the 3x4 transform, then ids.
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer TlasInstanceWords {
+    uvec4 w[];
+};
+const uint MOTION_FLAG_HISTORY      = 1u;  // history slot holds the previous dispatch
+const uint MOTION_FLAG_OBJECTS      = 2u;  // previous instance transforms are valid
+const uint MOTION_FLAG_HALTON       = 4u;  // jitter.xy drives the primary ray
+const uint MOTION_FLAG_PREV_CAMERA  = 8u;  // prev* camera vectors are valid
 
 // ============================================================
 // BOUNCE_* now live in rt_payload.glsl next to payload.bounceType, the field
@@ -649,6 +687,66 @@ vec3 dvCellColor(ivec3 c) {
 }
 
 // ============================================================
+// Motion AOV helpers (B2)
+// ============================================================
+// Pixel position of world point P in a camera given by its push-constant
+// vectors, inverting the primary-ray mapping in main(): target = LL + u*H + v*V,
+// u = px / W, v = 1 - py / H. `inFront` is false behind that camera.
+vec2 motionProject(vec3 O, vec3 LL, vec3 H, vec3 V, vec3 P, vec2 size, out bool inFront) {
+    vec3 n = cross(H, V);
+    float planeDist = dot(LL - O, n);
+    float along = dot(P - O, n);
+    inFront = along * planeDist > 0.0;
+    if (!inFront) return vec2(-1.0);
+    vec3 q = O + (P - O) * (planeDist / along) - LL;
+    float u = dot(q, H) / dot(H, H);
+    float v = dot(q, V) / dot(V, V);
+    return vec2(u * size.x, (1.0 - v) * size.y);
+}
+
+// Rows 0-2 of instance `i`'s 3x4 transform from a VkAccelerationStructureInstanceKHR array.
+void motionInstanceRows(uint64_t addr, uint i, out vec4 r0, out vec4 r1, out vec4 r2) {
+    TlasInstanceWords inst = TlasInstanceWords(addr);
+    r0 = uintBitsToFloat(inst.w[i * 4u + 0u]);
+    r1 = uintBitsToFloat(inst.w[i * 4u + 1u]);
+    r2 = uintBitsToFloat(inst.w[i * 4u + 2u]);
+}
+
+// Where world point P (on instance i now) was in the previous dispatch.
+vec3 motionPreviousPosition(MotionParamsRef mp, uint inst, vec3 P) {
+    uint64_t curAddr  = uint64_t(mp.instAddr.x) | (uint64_t(mp.instAddr.y) << 32);
+    uint64_t prevAddr = uint64_t(mp.instAddr.z) | (uint64_t(mp.instAddr.w) << 32);
+    vec4 c0, c1, c2, p0, p1, p2;
+    motionInstanceRows(curAddr, inst, c0, c1, c2);
+    motionInstanceRows(prevAddr, inst, p0, p1, p2);
+    // Affine inverse of the current transform: object = A^-1 (P - t).
+    mat3 A = transpose(mat3(c0.xyz, c1.xyz, c2.xyz));
+    vec3 t = vec3(c0.w, c1.w, c2.w);
+    float det = determinant(A);
+    if (abs(det) < 1e-20) return P;
+    vec3 obj = inverse(A) * (P - t);
+    return vec3(dot(p0, vec4(obj, 1.0)), dot(p1, vec4(obj, 1.0)), dot(p2, vec4(obj, 1.0)));
+}
+
+uint motionPackMeta(uint materialId, vec3 normal) {
+    vec2 o = vec2(0.5);
+    if (dot(normal, normal) > 1e-8) {
+        vec3 n = normal / (abs(normal.x) + abs(normal.y) + abs(normal.z));
+        o = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        o = o * 0.5 + 0.5;
+    }
+    uvec2 q = uvec2(clamp(o, 0.0, 1.0) * 255.0 + 0.5);
+    return (materialId & 0xFFFFu) | (q.x << 16) | (q.y << 24);
+}
+
+vec3 motionUnpackNormal(uint meta) {
+    vec2 o = vec2(float((meta >> 16) & 0xFFu), float(meta >> 24)) / 255.0 * 2.0 - 1.0;
+    vec3 n = vec3(o, 1.0 - abs(o.x) - abs(o.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return normalize(n);
+}
+
+// ============================================================
 // Main
 // ============================================================
 void main() {
@@ -681,9 +779,21 @@ void main() {
 
     uint seed = initSeed(pixel, screenSize, cam.frameCount);
 
-    // Jittered AA sample
+    // Motion params of this dispatch (0 address = motion AOV off).
+    const uint64_t motionAddr = uint64_t(cam.motionParamsLo) | (uint64_t(cam.motionParamsHi) << 32);
+    const bool motionOn = motionAddr != 0ul;
+    uint motionFlags = 0u;
+    if (motionOn) motionFlags = MotionParamsRef(motionAddr).info.y;
+
+    // Jittered AA sample. Halton mode replaces the random sub-pixel offset with
+    // the dispatch's known one, so a temporal upscaler can undo it.
     float jitterU = (float(pixel.x) + rnd(seed)) / float(screenSize.x);
     float jitterV = 1.0 - (float(pixel.y) + rnd(seed)) / float(screenSize.y);
+    if ((motionFlags & MOTION_FLAG_HALTON) != 0u) {
+        vec2 j = MotionParamsRef(motionAddr).jitter.xy;
+        jitterU = (float(pixel.x) + 0.5 + j.x) / float(screenSize.x);
+        jitterV = 1.0 - (float(pixel.y) + 0.5 + j.y) / float(screenSize.y);
+    }
 
     // Primary ray with effects
     float u = jitterU;
@@ -777,6 +887,7 @@ void main() {
     vec3 primaryAlbedo    = vec3(0.0);
     vec3 primaryNormal    = vec3(0.0);
     uint primaryMaterialId = PL_MATID_MASK;   // 16-bit id space; 0xFFFF = none
+    uint primaryInst = 0xFFFFFFFFu;           // TLAS instance of the primary surface
     bool primaryHitValid  = false;
     bool primaryVolumeHit = false;
     float firstHitTransmission = 0.0;
@@ -836,6 +947,7 @@ void main() {
         payload.primaryARG    = 0u;
         payload.primaryABT    = 0u;
         payload.primaryNrm    = 0u;
+        payload.primaryInst   = 0xFFFFFFFFu;
         payload.primaryMeta   = plMetaReset(payload.primaryMeta); // keeps dispersion bits
         if (bounce == 0) payload.primaryMeta |= PL_CAMERA_SEGMENT;
         payload.bounceType = BOUNCE_SPECULAR;
@@ -880,6 +992,7 @@ void main() {
             vec2 aBT = unpackHalf2x16(payload.primaryABT);
             primaryAlbedo = vec3(aRG, aBT.x);
             primaryMaterialId = payload.primaryMeta & PL_MATID_MASK;
+            primaryInst = payload.primaryInst;
             primaryVolumeHit = (payload.primaryMeta & PL_PRIMARY_VOLUME) != 0u;
             bool hasVolumeDepth =
                 (payload.primaryMeta & PL_PRIMARY_VOLUME_DEPTH) != 0u;
@@ -940,8 +1053,8 @@ void main() {
         // Erken çıkış
         if (max(throughput.r, max(throughput.g, throughput.b)) < 0.001) break;
 
-        // Russian Roulette (bounce >= 3)
-        if (bounce >= 3) {
+        // Russian Roulette from cam.rrStartBounce (default 3, render.set_settings)
+        if (bounce >= int(cam.rrStartBounce)) {
             float maxComp     = max(throughput.r, max(throughput.g, throughput.b));
             float surviveProb = clamp(maxComp, 0.05, 1.0);
             if (rnd(seed) > surviveProb) break;
@@ -1165,6 +1278,77 @@ void main() {
                 : vec3(0.0);
         }
         radiance = mix(dbg, radiance, clamp(cam.debugParam, 0.0, 1.0));
+    }
+
+    // ── MOTION AOV (B2) ──────────────────────────────────────────────────────
+    // One record per dispatch, last write wins (not accumulated). Every dispatch
+    // is a "frame" for motion: the previous camera and instance transforms are
+    // those of the previous dispatch.
+    if (motionOn) {
+        MotionParamsRef mp = MotionParamsRef(motionAddr);
+        vec2 size = vec2(screenSize);
+        bool hit = primaryHitValid && firstHitValid;
+        // Current point: the primary hit, or a direction at infinity for a miss
+        // (reprojects by camera rotation only).
+        vec3 P = hit ? firstHitPos : primaryRayOrigin + normalize(primaryRayDir) * 1.0e6;
+        vec3 prevP = P;
+        if (hit && (motionFlags & MOTION_FLAG_OBJECTS) != 0u && primaryInst < mp.info.x)
+            prevP = motionPreviousPosition(mp, primaryInst, P);
+
+        vec2 motion = vec2(0.0);
+        bool rejected = true;
+        if ((motionFlags & MOTION_FLAG_PREV_CAMERA) != 0u) {
+            // Both ends are PROJECTIONS of the same point, never "pixel centre":
+            // P came from a jittered ray, and subtracting the centre would put
+            // up to 0.7 px of jitter noise on a still camera.
+            bool inFront, curInFront;
+            vec2 prevPx = motionProject(mp.prevOrigin.xyz, mp.prevLowerLeft.xyz,
+                                        mp.prevHorizontal.xyz, mp.prevVertical.xyz,
+                                        prevP, size, inFront);
+            vec2 curPx = motionProject(cam.origin.xyz, cam.lowerLeft.xyz,
+                                       cam.horizontal.xyz, cam.vertical.xyz,
+                                       P, size, curInFront);
+            inFront = inFront && curInFront;
+            motion = inFront ? prevPx - curPx : vec2(0.0);
+            bool onScreen = inFront && all(greaterThanEqual(prevPx, vec2(0.0))) &&
+                            all(lessThan(prevPx, size));
+            if (onScreen && (motionFlags & MOTION_FLAG_HISTORY) != 0u) {
+                uint readSlot = (cam.motionInfo & 1u) ^ 1u;
+                uvec4 h = readSlot == 0u ? imageLoad(motionHistory0, ivec2(prevPx))
+                                         : imageLoad(motionHistory1, ivec2(prevPx));
+                uint histMat = h.w & 0xFFFFu;
+                uint curMat = hit ? (primaryMaterialId & 0xFFFFu) : 0xFFFFu;
+                if (histMat == curMat) {
+                    if (!hit) {
+                        rejected = false;   // sky to sky
+                    } else {
+                        vec3 histPos = uintBitsToFloat(h.xyz);
+                        float viewDist = length(prevP - mp.prevOrigin.xyz);
+                        bool samePlace = distance(histPos, prevP) < max(0.02, viewDist * 0.01);
+                        bool sameFacing = dot(motionUnpackNormal(h.w), primaryNormal) > 0.8;
+                        rejected = !(samePlace && sameFacing);
+                    }
+                }
+            }
+        }
+        float reactive = primaryVolumeHit ? 1.0 : (hit && firstHitTransmission > 0.5 ? 0.5 : 0.0);
+        imageStore(motionImage, ivec2(pixel), vec4(motion, reactive, rejected ? 1.0 : 0.0));
+
+        uvec4 rec = uvec4(floatBitsToUint(P),
+                          motionPackMeta(hit ? primaryMaterialId : 0xFFFFu, hit ? primaryNormal : vec3(0.0)));
+        if ((cam.motionInfo & 1u) == 0u) imageStore(motionHistory0, ivec2(pixel), rec);
+        else                             imageStore(motionHistory1, ivec2(pixel), rec);
+
+        // Debug views 16 (motion vectors) and 17 (history state). Raygen-side:
+        // they replace beauty like views 1-5 and 9.
+        if (cam.debugView == 16u) {
+            vec2 m = motion * (0.05 * max(cam.debugExposure, 1e-3));
+            vec3 dbg = vec3(0.5 + m.x, 0.5 - m.y, 0.5) * (rejected ? 0.4 : 1.0);
+            radiance = mix(dbg, radiance, clamp(cam.debugParam, 0.0, 1.0));
+        } else if (cam.debugView == 17u) {
+            vec3 dbg = vec3(rejected ? 1.0 : 0.0, reactive, rejected ? 0.0 : 0.25);
+            radiance = mix(dbg, radiance, clamp(cam.debugParam, 0.0, 1.0));
+        }
     }
 
     // Stochastic CA Channel Masking and Energy Conservation

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Fluid/FluidViewResolver.h"
+#include "Fluid/GasSourceProvenance.h"
 #include "Vec3.h"
 #include <cstddef>
 #include <cstdint>
@@ -12,13 +13,15 @@ namespace RayTrophiSim::Fluid {
 // Internal field preparation only. No VDB registration, materials or solver writes.
 enum class FogFieldKind : uint8_t {
     Carrier,
-    GasAggregate
+    GasAggregate,
+    GasSource
 };
 
 struct FogFieldKey {
     FogFieldKind kind = FogFieldKind::Carrier;
     uint32_t substance_tag = 0;
     MatterOutputPhase phase = MatterOutputPhase::Unknown;
+    uint64_t producer_uid = 0;
     bool operator<(const FogFieldKey& other) const;
     bool operator==(const FogFieldKey& other) const;
 };
@@ -44,6 +47,7 @@ struct GasFogFieldView {
     // Caller must explicitly identify an authoritative render snapshot. This
     // helper must never read a stale GPU-resident host mirror as current gas.
     bool authoritative = false;
+    const GasSourceImages* sources = nullptr;
 };
 
 struct MatterFogFieldInput {
@@ -61,6 +65,7 @@ struct MatterFogFieldInput {
 
 struct MatterFogField {
     FogFieldKey key;
+    std::string producer_name;
     FogFieldGrid grid;
     std::size_t carrier_count = 0;
     std::vector<float> density;
@@ -71,10 +76,11 @@ struct MatterFogField {
 struct MatterFogFields {
     std::vector<MatterFogField> fields;
     std::size_t peak_dense_bytes_bound = 0;
+    double gas_max_abs_density_error = 0.0;
 };
 
 // Transactional: refusal leaves output unchanged. Phase/matter Fog fields are
-// separate from aggregate gas; source-specific gas is deliberately not invented.
+// separate from gas. Source fields partition its authoritative render density.
 bool buildMatterFogFields(const MatterFogFieldInput& input,
                          MatterFogFields& output, std::string& error);
 

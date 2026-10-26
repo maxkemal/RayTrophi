@@ -1213,6 +1213,7 @@ private:
               5, 76 },
             { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          7, 28 },
             { "sim_inventory_advect_scalar", "sim_inventory_advect_scalar.spv", 7, 28 },
+            { "sim_gas_source_partition", "sim_gas_source_partition.spv", 7, 16 },
             { "sim_inventory_maccormack_scalar", "sim_inventory_maccormack_scalar.spv", 7, 28 },
             { "sim_inventory_conserve", "sim_inventory_conserve.spv", 6, 16 },
             { "sim_inventory_clear", "sim_inventory_clear.spv", 2, 4 },

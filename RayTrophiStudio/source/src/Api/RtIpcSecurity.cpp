@@ -313,6 +313,15 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "render.volume_light_cache") return Read;
     // LOD report only; render.set_volume_march_lod stays Render.
     if (method == "render.volume_march_lod") return Read;
+    // Denoiser settings/cost reports only; set_denoiser and
+    // reset_denoiser_stats stay Render.
+    if (method == "render.get_denoiser" || method == "render.denoiser_stats") return Read;
+    // Motion profile report only; set_motion_profile stays Render.
+    if (method == "render.get_motion_profile") return Read;
+    // Motion AOV report (its optional sample is a read-back, it changes nothing);
+    // render.set_motion stays Render.
+    if (method == "render.motion_stats") return Read;
+    if (method == "render.realtime_denoiser_stats") return Read;
     if (method.rfind("render.", 0) == 0) {
         if (method == "render.start" || method == "render.start_sequence")
             return Render | FilesWrite;

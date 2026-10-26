@@ -223,6 +223,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // after the first and reads the neighbour's fields as this one's.
     float    _uvw_pad[1];
     // Appended at byte 624; total record stride is now 672 bytes.
+    // [0..8] density curve, [9] RT mixture adaptive policy, [10..11] reserved.
     float density_curve[12];
 };
 

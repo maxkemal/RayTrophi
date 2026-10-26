@@ -48,7 +48,8 @@ std::vector<Target> targets(UIContext& ctx) {
             for (auto& [key, appearance] : domain.matter_fog_streams) {
                 auto* slot = &appearance;
                 const std::string name = domain.name + " / " +
-                    RayTrophiSim::Fluid::fogFieldName(key);
+                    (appearance.producer_name.empty() ? RayTrophiSim::Fluid::fogFieldName(key)
+                        : appearance.producer_name);
                 result.push_back({"matter:" + domain.name + ":" +
                     RayTrophiSim::Fluid::fogFieldId(key), name, slot->shader,
                     [slot](auto shader) { slot->shader = shader; }, &slot->visible,
@@ -167,7 +168,9 @@ const MethodDescriptor setDescriptor = {
     "volume.set_material", "volume", "Configure gas/VDB physical optics and emission response",
     "Stable matter:<domain>:<field> targets persist independent Fog appearances; visible is "
     "an optional boolean on these targets. Atomic overlay. Unknown keys and invalid values "
-    "are rejected. Presets preserve density "
+    "are rejected. adaptive_stepping also selects bounded variable steps in RT mixtures; "
+    "noise/programmed fields keep fixed steps and emissive fields do not coarsen. "
+    "Presets preserve density "
     "scale and channel names. Vulkan RT random walk; RayFusion uses bounded approximation.",
     "write", "SceneWrite", false, "object", "volume|gas|vdb|material|scattering|emission",
     "volume.get_material", "volume.list_materials", nullptr, "volume.get_material",

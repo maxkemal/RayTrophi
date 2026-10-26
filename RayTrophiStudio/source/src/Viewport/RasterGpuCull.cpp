@@ -70,6 +70,7 @@ struct RasterGpuCull::Impl {
     VulkanRT::BufferHandle bounds;      // CPU_TO_GPU
     VulkanRT::BufferHandle meshParams;  // CPU_TO_GPU
     VulkanRT::BufferHandle dstMatrices; // GPU_ONLY  (STORAGE | VERTEX)
+    VulkanRT::BufferHandle dstPrevious;
     VulkanRT::BufferHandle counters;    // GPU_ONLY  (STORAGE | TRANSFER_DST)
     VulkanRT::BufferHandle cmds;        // GPU_ONLY  (STORAGE | INDIRECT)
     VulkanRT::BufferHandle globals;     // CPU_TO_GPU
@@ -87,6 +88,7 @@ struct RasterGpuCull::Impl {
 
     // Descriptor'i yalnizca kaynak buffer degistiginde yeniden yaz.
     VkBuffer boundSrcInstanceBuffer = VK_NULL_HANDLE;
+    VkBuffer boundPreviousBuffer = VK_NULL_HANDLE;
 
     std::vector<MeshBinding> bindings;
     uint32_t activeMeshCount = 0;
@@ -106,9 +108,11 @@ struct RasterGpuCull::Impl {
         drop(globals, globalsMapped);
         drop(state, stateMapped);
         drop(dstMatrices, none);
+        drop(dstPrevious, none);
         drop(counters, none);
         drop(cmds, none);
         boundSrcInstanceBuffer = VK_NULL_HANDLE;
+        boundPreviousBuffer = VK_NULL_HANDLE;
     }
 };
 
@@ -147,7 +151,7 @@ bool RasterGpuCull::ensure(VulkanRT::VulkanDevice& device,
             return false;
         }
 
-        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8 };
+        VkDescriptorPoolSize ps{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10 };
         VkDescriptorPoolCreateInfo pi{ VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
         pi.poolSizeCount = 1; pi.pPoolSizes = &ps; pi.maxSets = 1;
         if (vkCreateDescriptorPool(vk, &pi, nullptr, &impl_->descPool) != VK_SUCCESS) {
@@ -155,15 +159,15 @@ bool RasterGpuCull::ensure(VulkanRT::VulkanDevice& device,
             return false;
         }
 
-        VkDescriptorSetLayoutBinding b[8]{};
-        for (uint32_t i = 0; i < 8; ++i) {
+        VkDescriptorSetLayoutBinding b[10]{};
+        for (uint32_t i = 0; i < 10; ++i) {
             b[i].binding = i;
             b[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             b[i].descriptorCount = 1;
             b[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
         }
         VkDescriptorSetLayoutCreateInfo li{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-        li.bindingCount = 8; li.pBindings = b;
+        li.bindingCount = 10; li.pBindings = b;
         if (vkCreateDescriptorSetLayout(vk, &li, nullptr, &impl_->descLayout) != VK_SUCCESS) {
             destroy(); return false;
         }
@@ -235,6 +239,7 @@ bool RasterGpuCull::ensure(VulkanRT::VulkanDevice& device,
         impl_->globals     = make(sizeof(GlobalsGPU), U::STORAGE, M::CPU_TO_GPU);
         impl_->state       = make(uint64_t(newMesh)  * sizeof(MeshStateGPU), U::STORAGE, M::CPU_TO_GPU);
         impl_->dstMatrices = make(uint64_t(newOut)   * 64, U::STORAGE | U::VERTEX, M::GPU_ONLY);
+        impl_->dstPrevious = make(uint64_t(newOut) * 64, U::STORAGE | U::VERTEX, M::GPU_ONLY);
         // ★ Mesh basina DORT uint: full, proxy, maxDistSqBits, reserved.
         //   raster_cull.comp counters[meshIndex * 4u + k] ile indeksliyor;
         //   burayi 2'ye dusurursen sinir disina yazar.
@@ -243,7 +248,8 @@ bool RasterGpuCull::ensure(VulkanRT::VulkanDevice& device,
                                   U::STORAGE | U::INDIRECT | U::TRANSFER_DST, M::GPU_ONLY);
 
         if (!impl_->bounds.buffer || !impl_->meshParams.buffer || !impl_->globals.buffer ||
-            !impl_->state.buffer || !impl_->dstMatrices.buffer || !impl_->counters.buffer ||
+            !impl_->state.buffer || !impl_->dstMatrices.buffer || !impl_->dstPrevious.buffer ||
+            !impl_->counters.buffer ||
             !impl_->cmds.buffer) {
             SCENE_LOG_WARN("[RasterCull] buffer ayirma basarisiz; GPU culling kapali.");
             impl_->destroyBuffers();
@@ -324,10 +330,13 @@ void RasterGpuCull::setBounds(uint32_t firstInstance,
                 centerRadius4, static_cast<size_t>(count) * 16);
 }
 
-void RasterGpuCull::record(void* commandBuffer, void* srcInstanceBuffer, uint32_t meshCount) {
+void RasterGpuCull::record(void* commandBuffer, void* srcInstanceBuffer, uint32_t meshCount,
+    void* previousInstanceBuffer) {
     if (!isReady() || !impl_->device) return;
     VkCommandBuffer cmd = static_cast<VkCommandBuffer>(commandBuffer);
     VkBuffer src = static_cast<VkBuffer>(srcInstanceBuffer);
+    VkBuffer previous = previousInstanceBuffer ?
+        static_cast<VkBuffer>(previousInstanceBuffer) : src;
     if (cmd == VK_NULL_HANDLE || src == VK_NULL_HANDLE) return;
 
     const uint32_t meshes = (std::min)(meshCount, impl_->activeMeshCount);
@@ -337,22 +346,25 @@ void RasterGpuCull::record(void* commandBuffer, void* srcInstanceBuffer, uint32_
 
     // Kaynak instance buffer'i buyudugunde yeniden olusur; descriptor o zaman
     // yeniden yazilir. Bunu atlarsan SILINMIS bir buffer'dan okursun.
-    if (impl_->boundSrcInstanceBuffer != src) {
-        const VkBuffer bufs[8] = {
+    if (impl_->boundSrcInstanceBuffer != src || impl_->boundPreviousBuffer != previous) {
+        impl_->device->waitIdle();
+        const VkBuffer bufs[10] = {
             src, impl_->bounds.buffer, impl_->meshParams.buffer, impl_->dstMatrices.buffer,
-            impl_->counters.buffer, impl_->cmds.buffer, impl_->globals.buffer, impl_->state.buffer
+            impl_->counters.buffer, impl_->cmds.buffer, impl_->globals.buffer, impl_->state.buffer,
+            previous, impl_->dstPrevious.buffer
         };
-        VkDescriptorBufferInfo bi[8]{};
-        VkWriteDescriptorSet w[8]{};
-        for (uint32_t i = 0; i < 8; ++i) {
+        VkDescriptorBufferInfo bi[10]{};
+        VkWriteDescriptorSet w[10]{};
+        for (uint32_t i = 0; i < 10; ++i) {
             bi[i].buffer = bufs[i]; bi[i].offset = 0; bi[i].range = VK_WHOLE_SIZE;
             w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             w[i].dstSet = impl_->descSet; w[i].dstBinding = i; w[i].descriptorCount = 1;
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             w[i].pBufferInfo = &bi[i];
         }
-        vkUpdateDescriptorSets(vk, 8, w, 0, nullptr);
+        vkUpdateDescriptorSets(vk, 10, w, 0, nullptr);
         impl_->boundSrcInstanceBuffer = src;
+        impl_->boundPreviousBuffer = previous;
     }
 
     auto barrier = [&](VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
@@ -450,4 +462,10 @@ void RasterGpuCull::destroy() {
     impl_->device = nullptr;
 }
 
+} // namespace Backend
+
+namespace Backend {
+void* RasterGpuCull::compactedPreviousBuffer() const {
+    return impl_->dstPrevious.buffer;
+}
 } // namespace Backend

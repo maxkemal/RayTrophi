@@ -153,6 +153,7 @@ void SceneData::syncMatterFogStreams(ParticleSystemObject& system, std::size_t d
     for (const auto& field : fields.fields) {
         auto& appearance = ensureFogAppearance(desc.matter_fog_streams,
             field.key, desc.fluid_fog_shader);
+        appearance.producer_name = field.producer_name;
         auto& stream = streams[field.key];
         const bool populated = std::any_of(field.density.begin(), field.density.end(),
             [](float density) { return density > 0.0f; });
@@ -163,7 +164,8 @@ void SceneData::syncMatterFogStreams(ParticleSystemObject& system, std::size_t d
             continue;
         }
         const auto& grid = field.grid;
-        const std::string name = desc.name + " / " + fogFieldName(field.key);
+        const std::string name = desc.name + " / " +
+            (field.producer_name.empty() ? fogFieldName(field.key) : field.producer_name);
         const int id = manager.registerOrUpdateLiveVolume(stream.vdb_id, name,
             grid.nx, grid.ny, grid.nz, grid.voxel, field.density.data(),
             field.temperature_kelvin.empty() ? nullptr : field.temperature_kelvin.data(),

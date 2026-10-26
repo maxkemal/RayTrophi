@@ -1214,6 +1214,7 @@ void shadeSceneHit() {
                 payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
                                     | (matIndex & PL_MATID_MASK)
                                     | PL_PRIMARY_DONE | PL_PRIMARY_VOLUME;
+                payload.primaryInst = uint(gl_InstanceID);
             }
 
             payload.radiance += integratedRadiance;
@@ -1897,6 +1898,7 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
         // Stylize AOV: real material boundary for outlines (16-bit id space)
         payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK)
                             | PL_PRIMARY_DONE | (matIndex & PL_MATID_MASK);
+        payload.primaryInst = uint(gl_InstanceID);
     }
     worldNormal = tangentNormal;
     worldNormal = weatherSurfaceNormal(hitPos, worldNormal, weatherSupportNormal);

@@ -91,6 +91,9 @@ bool matterFogNeedsGeneralMixture(uint selected, int companion, uint count) {
     if (members != 2u) return true;
     VkVolumeInstance a = volumes.v[selected];
     VkVolumeInstance b = volumes.v[uint(companion)];
+    // The companion fast path has a fixed midpoint lattice. An adaptive
+    // request must not silently fall back to it when two materials match.
+    if (a.density_curve[9] > 0.5 || b.density_curve[9] > 0.5) return true;
     if (a.random_walk_enabled > 0.5 || b.random_walk_enabled > 0.5 ||
         a.emission_mode != 0 || b.emission_mode != 0) return true;
     if ((a._reserved[1] > 0.5 &&
@@ -259,6 +262,8 @@ MfTerms mfSum(vec3 position, vec3 direction, bool includeEmission) {
     }
     return sum;
 }
+
+#include "volume_mixture_adaptive.glsl"
 
 float mfEmptyStep(vec3 position, vec3 direction, float baseStep) {
     float safe = 1e30;
@@ -478,11 +483,12 @@ bool mfFlight(vec3 origin, vec3 direction, float limit, float stepLength,
     out MfTerms hitTerms, out vec3 coefficientPosition) {
     float opticalTarget = -log(max(1.0 - rnd(payload.seed), 1e-7));
     int steps = clamp(int(ceil(limit / stepLength)), 1, 2048);
-    float dt = limit / float(steps);
+    float baseStep = limit / float(steps);
     hitTerms = MfTerms(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
     coefficientPosition = origin;
-    for (int i = 0; i < steps; ++i) {
-        float start = float(i) * dt;
+    float start = 0.0;
+    for (int i = 0; i < MF_ADAPTIVE_LIMIT && start < limit; ++i) {
+        float dt = mfBudgetedSpan(origin, direction, start, limit - start, baseStep, i);
         coefficientPosition = origin + direction * (start + 0.5 * dt);
         MfTerms term = mfSum(coefficientPosition, direction, true);
         float proposal = mfPeak(term.extinction);
@@ -503,6 +509,7 @@ bool mfFlight(vec3 origin, vec3 direction, float limit, float stepLength,
             return true;
         }
         opticalTarget -= proposal * dt;
+        start += dt;
     }
     hitDistance = limit;
     return false;
@@ -520,7 +527,8 @@ void mfContinue(vec3 radiance, vec3 throughput, vec3 origin, vec3 direction,
     payload.bounceType = scattered ? BOUNCE_DIFFUSE : BOUNCE_TRANSPARENT;
     if (boundary) volumeRecordGasHandoff();
     volumeRecordShadowSamples(mfShadowSamples);
-    volumeRecordRay(mfSamples, mfEmptySegments, 0u, 0u, VOLUME_MARCH_COMPLETED);
+    volumeRecordRay(mfSamples, mfEmptySegments, 0u, 0u,
+        mfStepBudgetHit ? VOLUME_MARCH_STEP_BUDGET : VOLUME_MARCH_COMPLETED);
     if (scattered) volumeRecordWalk(events, rwProbeTraces, rwShadowTraces, 0u, false);
 }
 
@@ -542,6 +550,7 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
     mfEventOrdinal = 0u;
     mfShadowSamples = 0u;
     mfEmptySegments = 0u;
+    mfStepBudgetHit = false;
     mfInShadow = false;
     mfWalking = false;
     mfLightingStep = 0;
@@ -598,21 +607,24 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
     mfWalking = randomWalk;
     if (!randomWalk) {
         int steps = clamp(int(ceil((farT - nearT) / stepLength)), 1, 2048);
-        float dt = (farT - nearT) / float(steps);
+        float baseStep = (farT - nearT) / float(steps);
         float opacityWeight = 0.0;
         float depthWeight = 0.0;
         vec3 colorWeight = vec3(0.0);
-        for (int step = 0; step < steps; ++step) {
-            mfCameraT = nearT + (float(step) + 0.5) * dt;
-            vec3 position = origin + direction * mfCameraT;
-            float remaining = max((farT - nearT) - (float(step) + 0.5) * dt, 0.0);
-            float emptySpan = min(mfEmptyStep(position, direction, dt), remaining);
-            if (emptySpan > dt * 1.01) {
-                int skip = max(1, int(floor(emptySpan / dt)));
-                mfEmptySegments += uint(skip);
-                step += skip - 1;
+        float marchT = nearT;
+        for (int step = 0; step < MF_ADAPTIVE_LIMIT && marchT < farT; ++step) {
+            float remaining = farT - marchT;
+            mfCameraT = marchT;
+            float emptySpan = min(mfEmptyStep(origin + direction * marchT,
+                direction, baseStep), remaining);
+            if (emptySpan > baseStep * 1.01 && step < MF_ADAPTIVE_LIMIT - 1) {
+                mfEmptySegments += uint(max(1.0, floor(emptySpan / baseStep)));
+                marchT += emptySpan;
                 continue;
             }
+            float dt = mfBudgetedSpan(origin, direction, marchT, remaining, baseStep, step);
+            mfCameraT = marchT + 0.5 * dt;
+            vec3 position = origin + direction * mfCameraT;
             MfTerms sum = mfSum(position, direction, true);
             vec3 source = sum.emission;
             mfLightingStep = step;
@@ -630,9 +642,10 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
             float opacity = dot(throughput * (vec3(1.0) - sampleT),
                 vec3(0.2126, 0.7152, 0.0722));
             opacityWeight += opacity;
-            depthWeight += opacity * (nearT + (float(step) + 0.5) * dt);
+            depthWeight += opacity * mfCameraT;
             colorWeight += opacity * sum.scattering / max(sum.scatterRate, EPSILON);
             throughput *= sampleT;
+            marchT += dt;
             if (mfPeak(throughput) < 1e-6) break;
         }
         // A boundary handoff leaves the primary AOV for the actual SDF/solid,

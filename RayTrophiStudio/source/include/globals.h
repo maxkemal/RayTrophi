@@ -21,6 +21,7 @@
 #include <memory>
 #include "Vec3.h"
 #include "Backend/RenderCapabilities.h"
+#include "Backend/RealtimeDenoiserTypes.h"
 #include "SimulationComputeVulkanContext.h"
 #include <filesystem>
 #include <fstream>
@@ -242,6 +243,18 @@ enum class DenoiserQuality {
     High = 2
 };
 
+// When the viewport denoiser runs while accumulation is still in progress.
+// Progressive denoises at samples 1, 2, 4, 8, ... and on completion, and
+// re-shows the last denoised image in between: the accumulated image changes
+// slowly, and OIDN (43 ms fast at 1680x945 on a 3060, measured 2026-10-26)
+// also slows the RT dispatch it shares the GPU with. A reset (camera move)
+// always denoises the new first sample. Final renders are unaffected.
+enum class DenoiserSchedule {
+    EverySample = 0,
+    Progressive = 1,
+    ConvergedOnly = 2
+};
+
 struct RenderSettings {
     // Input / Interaction
     // Angular look/orbit response only; independent of scene/world scale.
@@ -273,6 +286,26 @@ struct RenderSettings {
     int max_bounces = 10;
     int diffuse_bounces = 4;
     int transmission_bounces = 8;
+    // First bounce at which Russian roulette may end a path (Vulkan RT).
+    int rr_start_bounce = 3;
+    // Motion bounce profile: while the camera moves (and for motion_settle_ms
+    // after it stops) the backend traces with these budgets instead of the
+    // authored ones above, which are never overwritten. Settling restores the
+    // authored budget and accumulation restarts at full quality.
+    bool motion_profile_enabled = false;
+    int motion_max_bounces = 2;
+    int motion_diffuse_bounces = 2;
+    int motion_transmission_bounces = 2;
+    int motion_settle_ms = 150;
+    // Runtime, written by the main loop; never saved.
+    bool motion_profile_active = false;
+    // Motion AOV of the Vulkan RT path (render.set_motion). Process state, not
+    // saved. Halton jitter replaces the random sub-pixel AA offset with a known
+    // 8-phase pattern for a temporal upscaler; it lowers converged AA quality
+    // (8 positions instead of random), so it is off by default.
+    bool motion_aov_enabled = true;
+    VulkanRT::RealtimeDenoiserSettings realtime_denoiser;
+    bool motion_halton_jitter = false;
     bool show_scene_stats_hud = true;
 
     // Adaptive Sampling
@@ -332,6 +365,7 @@ struct RenderSettings {
     float denoiser_blend_factor = 1.0f;
     DenoiserMode denoiser_mode = DenoiserMode::Quality;
     DenoiserQuality denoiser_quality = DenoiserQuality::Fast; // Viewport OIDN model tier; final render forced to High
+    DenoiserSchedule denoiser_schedule = DenoiserSchedule::Progressive; // viewport only
     // Set per-frame from Renderer::stylizeMode.enabled so the OptiX backend allocates the
     // albedo/normal/position AOV buffers for Stylize even when the denoiser is off.
     bool stylize_enabled = false;

@@ -896,6 +896,7 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         m_device->destroyImage(m_interactiveViewport.hdrColorImage);
         m_interactiveViewport.hdrColorImage = {};
     }
+    destroyRasterObjectMotionImage();
     if (m_interactiveViewport.reflectionNormalImage.image) {
         m_device->destroyImage(m_interactiveViewport.reflectionNormalImage);
         m_interactiveViewport.reflectionNormalImage = {};
@@ -1089,7 +1090,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                                             VkImageLayout depthInitial,
                                             bool withGbuffer,
                                             VkRenderPass* out) -> bool {
-            VkAttachmentDescription attachments[4]{};
+            VkAttachmentDescription attachments[5]{};
             attachments[0].format = colorFormat;
             attachments[0].samples = VK_SAMPLE_COUNT_1_BIT;
             attachments[0].loadOp = colorLoad;
@@ -1118,9 +1119,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             //   CLEAR yapmak `resumeRtShadowShading`'in `clearValueCount = 0`
             //   cagrisini gecersiz kilardi; ayrica temizlik zaten kare basinda
             //   bir kez olmali, gecisin her yeniden acilisinda degil.
-            for (uint32_t g = 2; g < 4; ++g) {
+            for (uint32_t g = 2; g < 5; ++g) {
                 attachments[g].format = g == 2 ? kRfGbufferNormalFormat
-                                               : kRfGbufferSpecularFormat;
+                                               : (g == 3 ? kRfGbufferSpecularFormat : VK_FORMAT_R32G32B32A32_SFLOAT);
                 attachments[g].samples = VK_SAMPLE_COUNT_1_BIT;
                 attachments[g].loadOp = colorLoad;
                 attachments[g].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -1131,7 +1132,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 attachments[g].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
             }
 
-            VkAttachmentReference colorRefs[3]{};
+            VkAttachmentReference colorRefs[4]{};
             colorRefs[0].attachment = 0;
             colorRefs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
             colorRefs[1].attachment = 2;
@@ -1139,13 +1140,14 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             colorRefs[2].attachment = 3;
             colorRefs[2].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+            colorRefs[3] = {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
             VkAttachmentReference depthRef{};
             depthRef.attachment = 1;
             depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
             VkSubpassDescription subpass{};
             subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-            subpass.colorAttachmentCount = withGbuffer ? 3u : 1u;
+            subpass.colorAttachmentCount = withGbuffer ? 4u : 1u;
             subpass.pColorAttachments = colorRefs;
             subpass.pDepthStencilAttachment = &depthRef;
 
@@ -1162,7 +1164,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
             dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                                        VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT |
-                                       VK_ACCESS_SHADER_WRITE_BIT;
+                                       VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT;
             dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
             dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
                                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
@@ -1171,7 +1173,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
 
             VkRenderPassCreateInfo renderPassInfo{};
             renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
-            renderPassInfo.attachmentCount = withGbuffer ? 4u : 2u;
+            renderPassInfo.attachmentCount = withGbuffer ? 5u : 2u;
             renderPassInfo.pAttachments = attachments;
             renderPassInfo.subpassCount = 1;
             renderPassInfo.pSubpasses = &subpass;
@@ -1417,14 +1419,14 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         //   G-buffer yazmaz (yansima icin bir yuzey beyan etmiyor), ama blend
         //   eklenti SAYISI gecisle uyusmak zorunda -- LDR ornegi tek eklentiyle
         //   kalir, o yuzden dizi burada, ortak `colorBlending`'te degil.
-        VkPipelineColorBlendAttachmentState solidHdrAttachments[3]{};
+        VkPipelineColorBlendAttachmentState solidHdrAttachments[4]{};
         solidHdrAttachments[0] = colorBlendAttachment;
         solidHdrAttachments[1].colorWriteMask = 0;
         solidHdrAttachments[1].blendEnable = VK_FALSE;
         solidHdrAttachments[2].colorWriteMask = 0;
         solidHdrAttachments[2].blendEnable = VK_FALSE;
         VkPipelineColorBlendStateCreateInfo solidHdrBlend = colorBlending;
-        solidHdrBlend.attachmentCount = 3;
+        solidHdrBlend.attachmentCount = 4;
         solidHdrBlend.pAttachments = solidHdrAttachments;
         pipelineInfo.pColorBlendState = &solidHdrBlend;
         if (vkCreateGraphicsPipelines(vkDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
@@ -1887,14 +1889,15 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpStages[1].module = mpFragModule;
                     mpStages[1].pName = "main";
 
-                    VkVertexInputBindingDescription mpBindings[5]{};
+                    VkVertexInputBindingDescription mpBindings[6]{};
                     mpBindings[0].binding = 0; mpBindings[0].stride = sizeof(float) * 3;  mpBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
                     mpBindings[1].binding = 1; mpBindings[1].stride = sizeof(float) * 3;  mpBindings[1].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
                     mpBindings[2].binding = 2; mpBindings[2].stride = sizeof(uint32_t);   mpBindings[2].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
                     mpBindings[3].binding = 3; mpBindings[3].stride = sizeof(float) * 16; mpBindings[3].inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
                     mpBindings[4].binding = 4; mpBindings[4].stride = sizeof(float) * 2;  mpBindings[4].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
 
-                    VkVertexInputAttributeDescription mpAttribs[8]{};
+                    mpBindings[5] = {5, sizeof(float) * 16, VK_VERTEX_INPUT_RATE_INSTANCE};
+                    VkVertexInputAttributeDescription mpAttribs[12]{};
                     mpAttribs[0].location = 0; mpAttribs[0].binding = 0; mpAttribs[0].format = VK_FORMAT_R32G32B32_SFLOAT;    mpAttribs[0].offset = 0;
                     mpAttribs[1].location = 1; mpAttribs[1].binding = 1; mpAttribs[1].format = VK_FORMAT_R32G32B32_SFLOAT;    mpAttribs[1].offset = 0;
                     mpAttribs[2].location = 2; mpAttribs[2].binding = 2; mpAttribs[2].format = VK_FORMAT_R32_UINT;            mpAttribs[2].offset = 0;
@@ -1904,11 +1907,15 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpAttribs[6].location = 6; mpAttribs[6].binding = 3; mpAttribs[6].format = VK_FORMAT_R32G32B32A32_SFLOAT; mpAttribs[6].offset = sizeof(float) * 12;
                     mpAttribs[7].location = 7; mpAttribs[7].binding = 4; mpAttribs[7].format = VK_FORMAT_R32G32_SFLOAT;       mpAttribs[7].offset = 0;
 
+                    for (uint32_t i = 0; i < 4; ++i) {
+                        mpAttribs[8 + i] = {8 + i, 5, VK_FORMAT_R32G32B32A32_SFLOAT,
+                            static_cast<uint32_t>(i * sizeof(float) * 4)};
+                    }
                     VkPipelineVertexInputStateCreateInfo mpVertInput{};
                     mpVertInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-                    mpVertInput.vertexBindingDescriptionCount = 5;
+                    mpVertInput.vertexBindingDescriptionCount = 6;
                     mpVertInput.pVertexBindingDescriptions = mpBindings;
-                    mpVertInput.vertexAttributeDescriptionCount = 8;
+                    mpVertInput.vertexAttributeDescriptionCount = 12;
                     mpVertInput.pVertexAttributeDescriptions = mpAttribs;
 
                     VkPipelineInputAssemblyStateCreateInfo mpIA{};
@@ -1958,9 +1965,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     //   olmadigi bir yon cikar. Yansima o yonu izler.
                     //   `_sim` yok: yalnizca en ondeki opak yazim gecerli
                     //   olsun diye depth testi bu isi zaten yapiyor.
-                    VkPipelineColorBlendAttachmentState mpAttachments[3]{};
+                    VkPipelineColorBlendAttachmentState mpAttachments[4]{};
                     mpAttachments[0] = mpCBA;
-                    for (uint32_t g = 1; g < 3; ++g) {
+                    for (uint32_t g = 1; g < 4; ++g) {
                         mpAttachments[g].colorWriteMask =
                             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                             VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
@@ -1969,7 +1976,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
 
                     VkPipelineColorBlendStateCreateInfo mpCB{};
                     mpCB.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-                    mpCB.attachmentCount = 3;
+                    mpCB.attachmentCount = 4;
                     mpCB.pAttachments = mpAttachments;
 
                     VkDynamicState mpDynStates[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
@@ -2073,15 +2080,15 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                                     // ★ Prepass HICBIR eklentiye yazmaz, ama
                                     //   sayisi gecisle UYUSMAK ZORUNDA: HDR
                                     //   gecisi artik 2 renk eklentisi tasiyor.
-                                    VkPipelineColorBlendAttachmentState dpCBA[3]{};
-                                    for (uint32_t g = 0; g < 3; ++g) {
+                                    VkPipelineColorBlendAttachmentState dpCBA[4]{};
+                                    for (uint32_t g = 0; g < 4; ++g) {
                                         dpCBA[g].colorWriteMask = 0;
                                         dpCBA[g].blendEnable = VK_FALSE;
                                     }
 
                                     VkPipelineColorBlendStateCreateInfo dpCB{};
                                     dpCB.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-                                    dpCB.attachmentCount = 3;
+                                    dpCB.attachmentCount = 4;
                                     dpCB.pAttachments = dpCBA;
 
                                     VkGraphicsPipelineCreateInfo dpPCI = mpPCI;
@@ -3066,6 +3073,10 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     //   texelFetch ile okur, uzerine yazmaz. Basarisizligi olumcul DEGIL --
     //   asagidaki zorunlu-kaynak kontrolune girmiyor; yoksa yansima gecisi
     //   kendini kapatir ve viewport env lookup'iyla calismaya devam eder.
+    if (!ensureRasterObjectMotionImage(width, height)) {
+        destroyInteractiveViewportResourcesImpl(true);
+        return false;
+    }
     m_interactiveViewport.reflectionNormalImage = m_device->createImage2D(
         (uint32_t)width, (uint32_t)height, kRfGbufferNormalFormat,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -3121,15 +3132,16 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         //   1 derinlik, 2 G-buffer. Subpass referanslari renk olarak 0 ve 2'yi
         //   gosteriyor; buradaki sirayi degistirmek derinligi renk eklentisi
         //   yapar ve belirtisi bir sizinti degil, dogrudan validation hatasidir.
-        VkImageView hdrAttachments[4] = {
+        VkImageView hdrAttachments[5] = {
             m_interactiveViewport.hdrColorImage.view,
             m_interactiveViewport.depthImage.view,
             m_interactiveViewport.reflectionNormalImage.view,
-            m_interactiveViewport.reflectionSpecularImage.view
+            m_interactiveViewport.reflectionSpecularImage.view,
+            m_interactiveViewport.objectPreviousClipImage.view
         };
         VkFramebufferCreateInfo hdrFBI = framebufferInfo;
         hdrFBI.renderPass = m_interactiveViewport.hdrRenderPass;
-        hdrFBI.attachmentCount = 4;
+        hdrFBI.attachmentCount = 5;
         hdrFBI.pAttachments = hdrAttachments;
         if (vkCreateFramebuffer(vkDevice, &hdrFBI, nullptr, &m_interactiveViewport.hdrFramebuffer) != VK_SUCCESS) {
             destroyInteractiveViewportResourcesImpl(true);
@@ -3500,10 +3512,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     //   lazim"i ayni bayraga katlardi -- ve birikimi sifirlama kurali
     //   (dirty => sifirla) kendi istedigi kareyi sifirlayarak sonsuza kadar
     //   yakinsamayan bir dongu kurardi.
-    const bool taaWantsMoreFrames =
-        m_taaEnabled &&
-        m_interactiveViewport.taaPipeline != VK_NULL_HANDLE &&
-        m_taaFrameIndex < m_taaTargetSamples;
+    const bool taaWantsMoreFrames = rasterTaaPending();
     if (!m_interactiveViewport.dirty && !taaWantsMoreFrames &&
         !rayFusionProbeUpdatesPending() && camHash == m_lastCameraHash &&
         m_interactiveViewport.width == width &&
@@ -3922,7 +3931,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     if (m_rasterGpuCullActive && m_rasterGpuCull) {
         m_rasterGpuCull->record(cmd,
                                 m_rasterGlobalInstBuf->vkBuffer(),
-                                m_rasterCullMeshCount);
+                                m_rasterCullMeshCount,
+                                m_rasterGlobalInstBuf->previousBuffer());
     }
     markRasterStage(cmd, RasterStage::GpuCull,
                     m_rasterGpuCullActive && m_rasterGpuCull != nullptr);
@@ -3969,7 +3979,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     const bool useMaterialPreview = hdrPassActive &&
         (!m_rasterInstances.empty() || m_device->m_volumeCount > 0u);
 
-    VkClearValue clearValues[4]{};
+    VkClearValue clearValues[5]{};
     const bool hasWorldBg = (m_cachedWorld.color.x != 0.0f || m_cachedWorld.color.y != 0.0f || m_cachedWorld.color.z != 0.0f);
     clearValues[0].color = { {
         hasWorldBg ? m_cachedWorld.color.x : 0.13f,
@@ -4004,7 +4014,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // ★ LDR gecisinin 2, HDR gecisinin 4 eklentisi var; fazla clear value
     //   vermek gecerli degil, eksik vermek CLEAR op'lu bir eklentiyi
     //   tanimsiz birakir.
-    renderPassInfo.clearValueCount = hdrPassActive ? 4u : 2u;
+    renderPassInfo.clearValueCount = hdrPassActive ? 5u : 2u;
 
     renderPassInfo.renderArea.offset = { 0, 0 };
     renderPassInfo.renderArea.extent = { (uint32_t)width, (uint32_t)height };
@@ -4134,6 +4144,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             // matris buffer'indan ve indirect komuttan surulur.
             const bool cullDriven = m_rasterGpuCullActive && m_rasterGpuCull &&
                                     rmb.cullDrawSlot != UINT32_MAX;
+            const bool useGlobalInstances =
+                m_rasterUseGlobalInstBuffer && m_rasterGlobalInstBuf;
             VkBuffer instanceBuffer =
                 cullDriven
                     ? static_cast<VkBuffer>(m_rasterGpuCull->compactedInstanceBuffer())
@@ -4249,7 +4261,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 mpPush.cameraPos[0] = m_camera.origin.x;
                 mpPush.cameraPos[1] = m_camera.origin.y;
                 mpPush.cameraPos[2] = m_camera.origin.z;
-                mpPush.cameraPos[3] = 0.0f;
+                mpPush.cameraPos[3] = useGlobalInstances &&
+                    m_rasterGlobalInstBuf->previousValid() ? 1.0f : 0.0f;
                 mpPush.lightDir0[0] = 0.45f; mpPush.lightDir0[1] = 0.8f; mpPush.lightDir0[2] = 0.35f; mpPush.lightDir0[3] = 2.5f;
                 mpPush.lightDir1[0] = -0.6f; mpPush.lightDir1[1] = 0.3f; mpPush.lightDir1[2] = 0.4f; mpPush.lightDir1[3] = 0.8f;
                 mpPush.lightDir2[0] = -0.2f; mpPush.lightDir2[1] = 0.4f; mpPush.lightDir2[2] = -0.8f; mpPush.lightDir2[3] = 1.2f;
@@ -4279,19 +4292,25 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                    0, sizeof(MaterialPreviewPushConstants), &mpPush);
 
-                VkBuffer mpVertexBuffers[5] = {
+                const VkBuffer previousInstances = cullDriven
+                    ? static_cast<VkBuffer>(m_rasterGpuCull->compactedPreviousBuffer())
+                    : (useGlobalInstances
+                        ? static_cast<VkBuffer>(m_rasterGlobalInstBuf->previousBuffer())
+                        : instanceBuffer);
+                VkBuffer mpVertexBuffers[6] = {
                     rmb.vertexBuffer.buffer,
                     rmb.normalBuffer.buffer  ? rmb.normalBuffer.buffer  : rmb.vertexBuffer.buffer,
                     rmb.matIdBuffer.buffer ? rmb.matIdBuffer.buffer : rmb.vertexBuffer.buffer,
                     instanceBuffer,
                     rmb.uvBuffer.buffer ? rmb.uvBuffer.buffer : rmb.vertexBuffer.buffer,
+                    previousInstances,
                 };
                 // ★ Instance binding'i mesh'in SIKISTIRILMIS cikti bolgesinin
                 //   tabanindan baglanir; indirect komuttaki firstInstance 0
                 //   kalir. Boylece drawIndirectFirstInstance cihaz ozelligine
                 //   bagimlilik yok (bkz. RasterGpuCull.h).
-                VkDeviceSize mpOffsets[5] = { 0, 0, 0, instanceBindOffset, 0 };
-                vkCmdBindVertexBuffers(cmd, 0, 5, mpVertexBuffers, mpOffsets);
+                VkDeviceSize mpOffsets[6] = { 0, 0, 0, instanceBindOffset, 0, instanceBindOffset };
+                vkCmdBindVertexBuffers(cmd, 0, 6, mpVertexBuffers, mpOffsets);
             } else {
                 // ★★ On gecis YALNIZCA materyal yolunu kapsar. Solid/matcap
                 //   dali derinligi zaten kendi geciste yaziyor, ve on gecis
@@ -5020,6 +5039,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // BEFORE the submit: endFrame writes the closing timestamps into THIS
     // command buffer, so publishing after submission would put them in the next
     // frame's buffer and every stage would be attributed one frame late.
+    if (m_rasterGlobalInstBuf) m_rasterGlobalInstBuf->recordPrevious(cmd);
     publishRasterStageTimings(cmd, cpuRecordMs, visibleTriangleTotal, rasterDrawCalls);
 
     double submitMs = 0.0;

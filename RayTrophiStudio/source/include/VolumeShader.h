@@ -483,6 +483,11 @@ public:
             if (!adaptive_stepping || voxel_size <= 1e-6f) return step_size;
             return voxel_size * voxel_step_multiplier;
         }
+
+        void packSamplingPolicy(float (&curve)[12]) const {
+            // Curve knots occupy [0..8]; [9] is the RT mixture sampling policy.
+            curve[9] = adaptive_stepping ? 1.0f : 0.0f;
+        }
     } quality;
 
     // ... (rest of file)
