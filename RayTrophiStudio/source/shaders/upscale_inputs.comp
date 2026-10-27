@@ -1,0 +1,79 @@
+#version 460
+layout(local_size_x = 8, local_size_y = 8) in;
+#ifdef RAW32
+layout(binding = 0, rgba32f) uniform image2D rawImage;
+#else
+layout(binding = 0, rgba16f) uniform image2D rawImage;
+#endif
+layout(binding = 1, rgba32f) uniform readonly image2D positionImage;
+layout(binding = 2, rgba16f) uniform readonly image2D motionImage;
+layout(binding = 3, r32f) uniform writeonly image2D depthImage;
+layout(binding = 4, rg16f) uniform writeonly image2D velocityImage;
+layout(binding = 5, r8) uniform writeonly image2D reactiveImage;
+layout(binding = 6, rgba16f) uniform readonly image2D fsrImage;
+layout(binding = 7, rgba32f) uniform readonly image2D oldPositionImage;
+layout(push_constant) uniform Push {
+    uvec4 extent; // active render xy, full display zw
+    vec4 origin; // xyz camera origin, w world pixel pitch per unit depth
+    vec4 forward; // xyz unit view direction, w near plane
+    uint stage;
+    // Stage 2: bridge weight. Stage 0: strength of the rejection-cluster
+    // reactive (UpscaleSettings::rejection_reactive, 0 or 1).
+    float bridgeWeight;
+    uint oldWidth;
+    uint oldHeight;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    uvec2 size = pc.stage == 0u ? pc.extent.xy : pc.extent.zw;
+    if (any(greaterThanEqual(uvec2(p), size))) {
+        return;
+    }
+    vec4 position = imageLoad(positionImage, p);
+    if (pc.stage == 0u) {
+        vec4 motion = imageLoad(motionImage, p);
+        float z = dot(position.xyz - pc.origin.xyz, pc.forward.xyz);
+        // Position.w==0 means sky (raygen's canonical AOV encoding).
+        float depth = position.w == 0.0 ? 0.0 :
+            clamp(pc.forward.w / max(z, pc.forward.w), 0.0, 1.0);
+        imageStore(depthImage, p, vec4(depth));
+        imageStore(velocityImage, p, vec4(motion.xy, 0.0, 0.0));
+        // Raygen's rejection flag (w) carries what the vectors cannot: content
+        // that moved without a matching vector, e.g. sim particles whose previous
+        // transforms were not trusted (zero vector, yet a different surface sits
+        // here now). SVGF's own position test drops that history; FSR reprojected
+        // it and left ghost trails. Isolated rejections are jittered silhouettes
+        // and grazing planes, which SVGF re-accepts from neighbours and FSR must
+        // keep anti-aliasing - so only a 3x3 cluster (>= 4 of 9, full at 7)
+        // becomes reactive.
+        float rejected = 0.0;
+        for (int y = -1; y <= 1; ++y) {
+            for (int x = -1; x <= 1; ++x) {
+                ivec2 q = clamp(p + ivec2(x, y), ivec2(0), ivec2(pc.extent.xy) - 1);
+                rejected += imageLoad(motionImage, q).w > 0.5 ? 1.0 : 0.0;
+            }
+        }
+        float cluster = clamp((rejected - 3.0) / 4.0, 0.0, 1.0) * pc.bridgeWeight;
+        imageStore(reactiveImage, p, vec4(clamp(max(motion.z, cluster), 0.0, 0.9)));
+        return;
+    }
+    vec4 raw = imageLoad(rawImage, p);
+    vec3 color = imageLoad(fsrImage, p).rgb;
+    if (pc.stage == 2u) {
+        // Last moving frame and first full-resolution frames share a camera.
+        // A world-position/material test rejects newly exposed thin surfaces;
+        // participating media have no reliable primary surface correspondence.
+        ivec2 q = clamp(ivec2((vec2(p) + 0.5) / vec2(pc.extent.zw) *
+            vec2(pc.oldWidth, pc.oldHeight)), ivec2(0),
+            ivec2(pc.oldWidth, pc.oldHeight) - 1);
+        vec4 old = imageLoad(oldPositionImage, q);
+        float distanceToCamera = length(position.xyz - pc.origin.xyz);
+        float tolerance = max(0.02, 3.0 * pc.origin.w * distanceToCamera);
+        bool same = position.w == old.w &&
+            distance(position.xyz, old.xyz) < tolerance &&
+            imageLoad(motionImage, p).z < 0.25;
+        color = mix(raw.rgb, color, same ? pc.bridgeWeight : 0.0);
+    }
+    imageStore(rawImage, p, vec4(color, raw.a));
+}

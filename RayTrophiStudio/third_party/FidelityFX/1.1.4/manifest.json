@@ -1,0 +1,84 @@
+{
+  "sdk_version": "1.1.4",
+  "fsr_upscaler_version_in_release": "3.1.4",
+  "release_url": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v1.1.4",
+  "archive": {
+    "url": "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/download/v1.1.4/FidelityFX-SDK-v1.1.4.zip",
+    "size_bytes": 470858939,
+    "sha256": "0216556bfb0e243cec30004a2a98d38f4e3f7406cb7938e3c1b85c758e95d952",
+    "hash_provenance": "Computed locally from official HTTPS release asset; release API supplies no separate digest."
+  },
+  "runtime": {
+    "filename": "amd_fidelityfx_vk.dll",
+    "architecture": "x64",
+    "sha256": "a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78",
+    "file_version": "1.0.1.41314",
+    "product_version": "1.0.1.0",
+    "signature_status_at_staging": "Valid",
+    "signature_verified_date": "2026-10-26",
+    "signer": "CN=Advanced Micro Devices, O=Advanced Micro Devices, S=California, C=US",
+    "signer_thumbprint": "33D35682079E201671B738B7209B4586103BC271",
+    "provider_version": "Query at runtime during B4 integration; not inferred from DLL file version.",
+    "exports": [
+      "ffxCreateContext",
+      "ffxDestroyContext",
+      "ffxConfigure",
+      "ffxQuery",
+      "ffxDispatch"
+    ],
+    "imports": [
+      "vulkan-1.dll",
+      "KERNEL32.dll",
+      "MSVCP140.dll",
+      "VCRUNTIME140.dll",
+      "VCRUNTIME140_1.dll",
+      "api-ms-win-crt-heap-l1-1-0.dll",
+      "api-ms-win-crt-stdio-l1-1-0.dll",
+      "api-ms-win-crt-string-l1-1-0.dll",
+      "api-ms-win-crt-math-l1-1-0.dll",
+      "api-ms-win-crt-runtime-l1-1-0.dll"
+    ]
+  },
+  "files": [
+    {
+      "archive_path": "ffx-api/include/ffx_api/ffx_api.h",
+      "local_path": "include/ffx_api/ffx_api.h",
+      "sha256": "408b4203545e8299ed188fbb1d9ddfe0932b73ea6e8b14fe10edcf1f45771561"
+    },
+    {
+      "archive_path": "ffx-api/include/ffx_api/ffx_api_loader.h",
+      "local_path": "include/ffx_api/ffx_api_loader.h",
+      "sha256": "7be51b7bf1e640b84c0c7f22a9db50a6816debce3755b51224e56c89501659c3"
+    },
+    {
+      "archive_path": "ffx-api/include/ffx_api/ffx_api_types.h",
+      "local_path": "include/ffx_api/ffx_api_types.h",
+      "sha256": "dee2782813d22047c068e0fb27d1347324f8ce79d280a4672848b3b294cb12fe"
+    },
+    {
+      "archive_path": "ffx-api/include/ffx_api/ffx_upscale.h",
+      "local_path": "include/ffx_api/ffx_upscale.h",
+      "sha256": "1155bcdcea9c10e6a95507bc9422ca062a853ac84250f0b09a637a66836b3ac1"
+    },
+    {
+      "archive_path": "ffx-api/include/ffx_api/vk/ffx_api_vk.h",
+      "local_path": "include/ffx_api/vk/ffx_api_vk.h",
+      "sha256": "a50a8d5ff5689a10a6ce378f2df5569fd880c89ec46e8356aaf35eb40512edd9"
+    },
+    {
+      "archive_path": "PrebuiltSignedDLL/amd_fidelityfx_vk.dll",
+      "local_path": "runtime/amd_fidelityfx_vk.dll",
+      "sha256": "a1624cc4238fef046f30c4d80ce3f47be63fc5f5373f49e3ee9edb9960f54c78"
+    },
+    {
+      "archive_path": "sdk/LICENSE.txt",
+      "local_path": "LICENSE.txt",
+      "sha256": "c93d509cd69d50698796c9c3274247352736ef122a3197ace2010f0978e21aa6"
+    },
+    {
+      "archive_path": "docs/license.md",
+      "local_path": "licenses/docs-license.md",
+      "sha256": "a335c2bb2bd28184b9a30b6e35b0c7e4aa7826abd1c388fc2aa02405e9d04f03"
+    }
+  ]
+}

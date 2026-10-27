@@ -16,8 +16,8 @@ VulkanRT::RealtimeDenoiserSettings realtimeDenoiserSettings() {
 
 Result setRealtimeDenoiser(const std::optional<std::string>& mode,
     std::optional<int> atrous_iterations, std::optional<int> history_max,
-    std::optional<float> firefly_clip, std::optional<int> static_samples,
-    std::optional<bool> debug_history) {
+    std::optional<float> firefly_clip, std::optional<float> still_noise,
+    std::optional<bool> debug_history, std::optional<bool> scene_motion) {
     if (!g_ctx) {
         return notBound();
     }
@@ -37,11 +37,14 @@ Result setRealtimeDenoiser(const std::optional<std::string>& mode,
     if (firefly_clip) {
         next.firefly_clip = *firefly_clip;
     }
-    if (static_samples) {
-        next.static_samples = *static_samples;
+    if (still_noise) {
+        next.still_noise = *still_noise;
     }
     if (debug_history) {
         next.debug_history = *debug_history;
+    }
+    if (scene_motion) {
+        next.scene_motion = *scene_motion;
     }
     if (next.atrous_iterations < 1 || next.atrous_iterations > 5) {
         return Result::fail("atrous_iterations must be in [1, 5]");
@@ -53,8 +56,9 @@ Result setRealtimeDenoiser(const std::optional<std::string>& mode,
         next.firefly_clip < 0.1f || next.firefly_clip > 10.0f) {
         return Result::fail("firefly_clip must be finite and in [0.1, 10]");
     }
-    if (next.static_samples < 0 || next.static_samples > 1024) {
-        return Result::fail("static_samples must be in [0, 1024] (0 = off)");
+    if (!std::isfinite(next.still_noise) || next.still_noise < 0.0f ||
+        next.still_noise > 0.5f) {
+        return Result::fail("still_noise must be finite and in [0, 0.5] (0 = off)");
     }
     if (next.enabled && !g_ctx->render_settings.motion_aov_enabled) {
         return Result::fail("SVGF requires render.set_motion enabled=true");
@@ -86,6 +90,11 @@ void updateRealtimeDenoiserPolicy(bool cameraMoving, bool finalRender) {
     if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
         const bool wasMoving = vk->realtimeDenoiserStats(false).moving;
         vk->configureRealtimeDenoiser(settings, cameraMoving);
+        if (g_ctx && vk->configureUpscale(g_ctx->render_settings.upscale,
+                vk->realtimeDenoiserStats(false).moving,
+                ui.viewport_settings.shading_mode == 2 && !finalRender)) {
+            g_ctx->start_render = true;
+        }
         if (wasMoving && !vk->realtimeDenoiserStats(false).moving && settings.enabled) {
             vk->requestPresentRefresh();
             if (g_ctx) {

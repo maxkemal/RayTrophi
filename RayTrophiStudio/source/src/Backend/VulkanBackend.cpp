@@ -1,3 +1,4 @@
+#include "Backend/VulkanFsrLoader.h"
 #include "PostProcess/Exposure.h"
 #include "Viewport/AutomaticCutout.h"
 /*
@@ -1534,6 +1535,8 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     }
     features2.features.shaderFloat64 = canUseShaderFloat64 ? VK_TRUE : VK_FALSE;
     features2.features.shaderInt64 = canUseShaderInt64 ? VK_TRUE : VK_FALSE;
+    m_fsrImageFeatures = enableFsrImageFeatures(supportedFeatures.features,
+        features2.features, vulkanLegacyMode());
 
     VkPhysicalDeviceBufferDeviceAddressFeatures bdaFeatures{};
     bdaFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES;
@@ -1622,6 +1625,8 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         *nextLink = &scalarFeatures;
         nextLink = &scalarFeatures.pNext;
     }
+    FsrDeviceFeatures fsrFeatures;
+    fsrFeatures.append(m_physicalDevice, nextLink, vulkanLegacyMode());
     *nextLink = nullptr;
 
     VkDeviceCreateInfo deviceCreateInfo{};
@@ -7188,7 +7193,8 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     const VulkanRT::BufferHandle& ldrStaging, bool doTrace,
     const std::function<void(VkCommandBuffer)>& prepass,
     const std::function<void(VkCommandBuffer)>& beforeTonemap,
-    const std::function<void(VkCommandBuffer)>& afterTonemap) {
+    const std::function<void(VkCommandBuffer)>& afterTonemap,
+    uint32_t renderWidth, uint32_t renderHeight) {
     if (slot >= kFrameSlotCount) return false;
     if (!m_rtPipelineReady || !fpCmdTraceRaysKHR || !m_tlas.accel) return false;
     if (m_tonemapPipeline == VK_NULL_HANDLE || m_tonemapDescSet == VK_NULL_HANDLE) return false;
@@ -7252,9 +7258,11 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
                 VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
                 VK_SHADER_STAGE_MISS_BIT_KHR  | VK_SHADER_STAGE_ANY_HIT_BIT_KHR,
                 0, (uint32_t)m_pushConstantData.size(), m_pushConstantData.data());
-        const uint32_t timingToken = beginRayGpuTiming(cmd, w, h);
+        const uint32_t traceW = renderWidth ? renderWidth : w;
+        const uint32_t traceH = renderHeight ? renderHeight : h;
+        const uint32_t timingToken = beginRayGpuTiming(cmd, traceW, traceH);
         fpCmdTraceRaysKHR(cmd, &m_sbtRaygenRegion, &m_sbtMissRegion,
-                          &m_sbtHitRegion, &m_sbtCallableRegion, w, h, 1);
+                          &m_sbtHitRegion, &m_sbtCallableRegion, traceW, traceH, 1);
         endRayGpuTiming(cmd, timingToken);
     }
 
@@ -8099,6 +8107,7 @@ void VulkanBackendAdapter::shutdown() {
     // repeated Vulkan RT <-> OptiX switches on WDDM.
     purgeUploadedTextureCacheLocked();
 
+    releaseUpscaleResources();
     // Adapter-owned output/readback resources.
     if (m_outputImage.image) {
         m_device->destroyImage(m_outputImage);
@@ -8134,6 +8143,7 @@ void VulkanBackendAdapter::shutdown() {
     m_volumeTemporal.destroy(*m_device);
     m_motionHistory.destroy(*m_device);
     m_realtimeDenoiser.destroy(*m_device);
+    m_rawGuard.destroy(*m_device);
     m_volumeInstrumentation.destroy(*m_device);
     if (m_volumeLightCache.buffer) m_device->destroyBuffer(m_volumeLightCache);
     m_volumeLightCache = {};
@@ -18359,6 +18369,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         return;
     }
 
+    syncUpscaleFrame(width, height, false);
     // A post-processing panel edit (exposure/gamma/saturation/tone mapping/
     // vignette/camera exposure) made AFTER accumulation has already converged
     // must still reach the presented frame. While actively accumulating this
@@ -18488,6 +18499,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
 
     // 1. Recreate output image if size changed
     if (m_imageWidth != width || m_imageHeight != height) {
+        releaseUpscaleResources();
         if (m_outputImage.image) m_device->destroyImage(m_outputImage);
         if (m_varianceImage.image) m_device->destroyImage(m_varianceImage);
         if (m_stagingBuffer.buffer) m_device->destroyBuffer(m_stagingBuffer);
@@ -18545,7 +18557,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         }
         m_outputImage = m_device->createImage2D(
             width, height, outFmt,
-            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+            VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+            VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
         m_varianceImage = m_device->createImage2D(
             width, height, VK_FORMAT_R32_SFLOAT,
             VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
@@ -18985,6 +18998,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     };
 
     static_assert(sizeof(CameraPushConstants) == 212, "CameraPC motion AOV ABI");
+    syncUpscaleFrame(width, height, true);
     CameraPushConstants pushConst{};
     
     // Camera image plane from m_camera. ★ ONE formula (AerialFroxelParams.h),
@@ -19406,7 +19420,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             //    overlap happens: while CPU memcpy + SDL update run, GPU is already
             //    chewing on submitSlot's command buffer.
             const bool canConsume = m_tonemappedSlotInFlight[consumeSlot] &&
-                m_device->frameSlotHasImage(consumeSlot);
+                m_device->frameSlotHasImage(consumeSlot) && upscaleSlotValid(consumeSlot);
             bool consumed = false;
             auto consumeTonemappedSlot = [&](uint32_t slot) {
                 if (!m_device->waitFrameSlot(slot)) return;

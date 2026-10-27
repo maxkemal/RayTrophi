@@ -28,6 +28,7 @@
 #include "Api/RtApiDenoiser.h"
 #include "Api/RtApiMotion.h"
 #include "Api/RtApiRealtimeDenoiser.h"
+#include "Api/RtApiUpscale.h"
 #include "Api/RtApiReflection.h"
 #include "Api/RtApiRig.h"
 #include "Api/RtApiRigMotion.h"

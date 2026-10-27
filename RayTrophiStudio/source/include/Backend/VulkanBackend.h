@@ -57,6 +57,8 @@
 #include "Backend/VulkanVolumeTemporal.h"
 #include "Backend/VulkanMotionHistory.h"
 #include "Backend/VulkanRealtimeDenoiser.h"
+#include "Backend/VulkanRawGuard.h"
+#include "Backend/VulkanFsrUpscaler.h"
 #include "AtmosphereLUT.h"
 
 // Facade-mesh SoA database (DNA::GeometryDetail) — used by the indexed-BLAS upload path.
@@ -641,6 +643,9 @@ public:
      * @brief Get detected GPU capabilities
      */
     const GPUCapabilities& getCapabilities() const { return m_capabilities; }
+    bool fsrImageFeaturesEnabled() const {
+        return m_fsrImageFeatures;
+    }
     
     /**
      * @brief Check if hardware ray tracing is available
@@ -1416,7 +1421,8 @@ public:
                                  bool doTrace = true,
                                  const std::function<void(VkCommandBuffer)>& prepass = {},
                                  const std::function<void(VkCommandBuffer)>& beforeTonemap = {},
-                                 const std::function<void(VkCommandBuffer)>& afterTonemap = {});
+                                 const std::function<void(VkCommandBuffer)>& afterTonemap = {},
+                                 uint32_t renderWidth = 0, uint32_t renderHeight = 0);
     bool waitFrameSlot(uint32_t slot, uint64_t timeoutNs = UINT64_MAX);
     // Updates the persistent tonemap descriptor set with new image views. Caller MUST
     // ensure no in-flight submission references the previous binding (drain fences first).
@@ -1695,7 +1701,7 @@ private:
     // Core Vulkan handles
     VkInstance m_instance = VK_NULL_HANDLE;
     VkPhysicalDevice m_physicalDevice = VK_NULL_HANDLE;
-   
+
     VkQueue m_computeQueue = VK_NULL_HANDLE;
     uint32_t m_computeQueueFamily = 0;
     bool m_queueSupportsGraphics = false;
@@ -1721,10 +1727,10 @@ private:
     uint32_t m_activePipeline = UINT32_MAX;
     
     // RT Pipeline (separate from compute)
-   
+
     VkPipelineLayout m_rtPipelineLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout m_rtDescriptorSetLayout = VK_NULL_HANDLE;
-   
+
    
 
     // Hair GPU buffers (bindings 10 and 11)
@@ -1816,6 +1822,7 @@ private:
     
     // Detected capabilities
     GPUCapabilities m_capabilities;
+    bool m_fsrImageFeatures = false;
     
     
     
@@ -1831,7 +1838,7 @@ private:
     void detectCapabilities();
     void setupDebugMessenger();
     
-   
+
     
     GPUVendor vendorFromID(uint32_t vendorID);
     
@@ -2626,6 +2633,9 @@ public:
     void configureRealtimeDenoiser(const VulkanRT::RealtimeDenoiserSettings& settings,
         bool moving);
     bool realtimeDenoiserOwnsViewport() const;
+    bool configureUpscale(const VulkanRT::UpscaleSettings& settings, bool moving,
+                          bool renderVisible = true);
+    VulkanRT::UpscaleStats upscaleStats(bool synchronize = true);
 protected:
     uint64_t m_aerialFroxelInputHash = 0;    // inputs of the last scheduled build, 0 = none
     bool m_aerialFroxelActive = false;       // last syncAerialFroxel() answer
@@ -2670,6 +2680,11 @@ protected:
 
 
     bool prepareRealtimeDenoiser();
+
+
+    void syncUpscaleFrame(uint32_t width, uint32_t height, bool resourcesReady);
+    void releaseUpscaleResources();
+    bool upscaleSlotValid(uint32_t slot) const;
     bool submitRealtimeTrace(uint32_t slot, uint32_t width, uint32_t height,
         const std::function<void(VkCommandBuffer)>& prepass);
 
@@ -3322,6 +3337,21 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     VulkanRT::VulkanVolumeTemporal m_volumeTemporal;
     VulkanRT::VulkanMotionHistory m_motionHistory;   // B2 motion AOV
     VulkanRT::VulkanRealtimeDenoiser m_realtimeDenoiser;
+    VulkanRT::VulkanFsrUpscaler m_upscale;
+    // Backs raw up for whichever display-only stage composes into it (SVGF,
+    // the upscaler or its bridge); owned by neither.
+    VulkanRT::VulkanRawGuard m_rawGuard;
+    bool m_svgfThisFrame = false;           // prepareRealtimeDenoiser's decision
+    // Scene-motion detection (RealtimeDenoiserSettings::scene_motion), updated
+    // per realtime trace and read by the NEXT frame's policy: deciding from the
+    // previous trace is what makes it independent of where in the frame the
+    // TLAS rebuild / accumulation reset happens.
+    uint64_t m_sceneMotionEpoch = 0;        // accumulation epoch of the previous trace
+    int m_sceneResetStreak = 0;             // consecutive camera-still traces that reset
+    bool m_policyCameraMoving = false;      // last policy's camera-motion input
+    const char* m_motionSource = "none";
+    const char* m_upscaleInput = "none";    // provider of the last FSR dispatch's input
+    bool m_upscaleResetApplied = false;
     uint64_t m_motionSeenInstanceSerial = 0;
     VulkanRT::VulkanVolumeInstrumentation m_volumeInstrumentation;
 
@@ -3644,7 +3674,7 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     //   yonu birincil yonle ayni ise (dot >= kAlignDot) devralinir. UI anahtari
     //   kapali ama yonler denk ise yine devralinir; anahtar acik ama biri elle
     //   cevrilmisse devralinmaz. Bayrak bir niyet, yon bir olcumdur.
-   
+
     bool rtShadowCoveredLight(RtShadowCoverage& coverage, std::string& reason) const;
     // Last frame's ACTUAL outcome, not this frame's intent. The scene AS is
     // built one call AFTER the cascade views (it hangs off the world bindings,
@@ -3697,19 +3727,19 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     //   inferred from an A/B on the display loop period, one frame per IPC
     //   round trip. That answers "did this switch help" and nothing else.
  
-   
+
     // Host time recorded per stage this frame, same order as RasterStage.
     
   
     // Closes the host clock on `stage` and opens the next one. Paired with the
     // GPU mark at the same call site so the two halves cannot describe
     // different boundaries.
-   
+
  
     void publishRasterStageTimings(double frameCpuMs);
-   
+
 public:
-   
+
    
     bool m_rasterUseGlobalInstBuffer = false;  // false = CPU fallback
     void refreshRasterInstanceLayout();
@@ -3742,11 +3772,11 @@ private:
     // Where the compiled SPV lives. Cached when the IBL resources are created,
     // because the per-frame probe service has no shader-dir argument and adding
     // one to every caller would spread a path through the frame loop.
-   
+
 
     // ── Production instancing: single global instance buffer ────────────
   
-   
+
     void rebuildRasterInstanceLayout();           // compact pack all meshes
     // Layout + upload in ONE body. Every geometry build must end here; the
     // realtime viewport's override once carried its own copy of this tail and
@@ -3772,13 +3802,13 @@ private:
     //   kapatmis olabilir. Ikisi de ayni olcumu uretir.
     //   Kol ve pipeline KORUNDU: RT golge maskesi icin piksel basina derinlik
     //   gerekiyor ve orada 113 ms'lik golge terimine karsi 22 ms iyi bir takas.
-   
+
     void writeRasterInstanceTransformsToGlobal(); // batch write all transforms
 
     // Generation counter: last g_scene_geometry_generation value seen when
     // raster geometry was built.  Allows skipping redundant rebuilds on
     // Rendered→Solid transitions when scene geometry hasn't changed.
-   
+
     // Attribution for the token above: which code path last wrote it. Only a FULL
     // raster build may write it; this string is logged by the early-out so a cache
     // that wrongly claims to be current names its writer instead of hiding.
@@ -3855,7 +3885,7 @@ private:
     std::unordered_map<uint64_t, std::pair<const void*, std::string>> m_cacheKeyOwner;
     int64_t m_nextTextureID = 1;
     uint64_t m_textureCacheGeneration = 1;
-   
+
     uint64_t m_textureUploadBytes = 0;
     uint32_t m_textureUploadCount = 0;
     uint32_t m_textureUploadBC4Count = 0;
@@ -4037,7 +4067,7 @@ private:
 
 
 
-   
+
 
     // True once a BLAS has been uploaded WITH the per-vertex pointiness block. The node
     // editor reads it back (geometryHasPointiness) to decide whether a graph that newly
@@ -4144,7 +4174,7 @@ private:
 
     // Selection outline internals shared by the raster-mode composite path
     // and the Rendered-mode mask readback. Caller must hold m_mutex.
-   
+
     // Resolves node names against m_rasterInstances and uploads one matrix
     // per matched instance into selectionInstanceBuffer. The shared uploader
     // drains before changed host writes; call before command recording starts.

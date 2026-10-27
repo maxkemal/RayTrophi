@@ -22,6 +22,7 @@
 #include "Vec3.h"
 #include "Backend/RenderCapabilities.h"
 #include "Backend/RealtimeDenoiserTypes.h"
+#include "Backend/UpscaleTypes.h"
 #include "SimulationComputeVulkanContext.h"
 #include <filesystem>
 #include <fstream>
@@ -305,6 +306,7 @@ struct RenderSettings {
     // (8 positions instead of random), so it is off by default.
     bool motion_aov_enabled = true;
     VulkanRT::RealtimeDenoiserSettings realtime_denoiser;
+    VulkanRT::UpscaleSettings upscale;
     bool motion_halton_jitter = false;
     bool show_scene_stats_hud = true;
 

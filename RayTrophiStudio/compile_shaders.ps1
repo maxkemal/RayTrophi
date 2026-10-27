@@ -112,6 +112,8 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
 }
 Add-Shader (Join-Path $shaderRoot 'realtime_svgf.comp') 'realtime_svgf32' @(
     '-DRAW32=1', '--target-env=vulkan1.3', '-O')
+Add-Shader (Join-Path $shaderRoot 'upscale_inputs.comp') 'upscale_inputs32' @(
+    '-DRAW32=1', '--target-env=vulkan1.3', '-O')
 $windowShaders = @(
     'sim_fluid_divergence', 'sim_fluid_divergence_var',
     'sim_fluid_cg_build_diag', 'sim_fluid_cg_build_diag_var',

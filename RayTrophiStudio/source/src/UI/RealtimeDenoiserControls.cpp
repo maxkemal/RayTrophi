@@ -29,13 +29,32 @@ void drawRealtimeDenoiserControls() {
     if (ImGui::SliderInt("SVGF History", &settings.history_max, 1, 64)) {
         apply(setRealtimeDenoiser({}, {}, settings.history_max, {}));
     }
-    if (ImGui::SliderInt("SVGF On Still Frames", &settings.static_samples, 0, 256)) {
-        apply(setRealtimeDenoiser({}, {}, {}, {}, settings.static_samples));
+    float stillPercent = settings.still_noise * 100.0f;
+    if (ImGui::SliderFloat("SVGF Still Noise %", &stillPercent, 0.0f, 10.0f, "%.1f")) {
+        apply(setRealtimeDenoiser({}, {}, {}, {}, stillPercent / 100.0f));
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("With the OIDN denoiser OFF: filter the still image while it "
-                          "accumulates, fading to the raw result by this sample count. "
-                          "0 = off. The converged image is never filtered.");
+                          "accumulates. Each pixel switches to the raw result once its "
+                          "measured noise falls to this level (fully filtered at twice it). "
+                          "0 = off. Pixels still noisier than this stay filtered on the "
+                          "final image; the accumulated result itself is never changed.");
+    }
+    if (const auto still = realtimeDenoiserStats(false); still.still_complete) {
+        ImGui::TextUnformatted("Still frame: clean, filter off");
+    } else if (still.still_filtered_fraction >= 0.0) {
+        ImGui::Text("Still frame: %.1f%% of pixels filtered",
+                    still.still_filtered_fraction * 100.0);
+    }
+    bool sceneMotion = settings.scene_motion;
+    if (ImGui::Checkbox("Animation Counts As Motion", &sceneMotion)) {
+        apply(setRealtimeDenoiser({}, {}, {}, {}, {}, {}, sceneMotion));
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Skinning, timeline or simulation that restarts the image every "
+                          "frame with the camera still is treated like camera motion: SVGF "
+                          "keeps its history and FSR can engage. Off: each such frame is "
+                          "filtered alone at full resolution.");
     }
     bool debugHistory = settings.debug_history;
     if (ImGui::Checkbox("SVGF History Debug", &debugHistory)) {

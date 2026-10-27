@@ -103,21 +103,25 @@ bool VulkanBackendAdapter::sampleMotionImage(bool raster, VulkanRT::MotionImageS
         out.reason = raster ? "raster motion image is not allocated" : "RT motion image is not allocated";
         return false;
     }
-    const uint64_t pixels = uint64_t(img->width) * img->height;
+    const uint32_t sampleWidth = raster ? img->width : m_upscale.renderWidth(img->width);
+    const uint32_t sampleHeight = raster ? img->height : m_upscale.renderHeight(img->height);
+    const uint64_t pixels = uint64_t(sampleWidth) * sampleHeight;
+    const uint64_t allocationPixels = uint64_t(img->width) * img->height;
     VulkanRT::BufferCreateInfo bci;
-    bci.size = pixels * 8ull;   // RGBA16F
+    bci.size = allocationPixels * 8ull;   // RGBA16F
     bci.usage = VulkanRT::BufferUsage::TRANSFER_DST;
     bci.location = VulkanRT::MemoryLocation::GPU_TO_CPU;
     VulkanRT::BufferHandle staging = m_device->createBuffer(bci);
     if (!staging.buffer) { out.reason = "staging allocation failed"; return false; }
     m_device->copyImageToBuffer(*img, staging);   // single-time submit, waits
-    std::vector<uint16_t> half(size_t(pixels) * 4u);
+    std::vector<uint16_t> half(size_t(allocationPixels) * 4u);
     m_device->downloadBuffer(staging, half.data(), bci.size);
     m_device->destroyBuffer(staging);
 
     uint64_t rejected = 0, reactive = 0, accepted = 0;
     double sx = 0.0, sy = 0.0, sLen = 0.0, maxLen = 0.0;
-    for (uint64_t i = 0; i < pixels; ++i) {
+    for (uint64_t sample = 0; sample < pixels; ++sample) {
+        const uint64_t i = (sample / sampleWidth) * img->width + sample % sampleWidth;
         const float mx = motionHalfToFloat(half[i * 4 + 0]);
         const float my = motionHalfToFloat(half[i * 4 + 1]);
         const float rz = motionHalfToFloat(half[i * 4 + 2]);

@@ -6922,7 +6922,7 @@ static const MethodParam params_render_realtime_denoiser_stats[] = {
 static const MethodDescriptor desc_render_realtime_denoiser_stats = {
     "render.realtime_denoiser_stats", "render",
     "Read SVGF settings, last completed GPU costs and measured history length",
-    "synchronize=true waits for the render GPU; use false for polling. GPU costs are last completed timestamps, not CPU recording times. total_ms includes backup/composition/tonemap/restore; history_length_mean requires synchronization. available does not imply active: moving and presenting describe the last policy/frame.",
+    "synchronize=true waits for the render GPU; use false for polling. GPU costs are last completed timestamps, not CPU recording times. total_ms includes composition/tonemap (the raw backup/restore belongs to the shared raw guard but sits inside the same interval); history_length_mean requires synchronization. available does not imply active: moving and presenting describe the last policy/frame. still_filtered_fraction is the share of pixels still (partly) filtered in the last measured still frame (-1 = not measured for this accumulation; read back one frame slot late, never stalls); still_complete = every pixel reached still_noise, still-frame SVGF stopped until the next accumulation reset. motion_source is why the policy says moving (camera | scene | none); scene_reset_streak counts consecutive camera-still traces that started a new accumulation (scene motion needs >= 2).",
     "read", "Read", false, "any",
     "render|realtime|denoiser|stats",
     nullptr,
@@ -7051,18 +7051,19 @@ static const MethodParam params_render_set_realtime_denoiser[] = {
     {"atrous_iterations", "integer", false, "Inclusive range 1..5; invalid values are rejected.", nullptr, nullptr},
     {"history_max", "integer", false, "Inclusive range 1..64; invalid values are rejected.", nullptr, nullptr},
     {"firefly_clip", "number", false, "Firefly clamp in sigmas, applied only to pixels that start a new history (no reprojected tap passed the 2x2/3x3 consistency test). Inclusive range 0.1..10; invalid values are rejected.", nullptr, nullptr},
-    {"static_samples", "integer", false, "0 = off; default 64. Still camera with viewport OIDN OFF: spatial-only SVGF over the accumulated image until this many samples, fading linearly to the raw accumulation; capped one below the target sample count so the frame left on screen at convergence is never filtered. Range 0..1024. realtime_denoiser_stats.static_active reports a still-frame dispatch.", nullptr, nullptr},
+    {"still_noise", "number", false, "0 = off; default 0.02. Still camera with viewport OIDN OFF: spatial-only SVGF over the accumulated image, faded out PER PIXEL by measured noise: the raw accumulation's relative standard error (raygen Welford M2, same-material 3x3 mean, trusted from 8 samples) is shown unfiltered at or below this value and fully filtered at twice it. Applies through the converged frame: pixels still above the target stay filtered on the final view (display only; the accumulator is never modified). The earlier forced raw ramp before the target was removed because it handed a clean SVGF image back to a noisy raw interior at the end. Once at most 0.1% of pixels are still filtered the accumulation is complete and still-frame SVGF stops dispatching (realtime_denoiser_stats.still_complete). Range 0..0.5. Replaces static_samples, whose fixed linear fade made shown noise GROW with the sample count on noisy interiors.", nullptr, nullptr},
     {"debug_history", "boolean", false, "Diagnostic: SVGF frames show per-pixel temporal history length instead of the image (red = none, yellow = under 4 frames, green ramp = long). Capture with viewport.get_screenshot while moving. Session only, default false.", nullptr, nullptr},
+    {"scene_motion", "boolean", false, "Default true. Scene animation counts as motion: when at least 2 consecutive realtime traces each start a new accumulation with the camera still (skinning, timeline, simulation, rigid object edits), SVGF runs its temporal path and FSR may engage. Decided from the PREVIOUS trace, independent of where in the frame the reset happens. false = such frames run the still filter at 1 spp with history wiped every frame (measured on a skinned scene: 11.8 ms/frame at full resolution, mean history 1.0). realtime_denoiser_stats.motion_source reports camera|scene|none.", nullptr, nullptr},
 };
 static const MethodDescriptor desc_render_set_realtime_denoiser = {
     "render.set_realtime_denoiser", "render",
     "Configure session-only Vulkan SVGF during motion with atomic validation",
-    "Requires motion AOV enabled. Defaults: svgf (on since B3b), 4 iterations, 24 history, firefly clip 3, static_samples 64. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera or a rigid object moves; timeline playback alone does not trigger it. Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged.",
+    "Requires motion AOV enabled. Disabling SVGF while FSR is on is allowed: FSR then upscales the raw accumulation (upscale_stats input_provider \"none\"). Defaults: svgf (on since B3b), 4 iterations, 24 history, firefly clip 3, still_noise 0.02. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera moves, or while scene animation restarts accumulation every frame (scene_motion, default on). Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged.",
     "render", "Render", false, "any",
     "render|set|realtime|denoiser",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_render_set_realtime_denoiser, 6,
+    params_render_set_realtime_denoiser, 7,
     true
 };
 static const MethodRegistration reg_render_set_realtime_denoiser(desc_render_set_realtime_denoiser);
@@ -7086,6 +7087,25 @@ static const MethodDescriptor desc_render_set_settings = {
     true
 };
 static const MethodRegistration reg_render_set_settings(desc_render_set_settings);
+
+static const MethodParam params_render_set_upscale[] = {
+    {"mode", "string", false, "", nullptr, "['off', 'fsr', 'auto']"},
+    {"quality", "string", false, "", nullptr, "['quality', 'balanced', 'performance', 'ultra_performance']"},
+    {"sharpness", "number", false, "Finite inclusive range 0..1. Omitted fields retain current values.", nullptr, nullptr},
+    {"rejection_reactive", "boolean", false, "Default true. Raygen's motion-history rejections (motion AOV w) that form a 3x3 cluster (>= 4 of 9, full at 7) are written into FSR's reactive mask, so content that moved without a matching vector (sim particles, deforming surfaces) uses the new frame instead of dragging old history. Isolated rejections (jittered silhouettes) are ignored to keep anti-aliasing. false = reactive from volume/transmission only, which ghosted moving particles under FSR while SVGF alone was clean.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_render_set_upscale = {
+    "render.set_upscale", "render",
+    "Configure moving Vulkan FSR upscaling with atomic validation; stable frames remain full resolution",
+    "Session-only. Default off, quality, sharpness 0.2; mode remains requested if the device/DLL/context is unavailable. Requires the motion AOV only. The denoiser is an input PROVIDER, not a requirement: with SVGF on FSR upscales its denoised HDR, with SVGF off it upscales the raw accumulation (noisy on path-traced views); upscale_stats.input_provider reports which. Only Vulkan Rendered perspective motion frames use a reduced render extent. Final/debug/stationary paths are full resolution. Changes reset histories atomically at the frame boundary. SDK DLL is loaded only from the application directory. No frame generation.",
+    "render", "Render", false, "any",
+    "render|set|upscale",
+    "render.upscale_stats|render.set_realtime_denoiser|render.motion_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_render_set_upscale, 4,
+    true
+};
+static const MethodRegistration reg_render_set_upscale(desc_render_set_upscale);
 
 static const MethodParam params_render_set_volume_light_cache[] = {
     {"max_cells", "int", true, "", nullptr, nullptr},
@@ -7171,6 +7191,22 @@ static const MethodDescriptor desc_render_status = {
     true
 };
 static const MethodRegistration reg_render_status(desc_render_status);
+
+static const MethodParam params_render_upscale_stats[] = {
+    {"synchronize", "boolean", false, "", "True", nullptr},
+};
+static const MethodDescriptor desc_render_upscale_stats = {
+    "render.upscale_stats", "render",
+    "Read FSR requested settings, observed runtime/provider, render/display extents, jitter and GPU timings",
+    "synchronize=true waits for the GPU and collects completed timestamp queries; false never loads the DLL or probes the GPU. Capability is lazily checked on a requested moving frame. available differs from active; reason is a capability/error reason, inactive_reason explains deliberate full-resolution paths. gpu_ms covers input conversion + FSR + display composition + bridge-position save. input_provider is who produced FSR's colour input on the last dispatch: \"svgf\" or \"none\" (raw accumulation). svgf_filter_ms is temporal+variance+atrous only (0 when the provider is not svgf); do not add SVGF total_ms (its enclosing submission includes FSR again). ffx_version is the queried provider name, not DLL file version. Extent changes discard stale frame slots. SDK preparation: scripts/setup_fidelityfx.ps1.",
+    "read", "Read", false, "any",
+    "render|upscale|stats",
+    "render.set_upscale|render.gpu_timing_stats|render.realtime_denoiser_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_render_upscale_stats, 1,
+    true
+};
+static const MethodRegistration reg_render_upscale_stats(desc_render_upscale_stats);
 
 static const MethodParam params_render_volume_counters[] = {
     {"enabled", "bool", true, "", nullptr, nullptr},

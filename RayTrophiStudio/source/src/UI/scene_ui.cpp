@@ -1476,6 +1476,7 @@ static void DrawBounceControls(UIContext& ctx) {
 // OIDN switch, so it is never hidden behind it.
 static void DrawDenoiseControls(UIContext& ctx) {
     rtapi::drawRealtimeDenoiserControls();
+    rtapi::drawUpscaleControls();
     UIWidgets::Divider();
     if (ImGui::Checkbox("Enable Denoiser (OIDN)", &ctx.render_settings.use_denoiser)) {
         // Mirror to legacy 'render_use_denoiser' so the final single-frame

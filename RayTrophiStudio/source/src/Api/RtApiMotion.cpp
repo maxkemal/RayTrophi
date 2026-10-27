@@ -103,6 +103,12 @@ Result setMotion(std::optional<bool> enabled, std::optional<bool> halton_jitter)
     if (enabled && !*enabled && g_ctx->render_settings.realtime_denoiser.enabled) {
         return Result::fail("disable SVGF before disabling the motion AOV");
     }
+    // FSR needs the motion AOV on its own: SVGF is no longer the gate that
+    // kept it on (the upscale input provider may be "none").
+    if (enabled && !*enabled &&
+        g_ctx->render_settings.upscale.mode != VulkanRT::UpscaleMode::Off) {
+        return Result::fail("disable upscale before disabling the motion AOV");
+    }
     auto& rs = g_ctx->render_settings;
     if (enabled) rs.motion_aov_enabled = *enabled;
     if (halton_jitter) rs.motion_halton_jitter = *halton_jitter;
