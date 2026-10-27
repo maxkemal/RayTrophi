@@ -149,6 +149,31 @@ later cloud-volume stages remain planned. [Atmosphere notes](docs/dev/ATMOSPHERE
 - **Intel Open Image Denoise (OIDN)** — CPU and CUDA-accelerated paths, viewport and final
 - Tone mapping and post-processing
 
+### Real-time denoising & upscaling (Vulkan RT)
+
+- **SVGF** combines motion-reprojected temporal history with edge-aware à-trous
+  filtering for interactive path-traced previews. The viewport returns to progressive
+  full-resolution accumulation when motion settles; OIDN remains available for
+  viewport/final denoising.
+- **AMD FidelityFX FSR 3.1.4** reconstructs the display image from a lower-resolution
+  render during motion. Off / FSR / Auto modes, Quality / Balanced / Performance /
+  Ultra Performance presets, sharpening, and reactive-mask controls are available.
+  This integration provides upscaling, without frame generation.
+- FSR can use SVGF-filtered HDR or raw accumulation; SVGF is optional. FSR mode,
+  quality, sharpness, and reactive preference are saved with the project. GPU
+  availability and temporal history remain runtime state.
+- UI, Python, and IPC expose the controls and diagnostics through
+  `render.set_realtime_denoiser`, `render.realtime_denoiser_stats`,
+  `render.set_upscale`, and `render.upscale_stats`.
+- Currently limited to the **Vulkan RT Render viewport**; RayFusion, Solid, Matcap,
+  CPU/OptiX, and final renders do not use this FSR path. Unsupported configurations
+  report the reason and retain full-resolution rendering.
+- Runtime deployment includes `amd_fidelityfx_vk.dll` beside the executable,
+  `FidelityFX-LICENSE.txt`, and the compiled SVGF/upscale shaders in `shaders/`.
+  SVGF adds no separate DLL. See the
+  [implementation and acceptance notes](docs/dev/RT_REALTIME_DENOISE_UPSCALE_PLAN.md)
+  for recorded checks and remaining limitations.
+
 ### Backend comparison
 
 <details>

@@ -59,7 +59,7 @@ Result setUpscale(const std::optional<std::string>& mode,
     if (next.mode != UpscaleMode::Off && !g_ctx->render_settings.motion_aov_enabled) {
         return Result::fail("FSR requires the motion AOV enabled");
     }
-    // Session-only preference. Hardware availability is an observed status,
+    // Project-persisted preference. Hardware availability is an observed status,
     // never a reason to silently replace the requested mode with 'off'.
     g_ctx->render_settings.upscale = next;
     if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {

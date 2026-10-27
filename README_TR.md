@@ -149,6 +149,30 @@ parçacıkları, hücre rüzgârları, yüzey birikimi/akış ve sonraki hacim a
 - **Intel Open Image Denoise (OIDN)** — CPU ve CUDA hızlandırmalı yollar, viewport ve final
 - Tone mapping ve son-işleme
 
+### Gerçek zamanlı denoise & upscale (Vulkan RT)
+
+- **SVGF**, interaktif path-tracing ön izlemesinde hareketle yeniden izdüşürülen
+  zamansal geçmişi, kenar koruyan à-trous filtrelemeyle birleştirir. Hareket
+  durulduğunda viewport tam çözünürlüklü aşamalı birikime döner; viewport/final
+  denoise için OIDN kullanılmaya devam eder.
+- **AMD FidelityFX FSR 3.1.4**, hareket sırasında düşük çözünürlüklü render'dan
+  ekran çözünürlüğünde görüntü oluşturur. Off / FSR / Auto modları, Quality /
+  Balanced / Performance / Ultra Performance seçenekleri, keskinlik ve reactive
+  maskesi kontrolleri sunulur. Bu entegrasyon upscale sağlar; kare üretimi içermez.
+- FSR, SVGF ile filtrelenmiş HDR veya ham birikimi kullanabilir; SVGF isteğe
+  bağlıdır. FSR modu, kalite, keskinlik ve reactive tercihi projeyle kaydedilir.
+  GPU kullanılabilirliği ve zamansal geçmiş çalışma anında belirlenir.
+- UI, Python ve IPC üzerinden `render.set_realtime_denoiser`,
+  `render.realtime_denoiser_stats`, `render.set_upscale` ve
+  `render.upscale_stats` ile kontrol ve tanılama sağlanır.
+- Şimdilik yalnız **Vulkan RT Render viewport** kapsamındadır; RayFusion, Solid,
+  Matcap, CPU/OptiX ve final render bu FSR yolunu kullanmaz. Desteklenmeyen
+  yapılandırmalarda neden bildirilir ve tam çözünürlüklü render korunur.
+- Dağıtımda EXE yanında `amd_fidelityfx_vk.dll` ve `FidelityFX-LICENSE.txt`,
+  `shaders/` içinde derlenmiş SVGF/upscale shader'ları bulunur. SVGF ayrı DLL
+  gerektirmez. Kayıtlı kontroller ve kalan sınırlar için
+  [uygulama ve kabul notlarına](docs/dev/RT_REALTIME_DENOISE_UPSCALE_PLAN.md) bakın.
+
 ### Backend karşılaştırması
 
 <details>
