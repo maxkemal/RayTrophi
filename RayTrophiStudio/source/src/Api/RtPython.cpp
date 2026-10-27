@@ -11,6 +11,7 @@
 #include "RtRasterDiagnosticsBindings.h"
 #include "RtScreenGiBindings.h"
 #include "RtRealtimeDenoiserBindings.h"
+#include "RtUpscaleBindings.h"
 #include "RtReflectionBindings.h"
 #include "RtRigBindings.h"
 #include "RtClipBindingBindings.h"
@@ -5767,6 +5768,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     py::module_ render = module.def_submodule("render", "Asynchronous final-render jobs");
     bindRayGpuTimingPython(render);
     bindRealtimeDenoiser(render);
+    bindUpscale(render);
     render.def("optix_accum_status", []() -> py::dict {
         rtapi::OptixAccumStatus st;
         requireResult(rtapi::optixAccumStatus(st));

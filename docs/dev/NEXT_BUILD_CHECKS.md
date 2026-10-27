@@ -1,6 +1,222 @@
 # NEXT BUILD CHECKS
 
-> **Durum:** CANLI — 2026-10-26 B3f PASS (durma anı düşüşü %4.5 → ~%1); B3 ailesi kapandı. Sıradaki B4 (karar bekliyor). Altında B3b–B3f ve B2 sonuçları.
+> **B4 Auto geçişi çökme — 2026-10-27:** Kullanıcı ffxCreateContext içinde
+> DLL → null function çağrısı bildirdi. SDK 1.1.4 kaynak denetimi, backend'in
+> vkGetBufferMemoryRequirements2KHR adresini yüklediğini doğruladı; uygulama bu
+> extension'ı açmıyor (Vulkan core sürümünü kullanıyor). FSR'ye verilen resolver,
+> KHR adresi yoksa ABI eşdeğeri core vkGetBufferMemoryRequirements2'ye dönüyor.
+> DLL çağrısından önce SDK'nin gerekli device komutları kontrol ediliyor;
+> eksik komut durumunda adıyla tam çözünürlük fallback yapılıyor.
+> Kök neden canlı debugger ile henüz doğrulanmadı. C++ Release yeniden derlenip
+> uygulama yeniden açılarak Auto/Pro hareket testi yapılmalı; shader değişmedi.
+
+
+> **B4 ilk canlı kontrol — 2026-10-27:** Kullanıcı derledi. 1920×1080,
+> Auto / Ultra Performance ile durağan durumda giriş=çıkış (beklenen).
+> Harici IPC kamera hareket turunda da active=false, dll_loaded=false,
+> dispatches=0; genel uygunluk engeline takıldı. Kamera tur sonunda geri yüklendi.
+> Kaynak denetimi: camera_mode==0 koşulu varsayılan Pro (1) modunu da dışlıyordu.
+> Auto+Pro desteği ve engelleyen koşulu ayrı ayrı bildiren inactive_reason eklendi.
+> Bu düzeltme için kullanıcı C++ Release derlemesi gerekir; FSR GPU kabulü henüz PASS değil.
+
+
+> **Durum:** DERLEME BEKLİYOR — 2026-10-27 B4c (sahne animasyonu = hareket). B4b CANLI (kullanıcı: duruş birikimi "çok kaliteli"). Ayrıntı: `RT_REALTIME_DENOISE_UPSCALE_PLAN.md` en üstteki devir notu.
+
+## B4c — sahne animasyonu SVGF ve FSR için hareket sayılır (2026-10-27, derlenmedi; YALNIZ C++)
+
+**Kullanıcı:** yalnız C++ x64 Release; shader değişmedi. Yeni dosya yok.
+
+**Kök (canlı, skin animasyonlu sahne, kamera duruyor):** `moving=false`, `static_active=true`,
+`sample=1`, saniyede 38.7 SVGF çalışması ve **38.7 geçmiş sıfırlaması**, ortalama geçmiş **1.0**,
+SVGF **11.8 ms/kare** (à-trous 7.6) tam çözünürlükte, FSR kapalı. Nesne hareketi
+algılaması (TLAS seri ↔ "görülen" kopya) aynı karenin render'ında ikisi birden
+ilerlediği için policy anında hep eşitti: yapısal olarak hiç tetiklenmiyordu.
+Yeni: önceki trace'e bakılır; kamera dururken art arda ≥2 trace birikimi sıfırladıysa
+`motion_source="scene"` ve SVGF ile FSR hareket modunda çalışır. Eski seri karşılaştırması söküldü.
+
+**Statik kontrol:** IPC audit PASS, descriptor üretildi, probe AST temiz ve Release aynasında.
+
+1. **API probe'u** — `python scripts/test/rt_probe_realtime_denoiser_ipc.py`.
+   Görmen gereken: PASS, `scene_motion` bool değilse reddediliyor, stats'ta `motion_source`
+   ve `scene_reset_streak` var. Bozuksa: alan IPC listesinde yok (eski exe?).
+
+2. **Skin sahnesi, animasyon oynuyor, kamera duruyor** — `render.realtime_denoiser_stats`
+   (synchronize=true) 2 sn arayla iki kez.
+   Görmen gereken: `motion_source="scene"`, `moving=true`, `static_active=false`,
+   `history_resets` artışı ≈ 0, `history_length_mean` 1.0'dan belirgin yüksek (arka plan 24'e
+   yaklaşır). FSR açıksa `upscale_stats.active=true` ve render ~988×555, SVGF `total_ms`
+   11.8'den belirgin düşük.
+   Bozuksa: `scene_reset_streak` 0–1'de kalıyorsa animasyon her trace'te birikimi sıfırlamıyor
+   (ya da kamera hareketli sanılıyor); streak ≥2 ama source "none" → `scene_motion` kapalı.
+
+3. **Animasyon durunca normale dönüş** — oynatmayı durdur.
+   Görmen gereken: birkaç kare içinde `motion_source="none"`, FSR tam çözünürlüğe döner (bir kez
+   reset), birikim yükselir, duruş SVGF'si (B4b) devreye girer.
+   **★ Sessiz arıza:** streak kendini besler ve source "scene"de takılı kalırsa görüntü hep
+   düşük çözünürlüklü ve 1 spp kalır ama "hareket ediyor" gibi makul görünür. Kontrol:
+   durduktan sonra `sample` artıyor mu?
+
+4. **Tek değişiklik animasyon değildir** — kamera dururken tek bir `scene.set_transform` ya da
+   bir slider değişikliği yap. Görmen gereken: `scene_reset_streak` 1'e çıkar ve sıfırlanır,
+   `motion_source` "none" kalır, FSR devreye girmez. Bozuksa: eşik 1'e düşmüş ya da her
+   düzenlemede gereksiz çözünürlük geçişi oluyor (titreme).
+
+5. **Görüntü: skin karakteri hareket ederken** — `viewport.get_screenshot`, `debug_history=true`.
+   Görmen gereken: duvar ve zemin yeşil (uzun geçmiş), deforme olan karakter kırmızı/sarı
+   (tutarlılık testi reddediyor, beklenen). Karakterin arkasında iz varsa → rijit hız
+   yaklaşımı deformasyonu yanlış reprojekte ediyor (ayrı iş, hacim ajanının hız sözleşmesine).
+
+6. **Kapatma A/B'si** — `render.set_realtime_denoiser scene_motion=false`.
+   Görmen gereken: eski ölçümler geri gelir (geçmiş 1.0, ~11.8 ms). Kanıt, bu partinin farkın
+   kaynağı olduğunu gösterir.
+
+## B4b — duruş sönmesi ölçülen gürültüyle + FSR'ı SVGF'den ayırma (2026-10-27, derlenmedi; SHADER + C++)
+
+**Kullanıcı:** `compile_shaders.bat` (yalnız `realtime_svgf.comp` değişti → `realtime_svgf.spv`
+ve `realtime_svgf32.spv`), ardından C++ x64 Release. Yeni C++: `Backend/VulkanRawGuard.cpp`
+(vcxproj/filters'ta). SVGF push hâlâ **64 bayt**; yeni bindingler 15 (r32f Welford M2)
+ve 16 (slot başına sayaç SSBO). **Eski .spv + yeni exe = descriptor uyumsuzluğu**: shader
+derlenmeden C++ çalıştırılırsa SVGF pipeline'ı hata verir (reason'da görünür).
+
+**Statik kontrol:** glslangValidator iki varyant (HDR16 / RAW32) temiz; IPC audit PASS
+(709 metot), descriptor üretildi; iki probe `py_compile` temiz ve Release aynasında.
+Derleme ve canlı GPU doğrulaması DEĞİLDİR.
+
+Sıra: bağımsız ve hızlı olanlar önce; görüntü sonuçları en sonda.
+
+1. **API/IPC probe'ları** — `python scripts/test/rt_probe_realtime_denoiser_ipc.py`,
+   ardından `python scripts/test/rt_probe_upscale_ipc.py`.
+   Görmen gereken: ikisi de `"api_validation": "PASS"`. Upscale probe'u artık SVGF kapalıyken
+   FSR isteğinin **korunduğunu** ve `mode="auto"`'nun SVGF'siz **kabul edildiğini** doğrular;
+   denoiser probe'u `still_noise` aralığını ve eski `static_samples` adının **reddini** doğrular.
+   Bozuksa: "FSR refused without SVGF" → `RtApiUpscale.cpp` kapısı hâlâ duruyor (eski exe?);
+   `static_samples` kabul edildiyse IPC alan listesi eski.
+
+2. **Hareket AOV'u FSR'ı korur** — FSR açıkken, SVGF kapalıyken
+   `render.set_motion enabled=false`. Görmen gereken: "disable upscale before disabling the
+   motion AOV" hatası. Bozuksa: FSR hız vektörsüz çalışmaya çalışır (eskiden bunu yalnız SVGF
+   kuralı dolaylı engelliyordu).
+
+3. **Temiz sahnede duruş SVGF'si kendiliğinden durur** — az gürültülü bir dış sahne, OIDN
+   kapalı, kamera dur. `render.realtime_denoiser_stats` birkaç saniye arayla.
+   Görmen gereken: `static_active=true` ile başlar, `still_filtered_fraction` 1.0'dan düşer,
+   kısa sürede `still_complete=true` olur ve `dispatches` artmayı keser.
+   Bozuksa: fraction hep -1 → sayaç okunmuyor (slot etiketi / eşleme); hep 1.0 → shader M2'yi
+   okumuyor (binding 15 eski .spv) ya da `still_noise` 0.
+
+4. **★ Gürültülü iç mekanda duruş: örnek arttıkça DAHA TEMİZ** — yatak odası, OIDN kapalı,
+   hedef 128. 8, 32, 64, 100 ve 127. örneklerde `viewport.get_screenshot` + aynı bölgede
+   `render.probe` (duvar/tavan).
+   Görmen gereken: gürültü monoton azalır; eskiden 32→64 arasında artıyordu (σ√N/64).
+   `still_filtered_fraction` 64'te hâlâ büyük olabilir (doğru: oda 2% RSE'ye inmiyor);
+   son çeyrekte (96→127) ham görüntüye yumuşak geçiş, 127'de **sıçrama yok**.
+   Bozuksa: 8'den önce lekeli ham noktalar → güven eşiği çalışmıyor; 127'de sert geçiş →
+   ev sahibi rampası (rawBlend) gelmiyor.
+   **★ Sessiz arıza:** her şey "makul" görünür ama yakınsamış kare filtreli kalır. Kontrol:
+   hedefe ulaşınca SVGF kapalıyken alınan 128 spp karesi ile **bit-bit aynı** olmalı
+   (B3c ölçütü: meanabs 0).
+
+5. **SVGF kapalı + FSR açık** — `render.set_realtime_denoiser mode=off`, FSR balanced,
+   kamera hareket. `render.upscale_stats`. Görmen gereken: `active=true`,
+   `input_provider="none"`, `svgf_filter_ms=0`; görüntü gürültülü ama doğru konumda, durunca
+   tam çözünürlüğe döner ve birikim temiz. Sonra SVGF'yi aç: `input_provider="svgf"`.
+   Bozuksa: hareket karesi siyah/eski → guard.save çalışmıyor (raw yedeği yok); durunca
+   kalıcı bulanıklık veya FSR izi → guard.restore atlanıyor (birikim kirlendi — ciddi).
+
+6. **SVGF + FSR regresyonu** — varsayılanlar (SVGF açık, FSR balanced), aynı oda, 14°
+   yörünge. Görmen gereken: B4'teki gibi active 988×555, FSR ~1.1 ms, parlaklık durağanla
+   aynı (bu oturumda 0.470 / 0.462). Bozuksa: guard sırası SVGF'nin yedek okumasını bozdu
+   (SVGF artık backup'ı guard'dan alıyor).
+
+## B4 — FSR 3.1 Vulkan, tek derleme ve parti sonunda tek IPC kabul turu
+
+**Kullanıcı:** tüm shader'lar için `RayTrophiStudio/compile_shaders.bat`, ardından
+C++ x64 Release. Bu tek partidir; ajan SDK/shader/C++ derlemesi çalıştırmaz.
+Yeni shader: `upscale_inputs.comp` → `upscale_inputs.spv` (HDR16),
+`upscale_inputs32.spv` (`RAW32`, HDR32). Push **64 bayt**, 8 storage image.
+RT camera push **212**, B2 motion record **112**, SVGF push **64 bayt** değişmedi.
+Yeni kaynaklar proje/filter'da. `FidelityFX.targets` DLL+MIT lisansı `$(OutDir)`'e
+kopyalar; **x64/Release/amd_fidelityfx_vk.dll** şu anda hazır. SDK derlenmez,
+import lib bağlanmaz. Uygulama yeniden açıldığında yeni Vulkan mantıksal cihaz
+özellikleri de kullanılacak. Varsayılan upscale off; SDK varlığı hız PASS değildir.
+
+**Statik kontrol:** IPC audit PASS (709 metot), descriptor `--check` PASS;
+proje/filter/targets XML, 8 yeni C++ modül kaydı, probe AST ve Release aynaları
+PASS. Bunlar C++/shader derlemesi veya canlı GPU doğrulaması değildir.
+
+Ön koşul: Vulkan Rendered, standart perspektif/lens, SVGf ve motion açık;
+OIDN viewport seçeneği ayrıca korunur. İç oda 1680x945, aynı bounce/pozlama,
+motion profile kapalı; ardından bulut/gaz sahnesi. Dış named pipe
+`scripts/test/rt_ipc.py`; gömülü script içinde bekleme döngüsü YOK.
+Windows error 5 olursa aynı probe gerekli sandbox yükseltmesiyle yeniden koşulur.
+
+1. **İLK: soğuk DLL-yok kapısı.** Yeni açılan uygulama henüz upscale off iken,
+   FSR DLL'ini geçici olarak Release dışında tut; ilk mode=auto ve kamera
+   hareketinde uygulama çalışmalı, available/active false + açıklayıcı reason,
+   tam çözünürlük. Sonra DLL'i geri koy, mode off/on ve tekrar hareket: dll_loaded,
+   available, active true; ffx_version provider'dan dolu. Zaten yüklenmiş DLL'i
+   sonradan kaldırmak bu testi yapmaz. Başka DLL indirme/taşıma yok; orijinali koru.
+2. **API atomikliği/bağımlılıklar.** Dış terminal:
+   `python scripts/test/rt_probe_upscale_ipc.py`. 11 geçersiz güncelleme reddi,
+   kısmi yazım yok, aktif upscale'nin SVGF/motion bağımlılığı korunmalı; başlangıç
+   ayarları geri yüklenir. Python eş yüzeyleri `rt.render.set_upscale(...)`,
+   `rt.render.upscale_stats(synchronize=False)`; yanlış bool/enum/range reddi.
+3. **Boyut ve jitter.** Rendered'da
+   `python scripts/test/rt_probe_upscale_ipc.py --motion-seconds 4`.
+   balanced: render_w/h display'den küçük, active/dispatches artar; jitter phase
+   SDK'dan (>8), authored Halton tercihi değişmez. Durunca active false ve
+   render=display. ★ Sessiz arıza: mode fsr iken active false / dispatches sabit
+   ise FPS karşılaştırmasını kazanım sayma; reason/inactive_reason oku.
+4. **İşaret/ölçek.** Aynı 1° sağ dönüş: native RT mean_dx yaklaşık +28 px;
+   balanced RT vektörü yaklaşık +28 * render_w/display_w. FSR ekranında kayma
+   yine yaklaşık28 display px. Ters işaret, ölçek katlanması, yüzme/bulanıklık
+   → motionVectorScale/jitter/depth sözleşmesi bozuk. Duran kamera ~0 px.
+   Motion sample'ı hareket çağrısının hemen ardından al, sonraki dispatch üstüne yazar.
+5. **Hız.** Mode off ve balanced için ayrı `set_gpu_timing enabled=true`
+   pencereleri; RT ms/örnek medyanı ve ölçülen piksel boyutu. Balanced RT
+   **<=0.5x** native hedefi. `upscale_stats synchronize=true`: GPU timing
+   available true, gpu_ms + svgf_filter_ms OIDN fast ~44 ms'nin altında hedef.
+   İlk context/pipeline kurulumu hariç. `realtime_denoiser_stats.total_ms` FSR'ı
+   da içerdiğinden iki kez toplama; gerçek hareket FPS'ini ayrıca sayıyla yaz.
+6. **Duruş/tek örnek.** OIDN açık/kapalı iki durumda ani duruşta eski poz,
+   çift kontur veya kararma/gürültü sıçraması olmamalı. Bridge yalnız doğru
+   poz/epoch/yüzeyde; slider düzenlemesinden sonra eski FSR görüntüsü karışmamalı.
+   Target=1'de durunca eski düşük çözünürlüklü karede kalmamalı; son tonemap
+   pompalanır. Çalışmazsa epoch/slot/reset/bridge kimliği hatalıdır.
+7. **Referans.** Sabit pozlama/seed/zamanla native off ve hareketten sonra full
+   128 örnek: ham radyans ve son ekran bit bit aynı hedef. Birikim sayısının
+   ÖNCE sıfırlanmasını bekle; eski completed bayrağıyla erken çıkma. Filtreli veya
+   upscaled radyansın Welford/OIDN girdisine sızması en ağır sessiz arızadır.
+8. **Kalite.** Pervaz/avize/hasır/saç yörüngede titrememeli; hareketli nesne
+   arkasında iz <4 kare; gaz/nükleer/bulut reactive bölgede hayaletsiz.
+   Gürültü, parlaklık ve hayalet sayısını görüntü ölçümüyle raporla; yalnız FPS
+   artışı kalite kabulü değildir. B3 §7 açık işlerini yeni B4 başarısı sayma.
+9. **Yaşam döngüsü.** Hareket sırasında quality değiştirme, tek/çift viewport
+   boyutlarıyla resize, Material/Solid/Rendered geçişi; siyah kenar/eski slot/
+   hatalı boyut yok. Raster/durağan/final/debug ve desteklenmeyen lenslerde
+   active false, tam çözünürlük; raster boşta gereksiz sürekli redraw olmamalı.
+   Backend değişimi/device recovery eski DLL context/descriptors taşımamalı.
+10. **Hata ve temizlik.** SDK/feature/context/shader hatasında full-res reason;
+    başarısız FSR slot'u yayımlanmaz. Kamera ve tüm seçenekleri başlangıca al,
+    kullanıcı projesini kaydetme. Geçici resimleri yalnız `docs/dev/.captures/`
+    altında tut ve sonunda sil. Sonuçları buranın başına tek rapor olarak yaz;
+    yeni bulgular plan §7'ye. Kabulden sonra kullanıcı auto'yu açar.
+
+## B4 — SDK hazırlığı (2026-10-26) — kaynak/dağıtım doğrulandı
+
+1. **PASS:** resmî SDK v1.1.4 arşivi (470,858,939 bayt), SHA-256 manifestte.
+   `amd_fidelityfx_vk.dll`: x64, AMD Authenticode Valid, 5 FFX API export'u mevcut.
+2. **PASS:** `x64/Release/amd_fidelityfx_vk.dll` + `FidelityFX-LICENSE.txt` hazır;
+   mevcut `x64/Debug` kopyaları da aynı hash/lisans. Beş API başlığı third_party'de.
+3. **PASS:** `scripts/setup_fidelityfx.ps1` yerel pinli arşivle çalıştı; PowerShell
+   parser, dosya hash'leri, proje/filter/targets XML ve import/kopya bağlantıları
+   doğrulandı. `FidelityFX.targets` sonraki normal x64 derlemelerinde `$(OutDir)`
+   DLL+lisans dağıtımını yapar; SDK kaynak derlemesi veya import lib bağımlılığı yok.
+4. **HENÜZ YOK:** FSR loader/context, düşük çözünürlük dispatch, UI/API ve canlı
+   GPU kabulü. DLL indirildi/kopyalandı diye `available=true`/FPS kazanımı sayılmaz.
+   Uygulama ve SDK DLL çalıştırılmadı. SDK hazırlığı için ayrı uygulama derlemesi
+   gerekmiyor; §6 somut planı onaylandıktan sonra tüm B4 tek derleme partisi,
+   canlı kabul listesi o parti sonunda güncellenecek.
 
 ## B3f SONUÇLARI (2026-10-26, canlı, iç oda, OIDN kapalı) — PASS; B3 ailesi KAPANDI
 

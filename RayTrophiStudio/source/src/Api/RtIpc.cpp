@@ -11,6 +11,7 @@
 #include "RtRasterDiagnosticsBindings.h"
 #include "RtScreenGiBindings.h"
 #include "RtIpcRealtimeDenoiser.h"
+#include "RtIpcUpscale.h"
 #include "RtReflectionBindings.h"
 #include "RtRigBindings.h"
 #include "RtClipBindingBindings.h"
@@ -1032,6 +1033,10 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json upscale_result;
+    if (dispatchUpscaleIpc(method, params,
+            [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+            upscale_result)) return upscale_result;
     json realtime_denoiser_result;
     if (dispatchRealtimeDenoiserIpc(method, params,
             [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },

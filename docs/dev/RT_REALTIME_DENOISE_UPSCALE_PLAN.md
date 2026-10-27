@@ -1,40 +1,164 @@
 # Vulkan RT + RayFusion: hareket halinde hız — denoise, temporal, upscale planı
 
-> **Durum:** AKTİF — 2026-10-26. B1–B3 CANLI ve kapandı. **Sıradaki B4: FSR 3.1.4 (FidelityFX SDK 1.1.4, Vulkan, hazır DLL) — kullanıcı onayladı, plan yazılacak.** Devir notu hemen aşağıda.
+> **Durum:** AKTİF — 2026-10-27. B1–B4b CANLI (B4b: kullanıcı duruş birikimi "çok kaliteli"; canlı IPC: hareket 20/20 FSR active, input svgf). **B4c yazıldı, DERLENMEDİ** (yalnız C++): sahne animasyonu SVGF/FSR için hareket.
 
-## DEVİR NOTU — B4'e devir (2026-10-26) — devralan ajan ÖNCE BUNU okusun
+## DEVİR NOTU — B4c (2026-10-27)
 
-**Durum:** B1–B3 CANLI ve kapandı (B3b–B3f sonuçları `NEXT_BUILD_CHECKS.md`). SVGF varsayılan
-açık: hareket karesi ~10 ms (OIDN fast 44 ms), durağan mod `static_samples` 64 (OIDN
-kapalıyken; 8 örnek ≈ 48 ham), 128 örnekte ekran bit bit korunuyor, durma geçişi ~%1. Kalan
-küçük SVGF işleri §7'de. **Sıradaki iş B4: FSR 3.1 upscaler** — kullanıcı onayladı; tasarım
-§6 "B4 KARARI". Kural: önce PLAN (§6'yı somut dosya/adım listesine çevir, kullanıcıya
-göster), onaydan sonra TEK derleme partisi, test parti sonunda.
+**ÖNCE:** `NEXT_BUILD_CHECKS.md` en üstündeki B4c listesi. Yalnız C++.
+Kök (skin sahnesi, canlı): kamera dururken animasyon her karede birikimi sıfırlıyor,
+SVGF bunu duruş sanıyor → 1 spp, geçmiş her karede siliniyor (ortalama 1.0),
+11.8 ms/kare tam çözünürlük, FSR kapalı. Nesne hareketi algılaması
+(`motionInstanceSerial` ↔ `m_motionSeenInstanceSerial`) policy anında hep eşitti:
+ikisi aynı karenin render'ında ilerliyordu (üretici ≠ tüketici). Düzeltme:
+`VulkanRealtimeDenoiserAdapter.cpp` — `submitRealtimeTrace` kamera dururken art
+arda birikim sıfırlayan trace'leri sayar (`m_sceneResetStreak`), sonraki karenin
+`configureRealtimeDenoiser`'ı ≥2'de "scene" hareketi verir. FSR policy'si SVGF'nin
+`moving`'ini okuduğu için kendiliğinden izler. Tek değişiklik (slider, tek
+transform, FSR extent geçişinin kendi reset'i) eşiğe takılmaz. Ayar
+`scene_motion` (vars. true), stats `motion_source` / `scene_reset_streak`;
+IPC/Python/panel/overlay. Açık soru: deforme mesh'te rijit hız yaklaşımı iz
+bırakıyor mu (kontrol 5); bırakıyorsa hız sözleşmesi işi.
+İkincil gözlem (ölçüldü, kaynağı aranmadı): skin sahnesinde epoch SVGF
+çalışması başına ~4 artıyor → kare başına birden fazla `resetAccumulation`.
 
-**Neden B4:** darboğaz artık denoiser değil RT: iç oda 95 ms/örnek, bulutlu dış sahne hareketin
-ilk örneği ~470 ms. Denoiser seçimi FPS'i değiştirmiyor (ölçüldü). Kazanç yalnız daha az
-piksel izleyip büyütmekten gelir.
+## DEVİR NOTU — B4b kaynak partisinden sonra (2026-10-27)
 
-**İlk iş (kod yazmadan):**
-1. SDK sürümünü doğrula: Vulkan için **FidelityFX SDK v1.1.4 (FSR 3.1.4)**. SDK 2.x (FSR 4 /
-   3.1.5) Vulkan'ı DESTEKLEMİYOR (README bilinen sorunlar; 2.x ön koşulları yalnız DX12).
-   SDK'yı indirmek kullanıcının onayına bağlı; indirilen dosya güvenilmeyen veri, kendi
-   klasöründe.
-2. İndirilen pakette Vulkan için hazır imzalı DLL'in TAM adını ve lisans dosyasını oku
-   (`PrebuiltSignedDLL`; ad doğrulanmadı — `amd_fidelityfx_vk.dll` tahmini). Başlıklar:
-   ffx API (`ffx_api.h`, upscale ve vk başlıkları) → `third_party/` altına.
-3. Kullanıcıya özet + plan; onay.
+**ÖNCE:** `NEXT_BUILD_CHECKS.md` en üstündeki B4b listesi. Shader (`realtime_svgf.comp`,
+iki varyant) + C++ derlemesi gerekir; glslangValidator sözdizimi denetimi iki
+varyantta temiz, `.spv` üretilmedi. IPC audit PASS, descriptor üretildi.
 
-**Kurallar (bu oturumda pahalıya öğrenildi):** kullanıcı derler (shader dahil); her yeni yüzey
-5 katman (RtApi, IPC, Python, yetki, overlay + `gen_ipc_descriptors.py`, audit); panel kendi
-durum tutmaz, değer API'den yazılır; anlamı değişen alanın adı değişir; ekran görüntüleri
-scratchpad'e, iş bitince silinir; viewport OIDN `viewport_enabled` ile (render_enabled final
-içindir); Vec3 IPC parametreleri dizi; `gpu_timing_stats` parametresiz, yeni pencere
-`set_gpu_timing enabled=true`; hız görüntüsünü hareket çağrısının HEMEN ardından oku;
-bekleme döngüsünde önce örnek sayısının sıfırlandığını bekle (yoksa eski "tamamlandı"
-bayrağıyla erken çıkılır); async ping-pong'da ekrandaki son kare hedef−1. örnektir.
-Ölçüm araçları: `render.motion_stats sample='rt'|'raster'`, `render.realtime_denoiser_stats
-synchronize=true`, `debug_history`, debug view 16/17, `viewport.get_screenshot`.
+**Teşhis (canlı, iç mekan yatak odası, bu oturum):** 0.01° salınımla 16 kare,
+zamansal sapma: ham 1 spp sd 0.107–0.110; SVGF sd 0.008 (kolon) / 0.012 (tavan)
+ama sapmanın **%66–93'ü 8×8 blok** ölçeğinde (ham: %12) → "yüzen leke" =
+SVGF ince gürültüyü büyük lekeye çeviriyor. skew ≤ 0 ve firefly_clip 1.0
+iyileştirmedi → ateşböceği DEĞİL. atrous 5 etkisiz → luminance edge-stop
+geç geçişlerde daralıyor. Kalıcı çözüm girdi varyansı (radyans önbelleği /
+ReSTIR GI). Makaleden sapma: Schied 2017 geçmişe ilk à-trous çıktısını geri
+besler, bizimki ham temporal rengi saklıyor (`temporal()` nextColor) — ucuz
+kaldıraç, bu partide YAPILMADI (Sonra listesi).
+
+**1. Duruş sönmesi (kök: `rawBlend = sample/64` doğrusal).** Ekrandaki gürültü
+≈ σ·√N/64 → örnek arttıkça BÜYÜYORDU; 64'ten sonra ham 64+ spp kalıyordu.
+Yeni: `still_noise` (göreli standart hata, vars. 0.02; `static_samples` SÖKÜLDÜ,
+ad değişti). Shader raygen'in Welford M2'sini (binding 15) okur; aynı materyal
+3×3 ortalamasıyla RSE ≤ τ → ham, ≥ 2τ → filtreli, piksel başına. 8 örnek altı
+M2'ye güvenilmez. Son çeyrekte ev sahibi rampası tabanı (target-1'de sıçrama
+yok). Filtreli piksel sayısı slot başına sayaç (binding 16, eşlenmiş), slot
+fence'inden sonra okunur; ≤ %0.1 → `still_complete`, duruş SVGF'si o epoch için
+durur (temiz sahne bedava). Stats: `still_filtered_fraction`, `still_complete`.
+
+**2. Sağlayıcı sözleşmesi.** raw yedek/geri yükleme SVGF'den
+`Backend/VulkanRawGuard.*`'a taşındı (yeni .cpp, vcxproj'da). Adapter:
+guard.save → [SVGF.begin varsa] → FSR/köprü → tonemap → guard.restore.
+SVGF artık **isteğe bağlı sağlayıcı**: kapalıyken FSR ham birikimi büyütür.
+Kalkan kapılar: `setUpscale` SVGF şartı, `setRealtimeDenoiser` "önce upscale
+kapat", uygunlukta "SVGF is disabled". Yeni: `upscale_stats.input_provider`
+("svgf"/"none"), panelde "Input:". Delik kapatıldı: hareket AOV'u artık FSR
+açıkken de kapatılamaz (eskiden yalnız SVGF kuralıyla dolaylı korunuyordu).
+Gelecek sağlayıcı (kare başı OIDN vb.) aynı guard altında raw'a compose eder
+ve `m_upscaleInput`'u yazar; OIDN'in Vulkan↔OIDN harici bellek köprüsü YOK.
+
+**Sonra:** filtreli geçmiş geri beslemesi (Schied); iç mekan varyans azaltma;
+RayFusion için FSR (TAA'nın yerine; raster derinlik girdisi, matriste jitter,
+overlay sırası) — ayrı plan bölümü.
+
+> **B4 Auto geçişi çökme — 2026-10-27:** Kullanıcı ffxCreateContext içinde
+> DLL → null function çağrısı bildirdi. SDK 1.1.4 kaynak denetimi, backend'in
+> vkGetBufferMemoryRequirements2KHR adresini yüklediğini doğruladı; uygulama bu
+> extension'ı açmıyor (Vulkan core sürümünü kullanıyor). FSR'ye verilen resolver,
+> KHR adresi yoksa ABI eşdeğeri core vkGetBufferMemoryRequirements2'ye dönüyor.
+> DLL çağrısından önce SDK'nin gerekli device komutları kontrol ediliyor;
+> eksik komut durumunda adıyla tam çözünürlük fallback yapılıyor.
+> Kök neden canlı debugger ile henüz doğrulanmadı. C++ Release yeniden derlenip
+> uygulama yeniden açılarak Auto/Pro hareket testi yapılmalı; shader değişmedi.
+
+
+> **B4 ilk canlı kontrol — 2026-10-27:** Kullanıcı derledi. 1920×1080,
+> Auto / Ultra Performance ile durağan durumda giriş=çıkış (beklenen).
+> Harici IPC kamera hareket turunda da active=false, dll_loaded=false,
+> dispatches=0; genel uygunluk engeline takıldı. Kamera tur sonunda geri yüklendi.
+> Kaynak denetimi: camera_mode==0 koşulu varsayılan Pro (1) modunu da dışlıyordu.
+> Auto+Pro desteği ve engelleyen koşulu ayrı ayrı bildiren inactive_reason eklendi.
+> Bu düzeltme için kullanıcı C++ Release derlemesi gerekir; FSR GPU kabulü henüz PASS değil.
+
+
+## DEVİR NOTU (ARŞİV) — B4 kaynak partisinden sonra (2026-10-27)
+
+> B4 o zamandan beri derlendi ve CANLI; aşağıdaki "SVGF şartı" ve "FSR açıkken
+> SVGF kapatılamaz" sözleşmeleri B4b'de söküldü (yukarıdaki devir notu).
+
+**ÖNCE:** `NEXT_BUILD_CHECKS.md` en üstündeki B4 listesi. Kod yazımı ve SDK hazırlığı
+bitti; bu ajan C++/shader derlemesi, DLL çalıştırma veya uygulama açma yapmadı.
+Canlı testler yalnız kullanıcının derlemesinden sonra, açık uygulamaya dış
+`scripts/test/rt_ipc.py` ile tek turda yapılır. SDK kaynakları derlenmez.
+
+**Checkpoint:** B1–B3 + gaz işleri `8c7be7f9` commit'inde. B4/SDK değişiklikleri
+henüz commit edilmedi. Eski yedi devir notunun arşivi dosyanın sonunda korunuyor.
+
+**Hazır SDK:** FidelityFX SDK 1.1.4 / resmî Vulkan `amd_fidelityfx_vk.dll`;
+AMD Authenticode Valid, x64 ve 5 FFX export'u statik doğrulandı. Başlıklar,
+MIT lisansları ve hash manifesti `RayTrophiStudio/third_party/FidelityFX/1.1.4/`.
+DLL+lisans **x64/Release** ve mevcut Debug'a kopyalı. `FidelityFX.targets`
+kullanıcı derlemelerinden sonra `$(OutDir)`'e kopyalar. DLL ve ZIP Git-ignore'da;
+yeni checkout: `powershell -NoProfile -File scripts/setup_fidelityfx.ps1 -Download`.
+DLL file version 1.0.1.41314, FSR provider sürümü değildir; provider API'den sorgulanır.
+
+**Gerçek kaynak haritası (onaylı §6 planı uygulandı):**
+- `Backend/UpscaleTypes.h`, `VulkanFsrLoader.*`: tipler, kesin exe dizininden güvenli
+  dinamik DLL yükleme, export kontrolü ve mantıksal Vulkan cihaz özellikleri.
+- `Backend/VulkanFsrUpscaler.*`: context/quality/jitter query, GPU timestamp,
+  hareket/extent politikası ve etiketli duruş köprüsü. Plandaki ayrı Policy/History
+  dosyaları bu odaklı (<2000 satır) modülde toplandı.
+- `Backend/VulkanUpscaleInputs.*` + `shaders/upscale_inputs.comp`: depth/velocity/
+  reactive dönüştürme, full-res compose ve eski pozisyon görüntüsü.
+- `Backend/VulkanUpscaleAdapter.cpp` + mevcut `VulkanRealtimeDenoiserAdapter.cpp`:
+  sunum bağlantısı, slot/fence/epoch geçişleri. Büyük backend dosyasında yalnız
+  özellik/çağrı/trace-extent/kaynak yaşam döngüsü bağlantıları var.
+- `Api/RtApiUpscale.*`, `RtIpcUpscale.*`, `RtUpscaleBindings.*`,
+  `UI/UpscaleControls.cpp`: ortak servis, IPC, Python, panel; capability/overlay/
+  descriptor üretimi ve vcxproj/filters kayıtları tamamlandı.
+
+**Sözleşmeler:**
+- `render.set_upscale {mode:off|fsr|auto, quality:quality|balanced|performance|
+  ultra_performance, sharpness:0..1}`; atomik doğrulama, atlanan alan korunur.
+  Oturumluk; varsayılan **off / quality / 0.2**. Kabul sonrasında auto kullanıcı
+  tarafından açılır; bu kaynak partisinde varsayılan sessizce değiştirilmedi.
+- `render.upscale_stats {synchronize:true|false}`; true GPU bekler, false poll.
+  available/active ayrı; reason hata/kapı, inactive_reason bilerek tam çözünürlük.
+  Context ilk uygun hareket karesinde tembel kurulur; duran karede ilk sorgunun
+  available=false olması tek başına donanım uyumsuzluğu değildir.
+- Yalnız görünür Vulkan Rendered + standart perspektif/lens + SVGF + motion AOV.
+  Final/debug/ortho/distortion/CA/shake/raster tam çözünürlük; bunların son moving
+  frame'inden kalan active bayrağı raster paneline taşınmaz. SDK kapısı mantıksal
+  storage-image özellikleri, Vulkan >=1.2, formatlar ve context sonucuna bakar.
+- Kapasite full display'dir; RT/SVGF aktif düşük dikdörtgende, FSR/tonemap/readback
+  full boyutta. Motion sample özeti yalnız aktif RT dikdörtgenini okur.
+  Her extent geçişinde eski frame slot'ları beklenir/atılır; geçmişler sıfırlanır.
+- FSR query jitter'ı B2'nin authored Halton tercihini değiştirmeden zorlanır.
+  B2 hızları **render pikseli** olduğundan motionVectorScale=(1,1); normalized
+  vektör örneklerinin renderW/H çarpanı tekrar uygulanmaz. Yön/ölçek canlı kabulde
+  1° dönüşle doğrulanacak; kaynak incelemesi görüntü kabulü değildir.
+- R32 depth=near/viewZ, sky=0; ters-Z/sonsuz bayrakları. SDK'nın ters derinlik
+  sırasıyla cameraNear=FLT_MAX, cameraFar=0.01. Reactive B2 z → R8, <=0.9.
+- B3 mevcut kodu radyansı scene-linear tutuyor (`pushConst.exposureFactor=1`);
+  FSR **preExposure=1**, kamera pozlaması yalnız mevcut display post'ta.
+- FSR, SVGF'nin compose ettiği HDR'ı raw restore'dan önce tüketir; full-res
+  çıktısı aynı raw sunum hedefine compose edilir, tonemap sonrası raw yedekten
+  aynen geri gelir. Duruşta aynı poz/epoch ve uyumlu yüzeyde dondurulmuş FSR
+  görüntüsü 64 örneğe kadar söner; 128'de katkı yok. Slider/resize/viewport
+  değişiminde eski köprü taşınmaz. Target=1 için eski düşük görüntüde takılmayı
+  önleyen bir tonemap-only son sunum var; 128 örnek native davranışı korunur.
+- gpu_ms: inputs+FSR+compose+pozisyon kopyası GPU zamanıdır. svgf_filter_ms:
+  temporal+variance+atrous. **SVGF total_ms'i ayrıca ekleme**: dış submission
+  zaman aralığı FSR'ı da içerir. İlk shader/context kurulumunu hız kabulüne katma.
+- DLL/context/shader/dispatch hatası reason ile full-res fallback. Hatalı düşük
+  çözünürlüklü slot yayımlanmaz. Hata sonrası yeniden denemek için mode off/on.
+  FSR açıkken SVGF'yi kapatmak reddedilir; önce upscale off.
+
+**Bekleyenler:** kullanıcı derlemesi; soğuk DLL-yok kapısı; GPU süre/FPS, jitter,
+ince çizgi/hayalet, gaz reactive, duruş ve bit-bit 128 referans. Hiçbiri PASS
+olarak yazılmadı. Statik kontrol sonucu `NEXT_BUILD_CHECKS.md` B4 bölümüne yazılır.
+Yeni bulgular §7'ye; B3 Sonra mikro işleri bu partiyi büyütmez.
 
 ## 0. Kapsam ve kural
 
@@ -328,6 +452,97 @@ Moving (FSR 3.1)". Python + yetki + overlay + audit (5 katman).
 6. Durunca tam çözünürlüğe dönüş: 128 örnekte ekran upscale kapalıyla bit bit aynı.
 7. ★ Sessiz arıza: hız vektörü ölçeği yanlışsa (piksel vs UV) FSR "biraz bulanık / yüzen"
    görüntü verir, kimse hata demez — 4. madde bunu sayıyla yakalar.
+
+### B4 UYGULAMA PLANI — somut dosya/adım listesi (2026-10-26)
+
+**Durum: 2026-10-27 kullanıcı planı onayladı; kaynak adımları uygulandı. Derleme/canlı kabul bekliyor. Gerçek modül haritası en üstteki B4 devir notunda.**
+Devir kuralı: plan kullanıcıya gösterilir; onaydan sonra aşağıdaki işler TEK kaynak
+partisinde tamamlanır, kullanıcı tek shader+C++ derlemesi alır, canlı testler en sonda.
+SDK başlıkları doğrudan incelendi; Vulkan DLL tahmini değil doğrulanmış bağımlılıktır.
+
+1. **Bağımlılık/Release — TAMAM.**
+   `RayTrophiStudio/third_party/FidelityFX/1.1.4/` içinde `include/ffx_api/`,
+   `runtime/amd_fidelityfx_vk.dll`, lisanslar, SHA-256 `manifest.json`, README ve
+   `FidelityFX.targets`; `scripts/setup_fidelityfx.ps1` yalnız indirir/doğrular/kopyalar.
+   Proje include yolu ve x64 build-sonrası `$(OutDir)` kopyası bu target'tadır.
+   `x64/Release/amd_fidelityfx_vk.dll` ve `FidelityFX-LICENSE.txt` şu anda mevcut ve
+   kaynakla hash eşit. SDK/DLL derlenmez; import lib kullanılmaz. Kaynak XML,
+   PowerShell parser, pinli arşiv kurulumu ve Release/Debug hash kontrolü geçmiştir;
+   MSBuild veya uygulama çalıştırılmamıştır.
+2. **Loader, cihaz kapısı ve context.** Yeni
+   `source/include/Backend/UpscaleTypes.h`, `Backend/VulkanFsrLoader.h/.cpp`,
+   `Backend/VulkanFsrUpscaler.h/.cpp`.
+   Loader uygulama dizinindeki kesin DLL yolunu güvenli `LoadLibraryExW` ile açar;
+   beş export zorunlu. `ffxCreateBackendVKDesc` + `ffxCreateContextDescUpscale`
+   zinciri yalnız mevcut Vulkan cihazını kullanır; üretici/kart adı allowlist'i yok.
+   Özellik/format kontrolü, context oluşturma ve provider-version sorgusu ayrı
+   hata aşamaları olarak raporlanır. DLL file-version provider-version yerine
+   yazılmaz. Resize/device-loss/context teardown yalnız ilgili fence'ler boşalınca.
+3. **Hareket politikası ve etkin boyut.** Yeni
+   `Backend/VulkanUpscalePolicy.h/.cpp` ve `Backend/VulkanUpscaleAdapter.cpp`.
+   Mevcut kamera/nesne hareket kararını ortak kullan; ikinci bağımsız zamanlayıcı yok.
+   Display/allocation extent ve active render extent ayrı değerlerdir. Quality
+   modlarının render boyutunu SDK query'si verir (quality/balanced/performance/
+   ultra_performance). `off`, final render, debug/AOV veya kapı başarısızlığı tam
+   çözünürlüktedir. Hareket başlangıcı/duruşu/quality/resize değişimi epoch, motion,
+   SVGF ve FSR history resetlerini tek geçişte tutarlı uygular. Düşük çözünürlük
+   radyansı tam çözünürlük progressive tahminine veya OIDN girdisine karışmaz.
+4. **Raygen, motion ve SVGF active extent.** Mevcut
+   `VulkanMotionHistory.*`, `VulkanRealtimeDenoiser.*`, `raygen.rgen` ve
+   `realtime_svgf.comp` üzerinde odaklı değişiklikler. Kapasite display boyutunda
+   kalır; aktif dikdörtgen dispatch/copy/kernel sınırlarına ayrıca verilir.
+   Shader'ların `imageSize`/allocation ile aktif viewport'u karıştırması önlenir;
+   komşu örnekleri de aktif sınıra clamp edilir. B2 hız vektörü aktif render pikseli
+   olarak kalır. Halton faz sayısı ve jitter offset'i `ffxQuery` içindeki
+   `ffxQueryDescUpscaleGetJitterPhaseCount/GetJitterOffset` ile gelir; bugünkü sabit
+   8 faz FSR etkinliğinde kullanılmaz. Authored jitter tercihi değiştirilmez.
+5. **FSR girişleri.** Yeni `shaders/upscale_inputs.comp` ve
+   `Backend/VulkanUpscaleInputs.cpp`. Position AOV + etkin kamera → view-space
+   pozitif derinlikten ters-Z/sonsuz-far R32 depth; sky far=0. Motion xy RG16F,
+   reactive R8 (B2 z, 0..0.9); FSR jitter'sız piksel vektörüne uygun ölçek açıkça
+   tanımlanır ve 1° dönüşte ölçülür. Normalized motion örneğinin renderW/H çarpanı
+   bizim piksel vektörüne körlemesine uygulanmaz. HDR preExposure ve exposure
+   girdileri mevcut raygen/tonemap pozlaması izlenerek tek kez uygulanır.
+6. **Aynı submission'da SVGF → FSR → tonemap.** Yeni
+   `Backend/VulkanUpscalePresentation.cpp` mevcut
+   `VulkanRealtimeDenoiserAdapter.cpp` sunum bağlantısını yönetir. `VulkanDevice`
+   trace boyutu ile display/tonemap/readback boyutu ayrılır. FSR Vulkan komutlarını
+   mevcut frame-slot command buffer'ına kaydeder. Filtreli düşük çözünürlük rengi
+   raw restore'dan ÖNCE tüketilir; tam çözünürlük FSR çıktısı tonemap'e gider.
+   Tonemap kaynak descriptor'ı in-flight güncellenmez: slot başına descriptor
+   veya mevcut raw-backup/restore sözleşmesine uygun ayrı compose geçişi kullanılır;
+   nihai seçim mevcut descriptor/readback kodu incelenerek bu modülde sabitlenir.
+   Başarısız dispatch düşük çözünürlük köşesini tam görüntü diye sunmaz: o slot
+   yayımlanmaz, reason kaydedilir, sonraki kare tam çözünürlük resetine döner.
+7. **Duruş köprüsü ve durgun referans.** Yeni `Backend/VulkanUpscaleHistory.cpp`
+   son tam display FSR görüntüsünü epoch/pose/extent ile etiketler. İlk full-res
+   karelerde görüntü köprüsü yalnız aynı poz/geçerli yüzey geçmişiyle çalışır;
+   B3f'in düşük çözünürlüklü momentleri doğrudan full-res geçmiş gibi okunmaz.
+   Birikim sayısı boyunca köprü söner; 128 örnekte katkısı sıfır, raw HDR ve son
+   sunum upscale-off referansıyla aynı olmalıdır. Sabit kamera slider değişikliği,
+   yeni sahne ve resize eski FSR görüntüsünü taşımamalı. Bu adım geçişteki kararma/
+   gürültü sıçraması regresyonunu önler; B3 küçük Sonra işleri bu partiyi büyütmez.
+8. **Ortak API, IPC, Python ve panel.** Yeni `Api/RtApiUpscale.h/.cpp`,
+   `Api/RtIpcUpscale.h/.cpp`, `Api/RtUpscaleBindings.h/.cpp`,
+   `UI/UpscaleControls.cpp`; mevcut büyük dosyalara yalnız include/kayıt/çağrı.
+   `render.set_upscale {mode:off|fsr|auto, quality, sharpness:0..1}` atomik
+   doğrulanır; panel de aynı servisi çağırır. Stats: requested mode/quality,
+   effective scale ve active; available/reason/dll_loaded/ffx_version; render ve
+   display boyutları; gerçek GPU timestamp ms, reset/dispatch/failure sayaçları.
+   `RtIpcSecurity`, overlay ve capability audit aynası; descriptor üretimi.
+   Yeni kaynakların vcxproj/filters kayıtları. Geliştirme varsayılanı off;
+   kabul sonrasında kullanıcı auto'yu açar; etkinlik kapısı cihaz/context sonucudur.
+9. **Parti sonunda doğrulama.** Statik kaynak/ABI/IPC/dağıtım kontrolleri; dış
+   `scripts/test/rt_probe_upscale_ipc.py` ve Release aynası hazırlanır. Kullanıcı
+   bütün shader'ları ve C++'ı BİR kez derler. Sonra dış named-pipe ile tek canlı
+   tur: DLL yok kapısı; balanced RT <=0.5x taban ve toplam SVGF+FSR ms; jitter/hız
+   işaret-ölçek; ince geometri ve hareketli nesne; gaz reactive; duruş/resize;
+   128 örnekte referans eşitliği. Sonuçlar `NEXT_BUILD_CHECKS.md` başına yazılır;
+   test ortasında yeni özellik eklenmez. Derleme ve uygulama açma ajan tarafından
+   yapılmaz; test için açık uygulama kullanıcıdan gelir.
+
+**B4 dışı:** frame generation, DX12/OptiX, FSR4/SDK2 yükseltmesi, raster viewport'u
+FSR'a geçirmek, SVGF §7 mikro-optimizasyonları. İlk B4 yalnız Vulkan Rendered yolu.
 
 ## 7. Sonra (bu planın dışında, sırasız)
 

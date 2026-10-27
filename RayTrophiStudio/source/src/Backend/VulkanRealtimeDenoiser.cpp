@@ -15,7 +15,9 @@ struct Push {
     uint32_t width, height, stage, stepWidth, historyFlags, historyMax;
     float fireflyClip, rawBlend;
     float camera[4];   // origin xyz, pixel size per unit distance
-    uint32_t sampleCount, pad[3];
+    uint32_t sampleCount, noiseSlot;
+    float stillNoise;
+    uint32_t pad;
 };
 static_assert(sizeof(Push) == 64, "realtime_svgf.comp ABI");
 // historyFlags bits, mirrored in realtime_svgf.comp.
@@ -24,9 +26,18 @@ constexpr uint32_t kSvgfRtHistory = 2u;  // RT record slots hold this and the pr
 constexpr uint32_t kSvgfRtSlot1 = 4u;    // this dispatch's RT record is motionHistory1
 constexpr uint32_t kSvgfStatic = 8u;     // still camera: spatial-only over the accumulation
 constexpr uint32_t kSvgfDebugHistory = 16u;  // compose shows history length
-constexpr uint32_t kBindings = 15;       // 0-11 images, 12 statistics, 13-14 RT records
+// 0-11 images, 12 statistics, 13-14 RT records, 15 Welford M2, 16 still-noise counters
+constexpr uint32_t kBindings = 17;
 constexpr uint32_t kSlots = 2;
 constexpr uint32_t kQueries = 5;
+// A still accumulation is complete once at most this share of pixels is still
+// filtered: a handful of firefly pixels must not keep SVGF dispatching to the
+// target, and switching them to raw is invisible next to the rest.
+constexpr double kStillCompleteFraction = 0.001;
+
+bool bufferBinding(uint32_t binding) {
+    return binding == 12 || binding == 16;
+}
 
 void barrier(VkCommandBuffer cmd, VkPipelineStageFlags src, VkPipelineStageFlags dst,
              VkAccessFlags read, VkAccessFlags write) {
@@ -40,15 +51,6 @@ void computeBarrier(VkCommandBuffer cmd) {
     barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
             VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT,
             VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-}
-
-void copyImage(VkCommandBuffer cmd, const ImageHandle& src, const ImageHandle& dst) {
-    VkImageCopy region{};
-    region.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.dstSubresource = region.srcSubresource;
-    region.extent = {src.width, src.height, 1};
-    vkCmdCopyImage(cmd, src.image, VK_IMAGE_LAYOUT_GENERAL,
-                   dst.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
 }
 
 std::vector<uint32_t> loadShader(bool raw32) {
@@ -73,12 +75,26 @@ std::vector<uint32_t> loadShader(bool raw32) {
 } // namespace
 
 struct VulkanRealtimeDenoiser::Impl {
+    uint32_t activeWidth = 0, activeHeight = 0;
     RealtimeDenoiserSettings settings;
     RealtimeDenoiserStats status;
-    ImageHandle raw, albedo, normal, position, motion, backup;
+    ImageHandle raw, albedo, normal, position, motion;
+    ImageHandle backup;       // VulkanRawGuard's copy of raw, not owned
+    ImageHandle variance;     // raygen's Welford M2, not owned
     ImageHandle records[2];   // raygen motionHistory0/1, not owned
     ImageHandle color[2], moments[2], work[2];
     BufferHandle counters[2];
+    // One filtered-pixel counter per frame slot, host-coherent and mapped.
+    BufferHandle stillCounters;
+    uint32_t* stillMapped = nullptr;
+    struct StillTag {
+        bool measured = false;
+        uint64_t epoch = 0;
+        uint64_t pixels = 0;
+    };
+    StillTag stillTags[kSlots];
+    uint64_t stillCompleteEpoch = 0;
+    bool stillComplete = false;
     VkDescriptorSetLayout descriptors = VK_NULL_HANDLE;
     VkDescriptorPool pool = VK_NULL_HANDLE;
     VkDescriptorSet sets[2][2]{};
@@ -138,9 +154,10 @@ void VulkanRealtimeDenoiser::configure(const RealtimeDenoiserSettings& settings,
         s.settings.history_max != settings.history_max ||
         s.settings.atrous_iterations != settings.atrous_iterations ||
         s.settings.firefly_clip != settings.firefly_clip ||
-        s.settings.static_samples != settings.static_samples) {
+        s.settings.still_noise != settings.still_noise) {
         invalidate();
         s.failed = false;
+        s.stillComplete = false;
     }
     if (s.status.moving && !moving) {
         s.warm = true;
@@ -160,23 +177,32 @@ void VulkanRealtimeDenoiser::invalidate() {
     m_impl->warm = false;
     ++m_impl->status.history_resets;
 }
+void VulkanRealtimeDenoiser::setActiveExtent(uint32_t width, uint32_t height) {
+    m_impl->activeWidth = width;
+    m_impl->activeHeight = height;
+}
 
-bool VulkanRealtimeDenoiser::wantsFrame(int sample, int targetSamples, bool finalRender,
-    bool debug, bool staticAllowed) const {
+bool VulkanRealtimeDenoiser::wantsFrame(uint64_t epoch, int sample, int targetSamples,
+    bool finalRender, bool debug, bool staticAllowed) const {
     auto& s = *m_impl;
     if (!s.status.moving && sample >= 8) {
         s.warm = false;
     }
-    // Capped one BELOW the target: the async ping-pong shows the previous
-    // submit's image, and once accumulation completes the last submit is never
-    // consumed - the image left on screen is sample target-1. With the cap at
-    // the target that frame was still slightly filtered (B3c live test: limit
-    // 128 of 128 left meanabs 0.84 / max 27 on the converged view; limit 100
-    // was bit-identical).
-    s.staticLimit = targetSamples > 0 ? std::min(s.settings.static_samples, targetSamples - 1)
-                                      : s.settings.static_samples;
-    s.staticFrame = !s.status.moving && staticAllowed && s.staticLimit > 1 &&
-                    sample < s.staticLimit;
+    // Up to and INCLUDING the frame left on screen. The async ping-pong shows
+    // the previous submit, so the converged view is sample target-1; it stays
+    // filtered wherever the measured noise is still above still_noise. The old
+    // rule (cap at target-1 plus a raw ramp over the last quarter, B3c "the
+    // converged frame is never filtered") handed a clean SVGF image back to a
+    // visibly noisy raw 128 spp interior at the very end (user, 2026-10-27).
+    // Pixels that did converge are already raw by the per-pixel weight; the
+    // accumulator itself is never modified. 0 = no target (endless
+    // progressive): only the measured noise ends still filtering.
+    s.staticLimit = targetSamples > 0 ? targetSamples : 0;
+    const bool complete = s.stillComplete && s.stillCompleteEpoch == epoch;
+    s.status.still_complete = complete;
+    s.staticFrame = !s.status.moving && staticAllowed && s.settings.still_noise > 0.0f &&
+                    !complete && (s.staticLimit == 0 || (s.staticLimit > 1 &&
+                    sample < s.staticLimit));
     const bool wanted = s.settings.enabled && !finalRender && !debug &&
         (s.status.moving || s.staticFrame || (s.warm && sample < 8));
     if (!wanted) {
@@ -191,6 +217,7 @@ bool VulkanRealtimeDenoiser::ownsViewport() const {
 }
 
 bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw,
+    const ImageHandle& backup, const ImageHandle& variance,
     const ImageHandle& albedo, const ImageHandle& normal, const ImageHandle& position,
     const ImageHandle& motion, const ImageHandle& record0, const ImageHandle& record1) {
     auto& s = *m_impl;
@@ -200,10 +227,16 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
         s.status.reason = "motion or first-hit AOVs unavailable";
         return false;
     }
+    if (!backup.image || !variance.image) {
+        s.status.available = false;
+        s.status.reason = "raw backup or Welford variance image unavailable";
+        return false;
+    }
     if (s.failed && s.raw.view == raw.view && s.motion.view == motion.view) {
         return false;
     }
-    if (s.pipeline && s.raw.view == raw.view && s.albedo.view == albedo.view &&
+    if (s.pipeline && s.raw.view == raw.view && s.backup.view == backup.view &&
+        s.variance.view == variance.view && s.albedo.view == albedo.view &&
         s.normal.view == normal.view && s.position.view == position.view &&
         s.motion.view == motion.view && s.records[0].view == record0.view &&
         s.records[1].view == record1.view) {
@@ -213,6 +246,8 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
     device.waitIdle();
     destroy(device);
     s.raw = raw;
+    s.backup = backup;
+    s.variance = variance;
     s.albedo = albedo;
     s.normal = normal;
     s.position = position;
@@ -232,7 +267,6 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
     }
     const auto usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
         VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    s.backup = device.createImage2D(raw.width, raw.height, raw.format, usage);
     for (auto* array : {s.color, s.moments, s.work}) {
         for (uint32_t i = 0; i < 2; ++i) {
             array[i] = device.createImage2D(raw.width, raw.height,
@@ -241,9 +275,6 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
                 return fail("SVGF history allocation failed");
             }
         }
-    }
-    if (!s.backup.image) {
-        return fail("SVGF backup allocation failed");
     }
     for (auto& buffer : s.counters) {
         BufferCreateInfo ci;
@@ -255,9 +286,26 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
             return fail("SVGF statistics allocation failed");
         }
     }
+    {
+        BufferCreateInfo ci;
+        ci.size = kSlots * sizeof(uint32_t);
+        ci.usage = BufferUsage::STORAGE | BufferUsage::TRANSFER_DST;
+        ci.location = MemoryLocation::CPU_TO_GPU;
+        s.stillCounters = device.createBuffer(ci);
+        void* mapped = nullptr;
+        if (!s.stillCounters.buffer || vkMapMemory(vk, s.stillCounters.memory, 0,
+                ci.size, 0, &mapped) != VK_SUCCESS) {
+            return fail("SVGF still-noise counter allocation failed");
+        }
+        s.stillMapped = static_cast<uint32_t*>(mapped);
+        std::memset(s.stillMapped, 0, ci.size);
+        for (auto& tag : s.stillTags) {
+            tag = {};
+        }
+    }
     VkDescriptorSetLayoutBinding bindings[kBindings]{};
     for (uint32_t i = 0; i < kBindings; ++i) {
-        bindings[i] = {i, i == 12 ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER :
+        bindings[i] = {i, bufferBinding(i) ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER :
             VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     }
     VkDescriptorSetLayoutCreateInfo di{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -266,8 +314,8 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
     if (vkCreateDescriptorSetLayout(vk, &di, nullptr, &s.descriptors) != VK_SUCCESS) {
         return fail("SVGF descriptor layout failed");
     }
-    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 * (kBindings - 1)},
-                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4}};
+    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4 * (kBindings - 2)},
+                                    {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4 * 2}};
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     pi.maxSets = 4;
     pi.poolSizeCount = 2;
@@ -284,22 +332,23 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
             if (vkAllocateDescriptorSets(vk, &ai, &s.sets[p][w]) != VK_SUCCESS) {
                 return fail("SVGF descriptor allocation failed");
             }
-            // Index = binding; 12 is the statistics buffer.
+            // Index = binding; 12 and 16 are buffers.
             const ImageHandle* images[] = {&s.raw, &s.albedo, &s.normal, &s.position,
                 &s.motion, &s.color[1 - p], &s.color[p], &s.moments[1 - p],
                 &s.moments[p], &s.work[w], &s.work[1 - w], &s.backup, nullptr,
-                &s.records[0], &s.records[1]};
+                &s.records[0], &s.records[1], &s.variance, nullptr};
             VkDescriptorImageInfo info[kBindings]{};
             VkWriteDescriptorSet writes[kBindings]{};
-            VkDescriptorBufferInfo buffer{s.counters[p].buffer, 0, 2 * sizeof(uint32_t)};
+            VkDescriptorBufferInfo statistics{s.counters[p].buffer, 0, 2 * sizeof(uint32_t)};
+            VkDescriptorBufferInfo still{s.stillCounters.buffer, 0, kSlots * sizeof(uint32_t)};
             for (uint32_t i = 0; i < kBindings; ++i) {
                 writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
                 writes[i].dstSet = s.sets[p][w];
                 writes[i].dstBinding = i;
                 writes[i].descriptorCount = 1;
-                if (i == 12) {
+                if (bufferBinding(i)) {
                     writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                    writes[i].pBufferInfo = &buffer;
+                    writes[i].pBufferInfo = i == 12 ? &statistics : &still;
                     continue;
                 }
                 info[i].imageView = images[i]->view;
@@ -357,7 +406,6 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
             clears.push_back({&array[i], 0, 0, 0, 0});
         }
     }
-    clears.push_back({&s.backup, 0, 0, 0, 0});
     device.clearImages(clears);
     s.status.available = true;
     s.status.reason.clear();
@@ -366,14 +414,30 @@ bool VulkanRealtimeDenoiser::ensure(VulkanDevice& device, const ImageHandle& raw
 
 void VulkanRealtimeDenoiser::begin(VulkanDevice& device, VkCommandBuffer cmd,
     uint32_t slot, uint64_t epoch, int sample, uint64_t rtDispatch,
-    bool rtHistory, uint32_t rtWriteSlot, const float camera[4]) {
+    bool rtHistory, uint32_t rtWriteSlot, const float camera[4], bool forceMoving) {
     auto& s = *m_impl;
     s.composed = false;
     if (!s.status.available || slot >= kSlots) {
         return;
     }
-    // Called after this frame slot's fence. Query reads cannot race slot reuse.
+    // Called after this frame slot's fence. Query and counter reads cannot race
+    // slot reuse.
     s.collect(device, slot);
+    if (s.stillMapped && s.stillTags[slot].measured) {
+        const auto& tag = s.stillTags[slot];
+        if (tag.epoch == epoch && tag.pixels > 0) {
+            const double fraction = double(s.stillMapped[slot]) / double(tag.pixels);
+            s.status.still_filtered_fraction = fraction;
+            if (fraction <= kStillCompleteFraction) {
+                s.stillComplete = true;
+                s.stillCompleteEpoch = epoch;
+            }
+        }
+        s.stillTags[slot].measured = false;
+    }
+    if (s.status.epoch != epoch) {
+        s.status.still_filtered_fraction = -1.0;
+    }
     if (!s.status.moving) {
         if (s.status.epoch != epoch && (!s.warm || s.warmEpoch != 0)) {
             invalidate();
@@ -395,31 +459,36 @@ void VulkanRealtimeDenoiser::begin(VulkanDevice& device, VkCommandBuffer cmd,
         vkCmdResetQueryPool(cmd, s.queries, slot * kQueries, kQueries);
     }
     stamp(0);
+    // raw -> backup was copied by VulkanRawGuard::save just before this call.
     barrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_ACCESS_MEMORY_WRITE_BIT | VK_ACCESS_MEMORY_READ_BIT,
         VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-    copyImage(cmd, s.raw, s.backup);
     vkCmdFillBuffer(cmd, s.counters[s.parity].buffer, 0, 2 * sizeof(uint32_t), 0);
+    vkCmdFillBuffer(cmd, s.stillCounters.buffer, slot * sizeof(uint32_t), sizeof(uint32_t), 0);
     barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s.pipeline);
     const bool consecutive = s.historyValid &&
         s.tags[1 - s.parity].dispatch + 1 == rtDispatch;
-    const bool still = s.staticFrame && !s.status.moving;
+    const bool moving = s.status.moving || forceMoving;
+    const bool still = s.staticFrame && !moving;
     const uint32_t flags = (consecutive ? kSvgfHistory : 0u) |
         (rtHistory ? kSvgfRtHistory : 0u) | ((rtWriteSlot & 1u) ? kSvgfRtSlot1 : 0u) |
         (still ? kSvgfStatic : 0u) | (s.settings.debug_history ? kSvgfDebugHistory : 0u);
-    // Moving: filtered only. Still frame: fade to raw by the static limit.
-    // Warm bridge after a stop (OIDN on): fade over 8 samples.
-    const float rawBlend = (s.status.moving || s.settings.debug_history) ? 0.0f :
-        still ? std::min(float(sample) / float(s.staticLimit), 1.0f) :
-                std::min(float(sample) / 8.0f, 1.0f);
+    // Moving: filtered only. Still frame: the shader blends per pixel by
+    // measured noise alone (no host floor). Warm bridge after a stop (OIDN
+    // on): fade over 8 samples.
+    const float rawBlend = (moving || still || s.settings.debug_history) ? 0.0f :
+        std::min(float(sample) / 8.0f, 1.0f);
     s.status.static_active = still;
-    Push push{s.raw.width, s.raw.height, 0, 1, flags,
+    const uint32_t width = s.activeWidth ? s.activeWidth : s.raw.width;
+    const uint32_t height = s.activeHeight ? s.activeHeight : s.raw.height;
+    s.stillTags[slot] = {still, epoch, still ? uint64_t(width) * height : 0u};
+    Push push{width, height, 0, 1, flags,
         static_cast<uint32_t>(s.settings.history_max), s.settings.firefly_clip,
         rawBlend, {camera[0], camera[1], camera[2], camera[3]},
-        static_cast<uint32_t>(std::max(sample, 1)), {0u, 0u, 0u}};
+        static_cast<uint32_t>(std::max(sample, 1)), slot, s.settings.still_noise, 0u};
     auto dispatch = [&](uint32_t stage, uint32_t input, uint32_t step) {
         push.stage = stage;
         push.stepWidth = step;
@@ -453,12 +522,7 @@ void VulkanRealtimeDenoiser::end(VkCommandBuffer cmd) {
     if (!s.composed) {
         return;
     }
-    barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT);
-    copyImage(cmd, s.backup, s.raw);
-    barrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT);
+    // raw itself is restored by VulkanRawGuard::restore, recorded just before.
     if (s.queries) {
         vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
             s.queries, s.activeSlot * kQueries + 4);
@@ -515,10 +579,8 @@ void VulkanRealtimeDenoiser::destroy(VulkanDevice& device) {
             array[i] = {};
         }
     }
-    if (s.backup.image) {
-        device.destroyImage(s.backup);
-    }
     s.backup = {};
+    s.variance = {};
     s.records[0] = s.records[1] = {};
     for (auto& buffer : s.counters) {
         if (buffer.buffer) {
@@ -526,6 +588,15 @@ void VulkanRealtimeDenoiser::destroy(VulkanDevice& device) {
         }
         buffer = {};
     }
+    if (s.stillMapped) {
+        vkUnmapMemory(vk, s.stillCounters.memory);
+        s.stillMapped = nullptr;
+    }
+    if (s.stillCounters.buffer) {
+        device.destroyBuffer(s.stillCounters);
+    }
+    s.stillCounters = {};
+    s.stillComplete = false;
     s.status.available = false;
     s.status.presenting = false;
     s.failed = false;

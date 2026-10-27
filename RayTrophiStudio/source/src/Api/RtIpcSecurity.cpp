@@ -322,6 +322,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // render.set_motion stays Render.
     if (method == "render.motion_stats") return Read;
     if (method == "render.realtime_denoiser_stats") return Read;
+    if (method == "render.upscale_stats") return Read;
     if (method.rfind("render.", 0) == 0) {
         if (method == "render.start" || method == "render.start_sequence")
             return Render | FilesWrite;

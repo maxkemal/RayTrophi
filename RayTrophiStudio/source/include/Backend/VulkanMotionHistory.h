@@ -97,6 +97,9 @@ public:
 
     uint32_t writeIndex() const;
     bool hasHistory() const;
+    void setActiveExtent(uint32_t width, uint32_t height);
+    void setExternalJitter(bool enabled, const float jitter[2]);
+    void cameraVectors(float out[4][4]) const;
     // This dispatch's camera origin (xyz) and the world size of one pixel per
     // unit of distance (w), from the vectors given to prepareDispatch.
     void cameraFootprint(float out[4]) const;

@@ -29,13 +29,14 @@ bool dispatchRealtimeDenoiserIpc(const std::string& method, const nlohmann::json
     }
     if (method == "render.set_realtime_denoiser") {
         std::optional<std::string> mode;
-        std::optional<int> iterations, history, still;
-        std::optional<float> clip;
-        std::optional<bool> debugHistory;
+        std::optional<int> iterations, history;
+        std::optional<float> clip, still;
+        std::optional<bool> debugHistory, sceneMotion;
         for (auto it = params.begin(); it != params.end(); ++it) {
             if (it.key() != "mode" && it.key() != "atrous_iterations" &&
                 it.key() != "history_max" && it.key() != "firefly_clip" &&
-                it.key() != "static_samples" && it.key() != "debug_history") {
+                it.key() != "still_noise" && it.key() != "debug_history" &&
+                it.key() != "scene_motion") {
                 throw std::invalid_argument("unknown realtime denoiser field: " + it.key());
             }
         }
@@ -65,12 +66,11 @@ bool dispatchRealtimeDenoiserIpc(const std::string& method, const nlohmann::json
             }
             clip = params["firefly_clip"].get<float>();
         }
-        if (params.contains("static_samples")) {
-            const auto& value = params["static_samples"];
-            if (!value.is_number_integer()) {
-                throw std::invalid_argument("static_samples must be an integer (0 = off)");
+        if (params.contains("still_noise")) {
+            if (!params["still_noise"].is_number()) {
+                throw std::invalid_argument("still_noise must be numeric (0 = off)");
             }
-            still = value.get<int>();
+            still = params["still_noise"].get<float>();
         }
         if (params.contains("debug_history")) {
             if (!params["debug_history"].is_boolean()) {
@@ -78,9 +78,15 @@ bool dispatchRealtimeDenoiserIpc(const std::string& method, const nlohmann::json
             }
             debugHistory = params["debug_history"].get<bool>();
         }
+        if (params.contains("scene_motion")) {
+            if (!params["scene_motion"].is_boolean()) {
+                throw std::invalid_argument("scene_motion must be a boolean");
+            }
+            sceneMotion = params["scene_motion"].get<bool>();
+        }
         result = enqueue([=](UIContext&) {
             const auto update = rtapi::setRealtimeDenoiser(mode, iterations, history, clip, still,
-                debugHistory);
+                debugHistory, sceneMotion);
             if (!update.ok) {
                 throw std::invalid_argument(update.error);
             }

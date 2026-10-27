@@ -29,6 +29,9 @@ struct VulkanMotionHistory::Impl {
     BufferHandle params;
     uint32_t width = 0;
     uint32_t height = 0;
+    uint32_t activeWidth = 0, activeHeight = 0;
+    bool externalJitter = false;
+    float externalOffset[2]{};
     uint32_t readIndex = 0;
     bool historyValid = false;
     bool prevCameraValid = false;
@@ -118,7 +121,10 @@ uint64_t VulkanMotionHistory::prepareDispatch(VulkanDevice& device, const float 
     std::memcpy(rec.prevVertical, m_impl->prevCamera[3], sizeof(rec.prevVertical));
 
     // Halton(2,3) over 8 phases, centred on the pixel; 0 in random-AA mode.
-    if (m_halton) {
+    if (m_impl->externalJitter) {
+        m_jitter[0] = m_impl->externalOffset[0];
+        m_jitter[1] = m_impl->externalOffset[1];
+    } else if (m_halton) {
         const uint32_t k = static_cast<uint32_t>(m_impl->dispatch % 8u) + 1u;
         m_jitter[0] = halton(k, 2) - 0.5f;
         m_jitter[1] = halton(k, 3) - 0.5f;
@@ -137,7 +143,9 @@ uint64_t VulkanMotionHistory::prepareDispatch(VulkanDevice& device, const float 
     uint32_t flags = 0;
     if (m_impl->historyValid) flags |= kMotionHistoryValid;
     if (objects) flags |= kMotionObjects;
-    if (m_halton) flags |= kMotionHalton;
+    if (m_halton || m_impl->externalJitter) {
+        flags |= kMotionHalton;
+    }
     if (m_impl->prevCameraValid) flags |= kMotionPrevCamera;
     rec.info[1] = flags;
     rec.info[2] = static_cast<uint32_t>(m_impl->dispatch);
@@ -181,8 +189,23 @@ void VulkanMotionHistory::cameraFootprint(float out[4]) const {
         vlen2 += cam[3][i] * cam[3][i];
     }
     const float dist = std::sqrt(dist2);
-    out[3] = (dist > 0.0f && m_impl->height > 0)
-        ? std::sqrt(vlen2) / (dist * static_cast<float>(m_impl->height)) : 0.0f;
+    const uint32_t height = m_impl->activeHeight ? m_impl->activeHeight : m_impl->height;
+    out[3] = (dist > 0.0f && height > 0)
+        ? std::sqrt(vlen2) / (dist * static_cast<float>(height)) : 0.0f;
+}
+void VulkanMotionHistory::setActiveExtent(uint32_t width, uint32_t height) {
+    m_impl->activeWidth = width;
+    m_impl->activeHeight = height;
+}
+void VulkanMotionHistory::setExternalJitter(bool enabled, const float jitter[2]) {
+    m_impl->externalJitter = enabled;
+    if (enabled) {
+        m_impl->externalOffset[0] = jitter[0];
+        m_impl->externalOffset[1] = jitter[1];
+    }
+}
+void VulkanMotionHistory::cameraVectors(float out[4][4]) const {
+    std::memcpy(out, m_impl->pendingCamera, sizeof(m_impl->pendingCamera));
 }
 bool VulkanMotionHistory::hasHistory() const { return m_impl->historyValid; }
 const ImageHandle* VulkanMotionHistory::motionImage() const { return &m_impl->motion; }

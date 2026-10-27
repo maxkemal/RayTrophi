@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <RayTrophiFidelityFXRoot>$(MSBuildThisFileDirectory)</RayTrophiFidelityFXRoot>
+    <RayTrophiFidelityFXRuntime>$(RayTrophiFidelityFXRoot)runtime\amd_fidelityfx_vk.dll</RayTrophiFidelityFXRuntime>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(RayTrophiFidelityFXRoot)include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <Target Name="DeployRayTrophiFidelityFX" AfterTargets="Build"
+          Condition="'$(Platform)'=='x64' and '$(OutDir)'!=''">
+    <Copy SourceFiles="$(RayTrophiFidelityFXRuntime)"
+          DestinationFolder="$(OutDir)" SkipUnchangedFiles="true"
+          Condition="Exists('$(RayTrophiFidelityFXRuntime)')" />
+    <Copy SourceFiles="$(RayTrophiFidelityFXRoot)LICENSE.txt"
+          DestinationFiles="$(OutDir)FidelityFX-LICENSE.txt" SkipUnchangedFiles="true"
+          Condition="Exists('$(RayTrophiFidelityFXRuntime)')" />
+    <Warning Condition="!Exists('$(RayTrophiFidelityFXRuntime)')"
+             Text="FidelityFX Vulkan runtime missing. Run scripts/setup_fidelityfx.ps1 -Download; FSR will remain unavailable until the optional DLL is installed." />
+  </Target>
+</Project>

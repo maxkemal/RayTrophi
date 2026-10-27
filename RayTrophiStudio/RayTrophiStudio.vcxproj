@@ -2930,6 +2930,8 @@
   <ItemGroup>
     <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiser.cpp" />
     <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiserAdapter.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanRawGuard.cpp" />
+    <ClInclude Include="source\include\Backend\VulkanRawGuard.h" />
     <ClCompile Include="source\src\Api\RtApiRealtimeDenoiser.cpp" />
     <ClCompile Include="source\src\Api\RtIpcRealtimeDenoiser.cpp" />
     <ClCompile Include="source\src\Api\RtRealtimeDenoiserBindings.cpp" />
@@ -2942,5 +2944,31 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="source\src\Viewport\RasterObjectMotion.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="third_party\FidelityFX\1.1.4\include\ffx_api\ffx_api.h" />
+    <ClInclude Include="third_party\FidelityFX\1.1.4\include\ffx_api\ffx_api_loader.h" />
+    <ClInclude Include="third_party\FidelityFX\1.1.4\include\ffx_api\ffx_api_types.h" />
+    <ClInclude Include="third_party\FidelityFX\1.1.4\include\ffx_api\ffx_upscale.h" />
+    <ClInclude Include="third_party\FidelityFX\1.1.4\include\ffx_api\vk\ffx_api_vk.h" />
+    <None Include="third_party\FidelityFX\1.1.4\FidelityFX.targets" />
+  </ItemGroup>
+  <Import Project="$(ProjectDir)third_party\FidelityFX\1.1.4\FidelityFX.targets" />
+  <ItemGroup>
+    <ClCompile Include="source\src\Backend\VulkanFsrLoader.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanUpscaleInputs.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp" />
+    <ClCompile Include="source\src\Api\RtApiUpscale.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcUpscale.cpp" />
+    <ClCompile Include="source\src\Api\RtUpscaleBindings.cpp" />
+    <ClCompile Include="source\src\UI\UpscaleControls.cpp" />
+    <ClInclude Include="source\include\Backend\UpscaleTypes.h" />
+    <ClInclude Include="source\include\Backend\VulkanFsrLoader.h" />
+    <ClInclude Include="source\include\Backend\VulkanFsrUpscaler.h" />
+    <ClInclude Include="source\include\Backend\VulkanUpscaleInputs.h" />
+    <ClInclude Include="source\include\Api\RtApiUpscale.h" />
+    <ClInclude Include="source\src\Api\RtIpcUpscale.h" />
+    <ClInclude Include="source\src\Api\RtUpscaleBindings.h" />
   </ItemGroup>
 </Project>
