@@ -9,6 +9,7 @@
 #include "Fluid/FluidFogDensity.h"
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
+#include "Backend/UpscaleSettingsJson.h"
 #include "ProjectTimelineReset.h"
 #include "ProjectSimulationCache.h"
 #include "globals.h"
@@ -4413,6 +4414,7 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
 
 json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     json j;
+    j["upscale"] = VulkanRT::serializeUpscaleSettings(settings.upscale);
     
     j["samples_per_pixel"] = settings.samples_per_pixel;
     j["samples_per_pass"] = settings.samples_per_pass;
@@ -4472,6 +4474,7 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
 }
 
 void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& settings) {
+    settings.upscale = VulkanRT::deserializeUpscaleSettings(j);
     settings.samples_per_pixel = j.value("samples_per_pixel", 1);
     settings.samples_per_pass = j.value("samples_per_pass", 1);
     settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
