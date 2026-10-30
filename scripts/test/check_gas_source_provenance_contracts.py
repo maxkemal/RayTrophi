@@ -133,6 +133,15 @@ class GasSourceContracts(unittest.TestCase):
             self.assertIn(f"source\\src\\Physics\\Fluid\\{name}.cpp", entries)
             self.assertIn(f"source\\include\\Fluid\\{name}.h", entries)
 
+    def test_scale_is_not_refused_and_a_refusal_never_leaves_the_frame_loop(self):
+        source = read("src/Physics/Fluid/GasSourceProvenance.cpp")
+        self.assertNotIn("256u * 1024u", source)
+        self.assertIn("std::numeric_limits<uint32_t>::max()", source)
+        deposit = read("src/Physics/Fluid/MatterDomainSources.inl")
+        guarded = deposit.split("Fluid::GasSourceImage* provenance = nullptr;", 1)[1]
+        self.assertLess(guarded.index("prepareGasSourceDeposit"), guarded.index("holdGasInventory"))
+        self.assertLess(guarded.index("holdGasInventory"), guarded.index("#pragma omp"))
+
 
 if __name__ == "__main__":
     unittest.main()

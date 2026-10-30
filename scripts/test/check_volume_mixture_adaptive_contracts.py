@@ -32,6 +32,61 @@ def cell_exit(position, direction):
 
 
 class MixtureAdaptiveContracts(unittest.TestCase):
+    def test_cell_cache_preserves_march_partition_and_reduces_corner_reads(self):
+        # Independent continuous trilinear lattice. Compare the whole camera
+        # integration trajectory, not merely a cache hit's returned value.
+        def corners(cell):
+            return [0.2 + 0.03 * ((cell[0] + (i & 1)) % 7) +
+                    0.02 * (cell[1] + ((i >> 1) & 1)) +
+                    0.01 * (cell[2] + ((i >> 2) & 1)) for i in range(8)]
+
+        def march(cached):
+            cache = None
+            reads = 0
+            t = 0.125
+            trajectory = []
+            transmission = 1.0
+            while t < 12.875:
+                point = [t, 0.25, 0.375]
+                cell = tuple(math.floor(p) for p in point)
+                if cached and cache is not None and cache[0] == cell:
+                    bound = cache[1]
+                else:
+                    values = corners(cell)
+                    bound = (slope_bound(values, [1, 0, 0]), max(values))
+                    reads += 8
+                    cache = (cell, bound)
+                dt = min(12.875-t, cell_exit(point, [1, 0, 0]),
+                         max(0.25*0.05, min(0.05, math.sqrt(0.04/max(bound[0], 1e-12)))))
+                # Same midpoint emission/extinction integral as the reference.
+                sample = [t + 0.5*dt - cell[0], 0.25, 0.375]
+                density = trilinear(corners(cell), sample)
+                transmission *= math.exp(-density*dt)
+                trajectory.append((t, dt, density, transmission))
+                t += dt
+            return trajectory, reads
+
+        reference, uncached_reads = march(False)
+        optimized, cached_reads = march(True)
+        self.assertEqual(optimized, reference)
+        self.assertLess(cached_reads, uncached_reads/4)
+
+    def test_camera_cell_cache_scope_and_walk_fallback(self):
+        cache = read('shaders/volume_mixture_cell_cache.glsl')
+        self.assertIn('if (mfWalking) return false;', cache)
+        self.assertIn('all(equal(cell, mfBoundCellA))', cache)
+        self.assertIn('all(equal(cell, mfBoundCellB))', cache)
+        self.assertIn('mfBoundValidA = false;', cache)
+        self.assertIn('mfBoundValidB = false;', cache)
+        shader = read('shaders/volume_mixture.glsl')
+        shade = shader.split('void shadeFogMixture(', 1)[1]
+        self.assertLess(shade.index('mfResetCellBounds();'), shade.index('if (cached)'))
+        self.assertNotIn('mfCurveSlope', shader)
+        bounds = read('shaders/volume_mixture_adaptive.glsl').split(
+            'bool mfAdaptiveCellBounds(', 1)[1].split('ivec3 mfForwardCell(', 1)[0]
+        self.assertLess(bounds.index('mfLoadCellBounds('), bounds.index('volumeNanoCorners('))
+        self.assertLess(bounds.index('any(isnan(low))'), bounds.index('mfStoreCellBounds('))
+
     def test_trilinear_directional_bound(self):
         rng = random.Random(20261026)
         for _ in range(3000):
@@ -119,7 +174,8 @@ class MixtureAdaptiveContracts(unittest.TestCase):
         self.assertEqual(bound, 1002)
         shader = read('shaders/volume_mixture_adaptive.glsl')
         self.assertIn('index < mfCount', shader)
-        self.assertIn('slope += mfRawSlope', shader)
+        self.assertIn('slope += bound.x * (scatter', shader)
+        self.assertIn('bound.x = mfRawSlope(low, high, direction) * mfCellCurveSlope(', shader)
         self.assertIn('span = min(span, mfCellExit', shader)
         self.assertIn('span = min(span, lo - t)', shader)
 
@@ -130,9 +186,80 @@ class MixtureAdaptiveContracts(unittest.TestCase):
         self.assertLess(span(100), before)
         self.assertEqual(span(.1), before)
         shader = read('shaders/volume_mixture_adaptive.glsl')
-        self.assertIn('abs(v.density_multiplier)', shader)
+        self.assertIn('abs(volumes.v[index].density_multiplier)', shader)
         self.assertIn('float slope = 0.0', shader)
         self.assertNotIn('densityThreshold', shader)
+
+    def test_cell_curve_slope_bounds_the_range_it_is_given(self):
+        def curve(x, knots):
+            if x <= 0:
+                return x
+            if x >= 1:
+                return x*knots[7]
+            segment = min(int(x*7), 6)
+            return knots[segment] + (knots[segment+1]-knots[segment])*(x*7-segment)
+
+        def bound(low, high, knots, cutoff):
+            top, bottom = curve(high, knots), curve(low, knots)
+            if top <= cutoff:
+                return 0
+            slope = max(knots[7], 0) if high >= 1 else 0
+            if low < 1:
+                for segment in range(min(int(low*7), 6), min(int(high*7), 6)+1):
+                    slope = max(slope, 7*abs(knots[segment+1]-knots[segment]))
+            return slope*(4 if cutoff > 0 and bottom < cutoff*2 else 1)
+
+        def mapped(x, knots, cutoff):
+            d = curve(x, knots)
+            if d <= cutoff:
+                return 0
+            u = min((d-cutoff)/cutoff, 1) if cutoff > 0 else 1
+            return d*u*u*(3-2*u)
+
+        rng = random.Random(20261030)
+        for _ in range(4000):
+            knots = [0, *sorted(rng.random() for _ in range(7))]
+            cutoff = rng.choice([0, 0, .012, .2])
+            low = rng.uniform(0, 1.2)
+            high = low + rng.uniform(0, .4)
+            limit = bound(low, high, knots, cutoff)
+            points = [low + (high-low)*i/32 for i in range(33)]
+            for a, b in zip(points, points[1:]):
+                self.assertLessEqual(abs(mapped(b, knots, cutoff)-mapped(a, knots, cutoff)),
+                                     limit*(b-a) + 1e-9)
+        # The live saturated curve: flat above its first segment, steep below.
+        saturated = [0, 1, 1, 1, 1, 1, 1, 1]
+        self.assertEqual(bound(.3, .5, saturated, .012), 0)
+        self.assertEqual(bound(.05, .1, saturated, .012), 7)
+
+    def test_only_the_optical_bound_refines_past_the_authored_lattice(self):
+        def refined(cell, optical, base):
+            return max(max(min(cell, optical), min(base, optical)), 1e-6)
+        rng = random.Random(30)
+        for _ in range(3000):
+            base = rng.uniform(.01, .1)
+            cell = rng.uniform(1e-4, .3)
+            optical = rng.uniform(.25*base, 4*base)
+            span = refined(cell, optical, base)
+            self.assertGreaterEqual(span, min(base, optical))
+            self.assertLessEqual(span, max(cell, base))
+            self.assertLessEqual(span, optical)
+        helper = read('shaders/volume_mixture_adaptive.glsl')
+        walk = read('shaders/volume_mixture_shared_walk.glsl')
+        self.assertIn('mfRefinedSpan(span, opticalSpan, baseStep, progress)', helper)
+        self.assertIn('mfRefinedSpan(span, opticalSpan, baseStep, progress)', walk)
+
+    def test_camera_cutoff_matches_the_ordinary_march(self):
+        shader = read('shaders/volume_mixture.glsl')
+        self.assertIn('if (mfPeak(throughput) < 0.001) break;', shader)
+        self.assertNotIn('mfPeak(throughput) < 1e-6', shader)
+        self.assertIn('< 0.001) {', read('shaders/volume_fog_shading.glsl'))
+
+    def test_mixture_shadow_keeps_the_authored_sample_count(self):
+        shader = read('shaders/volume_mixture.glsl')
+        shadow = shader.split('vec3 mfShadow(', 1)[1].split('vec3 mfDirect(', 1)[0]
+        self.assertIn('mfShadowT = lo + (float(step) + 0.5) * dt;', shadow)
+        self.assertNotIn('tauHint', shadow)
 
     def test_packing_and_existing_authoring_surfaces(self):
         shader = read('include/VolumeShader.h')
@@ -150,7 +277,8 @@ class MixtureAdaptiveContracts(unittest.TestCase):
 
     def test_both_integrators_and_conservative_fallbacks(self):
         shader = read('shaders/volume_mixture.glsl')
-        self.assertEqual(shader.count('mfBudgetedSpan('), 2)
+        self.assertEqual(shader.count('mfBudgetedSpan('), 1)
+        self.assertEqual(shader.count('mfCameraBudgetedSpan('), 1)
         routing = shader.split('bool matterFogNeedsGeneralMixture(', 1)[1].split('bool mfContains(', 1)[0]
         self.assertIn('a.density_curve[9] > 0.5 || b.density_curve[9] > 0.5', routing)
         helper = read('shaders/volume_mixture_adaptive.glsl')

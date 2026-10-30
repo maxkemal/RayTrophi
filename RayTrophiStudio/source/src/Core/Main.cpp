@@ -112,6 +112,9 @@ std::string rtOptixFirstCudaErrorSite();
 
 namespace {
 bool g_startupDiagVerbose = false;
+// main() left through its catch. The atexit cleanup below must not take the
+// report with it: "no crash log" would then read as "a clean exit".
+bool g_fatalExitLogged = false;
 constexpr const char* kStartupDiagVersion = "startup_diag_v3_2026_03_01";
 
 constexpr DWORD kMsCppException = 0xE06D7363;
@@ -306,6 +309,9 @@ std::string startupCrashLogPath() {
 }
 
 void removeStartupCrashLogIfExists() {
+    if (g_fatalExitLogged) {
+        return;
+    }
     try {
         std::string p = startupCrashLogPath();
         if (!p.empty() && std::filesystem::exists(p)) {
@@ -7995,11 +8001,13 @@ catch (const std::exception& e) {
     // when the exception was an ordinary one; the difference between a written log and
     // an access violation in the logger when it was a stack overflow.
     _resetstkoflw();
+    g_fatalExitLogged = true;
     emergencyStartupLog(std::string("[FATAL] Unhandled std::exception in main: ") + e.what());
     return 1;
 }
 catch (...) {
     _resetstkoflw();
+    g_fatalExitLogged = true;
     emergencyStartupLog("[FATAL] Unhandled unknown exception in main. "
                         "If this followed work in the node editor, suspect a stack overflow "
                         "from a cyclic node graph (Graph::addLink now refuses to create one).");

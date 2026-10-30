@@ -35,6 +35,10 @@ float mfLightU;
 float mfLightV;
 vec3 mfLightVisibility;
 vec3 mfSkyVisibility;
+vec3 mfCameraSkyAmbient;
+
+#include "volume_mixture_cell_cache.glsl"
+#include "volume_mixture_shared_state.glsl"
 
 
 struct MfTerms {
@@ -115,9 +119,9 @@ bool mfContains(VkVolumeInstance v, vec3 position) {
 // Fixed scalar caches cover the common two-medium scene without the dynamic
 // aggregate arrays that caused shaderc failures. Further media use a scalar
 // fallback, preserving the full supported membership set.
-void mfInitializeNano(VkVolumeInstance v, out pnanovdb_buf_t fieldBuffer,
+void mfInitializeNano(uint64_t gridAddress, out pnanovdb_buf_t fieldBuffer,
     out pnanovdb_map_handle_t fieldMap, out pnanovdb_readaccessor_t fieldAccessor) {
-    fieldBuffer.address = v.volume_type == 2 ? v.vdb_grid_address : uint64_t(0);
+    fieldBuffer.address = gridAddress;
     fieldMap.address.byte_offset = 0u;
     pnanovdb_root_handle_t fieldRoot;
     fieldRoot.address.byte_offset = 0u;
@@ -130,124 +134,63 @@ void mfInitializeNano(VkVolumeInstance v, out pnanovdb_buf_t fieldBuffer,
     pnanovdb_readaccessor_init(fieldAccessor, fieldRoot);
 }
 
-float mfDensity(uint index, VkVolumeInstance v, vec3 position, bool cameraFast) {
+float mfDensity(uint index, vec3 position, bool cameraFast) {
+    if (cameraFast && mfSharedDensityReady) {
+        if (index == mfCacheIndexA) return mfSharedDensity.x;
+        if (index == mfCacheIndexB) return mfSharedDensity.y;
+    }
     if (mfInShadow && mfShadowIndexPath && index == mfShadowIndex) {
         if (index == mfCacheIndexA)
-            return volumeNanoDensity(v, mfShadowRay, mfShadowT,
+            return volumeNanoDensity(volumes.v[index], mfShadowRay, mfShadowT,
                 mfCacheBufferA, mfCacheAccessorA);
         if (index == mfCacheIndexB)
-            return volumeNanoDensity(v, mfShadowRay, mfShadowT,
+            return volumeNanoDensity(volumes.v[index], mfShadowRay, mfShadowT,
                 mfCacheBufferB, mfCacheAccessorB);
     }
-    if (cameraFast && index == mfCacheIndexA)
-        return volumeNanoDensity(v, mfCameraRayA, mfCameraT, mfCacheBufferA, mfCacheAccessorA);
-    if (cameraFast && index == mfCacheIndexB)
-        return volumeNanoDensity(v, mfCameraRayB, mfCameraT, mfCacheBufferB, mfCacheAccessorB);
-    if (index == mfCacheIndexA)
-        return sampleDensityAcc(v, position, mfCacheBufferA, mfCacheMapA, mfCacheAccessorA);
-    if (index == mfCacheIndexB)
-        return sampleDensityAcc(v, position, mfCacheBufferB, mfCacheMapB, mfCacheAccessorB);
+    if (cameraFast && index == mfCacheIndexA) {
+        return volumeNanoDensity(volumes.v[index], mfCameraRayA, mfCameraT,
+            mfCacheBufferA, mfCacheAccessorA);
+    }
+    if (cameraFast && index == mfCacheIndexB) {
+        return volumeNanoDensity(volumes.v[index], mfCameraRayB, mfCameraT,
+            mfCacheBufferB, mfCacheAccessorB);
+    }
+    if (index == mfCacheIndexA) {
+        return sampleDensityAcc(volumes.v[index], position,
+            mfCacheBufferA, mfCacheMapA, mfCacheAccessorA);
+    }
+    if (index == mfCacheIndexB) {
+        return sampleDensityAcc(volumes.v[index], position,
+            mfCacheBufferB, mfCacheMapB, mfCacheAccessorB);
+    }
     pnanovdb_buf_t fieldBuffer;
     pnanovdb_map_handle_t fieldMap;
     pnanovdb_readaccessor_t fieldAccessor;
-    mfInitializeNano(v, fieldBuffer, fieldMap, fieldAccessor);
-    return sampleDensityAcc(v, position, fieldBuffer, fieldMap, fieldAccessor);
+    uint64_t gridAddress = volumes.v[index].volume_type == 2
+        ? volumes.v[index].vdb_grid_address : uint64_t(0);
+    mfInitializeNano(gridAddress, fieldBuffer, fieldMap, fieldAccessor);
+    return sampleDensityAcc(volumes.v[index], position, fieldBuffer, fieldMap, fieldAccessor);
 }
 
-MfTerms mfEvaluate(uint index, vec3 position, vec3 direction, bool includeEmission) {
-    MfTerms term = MfTerms(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
-    VkVolumeInstance v = volumes.v[index];
-    if (!gasOverlapCandidate(v)) return term;
-    uint program = v._reserved[1] > 0.5
-        ? matProgramOffset(uint(v._reserved[1] - 1.0)) : MATPROG_NONE;
-    bool cameraFast = !mfWalking && !mfInShadow && program == MATPROG_NONE &&
-        v.volume_type == 2 && v.vdb_grid_address != uint64_t(0) &&
-        v._ext_reserved[7] < 0.5 && (index == mfCacheIndexA || index == mfCacheIndexB);
-    // mfShadow already clipped this field's chord to its AABB. Its midpoint
-    // lattice is strictly inside that interval; do not repeat the box query
-    // for every density sample on the same prepared ray.
-    bool shadowFast = mfInShadow && mfShadowIndexPath && index == mfShadowIndex;
-    if (!cameraFast && !shadowFast && !mfContains(v, position)) return term;
-    float density = mfDensity(index, v, position, cameraFast);
-    if (mfInShadow) mfShadowSamples++;
-    else mfSamples++;
-    float temperature = (includeEmission && v.emission_mode >= 2) || program != MATPROG_NONE
-        ? sampleTemperature(v, position) : 0.0;
-    vec3 scatterColor = v.scatter_color;
-    vec3 absorptionColor = v.absorption_color;
-    vec3 emissionColor = v.emission_color;
-    float scatterCoefficient = max(v.scatter_coefficient, 0.0);
-    float absorptionCoefficient = max(v.absorption_coefficient, 0.0);
-    float emissionStrength = max(v.emission_intensity, 0.0);
-    term.anisotropy = v.scatter_anisotropy;
-    term.multiScatter = clamp(v.scatter_multi, 0.0, 1.0);
-    if (program != MATPROG_NONE) {
-        float attributes[MP_ATTRIB_SLOTS];
-        for (int i = 0; i < MP_ATTRIB_SLOTS; ++i) attributes[i] = 0.0;
-        vec3 local;
-        local.x = dot(vec3(v.inv_transform[0], v.inv_transform[1], v.inv_transform[2]),
-            position) + v.inv_transform[3];
-        local.y = dot(vec3(v.inv_transform[4], v.inv_transform[5], v.inv_transform[6]),
-            position) + v.inv_transform[7];
-        local.z = dot(vec3(v.inv_transform[8], v.inv_transform[9], v.inv_transform[10]),
-            position) + v.inv_transform[11];
-        vec3 normalized = clamp((local - v.aabb_min) /
-            max(v.aabb_max - v.aabb_min, vec3(1e-6)), vec3(0.0), vec3(1.0));
-        MatProgOut material = evalMaterialProgram(program, vec2(0.0), position,
-            -direction, 0.5, vec3(0.0), attributes, local, -direction, density,
-            temperature, temperature > 0.0
-                ? clamp(temperature / max(v.max_temperature, 1.0), 0.0, 1.0) : 0.0,
-            0.0, vec3(0.0), position, scatterColor, emissionColor,
-            max(v.voxel_size, 1e-6), normalized, cam.waterTime);
-        if ((material.volumeWritten & 1u) != 0u) density = max(material.volumeDensity, 0.0);
-        if ((material.volumeWritten & 2u) != 0u) scatterColor = material.volumeScatterColor;
-        if ((material.volumeWritten & 4u) != 0u)
-            scatterCoefficient = max(material.volumeScatterStrength, 0.0);
-        if ((material.volumeWritten & 8u) != 0u) absorptionColor = material.volumeAbsorptionColor;
-        if ((material.volumeWritten & 16u) != 0u)
-            absorptionCoefficient = max(material.volumeAbsorptionStrength, 0.0);
-        if ((material.volumeWritten & 32u) != 0u) emissionColor = material.volumeEmissionColor;
-        if ((material.volumeWritten & 64u) != 0u)
-            emissionStrength = max(material.volumeEmissionStrength, 0.0);
-        if ((material.volumeWritten & 128u) != 0u)
-            term.anisotropy = clamp(material.volumeAnisotropy, -0.99, 0.99);
-        if ((material.volumeWritten & 256u) != 0u)
-            term.multiScatter = clamp(material.volumeMultiScatter, 0.0, 1.0);
-    }
-    float meanG = mix(v.scatter_anisotropy_back, term.anisotropy, v.scatter_lobe_mix);
-    if (v.random_walk_enabled > 0.5 && meanG > 0.05 &&
-        mfEventOrdinal >= uint(clamp(int(v.random_walk_exact_events), 1, 512))) {
-        scatterCoefficient *= 1.0 - meanG;
-        term.anisotropy = 0.0;
-        term.reduced = 1.0;
-    }
-    term.scatterRate = max(density, 0.0) * scatterCoefficient;
-    term.scattering = term.scatterRate * clamp(scatterColor, vec3(0.0), vec3(1.0));
-    vec3 absorption = max(absorptionColor, vec3(0.0));
-    absorption = mfPeak(absorption) > 1e-5 ? absorption / mfPeak(absorption) : vec3(1.0);
-    term.extinction = vec3(term.scatterRate) +
-        max(density, 0.0) * absorptionCoefficient * absorption;
-    vec3 source = vec3(0.0);
-    if (includeEmission && v.emission_mode == 1) {
-        source = volumeEmissionSource(emissionColor, 1.0, density, 1.0,
-            emissionStrength, v._retired_cloud, false);
-    } else if (includeEmission && v.emission_mode >= 2) {
-        // Preserve the existing thermal/ramp response for each contributor.
-        VkVolumeInstance thermal = v;
-        thermal.emission_color = emissionColor;
-        thermal.emission_intensity = emissionStrength;
-        source = volumeEmissionAt(thermal, position, density, temperature);
-    }
-    term.emission = source * term.extinction;
-    return term;
-}
+#include "volume_mixture_optical_terms.glsl"
+
+#include "volume_mixture_material_sample.glsl"
 
 MfTerms mfSum(vec3 position, vec3 direction, bool includeEmission) {
     MfTerms sum = MfTerms(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
     mfPickedTerms = sum;
     mfPickedIndex = 0u;
-    for (uint i = 0u; i < mfCount; ++i) {
-        MfTerms term = mfEvaluate(i, position, direction, includeEmission);
+    bool sharedGather = mfSharedWalk && mfSharedDensityReady && !mfWalking && !mfInShadow;
+    uint count = sharedGather ? 2u : mfCount;
+    for (uint slot = 0u; slot < count; ++slot) {
+        uint i = sharedGather ? (slot == 0u ? mfCacheIndexA : mfCacheIndexB) : slot;
+        MfTerms term;
+        if (sharedGather) {
+            float density = slot == 0u ? mfSharedDensity.x : mfSharedDensity.y;
+            term = mfSharedEvaluate(i, position, density, includeEmission);
+        } else {
+            term = mfEvaluate(i, position, direction, includeEmission);
+        }
         sum.extinction += term.extinction;
         sum.scattering += term.scattering;
         sum.emission += term.emission;
@@ -264,8 +207,12 @@ MfTerms mfSum(vec3 position, vec3 direction, bool includeEmission) {
 }
 
 #include "volume_mixture_adaptive.glsl"
+#include "volume_mixture_shared_walk.glsl"
 
 float mfEmptyStep(vec3 position, vec3 direction, float baseStep) {
+    if (mfSharedWalk) {
+        return mfSharedEmptyStep(baseStep);
+    }
     float safe = 1e30;
     for (uint i = 0u; i < mfCount; ++i) {
         VkVolumeInstance v = volumes.v[i];
@@ -306,7 +253,8 @@ float mfEmptyStep(vec3 position, vec3 direction, float baseStep) {
             pnanovdb_buf_t fieldBuffer;
             pnanovdb_map_handle_t fieldMap;
             pnanovdb_readaccessor_t fieldAccessor;
-            mfInitializeNano(v, fieldBuffer, fieldMap, fieldAccessor);
+            mfInitializeNano(v.volume_type == 2 ? v.vdb_grid_address : uint64_t(0),
+                fieldBuffer, fieldMap, fieldAccessor);
             span = nanoEmptyTileStep(v, position, direction, baseStep,
                 fieldBuffer, fieldMap, fieldAccessor, kind);
         }
@@ -378,9 +326,8 @@ vec3 mfShadow(vec3 position, vec3 direction, float distance) {
             mfShadowIndexPath = true;
         }
         // Prepared NanoVDB chords have no density/material program or noise.
-        // mfEvaluate's colors, emission and phase terms are unused by shadows;
-        // build its exact extinction coefficient once instead of copying and
-        // evaluating a whole volume/material record at every midpoint.
+        // Colors, emission and phase terms are unused by shadows; prepare the
+        // exact extinction coefficient outside the midpoint loop.
         float shadowScatter = 0.0;
         float shadowAbsorption = 0.0;
         vec3 shadowAbsorptionWeights = vec3(1.0);
@@ -413,7 +360,7 @@ vec3 mfShadow(vec3 position, vec3 direction, float distance) {
             vec3 samplePosition = position + direction *
                 mfShadowT;
             if (mfShadowIndexPath) {
-                float density = mfDensity(index, v, samplePosition, false);
+                float density = mfDensity(index, samplePosition, false);
                 mfShadowSamples++;
                 float positiveDensity = max(density, 0.0);
                 // Match the reference operation order for colored extinction.
@@ -422,7 +369,7 @@ vec3 mfShadow(vec3 position, vec3 direction, float distance) {
                     positiveDensity * shadowAbsorption * shadowAbsorptionWeights;
                 opticalDepth += extinction * dt;
             } else {
-                opticalDepth += mfEvaluate(index, samplePosition, direction, false).extinction * dt;
+                opticalDepth += mfShadowExtinction(index, samplePosition, direction) * dt;
             }
             if (min(opticalDepth.x, min(opticalDepth.y, opticalDepth.z)) > 16.0) break;
         }
@@ -434,17 +381,32 @@ vec3 mfShadow(vec3 position, vec3 direction, float distance) {
     return visibility;
 }
 
+#include "volume_mixture_light_cache.glsl"
+
+// Only the random walk tests geometry per shadow query. The camera march does
+// not, like the ordinary march (volume_fog_shading.glsl): a solid inside gas must
+// not paint a hard black shadow, and a trace here was the mixture's dearest
+// uncounted work - roughly 30 of 106 ms in the 2026-10-30 two-gas ablation.
+// Refractive SDF is not an opaque blocker: this mask matches the fog light mask.
+bool mfGeometryBlocks(vec3 position, vec3 direction, float distance) {
+    if (!mfWalking) {
+        return false;
+    }
+    rwShadowTraces++;
+    return rwSolidDistance(position, direction, distance) >= 0.0;
+}
+
 vec3 mfDirect(uint contributor, MfTerms term, vec3 position, vec3 direction,
-    bool approximateSky) {
+    bool approximateSky, float opticalStep) {
     vec3 result = vec3(0.0);
     if (approximateSky) {
         vec3 ambientDirection = normalize(vec3(0.0, 1.0, 0.0) * 0.55 + direction * 0.45);
-        if (mfWalking || mfLightingStep - mfSkyCacheStep >= max(mfShadowStride, 8)) {
+        // Same 0.01 gate as the ordinary march: an optically thin sample keeps
+        // the visibility it holds instead of buying another sky march.
+        if (mfWalking || (mfLightingStep - mfSkyCacheStep >= max(mfShadowStride, 8) &&
+                opticalStep > 0.01)) {
             float distance = max(mfExit(position, ambientDirection), 0.001);
-            rwShadowTraces++;
-            // Match the existing fog light mask: refractive SDF is not an
-            // opaque shadow blocker. Camera/walk SDF handoff is handled below.
-            mfSkyVisibility = rwSolidDistance(position, ambientDirection, distance) >= 0.0
+            mfSkyVisibility = mfGeometryBlocks(position, ambientDirection, distance)
                 ? vec3(0.0) : mfShadow(position, ambientDirection, distance);
             mfSkyCacheStep = mfLightingStep;
         }
@@ -452,7 +414,8 @@ vec3 mfDirect(uint contributor, MfTerms term, vec3 position, vec3 direction,
         float albedo = dot(term.scattering / max(term.extinction, vec3(EPSILON)),
             vec3(0.2126, 0.7152, 0.0722));
         float higherOrder = volumeHigherOrderSkyVisibility(skyT, term.multiScatter, albedo);
-        result = sampleSkyAmbient(direction) * (mfSkyVisibility + vec3(higherOrder));
+        result = (mfWalking ? sampleSkyAmbient(direction) : mfCameraSkyAmbient) *
+            (mfSkyVisibility + vec3(higherOrder));
     }
     if (cam.lightCount == 0u) return result;
     LightData light = lights.l[mfLightIndex];
@@ -466,9 +429,8 @@ vec3 mfDirect(uint contributor, MfTerms term, vec3 position, vec3 direction,
     float phase = dualLobeHG(dot(direction, wi), term.anisotropy,
         term.reduced > 0.5 ? 0.0 : v.scatter_anisotropy_back, v.scatter_lobe_mix);
     if (mfWalking || mfLightingStep - mfLightCacheStep >= mfShadowStride) {
-        rwShadowTraces++;
-        mfLightVisibility = rwSolidDistance(position, wi, distance) >= 0.0
-            ? vec3(0.0) : mfShadow(position, wi, distance);
+        mfLightVisibility = mfGeometryBlocks(position, wi, distance)
+            ? vec3(0.0) : mfDirectLightShadow(position, wi, distance);
         mfLightCacheStep = mfLightingStep;
     }
     return result + float(cam.lightCount) * light.color.rgb * light.color.a *
@@ -542,10 +504,14 @@ void mfPrimary(vec3 color, float distance, float transmission) {
 }
 
 void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
-    bool boundary, uint selected, uint count) {
+    bool boundary, uint selected, uint count, bool cached,
+    vec3 cachedRadiance, vec3 cachedTransmission) {
     mfCount = min(count, uint(MF_CAPACITY));
     mfCacheIndexA = 0xffffffffu;
     mfCacheIndexB = 0xffffffffu;
+    mfResetCellBounds();
+    mfSharedWalk = false;
+    mfSharedDensityReady = false;
     mfSamples = 0u;
     mfEventOrdinal = 0u;
     mfShadowSamples = 0u;
@@ -557,6 +523,11 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
     mfLightCacheStep = -10000;
     mfSkyCacheStep = -10000;
     mfShadowStride = 16;
+    if (cached) {
+        mfContinue(cachedRadiance, cachedTransmission, boundary ? origin :
+            origin + direction * (farT + 0.001), direction, boundary, false, 0u);
+        return;
+    }
     mfLightIndex = cam.lightCount > 0u
         ? min(int(rnd(payload.seed) * float(cam.lightCount)), int(cam.lightCount) - 1) : 0;
     mfLightU = rnd(payload.seed);
@@ -573,7 +544,8 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
         if (!gasOverlapCandidate(v)) continue;
         if (mfCacheIndexA == 0xffffffffu) {
             mfCacheIndexA = i;
-            mfInitializeNano(v, mfCacheBufferA, mfCacheMapA, mfCacheAccessorA);
+            mfInitializeNano(v.volume_type == 2 ? v.vdb_grid_address : uint64_t(0),
+                mfCacheBufferA, mfCacheMapA, mfCacheAccessorA);
             if (v.volume_type == 2 && v.vdb_grid_address != uint64_t(0)) {
                 mfCameraRayA = volumeNanoRay(v, origin, direction,
                     mfCacheBufferA, mfCacheMapA);
@@ -583,7 +555,8 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
             mfCameraIntervalA = intersectsA ? vec2(loA, hiA) : vec2(-1.0);
         } else if (mfCacheIndexB == 0xffffffffu) {
             mfCacheIndexB = i;
-            mfInitializeNano(v, mfCacheBufferB, mfCacheMapB, mfCacheAccessorB);
+            mfInitializeNano(v.volume_type == 2 ? v.vdb_grid_address : uint64_t(0),
+                mfCacheBufferB, mfCacheMapB, mfCacheAccessorB);
             if (v.volume_type == 2 && v.vdb_grid_address != uint64_t(0)) {
                 mfCameraRayB = volumeNanoRay(v, origin, direction,
                     mfCacheBufferB, mfCacheMapB);
@@ -605,14 +578,21 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
     // The caller already clamped this interval to opaque/SDF boundaries.
     // Do not issue the same camera solid probe a second time.
     mfWalking = randomWalk;
+    mfPrepareDirectLightCache();
+    mfConfigureSharedWalk(origin, direction);
     if (!randomWalk) {
-        int steps = clamp(int(ceil((farT - nearT) / stepLength)), 1, 2048);
+        // A straight camera segment has one view direction, so one sky lookup.
+        mfCameraSkyAmbient = sampleSkyAmbient(direction);
+        int stepBudget = mfCameraStepBudget(origin, direction, nearT, farT);
+        int steps = clamp(int(ceil((farT - nearT) / stepLength)), 1, stepBudget);
         float baseStep = (farT - nearT) / float(steps);
         float opacityWeight = 0.0;
         float depthWeight = 0.0;
         vec3 colorWeight = vec3(0.0);
         float marchT = nearT;
-        for (int step = 0; step < MF_ADAPTIVE_LIMIT && marchT < farT; ++step) {
+        int sampledSteps = 0;
+        for (int step = 0; step < MF_ADAPTIVE_LIMIT && marchT < farT &&
+                sampledSteps < stepBudget; ++step) {
             float remaining = farT - marchT;
             mfCameraT = marchT;
             float emptySpan = min(mfEmptyStep(origin + direction * marchT,
@@ -622,16 +602,20 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
                 marchT += emptySpan;
                 continue;
             }
-            float dt = mfBudgetedSpan(origin, direction, marchT, remaining, baseStep, step);
+            float dt = mfCameraBudgetedSpan(origin, direction, marchT, remaining,
+                baseStep, step, stepBudget - sampledSteps);
             mfCameraT = marchT + 0.5 * dt;
+            mfPrepareSharedDensity(mfCameraT);
             vec3 position = origin + direction * mfCameraT;
             MfTerms sum = mfSum(position, direction, true);
+            sampledSteps++;
             vec3 source = sum.emission;
             mfLightingStep = step;
             if (sum.scatterRate > EPSILON && mfPickedTerms.scatterRate > 0.0) {
                 source += mfPickedTerms.scattering *
                     (sum.scatterRate / mfPickedTerms.scatterRate) *
-                    mfDirect(mfPickedIndex, mfPickedTerms, position, direction, true);
+                    mfDirect(mfPickedIndex, mfPickedTerms, position, direction, true,
+                        dot(sum.extinction, vec3(0.2126, 0.7152, 0.0722)) * baseStep);
             }
             vec3 integral;
             for (int channel = 0; channel < 3; ++channel)
@@ -646,7 +630,9 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
             colorWeight += opacity * sum.scattering / max(sum.scatterRate, EPSILON);
             throughput *= sampleT;
             marchT += dt;
-            if (mfPeak(throughput) < 1e-6) break;
+            // The ordinary march's cutoff. 1e-6 doubled the optical depth walked
+            // inside opaque gas for nothing the camera can resolve.
+            if (mfPeak(throughput) < 0.001) break;
         }
         // A boundary handoff leaves the primary AOV for the actual SDF/solid,
         // as the ordinary gas path does. Thin transparent fog is not a surface.
@@ -685,7 +671,7 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
         mfPrimary(term.scattering / max(term.scatterRate, EPSILON), nearT + distance, 0.0);
         VkVolumeInstance v = volumes.v[contributor];
         radiance += throughput * mfDirect(contributor, term, position, direction,
-            v.random_walk_enabled < 0.5);
+            v.random_walk_enabled < 0.5, 1.0);
         if (v.random_walk_enabled < 0.5) break;
         if (event >= 4) {
             float probability = min(mfPeak(throughput), 0.98);

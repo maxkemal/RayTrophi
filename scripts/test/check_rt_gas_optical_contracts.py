@@ -1,5 +1,6 @@
 """Non-build safety and integration checks for the RT NanoVDB optical fast path."""
 from pathlib import Path
+from volume_shader_source import read_volume_shader
 import math
 import random
 import unittest
@@ -44,7 +45,7 @@ class NanoOpticalContracts(unittest.TestCase):
                         shadow.index("for (int step = 0; step < steps; ++step)"))
         self.assertIn("if (mfShadowIndexPath)", shadow)
         self.assertIn("mfShadowSamples++;", shadow)
-        self.assertIn("mfEvaluate(index, samplePosition, direction, false).extinction", shadow)
+        self.assertIn("mfShadowExtinction(index, samplePosition, direction)", shadow)
 
     def test_mixture_shadow_skip_keeps_midpoints_and_optical_depth(self):
         # Independent reference integration: a proven zero prefix followed by
@@ -84,10 +85,11 @@ class NanoOpticalContracts(unittest.TestCase):
         self.assertEqual(helper.count("return nanoEmptyIndexStep("), 2)
         shadow = shader.split("vec3 mfShadow(", 1)[1].split("vec3 mfDirect(", 1)[0]
         self.assertLess(shadow.index("mfShadowEmptyStep(index, v, dt)"),
-                        shadow.index("mfEvaluate(index, samplePosition"))
+                        shadow.index("mfShadowExtinction(index, samplePosition"))
         self.assertIn("int(floor(emptySpan / dt))", shadow)
         self.assertIn("step += skip - 1;", shadow)
-        self.assertIn("!cameraFast && !shadowFast && !mfContains", shader)
+        material = (SHADERS / "volume_mixture_material_sample.glsl").read_text(encoding="utf-8")
+        self.assertIn("!cameraFast && !shadowFast && !mfContains", material)
 
     def test_leaf_max_bounds_every_trilinear_sample(self):
         rng = random.Random(20261022)
@@ -117,13 +119,45 @@ class NanoOpticalContracts(unittest.TestCase):
             self.assertLessEqual(advance, span+1e-12)
             self.assertAlmostEqual(advance/dt, round(advance/dt))
 
+    def test_prepared_temperature_ray_is_gated_like_the_density_path(self):
+        rt = (SHADERS / "volume_fog_shading.glsl").read_text(encoding="utf-8")
+        walk = (SHADERS / "volume_mixture_shared_walk.glsl").read_text(encoding="utf-8")
+        self.assertIn("if (nanoIndexPath && !segmentCached)", rt)
+        self.assertIn("mfPreparedTemperature(temperatureRay, temperatureBuf, temperatureAcc, t)", rt)
+        self.assertIn(": sampleTemperature(vol, samplePos));", rt)
+        self.assertIn("prepared = v.emission_mode >= 2 && v.vdb_temp_address != uint64_t(0);", walk)
+
+    def test_held_light_cache_corners_only_follow_a_complete_read(self):
+        fill = (SHADERS / "volume_light_cache_fill.glsl").read_text(encoding="utf-8")
+        fetch = fill.split("bool volumeLightCacheFetch(", 1)[1].split("float volumeShadowFromIntegral(", 1)[0]
+        self.assertLess(fetch.index("vlcHeldKeyA"), fetch.index("volumeLightCacheSlot(slot, s)"))
+        self.assertLess(fetch.index("if (!complete) return false;"), fetch.index("vlcHeldKeyA = heldKey;"))
+        held = fetch.split("if (all(equal(c0,", 1)[1].split("VlcSlot s;", 1)[0]
+        self.assertIn("volumeRecordLightCache(true, 0u, 0u);", held)
+        # Held blend and the buffer path agree for every fraction and corner set.
+        import random
+        rng = random.Random(44)
+        for _ in range(2000):
+            v = [rng.uniform(0, 30) for _ in range(8)]
+            f = [rng.random() for _ in range(3)]
+            mix = lambda a, b, u: a + (b - a) * u
+            blend = mix(mix(mix(v[0], v[1], f[0]), mix(v[2], v[3], f[0]), f[1]),
+                        mix(mix(v[4], v[5], f[0]), mix(v[6], v[7], f[0]), f[1]), f[2])
+            summed = 0.0
+            for k in range(8):
+                weight = 1.0
+                for axis in range(3):
+                    weight *= f[axis] if k & (1 << axis) else 1 - f[axis]
+                summed += weight * v[k]
+            self.assertAlmostEqual(blend, summed, places=9)
+
     def test_fast_path_gates_and_empty_temperature_read(self):
-        rt = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        rt = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         shadow = (SHADERS / "volume_rt_shadow_march.glsl").read_text(encoding="utf-8")
         self.assertIn("vol._ext_reserved[7] < 0.5 && volumeProgram == MATPROG_NONE", rt)
         self.assertIn("vol._ext_reserved[7] < 0.5 && allowSparseTraversal", shadow)
         self.assertLess(rt.index('#include "volume_rt_empty_sample.glsl"'),
-                        rt.index("float temperature = needsTemperature"))
+                        rt.index("float temperature = !needsTemperature ? 0.0"))
         empty = (SHADERS / "volume_rt_empty_sample.glsl").read_text(encoding="utf-8")
         self.assertIn("!hasCompanion && volumeProgram == MATPROG_NONE", empty)
         self.assertIn("floor(sparseStep / stepSize)", shadow)
@@ -146,7 +180,7 @@ class NanoOpticalContracts(unittest.TestCase):
         helper = (SHADERS / "volume_solid_probe.glsl").read_text(encoding="utf-8")
         self.assertIn("min(state.x, distance)", helper)
         self.assertNotIn("terminateRayEXT", helper)
-        rt = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        rt = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         for flag in ["SOLID_FLAGS", "PROBE_FLAGS"]:
             declaration = rt.split("const uint " + flag + " =", 1)[1].split(";", 1)[0]
             self.assertNotIn("TerminateOnFirstHit", declaration)
@@ -158,7 +192,7 @@ class NanoOpticalContracts(unittest.TestCase):
     def test_solid_handoff_does_not_erase_front_volume_layer(self):
         # A 5 mm gas interval in front of a sphere used to be erased by 1 cm.
         self.assertLess(.005 - .01, 0)
-        rt = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        rt = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         self.assertIn("tFar = min(tFar, solidT);", rt)
         self.assertNotIn("tFar = solidT - 0.01", rt)
         self.assertIn("volumeRecordSolidProbe(shadowPayload.z > 0.5)", rt)
@@ -195,7 +229,7 @@ class NanoOpticalContracts(unittest.TestCase):
         self.assertNotRegex(helper, r"\bbool\s+invariant\b")
         self.assertIn("bool canReuse", helper)
         self.assertNotIn("density", helper.split("float volumeCachedPhase", 1)[1])
-        rt = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        rt = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         self.assertIn("lightType == 1 && !hasCompanion && volumeProgram == MATPROG_NONE", rt)
         self.assertIn("float sunPhase = volumeCachedPhase(phaseCache, 2", rt)
         self.assertIn("phase = mix(", rt)
@@ -253,7 +287,7 @@ class NanoOpticalContracts(unittest.TestCase):
                       "all(equal(volumeSunQueryDirection, direction))"]:
             self.assertIn(guard, shader)
         self.assertNotIn("rnd(", shader)
-        rt = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        rt = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         self.assertLess(rt.index("volumeRememberSunShadow(lightType"),
                         rt.index("volumeReuseSunShadow(samplePos"))
         self.assertIn("inscatter += sunLi * sunPhase * sunShadowTr", rt)
@@ -294,7 +328,7 @@ class NanoOpticalContracts(unittest.TestCase):
         self.assertIn("solidHandoffTMin = useSkipVolumeAABBs", raygen)
         self.assertLess(raygen.index("plSolidHandoffTMin(payload.volumeTraversalMask"),
                         raygen.index("payload.volumeTraversalMask = cullMask"))
-        rt = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        rt = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         self.assertEqual(rt.count("plSolidHandoffWord(payload.volumeTraversalMask, solidT)"), 1)
         sdf = rt.split("// ── Solid geometry inside the domain", 1)[1]
         self.assertIn("plSolidHandoffWord(payload.volumeTraversalMask, solidT)",
@@ -324,7 +358,7 @@ class NanoOpticalContracts(unittest.TestCase):
         backend = (SHADERS.parent / "src/Backend/VulkanBackend.cpp").read_text(encoding="utf-8")
         self.assertIn('volChitSPV = loadSPV(shaderDir + "/volume_closesthit.spv")', backend)
         self.assertNotIn("volumeSolidProbeShaderPath", backend)
-        shader = (SHADERS / "volume_closesthit.rchit").read_text(encoding="utf-8")
+        shader = read_volume_shader(SHADERS / "volume_closesthit.rchit")
         self.assertNotIn("VOLUME_TRY_INLINE_SOLID", shader)
         self.assertNotIn("VOLUME_INLINE_SOLID_QUERY", shader)
         plan = (ROOT / "RayTrophiStudio/compile_shaders.ps1").read_text(encoding="utf-8")

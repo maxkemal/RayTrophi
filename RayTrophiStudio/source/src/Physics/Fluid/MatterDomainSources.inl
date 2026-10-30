@@ -3,6 +3,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
     float time_seconds,
     int frame,
     SimulationComputeContext* compute) {
+    for (auto& state : grid_domain_states_) {
+        state.emission_withheld_kg_step = 0.0;
+    }
+    for (auto& source : flow_sources_) {
+        source.withheld_mass_kg_step = 0.0;
+    }
     if (flow_sources_.empty() || grid_domain_states_.empty()) {
         return;
     }
@@ -27,9 +33,8 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
         const auto& state = grid_domain_states_[source.domain_index];
         const auto resolved = resolveFlowSourceFrame(source, frame);
         if (!state.valid || resolved.parent_missing || !resolved.keyed.enabled ||
-            !simulationDomainHasLiquid(state.type) ||
-            (simulationDomainHasGas(state.type) &&
-             source.phase != SimulationFlowSourceDesc::Phase::Liquid) ||
+            !simulationDomainHasLiquid(state) ||
+            source.phase != SimulationFlowSourceDesc::Phase::Liquid ||
             (source.use_time_limit &&
              (time_seconds < source.start_time || time_seconds > source.end_time))) {
             continue;
@@ -40,9 +45,11 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             continue;
         }
         int count = static_cast<int>(std::min(requested, 2147483647.0));
-        if (source.use_particle_limit) {
-            count = std::min(count,
-                std::max(0, source.max_emitted_particles - source.total_emitted_particles));
+        // The exact kilogram cut happens while emitting (parcel masses are
+        // resolved there); a spent budget asks the shared pool for nothing.
+        if (source.use_mass_limit &&
+            source.total_emitted_mass_kg >= double(source.max_emitted_mass_kg)) {
+            count = 0;
         }
         source.pool_requested_particles = count;
         auto& request = pool_requests[source.domain_index][si];
@@ -89,9 +96,8 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
         // injecting density. Spawn rate accumulator survives across steps so
         // fractional rate*dt counts emit correctly. Capped by the domain's
         // max_particles.
-        const bool liquid_source = simulationDomainHasLiquid(state.type) &&
-            (!simulationDomainHasGas(state.type) ||
-             source.phase == SimulationFlowSourceDesc::Phase::Liquid);
+        const bool liquid_source = simulationDomainHasLiquid(state) &&
+            source.phase == SimulationFlowSourceDesc::Phase::Liquid;
         if (liquid_source) {
             const auto& fluid_domain = grid_domains_[static_cast<std::size_t>(source.domain_index)];
             const float rate = std::max(0.0f, keyed.flow_rate);
@@ -109,43 +115,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             RTPERF_FRAME_SCOPE("sim.matter.emit");
             source.fluid_emit_accumulator -= static_cast<float>(emit_count);
 
-            // Hysteresis gate: reseed trims over-populated cells every step,
-            // creating a small capacity gap even at max_particles. Without a
-            // dead-band, the emitter fills that gap each step producing a
-            // visible "trickle" of particles at full capacity.
-            // Only allow emission when at least 1% capacity is available so
-            // normal filling (empty → full) is unaffected but steady-state
-            // at-max oscillation is suppressed.
-            // ★ fluid_max_particles is a RESOURCE ceiling (memory/perf), not a
-            // budget on how much material may ever be introduced. An emitter
-            // authored as a continuous source is SUPPOSED to keep replacing what
-            // burns away; bounding total emission is what use_particle_limit and
-            // use_time_limit on the source are for.
-            //
-            // ★★ A previous revision subtracted state.burned_particles here so
-            // burned mass could not fund new emission. It was reverted: it
-            // silently repurposed the ceiling, and it would have throttled every
-            // ordinary fountain draining through an open boundary too. The
-            // counter is kept as telemetry only — read it, do not gate on it.
-            const std::size_t max_p = fluid_domain.fluid_max_particles;
-            const std::size_t cur_p = state.particles.size();
-            // The dead-band applies once when the shared plan is made, not
-            // again after an earlier source used its allocated share.
-            const std::size_t remaining =
-                cur_p < max_p ? max_p - cur_p : 0u;
-            emit_count = std::min<int>(emit_count, static_cast<int>(remaining));
-            emit_count = std::min(emit_count, source.pool_granted_particles);
-            if (emit_count <= 0) continue;
-
-            // Particle budget limit check
-            if (source.use_particle_limit) {
-                int limit_rem = source.max_emitted_particles - source.total_emitted_particles;
-                if (limit_rem <= 0) {
-                    continue;
-                }
-                emit_count = std::min<int>(emit_count, limit_rem);
+            if (source.use_mass_limit &&
+                source.total_emitted_mass_kg >= double(source.max_emitted_mass_kg)) {
+                continue;
             }
-            if (emit_count <= 0) continue;
 
             // Emission frame: keyframe channels + object parenting already
             // folded in. Using the resolved values (rather than the raw desc)
@@ -252,6 +225,65 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                       Fluid::domainSubstance(fluid_domain.fluid_params), emit_model,
                       fluid_domain.fluid_params.granular_enabled)
                 : 0.0f;
+            // Liquid parcels get their mass at birth as well: the same voxel/PPC
+            // mass ensureFluidParticleRestMasses would give them on the next
+            // step, so what this source poured is counted in kg as it happens.
+            const float liquid_rest_mass = grain_birth ? 0.0f : Fluid::fluidParticleRestMassKg(
+                emit_substance, Fluid::domainSubstance(fluid_domain.fluid_params),
+                state.voxel_size, fluid_domain.fluid_params.particles_per_cell, emit_model,
+                fluid_domain.fluid_params.granular_enabled &&
+                    !fluid_domain.fluid_params.grain.enabled);
+            const double parcel_mass = grain_birth ? grain_rest_mass : liquid_rest_mass;
+            if (source.use_mass_limit && parcel_mass > 0.0) {
+                const double left = double(source.max_emitted_mass_kg) - source.total_emitted_mass_kg;
+                emit_count = std::min<int>(emit_count, static_cast<int>(std::min(
+                    std::ceil(left / parcel_mass), 2147483647.0)));
+            }
+            // Hysteresis gate: reseed trims over-populated cells every step,
+            // creating a small capacity gap even at max_particles. Without a
+            // dead-band, the emitter fills that gap each step producing a
+            // visible "trickle" of particles at full capacity.
+            // Only allow emission when at least 1% capacity is available so
+            // normal filling (empty → full) is unaffected but steady-state
+            // at-max oscillation is suppressed.
+            // ★ fluid_max_particles is a RESOURCE ceiling (memory/perf), not a
+            // budget on how much material may ever be introduced. An emitter
+            // authored as a continuous source is SUPPOSED to keep replacing what
+            // burns away; bounding total emission is what use_mass_limit and
+            // use_time_limit on the source are for.
+            //
+            // ★★ A previous revision subtracted state.burned_particles here so
+            // burned mass could not fund new emission. It was reverted: it
+            // silently repurposed the ceiling, and it would have throttled every
+            // ordinary fountain draining through an open boundary too. The
+            // counter is kept as telemetry only — read it, do not gate on it.
+            const std::size_t max_p = fluid_domain.fluid_max_particles;
+            const std::size_t cur_p = state.particles.size();
+            // The dead-band applies once when the shared plan is made, not
+            // again after an earlier source used its allocated share.
+            const std::size_t remaining =
+                cur_p < max_p ? max_p - cur_p : 0u;
+            const int wanted = emit_count;
+            emit_count = std::min<int>(emit_count, static_cast<int>(remaining));
+            emit_count = std::max(0, std::min(emit_count, source.pool_granted_particles));
+            if (wanted > emit_count) {
+                // The ceiling, not the source, set this step's emission. Said
+                // in kg (status bar, flow_source.list, fluid.list_domains) and
+                // in the exchange ledger as a balanced EmissionWithheld record.
+                const double withheld = double(wanted - emit_count) * parcel_mass;
+                source.withheld_mass_kg_step += withheld;
+                source.withheld_mass_kg_total += withheld;
+                state.emission_withheld_kg_step += withheld;
+                state.emission_withheld_kg_total += withheld;
+                MatterExchangeRecord record;
+                record.kind = MatterExchangeKind::EmissionWithheld;
+                record.source = "flow_source:" + source.name;
+                record.target = "withheld:" + fluid_domain.name + ":max_particles";
+                record.substance = source.fluid_substance;
+                record.source_mass_kg = record.target_mass_kg = withheld;
+                matter_exchange_ledger_.record(std::move(record));
+            }
+            if (emit_count <= 0) continue;
             if (!grain_birth) {
                 source.fluid_emit_sample_serial += static_cast<uint64_t>(emit_count);
             }
@@ -272,6 +304,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                       std::min<uint64_t>(static_cast<uint64_t>(emit_count) * 64u, 262144u))
                 : static_cast<uint64_t>(emit_count);
             uint64_t attempts = 0;
+            double emitted_mass = 0.0;
             for (; attempts < attempt_limit; ++attempts) {
                 if (grain_birth && state.particles.size() - before_emission >=
                     static_cast<std::size_t>(emit_count)) {
@@ -355,7 +388,8 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 state.particles.emit(
                     spawn_pos, emit_vel, emit_kelvin, 0.0f, emit_substance,
                     nullptr, nullptr, grain_birth ? grain_rest_mass * std::pow(
-                        birth_radius / fluid_domain.fluid_params.grain.radius_m, 3.0f) : 0.0f,
+                        birth_radius / fluid_domain.fluid_params.grain.radius_m, 3.0f)
+                        : liquid_rest_mass,
                     emit_model);
                 state.particles.birth_source_uid.back() = source.timeline_uid;
                 if (grain_birth) {
@@ -363,14 +397,36 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                         state.particles.size() - 1, source.grain_birth_saturation,
                         fluid_domain.fluid_params.grain);
                 }
+                const std::size_t born = state.particles.size() - 1;
+                emitted_mass += double(state.particles.rest_mass_kg[born]) *
+                    state.particles.mass_fraction[born] + state.particles.pore_water_mass_kg[born];
+                if (source.use_mass_limit && source.total_emitted_mass_kg + emitted_mass >=
+                        double(source.max_emitted_mass_kg)) {
+                    break;
+                }
             }
             source.total_emitted_particles +=
                 static_cast<int>(state.particles.size() - before_emission);
+            source.total_emitted_mass_kg += emitted_mass;
+            if (emitted_mass > 0.0) {
+                MatterExchangeRecord record;
+                record.kind = MatterExchangeKind::Emission;
+                record.source = "flow_source:" + source.name;
+                record.target = "domain:" + fluid_domain.name;
+                record.substance = source.fluid_substance;
+                record.source_mass_kg = record.target_mass_kg = emitted_mass;
+                matter_exchange_ledger_.record(std::move(record));
+            }
             if (grain_birth) {
                 source.fluid_emit_sample_serial += attempts;
                 source.fluid_emit_accumulator += static_cast<float>(emit_count -
                     static_cast<int>(state.particles.size() - before_emission));
             }
+            continue;
+        }
+
+        if (!simulationDomainHasGas(state) ||
+            source.phase != SimulationFlowSourceDesc::Phase::Gas) {
             continue;
         }
 
@@ -545,8 +601,18 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 : std::pow(std::max(0.0f, 1.0f - normalized_distance), falloff);
         };
 
-        auto* provenance = Fluid::prepareGasSourceDeposit(state,
-            source.timeline_uid, source.name);
+        // This runs in the frame loop with nothing above it to catch: a refused
+        // source must hold its domain, not take the application and the user's
+        // unsaved work with it.
+        Fluid::GasSourceImage* provenance = nullptr;
+        try {
+            provenance = Fluid::prepareGasSourceDeposit(state,
+                source.timeline_uid, source.name);
+        } catch (const std::exception& exception) {
+            SCENE_LOG_ERROR(std::string("[GasSource] ") + exception.what());
+            Fluid::holdGasInventory(state, exception.what());
+            continue;
+        }
         #pragma omp parallel for collapse(2) schedule(static)
         for (int z = min_z; z <= max_z; ++z) {
             for (int y = min_y; y <= max_y; ++y) {
