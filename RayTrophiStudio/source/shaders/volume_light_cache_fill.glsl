@@ -13,11 +13,34 @@
 // Fill budget of ONE closest-hit invocation, shared by every lookup it makes.
 // A per-lookup budget would let a cold cache charge every march step of every
 // light: ~26 steps x 3 lights x 2 cells x 32 samples on frame one. Per
-// invocation the worst case is 4 cells (<= 128 samples) on top of the march it
+// invocation the worst case is 4 cells (<= 256 samples) on top of the march it
 // would have run anyway; a few million rays per sample still fill a 64^3 grid
 // within the first samples. (Private global: one copy per invocation.)
 const uint VLC_FILLS_PER_INVOCATION = 4u;
 uint vlcFillBudget = VLC_FILLS_PER_INVOCATION;
+
+// Last complete corner set of two streams, for this invocation only. A march
+// spends several steps in one cache cell, and a read otherwise repeats the header,
+// the tag hash and eight incoherent loads for values it just had. Cell contents
+// are deterministic and a light's channel is fixed per dispatch, so a held set
+// equals what the buffer would return. Scalar pair, no arrays, as elsewhere in
+// this stage. Two: the single-gas light + sun and two media under one light.
+const uint VLC_HELD_NONE = 0xffffffffu;
+uint vlcHeldKeyA = VLC_HELD_NONE;
+uint vlcHeldKeyB = VLC_HELD_NONE;
+uvec3 vlcHeldDimsA;
+uvec3 vlcHeldDimsB;
+uvec3 vlcHeldCellA;
+uvec3 vlcHeldCellB;
+vec4 vlcHeldLowA;
+vec4 vlcHeldLowB;
+vec4 vlcHeldHighA;
+vec4 vlcHeldHighB;
+
+float vlcHeldBlend(vec4 low, vec4 high, vec3 f) {
+    return mix(mix(mix(low.x, low.y, f.x), mix(low.z, low.w, f.x), f.y),
+        mix(mix(high.x, high.y, f.x), mix(high.z, high.w, f.x), f.y), f.z);
+}
 
 // Density integral from a cell centre toward the light, deterministic: fixed
 // midpoint lattice, step count from the cell size only. Two invocations that
@@ -39,9 +62,10 @@ float vlcFillCell(VkVolumeInstance vol, VlcSlot s, uvec3 c, bool positional, vec
     if (chord <= 1e-6) return 0.0;
     vec3 boxWorld = vlcLocalToWorld(vol, vol.aabb_max) - vlcLocalToWorld(vol, vol.aabb_min);
     float cellWorld = max(length(boxWorld) / length(vec3(s.dims)), 1e-6);
-    // One sample per cell crossed, 4..32. The march this replaces takes at most
-    // 12-16 adaptive samples, so the cached chord is never sampled coarser.
-    int n = clamp(int(ceil(chord / cellWorld)), 4, 32);
+    // At least the material's authored shadow count, including the mixture's
+    // supported 64-step case. Cell spacing can refine further within that cap.
+    int authored = clamp(vol.shadow_steps, 1, 64);
+    int n = clamp(max(int(ceil(chord / cellWorld)), authored), 4, 64);
     float h = chord / float(n);
     float sum = 0.0;
     for (int k = 0; k < n; ++k) {
@@ -57,6 +81,23 @@ bool volumeLightCacheFetch(uint slot, VkVolumeInstance vol, int lightIndex, vec3
                            pnanovdb_buf_t buf, pnanovdb_map_handle_t mapH,
                            inout pnanovdb_readaccessor_t acc, out float integral) {
     integral = 0.0;
+    uvec3 c0, c1;
+    vec3 f;
+    uint heldKey = (slot << 8) | uint(lightIndex + 1);
+    bool heldA = heldKey == vlcHeldKeyA;
+    if (heldA || heldKey == vlcHeldKeyB) {
+        VlcSlot held;
+        held.entries = 0ul;
+        held.dims = heldA ? vlcHeldDimsA : vlcHeldDimsB;
+        held.key = 0u;
+        vlcCorners(vol, held, worldPos, c0, c1, f);
+        if (all(equal(c0, heldA ? vlcHeldCellA : vlcHeldCellB))) {
+            integral = heldA ? vlcHeldBlend(vlcHeldLowA, vlcHeldHighA, f)
+                : vlcHeldBlend(vlcHeldLowB, vlcHeldHighB, f);
+            volumeRecordLightCache(true, 0u, 0u);
+            return true;
+        }
+    }
     VlcSlot s;
     if (!volumeLightCacheSlot(slot, s)) return false;
     uint channel;
@@ -65,13 +106,13 @@ bool volumeLightCacheFetch(uint slot, VkVolumeInstance vol, int lightIndex, vec3
     if (!volumeLightCacheChannel(lightIndex, channel, positional, geometry)) return false;
     uint tag = volumeLightCacheTag(s.key, channel, positional, geometry);
     uint filling = tag | 1u;
-    uvec3 c0, c1;
-    vec3 f;
     vlcCorners(vol, s, worldPos, c0, c1, f);
     VlcEntries entries = VlcEntries(s.entries);
     VlcWords words = VlcWords(s.entries);
     float sum = 0.0;
     bool complete = true;
+    vec4 low = vec4(0.0);
+    vec4 high = vec4(0.0);
     uint fills = 0u;
     uint fillSamples = 0u;
     for (uint k = 0u; k < 8u; ++k) {
@@ -80,7 +121,10 @@ bool volumeLightCacheFetch(uint slot, VkVolumeInstance vol, int lightIndex, vec3
         uint64_t word = entries.e[index];
         uint seen = uint(word);
         if (seen == tag) {
-            sum += vlcCornerWeight(f, k) * uintBitsToFloat(uint(word >> 32));
+            float stored = uintBitsToFloat(uint(word >> 32));
+            sum += vlcCornerWeight(f, k) * stored;
+            if (k < 4u) low[k] = stored;
+            else high[k - 4u] = stored;
             continue;
         }
         // Someone else is filling it for THIS tag: do not duplicate the work.
@@ -97,6 +141,8 @@ bool volumeLightCacheFetch(uint slot, VkVolumeInstance vol, int lightIndex, vec3
             vlcFillBudget--;
             fillSamples += n;
             sum += vlcCornerWeight(f, k) * value;
+            if (k < 4u) low[k] = value;
+            else high[k - 4u] = value;
             continue;
         }
         complete = false;
@@ -104,6 +150,20 @@ bool volumeLightCacheFetch(uint slot, VkVolumeInstance vol, int lightIndex, vec3
     volumeRecordLightCache(complete, fills, fillSamples);
     if (!complete) return false;
     integral = sum;
+    // Direct mapped by stream, so a lone light and the sun never evict each other.
+    if (((slot + channel) & 1u) == 0u) {
+        vlcHeldKeyA = heldKey;
+        vlcHeldDimsA = s.dims;
+        vlcHeldCellA = c0;
+        vlcHeldLowA = low;
+        vlcHeldHighA = high;
+    } else {
+        vlcHeldKeyB = heldKey;
+        vlcHeldDimsB = s.dims;
+        vlcHeldCellB = c0;
+        vlcHeldLowB = low;
+        vlcHeldHighB = high;
+    }
     return true;
 }
 

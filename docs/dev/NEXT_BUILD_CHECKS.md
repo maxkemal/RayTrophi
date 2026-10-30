@@ -1,5 +1,1011 @@
 # NEXT BUILD CHECKS
 
+## Gaz akışı birleştirme aşama 1 — 2026-10-30 (önce bu)
+
+★ **Canlı sonuç:** 1–3 ve 5 tamam: 262 → ~135 ms. **Madde 4 (görüntü) gözle yapılmadı**; JPEG farkı p99 19.
+Açılışta birleşme ilk yeniden yayına kadar gecikiyor.
+
+C++ derlemesi gerekir, shader değişmedi. Not: `RT_GAS_STREAM_MERGE_20261030.md`.
+
+1. **Sahne bozulmamalı.** İki gazlı sahneyi aç: A ve B materyalleri farklıysa `render.volume_slots`
+   hâlâ iki gaz göstermeli. Biri kayıpsa birleştirme yanlış tetiklenmiştir.
+2. **Birleşme.** B'ye A'nın emisyon ayarlarını ver (`volume.set_material`, `ramp_enabled`,
+   `color_ramp`). Slotlarda tek gaz kalmalı, `volume.get_material` iki hedefi de açmalı.
+3. **Süre.** Küplü sahnede yaklaşık tek akış bandı (~131 ms) beklenir; iki akış 240–280 ms.
+4. **★ Sessiz hata:** görüntü A+B ile aynı kalmalı. Gaz belirgin koyulaşır veya açılırsa eğri iki kez
+   işleniyor ya da hiç işlenmiyordur; hata vermez.
+5. **Görünürlük.** B'yi gizle: birleşme bozulup tek A kalmalı, gazın B payı kaybolmalı. Geri aç.
+
+## Sekme ışını: radyans önbelleği yürüyüşü — 2026-10-30 (önce bu)
+
+★ **Son ölçüm:** A+B 271 → 239 ms (adım 2), 224 ms (adım 4), notun §10.3'ü. Madde 3 hâlâ yapılmadı.
+
+★ **Bu derlemede yeni:** yürüyüş `secondary_step_scale`'e uyuyor (notun §10.2'si). Aynı süreçte
+`secondary_step_scale` 1 ve 2 ile A+B ölç: fark sekme yürüyüşünün payıdır. ★ Görsel: küpteki gaz
+yansıması koyulaşırsa veya bantlanırsa kaba adım fazla gelmiştir, kimse bug diye raporlamaz.
+
+★ **Canlı sonuç:** 1–2 tamam: A −%11, B −%27, A+B 252–323 ms; sekme hâlâ ~130 ms (notun §10.1'i).
+Madde 3 (görüntü) yapılmadı.
+
+Yalnız shader. `.\RayTrophiStudio\compile_shaders.bat -VolumeOnly -VolumeOptimization Off`,
+aynı küplü sahne, frame 99, duraklat. Notun §10'u.
+
+1. **Sayaçlar.** `radiance_cache_marches` ~0.14, kamera ~12.5: değişmemeli. `radiance_cache_fallbacks` 0.
+2. **Süre.** A, B, A+B ve `max_bounces=1`. Aynı oturumda oranla oku. A+B 300'ün belirgin
+   altına inmeli. İnmediyse kök boş adımlar değil, dolu adımların 32 okumasıdır.
+3. **★ Sessiz hata:** küp üstündeki gaz yansıması koyulaşır veya parlarsa `vrcProvenEmpty`
+   yayınlanmamış köşeyi boş saymıştır. Görüntü önceki gibi kalmalı.
+
+## İki gaz adım maliyeti — 2026-10-30 (önce bu)
+
+★ **Canlı sonuç:** 1–3 tamam: oran ~1.8× (başlangıç 3.2×), notun §9.1'i. Süreleri bantlar
+arasında kıyaslama, oran kullan. **Madde 4 (renk) ve önceki partinin görsel maddeleri yapılmadı.**
+
+Yalnız shader. `.\RayTrophiStudio\compile_shaders.bat -VolumeOnly -VolumeOptimization Off`,
+sonra iki gazlı sahneyi aç (legacy, frame 99, duraklat, Rendered). Notun §9'u.
+
+1. **Pipeline hazır, SHA aynı.** Değilse sonraki sayılar eski shader'ındır.
+2. **Sayaçlar.** `camera_density_samples` ve `shadow_density_samples` önceki düzeyde kalmalı
+   (~10–11 ve ~4.3), `majorant_queries` 3.5–3.9'dan belirgin düşmeli. Düşmediyse yaprak
+   önbelleği çalışmıyor; ortak yürüyüş açılmıyor olabilir.
+3. **A, B, A+B matrisi, kare dizileriyle.** A ve B değişmemeli, A+B ~80 ms'nin altına inmeli.
+   Yalnız medyana bakma, iki bant varsa tur sayısını artır.
+4. **★ Sessiz hata:** görüntü aynı kalmalı. Birim terim yanlış alana bağlanırsa iki gazın rengi
+   yer değiştirir, hata vermez. A ve B farklı malzemeyle bir kez bak.
+
+## Tek gaz okuma maliyeti — 2026-10-30 (önce bu)
+
+★ **Canlı sonuç:** madde 1 tamam (sayaçlar aynı). Madde 2 hükümsüz: süre örnek sırasına bağlı,
+sample 8–23 medyanı bu sahnede sağlam ölçü değil (notun §8.3'ü). Madde 3 ve 4 yapılmadı.
+
+Yalnız shader değişti. `.\RayTrophiStudio\compile_shaders.bat -VolumeOnly -VolumeOptimization Off`
+ardından `nuke.rtp` aç, frame 94'te duraklat, Rendered. Hash'ler açılışla değişebilir
+ama bu sahne kendini iyi tekrarlıyordu (412–415 ms).
+
+1. **Sayaçlar kıpırdamamalı.** `camera_density_samples` ~36.6, `light_cache_hits` ~10.3,
+   `light_cache_misses` ~0.07. Hit düştüyse tutulan okuma kaydı kırılmış; miss arttıysa
+   anahtar yanlış. Bu değişiklik iş sayısını değil, iş fiyatını düşürür.
+2. **GPU süresi.** Taban 412–415 ms. Düştüyse okuma payı doğrulanır. Düşmediyse okuma
+   fiyatı sanıldığı gibi bellek değildir; `shadow_steps=0` ile yeniden ayır.
+3. **Görüntü aynı kalmalı.** ★ Sessiz hata: sıcaklık ışını kayarsa ateş topu biraz başka
+   renkte ama makul görünür. Eski ekran görüntüsü yok; ramp sınırlarını ve gaz kenarını
+   önceki izleniminle karşılaştır, şüphede `sampleTemperature` ile A/B yap.
+4. **İki gazlı sahnede tekrar.** A, B, A+B. A+B ~75–80 ms bandında veya altında olmalı.
+
+## nuke.rtp + Play çökmesi — 2026-10-30 (önce bu)
+
+Kök bulundu: `Gas source provenance exceeds 8 emitters / 256 MiB budget`. 166x256x166
+= 7.05 M hücre, tek emitter için bile sabit bütçenin üstünde; istisnayı yakalayan kimse
+yoktu. Tavan söküldü, reddedilen kaynak artık domain'i hold eder. `Main.cpp` log
+koruması da kaldı. C++ derlemesi gerekir (shader'lar daha önce derlendiyse yeterli).
+
+1. `nuke.rtp` aç, Play. Görmen gereken: gaz kaynağı çalışır, uygulama kapanmaz.
+   Bozuksa: `StartupCrash.log` son `[FATAL]` satırı artık gerçek hatayı söyler.
+2. `render.volume_stats` ile gerçekten gaz yürüdüğünü doğrula: yoğunluk artıyor.
+3. ★ Sessiz başarısızlık: uygulama açık kalır ama gaz hiç büyümez. Bu hold'dur;
+   domain için `gas_stats.inventory_error` dolu demektir (reset ister).
+4. Düşük VRAM'de `GasSourceCurrent` ayırma hatası hâlâ istisna atar ve uygulamayı
+   kapatır: yalnız kaynak bırakma noktası korundu, adım içi `require` korunmadı.
+
+## İki gaz çakışma maliyeti — 2026-10-30
+
+★ **Canlı sonuç (tau bütçesi öncesi):** 1–3 tamam. A+B ~77 ms (önce ~112), A ve B
+değişmedi. **4–7 görsel maddeleri henüz yapılmadı.**
+
+★ **Tau bütçesi geri alındı:** A+B ~80 ms, gölge örneği −%33, süre kazancı gürültüden
+ayrılamadı (notun §7.1'i). Kaynaktan söküldü; kurulu shader hâlâ onu içeriyor.
+Aşağıdaki komutla yeniden derle, sonra 1–3'ü koş. Beklenen: gölge örneği yeniden
+~4.3/yol, A+B ~75–80 ms bandı. Gölge örneği 2.9 civarında kaldıysa eski `.spv`
+ölçülüyordur. ★ Görsel maddeler (4–7) bu derlemeyle yapılmalı.
+
+Ayrıntı: `RT_GAS_OVERLAP_COST_20261030.md`. Yalnız shader değişti, C++ derlemesi
+gerekmez. Studio kapalıyken:
+
+```powershell
+.\RayTrophiStudio\compile_shaders.bat -VolumeOnly -VolumeOptimization Off
+```
+
+Aynı sahneyi legacy modda aç. Gaz hash'leri açılıştan açılışa değişebilir; bu
+yüzden ölçümler kendi içinde karşılaştırılır, önceki 112 ms ile değil. Sıra:
+
+1. **Pipeline kurulu mu.** `render.rt_pipeline_status` `ready`, `volume_closesthit`
+   mevcut, kaynak ve `x64/Release/shaders/volume_closesthit.spv` SHA'sı aynı.
+   Değilse: eski shader ölçülüyor, aşağıdaki hiçbir sayı geçerli değil.
+2. **Sayaçlar çalışıyor mu (GPU süresinden bağımsız, hızlı).** Tek geçiş A+B:
+   `camera_density_samples` 13.8'den belirgin düşük (beklenti ~8–10/yol),
+   `shadow_density_samples` 6.9'dan düşük (~2–3/yol), `step_budget_exhausted`
+   0.113'ten düşük, `light_cache_misses` warm 0. Kamera örneği değişmediyse
+   `mfRefinedSpan`/`mfCellCurveSlope` etkin değil; gaz karışım yoluna girmiyor olabilir.
+3. **A+B/A/B/gizli matrisi.** `rt_probe_volume_split_cost.py` ile A+B alıp onu
+   `rt_probe_two_gas_cost_matrix.py --initial-both` ile ver. Görmen gereken: A ve B
+   tek başına yaklaşık aynı (shader tek gaz yolunu değiştirmedi; değiştiyse bir
+   include sızmıştır), A+B çok daha düşük. Hedef çoğu 45–60 ms, referans 34.5 ms.
+   80 ms üstü: izler veya kapılar beklenen yolda değil, 2. adıma dön.
+4. **Dumanın ışığı (görsel).** Yarı saydam ince saçak, özellikle yoğun çekirdeğin
+   uzak tarafındakiler. Gökyüzü kapısı burada görünürlüğü tutar; saçak parlıyorsa
+   kapı fazla erken kapıyor.
+5. **★ En sinsi: katı gölgesi kaybolmuş ama gaz makul görünüyor.** Çakışma bölgesinde
+   gaz artık katının gölgesini almaz; bu bilinçli (aynı gazın tek başına davranışı),
+   ama bug gibi rapor edilmez. Gaz içine/önüne katı koy, A+B ile A tek başına
+   karşılaştır: ikisi aynı davranmalı ve çakışma sınırında dikiş olmamalı. Kabul
+   edilmezse tek satır: `mfGeometryBlocks` içindeki `!mfWalking` erken dönüşü.
+6. **Yoğun gaz arkası.** Opak gaz gövdesinin arkasından parlak emisyon/arka plan
+   sızmamalı. 1e-3 eşiği 0.001 geçirgenlik bırakır, tek gazla aynı.
+7. **Random walk, üç katkıcı, gazın hizalı olmadığı durum.** Görüntü önceki gibi
+   olmalı: iz ve `sampleTemperature` geri düşüşü bu yollarda duruyor. Fark varsa
+   `mfWalking` kapısı veya ortak yürüyüş bayrağı yanlış yere bağlanmıştır.
+
+## Hacimsiz pipeline A/B canlı sonucu — 2026-10-30
+
+Kullanıcı build'i ardından iki gerçek stage listesi IPC'den doğrulandı. Aynı
+kamera/hedef, frame, render ayarları, 1680x945 ve sample 8–39 ile medyan:
+volume dahil 99.145424 ms, volume hit grubu hariç 98.818768 ms (%0.329 fark).
+Bu sahnede büyük genel RT maliyetinin salt volume grubunun bağlanmasından
+kaynaklandığı hipotezi desteklenmedi. `-O0` karşılaştırması veya iki-gaz sorunu
+çözülmüş değildir. Geçici kamera hedefi ve sayaçlar geri yüklendi. Normal
+kullanım için test environment değişkeni kaldırılarak uygulama yeniden açılmalı.
+
+## Hacimsiz sahnede volume pipeline A/B — 2026-10-30
+
+C++ kaynakları hazır: `RT_VK_AB_NO_VOLUME=1` process-start test modu volume hit
+grubunu pipeline hash'inden önce çıkarır. Diğer shaderlar aynı kalır; published
+volume veya TLAS volume slotu varsa RT çizimi reddedilir. Normalde değişken yok/0
+olmalı. Shader derlemesi gerekmez, yeni C++ build gerekir. Altı non-build test
+geçti; canlı GPU kabulü yapılmadı. Aynı kaydedilmiş hacimsiz sahne ve aynı binary
+ile iki ayrı açılışta ölçüm alınmalı; mevcut gaz sahnesinde uygulanmamalı.
+Komutlar: [RT_VOLUME_PIPELINE_AB.md](RT_VOLUME_PIPELINE_AB.md).
+
+## Son compiler denemesi ve scalar validation düzeltmesi — 2026-10-29
+
+Kullanıcı `-O` için uzun tek çekirdek çalışması ardından -1073741819 /
+0xC0000005 (access violation) bildirdi. `-O0` derlemesi ardından gelen
+`VkWorldDataExtended` offset 120 hatası, doğrulayıcıya scalar layout özelliğinin
+iletilmemesiydi. Shader GL_EXT_scalar_block_layout gerektiriyor; backend de
+scalarBlockLayout özelliğini açıyor. Validator artık `--scalar-block-layout`
+kullanır; buffer ABI değiştirilmedi. İncelemede runtime'da eski teşhis anahtarının
+scalarBlockLayout özelliğini false tuttuğu da görüldü; artık cihazın desteklediği
+özellik isteniyor ve mevcut pNext zincirine ekleniyor. Bu düzeltme C++ derlemesi
+gerektirir; pipeline oluşturma süresi ve görüntü ayrıca kontrol edilmeli.
+Mevcut SPV scalar seçeneğiyle gerçek spirv-val salt okunur kontrolünden geçti.
+Normal varsayılan `Off` / `-O0` oldu.
+`-VolumeOnly` artık uzun `-O` denemesine girmez; Auto/Full yalnız açık seçimdir.
+Optimizasyon denemesi performans sorununu çözmedi; GPU kabulü hâlâ açık.
+
+## Hacim shader derleme optimizasyonu — 2026-10-29
+
+`compile_shaders.bat -VolumeOnly` artık yalnız `volume_closesthit` için `-O`
+dener, SPIR-V'yi `spirv-val` ile doğrular ve başarılıysa yayımlar. `Auto`
+modunda compiler/validation hatası bir kez `-O0` fallback yapar; yayınlama
+hatası fallback ile gizlenmez. Her iki derleme başarısızsa eski SPV korunur.
+`-VolumeOptimization Full` fallback yapmaz; `Off` eski `-O0` referansıdır.
+Log'daki son `OK ... [-O ...]` veya `[-O0 ...]` gerçek yayımlanan seçimi gösterir.
+VolumeOnly diğer shaderları yeniden derlemez, dağıtmaz veya silmez. Agent gerçek
+derleme çalıştırmadı; mock hata yolu ve salt kaynak planı kontrolleri yapıldı.
+Yeni shader uygulamada yüklenmeden GPU karşılaştırması geçerli değildir.
+
+## Gas RT ortak hücre yürüyüşü — son kaynak partisi, 2026-10-29
+
+Tam hizalı iki Matter gas alanı için ortak kamera hücre yürüyüşü eklendi.
+Kaynakların yoğunluk eğrileri, sıcaklığı ve optik katkıları ayrı korunuyor.
+Genel ve hızlı yol aynı optik yanıt modülünü kullanıyor. Üçüncü alan, hizasız
+alanlar, grafik/noise, random walk veya adaptif kapalı durumda genel yol sürer.
+Bu parti RT shader derlemesi gerektirir; GPU hız/görüntü kabulü henüz yapılmadı.
+43 birim testi ve iki ek kaynak denetimi geçti. Ayrıntılar ve kabul listesi:
+[GAS_RT_SHARED_CELL_WALK.md](GAS_RT_SHARED_CELL_WALK.md).
+
+## Gas RT maliyeti — 2026-10-29
+
+İki görünür gas alanının adaptif mixture yolunda aynı voxel için tekrarlanan
+NanoVDB köşe/sınır hesapları ışın başına önbelleğe alındı. Kalite ayarları
+azaltılmadı. Kullanıcı RT shader derlemesinden sonra mevcut frame 89 / Pause
+sahnesinde GPU süre ve görüntü eşliği kabulü gerekli; henüz hızlanma ölçülmedi.
+Ayrıntı: [GAS_RT_MIXTURE_CELL_CACHE.md](GAS_RT_MIXTURE_CELL_CACHE.md).
+
+## En son ana kaynak değişiklikleri — D2 / T6 E2/E6, 2026-10-29
+
+Son başarılı kullanıcı build'inden sonra RAM/disk cache frame preflight
+eklendi. Yeni C++ derlemesi gerekir; shader revision hâlâ 33. Kullanıcının
+son yönlendirmesi: ana plan kaynakları önce, hassas fizik ölçüm/tuning en son.
+Toplu kabulde iki sistemli cache'de ikinci domain'in lane/count veya frame
+dosyası bozuk olduğunda ilk domain/MSF yarım restore edilmemeli, disk cache
+valid=false ve rebake log'u görülmeli. Eşleşen RAM/disk frame restore ve
+legacy project roundtrip de aynı turda yeniden kontrol edilmeli.
+İki loader'ın ortak saved-type parser'ı da bu partide: Gas/Fluid/Matter ve
+0/1/2 korunmalı; bilinmeyen tip artık Gas'a sessiz dönüşmemeli. Eksik eski
+type alanının Gas varsayılanı değişmedi. Karşılaştırmalı C++ test kaynakları
+eklendi; canlı dosya kabulü son toplu tura bırakıldı.
+Loader ilk synchronize çağrısı artık bütün flow source kayıtlarından sonra;
+aksi halde legacy type erken kayboluyor, kaynak phase göçü atlanıyordu.
+Legacy roundtrip'in iki kapalı/yanlış-faz kaynağı yeni build'de doğru faza
+dönmeli; ikinci save/open'da da değişmemeli.
+D2 kuvvet maliyeti düzeltmesi de C++ partisinde: yüzey Wind/atmosfer rüzgârı
+yoksa kolon clear/build ve kolon okuması atlanır. Son kabulde body Gravity/
+Vortex alanı, surface-drag Wind ve atmosfer rüzgârı davranışları ayrı kontrol
+edilmeli; süre karşılaştırması aynı sahne/sayılarda yapılmalı. Shader ABI ve
+revision bu değişiklikte değişmedi. `fluid_force_columns_test.cpp` ilgili
+bağımsız C++ kontrat kaynağıdır (ajan derlemedi).
+Nested-clock yuvarlama artık authored DEM limit'i aşamaz: örnek 512 istek,
+40 continuum, limit512 →64 continuum x8 DEM. Normal sınır içi zamanlama aynı.
+Son mixed_clock/4-emitter probunda DEM=continuum*per yanında DEM<=limit de
+doğrulanır. `matter_common_clock_test.cpp` bağımsız exhaustive oracle içerir;
+Python aritmetik oracle uygulamasız geçti, C++ derlenmedi. Yeni shader yok.
+
+## Yeni kullanıcı derlemesi canlı kabul — 2026-10-29
+
+Kullanıcı "derledim açık" dedi. Başlangıç: boş domain/source, timeline mode,
+Pause/frame0. Dokuz seçili smoke kolu sırayla dış IPC ile koşuldu: **7/9 PASS**.
+
+- matter_lanes 7/7, simulation_transport 8/8, substance, P9 melt 4/4,
+  P9 floor 2/2, MPM+DEM clock 5/5 ve run_readback geçti.
+- Snow-only artık 300 parsel, COM y=0.18331 m; mixed 600 parsel ve inferred
+  Snow y~0.185 m. Ölçülen schedule 40 continuum x2 DEM=80, grid=40.
+- Floor min-y=0.209966 m, 960 buz yüzü, step_held=false. Status temiz:
+  önceki `density position projection failed` artık yok.
+- Açık: seed_settle liquid_at_rest (4/5; Water p95=4.311 mm/kare,
+  Sand=0.1056 mm/kare). Ritter 0.3 hız=1.1093 m/s, hata=%54.28;
+  0.9 hız=1.9494 m/s, hata=%19.65; ideal referans=2.4261 m/s.
+  İki doğruluk kapısı ve 0.3 nonregression geçmedi. **0.3'e geçiş reddedilir**;
+  0.9 da bu deneyde kabul doğruluğunu sağlamadı. Built-in değiştirilmedi.
+- Son durum: Pause/frame0, timeline mode; domain/source/forcefield boş.
+  Loglar `C:/Users/maxkemal/AppData/Local/Temp/rt_matter_smoke/`.
+  Bu tur full suite, legacy save/open veya 4-emitter performans kabulü değildir.
+
+## Son testten sonraki kaynak partisi — 2026-10-29
+
+**Bu parti C++ yanında simülasyon shader derlemesi de ister (kullanıcıda).**
+DEM host/shader revision 33: history_blocks kapasite koruması 8 kelimelik
+yerleşime düzeltildi. `sim_matter_grain_list_clear/hash/list_build/step`
+çıktıları aynı güncel GLSL'den gelmeli; eski revision 32 SPIR-V kabul edilmez.
+
+Kullanıcı derlemesi sonrası boş sahne/Pause üzerinde dış IPC ile sırayla:
+
+Önce `python scripts/test/rt_test_simulation_transport_ipc.py`: gerçek kare
+döngüsünde Play ilerlemeli, Pause kareyi tutmalı, Live'da playhead sabitken
+kaynak parçacık üretmeli. Test fluid.step/run kullanmaz; gelen mode'u geri
+yükler. Bu test full smoke'da `simulation_transport` adıyla kayıtlıdır.
+
+1. `python scripts/test/rt_test_run_readback_ipc.py` — son sample/dış okuma
+   eşitliği, pozitif kütle, manual claim ve ilerleyen timeline frame.
+2. `python scripts/test/rt_test_mpm_dem_shared_clock_ipc.py` — Snow/Sand/mixed
+   sayılar ve düşüş; run sample ile dış digest uyuşmazsa fizik yorumu yapılmaz.
+3. `python scripts/test/rt_test_substance_profiles_ipc.py` — Sand kapasitesi 0.1.
+4. `python scripts/test/rt_test_p9_matter_ipc.py --arm floor` — buz teması ve
+   status'ta density projection failure olmaması ayrıca kontrol edilmeli.
+5. `python scripts/test/rt_test_p9_matter_ipc.py --arm melt` — ilk kütle sıfır
+   olmamalı ve final conservation kapısı geçmeli.
+6. `python scripts/test/rt_test_ritter_flip_ipc.py` — türetilmiş Water 0.3/0.9
+   karşılaştırması, 0.4 s kuru yatak salımı. Her kolun son cephe hızının
+   `2*sqrt(9.81*0.15)` referansına bağıl hatası <=%15; 0.3 hata payı 0.9'dan
+   en çok 5 yüzde puan kötü olabilir. Çıktı sistem TEMP/rt_ritter_flip.json.
+   Bu sonlu derinlik/çözünürlük deneyi tek başına genel solver doğrulaması
+   değildir; rest/column kapılarıyla birlikte preset kararı verilir.
+7. `python scripts/test/rt_test_matter_legacy_roundtrip_ipc.py` — yalnız boş,
+   harcanabilir projede: TEMP dosyalarına save/open yapar, aktif proje yolu
+   değişir. Synthetic legacy Gas+Fluid göçü, kapalı kaynak fazı, tek grid, gaz
+   shader korunumu, canonical save/open. Gerçek tarihsel dosya kabulü ayrıdır.
+
+Toplu son tur (boş proje, Pause): `python scripts/test/rt_matter_smoke.py`.
+Yeni matter_lanes, grain_sleep ve ritter_flip kolları full turda kayıtlıdır;
+quick tur kapsamı aynı kalır. Legacy proje turu yalnız açıkça
+`--with-legacy-project` eklenirse çalışır; harcanabilir proje gerekir. Tekil
+örnek: `python scripts/test/rt_matter_smoke.py --with-legacy-project --only legacy_project`.
+Phase-grid read-only probe ise authored domain adı ister, boş-scene otomatik
+suite'e eklenmedi. 4-emitter maliyet ölçümü kendi sahnesinde ayrı koşulur:
+`python scripts/test/rt_probe_grain_clock_ipc.py --steps 204 --every 12 --require-clock`.
+Clock kabulü: DEM=continuum*per, 0<grid_steps<=continuum ve hiçbir held kare
+yok. Prob JSON'u tam host_ms/clock/contactless/transfer verisini, ayrı
+`TEMP/rt_probe_grain_clock_summary.json` ise örneklenmiş medyan/p95 dökümünü
+verir. İç içe süreleri toplama; IPC wall-clock ile solver süresini karşılaştırma.
+
+Bu parti fluid.step/run için physics.step ile ortak manual timeline claim,
+sıvısız density no-op GPU restore düzeltmesi ve Sand test beklentisini içerir.
+Henüz derlenmedi/canlı kabul edilmedi. Son teşhis pipe error 2: bağlantı yok;
+ajan uygulama açmadı. Liquid-at-rest, kalan D2 ve geniş T6 kabulü hâlâ açık.
+
+## Kullanıcı derlemesi hızlı kabul — 2026-10-29
+
+Boş sahne/Pause, dış named-pipe istemcisi. Build ajan tarafından yapılmadı.
+
+- `rt_test_matter_lanes_ipc.py`: **7/7 PASS** (canonical identity, presets,
+  absent grid, invalid/no-mutation, source guard, lane switch, auto phase).
+- `rt_matter_smoke.py --quick --timeout 360`: **7/11 test PASS**.
+  Thermal films 5/5, phase3 freeze, fire/steam 8/8, grain readiness 1/1,
+  P9 floor 2/2, run readback 1/1 ve fast fall 2/2 geçti.
+- Açık: substance Sand `grain_water_capacity_fraction == 0` beklentisi;
+  seed_settle liquid_at_rest (su p95 4.31 mm/kare; tane kapıları geçti);
+  p9_melt mass kapısı (`mass_after_pour_kg=0`, son 140.325079 kg; bu okuma
+  fiziksel kütle kaybını kanıtlamaz); mpm_dem_clock 1/4 (snow-only digest 0,
+  sand 300, mixed 600; boş Snow artık yanlış PASS sayılmıyor).
+- Düz buz levhası: 4608 frozen parcel, 960 yüz, kum min-y 0.2099565 m,
+  COM y 0.2120414 m; step_held=false. **Ek açık:** status'ta
+  `density position projection failed` var. Floor gate geçti diye density
+  pass kabulü verilmez; bu hata sonraki kaynak düzeltmesine girer.
+- Son salt-okuma: Pause, frame 0, driver none; domain/source/forcefield listeleri
+  boş. Loglar `%LOCALAPPDATA%/Temp/rt_matter_smoke/`.
+
+Bu hızlı tur T0, tam legacy save/open ve uzun hacim/Ritter kabulü değildir.
+Tur sırasında kaynak düzeltmesi veya uzun ayıklama koşusu yapılmadı.
+
+## Rig: Human Walk v2 (W1–W4) + Rig Studio kalıntı sökümü — 2026-10-28 (yalnız C++, derlenmedi; madde partisiyle birlikte derlenecek)
+
+### R1 otomatik işaret + R3 geodezik ağırlık (2026-10-29, derlenmedi; derleme planın sonunda)
+
+**R1 otomatik işaret (2026-10-29, derlenmedi):** `Animation/RigAutoLandmarks`,
+`rig.auto_landmarks` (salt okunur) + Python + Alignment penceresinde **"Auto place"**.
+`get_fit_setup` ile aynı uzay ve biçim → doğrudan `preview_fit` / `commit_fit`'e girer.
+Şablonun sınır kutusuna ölçeklenmiş halinden başlar. Humanoid: baş tepesi en yüksek
+noktalardan, ayak ucu/top/bilek her taraftaki en alçak banttan, el ucu kalçanın
+üstündeki en yanal noktadan (T ve A poz), dirsek/bilek omuz→el çizgisinde, diz kalça→
+bilek çizgisinde; her eklem kendi kesitinin ortasına çekilir ve kesit yoğunluğu + ne
+kadar kaydığıyla puanlanır. Parmaklar tespit edilen kol yönüne ve uzunluğuna taşınır,
+bilerek .45 (eşiğin altı) — eller hep bir bakış ister. Diğer aileler: her eklem ebeveyn
+kemiğine dik kesitte ortalanır. Mesh −Z'ye bakıyorsa (`forward_check`) tüm güvenler
+.3'e kırpılır. Panelde düşük güvenliler **amber**; elle taşınan eklem listeden düşer.
+
+**R3 geodezik voksel ağırlık (2026-10-29, derlenmedi):** `Animation/RigGeodesicWeights`
+(Dionne & de Lasa 2013). Bağlı mesh'ler bind pozisyonlarında birlikte vokselleşir
+(çözünürlük 32..256, varsayılan 96): üçgenler yüzey, dış kenardan taşma doldurma = dışarı,
+kalan = iç. Her deforme eden kemik (envelope ile aynı segmentler, root hariç) yalnız
+**katı** vokseller içinde 26 komşulu Dijkstra ile mesafe büyütür (boyun yarısına kadar);
+vertex en yakın 4 kemiği tutar, ağırlık = max(d, ½ voksel)^-falloff, sonra ortak en
+güçlü-4 sözleşmesi. Açık mesh taşar → yalnız yüzey kabuğu mesafe taşır
+(`closed_volume` false), yine kullanılır. `rig.preview_geodesic_weights` (salt okunur) /
+`rig.apply_geodesic_weights` (envelope ile **aynı** ağır geri alma komutu; algoritma
+`geodesic_voxel_v1` projeye yazılır, yükleyici kabul eder; envelope yarıçapları ve
+profiller korunur). Panel: Skin binding → envelope bölümünün altında "Geodesic voxel
+weights". Ölçüm aracı: `scripts/test/rt_probe_rig_auto_ipc.py [--apply]`.
+
+Sırayla:
+1. `python scripts/test/rt_probe_rig_auto_ipc.py Rig` (sahneyi değiştirmez) →
+   auto_landmarks satırı + geodezik önizleme. Bağlı rig'de fit hedefi zaten skinli olduğu
+   için auto_landmarks **reddedilir** (tasarım: `target_already_skinned`) — R1'i test
+   etmek için yeni bir humanoid mesh içe al, şablon rig oluştur, bağlamadan önce koş.
+2. Yeni mesh'te: Alignment → Prepare → **Auto place** → amber eklemler az olmalı (T poz
+   insan: çoğunlukla yalnız parmaklar). Önden ve yandan bak: bilek/dirsek/diz kol ve
+   bacak içinde. Preview → `outside_bounds` 0. Bozuksa: el ucu kalçaya düşüyor → kol
+   gövdeye yapışık (uyarı satırı söyler); her şey .3 → mesh −Z'ye bakıyor.
+3. Geodezik: önizlemede `fallback_vertices` 0, `closed_volume` true (kapalı mesh),
+   `bones_outside_mesh` küçük (parmak ucu kemikleri olabilir).
+4. `--apply` ile koş → ROM önce/sonra satırları; `folded` ve `pinched` azalmalı ya da
+   eşit. Uygulamada Ctrl+Z → eski ağırlıklar ve `rig.get_binding` eski algoritma.
+   Kaydet → yeni .rtp → aç → `geodesic_voxel_v1` yükleniyor (yükleyici reddetmemeli).
+★ Sinsi: çözünürlük düşükse (≤48) parmaklar aynı voksellere düşer ve birbirinin
+ağırlığını alır — ROM'da parmak hareketleri "katlanma" gösterir, gövde temiz görünür.
+Sayı kötüyse önce çözünürlüğü artır, falloff'a sonra dokun.
+★ Süre: 96'da birkaç saniye UI donar (UI iş parçacığında koşar) — hata değil.
+
+### Rig gizmosu + R2 ROM testi (2026-10-29, derlenmedi; derleme planın sonunda)
+
+**R2 ROM testi (2026-10-29, derlenmedi):** yeni çekirdek `Animation/RigRomTest`
+(vcxproj'a eklendi). Her uzuv zinciri için kök swing ±60 / spread ±45 / twist ±45, orta
+eklem 110° bükülme (bükülme ipucundan **uzağa** katlanır: diz öne gider, baldır geriye),
+uç eklem twist ±60 / flex ±45; her spine/neck/head rolü flex ±30, yan ±25, twist ±35.
+Eksenler kemikten + bükülme ipucundan + ayaklardan ölçülen karakter çerçevesinden
+kurulur, sabit eksen yok; yazılmış eklem limitleri her pozu kırpar (`limited`). Deri
+CPU'da `pose · rest⁻¹` ile bind pozisyonları ve kayıtlı flat ağırlık satırlarından
+hesaplanır; her geçerli üçgen için alan oranı: < .5 **sıkışma** (çökme, şeker ambalajı),
+> 2 **gerilme**; normali baskın kemiğinin taşıyacağı yöne ters dönen üçgen **katlanma**.
+`rig.preview_rom_test` (salt okunur, her modda) satır başına hareket, kemik, açı, en
+kötü mesh/vertex/kemik ve klipteki tepe karesini verir; `rig.create_rom_clip` aynı
+hareketleri dinlenim/tepe/dinlenim anahtarlarıyla klibe yazar (tek geri alma adımı).
+Panel: Pose → Quick Motion → "Range of motion test" (kontrol / klip üret / en kötü 10
+tablosu). Yürüyüşün klip yayınlama gövdesi ortak `publishAuthoredClip`'e taşındı.
+Ölçüm aracı: `scripts/test/rt_probe_rig_rom_ipc.py`.
+
+**Gizmo düzeltmesi (2026-10-29, derlenmedi):** kemik/rig gizmosu fare bir panelin
+üstüne geçince **kayboluyordu** — `RigViewportUI` panel hover'ında çizmeden dönüyordu.
+Artık IK gizmosu gibi: her zaman çizilir, panel fareyi tuttuğunda yalnız sürükleme
+başlatılamaz.
+
+Sırayla (bağımsız ve hızlı önce):
+1. **Gizmo (gözle, 10 sn):** Edit veya Pose'da bir kemik seç, fareyi viewport'tan sağ
+   dock'a ve geri gezdir → gizmo hiç kaybolmamalı. Panelin üstündeyken gizmonun altına
+   denk gelen bir yere tıkla → panel tepki verir, kemik **hareket etmez**. Bozuksa:
+   kaybolma sürüyor → derleme eski; panel tıklaması kemiği oynatıyor → sürükleme
+   engeli çalışmıyor.
+2. `python scripts/test/rt_probe_rig_rom_ipc.py Rig` → 4/4 PASS; tablo en kötü 10
+   hareketi listeler. Bozuksa: `unknown_influences` > 0 → deri satırları bu rig'in
+   indekslerini göstermiyor (binding/indeks remap sorunu, ROM değil); motions 0 →
+   anatomide zincir/rol yok.
+3. Panelde "Check deformation" → aynı sayılar; "Generate ROM clip" → `ROM_Test` seçili
+   klip, oynatınca her eklem sırayla bükülüp dinlenime döner. En kötü satırın
+   `frame_peak` karesine git → sıkışma/katlanma tabloda adı geçen kemikte görünmeli.
+4. Kendi kontrolü: Envelope Editor'da kol kapsülünü daralt/genişlet → `min_area_ratio`
+   değişmeli (ROM ağırlığa duyarlı).
+★ Sinsi: diz `bend` hareketi ipucu olmayan eski rig'de karakter ileri yönünden
+türetilir; dirsek de öne katlanır ve "kol yanlış bükülüyor" görünür. Önce
+`rig.derive_limb_hints` (yukarıdaki v8 bölümü) — ROM raporu bunu kendisi söylemez.
+
+
+**Şablon v4 / anatomi v8 (2026-10-29, derlenmedi):** iki kalıcı anatomi alanı —
+`bend_hints` (zincir başına rig uzayında bükülme yönü) ve `foot_pivots` (bacak
+zincirinin üçüncü kemiğine, bileğe göre topuk/top/uç, bileğin dinlenim çerçevesinde).
+`IKControl.bendHint` → `matchIKPose` polü dinlenim bükülmesi yerine ipucundan kurar
+(K4 artık **Pose IK'da da** kapalı, kontroller yeniden oluşturulunca). Yürüyüş kayıtlı
+pivotları okur; kayıt yoksa aynı ortak `deriveFootPivots` ile türetir; kayıt parmaklarla
+.02h'den fazla ayrışırsa `foot_pivots_differ_from_toes` raporlanır (refit sonrası bayat
+kayıt sessiz kalmasın). Şablonlar: humanoid/detaylı → diz +Z, dirsek −Z, ayak pivotları
+(boyla ölçekli); kuş → bacak +Z. Eski rig'ler için `rig.derive_limb_hints`
+(UI düğmesi + Python + IPC): ileri yönü **ayaklardan** ölçer (bilek→parmak), sabit
+eksen yok. Panel: Rig anatomy → "Bend hints and foot pivots" (doldur / yeniden türet /
+Enter ile düzenle / sil); zincir silinince ona bağlı ipucu ve pivotlar da silinir.
+Eklem yönelim çerçeveleri bu partide **yok** — parmak curl eksenleri, limit eksenleri
+ve bind matrisleri yerel eksene bağlı; ayrı parti.
+
+Prob artık önce `rig.derive_limb_hints` çağırır ve 9 eşik koşar (+ pivotlar anatomiden
+ve parmaklarla uyumlu, + diz polü anatomi ipucundan). Ek elle kontroller, sırayla:
+1. Rapor: `forward` ≈ (0,0,1), `forward_assumed` false, 4 ipucu, 2 pivot seti,
+   `pivots_estimated` boş. Bozuksa: forward ters → ayak bilek/parmak sırası ters
+   okunuyor; ipucu 0 → aile `humanoid` değil.
+2. `rig.get_anatomy` → `version` 8, `bend_hints` + `foot_pivots` var. Kaydet → yeni
+   .rtp → aç → aynı.
+3. Pose'da IK kontrollerini yeniden oluştur → `rig.get_controls` satırlarında
+   `bend_hint`; bacak hedefini yukarı çek → diz **öne** bükülür, dirsek geriye.
+4. Yeni humanoid şablon rig (`rig.create`) → anatomi doğrudan v8, pivotlar boyla ölçekli
+   (1,8 m'de topuk z ≈ −0,051, top z ≈ 0,171).
+5. Panelde bir pivotu değiştir (Enter) → `foot_pivots_differ_from_toes` true olur;
+   "Re-derive all" → false. Zincir sil → kayıt reddedilmeden ipucu/pivot da gider.
+★ Sinsi: IK kontrolleri v8'den ÖNCE oluşturulduysa ipucu taşımaz ve diz eski gibi
+dinlenim bükülmesinden davranır — hata yok, sadece eski davranış. 3. madde bu yüzden
+"yeniden oluştur" diyor.
+
+
+**W1b canlı (2026-10-29, ikinci derleme):** prob 6/6 PASS verdi ama **yanlış**: diz
+f0–f13 boyunca 11,5°'de sabitti (= `leg_reach` .995 tavanı). Testin pencere hatası
+itiş öncesi kareleri de sayıyordu. Kök: diz profili bacak boyunu **milimetre**
+değiştiriyor (18° ile 11,5° arası ~6 mm), `body_bounce` .01h ise **1,8 cm** ekliyordu —
+zıplama pelvisi tavana itip profili eziyordu. Derlemesiz doğrulandı (IPC'den
+`body_bounce=0`, `leg_reach=.998`): diz temasta 7,3° → yükte 17,8° → itiş öncesi 7,3° →
+salınım tepesi 70°, penetration 1e-7, hata 1e-7. Aynı tabloda yeni bulgu: pelvis
+temas anında **tek karede 3–3,4 cm düşüyor** (her adımda "küt" oturma) — öndeki
+bacak tavana son anda yetişip pelvisi çekiyor.
+
+**W1c (2026-10-29, derlenmedi):** pelvis düşüşü iki geçişte: önce kare başına ham
+düşüş, sonra döngüsel **genişlet (max, r) + kutu bulanıklığı (r)**, r = döngünün
+%8'i. Sonuç hiçbir karede ham değerin altında değil → her erişim tavanı hâlâ tutar.
+Varsayılanlar: `body_bounce` **0**, `leg_reach` **.998**. Prob düzeltildi: diz değişimi
+yalnız temas→topuk kalkışı penceresinde ölçülür, yeni eşik **pelvis adımı ≤ .006h/kare**.
+
+Beklenen (W1c sonrası): 7/7 PASS; tabloda pelvisY kareden kareye ≤ ~1 cm değişmeli,
+temas karesinde (f0/f29) sıçrama yok. Diz eğrisi yukarıdaki derlemesiz koşuyla aynı
+biçimde (temas ~7°, yük ~18°, salınım ~70°), yalnızca birkaç derece daha bükük olabilir
+(yumuşatma düşüşü yalnız artırır). Bozuksa: pelvis adımı hâlâ büyük → yumuşatma
+uygulanmıyor; diz yine sabit → `body_bounce` 0 değil ya da tavan her karede bağlıyor.
+
+
+`python scripts/test/rt_probe_human_walk_ipc.py Rig` — karakter Pose'da. `Walk_Loop`'u
+varsayılanlarla yeniden üretir, sol bacağın bir döngüsünü kare kare basar, 6 eşik:
+ayak hedef hatası ≤ .005h, zemine girme ≤ .002h, erişilemeyen kare 0, **basma
+fazında diz en az 8° değişmeli**, temasta diz ≤ 12°, salınım dizi tepesi 50–75°.
+Bozuksa: diz yine sabit → pelvis profili uygulanmıyor (ya da `leg_reach` tavanı
+her karede bağlıyor, `max_reach_ratio` .995'e yapışık); penetration sürüyor → parmak
+bükülmesi yanlış işaretli (parmak aşağı kıvrılıyor) ya da rigde toe rolü yok
+(`toe_bend` false). Sonra gözle: yandan bak, basan dizin temasta neredeyse düz,
+yüklenirken hafif bükük, itişte yine düz olması gerekir.
+★ Sinsi: dikey zıplama fazla gelirse `body_bounce`'u 0 yap — artık asıl dikey hareketi
+bacak geometrisi üretiyor, parametre yalnızca üstüne ekler.
+
+**İlk canlı ölçüm (2026-10-29, W1–W4 derlemesi, `humanoid_detailed`, 1,8 m, varsayılanlar):**
+`max_reach_ratio` .970, `foot_target_error` 1,9e-7 m, `unreachable_frames` 0,
+pelvis düşüşü 2,8–7,2 cm → W1 sayısal olarak PASS. **İki FAIL, ikisi de gözle görülen
+"robotik" his:** (1) basan bacakta diz bütün basma fazı boyunca **28,1°'de sabit** —
+pelvis çözümü bacağı her karede tam `leg_reach`=.97 sınırına çiviliyordu (.97 = 28°
+diz, kosinüs kuralı), bacak bükük bir değnek gibi pergel yürüyüşü yapıyordu; kalça hiç
+geriye açılmıyordu (min +5°). (2) `ground_penetration_max` 3,99 cm: topuk top
+etrafında kalkarken parmaklar bükülmediği için uç zemine giriyordu. Salınım dizi tepesi
+74°, dirsek 25–57°, ayak yuvarlanması (topuk 15°, kalkış 30°) beklendiği gibi.
+
+**W1b düzeltmesi (2026-10-29, derlenmedi):** pelvis yüksekliğini artık basan bacağın
+**diz bükülme profili** belirler: temasta ~5°, `stance_knee_deg` (18°) yükleme
+bükülmesi, topuk kalkmadan önce ~6°; bacaklar destek ağırlığıyla harmanlanır.
+`leg_reach` yalnız tavan (varsayılan .97 → **.995**), `body_bounce` bunun üstüne eklenir
+(varsayılan .02 → **.01**, çünkü dikey hareketi artık geometri üretiyor). Parmak kemiği
+topuk kalkışında ayak pitch'ine karşı bükülür, salınımın ilk üçte birinde düzelir
+(`toe_bend`); uç ölçümü parmak kemiğinden yapılır. Göğüs ve kollar pelvisi döngünün
+%5'i kadar geriden izler (`upper_body_lag`). Yeni alan `stance_knee_deg` 0..35 her
+katmanda. Ölçüm aracı: `scripts/test/rt_probe_human_walk_ipc.py` (6 eşik).
+
+Kaynak: `RigWalkRecipe.cpp` yeniden yazıldı (W1 pelvis yüksekliği, W2 ayak
+yuvarlanması, W3 gövde dönüşleri karakter çerçevesinde, W4 diz polü karakterin
+baktığı yönden); yeni tarif alanları `leg_reach`,
+`heel_strike_deg`, `toe_off_deg` UI/Python/IPC'de. Plan ve teşhis:
+`RIG_AUTHORING_ROADMAP.md` §11. 20 ölü Rig Studio dosyası silindi (vcxproj'da
+zaten yoktu; `RigFingerFK*` canlı, dokunulmadı). Önden arkaya, bağımsız ve hızlı
+olan önce:
+
+1. **Derleme.** Hatasız bitmeli. Bozuksa: silinen 20 dosyadan birini include eden
+   bir yer kalmış demektir (hata satırı dosyayı söyler) — ya da yeni `RigWalkRecipe.cpp`
+   tip hatası.
+2. **Check recipe, varsayılanlarla** (Pose → Quick Motion; ya da IPC
+   `rig.preview_human_walk`). Paneldeki yeni iki satır ve `metrics`:
+   - `max_reach_ratio` ≈ .97 (≤ .98), `unreachable_frames` = 0
+   - `foot_target_error_fraction` < .005 (panelde "%0.5" altı)
+   - `pelvis_drop_min` ≈ 0, `pelvis_drop_max` > 0 (beklenen ~.02–.05 × boy)
+   - `ground_penetration_max` ≈ 0 (≤ .002 × boy)
+   Bozuksa: reach > .98 → pelvis çözümü uygulanmıyor; reach doğru ama foot error
+   büyük → ayağı hedeften koparan şey IK sonrası **eklem limitleri** ya da diz polü
+   (teşhis K4/K5); penetration büyük → pivot türetimi yanlış (`foot_pivots`
+   alanındaki heel/ball/tip noktalarına bak, `foot_pivots_estimated`).
+3. **Karşılaştırma:** aynı rig'de `leg_reach=1` ile tekrar → `max_reach_ratio` ≈ 1 ve
+   `pelvis_drop_max` 2'dekinden küçük olmalı. Bu, sayının pelvis çözümünden
+   geldiğinin kanıtı.
+4. **Generate `Walk_Loop`, YANDAN izle.** Ayak artık yerden havada kalmamalı, diz hiç
+   kilitlenmemeli; topuk vuruşunda parmak yukarıda, kalkıştan önce topuk ball
+   etrafında yükselmeli; duruş sonu → salınım başı geçişinde ve döngü sınırında
+   ayak sıçramamalı. Bozuksa: salınım başında sıçrama → `moveFoot` uç noktaları
+   duruş eğrisiyle eşleşmiyor.
+5. **`heel_strike_deg=0`, `toe_off_deg=0`** → yuvarlanma kaybolur, düz taban; pelvis
+   çözümü sürer (metrikler 2'deki gibi kalmalı).
+6. **Python paritesi:** `rt.rig.preview_human_walk(char, leg_reach=.95, toe_off_deg=40)`
+   ile aynı değerleri IPC'ye ver → `metrics` birebir aynı. Geçersiz değer
+   (`leg_reach=.5`) iki yoldan da `rig_walk_invalid_recipe`.
+7. **W3/W4 — önizleme alanları:** `body_frame` = `character`, `knee_pole` =
+   `character_forward`. Şablon rig'de yürüyüş öncekiyle **gözle aynı** görünmeli
+   (şablonun eksenleri zaten dünyaya hizalı). Fark görünürse W3'ün çevrimi yanlış.
+8. **W3/W4 — asıl test:** içe alınmış, yönlendirilmiş kemikli bir humanoid
+   (ör. Mixamo FBX, humanoid anatomisi eşlenmiş) üzerinde Generate. Gövde öne
+   eğilmeli, kalça yürüyüş yönünde dönmeli, dizler HER karede öne bükülmeli.
+   Bozuksa: gövde yana yatıyor/ters dönüyor → `context.forward/left` yanlış
+   türetilmiş (ayak→parmak yönü ve omuz farkı, önizlemede görünmüyor); diz yana
+   bükülüyor → pol hesabı.
+
+★ **Sinsi, makul görünen sonuç:** büyük stride'da karakter belirgin şekilde
+**çömelerek** yürür. Bu hata değil, bacak boyunun dürüst sonucu (eski hali aynı
+stride'da ayağı 5 cm havada bırakıyordu). Çömelme fazlaysa stride'ı düşür.
+★ İkinci sinsi durum: `ground_penetration_max` ≈ 0 ama `foot_target_error`
+büyük → ayak hedefin **üstünde** kalıyor; önden bakınca görünmez.
+
+Yapılmadı: pivotlar ve bükülme yönü kalıcı/düzenlenebilir değil (şablon v4);
+Pose modundaki IK kontrolleri hâlâ dinlenim bükülmesinden pol alıyor (W4 yalnız
+yürüyüş tarifinde). Önizleme artık kare başına ~9 poz örneklemesi yapar; çok
+kemikli rig'de "Check recipe" bir an takılabilir — hata değil.
+
+## Birleşik madde canlı kabul — 2026-10-28 (kullanıcı derlemesi)
+
+**4-emitter sahnesi devam kabulü (aynı gün):** ayarlar değiştirilmeden
+`rt_probe_emission_ceiling_ipc.py` ile 204 adım, dt 1/24 (8.5 s simülasyon,
+199 s duvar süresi). Domain tavanı 100000; son okuma 99146 parsel,
+`step_held=false`. Tavan kısılması kaynaklarda ve domain'de birebir aynı:
+89.571863067 kg (Water 51.040814146, Snow 2.053671730, Sand 36.477377191).
+Son adımda da kısılan kütle pozitif. Son parçacık sayısının tavanın altında
+olması, o adımda emisyon kapısının bağlanmadığı anlamına gelmez.
+Durum çubuğundaki sarı **EMITTERS THROTTLED: Physics Domain 1** uyarısı
+gözle doğrulandı. Tek seferlik HUD mesajı gözlenmedi; pill tıklama testi
+yapılmadı. Sahne resetlenmeden ölçülen durumda bırakıldı; ayarlar kaydedilmedi.
+Rapor: `%LOCALAPPDATA%/Temp/rt_probe_emission_ceiling.json`.
+
+Boş sahne, Pause; dış `scripts/test/rt_ipc.py` istemcisi kullanıldı.
+Sandbox named-pipe hata 5 sonrası testler gerekli escalation ile koşuldu.
+
+- `rt_test_emission_budget_ipc.py`: **6/6 PASS**. 2 kg sınırında
+  2.009578 kg / 129 parsel (parsel 0.015578 kg; bir parsel toleransında).
+  400 parçacık tavanında kaynak/domain kısılan kütlesi aynı: 87.237503 kg;
+  `emission_withheld` defter kaydı mevcut, eski sayı anahtarı reddediliyor.
+- `rt_test_matter_exchange_ledger_ipc.py`: **PASS**, kütle hatası 0 kg,
+  enerji hatası 0 J.
+- `rt_matter_smoke.py --quick`: **7/11 test PASS**. Geçenler: thermal_films,
+  phase3_freeze, fire_steam (8/8), grain_readiness, p9_melt (4/4),
+  run_readback, fast_fall.
+- Açık: substance testi Snow `granular_compaction_hardening > 0` assertion;
+  seed_settle 4/5 (`liquid_at_rest`, su p95 4.53 mm/kare);
+  p9_floor 1/2 (`sand_rests_on_ice`, 864 buz yüzüne rağmen kum min y 0.00999 m);
+  mpm_dem_clock 3/4 (`equal_counts`: snow-only okuması 0, sand-only 300,
+  mixed 600; kök bu turda ayıklanmadı).
+
+Loglar: `%LOCALAPPDATA%/Temp/rt_matter_smoke/`; emisyon raporu:
+`%LOCALAPPDATA%/Temp/rt_test_emission_budget.json`. Son salt-okuma kontrolü:
+Pause, frame 0; domain, kaynak ve forcefield listeleri boş. UI pill/HUD ve
+4-emitter sahnesinde uzun koşu kabulü henüz yapılmadı. Bu kayıt tüm D2/D3
+işlerini veya önceki tarihli build bekleyen maddeleri kapatmaz.
+
+## Gaz §24: doğal GPU ölçümü (build gerekmiyor)
+
+İki ana prob düzeltildi: viewport.render_frames artık kullanılmaz. GPU süreleri
+sayaçlar kapalıyken doğal display akışından, counters ayrı pass'ten alınır.
+Aynı voxel/kamera kimliğiyle son256/16/256=611/572/606ms; örnekler32.88/10.31/32.88.
+MaxSteps çalışıyor ama kalan per-entry maliyet yüksek. Yeni shader/C++ değişmedi.
+
+- `python scripts/test/rt_probe_gas_max_steps_ipc.py` yeni sampling_method etiketini
+  ve aynı scene_signature'ı göstermeli; orijinal ayarlar restore edilmeli.
+- `python scripts/test/rt_probe_gas_overlap_cost_ipc.py --frames 4` aynı doğal
+  helper'ı kullanır. Eski forced-pass ms sonuçlarını yeni sayılarla karıştırma.
+- Sabit/per-entry maliyet için GPU profiling/ayrıntılı maliyet ayrımı gerekiyor;
+  yeni bir spekülatif march algoritması eklenmedi.
+
+Canlı ölçüm ve Python sampling/snapshot testleri geçti; yeni build gerekmiyor.
+
+
+## Gaz §23: snapshot kimliği / tekrar yükleme tutarlılığı (shader değişmedi)
+
+Yeni GPU optimizasyonu yok. Yeni Python probu şimdi kullanılabilir; eski
+build'de summary_only kimlik verir. Tüm voxel hash'leri için C++ build gerekir
+(FogFieldDigest.h + RtApiMatterFogInspection), shader build gerekmez.
+
+1. Yeni C++ build sonrası `fluid.inspect_fog_fields` her field'da density_hash /
+   temperature_hash döndürmeli. UI/IPC/Python aynı read-only API'yi kullanır.
+2. Aynı oturumda `python scripts/test/rt_probe_gas_max_steps_ipc.py`:
+   başta scene_signature/fingerprint_strength, sonra her koşunun kimliği ve
+   çözünürlüğü yazılır. Kimlik değişirse sonuç INVALID; eski raporla oran kurma.
+   Orijinal cap ve instrumentation finally ile geri alınmalı.
+3. Reset/step yapmadan aynı karede iki read-only snapshot aynı olmalı. Kaydet/
+   yeniden yükle veya timeline cache restore sonrası aynı alan bekleniyorsa
+   field hash ve optical_bounds karşılaştır. Float hash değişirse sim alanı
+   aynı değildir; yalnız AABB farkı üzerinden renderer regresyonu ilan etme.
+4. Son kullanıcı256/16/256-repeat:625.6/488.7/603.8 ms; iki256'nın sayaçları
+   birebir aynı. Son reload buhar kutusu%6.06, önceki yavaş snapshot%45.08 ve
+   kamera hedefi farklı. Girdi farkının kaynağı hâlâ açık.
+
+Statik snapshot kimliği testleri geçti. Ajan uygulamayı açmadı/derlemedi.
+
+
+## Gaz §22: genel karışım Max Steps cap'i (yalnız shader, DERLENMEDİ)
+
+Kaynakta bug doğrulandı: genel karışım max_steps okumuyordu. Yeni cap,
+segmentteki ilgili üyelerin en düşük değeridir; kaba adım kalan yolu kaplar,
+gaz kuyruğu kesilmez. Boş atlama örnek bütçesi yemez. Random-walk/cache değişmez.
+
+1. Kullanıcı `compile_shaders.bat` çalıştırır. Yeni C++ build GEREKMEZ.
+2. Aynı kare/kamera/çözünürlükte dış terminal:
+   `python scripts/test/rt_probe_gas_max_steps_ipc.py`.
+   256/16/256-repeat ölçülür, orijinal ayarlar sonunda geri alınır. 16'da
+   uzun kamera segmentleri daha az örneklenmeli; step_budget_exhausted yerel
+   adaptif hedefin work cap yüzünden kabalaştığı ışınlarda artabilir.
+3. Çok düşük bütçede görüntü kabalaşabilir; gaz sonu kaybolmamalı. İnce buhar,
+   emissif pikler ve SDF/solid önündeki sınır görsel kontrol edilsin.
+4. UI, Python ve IPC max_steps aynı sonucu vermeli. İki çakışan üyeden biri
+   16 diğeri256 iken ortak cap16; off-ray bir16-lı slot etkilememeli.
+5. Pipeline süre/boyut kaydedilsin. §21 son GPU tabanı185/84/280 ms,
+   kamera density9.482/yol; residency dört NanoVDB grid için1. Sekme density
+   ve radiance cache fallback0 korunmalı. Sonuç GPU'da henüz ölçülmedi.
+
+Statik/nümerik örnek tavanı ve Beer–Lambert tam segment coverage kontrolleri geçti.
+
+
+## Gaz §21: NanoVDB yoğunluk/sıcaklık device-local (yalnız C++, DERLENMEDİ)
+
+Somut açık: CPU_TO_GPU buffer isteği host-visible/coherent ister, VRAM istemez.
+RTX 3060 memory type sıralamasında ilk eşleşen type 3 sistem heap'indedir;
+host-visible VRAM type 5 sonra gelir. Yeni allocation GPU_ONLY ile
+DEVICE_LOCAL zorunlu. Shader ve örnek politikası değişmez; kazanç ölçülmedi.
+
+1. C++ build al, uygulamayı yeni executable ile yeniden aç. Shader build GEREKMEZ.
+   Yeni module VulkanVolumeResidency.cpp vcxproj/filter listelerine eklendi.
+2. Aynı scene/kare 50/kamera/1680×945, Vulkan Rendered:
+   `python scripts/test/rt_probe_fog_bounds_ipc.py`.
+   Her iki Matter NanoVDB slotunda density_device_local=1 ve
+   temperature_device_local=1 olmalı. 0=host heap (FAIL), -1=bilinmiyor;
+   -1'i VRAM'de sanma. Dar kutular korunmalı.
+3. `python scripts/test/rt_probe_gas_overlap_cost_ipc.py --frames 4`.
+   Son aynı oturum authored birlikte GPU 537 ms; önceki 50. kare koşusu 573 ms.
+   GPU süreleri, kamera density, majorant/probe sayıları ve görüntüyü karşılaştır.
+   Örnek sayısı değişmeden süre azalması bu partinin hedefidir. İkincil density
+   ve radiance_cache_fallbacks sıfır korunmalı. Süre düşmediyse RAM hipotezini
+   tek neden sayma; yeni residency kanıtını ve GPU profiling'i kullan.
+4. Kamera sabitken görüntü aynı olmalı. Sim playback'te first upload/host
+   beklemeleri ayrıca ölçülsün: GPU_ONLY staging/copy ekleyebilir. Content
+   update, timeline seek, backend switch ve kaynak görünürlüğü çalışmalı.
+5. OptiX ~110 ms kullanıcı referansı kaydedildi ama optik formüller farklı;
+   eşit kaliteli/eşit GPU-dispatch kapsamlı benchmark varsayılmamalı.
+
+Statik residency/Fog bounds/material/march kontrolleri geçti. Gerçek GPU
+bellek yerleşimi ve performans kullanıcı build'i sonrası doğrulanacak.
+
+
+## Gaz §20.1: blok adımı geri alındı (CANLI §20.2, yeni build gerekmiyor)
+
+Geri alma sonrası güncel canlı ölçüm: kare 50, buhar kutusu %51.5, GPU
+446/78/573 ms. Önceki 329 ms snapshot kutusu %11.27 idi; sabit kare/kamera
+olmadan doğrudan geri dönüş oranı çıkarılamaz. Mevcut shader yeniden
+derlenmek zorunda değil. Aşağıdaki liste tarihsel geri alma kontrolüdür.
+
+§20 kullanıcı ölçümünde FAIL: birlikte 766 ms (önce 329), kamera örneği
+24.794/yol (önce 10.745), majorant sorgusu 11.542/yol (önce 4.463).
+İkincil density/fallback hâlâ sıfır; sekme cache'i sorun değil.
+
+1. Kullanıcı `compile_shaders.bat` çalıştırır. Bu geri almanın performans
+   düzeltmesi için C++ gerekmez; eski tooltip'e dönmek için C++ build isteğe bağlı.
+   Yeni optical-block include silindi; tek hacim yönlendirmesi de kaldırıldı.
+2. Aynı kare/kamera/çözünürlükte dış terminal:
+   `python scripts/test/rt_probe_gas_overlap_cost_ipc.py --frames 4`.
+   §19 tabanı buhar/duman/birlikte 261/84/329 ms. Geri dönüş henüz ölçülmedi;
+   kamera density ve majorant sorguları da tabana yaklaşmalı.
+3. `python scripts/test/rt_probe_fog_bounds_ipc.py`: dar kutu hâlâ korunmalı
+   (son kullanıcı ölçümü buhar %11.27, duman %2.66). Görünür buhar değişmemeli.
+4. İkincil density/cache fallback sıfır kalmalı. Pipeline süresini kaydet.
+
+Statik geri alma, adaptive, optical, cache ve Fog bounds kontrolleri geçti.
+Yeni deney eklenmedi. Sonraki değişiklik öncesi kalan GPU işinin profillenmesi
+veya daha ayrıntılı sayaçlarla ayrılması gerekiyor.
+
+## Gaz §19: materyale göre daralan Fog kutusu (CANLI hız/kutu geçti)
+
+Canlı sonuç: buhar kutusu %11.27, duman %2.66; GPU buhar/duman/birlikte
+261/84/329 ms. İkincil density ve cache fallback sıfır. Yeni build gerekmiyor;
+aşağıdaki listede görsel ve materyal değişimi kontrolleri açık. Ayrıntı §19.1.
+
+Bu parti shader değiştirmez. Önceki §18.1 kullanıcı tarafından derlendi,
+anlamlı iyileşme gözlenmedi. Yeni kutu kodu görünür katkısı olmayan ham
+yoğunluk kalıntılarını güvenli biçimde dışarıda bırakır. Kazanç ölçülmedi.
+
+1. C++ build al. Header proje listelerine eklendi; yeni .cpp modülü yok.
+   Gerçek çekirdek regresyonu istenirse VS Developer terminalinde:
+   `cl /nologo /std:c++17 /EHsc /I RayTrophiStudio/source/include scripts/test/fog_optical_bounds_test.cpp RayTrophiStudio/source/src/Math/Vec3.cpp "/Fe$env:TEMP\fog_optical_bounds_test.exe" "/Fo$env:TEMP\"`
+   ardından `& "$env:TEMP\fog_optical_bounds_test.exe"` çalıştır. Ajan derlemedi.
+2. Aynı sahne/kare/kamera (matter4emiter, kare 38–39). Dış terminal:
+   `python scripts/test/rt_probe_fog_bounds_ipc.py`.
+   Buharın eski AABB oranı %93.02 idi. `render_box_fraction` ve gerçek
+   `render.volume_slots` kutusunu kontrol et. fallback=false olmalı;
+   kutu gerçekten daralmadıysa performans kazancı varsayma.
+3. `python scripts/test/rt_probe_gas_overlap_cost_ipc.py --frames 4`.
+   Önceki aynı koşu 771 / 185 / 1052 ms (buhar/duman/birlikte), sonraki
+   baseline 1153 ms; çözünürlük 1680×945. İkincil density/fallback=0 korunmalı.
+4. Cutoff'u azalt, eğriyi değiştir, yoğunluk multiplier'ını 0 yapıp geri al:
+   aynı timeline karesinde kutu büyümeli/daralmalı, gizlenen akış geri gelmeli.
+   UI, `volume.set_material` IPC ve Python `rt.volume.set_material` aynı
+   davranmalı. Değerleri geri yükle. Graph/noise'da fallback tam grid olmalı.
+5. İnce buhar kenarları, zemine düşen gölge ve sıcak emisyon önceki görüntüyle
+   karşılaştırılsın; görünür veri kesilmemeli. Hareketli plume kutusu büyürken
+   yeni yoğunluk görünür olmalı. Fog → SDF/Splat kaydı temizliği korunmalı.
+
+Statik kontroller geçti; C++ build, C++ nümerik test ve canlı hız/görüntü
+kabulü kullanıcı build'inden sonra yapılacak.
+
+
+## Gaz §18.1: boş örnek erken dönüşü / kamera dönüşümü reuse (yalnız shader)
+
+§17 CANLI: ikincil density=0 ve fallback=0, fakat birlikte 1052 ms,
+üstüne yalnız buhar 771 ms. Cache bypass artık kök değil. Sonraki küçük
+parti `volume_mixture.glsl` ve `volume_mixture_adaptive.glsl` içindeki
+tekrarlı işleri azaltır; örnek çözünürlüğünü değiştirmez. Kazanç bilinmiyor.
+
+1. Kullanıcı `compile_shaders.bat` çalıştırır; bu yeni parti için C++ gerekmez.
+2. Aynı kamera, 1680×945, kare 38–39. Pipeline compile_seconds taban 219.734 sn;
+   %10 artış sınırını ve SPV boyutunu kaydet.
+3. Dış terminal: `python scripts/test/rt_probe_gas_overlap_cost_ipc.py --frames 4`.
+   Kamera örnekleri, sekme örnekleri ve görüntü aynı kalmalı; GPU sürelerini
+   771 / 185 / 1052 ms ile karşılaştır. Cache fallback=0 korunmalı.
+4. Graph'ın boş kaynakta yoğunluk üretmesi ve random-walk regresyonu.
+   Değişim hızlandırmazsa yoğunluk sayısını tekrar azaltmaya çalışmak yerine
+   GPU profiler ile NanoVDB erişimi / register spill / ray tracing işini ayır.
+
+Canlı A/B ayarları geri yüklendi. Başka build veya uygulama başlatma yapılmadı.
+
+
+## Genel gaz karışımı cache + Fog kaydı temizliği — 2026-10-28 (C++ ve shader)
+
+Bu parti §16b'deki genel karışım bypass'ını düzeltir. Aşağıdaki eski
+"yalnız shader" partisi önceki denemedir; bu parti onun devamıdır.
+
+1. C++ build ve `compile_shaders.bat` çalıştır. Yeni shader include:
+   `volume_cached_segment.glsl`; değişenler: `volume_radiance_cache.glsl`,
+   `volume_mixture.glsl`, closest-hit bağlantısı. C++: MatterFogPublisher ve VDB UI.
+2. `E:\rt_k\matter4emiter.rtp`, kare 38–39, kamera sabit, Vulkan Rendered.
+   `render.rt_pipeline_status` derleme süresini ve SPV boyutunu kaydet.
+   Taban 206 sn / 982,912 B; %10'dan fazla artış kabul dışı.
+3. Dış terminalden `python scripts/test/rt_probe_gas_overlap_cost_ipc.py`.
+   Isınma sonrası both: `secondary_density_samples` yaklaşık 0,
+   `radiance_cache_marches` artmalı; GPU ms ayrı hacimlerin toplamına yaklaşmalı.
+   Son ölçüm 598 + 112 → 1157 ms idi. Yeni kazanç henüz ölçülmedi.
+4. Cache kapalı/açık karşılaştır: zemin/sıvı dolaylı ışığı ve sıcak emissif
+   çakışmalar; kamera görüntüsü değişmemeli. Tek hacim, programlı hacim,
+   random-walk ve SDF önündeki fog sınırı regresyonlarını kontrol et.
+5. Bir emitter'in katı/sıvı çıktısını Fog yap, VDB materyalini düzenle;
+   SDF ve Splat'a geçir. Eski carrier Fog kaydı listeden ve seçili özelliklerden
+   kalkmalı; gerçek gaz/vapor akışları kalmalı. Fog'a dönünce materyal geri gelmeli.
+   Aynı değişimi Python/IPC çıktılarıyla ve undo/redo ile tekrarla.
+
+Statik kontroller geçti; ajan build çalıştırmadı ve uygulamayı açmadı.
+
+
+## Gaz RT: çakışan iki gaz hacminde radyans önbelleği — 2026-10-28 (yalnız shader)
+
+Emitter bütçesi partisi CANLI geçti (kullanıcı: hepsi PASS). Bu parti yalnız
+`volume_radiance_cache.glsl` ve `volume_closesthit.rchit`'e dokunuyor:
+`compile_shaders.bat` yeter, C++ derlemesi gerekmez. Sahne:
+`E:
+t_k\matter4emiter.rtp`, kare 39, kamera değişmeden.
+
+1. **Derleme süresi (ilk iş, kural):** shader'ı derle, uygulamayı aç, Rendered'e
+   geç ve ilk RT görüntüsüne kadar bekle. Sonra `render.rt_pipeline_status` →
+   `stage_seconds` toplamını ve `x64/Release/shaders/volume_closesthit.spv`
+   boyutunu yaz. Taban: 977,104 B; geçmiş ölçümler 314 sn (normal) ve 495 sn
+   (geri alınan deneme). Belirgin artış (> %10) varsa tek çağrı yeri kuralı
+   tutmamış demektir.
+2. **Hız (asıl kabul):** iki gaz görünürken bir RT örneği önceden 964 ms
+   (yalnız buhar 366, yalnız duman 86). Aynı ölçüm, kamera sabit:
+   `python scripts/test/rt_probe_gas_overlap_cost_ipc.py`.
+   Görmen gereken: ikisi birlikteyken ikincil yoğunluk örneği ~0 (önce 3.3/yol),
+   GPU ms ~ ayrı ayrı toplamına (~450) yakın. Hâlâ 900+ ise önbellek çakışmada
+   kaçırılıyor (`radiance_cache_fallbacks` sayacına bak).
+3. **Görüntü:** iki gazın çakıştığı yerde sekme ışığı (zemine ve sıvıya düşen
+   dolaylı ışık) öncekinden belirgin parlak ya da karanlık olmamalı. Hafif fark
+   beklenir: her ortamın J'si yalnız kendi ortamıyla gölgeleniyor.
+   ★ Sinsi olan: buhar ve dumanın İKİSİ de blackbody (emission_mode 2). Kamera
+   march'ı companion'ın emisyonunu atlıyor, önbellek atlamıyor: düşük sıcaklıkta
+   fark görünmez, ama sıcak bir duman companion olursa sekme ışınlarında
+   kameradan fazla parlar ve hiçbir şey hata vermez.
+4. **Regresyon:** tek gazlı sahnede (yalnız buhar ya da yalnız duman) süre ve
+   görüntü değişmemeli; tek ortam yolu aynı formüle iner (J = J₁).
+
+Statik: `check_volume_march_lod_contracts` OK, gaz optik / boş eleme / ışık
+önbelleği / malzeme / karışım kontrolleri OK. `check_rt_gpu_timing_contracts`
+FAIL, bu partiden bağımsız: kontrol `beginRayGpuTiming(cmd, w, h)` arıyor, kod
+FSR partisinde `traceW, traceH`'ye geçmiş (diğer ajanın alanı).
+
+## Emitter bütçesi kg + Max Particles kısma uyarısı — 2026-10-28 (yalnız C++)
+
+Ortak saat partisinin 2. derlemesi CANLI geçti (128'de GRAINS SOFTENED ile
+devam; 512'de bölünme 24 × 8). Bu parti shader'a dokunmuyor.
+Kaynak sınırı artık kg: `use_mass_limit` + `max_emitted_mass_kg` (eski
+`use_particle_limit`/`max_emitted_particles` IPC ve Python'da gerekçeli
+reddediliyor, proje yüklemesinde uyarıyla düşüyor). Sıvı parseli doğumda
+kütlesini alıyor. Tavan bağlayınca kısılan kütle sayılıyor, defterde
+`emission_withheld`, durum çubuğunda sarı EMITTERS THROTTLED.
+
+1. **Kabul testi (en hızlı, her şeyi kapsar):**
+   `python scripts/test/rt_test_emission_budget_ipc.py` (boş sahne, Pause).
+   Beklenen 6/6: eski anahtar reddi, 2 kg'da durma (bir parsel içinde),
+   parsel sayısı = kütle / parcel_mass_kg, tavan kısıyor, domain = kaynak
+   toplamı, defterde emission_withheld.
+   Bozuksa: `budget_stops_at_mass` FAIL ve kütle 2 kg'ı çok aşıyorsa döngü
+   içindeki kg kesmesi çalışmıyor; `ceiling_withholds` FAIL ise tavan kapısı
+   artık kısılanı saymıyor.
+2. **Panel:** bir sıvı kaynağında "Limit Emitted Mass" + "Max Emitted Mass
+   (kg)" ve ilerleme çubuğu kg cinsinden. Kapalıyken "Emitted: x kg (n
+   particles)". Domain Max Particles'ı küçük yap (ör. 400): kaynağın altında
+   "Max Particles withheld ... kg" satırı, durum çubuğunda sarı **EMITTERS
+   THROTTLED** pill'i ve bir kez HUD mesajı. Tıklayınca domain açılmalı.
+3. **Senin sahnende (E:
+t_k\matter4emiter.rtp) uzun koşu:** su 10k/s,
+   tavan 100k. Tavana ulaşınca sarı pill çıkmalı; `fluid.list_domains` →
+   `emission_withheld_kg_step` > 0. Buharlaşma sürerken pill kalır, bu doğru:
+   kaynak artık kaybı dolduruyor.
+4. **Test istemcisi:** test betikleri eski sayı sınırı yerine `parcels=N`
+   (ve `limit_parcels=`) geçiyor; `rt_ipc.py` bunu kaynağın
+   `parcel_mass_kg`'sıyla kg'a çeviriyor ve tane yarıçapı gibi ayarlar sonradan
+   değişirse bir sonraki reset/adımda yeniden boyutluyor. Kontrol:
+   `rt_test_snow_heat_ipc.py` (kaynaktan SONRA tane yarıçapını değiştiriyor)
+   önceki gibi 11/11 ve aynı tane sayıları (sand 1500, snow 3000).
+   Sayılar farklıysa yeniden boyutlama tetiklenmiyor.
+5. **Regresyon:** `rt_test_matter_exchange_ledger_ipc.py` (yeni türler izinli),
+   `rt_matter_smoke.py --quick`.
+6. ★ **Sinsi olan:** sıvı parseli artık doğumda kütlesini alıyor (önceden 0
+   doğup bir sonraki adımda dolduruluyordu). Değer aynı formül
+   (voksel³/PPC × yoğunluk) ama hacim `state.voxel_size`'tan; bir domain'in
+   sıvı ızgarası farklı bir voksel kullanıyorsa ilk adımdaki kütle önceki
+   davranıştan sapar ve hiçbir şey çökmez. Kontrol: smoke'taki kütle
+   korunumu kapıları (`p9_melt`, `snow_heat` ledger) değişmemeli.
+7. `matter.exchanges` özetine (source/target/mass_error) emisyon kayıtları
+   girmiyor, yalnız `exchanges` listesinde görünüyor; özet sayıları önceki
+   gibi kalmalı.
+
+## Ortak saat: sıvı yol minimumu söküldü — 2026-10-27 (2. derleme, yalnız C++)
+
+1. derlemenin canlı sonucu (kullanıcı sahnesi, probe, limit 512): 120 adımda
+**hiç durmadı**; köprü hacmi tabanda (6.54e-9 m³), sınırlayan yay `tangential`
+(köprü değil), varsayılan temas 12–14 (eskiden 24). Ama bölünme `154 x 2`:
+sürekli ortamı sıvının yol minimumu (her yenilemede < 2.5 mm) 154 adıma
+zorluyordu, ve limit 128'de "Matter common clock needs 132 substeps" ile
+domain'i durduruyordu (DEM ise 0.5 yumuşatmayla 126'ya sığmıştı).
+Bu derleme o minimumu söküyor; shader değişmedi.
+
+1. Limit **128**'de (sahnede şu an 128) Play: durmamalı. Sarı GRAINS
+   SOFTENED pill'i görünebilir (DEM 128'e sığmak için yumuşar), kırmızı
+   SIM STOPPED görünmemeli. Kırmızı çıkarsa ve mesaj "liquid/MPM continuum
+   needs N" diyorsa sürekli ortamın KENDİ CFL'i (sıvı hızı / kar sertliği)
+   limiti aşıyor demektir; o gerçek bir sınır.
+2. Probe (limit 512): `python scripts/test/rt_probe_grain_clock_ipc.py --every 12`.
+   Bölünme `C x K`'da C artık ~24 civarı (kar MPM dalga sınırı 23), K ~13;
+   toplam yine ~300. `grain_step_ms` 1. derlemede 142 → 361 ms (parçacık
+   arttıkça) idi; aynı adımlarda belirgin düşmeli. Düşmüyorsa maliyet sürekli
+   ortamda değil DEM'in kendisinde demektir (o zaman D2-2'nin ikinci yarısı:
+   yalnız temastaki taneler).
+3. ★ Sinsi olan: tanelerin gördüğü sıvı alanı artık daha seyrek tazeleniyor
+   (sürekli adım başına bir kez). Hızlı akan suda taneler sürüklenmeyi bir
+   adım geç görür; çökme yok, yalnız taneler akıntıyı biraz "geç" takip eder.
+   Kontrol: aşağıdaki 6. madde (`momentum_residual_n_s` ~0) ve gözle kum
+   suya düşerken önceki derlemeye göre farklı savruluyor mu.
+Aşağıdaki 1. derleme listesi hâlâ geçerli (madde 1–2 CANLI geçti).
+
+## Tane alt adımı: köprü tabanı, sertlik uyarlama, ayrık ortak saat — 2026-10-27
+
+C++ **ve shader** (`sim_matter_grain.glsl` → `compile_shaders.bat`; revizyon
+31 → 32). Sahne: `E:
+t_k\matter4emiter.rtp` (su, kar, 600 K kum, gaz).
+Önceki ölçüm: ortak saat 322 alt adım, ıslanmayla 32. adımda 527 > 512 → durma.
+Durma uyarısı (önceki parti) kullanıcı tarafından CANLI doğrulandı.
+
+1. **Derleme + shader.** Exe ve shader'lar birlikte. Shader eskiyse ilk karede
+   "grain step shader revision mismatch; rebuild simulation shaders" görürsün:
+   bu, derlemenin değil shader'ın eksik olduğunu söyler.
+2. **Probe (en hızlı, her şeyi gösterir):**
+   `python scripts/test/rt_probe_grain_clock_ipc.py` (sahne açık, Pause).
+   Görmen gereken:
+   - `never held in 120 steps`.
+   - Bölünme `sub N = C x K`: C sürekli ortamın kendi sayısı (kar MPM dalga
+     sınırı ~23-24 civarı), K DEM'in her birindeki iç adımı. Eskiden C = 322.
+   - Islanmadan sonra (adım ~22+) kaynak `contact`, `bridge` DEĞİL;
+     `Vb` ≥ ~6.5e-9 m³ (2.5 cm tanede 1e-4 × tane hacmi).
+   - `contacts a/b`: b (varsayılan) 12–10 civarı, 24 değil.
+   - `grain_step_ms` öncekinden düşük (önceki tabanı ölçmedik; sayıyı yaz).
+   Bozuksa: kaynak hâlâ `bridge` → shader eski (revizyon) ya da taban hesabı
+   yanlış; C hâlâ yüzlerce → `.inl`'deki `clock.minimum_substeps` değişikliği
+   derlenmemiş.
+3. **Sertlik uyarlama:** Physics → Advanced solver → Contact substep limit'i
+   64'e indir, Play. Sim durmamalı; durum çubuğunda sarı
+   "GRAINS SOFTENED x0.xx" pill'i, DEM panelinde "Contact springs softened"
+   satırı. Taneler patlamamalı, daha fazla iç içe geçebilir. Limit'i geri al:
+   pill kaybolmalı. Bozuksa (yine kırmızı SIM STOPPED): mesaj "even with the
+   contact springs softened 1000x" diyorsa sınırı köprü ya da çok küçük tane
+   koyuyor, ayrıntı `cfl_terms`'te.
+4. **Islak kum hâlâ yapışkan mı:** `rt_g2_dry_wet_compare_ipc.py` ve H1
+   `--wet-only`. Köprü tabanı yalnız çok az sulu taneyi etkilemeli; ıslak kum
+   davranışı değişmemeli. Islak taraf kuruya yaklaştıysa taban çok yüksek.
+5. **Ortak saat regresyonu:** `rt_test_mpm_dem_shared_clock_ipc.py` (4/4
+   bekleniyor), `rt_test_snow_heat_ipc.py`, `rt_matter_smoke.py --quick`.
+6. ★ **Sinsi olan — sıvı sürüklemesi/kaldırma ölçeği:** DEM artık bir sürekli
+   adımda K kez dönüyor; sürükleme dürtüsü K adım boyunca birikip sıvıya bir
+   kez dönüyor, kaldırma kuvveti sürekli adımın dt'siyle. Yanlışsa hiçbir şey
+   çökmez: taneler suda biraz fazla yüzer ya da batar ve "fizik böyle" gibi
+   görünür. Kontrol: `fluid.matter_models` → `grain_diagnostics.liquid`
+   `momentum_residual_n_s` önceki gibi ~0 kalmalı ve `buoyancy_impulse_n_s`
+   ≈ Σ(ρ_su·g·V_batık)·t. Artık büyüdüyse tepki K ile ölçeklenmiş demektir.
+7. **Temas bütçesi aşımı:** yoğun bir yığında (`rt_h1_dense_grain_scene_ipc.py`
+   ortak saatte) `runtime.cfl_contacts_exceeded` arada bir true olabilir; bu
+   bir sonraki kareyi büyütür. Sürekli true ve yığın titriyorsa margin (+4)
+   yetmiyor.
+
+Statik kontroller: 11 `check_matter_*`'tan 7'si PASS. Dördü **bu partiden
+önce de** eski pinlerle düşüyor: `check_matter_grain_contracts`
+(`const uint SLOTS = 24u` arıyor; revizyon 30'dan beri kapasite çalışma
+zamanında), iki sleep kontrolü (`5 * capacity * sizeof(uint32_t)`),
+`check_matter_gpu_contracts` (`stress_update` push 100 ≠ 68). Sonra listesine.
+
+## SVGF ilk à-trous geçmişi — 2026-10-27
+
+Kaynak yazıldı; shader/C++ derlenmedi, canlı kalite ve maliyet kabulü bekliyor.
+
+1. C++ ve iki shader varyantını (`realtime_svgf.spv`, `realtime_svgf32.spv`)
+   kullanıcı derlemeli. Yeni historyFlags biti 32 iki tarafta eşleşir; eski shader
+   ile yeni C++ bu iyileştirmeyi uygulamaz.
+2. Önceki derlemeyle aynı iç mekan, kamera hareketi, çözünürlük, sample ve SVGF
+   ayarlarında karşılaştır. İlk à-trous rengi yalnız hareket karelerinde geçmişe
+   gider; son geniş filtre sonucu, momentler ve history length değişmez.
+3. FSR kapalıyken duvar/tavan lekesi ve kareler arası oynama azalmış mı ölç.
+   İnce pervaz, tel, doku, yazı ve parlak yansımada zamanla yumuşama olmamalı.
+   Aynı kontrolleri FSR Quality/Balanced ve timeline/simülasyon hareketinde yap.
+4. Hızlı kamera hareketi, yeni açılan yüzey, hareketli nesne ve ışık değişiminde
+   hayalet izi olmamalı. Reactive > 0.5 pikseller uzaysal filtreden önceki rengi
+   saklamayı sürdürür; geçmiş kabul/reddetme testleri değiştirilmedi.
+5. Kamera durunca donmuş hareket geçmişi tekrar filtrelenmemeli. OIDN açık/kapalı
+   duruş geçişini, resize, sahne değişimi ve SVGF kapat/aç işlemlerini kontrol et.
+   Ham birikim/final render sonucu aynı kalmalı.
+6. `render.realtime_denoiser_stats` ile aynı render çözünürlüğünde temporal,
+   variance, atrous ve total GPU ms karşılaştır. Yeni dispatch veya tampon yok;
+   ilk geçişte piksel başına bir history okuması/yazması var. Kazanç ve maliyet
+   canlı ölçülmeden PASS sayılmaz.
+
+## FSR proje kaydı — 2026-10-27
+
+Kullanıcı derleyip kayıt/yükleme işleminin başarılı olduğunu doğruladı.
+Shader değişmedi. Aşağıdaki ayrıntılı regresyon maddelerinin tamamı için ayrı
+kabul kaydı henüz yok.
+
+1. C++ derlemesinden sonra FSR modunu Auto, kaliteyi Balanced, sharpness'ı 0.35,
+   rejection_reactive'i false yapıp projeyi kaydet. Uygulamayı yeniden açıp projeyi
+   yükle; panel ve IPC `render.upscale_stats` / Python `render.upscale_stats()`
+   üzerinden dört tercihin korunduğunu kontrol et.
+2. Off ve Fsr modlarını, diğer kalite seçeneklerini, sharpness 0/1 ve reactive true
+   değerlerini de kaydet/yükle ile kontrol et. UI ve `render.set_upscale` ile yapılan
+   değişiklikler aynı `RenderSettings::upscale` kaydını kullanır.
+3. `render_settings.upscale` içermeyen eski proje, önceki açık projenin FSR tercihini
+   taşımadan Off / Quality / 0.2 / true varsayılanlarına dönmeli.
+4. Geçersiz mode/quality, sayısal olmayan veya aralık dışı sharpness ve yanlış tipte
+   reactive değeri yükleme hatası vermeli. Kayıtta GPU status/history bulunmamalı.
+5. FSR kullanılamayan backend/donanımda kayıtlı tercih korunmalı; mevcut uygunluk
+   kontrolü ve tam çözünürlük fallback'i çalışmalı. Kaydet/yükle işlemini IPC ve
+   Python proje API'leri üzerinden de doğrula.
+
 > **B4 Auto geçişi çökme — 2026-10-27:** Kullanıcı ffxCreateContext içinde
 > DLL → null function çağrısı bildirdi. SDK 1.1.4 kaynak denetimi, backend'in
 > vkGetBufferMemoryRequirements2KHR adresini yüklediğini doğruladı; uygulama bu
@@ -20,7 +1026,63 @@
 > Bu düzeltme için kullanıcı C++ Release derlemesi gerekir; FSR GPU kabulü henüz PASS değil.
 
 
-> **Durum:** DERLEME BEKLİYOR — 2026-10-27 B4c (sahne animasyonu = hareket). B4b CANLI (kullanıcı: duruş birikimi "çok kaliteli"). Ayrıntı: `RT_REALTIME_DENOISE_UPSCALE_PLAN.md` en üstteki devir notu.
+> **Durum:** DERLEME BEKLİYOR — 2026-10-27 B4d (lens distortion için hız vektörleri, FSR distortion kapısı kaldırıldı). B4c ve öncesi CANLI, `e44153d9`. Ayrıntı: `RT_REALTIME_DENOISE_UPSCALE_PLAN.md` en üstteki devir notu.
+
+## B4d — distortion'lı kamerada doğru hız vektörü + FSR (2026-10-27, derlenmedi; RAYGEN + C++)
+
+**Kullanıcı:** `compile_shaders.bat` (`raygen.rgen` değişti) + C++ x64 Release. Push/binding
+değişmedi. **Statik:** glslc `--target-env=vulkan1.3 --target-spv=spv1.4` çıktısız temiz.
+
+1. **Kapı kalktı** — distortion'lı eski bir projeyi aç, FSR balanced, kamerayı hareket ettir.
+   `render.upscale_stats`. Görmen gereken: `active=true`, render ~988×555, `inactive_reason`
+   artık "camera lens distortion is active" DEĞİL. Bozuksa: eski exe.
+
+2. **Vektör doğru mu (distortion'sız regresyon önce)** — distortion 0'lı sahnede
+   `render.set_settings debug_view=16` (motion vectors) + küçük yörünge: B4'teki gibi.
+   Sonra distortion'lı sahnede aynısı. Görmen gereken: düz bir duvarda vektör renkleri
+   merkezden kenara **pürüzsüz** değişir, kenar bandında ani sıçrama yok.
+   Bozuksa: kenarda dairesel bir halka/sıçrama → Newton tersi yanlış işaretli veya aspect
+   ölçeği hatalı (`motionLensPx`).
+
+3. **SVGF geçmişi kenarlarda** — distortion'lı sahne, `debug_history=true`, yavaş yörünge.
+   Görmen gereken: kenarlar da yeşil (uzun geçmiş). Önceden kenar bandı sarı/kırmızıya
+   kayıyordu (yanlış piksele bakıyordu). Bozuksa: kenarlar hâlâ kırmızı → vektör hâlâ pinhole.
+
+4. **★ Sessiz arıza: FSR ile kenarda kayma** — distortion'lı sahnede FSR açık, ince
+   çizgili/desenli bir yüzeyi ekran kenarına getirip yatay yörünge. Görmen gereken:
+   desen kenarda da keskin ve yerinde. Bozuksa: kenarlarda "biraz yüzen/bulanık" desen —
+   kimse hata diye raporlamaz; vektör ölçeği kenarda yanlış demektir.
+
+5. **Güçlü barrel** — distortion'ı panelde en negatif değere çek. Görmen gereken: çökme yok,
+   aşırı kenar bölgesi en kötü ihtimalle reddedilir (debug_history kırmızı, iz yok).
+
+**B4d+ — gizli distortion durumu (aynı derleme, yalnız C++):** araştırma: model CPU/OptiX/
+Vulkan RT'de aynı ve doğru; RayFusion uygulamıyor. Sorun durumdu: canlı panel YOKTU
+(`scene_ui_camera.cpp` `drawCameraContent` yorum satırında), değer projede kayıtlı/yüklü,
+iki çelişen otomatik formül (`Camera.cpp` her modda FOV'dan, `Camera.h` Cinema'da).
+Düzeltme: proje anahtarı `lens_distortion` (eski `distortion` OKUNMAZ → eski projeler 0 açılır),
+`Camera.cpp` formülü söküldü (tek sahip `calculateLensCharacteristics`, yalnız Cinema),
+FOV altına her modda "Lens Distortion" slider'ı, IPC `camera.set_lens_distortion` +
+`camera.get` `lens_distortion`/`auto_lens`, Python `rt.camera.set(lens_distortion=..)`.
+
+6. **Eski proje sıfır açılır** — önceden FSR'ı "distortion" yüzünden kapatan eski projeyi aç.
+   `camera.get`. Görmen gereken: `lens_distortion=0`, panelde slider 0. Kaydet, yeniden aç:
+   hâlâ 0. Bozuksa: eski anahtar hâlâ okunuyor.
+7. **Yeni değer kalıcı** — slider'ı −0.1 yap, kaydet, yeniden aç → −0.1. IPC ile 0.6 dene →
+   ret (kırpma yok). Görüntü kenarları bükülmeli, RayFusion'da bükülmemeli (beklenen).
+8. **Auto lens sahipliği** — Cinema + Auto Lens Characteristics aç: slider kilitli ve değeri
+   gösterir, `camera.set_lens_distortion` reddedilir. Pro'ya geç: slider açılır ve değer artık
+   FOV değiştikçe KENDİLİĞİNDEN DEĞİŞMEZ. **★ Sessiz arıza:** Pro'da FOV oynatınca kenar bükümü
+   değişiyorsa eski `Camera.cpp` formülü hâlâ çalışıyor (eski exe).
+
+## B4c+ ek (derlendi, CANLI) — son kare, parçacık hayaleti, merkez okuma
+
+Kullanıcı derleyip doğruladı: son kare artık ham gürültüye dönmüyor (duruş SVGF'si
+yakınsamış karede de gürültüsü hedefin üstündeki piksellerde filtreli), FSR'da akışkan
+parçacık hayaleti yok (`rejection_reactive`: kümelenmiş raygen reddi → reactive).
+Ölçülen: skin sahnesi SVGF 10.5 ms (à-trous merkez okuma düzenlemesi yalnız %4).
+Bilinen uç durum: yakınsamadan sonra yalnız tonemap'i yenileyen işlem (pozlama
+değişikliği) SVGF'siz ham görüntüyü gösterebilir — gözlenirse raporla.
 
 ## B4c — sahne animasyonu SVGF ve FSR için hareket sayılır (2026-10-27, derlenmedi; YALNIZ C++)
 

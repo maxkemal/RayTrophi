@@ -23,7 +23,13 @@ struct MatterFogLiveStream {
     int vdb_id = -1;
     std::shared_ptr<VDBVolume> volume;
     bool populated = false;
+    bool optically_populated = true;
+    std::string optical_bounds_key;
     uint64_t state_version = ~uint64_t(0);
+    // Set on the one stream that carries merged gas (see MatterFogPublisher.cpp).
+    // Its density is already physical, so it renders with this neutral shader.
+    std::shared_ptr<VolumeShader> merged_shader;
+    std::string gas_merge_key;
 };
 
 using MatterFogLiveStreams = std::map<FogFieldKey, MatterFogLiveStream>;

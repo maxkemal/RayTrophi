@@ -38,9 +38,11 @@ positive render density. No source identity is inferred from old mixed gas.
   than claiming a stale host image is current.
 
 At most eight source UIDs plus the residual stream are retained per domain,
-including deleted sources with surviving history. A conservative 256 MiB
-provenance allocation budget is checked before source deposition. Fog field
-preparation and its diagnostic snapshots retain their separate 128 MiB budgets.
+including deleted sources with surviving history. Provenance has no memory
+budget: the fixed 256 MiB one refused a single emitter on a 7 M cell domain and
+was removed on 2026-10-30. A refused source holds its domain instead of leaving
+the frame loop. The diagnostic Fog snapshot (`fluid.inspect_fog_fields`) keeps
+its separate 128 MiB budget and refuses with a message; it does not affect render.
 The existing sixteen-volume render capacity still applies scene-wide.
 
 ## Shared UI, scripting and IPC operations

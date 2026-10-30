@@ -123,6 +123,15 @@ float volumeNanoRemap(VkVolumeInstance vol, float raw) {
         vol.density_curve);
 }
 
+float volumeNanoFinishDensity(VkVolumeInstance vol, float raw) {
+    if (isnan(raw) || isinf(raw)) return 0.0;
+    float density = volumeNanoRemap(vol, raw);
+    float cutoff = max(vol._reserved[0], 0.0);
+    if (density <= cutoff) return 0.0;
+    float fade = cutoff > 0.0 ? smoothstep(cutoff, cutoff * 2.0, density) : 1.0;
+    return density * vol.density_multiplier * fade;
+}
+
 // Exact same eight corners and optical transform as sampleDensityAccMode.
 // Call only for a NanoVDB field without material density noise or a graph.
 float volumeNanoDensity(VkVolumeInstance vol, VolumeNanoRay ray, float t,
@@ -141,12 +150,7 @@ float volumeNanoDensity(VkVolumeInstance vol, VolumeNanoRay ray, float t,
                        mix(low.z, low.w, f.x), f.y),
                    mix(mix(high.x, high.y, f.x),
                        mix(high.z, high.w, f.x), f.y), f.z);
-    if (isnan(raw) || isinf(raw)) return 0.0;
-    float density = volumeNanoRemap(vol, raw);
-    float cutoff = max(vol._reserved[0], 0.0);
-    if (density <= cutoff) return 0.0;
-    float fade = cutoff > 0.0 ? smoothstep(cutoff, cutoff * 2.0, density) : 1.0;
-    return density * vol.density_multiplier * fade;
+    return volumeNanoFinishDensity(vol, raw);
 }
 
 float nanoEmptyIndexStep(VkVolumeInstance vol, vec3 index, vec3 direction,
@@ -186,6 +190,8 @@ float nanoEmptyIndexStep(VkVolumeInstance vol, vec3 index, vec3 direction,
             PNANOVDB_GRID_TYPE_FLOAT, buf, acc.leaf));
         if (isnan(rawMax) || isinf(rawMax) ||
             !(volumeNanoRemap(vol, max(rawMax, 1e-6)) <= max(vol._reserved[0], 0.0))) {
+            // 3: this whole leaf holds optical density. Callers may remember it.
+            skipKind = 3u;
             return baseStep;
         }
     } else {

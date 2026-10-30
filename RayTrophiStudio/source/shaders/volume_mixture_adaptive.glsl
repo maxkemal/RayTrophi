@@ -7,18 +7,36 @@
 const int MF_ADAPTIVE_LIMIT = 8192;
 bool mfStepBudgetHit;
 
-float mfCurveSlope(VkVolumeInstance v) {
+// Largest d(density)/d(raw) over this cell's raw value range. A trilinear value
+// stays inside its corner range and the curve is monotone, so only the segments
+// that range touches can steepen the field. The whole-curve maximum made a
+// saturated, flat interior refine as if it sat on the curve's steepest segment.
+float mfCellCurveSlope(uint index, float rawLow, float rawHigh) {
+    float remapLow = volumes.v[index].density_remap_low;
+    float remapRange = max(volumes.v[index].density_remap_high - remapLow, EPSILON);
+    float low = max((rawLow - remapLow) / remapRange, 0.0);
+    float high = max((rawHigh - remapLow) / remapRange, 0.0);
+    float cutoff = max(volumes.v[index]._reserved[0], 0.0);
+    float densityLow = volumeDensityCurve(low, volumes.v[index].density_curve);
+    float densityHigh = volumeDensityCurve(high, volumes.v[index].density_curve);
+    if (densityHigh <= cutoff) {
+        return 0.0;
+    }
     float slope = 1.0;
-    if (v.density_curve[0] > 0.5) {
-        slope = max(v.density_curve[8], 0.0);
-        for (int knot = 1; knot < 8; ++knot) {
-            slope = max(slope, 7.0 * abs(v.density_curve[knot + 1] - v.density_curve[knot]));
+    if (volumes.v[index].density_curve[0] > 0.5) {
+        slope = high >= 1.0 ? max(volumes.v[index].density_curve[8], 0.0) : 0.0;
+        if (low < 1.0) {
+            int last = min(int(high * 7.0), 6);
+            for (int segment = min(int(low * 7.0), 6); segment <= last; ++segment) {
+                slope = max(slope, 7.0 * abs(volumes.v[index].density_curve[segment + 2] -
+                    volumes.v[index].density_curve[segment + 1]));
+            }
         }
     }
-    // The cutoff fade d*smoothstep(c,2c,d) has derivative at most four.
-    return slope * (v._reserved[0] > 0.0 ? 4.0 : 1.0) *
-        abs(v.density_multiplier) /
-        max(v.density_remap_high - v.density_remap_low, EPSILON);
+    // The cutoff fade d*smoothstep(c,2c,d) has derivative at most four, and
+    // exactly one above its top end.
+    bool fading = cutoff > 0.0 && densityLow < cutoff * 2.0;
+    return slope * (fading ? 4.0 : 1.0) * abs(volumes.v[index].density_multiplier) / remapRange;
 }
 
 float mfRawSlope(vec4 low, vec4 high, vec3 direction) {
@@ -30,6 +48,30 @@ float mfRawSlope(vec4 low, vec4 high, vec3 direction) {
     float dz = max(max(abs(high.x - low.x), abs(high.y - low.y)),
         max(abs(high.z - low.z), abs(high.w - low.w)));
     return dot(vec3(dx, dy, dz), abs(direction));
+}
+
+bool mfAdaptiveCellBounds(uint index, ivec3 cell, vec3 direction,
+    pnanovdb_buf_t fieldBuffer, inout pnanovdb_readaccessor_t accessor, out vec2 bound) {
+    if (mfLoadCellBounds(index, cell, bound)) return true;
+    vec4 low, high;
+    volumeNanoCorners(fieldBuffer, cell, accessor, low, high);
+    if (any(isnan(low)) || any(isnan(high)) || any(isinf(low)) || any(isinf(high))) {
+        return false;
+    }
+    bound.y = max(max(max(low.x, low.y), max(low.z, low.w)),
+        max(max(high.x, high.y), max(high.z, high.w)));
+    float lowest = min(min(min(low.x, low.y), min(low.z, low.w)),
+        min(min(high.x, high.y), min(high.z, high.w)));
+    bound.x = mfRawSlope(low, high, direction) * mfCellCurveSlope(index, lowest, bound.y);
+    mfStoreCellBounds(index, cell, bound);
+    return true;
+}
+
+// The cell edge limits how far the corner bound is proven, not how fine the
+// authored lattice is: clipping to it left many sliver steps below the spacing
+// a single gas uses. Only the optical bound may refine past the authored step.
+float mfRefinedSpan(float cellSpan, float opticalSpan, float baseStep, float progress) {
+    return max(max(min(cellSpan, opticalSpan), min(baseStep, opticalSpan)), progress);
 }
 
 ivec3 mfForwardCell(vec3 index, vec3 direction) {
@@ -67,9 +109,19 @@ float mfAdaptiveSpan(vec3 origin, vec3 direction, float t, float remaining,
             continue;
         }
         float lo, hi;
-        if (!volumeRayInterval(v, origin, direction, lo, hi) || hi <= t) {
+        // The straight camera segment prepared these affine rays and box
+        // intervals once. A random-walk flight has a new origin/direction and
+        // must compute its own interval and map instead.
+        if (!mfWalking && index == mfCacheIndexA) {
+            lo = mfCameraIntervalA.x;
+            hi = mfCameraIntervalA.y;
+        } else if (!mfWalking && index == mfCacheIndexB) {
+            lo = mfCameraIntervalB.x;
+            hi = mfCameraIntervalB.y;
+        } else if (!volumeRayInterval(v, origin, direction, lo, hi)) {
             continue;
         }
+        if (hi <= t) continue;
         if (lo > t) {
             span = min(span, lo - t);
             continue;
@@ -87,44 +139,54 @@ float mfAdaptiveSpan(vec3 origin, vec3 direction, float t, float remaining,
         pnanovdb_map_handle_t fieldMap;
         pnanovdb_readaccessor_t fieldAccessor;
         VolumeNanoRay ray;
-        vec4 low, high;
+        vec2 bound;
         if (index == mfCacheIndexA) {
-            ray = volumeNanoRay(v, origin, direction, mfCacheBufferA, mfCacheMapA);
+            ray = mfCameraRayA;
+            if (mfWalking) {
+                ray = volumeNanoRay(v, origin, direction, mfCacheBufferA, mfCacheMapA);
+            }
             vec3 point = ray.indexOrigin + ray.indexDirection * t;
             ivec3 cell = mfForwardCell(point, ray.indexDirection);
-            volumeNanoCorners(mfCacheBufferA, cell, mfCacheAccessorA, low, high);
+            if (!mfAdaptiveCellBounds(index, cell, ray.indexDirection,
+                    mfCacheBufferA, mfCacheAccessorA, bound)) {
+                return min(remaining, baseStep);
+            }
             span = min(span, mfCellExit(point, ray.indexDirection, cell));
         } else if (index == mfCacheIndexB) {
-            ray = volumeNanoRay(v, origin, direction, mfCacheBufferB, mfCacheMapB);
+            ray = mfCameraRayB;
+            if (mfWalking) {
+                ray = volumeNanoRay(v, origin, direction, mfCacheBufferB, mfCacheMapB);
+            }
             vec3 point = ray.indexOrigin + ray.indexDirection * t;
             ivec3 cell = mfForwardCell(point, ray.indexDirection);
-            volumeNanoCorners(mfCacheBufferB, cell, mfCacheAccessorB, low, high);
+            if (!mfAdaptiveCellBounds(index, cell, ray.indexDirection,
+                    mfCacheBufferB, mfCacheAccessorB, bound)) {
+                return min(remaining, baseStep);
+            }
             span = min(span, mfCellExit(point, ray.indexDirection, cell));
         } else {
-            mfInitializeNano(v, fieldBuffer, fieldMap, fieldAccessor);
+            mfInitializeNano(v.volume_type == 2 ? v.vdb_grid_address : uint64_t(0),
+                fieldBuffer, fieldMap, fieldAccessor);
             ray = volumeNanoRay(v, origin, direction, fieldBuffer, fieldMap);
             vec3 point = ray.indexOrigin + ray.indexDirection * t;
             ivec3 cell = mfForwardCell(point, ray.indexDirection);
-            volumeNanoCorners(fieldBuffer, cell, fieldAccessor, low, high);
+            if (!mfAdaptiveCellBounds(index, cell, ray.indexDirection,
+                    fieldBuffer, fieldAccessor, bound)) {
+                return min(remaining, baseStep);
+            }
             span = min(span, mfCellExit(point, ray.indexDirection, cell));
         }
         span = min(span, hi - t);
-        if (any(isnan(low)) || any(isnan(high)) || any(isinf(low)) || any(isinf(high))) {
-            return min(remaining, baseStep);
-        }
         float scatter = max(v.scatter_coefficient, 0.0);
         float meanG = mix(v.scatter_anisotropy_back, v.scatter_anisotropy, v.scatter_lobe_mix);
         if (v.random_walk_enabled > 0.5 && meanG > 0.05 &&
             mfEventOrdinal >= uint(clamp(int(v.random_walk_exact_events), 1, 512))) {
             scatter *= 1.0 - meanG;
         }
-        slope += mfRawSlope(low, high, ray.indexDirection) * mfCurveSlope(v) *
-            (scatter + max(v.absorption_coefficient, 0.0));
+        slope += bound.x * (scatter + max(v.absorption_coefficient, 0.0));
         // Temperature/ramp emission is an independent field. Do not coarsen it
         // based only on a smooth density field; keep its authored resolution.
-        float largestRaw = max(max(max(low.x, low.y), max(low.z, low.w)),
-            max(max(high.x, high.y), max(high.z, high.w)));
-        bool densityPresent = volumeNanoRemap(v, largestRaw) > max(v._reserved[0], 0.0);
+        bool densityPresent = volumeNanoRemap(v, bound.y) > max(v._reserved[0], 0.0);
         if (v.emission_mode != 0 && densityPresent) {
             span = min(span, baseStep);
         }
@@ -138,7 +200,7 @@ float mfAdaptiveSpan(vec3 origin, vec3 direction, float t, float remaining,
     float opticalSpan = slope > 1e-12 ? sqrt(0.04 / slope) : baseStep * 4.0;
     opticalSpan = max(opticalSpan, baseStep * 0.25);
     float progress = max(baseStep * 1e-5, abs(t) * 2e-7);
-    return min(remaining, max(min(span, opticalSpan), progress));
+    return min(remaining, mfRefinedSpan(span, opticalSpan, baseStep, progress));
 }
 
 float mfBudgetedSpan(vec3 origin, vec3 direction, float t, float remaining,
@@ -149,6 +211,34 @@ float mfBudgetedSpan(vec3 origin, vec3 direction, float t, float remaining,
         mfStepBudgetHit = true;
         return remaining;
     }
+    if (mfSharedWalk) {
+        return mfSharedCameraSpan(t, remaining, baseStep);
+    }
     return mfAdaptiveSpan(origin, direction, t, remaining, baseStep);
 }
+// All members are evaluated jointly at each camera sample, so the smallest
+// authored work ceiling governs an overlap. Unrelated/off-ray slots do not.
+int mfCameraStepBudget(vec3 origin, vec3 direction, float nearT, float farT) {
+    int budget = 2048;
+    for (uint i = 0u; i < mfCount; ++i) {
+        VkVolumeInstance v = volumes.v[i];
+        if (!gasOverlapCandidate(v)) continue;
+        float lo, hi;
+        if (!volumeRayInterval(v, origin, direction, lo, hi) ||
+            hi <= nearT || lo >= farT) continue;
+        budget = min(budget, clamp(v.max_steps, 1, 2048));
+    }
+    return budget;
+}
+
+float mfCameraBudgetedSpan(vec3 origin, vec3 direction, float t, float remaining,
+    float baseStep, int iteration, int samplesLeft) {
+    float requested = mfBudgetedSpan(origin, direction, t, remaining, baseStep, iteration);
+    // Budget overrides the local refinement target. Reserve enough coverage
+    // for every remaining sample; the last sample integrates the full tail.
+    float coverageFloor = remaining / float(max(samplesLeft, 1));
+    if (requested < coverageFloor) mfStepBudgetHit = true;
+    return min(remaining, max(requested, coverageFloor));
+}
+
 #endif

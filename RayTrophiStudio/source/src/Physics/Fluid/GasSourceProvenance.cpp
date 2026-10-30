@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace RayTrophiSim::Fluid {
@@ -70,12 +72,15 @@ struct GasSourceDevice {
     }
 };
 
+// The partition kernel takes a 32-bit cell count. Eight emitters is a design
+// choice, not an index limit: each stream is a render volume and a scene has 16
+// volume slots. Memory is not a limit here: a fixed 256 MiB refused one emitter
+// on a 166x256x166 domain, and a failed allocation already reports itself.
 void validateGasSourceBudget(std::size_t cells, std::size_t streams) {
-    constexpr std::size_t budget = 256u * 1024u * 1024u;
-    // Device currents + shared scratch, host snapshots and source staging.
-    const std::size_t floats = streams * 6u + 6u;
-    if (streams > 9 || cells == 0 || cells > budget / sizeof(float) / floats) {
-        throw std::runtime_error("Gas source provenance exceeds 8 emitters / 256 MiB budget");
+    if (streams > 9 || cells == 0 || cells > std::numeric_limits<uint32_t>::max()) {
+        throw std::runtime_error("Gas source provenance supports 8 emitters and 32-bit cell "
+            "counts (" + std::to_string(streams - 1) + " emitters, " +
+            std::to_string(cells) + " cells)");
     }
 }
 
