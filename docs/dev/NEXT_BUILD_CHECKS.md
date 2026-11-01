@@ -1,22 +1,20 @@
 # NEXT BUILD CHECKS
 
-## İç ışık adım düzeltmesi — 2026-11-01 (en önce)
+## İç ışık rayQuery denemesi — 2026-11-01 (en önce)
 
-Yalnız shader değişti, C++ gerekmez. Soğuk RT pipeline bekle (son ölçüm 400 sn).
-Commit'e girdi, derlenip ölçülmedi.
+★ KOŞULDU, madde 1–3 tamam: 1 adım 245 → 110 ms, 32 adım ~290 → 136 ms, görüntü
+sayıları aynı, test PASS. Kalan yalnız madde 4 (elle).
 
-    python scripts/test/rt_test_pyro_internal_ipc.py --domain "Nuclear Gas" --out <scratchpad>
+1. Pipeline kurulmalı. Kurulmazsa cihazda rayQuery kapalıdır; hacim hiç çizilmez.
+2. 69. kare, burn malzemesi, iç ışık 1 adım: kapalı hale yakın.
+3. `python scripts/test/rt_test_pyro_internal_ipc.py --domain "Nuclear Gas" --out <scratchpad>`
+   PASS ve p50 değerleri aynı (.636 civarı).
+4. Gaz içine katı koy: ateş ışığı katıdan geçmemeli. Bu sahnede yalnız zemin var, ölçülmedi.
 
-1. PASS: 69. karede `burn_lit` ve `burn_lit8` p50 farkı .03 altında. Üstündeyse adım
-   hâlâ enerji taşıyor.
-2. Görüntü: iç ışık önceki 32 adımlı halden daha koyu görünebilir. Beklenen: eski
-   değer yanlıydı. Parlaklığı `internal_light_steps` ile değil EV ile ayarla.
-3. Maliyet hâlâ açık: Rendered modda 69. karede adım 0, 1, 2 ile süre ve
-   `render.volume_stats` sayaçlarını karşılaştır. 1 adım da pahalıysa sabit kısım
-   iç yürüyüş değildir.
+★ EN SİNSİ SONUÇ: Alpha'lı geometri artık ateş ışığını opak gibi keser. Yaprak veya
+ızgara arkasındaki duman hatasız biraz karanlık kalır; bug diye raporlanmaz.
 
-★ EN SİNSİ SONUÇ: Az adım artık uzaktaki ışığı sessizce kaybeder. İnce dumanda çok
-düşük adım, hata vermeden ateşten uzak bölgeleri karanlık bırakır. 32 kullan.
+Adım için 8 kullan: ışık 32 ile aynı, maliyet eşit ya da düşük. 1–2 adım ateşe ulaşmaz.
 
 ## Eklemeli flame, iç ışık + burnout, panel — 2026-11-01
 

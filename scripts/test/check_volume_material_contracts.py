@@ -80,7 +80,7 @@ class VolumeMaterialContracts(unittest.TestCase):
         preview = read("shaders/volume_internal_preview.glsl")
         for text in (rt, preview):
             self.assertIn('#include "volume_internal_integral.glsl"', text)
-        self.assertIn("rwSolidDistance(", rt)
+        self.assertIn("volumeInternalSolidDistance(", rt)
         self.assertIn("sampleHG(", rt)
         self.assertIn("phaseDual(", preview)
         integral = read("shaders/volume_internal_integral.glsl")
