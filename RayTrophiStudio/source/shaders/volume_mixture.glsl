@@ -135,6 +135,12 @@ void mfInitializeNano(uint64_t gridAddress, out pnanovdb_buf_t fieldBuffer,
 }
 
 float mfDensity(uint index, vec3 position, bool cameraFast) {
+    if (!mfInShadow && volumeEmissionIndependent(volumes.v[index]._retired_cloud[0]) &&
+        volumes.v[index].density_multiplier <= 0.0) {
+        VkVolumeInstance emissionVolume = volumes.v[index];
+        emissionVolume.density_multiplier = 1.0;
+        return sampleDensity(emissionVolume, position);
+    }
     if (cameraFast && mfSharedDensityReady) {
         if (index == mfCacheIndexA) return mfSharedDensity.x;
         if (index == mfCacheIndexB) return mfSharedDensity.y;
@@ -170,6 +176,34 @@ float mfDensity(uint index, vec3 position, bool cameraFast) {
         ? volumes.v[index].vdb_grid_address : uint64_t(0);
     mfInitializeNano(gridAddress, fieldBuffer, fieldMap, fieldAccessor);
     return sampleDensityAcc(volumes.v[index], position, fieldBuffer, fieldMap, fieldAccessor);
+}
+
+// Camera source and extinction share the same density fetch. Shadow-only
+// consumers retain mfDensity and never pay for a temperature/source lookup.
+float mfDensityChannels(uint index, vec3 position, bool cameraFast,
+    out float emissionDensity) {
+    VkVolumeInstance v = volumes.v[index];
+    v.density_multiplier = volumeEmissionSamplingMultiplier(
+        v.density_multiplier, v._retired_cloud[0]);
+    if (cameraFast && !mfSharedDensityReady) {
+        if (index == mfCacheIndexA)
+            return volumeNanoDensityChannels(v, mfCameraRayA, mfCameraT,
+                mfCacheBufferA, mfCacheAccessorA, emissionDensity);
+        if (index == mfCacheIndexB)
+            return volumeNanoDensityChannels(v, mfCameraRayB, mfCameraT,
+                mfCacheBufferB, mfCacheAccessorB, emissionDensity);
+    }
+    if (index == mfCacheIndexA)
+        return sampleDensityAccChannels(v, position, mfCacheBufferA, mfCacheMapA,
+            mfCacheAccessorA, true, emissionDensity);
+    if (index == mfCacheIndexB)
+        return sampleDensityAccChannels(v, position, mfCacheBufferB, mfCacheMapB,
+            mfCacheAccessorB, true, emissionDensity);
+    pnanovdb_buf_t buf;
+    pnanovdb_map_handle_t mapH;
+    pnanovdb_readaccessor_t acc;
+    mfInitializeNano(v.volume_type == 2 ? v.vdb_grid_address : uint64_t(0), buf, mapH, acc);
+    return sampleDensityAccChannels(v, position, buf, mapH, acc, true, emissionDensity);
 }
 
 #include "volume_mixture_optical_terms.glsl"
@@ -218,7 +252,7 @@ float mfEmptyStep(vec3 position, vec3 direction, float baseStep) {
         VkVolumeInstance v = volumes.v[i];
         if (!gasOverlapCandidate(v)) continue;
         if (v._uvw_pad[0] < 0.5 || v._ext_reserved[7] >= 0.5 ||
-            volumeNanoRemap(v, 0.0) > max(v._reserved[0], 0.0)) return baseStep;
+            volumeNanoSupportRemap(v, 0.0) > max(v._reserved[0], 0.0)) return baseStep;
         // A graph can create density in source-empty cells. Unknown/dense
         // producers conservatively retain ordinary stepping.
         if (v._reserved[1] > 0.5 &&
@@ -281,7 +315,7 @@ float mfExit(vec3 position, vec3 direction) {
 float mfShadowEmptyStep(uint index, VkVolumeInstance v, float baseStep) {
     if (!mfShadowIndexPath || v._uvw_pad[0] < 0.5 ||
         v._ext_reserved[7] >= 0.5 ||
-        volumeNanoRemap(v, 1e-6) > max(v._reserved[0], 0.0)) return baseStep;
+        volumeNanoSupportRemap(v, 1e-6) > max(v._reserved[0], 0.0)) return baseStep;
     if (v._reserved[1] > 0.5 &&
         matProgramOffset(uint(v._reserved[1] - 1.0)) != MATPROG_NONE) return baseStep;
     vec3 indexPosition = mfShadowRay.indexOrigin + mfShadowRay.indexDirection * mfShadowT;
@@ -437,6 +471,16 @@ vec3 mfDirect(uint contributor, MfTerms term, vec3 position, vec3 direction,
         attenuation * phase * mfLightVisibility;
 }
 
+// A flight that reaches burned-out core after a scatter adds j*distance with
+// next to no extinction, a rare and huge sample that reads as sparks. Only
+// indirect flights roll off, so the camera's direct view of the fire is exact.
+vec3 mfBoundFlightEmission(vec3 gathered) {
+    if (mfEventOrdinal == 0u && volumeCameraSegment) return gathered;
+    float luminance = dot(gathered, vec3(0.2126, 0.7152, 0.0722));
+    if (!(luminance > 4.0)) return gathered;
+    return gathered * (4.0 * (1.0 + log(luminance / 4.0)) / luminance);
+}
+
 // Piecewise-constant exponential flight. A scalar proposal equal to the largest
 // RGB extinction preserves colored absorption through the likelihood ratio.
 // The same coefficients drive survival, emission and collision selection.
@@ -449,6 +493,7 @@ bool mfFlight(vec3 origin, vec3 direction, float limit, float stepLength,
     hitTerms = MfTerms(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
     coefficientPosition = origin;
     float start = 0.0;
+    vec3 gathered = vec3(0.0);
     for (int i = 0; i < MF_ADAPTIVE_LIMIT && start < limit; ++i) {
         float dt = mfBudgetedSpan(origin, direction, start, limit - start, baseStep, i);
         coefficientPosition = origin + direction * (start + 0.5 * dt);
@@ -462,18 +507,20 @@ bool mfFlight(vec3 origin, vec3 direction, float limit, float stepLength,
             integral[channel] = abs(ratio[channel]) > 1e-6
                 ? (exp(ratio[channel] * length) - 1.0) / ratio[channel] : length;
         }
-        radiance += throughput * term.emission * integral;
+        gathered += throughput * term.emission * integral;
         throughput *= exp(ratio * length);
         if (collision) {
             hitDistance = start + length;
             // Return the same piecewise sample used to draw the collision.
             hitTerms = term;
+            radiance += mfBoundFlightEmission(gathered);
             return true;
         }
         opticalTarget -= proposal * dt;
         start += dt;
     }
     hitDistance = limit;
+    radiance += mfBoundFlightEmission(gathered);
     return false;
 }
 
@@ -651,7 +698,12 @@ void shadeFogMixture(vec3 origin, vec3 direction, float nearT, float farT,
         float distance;
         MfTerms sum;
         vec3 coefficientPosition;
-        bool collision = mfFlight(position, direction, limit, stepLength,
+        // The authored bounce LOD applies to every flight the camera cannot see.
+        float flightStep = stepLength;
+        if (events > 0u || !volumeCameraSegment) {
+            flightStep *= float(((worldData.w.volumeMarchLod >> 8) & 15u) + 1u);
+        }
+        bool collision = mfFlight(position, direction, limit, flightStep,
             throughput, radiance, distance, sum, coefficientPosition);
         if (!collision) {
             mfContinue(radiance, throughput, boundary ? position :

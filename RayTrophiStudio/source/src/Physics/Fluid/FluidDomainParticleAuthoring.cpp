@@ -15,7 +15,7 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
     float grain_saturation) {
     for (auto& domain : grid_domains_) {
         if (domain.name != domain_name ||
-            !simulationDomainHasLiquid(domain.type)) {
+            !simulationDomainHasLiquid(domain)) {
             continue;
         }
 
@@ -55,7 +55,7 @@ bool ParticleSimulationSystem::configureFluidDomainSettle(
     bool request) {
     for (auto& domain : grid_domains_) {
         if (domain.name != domain_name ||
-            !simulationDomainHasLiquid(domain.type)) {
+            !simulationDomainHasLiquid(domain)) {
             continue;
         }
         if (on_seed) domain.fluid_seed_settle = *on_seed;
@@ -76,7 +76,7 @@ bool ParticleSimulationSystem::clearFluidDomainParticles(
     for (std::size_t i = 0; i < grid_domains_.size(); ++i) {
         auto& domain = grid_domains_[i];
         if (domain.name != domain_name ||
-            !simulationDomainHasLiquid(domain.type)) {
+            !simulationDomainHasLiquid(domain)) {
             continue;
         }
 

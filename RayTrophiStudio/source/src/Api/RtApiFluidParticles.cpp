@@ -45,7 +45,7 @@ Result resolveLiveLiquidState(const std::string& domain_id_or_name,
     const auto& states = sys.gridDomainStates();
     for (std::size_t i = 0; i < domains.size(); ++i) {
         if (domains[i].name != info.name) continue;
-        if (!RayTrophiSim::simulationDomainHasLiquid(domains[i].type)) break;
+        if (!RayTrophiSim::simulationDomainHasLiquid(domains[i])) break;
         if (i < states.size() && states[i].valid) state = &states[i];
         return Result::success();
     }
@@ -119,6 +119,16 @@ Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDiges
     out.position_hash = out.velocity_hash = 1469598103934665603ull;
     double cx = 0.0, cy = 0.0, cz = 0.0, speed = 0.0;
     for (std::size_t i = 0; i < ps.position.size(); ++i) {
+        const double coordinates[] = {ps.position[i].x, ps.position[i].y, ps.position[i].z};
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            if (!std::isfinite(coordinates[axis])) {
+                return Result::fail("particle position is not finite");
+            }
+            out.bounds_min[axis] = i == 0 ? coordinates[axis]
+                : std::min(out.bounds_min[axis], coordinates[axis]);
+            out.bounds_max[axis] = i == 0 ? coordinates[axis]
+                : std::max(out.bounds_max[axis], coordinates[axis]);
+        }
         out.position_hash = fnv(out.position_hash, ps.position[i]);
         cx += ps.position[i].x; cy += ps.position[i].y; cz += ps.position[i].z;
         if (i < ps.velocity.size()) {
@@ -127,6 +137,7 @@ Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDiges
         }
     }
     if (out.particles > 0) {
+        out.bounds_measured = true;
         const double n = static_cast<double>(out.particles);
         out.centroid[0] = cx / n; out.centroid[1] = cy / n; out.centroid[2] = cz / n;
         out.mean_speed = speed / n;

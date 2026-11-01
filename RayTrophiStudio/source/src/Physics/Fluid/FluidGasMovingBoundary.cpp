@@ -41,7 +41,7 @@ FluidGasMovingBoundaryStats buildFluidGasMovingBoundary(
     const SimulationGridDomainState& gas_state = states[gas_domain_index];
     const FluidSim::FluidGrid& gas = gasGrid(gas_state);
     const std::size_t cell_count = gas.getCellCount();
-    if (!gas_domain.enabled || !simulationDomainHasGas(gas_domain.type) ||
+    if (!gas_domain.enabled || !simulationDomainHasGas(gas_domain) ||
         !gas_state.valid || cell_count == 0 || !(gas.voxel_size > 0.0f)) {
         return stats;
     }
@@ -60,7 +60,7 @@ FluidGasMovingBoundaryStats buildFluidGasMovingBoundary(
         }
         const SimulationGridDomainDesc& fluid_domain = domains[domain_index];
         const SimulationGridDomainState& fluid_state = states[domain_index];
-        if (!fluid_domain.enabled || !simulationDomainHasLiquid(fluid_domain.type) ||
+        if (!fluid_domain.enabled || !simulationDomainHasLiquid(fluid_domain) ||
             !fluid_state.valid || fluid_state.particles.empty() ||
             !overlaps(fluid_domain, gas_domain)) {
             continue;

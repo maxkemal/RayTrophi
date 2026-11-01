@@ -1,0 +1,334 @@
+{
+  "signature": "d8402f4d834bab4804dac83af27f11de29949d42e4e7a59f6941a3f60d6c9852",
+  "fingerprint_strength": "summary_only",
+  "state_versions": {
+    "Physics Domain 1": 256
+  },
+  "context": {
+    "frame": 50,
+    "camera": {
+      "position": [
+        3.109327554702759,
+        0.528326153755188,
+        5.323207378387451
+      ],
+      "target": [
+        1.0304944515228271,
+        -0.3562266230583191,
+        2.047130584716797
+      ],
+      "up": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "fov": 40.0,
+      "focus_distance": 3.9795308113098145,
+      "aperture": 0.0,
+      "depth_of_field": false,
+      "effective_lens_radius": 0.0,
+      "lens_distortion": 0.0,
+      "auto_lens": false
+    },
+    "fields": [
+      {
+        "target": "matter:Physics Domain 1:gas",
+        "grid": [
+          86,
+          86,
+          86
+        ],
+        "snapshot_source": "host",
+        "density_hash": null,
+        "temperature_hash": null,
+        "active_cells": 63072,
+        "density_sum": 126.15447031729506,
+        "temperature_min_kelvin": 218.18667602539062,
+        "temperature_max_kelvin": 596.3455200195312,
+        "optical_bounds": {
+          "conservative_fallback": false,
+          "empty": false,
+          "end_voxel": [
+            86,
+            8,
+            64
+          ],
+          "first_voxel": [
+            0,
+            0,
+            8
+          ]
+        },
+        "visible": true
+      },
+      {
+        "target": "matter:Physics Domain 1:gas_source:14",
+        "grid": [
+          86,
+          86,
+          86
+        ],
+        "snapshot_source": "host",
+        "density_hash": null,
+        "temperature_hash": null,
+        "active_cells": 16789,
+        "density_sum": 358.4213047358225,
+        "temperature_min_kelvin": 282.16888427734375,
+        "temperature_max_kelvin": 480.4877014160156,
+        "optical_bounds": {
+          "conservative_fallback": false,
+          "empty": false,
+          "end_voxel": [
+            86,
+            32,
+            56
+          ],
+          "first_voxel": [
+            56,
+            0,
+            16
+          ]
+        },
+        "visible": true
+      }
+    ],
+    "materials": {
+      "matter:Physics Domain 1:gas": {
+        "absorption_coefficient": 1.4600000381469727,
+        "absorption_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "adaptive_stepping": true,
+        "anisotropy": 0.20600000023841858,
+        "back_anisotropy": -0.30000001192092896,
+        "blackbody_intensity": 38.194000244140625,
+        "color_ramp": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.20000000298023224,
+            0.10000000149011612,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ],
+          [
+            0.4000000059604645,
+            0.800000011920929,
+            0.20000000298023224,
+            0.0,
+            0.699999988079071
+          ],
+          [
+            0.699999988079071,
+            1.0,
+            0.6000000238418579,
+            0.10000000149011612,
+            0.8999999761581421
+          ],
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.800000011920929,
+            1.0
+          ]
+        ],
+        "density_curve": {
+          "enabled": true,
+          "values": [
+            0.0,
+            0.3983517289161682,
+            0.5679944753646851,
+            0.7287086844444275,
+            0.7912086248397827,
+            0.8626371622085571,
+            0.9251371622085571,
+            1.0
+          ]
+        },
+        "density_cutoff": 0.009999999776482582,
+        "density_multiplier": 11.111000061035156,
+        "density_power": 1.0,
+        "density_remap_high": 1.0,
+        "density_remap_low": 0.0,
+        "emission_color": [
+          1.0,
+          0.5,
+          0.10000000149011612
+        ],
+        "emission_exposure_ev": 0.0,
+        "emission_mode": 2,
+        "emission_saturation": 1.0,
+        "emission_strength": 0.0,
+        "exact_scatter_events": 4,
+        "internal_light_steps": 0,
+        "internal_light_stride": 8,
+        "lobe_mix": 0.699999988079071,
+        "max_scatter_events": 32,
+        "multi_scatter": 0.30000001192092896,
+        "ramp_enabled": false,
+        "random_walk": false,
+        "response_enabled": false,
+        "scatter_coefficient": 0.0,
+        "scatter_color": [
+          0.8999999761581421,
+          0.8999999761581421,
+          0.9200000166893005
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.800000011920929,
+        "shadow_stride": 4,
+        "temperature_max": 4150.0,
+        "temperature_min": 0.0,
+        "temperature_power": 1.0,
+        "temperature_scale": 0.31299999356269836,
+        "visible": true,
+        "voxel_step_multiplier": 0.5
+      },
+      "matter:Physics Domain 1:gas_source:14": {
+        "absorption_coefficient": 1.4600000381469727,
+        "absorption_color": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "adaptive_stepping": true,
+        "anisotropy": 0.20600000023841858,
+        "back_anisotropy": -0.30000001192092896,
+        "blackbody_intensity": 38.194000244140625,
+        "color_ramp": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.20000000298023224,
+            0.10000000149011612,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ],
+          [
+            0.4000000059604645,
+            0.800000011920929,
+            0.20000000298023224,
+            0.0,
+            0.699999988079071
+          ],
+          [
+            0.699999988079071,
+            1.0,
+            0.6000000238418579,
+            0.10000000149011612,
+            0.8999999761581421
+          ],
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.800000011920929,
+            1.0
+          ]
+        ],
+        "density_curve": {
+          "enabled": true,
+          "values": [
+            0.0,
+            0.3983517289161682,
+            0.5679944753646851,
+            0.7287086844444275,
+            0.7912086248397827,
+            0.8626371622085571,
+            0.9251371622085571,
+            1.0
+          ]
+        },
+        "density_cutoff": 0.009999999776482582,
+        "density_multiplier": 11.111000061035156,
+        "density_power": 1.0,
+        "density_remap_high": 1.0,
+        "density_remap_low": 0.0,
+        "emission_color": [
+          1.0,
+          0.5,
+          0.10000000149011612
+        ],
+        "emission_exposure_ev": 0.0,
+        "emission_mode": 2,
+        "emission_saturation": 1.0,
+        "emission_strength": 0.0,
+        "exact_scatter_events": 4,
+        "internal_light_steps": 0,
+        "internal_light_stride": 8,
+        "lobe_mix": 0.699999988079071,
+        "max_scatter_events": 32,
+        "multi_scatter": 0.30000001192092896,
+        "ramp_enabled": false,
+        "random_walk": false,
+        "response_enabled": false,
+        "scatter_coefficient": 0.0,
+        "scatter_color": [
+          0.8999999761581421,
+          0.8999999761581421,
+          0.9200000166893005
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.800000011920929,
+        "shadow_stride": 4,
+        "temperature_max": 4150.0,
+        "temperature_min": 0.0,
+        "temperature_power": 1.0,
+        "temperature_scale": 0.31299999356269836,
+        "visible": true,
+        "voxel_step_multiplier": 0.5
+      }
+    },
+    "gpu_boxes": [
+      {
+        "name": "Physics Domain 1 / Point Flow Source 4",
+        "aabb_min": [
+          3.2558140754699707,
+          0.0,
+          0.930232584476471
+        ],
+        "aabb_max": [
+          5.0,
+          1.860465168952942,
+          3.2558140754699707
+        ],
+        "is_active": 1,
+        "volume_type": 2,
+        "density_device_local": 1,
+        "temperature_device_local": 1
+      },
+      {
+        "name": "Physics Domain 1 / Vapor / Unattributed Gas",
+        "aabb_min": [
+          0.0,
+          0.0,
+          0.4651162922382355
+        ],
+        "aabb_max": [
+          5.0,
+          0.4651162922382355,
+          3.720930337905884
+        ],
+        "is_active": 1,
+        "volume_type": 2,
+        "density_device_local": 1,
+        "temperature_device_local": 1
+      }
+    ]
+  }
+}

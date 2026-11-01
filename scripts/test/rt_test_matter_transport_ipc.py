@@ -48,7 +48,7 @@ def main():
                         source_mode="point", position=[x, 0.6, 0], radius=0.0001,
                         fluid_substance=material, velocity=[vx, 0, 0],
                         fluid_velocity_spread=0.0, fluid_particles_per_second=60.0,
-                        use_particle_limit=True, max_emitted_particles=1,
+                        limit_parcels=True, parcels=1,
                         fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
             sources.append(name)
         if args.kernel_timings:
@@ -100,8 +100,8 @@ def main():
         client.call("flow_source.create", name=water_source, domain=domain, phase="liquid",
                     source_mode="point", position=[0.3, 0.6, 0], radius=0.0001,
                     fluid_substance="Water", velocity=[-4, 0, 0], fluid_velocity_spread=0.0,
-                    fluid_particles_per_second=60.0, use_particle_limit=True,
-                    max_emitted_particles=1, fluid_temperature_override=True,
+                    fluid_particles_per_second=60.0, limit_parcels=True,
+                    parcels=1, fluid_temperature_override=True,
                     fluid_temperature_kelvin=293.15)
         sources.append(water_source)
         saw_contact = False

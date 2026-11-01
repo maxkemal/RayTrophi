@@ -33,6 +33,8 @@ OUT = Path(tempfile.gettempdir()) / 'rt_matter_smoke'
 
 # name, script, args. Order: independent and fast first (NEXT_BUILD_CHECKS).
 ARMS = [
+    ('matter_lanes', 'rt_test_matter_lanes_ipc.py', []),
+    ('simulation_transport', 'rt_test_simulation_transport_ipc.py', []),
     ('substance', 'rt_test_substance_profiles_ipc.py', []),
     ('thermal_films', 'rt_test_thermal_films_ipc.py', []),
     ('phase3_freeze', 'rt_test_fluid_phase3_boundary_freeze_ipc.py', []),
@@ -46,6 +48,8 @@ ARMS = [
     ('grain_readiness', 'rt_h1_grain_runtime_ipc.py', ['--readiness-only']),
     ('seed_settle', 'rt_test_seed_settle_ipc.py', []),
     ('sleep_transfer', 'rt_test_grain_sleep_transfer_ipc.py', []),
+    ('grain_sleep', 'rt_test_grain_sleep_ipc.py', []),
+    ('ritter_flip', 'rt_test_ritter_flip_ipc.py', []),
     ('liquid_column', 'rt_test_liquid_column_ipc.py', []),
     ('p9_melt', 'rt_test_p9_matter_ipc.py', ['--arm', 'melt']),
     ('p9_floor', 'rt_test_p9_matter_ipc.py', ['--arm', 'floor']),
@@ -58,6 +62,7 @@ ARMS = [
     ('t0', 'rt_t0_matter_vs_specialized_perf.py', ['--rounds', '1']),
 ]
 H1 = ('h1_suite', 'rt_h1_grain_suite.py', [])
+LEGACY = ('legacy_project', 'rt_test_matter_legacy_roundtrip_ipc.py', [])
 # Per-batch tier (2026-10-20 rule: at most ~10 minutes). The rest run once,
 # at the end of the plan.
 QUICK = ('substance', 'thermal_films', 'phase3_freeze', 'fire_steam', 'grain_readiness',
@@ -127,9 +132,10 @@ def run(name, script, args, timeout):
                               env={**os.environ, 'PYTHONIOENCODING': 'utf-8'})
         text, code = proc.stdout + proc.stderr, proc.returncode
     except subprocess.TimeoutExpired as error:
-        text, code = (error.stdout or '') + '\nTIMEOUT', -1
+        text, code = error.stdout or '', -1
         if isinstance(text, bytes):
             text = text.decode('utf-8', 'replace')
+        text += '\nTIMEOUT'
     log.write_text(text, encoding='utf-8')
     gates = [m.groups() for m in map(GATE.match, text.splitlines()) if m]
     failed = [g for verdict, g in gates if verdict == 'FAIL']
@@ -151,6 +157,9 @@ def run(name, script, args, timeout):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--with-h1', action='store_true')
+    parser.add_argument('--with-legacy-project', action='store_true',
+                        help='also save/open a synthetic project in TEMP; '
+                             'changes the current project path; use a disposable empty project')
     parser.add_argument('--only', nargs='*')
     parser.add_argument('--timeout', type=int, default=1200, help='seconds per test')
     parser.add_argument('--quick', action='store_true',
@@ -158,13 +167,21 @@ def main():
     parser.add_argument('--restart-app', action='store_true',
                         help='restart RayTrophi first (closes the open scene)')
     args = parser.parse_args()
-    if args.restart_app:
-        restart_app()
-    arms = ARMS + ([H1] if args.with_h1 else [])
+    arms = ARMS + ([H1] if args.with_h1 else []) + (
+        [LEGACY] if args.with_legacy_project else [])
     if args.quick:
         arms = [a for a in arms if a[0] in QUICK]
-    if args.only:
+    if args.only is not None:
+        if not args.only:
+            parser.error('--only needs at least one test name')
+        unknown = set(args.only) - {a[0] for a in arms}
+        if unknown:
+            parser.error('unknown or disabled tests: ' + ', '.join(sorted(unknown)))
         arms = [a for a in arms if a[0] in args.only]
+    if not arms:
+        parser.error('no tests selected')
+    if args.restart_app:
+        restart_app()
     ok = sum(run(name, script, extra, args.timeout) for name, script, extra in arms)
     print(f'==== {ok}/{len(arms)} tests pass; logs: {OUT}', flush=True)
     sys.exit(0 if ok == len(arms) else 1)

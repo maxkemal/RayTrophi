@@ -30,6 +30,7 @@
 #include "ParticleSimulation.h"
 #include "Fluid/GasInventoryFrameCapture.h"
 #include "SimCache.h"
+#include "Fluid/MatterCacheRestore.h"
 #include "SimFrameCompress.h"
 #include "SimFrameCacheMemory.h"
 #include "MatterGridFrameCache.h"
@@ -1568,7 +1569,7 @@ struct SceneData {
                 for (auto& sys : particle_systems) {
                     if (!sys.runtime) continue;
                     for (const auto& gd : sys.runtime->gridDomainStates()) {
-                        if (!RayTrophiSim::simulationDomainHasLiquid(gd.type) || !gd.valid) continue;
+                        if (!RayTrophiSim::simulationDomainHasLiquid(gd) || !gd.valid) continue;
                         const auto& liquid_grid =
                             RayTrophiSim::Fluid::liquidGrid(gd);
                         build_for(gd.particles, liquid_grid, kDomainLevelSet);
@@ -2785,7 +2786,7 @@ struct SceneData {
                 // handled entirely by ParticleRenderBridge — the volume route
                 // must tear its contribution down or the two paths fight.
                 const bool is_fluid_domain =
-                    RayTrophiSim::simulationDomainHasLiquid(state.type);
+                    RayTrophiSim::simulationDomainHasLiquid(state);
                 const auto& render_grid = is_fluid_domain
                     ? RayTrophiSim::Fluid::liquidGrid(state)
                     : RayTrophiSim::Fluid::gasGrid(state);
@@ -2834,7 +2835,7 @@ struct SceneData {
                     // gas grid while the primary slot remains the liquid
                     // surface. The fog publisher recognizes Matter and reads
                     // the gas density directly instead of particle fog.
-                    if (domains[d].type == RayTrophiSim::SimulationDomainType::Matter) {
+                    if (RayTrophiSim::simulationDomainHasBothPhases(domains[d])) {
                         view_plan.fog = true;
                     }
                     syncDomainFogVolume(system, d, state, domains[d], view_plan, mgr,
@@ -3321,7 +3322,7 @@ struct SceneData {
                 }
                 const std::string volume_name =
                     system.name + " Domain " + std::to_string(d) +
-                    (RayTrophiSim::simulationDomainHasLiquid(state.type)
+                    (RayTrophiSim::simulationDomainHasLiquid(state)
                          ? " [Fluid NanoVDB]"
                          : " [Gas NanoVDB]");
 
@@ -3342,7 +3343,8 @@ struct SceneData {
                     // the viewport's interpretation of the SDF to live gas and
                     // makes the surface disappear on the next simulation frame.
                     // Matter gas owns the secondary fog slot instead.
-                    state.type == RayTrophiSim::SimulationDomainType::Gas &&
+                    RayTrophiSim::simulationDomainHasGas(state) &&
+                    !RayTrophiSim::simulationDomainHasLiquid(state) &&
                     dense_gpu_view.valid();
                 // Live Render Update OFF freezes the volume so the path tracer can
                 // converge instead of resetting forever. Always do the first upload
@@ -3440,6 +3442,10 @@ struct SceneData {
                     const int   up_nz    = refined_upload ? up_stats.eff_nz : render_grid.nz;
                     const float up_voxel = refined_upload ? up_stats.eff_voxel : render_grid.voxel_size;
                     const float* up_temp = density_ptr_override ? nullptr : temp_ptr;
+                    const float* up_flame = up_temp && wants_temp &&
+                        domain_shader->emission_response.wantsFlame() &&
+                        render_grid.interaction.size() == render_grid.temperature.size()
+                        ? render_grid.interaction.data() : nullptr;
 
                     // ── Volume whitewater: foam → THIS volume's temperature channel ──
                     // Trilinear-splat the foam particles into a density field at the
@@ -3476,7 +3482,8 @@ struct SceneData {
                         up_voxel,
                         density_ptr,
                         up_temp,
-                        nullptr);
+                        nullptr,
+                        up_flame);
                     // ★registerOrUpdateLiveVolume returns -1 on ANY exception inside the
                     // OpenVDB→NanoVDB conversion. Writing that -1 back would ORPHAN the
                     // still-valid previous binding: the next call gets prev_id=-1 and
@@ -4011,7 +4018,7 @@ struct SceneData {
         for (const auto& s : particle_systems) {
             if (!s.runtime) continue;
             for (const auto& d : s.runtime->gridDomains()) {
-                if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(d)) continue;
                 if (can_move) return true;        // dynamic/kinematic + any fluid => coupled
                 if (!have_sphere) return true;    // unresolved static pose => conservative
                 // Closest point on the domain AABB to the rest-sphere centre.
@@ -4078,7 +4085,7 @@ struct SceneData {
             return static_cast<uint64_t>(bits);
         };
         h = RayTrophiSim::Fluid::hashPhaseSettings(h, d);
-        if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) return h;
+        if (!RayTrophiSim::simulationDomainHasLiquid(d)) return h;
         h = mix(h, d.enabled ? 1ull : 0ull);
         h = mix(h, static_cast<uint64_t>(d.backend));
         h = mix(h, static_cast<uint64_t>(d.boundary_mode));
@@ -4419,8 +4426,8 @@ struct SceneData {
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
-                h = mix(h, f.use_particle_limit ? 1ull : 0ull);
-                h = mix(h, static_cast<uint64_t>(f.max_emitted_particles));
+                h = mix(h, f.use_mass_limit ? 1ull : 0ull);
+                h = mix(h, qf(f.max_emitted_mass_kg));
                 h = mix(h, f.keyframes.size());
                 for (const auto& [frame, k] : f.keyframes) {
                     h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(frame)));
@@ -4787,8 +4794,8 @@ struct SceneData {
                     RayTrophiSim::Fluid::substanceTag(f.fluid_substance)));
                 h = mix(h, f.use_time_limit ? 1ull : 0ull);
                 h = mix(h, qf(f.start_time)); h = mix(h, qf(f.end_time));
-                h = mix(h, f.use_particle_limit ? 1ull : 0ull);
-                h = mix(h, static_cast<uint64_t>(f.max_emitted_particles));
+                h = mix(h, f.use_mass_limit ? 1ull : 0ull);
+                h = mix(h, qf(f.max_emitted_mass_kg));
                 h = mix(h, f.keyframes.size());
                 for (const auto& [frame, k] : f.keyframes) {
                     h = mix(h, static_cast<uint64_t>(static_cast<int64_t>(frame)));
@@ -6319,6 +6326,12 @@ struct SceneData {
 
     bool restoreSimFrame(int frame, float fixed_dt = 1.0f / 24.0f) {
         RTPERF_FRAME_SCOPE("sim.timeline.restore_frame");
+        std::string ram_lane_error;
+        if (!RayTrophiSim::MatterCacheRestore::validateRamFrame(
+                particle_systems, sim_frame_cache_, frame, ram_lane_error)) {
+            SCENE_LOG_WARN("[SimCache] " + ram_lane_error);
+            return false;
+        }
         // Frame 0 is reconstructed from the rest pose rather than from a cache
         // entry: it is the one frame that is exactly reproducible, and resetting
         // here is what makes a loop-back put a fallen body back at the top.
@@ -6389,26 +6402,23 @@ struct SceneData {
         RTPERF_FRAME_SCOPE("sim.timeline.restore_frame_disk");
         if (!sim_cache_valid_ || sim_cache_dir_.empty()) return false;
         if (frame < sim_cache_start_frame_ || frame > sim_cache_end_frame_) return false;
+        std::vector<RayTrophiSim::MatterCacheRestore::DiskSystemFrame> disk_frames;
+        std::string disk_lane_error;
+        if (!RayTrophiSim::MatterCacheRestore::stageDiskFrame(particle_systems,
+                sim_cache_valid_system_ids_, sim_cache_dir_, frame, disk_frames, disk_lane_error)) {
+            sim_cache_valid_ = false;
+            SCENE_LOG_WARN("[SimCache] " + disk_lane_error);
+            return false;
+        }
 
         for (std::size_t i = 0; i < particle_systems.size(); ++i) {
             if (!particle_systems[i].runtime) continue;
             if (sim_cache_valid_system_ids_.count(particle_systems[i].id) > 0) {
-                std::vector<RayTrophiSim::SimulationGridDomainState> loaded;
-                std::vector<RayTrophiSim::MaterialStateFieldSnapshot> loaded_msf;
-                if (RayTrophiSim::SimCache::readSystemFrame(
-                        sim_cache_dir_, particle_systems[i].id, frame, loaded, loaded_msf)) {
-                    particle_systems[i].runtime->setGridDomainStates(std::move(loaded));
-                    // Burn/heat damage rides alongside the grid states; without
-                    // this a disk-replayed frame shows pristine geometry inside a
-                    // fully simulated fire.
-                    particle_systems[i].runtime->restoreMaterialStateFields(
-                        loaded_msf, simulation_world.compute());
-                    invalidateSimulationRenderBindings(particle_systems[i]);
-                } else {
-                    particle_systems[i].runtime->resetGridDomainStates();
-                    particle_systems[i].runtime->clear();
-                    invalidateSimulationRenderBindings(particle_systems[i]);
-                }
+                auto& loaded = disk_frames[i];
+                particle_systems[i].runtime->setGridDomainStates(std::move(loaded.domains));
+                particle_systems[i].runtime->restoreMaterialStateFields(
+                    loaded.material_fields, simulation_world.compute());
+                invalidateSimulationRenderBindings(particle_systems[i]);
             } else {
                 particle_systems[i].runtime->resetGridDomainStates();
                 particle_systems[i].runtime->clear();
@@ -6519,7 +6529,7 @@ struct SceneData {
             const auto& states = system.runtime->gridDomainStates();
             for (std::size_t i = 0; i < domains.size(); ++i) {
                 const auto& dom = domains[i];
-                if (!RayTrophiSim::simulationDomainHasLiquid(dom.type)) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(dom)) continue;
                 const bool has_recipe =
                     dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
                     dom.fluid_reseed_on_reset;
@@ -6543,7 +6553,7 @@ struct SceneData {
                 // only refilled a couple of frames in and its SurfaceSDF volume
                 // wasn't built/raymarched until ~frame 2 (the reported bug).
                 for (auto& dom : system.runtime->gridDomains()) {
-                    if (RayTrophiSim::simulationDomainHasLiquid(dom.type) &&
+                    if (RayTrophiSim::simulationDomainHasLiquid(dom) &&
                         (dom.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
                          dom.fluid_reseed_on_reset)) {
                         dom.fluid_pending_seed = true;
@@ -6636,7 +6646,7 @@ struct SceneData {
             const std::size_t n = std::min(domains.size(), system.domain_volumes.size());
             for (std::size_t d = 0; d < n; ++d) {
                 if (!system.domain_volumes[d]) continue;
-                if (!RayTrophiSim::simulationDomainHasLiquid(domains[d].type)) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(domains[d])) continue;
                 // The volume says whether it is a surface; the mode no longer
                 // does (a fog-default domain can carry an SDF substance).
                 if (!system.domain_volumes[d]->render_as_isosurface) continue;
@@ -6847,6 +6857,9 @@ struct SceneData {
             simulation_render_updated = true;
             return;
         }
+        // A panel edit moves no frame and raises no sync request, so a paused
+        // scene would keep gas merged under materials that no longer match.
+        if (matterFogMergeChanged()) force_simulation_render_sync_ = true;
         const bool force_resync = force_simulation_render_sync_;
         if (simulation_key_authoring_mode_ && !playing) {
             // Key editing and simulation playback are intentionally separated:
@@ -8470,6 +8483,7 @@ public:
     // edits them on the volume is overwritten on the next frame. Edits go here.
     // `is_fog_view` (optional) tells which of the domain's two volumes this is:
     // the surface slot or the fog slot (FluidDomainFogVolume.cpp).
+    bool matterFogMergeChanged();
     RayTrophiSim::SimulationGridDomainDesc* matterFogDomainOwningVolume(
         const VDBVolume* volume, bool* fog_view);
     RayTrophiSim::SimulationGridDomainDesc* fluidDomainOwningVolume(const VDBVolume* vol,
@@ -8480,7 +8494,7 @@ public:
             if (!system.runtime) continue;
             auto& domains = system.runtime->gridDomains();
             for (std::size_t d = 0; d < domains.size(); ++d) {
-                if (!RayTrophiSim::simulationDomainHasLiquid(domains[d].type)) continue;
+                if (!RayTrophiSim::simulationDomainHasLiquid(domains[d])) continue;
                 const bool surface = d < system.domain_volumes.size() &&
                                      system.domain_volumes[d].get() == vol;
                 const bool fog = d < system.domain_fog_volumes.size() &&

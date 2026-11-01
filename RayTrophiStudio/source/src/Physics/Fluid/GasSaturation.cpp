@@ -375,10 +375,10 @@ bool adjustGasSaturation(const SimulationGridDomainDesc& domain,
     state.gas_rain_stamp = stamp + 1u == 0u ? 1u : stamp + 1u;
     const double absorbed = state.gas_rain_absorbed_pending_kg;
     state.gas_rain_absorbed_pending_kg = 0.0;
-    const bool matter_thermal = domain.type == SimulationDomainType::Matter &&
+    const bool matter_thermal = simulationDomainHasBothPhases(domain) &&
         domain.fluid_params.thermal_liquid_enabled;
     if (!inputs.scale || !(inputs.scale->kelvin_per_unit > 0.0f) || !state.valid ||
-        !simulationDomainHasGas(state.type) || !state.gas_inventory_error.empty() ||
+        !simulationDomainHasGas(state) || !state.gas_inventory_error.empty() ||
         !(matter_thermal || state.gas_liquid_water_present)) {
         return true;
     }
@@ -407,7 +407,7 @@ bool adjustGasSaturation(const SimulationGridDomainDesc& domain,
     // Rain-out only into this domain's own liquid phase.
     float quantum = 0.0f;
     Vec3 rain_min(0.0f), rain_max(0.0f);
-    if (domain.type == SimulationDomainType::Matter) {
+    if (simulationDomainHasBothPhases(domain)) {
         const auto& liquid = liquidGrid(state);
         if (liquid.nx > 0 && liquid.voxel_size > 0.0f) {
             quantum = fluidParticleRestMassKg(vapour.tag, domainSubstance(domain.fluid_params),

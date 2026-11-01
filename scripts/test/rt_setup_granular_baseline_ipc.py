@@ -12,7 +12,7 @@ def main() -> None:
     client = RtIpc()
     try:
         domains = client.call("fluid.list_domains")["domains"]
-        fluid_domains = [row for row in domains if row.get("type") == "fluid"]
+        fluid_domains = [row for row in domains if bool(set(row.get("phases", [])) & {"liquid", "granular"})]
         if not fluid_domains:
             raise RuntimeError("no fluid domain is visible")
         name = fluid_domains[0]["name"]

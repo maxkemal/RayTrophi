@@ -313,13 +313,32 @@ public:
     // SHADER ASSIGNMENT
     // ═══════════════════════════════════════════════════════════════════════════
     
-    void setShader(std::shared_ptr<VolumeShader> shader) { volume_shader = shader; }
-    std::shared_ptr<VolumeShader> getShader() const { return volume_shader; }
+    // Panels and scripting edit what getShader returns. Renderers read volume_shader.
+    // Live volumes retain the domain's authored pointer across preset assignments.
+    // Merged gas renders with a separate neutral response because its density is mapped.
+    void setShader(std::shared_ptr<VolumeShader> shader) {
+        if (authored_shader && shader) {
+            *authored_shader = *shader;
+        } else {
+            volume_shader = shader;
+        }
+    }
+    std::shared_ptr<VolumeShader> getShader() const {
+        return authored_shader ? authored_shader : volume_shader;
+    }
+    void setPublishedShader(std::shared_ptr<VolumeShader> render,
+        std::shared_ptr<VolumeShader> authored) {
+        volume_shader = render;
+        authored_shader = authored;
+    }
     
     /**
      * @brief Get or create default shader
      */
     std::shared_ptr<VolumeShader> getOrCreateShader() {
+        if (authored_shader) {
+            return authored_shader;
+        }
         if (!volume_shader) {
             volume_shader = std::make_shared<VolumeShader>();
         }
@@ -490,6 +509,7 @@ public:
     void* getVelocityGridGPU() const;
     // Shader
     std::shared_ptr<VolumeShader> volume_shader;
+    std::shared_ptr<VolumeShader> authored_shader;
     
     // Density control
     float density_scale = 1.0f;

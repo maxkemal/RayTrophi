@@ -111,7 +111,7 @@ def check_source():
     header = (SOURCE / 'include/Fluid/MatterGrain.h').read_text(encoding='utf-8-sig')
     revision = int(re.search(r'kMatterGrainShaderRevision = (\d+);', header).group(1))
     assert revision >= 24 and f'const uint REVISION = {revision}u;' in shader
-    guard = shader.index('uint(history_blocks.length()) < 5u*pc.substep.y')
+    guard = shader.index('uint(history_blocks.length()) / 8u < pc.substep.y')
     assert guard < shader.index('uint entry = history_blocks[i];')
     assert 'if (overflow & 16u)' in host
     assert 'g_dynamic_contact' not in shader
@@ -126,8 +126,8 @@ def check_source():
     assert 'floatBitsToUint(max(pc.sleep.w,pc.step_contact.x))' in shader
     assert 'sleep_context[8] = 0u;' in host
     assert 'constants.sleep[0] = 0.0f;' in host
-    assert host.count('5 * capacity * sizeof(uint32_t)') == 2
-    assert 'pc.substep.y+4u*g_block' in shader
+    assert host.count('8 * capacity * sizeof(uint32_t)') == 2
+    assert 'pc.substep.y+7u*g_block' in shader
     assert 'g_history_dt = elapsed+pc.step_contact.x;' in shader
     assert 'float elapsed = was_sleeping ? clock_auxiliary : 0.0;' in shader
     assert '!was_sleeping && can_sleep && input_slow' in shader

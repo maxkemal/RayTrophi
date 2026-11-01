@@ -65,8 +65,8 @@ bool exchangeGasSurfaceGpu(
     float gas_ambient_normalized, float drying_scale, float dt,
     uint64_t event_id_base, MatterExchangeLedger& ledger) {
     if (!(dt > 0.0f) || !fluid_domain.enabled || !gas_domain.enabled ||
-        !simulationDomainHasLiquid(fluid_domain.type) ||
-        !simulationDomainHasGas(gas_domain.type) || !fluid.valid || !gas.valid ||
+        !simulationDomainHasLiquid(fluid_domain) ||
+        !simulationDomainHasGas(gas_domain) || !fluid.valid || !gas.valid ||
         fluid.particles.empty() || !gridsOverlap(liquidGrid(fluid), gasGrid(gas)) ||
         !(scale.kelvin_per_unit > 0.0f)) {
         return true; // No overlap is a legitimate no-op.

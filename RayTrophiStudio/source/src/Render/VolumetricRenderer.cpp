@@ -797,8 +797,13 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         if (shader) {
             GpuVolumeShaderData gs = shader->toGPU();
             shader->emission_response.pack(gv.emission_response);
+            shader->emission_response.packMask(gv.emission_mask);
+            shader->emission_response.packSootBurnout(gv.soot_burnout);
+            gv.temperature_gamma = shader->emission_response.temperature_gamma;
             shader->density.curve.pack(gv.density_curve);
             shader->quality.packSamplingPolicy(gv.density_curve);
+            shader->emission_response.packTemperaturePolicy(gv.density_curve,
+                live_data && live_data->filepath == "[LIVE SIMULATION]");
             gv.internal_light_steps = shader->quality.internal_light_steps;
             gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier * vdb->density_scale;
@@ -849,7 +854,8 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
             }
 
             // Temperature fallback for live/domain VDBs that only carry density.
-            if (!gv.temperature_grid && gv.density_grid && gs.emission_mode >= 2) {
+            if (!gv.temperature_grid && gv.density_grid && gs.emission_mode >= 2 &&
+                gv.density_curve[10] == 0.0f) {
                 gv.temperature_grid = gv.density_grid;
             }
         } else {
@@ -916,8 +922,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         if (shader) {
             const GpuVolumeShaderData gs = shader->toGPU();
             shader->emission_response.pack(gv.emission_response);
+            shader->emission_response.packMask(gv.emission_mask);
+            shader->emission_response.packSootBurnout(gv.soot_burnout);
+            gv.temperature_gamma = shader->emission_response.temperature_gamma;
             shader->density.curve.pack(gv.density_curve);
             shader->quality.packSamplingPolicy(gv.density_curve);
+            shader->emission_response.packTemperaturePolicy(gv.density_curve);
             gv.internal_light_steps = shader->quality.internal_light_steps;
             gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier;
@@ -965,7 +975,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
                 );
             }
 
-            if (!gv.temperature_grid && gv.density_grid &&
+            if (!gv.temperature_grid && gv.density_grid && gv.density_curve[10] == 0.0f &&
                 (shader->emission.mode == VolumeEmissionMode::Blackbody ||
                  shader->emission.mode == VolumeEmissionMode::ChannelDriven ||
                  shader->emission.color_ramp.enabled)) {
@@ -1005,8 +1015,12 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         if (shader) {
             const GpuVolumeShaderData gs = shader->toGPU();
             shader->emission_response.pack(gv.emission_response);
+            shader->emission_response.packMask(gv.emission_mask);
+            shader->emission_response.packSootBurnout(gv.soot_burnout);
+            gv.temperature_gamma = shader->emission_response.temperature_gamma;
             shader->density.curve.pack(gv.density_curve);
             shader->quality.packSamplingPolicy(gv.density_curve);
+            shader->emission_response.packTemperaturePolicy(gv.density_curve);
             gv.internal_light_steps = shader->quality.internal_light_steps;
             gv.internal_light_stride = shader->quality.internal_light_stride;
             gv.density_multiplier = gs.density_multiplier;

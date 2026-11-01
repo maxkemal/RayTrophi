@@ -20,6 +20,7 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Backend/vulkan_volume_types.h"
+#include "VolumeEmissionTransport.h"
 #include "Backend/vulkan_world_data.h"
 #include "VulkanBackend_Internal.h"
 #include "globals.h"
@@ -145,6 +146,34 @@ VulkanBackendAdapter::describeVolumeSlots() const {
             rows.push_back(std::move(r));
         }
     }
+    // Resolve the published address, not just the current VDB id: live ids can
+    // change while a backend still holds the preceding volume table.
+    if (m_device && shadow) {
+        auto residency = [&](uint64_t address) {
+            if (address == 0) {
+                return -1;
+            }
+            for (const auto& entry : m_vdbBuffers) {
+                if (entry.second.deviceAddress == address) {
+                    return m_device->bufferDeviceLocal(entry.second);
+                }
+            }
+            for (const auto& entry : m_vdbTempBuffers) {
+                if (entry.second.deviceAddress == address) {
+                    return m_device->bufferDeviceLocal(entry.second);
+                }
+            }
+            return -1;
+        };
+        for (auto& row : rows) {
+            if (row.slot < 0 || static_cast<std::size_t>(row.slot) >= shadow->size()) {
+                continue;
+            }
+            const auto& volume = (*shadow)[static_cast<std::size_t>(row.slot)];
+            row.density_device_local = residency(volume.vdb_grid_address);
+            row.temperature_device_local = residency(volume.vdb_temp_address);
+        }
+    }
     return rows;
 }
 
@@ -253,6 +282,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         }
         m_vdbTempBuffers.clear();
         m_vdbTempUploadedVersions.clear();
+        for (auto& [id, buf] : m_vdbFlameBuffers) {
+            (void)id;
+            if (buf.buffer) m_device->destroyBuffer(buf);
+        }
+        m_vdbFlameBuffers.clear();
+        m_vdbFlameUploadedVersions.clear();
         for (auto& [id, buf] : m_uvwBuffers) {
             (void)id;
             if (buf.buffer) m_device->destroyBuffer(buf);
@@ -352,6 +387,19 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             if (it->second.buffer) m_device->destroyBuffer(it->second);
             m_vdbTempUploadedVersions.erase(it->first);
             it = m_vdbTempBuffers.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = m_vdbFlameBuffers.begin(); it != m_vdbFlameBuffers.end(); ) {
+        if (volByID.find(it->first) == volByID.end()) {
+            if (!destroyedAny) {
+                m_device->waitIdle();
+                destroyedAny = true;
+            }
+            if (it->second.buffer) m_device->destroyBuffer(it->second);
+            m_vdbFlameUploadedVersions.erase(it->first);
+            it = m_vdbFlameBuffers.erase(it);
         } else {
             ++it;
         }
@@ -728,6 +776,9 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
         std::copy(src.density_curve, src.density_curve + 12, dst.density_curve);
+        std::copy(src.emission_mask, src.emission_mask + 4, dst.emission_mask);
+        std::copy(src.soot_burnout, src.soot_burnout + 3, dst._accel_reserved);
+        dst._accel_reserved[3] = src.temperature_gamma;
         dst.noise_scale = 1.0f;
         // Apply the authored density cutoff consistently on dense Vulkan,
         // NanoVDB Vulkan, OptiX and CPU. A Vulkan-only 1e-5 override retained a
@@ -749,14 +800,20 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // Procedural porosity rides _accel_reserved[0..2]. That block was
         // declared in all five ABI mirrors and never claimed, so the 576-byte
         // layout is unchanged and no other reader is disturbed.
-        dst._accel_reserved[0] = std::max(0.0f, src.pore_amount);
-        dst._accel_reserved[1] = std::max(1e-4f, src.pore_scale);
-        dst._accel_reserved[2] = std::max(0.0f, std::min(1.0f, src.pore_detail));
+        if (dst.source_type == 4) {
+            dst._accel_reserved[0] = std::max(0.0f, src.pore_amount);
+            dst._accel_reserved[1] = std::max(1e-4f, src.pore_scale);
+            dst._accel_reserved[2] = std::max(0.0f, std::min(1.0f, src.pore_detail));
+        } else {
+            // Gas never reads porosity, so soot burnout shares the block.
+            std::copy(src.soot_burnout, src.soot_burnout + 3, dst._accel_reserved);
+        }
         // Coordinate space claims [3], the last free float in that block.
         // Clamped rather than trusted: an out-of-range value would fall through
         // every branch in materialAnchor and return an uninitialised vector.
-        dst._accel_reserved[3] = static_cast<float>(
-            std::max(0, std::min(2, src.surface_coord_space)));
+        dst._accel_reserved[3] = dst.source_type == 4
+            ? static_cast<float>(std::max(0, std::min(2, src.surface_coord_space)))
+            : src.temperature_gamma;
         dst.shadow_stride = std::max(1, std::min(src.shadow_stride, 16));
         // Sync NanoVDB Host Buffer to Vulkan Device Buffer
         dst.volume_type = liveDenseGas ? 4 : 2;
@@ -782,10 +839,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         // Reaction field. Live gas only; a baked VDB has no combustion channel
         // and keeps the temperature-driven emission it always had.
         dst.flame_address = liveDenseGas ? src.dense_flame_address : 0;
-        // Keep live and cached gas on the same lighting estimator. The live-only
-        // emitter list adds a one-block Monte Carlo light weighted by the whole
-        // list, allowing bright scatter spikes in changing simulation frames.
-        // Direct volume emission and scene/sky scattering remain in the march.
+        // Retired live-only emitting-block NEE list. Keep these ABI words zero.
         dst.emissive_list_address = 0;
         dst.emissive_capacity = 0.0f;
         
@@ -812,12 +866,11 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 auto it = m_vdbBuffers.find(vdb_id);
                 bool needsUpload = false;
                 
-                // Over-allocate by 50% to absorb frame-to-frame NanoVDB growth.
-                // CPU_TO_GPU (host-visible, device-local BAR) memory lets uploadBuffer
-                // use vkMapMemory + memcpy directly — no staging buffer, no command
-                // buffer submit, no vkWaitForFences. This eliminates the per-frame
-                // GPU stall that was blocking fluid sim playback. NanoVDB data changes
-                // every frame anyway, so device-local-only has no advantage here.
+                // Over-allocate to absorb changing grid sizes, but keep the hot
+                // sampled tree in device-local memory. CPU_TO_GPU only requires
+                // HOST_VISIBLE|HOST_COHERENT: on discrete GPUs it can select a
+                // system-memory heap ahead of host-visible VRAM. Avoid paying
+                // PCIe latency at every NanoVDB lookup to save one upload copy.
                 const size_t allocSize = gridSize + (gridSize / 2);
                 if (it == m_vdbBuffers.end() || it->second.size < gridSize) {
                     if (it != m_vdbBuffers.end()) {
@@ -830,7 +883,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                         (uint32_t)VulkanRT::BufferUsage::STORAGE |
                         (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
                         0x0100 /* VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT - custom */);
-                    ci.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+                    ci.location = VulkanRT::MemoryLocation::GPU_ONLY;
                     VulkanRT::BufferHandle buf = m_device->createBuffer(ci);
                     m_vdbBuffers[vdb_id] = buf;
                     it = m_vdbBuffers.find(vdb_id);
@@ -874,7 +927,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                         (uint32_t)VulkanRT::BufferUsage::STORAGE |
                         (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
                         0x0100);
-                    ci2.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
+                    ci2.location = VulkanRT::MemoryLocation::GPU_ONLY;
                     m_vdbTempBuffers[vdb_id] = m_device->createBuffer(ci2);
                     it2 = m_vdbTempBuffers.find(vdb_id);
                     needsTempUpload = true;
@@ -906,6 +959,51 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                     m_vdbTempBuffers.erase(staleTemp);
                 }
                 m_vdbTempUploadedVersions.erase(vdb_id);
+            }
+            // Live reaction field. Unlike temperature a stale address is never
+            // kept: flame that outlives its publish would keep lighting smoke.
+            void* hostFlameGrid = vdbManager.getHostFlameGrid(vdb_id);
+            const size_t flameGridSize = vdbManager.getHostFlameGridSize(vdb_id);
+            if (hostFlameGrid && flameGridSize > 0) {
+                auto flame = m_vdbFlameBuffers.find(vdb_id);
+                bool needsFlameUpload = false;
+                if (flame == m_vdbFlameBuffers.end() || flame->second.size < flameGridSize) {
+                    if (flame != m_vdbFlameBuffers.end()) {
+                        m_device->waitIdle();
+                        m_device->destroyBuffer(flame->second);
+                    }
+                    VulkanRT::BufferCreateInfo ci3;
+                    ci3.size = flameGridSize + (flameGridSize / 2);
+                    ci3.usage = (VulkanRT::BufferUsage)(
+                        (uint32_t)VulkanRT::BufferUsage::STORAGE |
+                        (uint32_t)VulkanRT::BufferUsage::TRANSFER_DST |
+                        0x0100);
+                    ci3.location = VulkanRT::MemoryLocation::GPU_ONLY;
+                    m_vdbFlameBuffers[vdb_id] = m_device->createBuffer(ci3);
+                    flame = m_vdbFlameBuffers.find(vdb_id);
+                    needsFlameUpload = true;
+                }
+                auto flameVersion = m_vdbFlameUploadedVersions.find(vdb_id);
+                if (flameVersion == m_vdbFlameUploadedVersions.end() ||
+                    flameVersion->second != currentVersion) {
+                    needsFlameUpload = true;
+                }
+                if (flame->second.buffer) {
+                    if (needsFlameUpload) {
+                        synchronizeGridUpload();
+                        m_device->uploadBuffer(flame->second, hostFlameGrid, flameGridSize);
+                        m_vdbFlameUploadedVersions[vdb_id] = currentVersion;
+                    }
+                    dst.flame_address = flame->second.deviceAddress;
+                }
+            } else {
+                auto staleFlame = m_vdbFlameBuffers.find(vdb_id);
+                if (staleFlame != m_vdbFlameBuffers.end()) {
+                    synchronizeGridUpload();
+                    if (staleFlame->second.buffer) m_device->destroyBuffer(staleFlame->second);
+                    m_vdbFlameBuffers.erase(staleFlame);
+                }
+                m_vdbFlameUploadedVersions.erase(vdb_id);
             }
             if (dst.vdb_temp_address == 0) {
                 const auto existingTemp = m_vdbTempBuffers.find(vdb_id);
@@ -1260,6 +1358,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 continue;
             }
             Vec3 center = (worldMin + worldMax) * 0.5f;
+            tlas_changed = refreshVolumeStageMask(i) || tlas_changed;
             Vec3 sz(worldMax.x - worldMin.x, worldMax.y - worldMin.y, worldMax.z - worldMin.z);
             if (sz.x < 1e-4f) sz.x = 1e-4f;
             if (sz.y < 1e-4f) sz.y = 1e-4f;
@@ -1346,9 +1445,15 @@ void VulkanBackendAdapter::updateGasVolumes(const std::vector<GpuGasVolume>& vol
         dst.density_remap_low = src.density_remap_low;
         dst.density_remap_high = src.density_remap_high;
         std::copy(src.density_curve, src.density_curve + 12, dst.density_curve);
+        std::copy(src.emission_mask, src.emission_mask + 4, dst.emission_mask);
         dst.noise_scale = 1.0f;
         dst._reserved[0] = (src.density_pad > 0.0f) ? src.density_pad : 0.04f;
         dst._reserved[1] = src.emission_pad;
+        // The legacy texture-gas path left this block zero. Preserve that
+        // appearance unless the new coefficient convention is explicitly on.
+        if (volumeEmissionIndependent(src.emission_response[0])) {
+            std::copy(src.emission_response, src.emission_response + 5, dst._retired_cloud);
+        }
 
         dst.scatter_color[0] = src.scatter_color.x;
         dst.scatter_color[1] = src.scatter_color.y;
@@ -1485,7 +1590,8 @@ uint32_t packVolumeMarchLod(const VolumeMarchLod& lod) {
            ((field(lod.secondary_light_stride, 1, 16) - 1u) << 4) |
            ((field(lod.secondary_step_scale, 1, 16) - 1u) << 8) |
            (field(lod.secondary_max_steps, 0, 511) << 12) |
-           ((lod.secondary_radiance_cache ? 1u : 0u) << 21);
+           ((lod.secondary_radiance_cache ? 1u : 0u) << 21) |
+           (field(lod.camera_max_steps, 0, 511) << 22);
 }
 
 void VulkanBackendAdapter::refreshVolumeMarchLod() {

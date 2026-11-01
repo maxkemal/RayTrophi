@@ -4,6 +4,8 @@
 #include "Fluid/MatterFogFields.h"
 #include "Fluid/MatterFogSnapshot.h"
 #include "Fluid/MatterFogStreams.h"
+#include "Fluid/FogOpticalBounds.h"
+#include "Fluid/FogFieldDigest.h"
 #include "Fluid/MatterPhaseGrid.h"
 #include "MaterialStateField.h"
 
@@ -54,6 +56,8 @@ nlohmann::json fieldStats(const MatterFogField& field) {
         {"phase", gas ? "gas" : phaseName(field.key.phase)},
         {"carrier_count", field.carrier_count},
         {"active_cells", active}, {"density_sum", density_sum},
+        {"density_hash", fogFieldDigest(field.density)},
+        {"temperature_hash", fogFieldDigest(field.temperature_kelvin)},
         {"temperature_samples", temperature_samples},
         {"temperature_min_kelvin", nullptr}, {"temperature_max_kelvin", nullptr}
     };
@@ -137,6 +141,15 @@ Result inspectDomain(RayTrophiSim::ParticleSimulationSystem& runtime,
                 row["vdb_id"] = stream.vdb_id;
                 row["visible"] = stream.volume->visible;
                 row["name"] = stream.volume->name;
+                const auto appearance = desc.matter_fog_streams.find(field.key);
+                if (appearance != desc.matter_fog_streams.end()) {
+                    const auto bounds = fogOpticalBounds(field.density, field.grid.nx,
+                        field.grid.ny, field.grid.nz, appearance->second.shader.get(),
+                        stream.volume->density_scale);
+                    row["optical_bounds"] = {{"first_voxel", bounds.first},
+                        {"end_voxel", bounds.end}, {"empty", bounds.empty},
+                        {"conservative_fallback", bounds.conservative_fallback}};
+                }
                 any_published = true;
             }
         }
@@ -146,6 +159,7 @@ Result inspectDomain(RayTrophiSim::ParticleSimulationSystem& runtime,
         rows.push_back(std::move(row));
     }
     output = {{"domain", desc.name}, {"state_version", state.version},
+        {"gas_render_merge", matterGasMergeStatus(desc.matter_fog_streams)},
         {"render_connected", connected && any_published}, {"gas_snapshot", snapshot},
         {"grid", {grid.nx, grid.ny, grid.nz}},
         {"builder_peak_dense_bytes_bound", fields.peak_dense_bytes_bound},

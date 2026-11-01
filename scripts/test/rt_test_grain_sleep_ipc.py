@@ -61,7 +61,7 @@ def main():
         call('flow_source.create', name=source, domain=domain, enabled=False,
              phase='liquid', source_mode='point', fluid_substance='Sand',
              position=[0, 2, 0], radius=.0001, velocity=[0, 0, 0],
-             fluid_velocity_spread=0., use_particle_limit=True, max_emitted_particles=1,
+             fluid_velocity_spread=0., limit_parcels=True, parcels=1,
              use_time_limit=False, fluid_particles_per_second=200.,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
         source_created = True

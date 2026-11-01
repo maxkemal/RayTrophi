@@ -1,6 +1,42 @@
 # Birleşik madde — kalan yol haritası (2026-10-19)
 
-> **Durum:** AKTİF — kalan iş üç derlemede (D1–D3, aşağıda).  Kod partiler halinde ilerler. Test yalnız birkaç partiden sonra, tek bir toplu duman koşusuyla yapılır (`scripts/test/rt_matter_smoke.py`). Ayrıntılı tarih [BIRLESIK_MADDE_DOMAIN_TASARIMI.md](BIRLESIK_MADDE_DOMAIN_TASARIMI.md) dosyasında; bu dosya yalnız sırayı ve kuralı tutar.
+> **Güncel kaynak/kabul dökümü — 2026-10-29.** Kullanıcı önceliği: ana plan
+> kaynak işleri önce; hassas fizik ölçümleri ve ayarlama en son toplu turda.
+> Kapsam D2 + D3/T6; yeni yan iş eklenmez. Goal tamamlanmadı.
+>
+> Son kullanıcı derlemesinde seçili canlı tur **7/9 PASS**: şeritler 7/7,
+> Play/Pause/Live 8/8, substance, buz zemini 2/2, erime 4/4, MPM+DEM 5/5,
+> ilk okuma kabulü geçti. Water rest ve Ritter doğruluğu açık. FLIP 0.3
+> referansa 0.9'dan daha kötü çıktı; Water default .97 değiştirilmedi.
+>
+> Bu derlemeden sonraki C++ partisi: cache preflight/üst katman red sonucu,
+> iki loader'da kaynaklardan sonra göç, ortak saved-type parser, yüzey kolon
+> ihtiyacına göre dispatch ve nested-clock ceiling. Shader revision **33**
+> değişmedi. Ajan build/uygulama launch yapmaz. Kesin test sırası:
+> [NEXT_BUILD_CHECKS.md](NEXT_BUILD_CHECKS.md). Kaynak ayrıntısı:
+> [MATTER_FINAL_CLOSURE_HANDOFF.md](MATTER_FINAL_CLOSURE_HANDOFF.md),
+> T6 sözleşmesi: [MATTER_T6_LANES.md](MATTER_T6_LANES.md).
+
+## Gereksinim bazında kapanış durumu
+
+| Gereksinim | Kaynak / mevcut kanıt | Kapanmamış kapı |
+|---|---|---|
+| D2.1 buz collider | Flat ice-face modülü, winding/shared-node düzeltmesi; düz levha 2/2 canlı PASS | Son C++ partisi sonrası regresyon |
+| D2.2 ortak saat maliyeti | Continuum kendi CFL'inde; DEM iç döngüsü, GPU coupling, host dökümü, gereksiz kolon işinin kaldırılması ve ceiling düzeltmesi kaynakta | Yalnız temaslı DEM zaman daraltımı tam değil; 4-emitter hız kabulü verilmedi |
+| D2.3 jitter/sleep | Uyku ve transfer source/spec audit PASS; Sand p95 0.1056 mm/kare | Weak/strong impact, wet/large-N ve sleep-transfer canlı kabulü |
+| D2.4 FLIP | 0.3/0.9 Ritter karşılaştırması hazır ve koşuldu; 0.3 regresyon | Preset değişikliği kabul edilmedi; hassas karar en son |
+| D2.5 CPU PCG residual | CPU solver iterations/max/residual yayınlıyor | CPU canlı ölçüm kapısı |
+| D2.6 gerçek Play/Live | Ortak UI/Python/IPC core + cache state; 8/8 canlı PASS | Son C++ cache değişiklikleri sonrası regresyon |
+| D2.7 CPU RK2 | Destek dışı örneklemede kendi hızını kullanma kuralı kaynakta | CPU advection karşılaştırması / C++ testi |
+| D2.8 density enerji pompası | Hızdan ayrı position solve ve GPU restore kaynakta | Water rest hâlâ 4.31 mm/kare FAIL; volume/column ve hassas düzeltme en son |
+| D2.9 ilk okuma/erime | Preview koruması + manual claim; Snow sayısı, readback ve erime kütlesi PASS | Snow heat/volume dahil geniş son tur |
+| D3/T6 E1–E10 | Tek kimlik/şeritler, shared UI/API, kaynak/shader göçü, cache red ve ölü yol sökümü; 280 script AST audit | Yeni loader/cache partisinin build'i, legacy save/open, T0/render/cache rebake geniş kabulü |
+
+**Statik kaynak PASS, bütün ana planın tamamlandığı anlamına gelmez.** Yukarıdaki
+sayısal ve performans kapıları başarılı ölçüm veya gerekçeli nihai karar gerektirir.
+Önceki emisyon kabulü ayrı: kg bütçesi 6/6 ve ledger hatası 0; 4-emitter 204
+adımda withheld kaynak/domain 89.571863067 kg eşit, adım tutulmadı. Bu eski
+ölçüm yeni scheduler/kuvvet partisinin hız kanıtı değildir.
 
 ## Çalışma kuralı (2026-10-19 kararı)
 
@@ -308,6 +344,138 @@ plan sonunda bir kez koşulur.
   üçgenleri. Önce derinliği ölç: içerideki parselin yüzeye uzaklığı < 1
   voksel ise çözünürlük, daha derinse SDF/hücre işaretlemesi ya da
   parsel itme yolu hatalı.
+- **★★ Buhar envanteri ölçümü (2026-10-27, kullanıcının yeniden kurduğu 4
+  emitterli sahne `E:\rt_k\matter4emiter.rtp`, 5 s, dt 1/24, derlemesiz):**
+  `rt_probe_hot_particle_ipc.py` 600 K'yi geçen parçacık bulmadı. Ama gaz
+  hücresi okuması (`fluid.gas_cell_extremes`, 12 adımda bir) adayı doğruladı:
+  - Buhar zemin hücrelerinde (j = 0–1, hep aynı yer [46,0,42]) birikiyor ve
+    yükselmiyor: en yüksek **259 kg/m³ buhar**, 1 atm saf buharın **917
+    katı** (60. adım). Tv 1248 K olan bir hücre 70 adım yerinde kalıyor.
+  - O hücrenin hava sıcaklığı **776 K**; başka bir hücrede **813 K**. En
+    sıcak kaynak 600 K. 776.3 = 1248.1 × 18.015/28.97: okuyucu mol kesrini
+    1'e kırpıp hücreyi "saf buhar" sayıyor. Yani alan Tv'yi saf buharın
+    776 K'si kadar tutuyor; kaynağın üstü.
+  - ★ Yağmur sıcaklığı **11.4 K, 36 K, 84 K** (96.–120. adım, aynı hücre):
+    yağmur havuzunda enerji kütleden hızlı tükeniyor. Ayrı bir hata; 683 K
+    yağmurun tersi yönde aynı sınıf (kütle/enerji ayrışması).
+  - Buharlaşma toplamı 2.16 kg, yüzey yoğuşması 0.39 kg; gaz fazında sonda
+    0.10 kg buhar + 0.0005 kg sis + 0.04 kg yağmur. Kalanın ne kadarının
+    yağmurla sıvıya döndüğü ölçülmedi (`rained_kg` kare başı; toplanmadı),
+    yani defter kapanıyor mu henüz bilinmiyor.
+  - ⚠ Koşunun ~36. adımından sonrası **karışık adım durmuşken** alındı
+    (aşağıdaki madde). Buharlaşma o arada sürdü: taneler donmuş, ısı ve
+    kaynama koşuyor.
+  Sonraki adım (düzeltme yağmur/sis yoluna aittir): buhar neden zeminde
+  kalıyor (temas kaynaması buharı "en üst sıvı hücresinin bir üstüne"
+  koyma kuralını atlıyor mu, yoksa hücre katı/tane işaretli olduğu için
+  adveksiyon mu taşımıyor) ve envanterin basınç sınırı.
+- **★★ Karışık adım 1–1.5 s'de duruyor (2026-10-27, aynı sahne):** ortak
+  saat 322 alt adımla başlıyor, 25.–36. adım arasında "grain damping bound
+  needs 554 substeps per frame > max_substeps 512 at radius 0.025 m" ile
+  `step_held` oluyor ve bir daha kalkmıyor. Gerekli alt adım sayısının neden
+  322'den 554'e sıçradığı ölçülmedi (yarıçap aynı; aday: en hafif tane
+  kütlesi ya da temas sertliği koşu içinde değişiyor). Durunca taneler
+  donuyor ama ısı/kaynama/gaz koşmaya devam ediyor: "SIMULATION STOPPED"
+  yarım doğru. Kök muhtemelen D2-2 (ortak saati DEM sönüm sınırı
+  belirliyor).
+  ★ **ÖLÇÜLDÜ (2026-10-27, aynı sahne, adım adım, derlemesiz):**
+  - Kütle/sertlik tarafı sabit: `cfl_stiffness_mass_rate_s2` 32 adım boyunca
+    1.146e5 s⁻². En hafif tane ve temas sertliği sebep değil.
+  - Sıçrama **ıslanmayla birebir** başlıyor: gözenek suyu 21. adıma kadar 0;
+    22. adımda ilk su (0.3 g) → 23. adım 330, 25. adım 410, 28. adım 412,
+    31. adım 330, 32. adım 527 > 512 → durma. Monoton değil: toplam suyu
+    değil, **yeni ıslanan tanenin en küçük suyunu** izliyor. Aday kesinleşti:
+    köprü sertliği `capillary·R·2.1·√(R/V)`, V → 0'da sınırsız. Sahne
+    değerleriyle (R/r = 100, γ = 0.072) köprü, tane başına ~4 mg'ın altında
+    su taşıyan her tanede temas yayından sertleşiyor.
+  - **Temas bütçesi 4–6 kat fazla sayılıyor:** ölçülen en çok temas tane
+    başına 1–6, sınır 24 varsayıyor (ortak saatte kare yeniden koşulamadığı
+    için tam bütçe). Kuru haliyle bile 322 alt adımın büyük kısmı bu.
+  - MPM teması 32 adımda **0 olay** (kar parselleri 41 → 1291, hiç değmedi):
+    ortak saat bu sahnede yalnız DEM'in sınırını herkese dayatıyor.
+  - Durma mesajı yanlış kolu öneriyor: "Contact stiffness ≤ 18878 N/m".
+    Sınırı köprü koyuyorsa temas sertliğini düşürmek yetmez.
+  - Ölçüm aracı açığı (kural 1): rapor sınırlayan terimin ADINI veriyor
+    ("damping"), ama `k_effective`'in hangi bileşenden geldiğini, en küçük
+    köprü hacmini ve en hafif kütleyi vermiyor; ve tutulan karede rapor hiç
+    yazılmıyor (erken dönüş). Neden 554 istendiği bu yüzden yalnız
+    korelasyonla bulundu.
+  ✔ **YAZILDI, derlenmedi (2026-10-27, kullanıcı: "üçü tek derleme"; C++ +
+  shader rev 32):**
+  1. Rapor: `MatterGrainCflTerms` (en hafif kütle, temas/köprü/etkin sertlik
+     ve kaynağı, en küçük köprü hacmi, üç dt, varsayılan temas, istenen ve
+     koşan alt adım, sertlik ölçeği). Tane runtime'ında da tutuluyor; tutulan
+     kare `grain_report.cfl`'e geri kopyalanıyor. IPC:
+     `grain_diagnostics.cfl_terms`; panelde DEM satırının altında.
+  2. Köprü tabanı: `kMatterGrainBridgeMinVolumeFraction = 1e-4` (küçük tane
+     hacminin kesri; GLSL `BRIDGE_MIN_VOLUME_FRACTION`). Altında köprü yok;
+     host CFL aynı tabanı kullanıyor.
+  3. Aşınca donma yerine yay sertliği yumuşatılıyor (çeyrek oktav adımlı,
+     en az 1e-3); yalnız kararlılık sınırı için. Doğruluk ve yol sınırı
+     tavanda kesilip `capped` raporlanıyor. Sarı "GRAINS SOFTENED" pill'i.
+     Mesaj artık gerçekten sınırlayan yayı söylüyor.
+  4. Ortak saat (D2-2'nin ilk adımı): sürekli ortam kendi CFL + sıvı yol
+     sınırıyla adım atıyor; DEM her sürekli adımın içinde K kez dönüyor.
+     Sıvı bağlaşımı K iç adımın başındaki DEM indeksini alıyor (banka
+     paritesi + kare başı sıfırlama). Temas bütçesi ortak saatte de ölçülen
+     ipucu (+4, en az 12); aşılırsa kare yayımlanır ve `cfl_contacts_exceeded`.
+  Probe: `rt_probe_grain_clock_ipc.py`. Kontrol: NEXT_BUILD_CHECKS başı.
+  Açık: DEM'in yalnız temas olan tanelerde alt döngü yapması (D2-2'nin geri
+  kalanı) yazılmadı; K bütün tanelere uygulanıyor.
+  ✔ **DERLENDİ, CANLI kısmi (2026-10-27):** limit 512'de 120 adım durmadan;
+  köprü tabanda, sınırlayan yay `tangential`, varsayılan temas 12–14.
+  Limit 128'de DEM 0.5 yumuşatmayla 126'ya sığdı, ama domain yine durdu:
+  sürekli ortamı sıvı yol minimumu (yenileme başına < 0.1 tane yarıçapı)
+  132'ye zorluyordu; 512'de de bölünme `154 x 2` idi, kazanç gelmemişti.
+  ✔ YAZILDI (2. derleme, yalnız C++): o minimum söküldü (alan voksel
+  ızgarasında örnekleniyor, bayatlığını sürekli ortamın CFL'i sınırlıyor;
+  tane yolu DEM'in kendi sınırında, sıvı hızı dahil).
+  ✔ **2. derleme CANLI (2026-10-27):** limit 128'de birkaç kare sonra sarı
+  GRAINS SOFTENED ile devam ediyor, durmuyor (kullanıcı). Limit 512 probe:
+  bölünme **24 × 8** (önce 154 × 2, en başta 322 × 1), toplam DEM 192;
+  `grain_step_ms` 114 → 298 ms (önce 142 → 361; ~%18 az). Sürekli ortam
+  artık kar MPM dalga sınırında. Kalan maliyet DEM'in kendisinde ve host'ta:
+  sıradaki kaldıraç D2-2'nin ikinci yarısı (yalnız temastaki taneler) ve
+  `host_ms` dökümü — ölçülmedi.
+- **Emitter bütçesi ölçüde kör (kullanıcı sorusu, 2026-10-27, kod okuması):**
+  iki ayrı kapı var ve ayrım doğru: kaynak başına `use_particle_limit`
+  birikimli (buharlaşma kotayı geri vermez), domain `fluid_max_particles`
+  canlı sayıyla bir KAYNAK tavanı (MatterDomainSources.inl). Yanlış olan
+  tavana değince olan: buharlaşan/yanan/çıkan her parçacığın yeri dolduruluyor,
+  yani kaynak yazılan debisiyle değil **kayıp hızıyla** akıyor (seviye
+  tutucu) ve bunu hiçbir yer söylemiyor. İkincisi bütçe parçacık sayısında:
+  buharlaşma çoğu zaman `mass_fraction`'ı kısmen düşürür, %10'u kalmış parsel
+  tam sayılır, kütle ile sayı ayrışır. Öneri: tavan bağlayınca durum
+  çubuğunda uyarı + defterde kısılan kütle; kaynak sınırı kg cinsinden
+  (alan adı değişir, kural 5). Kullanıcı sahnesi: su 10k/s, sınırsız, tavan
+  100k — 5 s'de tavana ulaşmıyor, uzun koşuda ulaşır.
+  ✔ **YAZILDI, derlenmedi (2026-10-28, kullanıcı kararı):** kaynak sınırı kg
+  (`use_mass_limit`, `max_emitted_mass_kg`; eski sayı anahtarları IPC/Python'da
+  gerekçeli red, projede uyarıyla düşer, ön ayar aynı miktar yağa çevrildi).
+  Sıvı parseli doğumda kütlesini alıyor; kaynak başına
+  `total_emitted_mass_kg`, `parcel_mass_kg`, `withheld_mass_kg_step/_total`,
+  domain başına `emission_withheld_kg_step/_total`; defterde `emission` ve
+  `emission_withheld` (özet dengesine girmez). Sarı EMITTERS THROTTLED pill'i
+  + tek HUD. Test istemcisi `parcels=N` ile kg bütçesini kendisi boyutlar.
+  Test: `rt_test_emission_budget_ipc.py`. Kontrol: NEXT_BUILD_CHECKS başı.
+- **Bayat statik kontroller (2026-10-27):** `check_matter_grain_contracts`
+  (`const uint SLOTS = 24u`), iki sleep kontrolü
+  (`5 * capacity * sizeof(uint32_t)`), `check_matter_gpu_contracts`
+  (`stress_update` push 100 ≠ 68) bu partiden önce de FAIL. Pinler kodun
+  gerisinde kalmış.
+- **Durma uyarısı yalnız Solver panelinde (kullanıcı, 2026-10-27):**
+  `mixed_step_held` yalnız `MatterGrainControls.cpp` içindeki DEM satırında
+  görünüyor; kullanıcı başka paneldeyken simülasyonun durduğunu fark
+  etmiyor. IPC'de zaten var (`fluid.matter_models` → `step_held`, `status`).
+  ✔ YAZILDI, derlenmedi (kullanıcı isteği): `src/UI/SimulationHeldAlert.cpp`
+  — durum çubuğunda kalıcı kırmızı pill + durduğu anda bir kez HUD mesajı,
+  tıklayınca Physics sekmesi ve domain seçimi. Kontrol: NEXT_BUILD_CHECKS başı.
+- **Surface Dust çalışıyor, ama yalnız güçlü rüzgârda (kod okuması,
+  2026-10-27):** panel → `SolverParams` → CPU `addSurfaceDust` ve Vulkan
+  `sim_gas_surface_dust` bağlı. Zemin ve collider üstünde yatay hız
+  `Lift Threshold` (varsayılan 6 m/s) üstüne çıkınca toz kaldırır; patlama
+  eteği için yazılmış. Durgun sahnede hiç tetiklenmediği için ölü görünür.
+  Canlı ölçülmedi.
 - **Gaz render'ı tek malzemeyle düzenleniyor (kullanıcı, 2026-10-21):**
   domain'in gaz verisi tek bir hacim malzemesiyle çiziliyor. Gaz emitter
   nasıl görünüyorsa, kaynayan sudan çıkan buhar da öyle görünüyor (duman

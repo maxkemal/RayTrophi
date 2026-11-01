@@ -48,8 +48,8 @@ FluidMistPhaseExchangeStats transferMistToGas(
     MatterExchangeLedger& ledger) {
     FluidMistPhaseExchangeStats stats;
     if (!fluid_domain.enabled || !gas_domain.enabled ||
-        !simulationDomainHasLiquid(fluid_domain.type) ||
-        !simulationDomainHasGas(gas_domain.type) ||
+        !simulationDomainHasLiquid(fluid_domain) ||
+        !simulationDomainHasGas(gas_domain) ||
         !fluid_state.valid || !gas_state.valid ||
         fluid_state.particles.empty() ||
         !gridsOverlap(liquidGrid(fluid_state), gasGrid(gas_state))) {
@@ -232,8 +232,8 @@ FluidBoilingExchangeStats transferBoilingToGas(
     constexpr float kBubbleLifeSeconds = 0.75f;
     const Vec3 gravity = fluid_domain.fluid_params.gravity;
     if (!fluid_domain.enabled || !gas_domain.enabled ||
-        !simulationDomainHasLiquid(fluid_domain.type) ||
-        !simulationDomainHasGas(gas_domain.type) ||
+        !simulationDomainHasLiquid(fluid_domain) ||
+        !simulationDomainHasGas(gas_domain) ||
         !fluid_state.valid || !gas_state.valid ||
         fluid_state.particles.empty() ||
         !gridsOverlap(liquidGrid(fluid_state), gasGrid(gas_state))) {
@@ -472,7 +472,7 @@ bool advectGasPhaseInventory(
     SimulationGridDomainState& gas_state,
     const GridFluid::SolverParams& params,
     float dt) {
-    if (!gas_state.valid || !simulationDomainHasGas(gas_state.type) ||
+    if (!gas_state.valid || !simulationDomainHasGas(gas_state) ||
         !(dt > 0.0f) || !std::isfinite(dt)) {
         return false;
     }

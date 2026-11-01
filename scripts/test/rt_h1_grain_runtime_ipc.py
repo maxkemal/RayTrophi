@@ -135,7 +135,7 @@ def main():
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE,
              domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
              fluid_substance='Sand', position=[0, 1.5, 0], radius=.0001, velocity=[0, 0, 0],
-             fluid_velocity_spread=0., use_particle_limit=True, max_emitted_particles=1,
+             fluid_velocity_spread=0., limit_parcels=True, parcels=1,
              use_time_limit=True, start_time=0., end_time=.05,
              fluid_particles_per_second=200., fluid_temperature_override=True,
              fluid_temperature_kelvin=293.15)
@@ -209,7 +209,7 @@ def main():
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('flow_source.update', name=SOURCE, position=[0, .25, 0], radius=.16,
-                     velocity=[0, -.2, 0], max_emitted_particles=64,
+                     velocity=[0, -.2, 0], parcels=64,
                      fluid_particles_per_second=64*1.01*60, enabled=True, end_time=2/60)
                 control = call('sim.control_state')
                 runs = []
@@ -258,7 +258,7 @@ def main():
                  radius=.2, velocity=[0, 0, 0], fluid_velocity_spread=0.,
                  fluid_particles_per_second=24000., fluid_temperature_override=True,
                  fluid_temperature_kelvin=293.15, use_time_limit=True, start_time=0., end_time=.5,
-                 use_particle_limit=True, max_emitted_particles=12000)
+                 limit_parcels=True, parcels=12000)
             coexist_ready = True
             call('flow_source.update', name=SOURCE, domain=COEXIST, enabled=False)
             data['coexist'] = {}
@@ -292,8 +292,8 @@ def main():
                     # 1 s as the first ones fall away (live: 512 in 1/30 s never
                     # reached the count).
                     call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .45, 0],
-                         radius=.25, velocity=[0, 0, 0], max_emitted_particles=512,
-                         use_particle_limit=True, use_time_limit=True,
+                         radius=.25, velocity=[0, 0, 0], parcels=512,
+                         limit_parcels=True, use_time_limit=True,
                          fluid_particles_per_second=1024., start_time=0., end_time=1.,
                          enabled=True)
                     control = call('sim.control_state')
@@ -338,9 +338,9 @@ def main():
                      birth_saturation=0., wet_grains=True)
                 call('flow_source.update', name=WATER, position=[0, .2, 0], radius=.2,
                      fluid_particles_per_second=24000., start_time=0., end_time=.5,
-                     max_emitted_particles=12000, enabled=True)
+                     parcels=12000, enabled=True)
                 call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .6, 0], radius=.2,
-                     max_emitted_particles=256, fluid_particles_per_second=512., start_time=1.,
+                     parcels=256, fluid_particles_per_second=512., start_time=1.,
                      end_time=1.6, enabled=True)
                 control = call('sim.control_state')
                 absorb = []
@@ -388,10 +388,10 @@ def main():
                          fluid_coupling=True, volume_exclusion=exclude)
                     call('flow_source.update', name=WATER, position=[0, .2, 0], radius=.2,
                          fluid_particles_per_second=24000., start_time=0., end_time=.5,
-                         max_emitted_particles=12000, enabled=True)
+                         parcels=12000, enabled=True)
                     call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .6, 0],
-                         radius=.25, velocity=[0, 0, 0], max_emitted_particles=count,
-                         use_particle_limit=True, use_time_limit=True,
+                         radius=.25, velocity=[0, 0, 0], parcels=count,
+                         limit_parcels=True, use_time_limit=True,
                          fluid_particles_per_second=count/.5, start_time=1.5, end_time=2.5,
                          enabled=True)
                     control = call('sim.control_state')
@@ -465,7 +465,7 @@ def main():
                      volume_exclusion=not args.coexist_hydrostatic)
                 call('flow_source.update', name=WATER, enabled=True)
                 call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .15, 0],
-                     radius=.0001, velocity=[0, 0, 0], max_emitted_particles=1,
+                     radius=.0001, velocity=[0, 0, 0], parcels=1,
                      use_time_limit=True, start_time=1.5, end_time=1.55, enabled=True)
                 control = call('sim.control_state')
                 arm = {'coupled': coupled, 'samples': []}
@@ -545,12 +545,12 @@ def main():
             call('fluid.set_grain_settings', domain=COEXIST, stiffness_n_m=100000.,
                  restitution=restitution_of(8., 100000.), twisting_friction=.1, fluid_coupling=True)
             call('flow_source.update', name=SOURCE, domain=COEXIST, position=[0, .35, 0],
-                 radius=.28, velocity=[0, 0, 0], max_emitted_particles=256,
+                 radius=.28, velocity=[0, 0, 0], parcels=256,
                  fluid_particles_per_second=256*1.01*60, use_time_limit=True,
                  start_time=0., end_time=1/30, enabled=True)
             call('flow_source.update', name=WATER, position=[0, .6, 0], radius=.12,
                  fluid_particles_per_second=12000., start_time=1., end_time=1.5,
-                 max_emitted_particles=6000, enabled=True)
+                 parcels=6000, enabled=True)
             control = call('sim.control_state')
             pour = []
             data['coexist']['pour'] = pour
@@ -615,7 +615,7 @@ def main():
                 rest = .025-5e-5
                 call('flow_source.update', name=SOURCE,
                      position=[-math.sin(angle)*rest, 1.+math.cos(angle)*rest, 0], radius=.0001,
-                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
+                     velocity=[0, 0, 0], parcels=1, end_time=.05, enabled=True)
                 control = call('sim.control_state')
                 samples = []
                 data['static_hold'][f'{ratio:.4f}'] = {'samples': samples}
@@ -689,7 +689,7 @@ def main():
                      contact_resolution=args.repose_contact_resolution,
                      packing_fraction=.6, max_substeps=4096)
                 call('flow_source.update', name=SOURCE, domain=REPOSE, position=[0, .6, 0], radius=.08,
-                     velocity=[0, -.5, 0], max_emitted_particles=count, use_particle_limit=True,
+                     velocity=[0, -.5, 0], parcels=count, limit_parcels=True,
                      fluid_particles_per_second=count/2.5, start_time=0., end_time=30., enabled=True)
                 control = call('sim.control_state')
                 arm = {'label': label, 'radius': radius, 'mu_r': mu_r, 'count': count, 'samples': []}
@@ -790,7 +790,7 @@ def main():
                 configure(resolution)
                 y0 = .2
                 call('flow_source.update', name=SOURCE, position=[0, y0, 0], radius=.0001,
-                     velocity=[0, 0, 0], max_emitted_particles=1, end_time=.05, enabled=True)
+                     velocity=[0, 0, 0], parcels=1, end_time=.05, enabled=True)
                 ys = []
                 for step in range(1, 271):
                     call('fluid.step', dt=1/600)
@@ -811,7 +811,7 @@ def main():
             for resolution in resolutions:
                 configure(resolution)
                 call('flow_source.update', name=SOURCE, position=[0, .25, 0], radius=.16,
-                     velocity=[0, -.2, 0], max_emitted_particles=64,
+                     velocity=[0, -.2, 0], parcels=64,
                      fluid_particles_per_second=64*1.01*60, enabled=True, end_time=2/60)
                 control = call('sim.control_state')
                 arm = {'contact_resolution': resolution, 'samples': []}
@@ -854,7 +854,7 @@ def main():
                  twisting_friction=.1,
                  restitution=restitution_of(args.settle_normal_damping, 100000.))
             call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
-                 max_emitted_particles=256, fluid_particles_per_second=256*1.01*60,
+                 parcels=256, fluid_particles_per_second=256*1.01*60,
                  start_time=0., end_time=1/30, enabled=True)
             control = call('sim.control_state')
             data['settle_profile'] = call('fluid.grain_settings', domain=DOMAIN)
@@ -988,7 +988,7 @@ def main():
                 call('fluid.reset')
                 call('fluid.set_grain_settings', domain=DOMAIN, stiffness_n_m=100000.)
                 call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
-                     max_emitted_particles=count, fluid_particles_per_second=count*1.01*60,
+                     parcels=count, fluid_particles_per_second=count*1.01*60,
                      start_time=0., end_time=1/30, velocity=[0, 0, 0], enabled=True)
                 control = call('sim.control_state')
                 arm = {'count': count, 'samples': []}
@@ -1065,7 +1065,7 @@ def main():
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
             call('flow_source.update', name=SOURCE, position=[0, .25, 0], radius=.16,
-                 velocity=[0, -.2, 0], max_emitted_particles=64,
+                 velocity=[0, -.2, 0], parcels=64,
                  fluid_particles_per_second=64*1.01/dt, enabled=True, end_time=dt*2)
             control = call('sim.control_state')
             pile = []

@@ -543,8 +543,12 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
 
 RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     RayTrophiSim::SimulationGridDomainDesc d;
+    d.type = RayTrophiSim::SimulationDomainType::LegacyGas;
+    d.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
     if (j.contains("name")) d.name = j["name"];
-    if (j.contains("type")) d.type = (RayTrophiSim::SimulationDomainType)j["type"];
+    if (j.contains("type")) {
+        d.type = RayTrophiSim::parseSavedSimulationDomainType(j.at("type").get<int>());
+    }
     if (j.contains("backend")) d.backend = (RayTrophiSim::SimulationDomainBackend)j["backend"];
     if (j.contains("source_mode")) d.source_mode = (RayTrophiSim::SimulationGridDomainSourceMode)j["source_mode"];
     if (j.contains("boundary_mode")) d.boundary_mode = (RayTrophiSim::SimulationGridDomainBoundaryMode)j["boundary_mode"];
@@ -840,8 +844,8 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["use_time_limit"] = fs.use_time_limit;
     j["start_time"] = fs.start_time;
     j["end_time"] = fs.end_time;
-    j["use_particle_limit"] = fs.use_particle_limit;
-    j["max_emitted_particles"] = fs.max_emitted_particles;
+    j["use_mass_limit"] = fs.use_mass_limit;
+    j["max_emitted_mass_kg"] = fs.max_emitted_mass_kg;
     return j;
 }
 
@@ -876,8 +880,8 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("use_time_limit")) fs.use_time_limit = j["use_time_limit"];
     if (j.contains("start_time")) fs.start_time = j["start_time"];
     if (j.contains("end_time")) fs.end_time = j["end_time"];
-    if (j.contains("use_particle_limit")) fs.use_particle_limit = j["use_particle_limit"];
-    if (j.contains("max_emitted_particles")) fs.max_emitted_particles = j["max_emitted_particles"];
+    if (j.contains("use_mass_limit")) fs.use_mass_limit = j["use_mass_limit"];
+    if (j.contains("max_emitted_mass_kg")) fs.max_emitted_mass_kg = j["max_emitted_mass_kg"];
     return fs;
 }
 
@@ -1705,7 +1709,6 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     for (const auto& dj : rtj["grid_domains"]) {
                         system.runtime->addGridDomain(jsonToDomain(dj));
                     }
-                    system.runtime->synchronizeGridDomainsNow(); // Force initial state synchronization
                 }
 
                 // Flow Sources
@@ -1715,6 +1718,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                         system.runtime->addFlowSource(jsonToFlowSource(fsj));
                     }
                 }
+                // Legacy source phases migrate with their owning domain type.
+                system.runtime->synchronizeGridDomainsNow();
             }
 
             // Sync other run-time domain containers parallel lists to match grid domains count

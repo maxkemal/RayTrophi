@@ -1,4 +1,6 @@
 #include "Backend/LensWeatherGpu.h"
+#include "VolumeTemperatureMapping.h"
+#include "VolumeEmissionTransport.h"
 #include "renderer.h"
 #include "Animation/RigPoseView.h"
 #include <SDL_image.h>
@@ -5322,8 +5324,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     }
 
                     float d_remapped = std::max(0.0f, (density - remap_low) / remap_range);
-                    float d = d_remapped * density_scale;
-                    float sigma_s = d * scattering_intensity;
+                    const float emissionPolicy = shader
+                        ? shader->emission_response.policyFlags() : 0.0f;
+                    float d = d_remapped *
+                        volumeEmissionSamplingMultiplier(density_scale, emissionPolicy);
+                    float sigma_s = volumeEmissionOpticalDensity(d, density_scale, emissionPolicy) *
+                        scattering_intensity;
                     float cutoff_threshold = shader ? shader->density.cutoff_threshold : 0.04f;
                     if (cutoff_threshold <= 0.0f) cutoff_threshold = 0.04f;
                     float scatter_keep = std::clamp((sigma_s * actual_step_size) / cutoff_threshold, 0.0f, 1.0f);
@@ -5333,7 +5339,9 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             first_vol_t = t;
                         }
 
-                        float sigma_a = d * absorption_coeff;
+                        float sigma_a =
+                            volumeEmissionOpticalDensity(d, density_scale, emissionPolicy) *
+                            absorption_coeff;
                         float sigma_t = sigma_s + sigma_a;
                         // Match the GPU optical-depth budget: dense samples use
                         // shorter segments while sparse/empty regions retain the
@@ -5454,7 +5462,10 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         // --- EMISSION ---
                         Vec3f step_emission(0.0f);
                         if (emission_mode == VolumeEmissionMode::Constant) {
-                            step_emission = emission_color * emission_intensity * d;
+                            step_emission = shader
+                                ? shader->emission_response.evaluate(emission_color,
+                                    d, density_scale, 1.0f, 1.0f, emission_intensity, false)
+                                : emission_color * emission_intensity * d;
                         } else if (emission_mode == VolumeEmissionMode::Blackbody || emission_mode == VolumeEmissionMode::ChannelDriven) {
                             float temp_val = mgr.hasTemperatureGrid(live_vol_id) ? mgr.sampleTemperatureCPU(live_vol_id, local_p.x, local_p.y, local_p.z) : density;
                             
@@ -5463,17 +5474,23 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             float t_max = shader ? shader->emission.temperature_max : 1500.0f;
 
                             t_max = std::max(t_max, t_min + 1.0f);
-                            float authored_kelvin = temp_val > 20.0f
-                                ? std::clamp(temp_val, t_min, t_max)
-                                : t_min + std::clamp(temp_val, 0.0f, 1.0f) *
-                                  (t_max - t_min);
+                            const auto thermal = volumeMapTemperature(temp_val, temp_val,
+                                t_min, t_max, volumeResolveTemperatureUnits(
+                                    shader ? shader->emission_response.temperature_units : 0,
+                                    mgr.getVolume(live_vol_id) &&
+                                    mgr.getVolume(live_vol_id)->filepath == "[LIVE SIMULATION]"),
+                                mgr.hasTemperatureGrid(live_vol_id));
+                            float authored_kelvin = thermal.kelvin;
                             float kelvin = authored_kelvin * t_scale;
                             float t_ramp = std::clamp(
                                 ((authored_kelvin - t_min) / (t_max - t_min)) * t_scale,
                                 0.0f, 1.0f);
 
                             if (shader && shader->emission.color_ramp.enabled) {
-                                step_emission = toVec3f(shader->emission.color_ramp.sample(t_ramp)) * d * shader->emission.blackbody_intensity;
+                                step_emission = shader->emission_response.evaluate(
+                                    toVec3f(shader->emission.color_ramp.sample(t_ramp)), d,
+                                    density_scale, thermal.normalized, 1.0f,
+                                    shader->emission.blackbody_intensity, true);
                             } else {
                                 // T^4 radiance; blackbody_to_rgb is a chromaticity
                                 // only. See the note in volume_closesthit.rchit -
@@ -5481,10 +5498,18 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                 // else, and every thick plume clips to white.
                                 const float radiance = std::pow(
                                     std::clamp(authored_kelvin / t_max, 0.0f, 1.0f), 4.0f);
-                                step_emission = toVec3f(blackbody_to_rgb(kelvin)) * radiance * d * (shader ? shader->emission.blackbody_intensity : 10.0f);
+                                step_emission = shader ? shader->emission_response.evaluate(
+                                    toVec3f(blackbody_to_rgb(kelvin)), d, density_scale,
+                                    thermal.normalized, radiance, shader->emission.blackbody_intensity, true)
+                                    : toVec3f(blackbody_to_rgb(kelvin)) * radiance * d * 10.0f;
+                            }
+                            if (!thermal.valid) {
+                                step_emission = Vec3f(0.0f);
                             }
                         }
 
+                        step_emission = shader ? shader->emission_response.finish(step_emission, d,
+                            density_scale, emission_mode != VolumeEmissionMode::Constant) : step_emission;
                         // --- VOLUMETRIC INTEGRATION: Multi-Scattering Stable (Parity with GPU) ---
                         Vec3f albedo = (volume_albedo);
                         Vec3f source =
@@ -5493,7 +5518,8 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             step_emission;
                         
                         // Stable Analytical Integration over step
-                        Vec3f step_color = source * ((1.0f - step_transmittance) );
+                        Vec3f step_color = volumeEmissionIntegrate(source, step_emission, sigma_t,
+                            advance_step, emissionPolicy);
                         accumulated_vol_color += step_color * current_transparency;
 
                         current_transparency *= step_transmittance;

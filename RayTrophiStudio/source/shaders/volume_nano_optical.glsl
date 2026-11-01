@@ -1,3 +1,5 @@
+#include "volume_density_channels.glsl"
+
 #ifndef VOLUME_NANO_OPTICAL_GLSL
 #define VOLUME_NANO_OPTICAL_GLSL
 
@@ -123,19 +125,29 @@ float volumeNanoRemap(VkVolumeInstance vol, float raw) {
         vol.density_curve);
 }
 
+float volumeNanoSupportRemap(VkVolumeInstance vol, float raw) {
+    float normalized = max((raw - vol.density_remap_low) /
+        max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    return volumeDensitySupport(normalized, vol.density_curve, vol._retired_cloud[0]);
+}
+
+vec2 volumeNanoFinishChannels(VkVolumeInstance vol, float raw) {
+    if (isnan(raw) || isinf(raw)) return vec2(0.0);
+    float normalized = max((raw - vol.density_remap_low) /
+        max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    return volumeDensityChannels(normalized, vol.density_curve,
+        max(vol._reserved[0], 0.0), vol.density_multiplier, vol._retired_cloud[0]);
+}
+
 float volumeNanoFinishDensity(VkVolumeInstance vol, float raw) {
-    if (isnan(raw) || isinf(raw)) return 0.0;
-    float density = volumeNanoRemap(vol, raw);
-    float cutoff = max(vol._reserved[0], 0.0);
-    if (density <= cutoff) return 0.0;
-    float fade = cutoff > 0.0 ? smoothstep(cutoff, cutoff * 2.0, density) : 1.0;
-    return density * vol.density_multiplier * fade;
+    return volumeNanoFinishChannels(vol, raw).x;
 }
 
 // Exact same eight corners and optical transform as sampleDensityAccMode.
 // Call only for a NanoVDB field without material density noise or a graph.
-float volumeNanoDensity(VkVolumeInstance vol, VolumeNanoRay ray, float t,
-    pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc) {
+float volumeNanoDensityChannels(VkVolumeInstance vol, VolumeNanoRay ray, float t,
+    pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc, out float emissionDensity) {
+    emissionDensity = 0.0;
     if (vol.density_multiplier == 0.0) return 0.0;
     vec3 local = ray.localOrigin + ray.localDirection * t;
     if (any(lessThan(local, vol.aabb_min)) || any(greaterThan(local, vol.aabb_max))) {
@@ -150,7 +162,15 @@ float volumeNanoDensity(VkVolumeInstance vol, VolumeNanoRay ray, float t,
                        mix(low.z, low.w, f.x), f.y),
                    mix(mix(high.x, high.y, f.x),
                        mix(high.z, high.w, f.x), f.y), f.z);
-    return volumeNanoFinishDensity(vol, raw);
+    vec2 channels = volumeNanoFinishChannels(vol, raw);
+    emissionDensity = channels.y;
+    return channels.x;
+}
+
+float volumeNanoDensity(VkVolumeInstance vol, VolumeNanoRay ray, float t,
+    pnanovdb_buf_t buf, inout pnanovdb_readaccessor_t acc) {
+    float unusedEmission;
+    return volumeNanoDensityChannels(vol, ray, t, buf, acc, unusedEmission);
 }
 
 float nanoEmptyIndexStep(VkVolumeInstance vol, vec3 index, vec3 direction,
@@ -189,7 +209,7 @@ float nanoEmptyIndexStep(VkVolumeInstance vol, vec3 index, vec3 direction,
         float rawMax = pnanovdb_read_float(buf, pnanovdb_leaf_get_max_address(
             PNANOVDB_GRID_TYPE_FLOAT, buf, acc.leaf));
         if (isnan(rawMax) || isinf(rawMax) ||
-            !(volumeNanoRemap(vol, max(rawMax, 1e-6)) <= max(vol._reserved[0], 0.0))) {
+            !(volumeNanoSupportRemap(vol, max(rawMax, 1e-6)) <= max(vol._reserved[0], 0.0))) {
             // 3: this whole leaf holds optical density. Callers may remember it.
             skipKind = 3u;
             return baseStep;
@@ -201,7 +221,7 @@ float nanoEmptyIndexStep(VkVolumeInstance vol, vec3 index, vec3 direction,
         float rawTile = pnanovdb_read_float(buf,
             pnanovdb_readaccessor_get_value_address(PNANOVDB_GRID_TYPE_FLOAT, buf, acc, ijk));
         if (isnan(rawTile) || isinf(rawTile) ||
-            !(volumeNanoRemap(vol, rawTile) <= max(vol._reserved[0], 0.0))) return baseStep;
+            !(volumeNanoSupportRemap(vol, rawTile) <= max(vol._reserved[0], 0.0))) return baseStep;
         boxMin = floor(index / float(dim)) * float(dim);
         // The final voxel slab interpolates with the next tile/leaf. It must
         // retain normal sampling, even when the current tile is exactly zero.

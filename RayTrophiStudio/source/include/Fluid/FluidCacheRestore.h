@@ -25,7 +25,7 @@ inline void prepareFluidCacheRestore(
         // Render-only disk caches predate the secondary Matter liquid grid.
         // Recover its layout from the baked logical box and authored phase
         // settings; the default empty grid has a misleading 1-metre voxel.
-        if (state.valid && state.type == SimulationDomainType::Matter &&
+        if (state.valid && simulationDomainHasBothPhases(state) &&
             !state.matter_liquid_active && state.matter_liquid_grid.nx == 0 &&
             i < domains.size()) {
             const auto layouts = resolvePhaseLayouts(

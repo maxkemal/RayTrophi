@@ -69,8 +69,8 @@ def main():
              name=SOURCE, domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
              fluid_substance='Sand', position=[0, .6, 0], radius=.26, velocity=[0, 0, 0], fluid_velocity_spread=0.,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15,
-             use_time_limit=True, start_time=0., end_time=.35, use_particle_limit=True,
-             max_emitted_particles=360, fluid_particles_per_second=1200)
+             use_time_limit=True, start_time=0., end_time=.35, limit_parcels=True,
+             parcels=360, fluid_particles_per_second=1200)
         source_ready = True
         for label, voxel, dt, load in [('reference', .1, 1 / 60, 1),
                                        ('dt_half', .1, 1 / 120, 1),
@@ -85,7 +85,7 @@ def main():
             call('fluid.set_pore_exchange', domain=DOMAIN, enabled=True, porosity=.35,
                  wet_response_enabled=False, wet_appearance_enabled=False)
             call('flow_source.update', name=SOURCE, enabled=True,
-                 max_emitted_particles=count, fluid_particles_per_second=count / .3)
+                 parcels=count, fluid_particles_per_second=count / .3)
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
             control = call('sim.control_state')

@@ -50,6 +50,8 @@ void mfConfigureSharedWalk(vec3 origin, vec3 direction) {
     }
     VkVolumeInstance a = volumes.v[mfCacheIndexA];
     VkVolumeInstance b = volumes.v[mfCacheIndexB];
+    if ((a.emission_mode > 0 && volumeEmissionIndependent(a._retired_cloud[0])) ||
+        (b.emission_mode > 0 && volumeEmissionIndependent(b._retired_cloud[0]))) return;
     if (a.source_type != 6 || b.source_type != 6 ||
         !volumeNanoIndexEligible(a, mfCacheBufferA) ||
         !volumeNanoIndexEligible(b, mfCacheBufferB) ||
@@ -102,9 +104,9 @@ float mfSharedCameraSpan(float t, float remaining, float baseStep) {
     float slope = 0.0;
     slope += boundA.x * mfSharedExtinction.x;
     slope += boundB.x * mfSharedExtinction.y;
-    if ((mfSharedVolumeA.emission_mode != 0 && volumeNanoRemap(mfSharedVolumeA, boundA.y) >
+    if ((mfSharedVolumeA.emission_mode != 0 && volumeNanoSupportRemap(mfSharedVolumeA, boundA.y) >
             max(mfSharedVolumeA._reserved[0], 0.0)) ||
-        (mfSharedVolumeB.emission_mode != 0 && volumeNanoRemap(mfSharedVolumeB, boundB.y) >
+        (mfSharedVolumeB.emission_mode != 0 && volumeNanoSupportRemap(mfSharedVolumeB, boundB.y) >
             max(mfSharedVolumeB._reserved[0], 0.0))) {
         span = min(span, baseStep);
     }

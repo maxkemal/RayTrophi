@@ -32,7 +32,10 @@ vec3 mfEmissionSource(uint index, vec3 emissionColor, float emissionStrength,
     vec3 source = vec3(0.0);
     if (volumes.v[index].emission_mode == 1) {
         source = volumeEmissionSource(emissionColor, 1.0, density, 1.0,
-            emissionStrength, volumes.v[index]._retired_cloud, false);
+            emissionStrength, volumes.v[index]._retired_cloud, false, volumes.v[index].density_multiplier) *
+            volumeEmissionMaskFactor(density, volumeEmissionSamplingMultiplier(
+                volumes.v[index].density_multiplier, volumes.v[index]._retired_cloud[0]),
+                volumes.v[index].emission_mask);
     } else if (volumes.v[index].emission_mode >= 2) {
         // Thermal mode uses the authored ramp/blackbody strength. Graph emission
         // color/intensity never affected volumeEmissionAt's thermal branch.
@@ -43,6 +46,8 @@ vec3 mfEmissionSource(uint index, vec3 emissionColor, float emissionStrength,
 
 // Shared by camera and extinction-only shadows. No emission/temperature tree.
 MfTerms mfExtinctionTerms(uint index, MfOpticalResponse response, float density) {
+    density = volumeEmissionOpticalDensity(density, volumes.v[index].density_multiplier,
+        volumes.v[index]._retired_cloud[0]);
     MfTerms term = MfTerms(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
     float scatterCoefficient = response.scatterCoefficient;
     term.anisotropy = response.anisotropy;
@@ -66,11 +71,18 @@ MfTerms mfExtinctionTerms(uint index, MfOpticalResponse response, float density)
 
 // Canonical optical response shared by graph evaluation and aligned cell walks.
 MfTerms mfOpticalTerms(uint index, MfOpticalResponse response, vec3 position,
-    float density, float temperature, bool includeEmission) {
+    float density, float emissionDensity, float temperature, bool includeEmission) {
     MfTerms term = mfExtinctionTerms(index, response, density);
+    if (includeEmission) {
+        float soot = volumeSootScale(volumes.v[index], position, emissionDensity, temperature);
+        term.extinction *= soot;
+        term.scattering *= soot;
+        term.scatterRate *= soot;
+    }
     vec3 source = includeEmission ? mfEmissionSource(index, response.emissionColor,
-        response.emissionStrength, position, density, temperature) : vec3(0.0);
-    term.emission = source * term.extinction;
+        response.emissionStrength, position, emissionDensity, temperature) : vec3(0.0);
+    term.emission = volumeEmissionCoefficient(source, term.extinction,
+        volumes.v[index]._retired_cloud[0]);
     return term;
 }
 
@@ -94,7 +106,8 @@ MfTerms mfSharedEvaluate(uint index, vec3 position, float density, bool includeE
             ? mfSharedTemperature(index, position) : 0.0;
         vec3 source = mfEmissionSource(index, volumes.v[index].emission_color,
             max(volumes.v[index].emission_intensity, 0.0), position, density, temperature);
-        term.emission = source * term.extinction;
+        term.emission = volumeEmissionCoefficient(source, term.extinction,
+            volumes.v[index]._retired_cloud[0]);
     }
     return term;
 }

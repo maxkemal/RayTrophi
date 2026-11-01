@@ -572,7 +572,16 @@ void releaseGasInventoryDomainsForBackendChange(
     // Validate every mirror before destroying any device owner.
     std::vector<GasInventoryHostImage> mirrors;
     if (!captureGasInventoryHostImages(states, mirrors)) {
-        throw std::runtime_error("gas inventory backend switch readback failed");
+        // The backend goes away regardless, so its owners cannot survive this
+        // call. Nothing above it catches: hold the domains instead of exiting.
+        for (auto& state : states) {
+            holdGasInventory(state, "gas inventory unreadable at backend switch; reset required");
+            state.gas_inventory_device.reset();
+        }
+        for (auto& bank : buffers) {
+            releaseGasInventoryGpu(compute, bank.gas_inventory);
+        }
+        return;
     }
     for (std::size_t index = 0; index < states.size(); ++index) {
         states[index].gas_phase_mass_kg.swap(mirrors[index].mass);

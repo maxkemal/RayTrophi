@@ -43,7 +43,7 @@ bool advectGasInventoryGpu(SimulationGridDomainState& state,
     const std::size_t cells = grid.getCellCount();
     if (compute.backendType() != ComputeBackendType::VulkanCompute ||
         !compute.supportsDispatch() || !state.valid ||
-        !simulationDomainHasGas(state.type) || !(dt > 0.0f) || !std::isfinite(dt) ||
+        !simulationDomainHasGas(state) || !(dt > 0.0f) || !std::isfinite(dt) ||
         grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || !(grid.voxel_size > 0.0f) ||
         cells > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return false;

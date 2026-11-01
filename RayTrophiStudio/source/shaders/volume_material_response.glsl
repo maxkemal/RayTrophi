@@ -1,22 +1,23 @@
 #ifndef RT_VOLUME_MATERIAL_RESPONSE
 #define RT_VOLUME_MATERIAL_RESPONSE
 
+#include "../include/VolumeTemperatureMapping.h"
+#include "../include/VolumeEmissionMask.h"
+#include "../include/VolumeEmissionTransport.h"
+
 // Uniform response is deliberately opt-in, preserving old scene equations.
 vec3 volumeEmissionSource(vec3 color, float legacyRadiance, float density,
-                          float temperatureU, float strength, float response[5],
-                          bool temperatureDriven) {
-    if (response[0] < 0.5) {
-        return color * legacyRadiance * density * strength;
-    }
-    if (density <= 0.0) {
-        return vec3(0.0);
-    }
+    float temperatureU, float strength, float response[5], bool temperatureDriven,
+    float multiplier) {
+    float inputDensity = volumeEmissionInputDensity(density, multiplier, response[0]);
     float luminance = dot(color, vec3(0.2126, 0.7152, 0.0722));
-    color = max(mix(vec3(luminance), color, response[4]), vec3(0.0));
-    float thermal = temperatureDriven
-        ? (temperatureU > 0.0 ? pow(clamp(temperatureU, 0.0, 1.0), response[1]) : 0.0)
-        : 1.0;
-    return color * thermal * pow(density, response[2]) * strength * exp2(response[3]);
+    return vec3(
+        volumeEmissionChannel(color.r, luminance, legacyRadiance, inputDensity,
+            temperatureU, strength, response, temperatureDriven),
+        volumeEmissionChannel(color.g, luminance, legacyRadiance, inputDensity,
+            temperatureU, strength, response, temperatureDriven),
+        volumeEmissionChannel(color.b, luminance, legacyRadiance, inputDensity,
+            temperatureU, strength, response, temperatureDriven));
 }
 
 // Poisson probability of at least two interactions along the measured sky

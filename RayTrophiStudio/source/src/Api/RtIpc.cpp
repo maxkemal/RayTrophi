@@ -5,6 +5,8 @@
 #include "RtVolumeMaterialBindings.h"
 #include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
+#include "RtMatterLanes.h"
+#include "RtSimulationTransport.h"
 #include "RtMatterModels.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
@@ -390,8 +392,13 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"grain_birth_saturation", s.grain_birth_saturation},
         {"use_time_limit", s.use_time_limit},
         {"start_time", s.start_time}, {"end_time", s.end_time},
-        {"use_particle_limit", s.use_particle_limit},
-        {"max_emitted_particles", s.max_emitted_particles}};
+        {"use_mass_limit", s.use_mass_limit},
+        {"max_emitted_mass_kg", s.max_emitted_mass_kg},
+        {"total_emitted_particles", s.total_emitted_particles},
+        {"total_emitted_mass_kg", s.total_emitted_mass_kg},
+        {"parcel_mass_kg", s.parcel_mass_kg},
+        {"withheld_mass_kg_step", s.withheld_mass_kg_step},
+        {"withheld_mass_kg_total", s.withheld_mass_kg_total}};
 }
 
 // Overlay whichever fields the request mentions onto an existing info struct.
@@ -429,8 +436,17 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("use_time_limit", use_time_limit);
     RT_FS_FIELD("start_time", start_time);
     RT_FS_FIELD("end_time", end_time);
-    RT_FS_FIELD("use_particle_limit", use_particle_limit);
-    RT_FS_FIELD("max_emitted_particles", max_emitted_particles);
+    // The count budget became a mass budget (2026-10-27); a count is not an
+    // amount of material, so it is refused rather than converted.
+    for (const char* retired : {"use_particle_limit", "max_emitted_particles"}) {
+        if (p.contains(retired)) {
+            throw std::runtime_error(std::string(retired) + " was retired: the source budget "
+                "is mass now (use_mass_limit, max_emitted_mass_kg). flow_source.list reports "
+                "total_emitted_mass_kg and total_emitted_particles to size it.");
+        }
+    }
+    RT_FS_FIELD("use_mass_limit", use_mass_limit);
+    RT_FS_FIELD("max_emitted_mass_kg", max_emitted_mass_kg);
 #undef RT_FS_FIELD
     if (p.contains("position")) s.position = vec3FromJson(p.at("position"), s.position);
     if (p.contains("velocity")) s.velocity = vec3FromJson(p.at("velocity"), s.velocity);
@@ -775,6 +791,8 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
             {"rain_parcels", info.rain_parcels},
             {"fog_autoconverted_kg", info.fog_autoconverted_kg},
             {"rain_absorbed_kg", info.rain_absorbed_kg},
+            {"emission_withheld_kg_step", info.emission_withheld_kg_step},
+            {"emission_withheld_kg_total", info.emission_withheld_kg_total},
             {"gas_rain_kg", info.gas_rain_kg},
             {"gas_rain_cells", info.gas_rain_cells},
             {"gas_foreign_kg", info.gas_foreign_kg},
@@ -1075,6 +1093,12 @@ json dispatchMethod(const std::string& method, const json& params) {
     // owns the topology change, unlike the read-only tool catalogue above.
     json mesh_edit_result;
     nlohmann::json phase_grid_result;
+    if (dispatchSimulationTransportIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        phase_grid_result)) return phase_grid_result;
+    if (dispatchMatterLanesIpc(method, params,
+        [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+        phase_grid_result)) return phase_grid_result;
     if (dispatchMatterModelIpc(method, params,
         [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
         phase_grid_result)) return phase_grid_result;
@@ -2312,6 +2336,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"focus_distance", s.focus_distance}, {"aperture", s.aperture},
                         {"depth_of_field", s.depth_of_field},
                         {"effective_lens_radius", s.effective_lens_radius},
+                        {"lens_distortion", s.lens_distortion},
+                        {"auto_lens", s.auto_lens},
                         {"auto_exposure", s.auto_exposure},
                         {"use_physical_exposure", s.use_physical_exposure},
                         {"iso_preset_index", s.iso_preset_index},
@@ -2372,6 +2398,10 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "camera.set_depth_of_field") {
         bool v = requireBool(params, "enabled");
         return enqueueResult([v](UIContext&) { return rtapi::setCameraDepthOfField(v); });
+    }
+    if (method == "camera.set_lens_distortion") {
+        float k = requireFloat(params, "lens_distortion");
+        return enqueueResult([k](UIContext&) { return rtapi::setCameraLensDistortion(k); });
     }
 
     // ── Viewport navigation / pivot lock ────────────────────────────────
@@ -4055,6 +4085,56 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"pressure_min_height", m.pressure_min_height}};
         });
     }
+    if (method == "gas.field_stats") {
+        std::string domain = requireString(params, "domain");
+        float threshold = params.value("density_threshold", 0.01f);
+        int bins = optionalInt(params, "bins", 64);
+        return enqueueQuery([domain, threshold, bins](UIContext&) {
+            rtapi::GasFieldStats s;
+            rtapi::Result r = rtapi::measureGasFields(domain, threshold, bins, s);
+            if (!r.ok) return json{{"__error", r.error}};
+            const auto percentiles = [](const rtapi::GasFieldPercentiles& p) {
+                return json{{"min", p.minimum}, {"p1", p.p1}, {"p5", p.p5}, {"p25", p.p25},
+                            {"p50", p.p50}, {"p75", p.p75}, {"p95", p.p95}, {"p99", p.p99},
+                            {"max", p.maximum}, {"mean", p.mean}};
+            };
+            return json{{"measured", s.measured}, {"threshold", s.threshold},
+                        {"active_cells", s.active_cells},
+                        {"density", percentiles(s.density)},
+                        {"density_histogram", s.density_histogram},
+                        {"flame_measured", s.flame_measured},
+                        {"burning_cells", s.burning_cells},
+                        {"flame", percentiles(s.flame)},
+                        {"temperature_measured", s.temperature_measured},
+                        {"temperature_kelvin", percentiles(s.temperature_kelvin)},
+                        {"temperature_histogram", s.temperature_histogram},
+                        {"emission_measured", s.emission_measured},
+                        {"ramp_coordinate", percentiles(s.ramp_coordinate)},
+                        {"ramp_histogram", s.ramp_histogram},
+                        {"emission_luminance", percentiles(s.emission_luminance)},
+                        {"voxel_optical_depth", percentiles(s.voxel_optical_depth)},
+                        {"emitting_cells", s.emitting_cells},
+                        {"limited_cells", s.limited_cells}};
+        });
+    }
+    if (method == "gas.fit_temperature_range") {
+        std::string domain = requireString(params, "domain");
+        rtapi::GasTemperatureFitRequest request;
+        request.low_percentile = params.value("low_percentile", request.low_percentile);
+        request.high_percentile = params.value("high_percentile", request.high_percentile);
+        request.floor_kelvin = params.value("floor_kelvin", request.floor_kelvin);
+        request.median_target = params.value("median_target", request.median_target);
+        request.fit_gamma = params.value("fit_gamma", request.fit_gamma);
+        return enqueueQuery([domain, request](UIContext&) {
+            rtapi::GasTemperatureFit f;
+            rtapi::Result r = rtapi::fitGasTemperatureRange(domain, request, f);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"fitted", f.fitted}, {"temperature_min", f.temperature_min},
+                        {"temperature_max", f.temperature_max},
+                        {"temperature_gamma", f.temperature_gamma},
+                        {"median_before_gamma", f.median_before_gamma}, {"cells", f.cells}};
+        });
+    }
     if (method == "gas.get_shader") {
         std::string domain = requireString(params, "domain");
         return enqueueQuery([domain](UIContext&) {
@@ -4152,6 +4232,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"position_hash", hex(dg.position_hash)}, {"velocity_hash", hex(dg.velocity_hash)},
                 {"centroid", nlohmann::json::array({dg.centroid[0], dg.centroid[1], dg.centroid[2]})},
                 {"mean_speed", dg.mean_speed},
+                {"bounds_measured", dg.bounds_measured},
+                {"bounds_min", nlohmann::json::array({dg.bounds_min[0], dg.bounds_min[1], dg.bounds_min[2]})},
+                {"bounds_max", nlohmann::json::array({dg.bounds_max[0], dg.bounds_max[1], dg.bounds_max[2]})},
                 {"whitewater_particles", dg.whitewater_particles},
                 {"whitewater_position_hash", hex(dg.whitewater_position_hash)}};
         });
@@ -5338,7 +5421,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"secondary_light_stride", l.secondary_light_stride},
                         {"secondary_step_scale", l.secondary_step_scale},
                         {"secondary_max_steps", l.secondary_max_steps},
-                        {"secondary_radiance_cache", l.secondary_radiance_cache}};
+                        {"secondary_radiance_cache", l.secondary_radiance_cache},
+                        {"camera_max_steps", l.camera_max_steps}};
         });
     }
     if (method == "render.set_volume_march_lod") {
@@ -5351,6 +5435,8 @@ json dispatchMethod(const std::string& method, const json& params) {
         const int sec = optionalInt(params, "secondary_light_stride", 0);
         const int scale = optionalInt(params, "secondary_step_scale", 0);
         const int maxSteps = optionalInt(params, "secondary_max_steps", 0);
+        const bool hasCameraMax = params.contains("camera_max_steps");
+        const int cameraMax = optionalInt(params, "camera_max_steps", 0);
         const bool hasCache = params.contains("secondary_radiance_cache");
         const bool cache = hasCache ? requireBool(params, "secondary_radiance_cache") : true;
         return enqueueResult([=](UIContext&) {
@@ -5360,6 +5446,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             if (hasScale) l.secondary_step_scale = scale;
             if (hasMax) l.secondary_max_steps = maxSteps;
             if (hasCache) l.secondary_radiance_cache = cache;
+            if (hasCameraMax) l.camera_max_steps = cameraMax;
             return rtapi::setVolumeMarchLod(l);
         });
     }
@@ -5696,6 +5783,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"volume_type", s.volume_type},
                         {"has_density", s.has_density},
                         {"has_temperature", s.has_temperature},
+                        {"density_device_local", s.density_device_local},
+                        {"temperature_device_local", s.temperature_device_local},
                         {"emission_mode", s.emission_mode},
                         {"color_ramp_enabled", s.color_ramp_enabled},
                         {"blackbody_intensity", s.blackbody_intensity},

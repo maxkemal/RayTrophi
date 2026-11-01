@@ -5,13 +5,14 @@ import random
 import re
 import unittest
 from pathlib import Path
+from volume_shader_source import read_volume_shader
 from types import SimpleNamespace
 
 SHADERS = Path(__file__).resolve().parents[2] / "RayTrophiStudio/source/shaders"
 
 
 def shader(name):
-    return (SHADERS / name).read_text(encoding="utf-8")
+    return read_volume_shader(SHADERS / name)
 
 
 def actual_inert(**patch):
@@ -22,9 +23,10 @@ def actual_inert(**patch):
     """
     values = dict(source_type=0, volume_type=2, density_multiplier=1.0,
                   scatter_coefficient=1.0, absorption_coefficient=0.0,
-                  emission_mode=0, _reserved=[0.0, 0.0])
+                  emission_mode=0, _reserved=[0.0, 0.0], _retired_cloud=[0.0]*5)
     values.update(patch)
-    env = {"v": SimpleNamespace(**values)}
+    env = {"v": SimpleNamespace(**values),
+           "volumeEmissionIndependent": lambda flags: bool(int(flags) & 2)}
 
     def evaluate(expr):
         expr = expr.replace("&&", " and ").replace("||", " or ")
@@ -77,6 +79,13 @@ class EmptyVolumeRejection(unittest.TestCase):
             self.assertFalse(actual_inert(density_multiplier=weak))
             self.assertFalse(actual_inert(scatter_coefficient=weak))
 
+    def test_independent_coefficient_survives_zero_smoke_multiplier(self):
+        for flags, mode in itertools.product((2.0, 3.0), (1, 2, 3)):
+            self.assertFalse(actual_inert(density_multiplier=0, emission_mode=mode,
+                                         _retired_cloud=[flags, 1, 1, 0, 1]))
+        self.assertTrue(actual_inert(density_multiplier=0, emission_mode=0,
+                                    _retired_cloud=[3, 1, 1, 0, 1]))
+
     def test_nearest_solid_sdf_and_other_gas_survive_any_visit_order(self):
         # Independent traversal oracle: an inert domain encloses a foreground
         # smoke layer, a SurfaceSDF boundary and a farther triangle. Rejecting
@@ -94,26 +103,29 @@ class EmptyVolumeRejection(unittest.TestCase):
         self.assertLess(gate, intersection.index("reportIntersectionEXT(reportT"))
         self.assertIn("!volumeOpticallyInert(v)", shader("volume_overlap_selection.glsl"))
         self.assertIn("volumeOpticallyInert(gas)", shader("volume_overlap_selection.glsl"))
-        self.assertIn("if (!gasOverlapCandidate(v)) return term;", shader("volume_mixture.glsl"))
+        material = shader("volume_mixture_material_sample.glsl")
+        self.assertIn("if (!gasOverlapCandidate(volumes.v[index]))", material)
+        self.assertLess(material.index("if (!gasOverlapCandidate(volumes.v[index]))"),
+                        material.index("density = mfDensity("))
 
     def test_optical_gate_cannot_hide_raw_sdf_reads_or_graph_evaluation(self):
         gate = shader("volume_density_read_gate.glsl")
         self.assertIn("applyOpticalControls && vol.density_multiplier == 0.0", gate)
         rt = shader("volume_closesthit.rchit")
-        sampler = rt.split("float sampleDensityAccMode(", 1)[1].split(
+        sampler = rt.split("float sampleDensityAccChannels(", 1)[1].split(
             "float sampleDensityAcc(", 1)[0]
         self.assertLess(sampler.index('"volume_density_read_gate.glsl"'),
                         sampler.index("sampleNanoVDBFloatTrilinearAcc"))
         self.assertIn("sampleDensityAccMode(vol, worldPos, buf, mapH, acc, false)", rt)
         self.assertIn("density = max(vp.volumeDensity, 0.0)", rt)
         nano = shader("volume_nano_optical.glsl")
-        fast = nano.split("float volumeNanoDensity(", 1)[1].split("float nanoEmptyIndexStep", 1)[0]
+        fast = nano.split("float volumeNanoDensityChannels(", 1)[1].split("float nanoEmptyIndexStep", 1)[0]
         self.assertLess(fast.index("vol.density_multiplier == 0.0"),
                         fast.index("volumeNanoCorners(buf"))
 
     def test_uniform_tiles_require_a_value_proof_and_neighbor_support(self):
         nano = shader("volume_nano_optical.glsl")
-        self.assertIn("volumeNanoRemap(vol, rawTile)", nano)
+        self.assertIn("volumeNanoSupportRemap(vol, rawTile)", nano)
         self.assertIn("boxMax = boxMin + vec3(float(dim) - 1.0)", nano)
         self.assertNotIn("pnanovdb_readaccessor_is_active", nano)
         # A zero tile's final voxel interpolates with its nonzero neighbor.

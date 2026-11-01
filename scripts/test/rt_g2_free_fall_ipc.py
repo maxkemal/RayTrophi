@@ -66,13 +66,13 @@ def main():
              fluid_substance='Sand', position=[0, 2, 0],
              radius=.0001, velocity=[0, 0, 0], fluid_velocity_spread=0.,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15,
-             use_time_limit=True, use_particle_limit=True, max_emitted_particles=1,
+             use_time_limit=True, limit_parcels=True, parcels=1,
              start_time=0., end_time=.04, fluid_particles_per_second=61.)
         source_ready = True
         for count in (1, 64):
             for dt in (1 / 60, 1 / 120):
                 call('flow_source.update', name=SOURCE, enabled=True,
-                     radius=.0001 if count == 1 else .16, max_emitted_particles=count,
+                     radius=.0001 if count == 1 else .16, parcels=count,
                      fluid_particles_per_second=count * 1.01 / dt, end_time=dt * 2)
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')

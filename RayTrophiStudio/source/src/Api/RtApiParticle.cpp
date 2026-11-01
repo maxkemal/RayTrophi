@@ -1182,7 +1182,7 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
             return Result::fail("grid domain not found: " + domain_id_or_name);
         }
     }
-    if (!RayTrophiSim::simulationDomainHasLiquid(domains[index].type)) {
+    if (!RayTrophiSim::simulationDomainHasLiquid(domains[index])) {
         return Result::fail("domain is not fluid: " + domain_id_or_name);
     }
     if (index >= states.size()) return Result::fail("domain has no live state yet");

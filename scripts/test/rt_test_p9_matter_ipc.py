@@ -5,7 +5,7 @@
              runs, and at zero the parcel becomes liquid) but was never seen
              live. Gates: the melt point is reached, latent heat is paid,
              grains melt into the liquid, mass is conserved.
-  ice_floor  Water born at 180 K in a closed Matter domain freezes on the floor
+  ice_floor  A full-footprint Water seed at 180 K freezes into a flat slab
              (held ice). Sand falls on it. Before P9 grains met triangles only
              and fell through. Gates: held-ice faces exist; the sand rests
              above the floor (on the ice), not on it.
@@ -85,7 +85,7 @@ def main():
              fluid_velocity_spread=0., fluid_particles_per_second=rate,
              fluid_temperature_override=True, fluid_temperature_kelvin=kelvin,
              use_time_limit=True, start_time=start, end_time=end,
-             use_particle_limit=True, max_emitted_particles=limit)
+             limit_parcels=True, parcels=limit)
 
     sources = []
     try:
@@ -137,13 +137,18 @@ def main():
         try:
             if 'floor' not in arms:
                 raise StopIteration
-            source('T_P9_floor_water', name, 'Water', [0, .1, 0], .25, 180., 0., .4, 24000., 6000)
+            # A spherical frozen pour has sloping sides: grains legitimately
+            # roll off it, making the old min-y gate indistinguishable from
+            # tunnelling. A domain-wide slab leaves no path around the ice.
+            call('fluid.set_environment', domain=name, override_enabled=True,
+                 ambient_kelvin=180.)
             source('T_P9_floor_sand', name, 'Sand', [0, .5, 0], .08, 180., 1.5, 1.8, 1000., 200)
-            sources += ['T_P9_floor_water', 'T_P9_floor_sand']
+            sources.append('T_P9_floor_sand')
             call('fluid.set_grain_settings', domain=name, radius_m=.01, fluid_coupling=True,
                  max_substeps=2048)
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
+            call('fluid.seed', domain=name, particles_per_cell=8, fill_level=.3, replace=True)
             ice_faces_peak, frozen_peak = 0, 0
             held = None
             for chunk in range(10):
@@ -158,13 +163,14 @@ def main():
                                  'sand_particles': g['particles'],
                                  'sand_bounds_min': g.get('bounds_min'),
                                  'sand_com': g.get('dry_center_of_mass'),
+                                 'step_held': bool((inv.get('mixed_execution') or {}).get('step_held')),
                                  'mixed_status_last': held}
             print('ice_floor', json.dumps(data['ice_floor']), flush=True)
         except StopIteration:
             pass
         finally:
             if 'floor' in arms:
-                for s in ('T_P9_floor_water', 'T_P9_floor_sand'):
+                for s in ('T_P9_floor_sand',):
                     call('flow_source.remove', name=s)
                     sources.remove(s)
                 call('fluid.remove_domain', domain=name)
@@ -220,7 +226,8 @@ def main():
             # 1 cm grains on the floor sit at y ~ 0.01; on the ice they sit at
             # least a voxel (5 cm) higher. Hanging where they were born (y ~ .45)
             # is the 8th-build failure: the step was held.
-            'sand_rests_on_ice': f['sand_particles'] > 0 and f['sand_bounds_min'] is not None and
+            'sand_rests_on_ice': not f['step_held'] and f['sand_particles'] > 0 and
+                                 f['sand_bounds_min'] is not None and
                                  .05 < f['sand_bounds_min'][1] < .4,
             })
         if p is not None:

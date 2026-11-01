@@ -478,7 +478,8 @@ bool VDBVolumeManager::updateVolume(int volume_id, const std::string& filepath, 
 
 int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::string& name, 
                                                int res_x, int res_y, int res_z, float voxel_size,
-                                               const float* density_ptr, const float* temp_ptr, void* stream) {
+                                               const float* density_ptr, const float* temp_ptr, void* stream,
+                                               const float* flame_ptr) {
     RTPERF_FRAME_SCOPE("sim.render.volume.publish");
     if (!initialized) initialize();
     if (!initialized) return -1;
@@ -590,6 +591,21 @@ int VDBVolumeManager::registerOrUpdateLiveVolume(int existing_id, const std::str
             }
         }
 
+        // 4. Reaction field (optional). GPU only: no CPU reader wants it.
+        if (vol.internal_nano_flame_handle) {
+            delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_flame_handle);
+            vol.internal_nano_flame_handle = nullptr;
+        }
+        if (flame_ptr) {
+            openvdb::FloatGrid::Ptr flame_grid = openvdb::FloatGrid::create(0.0f);
+            DenseFloat dense(dense_bbox, const_cast<float*>(flame_ptr));
+            openvdb::tools::copyFromDense(dense, *flame_grid, /*tolerance*/ 1.0e-3f);
+            flame_grid->setTransform(density_grid->transform().copy());
+            auto flame_handle = nanovdb::tools::createNanoGrid(*flame_grid);
+            vol.internal_nano_flame_handle =
+                new nanovdb::GridHandle<nanovdb::HostBuffer>(std::move(flame_handle.buffer()));
+        }
+
         // Update bounds
         vol.bbox_min[0] = 0; vol.bbox_min[1] = 0; vol.bbox_min[2] = 0;
         vol.bbox_max[0] = res_x * voxel_size; 
@@ -695,6 +711,10 @@ void VDBVolumeManager::unloadVDB(int volume_id) {
         vol.internal_nano_handle = nullptr;
     }
 
+    if (vol.internal_nano_flame_handle) {
+        delete static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_flame_handle);
+        vol.internal_nano_flame_handle = nullptr;
+    }
     if (vol.internal_nano_temperature_handle) {
         auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol.internal_nano_temperature_handle);
         delete handle;
@@ -994,6 +1014,20 @@ void* VDBVolumeManager::getHostTemperatureGrid(int volume_id) const {
     if (!vol || !vol->internal_nano_temperature_handle) return nullptr;
     auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_temperature_handle);
     return handle->data();
+}
+
+void* VDBVolumeManager::getHostFlameGrid(int volume_id) const {
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_nano_flame_handle) return nullptr;
+    auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_flame_handle);
+    return handle->data();
+}
+
+size_t VDBVolumeManager::getHostFlameGridSize(int volume_id) const {
+    const VDBVolumeData* vol = getVolume(volume_id);
+    if (!vol || !vol->internal_nano_flame_handle) return 0;
+    auto* handle = static_cast<nanovdb::GridHandle<nanovdb::HostBuffer>*>(vol->internal_nano_flame_handle);
+    return handle->buffer().size();
 }
 
 size_t VDBVolumeManager::getHostTemperatureGridSize(int volume_id) const {

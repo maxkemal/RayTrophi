@@ -22,6 +22,7 @@
  *   RT_VK_RT_COMPILE_THREADS=N  at most N threads join the deferred operation
  */
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanVolumePipelineProbe.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -57,6 +58,7 @@ struct VulkanDevice::RTPipelineBuildJob {
     uint32_t photonGroupIdx = VK_SHADER_UNUSED_KHR;
     uint32_t callableGroupIdx = 0;
     bool hasVolume = false;
+    bool hasSurfaceVolume = false;
     bool hasHair = false;
     bool hasSphere = false;
     bool hasShadowMiss = false;
@@ -81,6 +83,7 @@ uint64_t hashShaderSet(const VulkanDevice::RTPipelineShaderSet& s) {
     };
     mixVec(s.raygen); mixVec(s.miss); mixVec(s.closestHit); mixVec(s.anyHit);
     mixVec(s.volumeClosestHit); mixVec(s.volumeIntersection);
+    mixVec(s.volumeSurfaceClosestHit);
     mixVec(s.hairClosestHit); mixVec(s.hairIntersection); mixVec(s.hairAnyHit);
     mixVec(s.shadowMiss);
     mixVec(s.sphereIntersection);
@@ -661,6 +664,12 @@ Backend::RTPipelineStatus::State VulkanDevice::requestRTPipelineBuild(RTPipeline
         m_rtBuildStatus.error = "hardware ray tracing is not available on this device";
         return State::Failed;
     }
+    if (omitVolumePipelineForProbe()) {
+        shaders.volumeClosestHit.clear();
+        shaders.volumeIntersection.clear();
+        shaders.volumeSurfaceClosestHit.clear();
+        SCENE_LOG_INFO("[RT Pipeline A/B] Volume hit group omitted; volume-free scenes only.");
+    }
     const uint64_t hash = hashShaderSet(shaders);
     if (m_rtBuildJob) {
         // One compile at a time. A different set (shaders rebuilt mid-compile)
@@ -770,6 +779,7 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     const VkShaderModule anyhitModule     = createModule(s.anyHit, "shadow_anyhit");
     const VkShaderModule volChitModule    = createModule(s.volumeClosestHit, "volume_closesthit");
     const VkShaderModule volIntModule     = createModule(s.volumeIntersection, "volume_intersection");
+    const VkShaderModule volSurfaceModule = createModule(s.volumeSurfaceClosestHit, "volume_surface_closesthit");
     const VkShaderModule hairChitModule   = createModule(s.hairClosestHit, "hair_closesthit");
     const VkShaderModule hairIntModule    = createModule(s.hairIntersection, "hair_intersection");
     const VkShaderModule hairAnyHitModule = createModule(s.hairAnyHit, "hair_shadow_anyhit");
@@ -779,6 +789,7 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     const VkShaderModule cloudCallModule  = createModule(s.cloudCallable, "cloud_callable");
 
     job.hasVolume     = (volChitModule != VK_NULL_HANDLE && volIntModule != VK_NULL_HANDLE);
+    job.hasSurfaceVolume = job.hasVolume && volSurfaceModule != VK_NULL_HANDLE;
     job.hasHair       = (hairChitModule != VK_NULL_HANDLE && hairIntModule != VK_NULL_HANDLE);
     job.hasSphere     = (sphereIntModule != VK_NULL_HANDLE);
     job.hasShadowMiss = (shadowMissModule != VK_NULL_HANDLE);
@@ -915,7 +926,7 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
     // [photon raygen], cloud callable. The sphere group's closest hit is the
     // triangle closesthit stage (one module, one compile).
     // Group order (the SBT layout depends on it): raygen | miss, [shadow miss] |
-    // triangle hit, [volume], [hair], [sphere] | [photon raygen] | cloud
+    // triangle hit, [volume/fog], [hair], [sphere], [SurfaceSDF] | [photon raygen] | cloud
     // callable. The photon group comes after all hit groups so the miss/hit
     // regions stay contiguous.
     auto attempt = [&](bool withHairAnyHit) -> VkResult {
@@ -939,9 +950,13 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
             ? addStage(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, anyhitModule, "shadow_anyhit") : VK_SHADER_UNUSED_KHR;
         uint32_t volChitStage = VK_SHADER_UNUSED_KHR, volIntStage = VK_SHADER_UNUSED_KHR;
         if (job.hasVolume) {
-            volChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volChitModule, "volume_closesthit");
+            volChitStage = addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volChitModule,
+                job.hasSurfaceVolume ? "volume_fog_closesthit" : "volume_closesthit");
             volIntStage  = addStage(VK_SHADER_STAGE_INTERSECTION_BIT_KHR, volIntModule, "volume_intersection");
         }
+        const uint32_t volSurfaceStage = job.hasSurfaceVolume
+            ? addStage(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, volSurfaceModule,
+                "volume_surface_closesthit") : VK_SHADER_UNUSED_KHR;
         uint32_t hairChitStage = VK_SHADER_UNUSED_KHR, hairIntStage = VK_SHADER_UNUSED_KHR;
         uint32_t hairAnyHitStage = VK_SHADER_UNUSED_KHR;
         if (job.hasHair) {
@@ -979,6 +994,10 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
             groups.push_back(makeHitGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR,
                                           chitStage, anyhitStage, sphereIntStage));
         }
+        if (job.hasSurfaceVolume) {
+            groups.push_back(makeHitGroup(VK_RAY_TRACING_SHADER_GROUP_TYPE_PROCEDURAL_HIT_GROUP_KHR,
+                volSurfaceStage, VK_SHADER_UNUSED_KHR, volIntStage));
+        }
         job.photonGroupIdx = VK_SHADER_UNUSED_KHR;
         if (job.hasPhoton) {
             job.photonGroupIdx = static_cast<uint32_t>(groups.size());
@@ -1001,10 +1020,11 @@ void VulkanDevice::runRTPipelineBuildJob(RTPipelineBuildJob& job) {
 
     VkResult result = VK_ERROR_INITIALIZATION_FAILED;
     if (raygenModule == VK_NULL_HANDLE || missModule == VK_NULL_HANDLE || chitModule == VK_NULL_HANDLE ||
-        cloudCallModule == VK_NULL_HANDLE) {
+        cloudCallModule == VK_NULL_HANDLE ||
+        (!s.volumeSurfaceClosestHit.empty() && !job.hasSurfaceVolume)) {
         // The hit and miss stages execute the cloud callable unconditionally
         // once clouds are on: a pipeline without it is not a degraded one.
-        job.error = "raygen/miss/closesthit/cloud_callable SPIR-V missing or invalid (see log)";
+        job.error = "required or paired volume SPIR-V missing or invalid (see log)";
     } else {
         const bool hairAnyHitIncluded = job.hasHair && hairAnyHitModule != VK_NULL_HANDLE;
         result = attempt(true);
@@ -1156,7 +1176,7 @@ bool VulkanDevice::installRTPipelineBuild(RTPipelineBuildJob& job) {
 
     // Hit region: triangle + optional volume + optional hair + optional sphere (contiguous)
     const uint32_t numHitGroups = 1u + (job.hasVolume ? 1u : 0u) + (job.hasHair ? 1u : 0u) +
-                                  (job.hasSphere ? 1u : 0u);
+                                  (job.hasSphere ? 1u : 0u) + (job.hasSurfaceVolume ? 1u : 0u);
     m_sbtHitRegion.deviceAddress = sbtAddr + static_cast<VkDeviceAddress>(job.triHitGroupIdx) * alignedHandleSize;
     m_sbtHitRegion.stride = alignedHandleSize;
     m_sbtHitRegion.size   = static_cast<VkDeviceSize>(numHitGroups) * alignedHandleSize;
@@ -1177,6 +1197,7 @@ bool VulkanDevice::installRTPipelineBuild(RTPipelineBuildJob& job) {
     }
 
     m_hasVolumeShaders = job.hasVolume;
+    m_hasSurfaceVolumeShader = job.hasSurfaceVolume;
     m_hasHairShaders   = job.hasHair;
     m_hasSphereShaders = job.hasSphere;
     m_hasShadowMiss    = job.hasShadowMiss;

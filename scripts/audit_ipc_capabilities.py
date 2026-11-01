@@ -88,7 +88,7 @@ def required(method, namespaces):
             return "SceneWrite|FilesRead"
         return "SceneWrite"
     if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings",
-                  "fluid.inspect_fog_fields",
+                  "fluid.inspect_fog_fields", "fluid.get_lanes",
                   "fluid.particle_extremes", "fluid.gas_cell_extremes"):
         return "Read"
     if method == "ipc.admin.audit.export":
@@ -216,6 +216,10 @@ def required(method, namespaces):
     # honest path the privileged one.
     if method == "sim.control_state":
         return "Read"
+    if method in ("timeline.transport", "sim.get_mode"):
+        return "Read"
+    if method in ("timeline.play", "timeline.pause", "sim.set_mode"):
+        return "SceneWrite"
     if method in ("physics.collider.proxy_set.list",
                   "physics.collider.proxy_set.get",
                   "physics.collider.proxy_set.sample",
@@ -240,7 +244,8 @@ def required(method, namespaces):
                   "anim.preview_clip_binding", "anim.sample_clip_binding",
                   "rig.preview_bind", "rig.preview_fit", "rig.preflight",
                   "rig.weight_stats", "rig.suggest_joint_profile",
-                  "rig.preview_envelope_weights",
+                  "rig.preview_envelope_weights", "rig.preview_rom_test",
+                  "rig.auto_landmarks", "rig.preview_geodesic_weights",
                   "anim.source_clips", "anim.source_channels", "msf.fields",
                   "msf.water_budget", "matter.exchanges",
                   "templates.refresh", "templates.validate",

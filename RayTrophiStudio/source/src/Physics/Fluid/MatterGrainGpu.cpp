@@ -234,6 +234,7 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
 
 void invalidateMatterGrainAfterReset(MatterGrainGpuRuntime& runtime) {
     runtime.cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+    runtime.last_cfl = {};
     runtime.history_fresh = true;
     runtime.coupling_zero = false;
     runtime.sleep_context_valid = false;
@@ -325,8 +326,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     }
     // Wet grains carry their held water (B6): it moves with the grain.
     double minimum_bridge_volume = std::numeric_limits<double>::infinity();
+    double minimum_radius = std::numeric_limits<double>::infinity();
     for (std::size_t i = 0; i < count; ++i) {
         masses[count + i] = matterGrainRadius(params, p, i);
+        minimum_radius = std::min(minimum_radius, double(masses[count + i]));
         const float water = p.pore_water_mass_kg[i];
         masses[i] = p.rest_mass_kg[i] * p.mass_fraction[i] + (params.wet_grains ? water : 0.0f);
         if (water > 0.0f) {
@@ -351,6 +354,13 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             masses[count + i], maximum_radius, masses[i],
             double(params.stiffness_n_m) / params.radius_m));
         maximum_speed = std::max(maximum_speed, p.velocity[i].length());
+    }
+    // The shader forms no bridge below a fraction of the smaller grain's
+    // volume, so no bridge is smaller than that floor at the smallest grain.
+    if (std::isfinite(minimum_bridge_volume) && std::isfinite(minimum_radius)) {
+        minimum_bridge_volume = std::max(minimum_bridge_volume,
+            double(kMatterGrainBridgeMinVolumeFraction) * 4.18879020478639 *
+                minimum_radius * minimum_radius * minimum_radius);
     }
     // Liquid coupling rows: {lump velocity, beta}, {buoyancy accel, lump mass},
     // {drag impulse accumulator}. Zero rows are an exact no-op in the shader,
@@ -437,27 +447,32 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // normal dashpot set the substep (712 at 1.3M grains where 3 contacts were
     // measured). Equal spheres touch at most 12 neighbours (kissing number),
     // the suite's densest piles measured 8-10, so the bound uses last frame's
-    // maximum + 4, never below 12. A frame that measures more is re-run below
-    // at the full budget; that re-run starts without contact history, which
-    // the +4 margin keeps rare. Coupled to the MPM/common clock the frame
-    // cannot be re-run (the MPM side has already advanced), so it keeps 24.
+    // maximum + 4, never below 12. A standalone frame that measures more is
+    // re-run below at the full budget; that re-run starts without contact
+    // history, which the +4 margin keeps rare.
+    // Coupled to the MPM/common clock the frame cannot be re-run (the other
+    // owners have already advanced), and it used to assume all 24 slots for
+    // that reason: 4-6x the 1-6 contacts measured in the 4-source scene
+    // (2026-10-27), which set most of its 322 substeps. It now uses the same
+    // measured hint; a frame that measures more is published, flagged
+    // (cfl_contacts_exceeded) and sizes the next frame. The bound is half the
+    // damped symplectic-Euler limit, so one frame past the assumption stays
+    // inside the true limit for up to 2x the assumed contacts.
     // The grain step always receives the MPM contact object; only an ACTIVE
     // one (MPM parcels in reach) advances state a re-run would apply twice.
-    const bool adaptive_contacts = !(mpm_contact && mpm_contact->active()) && !common_driver;
-    const uint32_t cfl_contacts = adaptive_contacts
-        ? std::clamp(runtime.cfl_contact_hint, 12u, contact_capacity)
-        : contact_capacity;
+    const bool can_rerun = !(mpm_contact && mpm_contact->active()) && !common_driver;
+    const uint32_t cfl_contacts = std::clamp(runtime.cfl_contact_hint, 12u, contact_capacity);
     const double budget = cfl_contacts;
     const double m = minimum_mass;
     // For every body i, all incident k_ij / m_i are bounded by this measured
     // maximum. Gershgorin then gives omega^2 <= 2 * contacts * max(k_ij/m_i).
     // The equivalent k,m below retain the existing accuracy/damping algebra,
     // without pairing the smallest grain mass with the largest stone's k.
-    const double k = maximum_contact_rate * m;
-    const double kt = params.tangential_stiffness_ratio * k;
+    const double contact_k = maximum_contact_rate * m;
     const double mu_r = params.rolling_friction;
     // Wet: liquid bridge stiffness at contact, |dF/dS| = F0 * 2.1 sqrt(R/V),
-    // F0 = 2 pi gamma cos(theta) R x scale (stiffest for the smallest bridge).
+    // F0 = 2 pi gamma cos(theta) R x scale (stiffest for the smallest bridge,
+    // which the shader floors at kMatterGrainBridgeMinVolumeFraction).
     // Coarse graining keeps the bulk cohesive stress: a simulated grain of
     // radius R stands for (R/r)^2 real bridges of 2 pi gamma r each, so
     // scale = R/r (2026-10-21). The earlier (R/r)^2 kept the per-grain Bond
@@ -472,63 +487,137 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         ? capillary * maximum_radius * 2.1 * std::sqrt(maximum_radius / minimum_bridge_volume)
         : 0.0;
     const double rolling_factor = maximum_radius > params.radius_m ? 5.625 : 2.8125;
-    const double k_effective = std::max({k, 3.5 * kt, rolling_factor * mu_r * mu_r * k,
-        bridge_stiffness});
-    const double accuracy_dt = 3.14159265358979 * std::sqrt(.5 * m / k) /
-        params.contact_resolution;
     const double zeta = matterGrainDampingRatio(params.restitution);
-    const double normal_damping = 2.0 * zeta * std::sqrt(k * m);
-    // Only the NORMAL dashpot is explicit. The sliding dashpot is capped in the
-    // shader so the whole contact budget cannot reverse a slip within one
-    // substep (sim_matter_grain.glsl contact(): min(c v, v / (BUDGET dt
-    // 1/m_t))) - unconditionally stable, so it sets no bound. Counting it here
-    // (7 c_t per contact) was the "damping" limit: an absolute 4 N s/m on an
-    // 8 mm grain read as zeta ~4.5 and cost 2622 substeps per frame where the
-    // normal dashpot alone needs ~710 (measured 2026-10-08, 1.3M grains).
-    // With fewer substeps the cap may engage: slip then decays in ~BUDGET
-    // substeps instead of one, still far below a frame.
-    const double damping_rate = budget * 2.0 * normal_damping / m;
-    // Spring and dashpot together: symplectic Euler on x'' = -w^2 x - 2 z w x'
-    // is stable for w^2 h^2 + 4 z w h < 4, i.e. h < (2/w)(sqrt(1+z^2) - z).
-    // Half of that, as the undamped bound always had (z = 0 gives the old
-    // 1/w). The two bounds used to be applied separately, the dashpot one at
-    // .5 / rate = 1/(4 z w), which is half the combined limit at large z and
-    // set the substep of every damped scene (234 substeps per frame at 16k).
-    const double omega = std::sqrt(2.0 * budget * k_effective / m);
-    const double aggregate_zeta = damping_rate / (2.0 * omega);
-    const double stability_dt =
-        (std::sqrt(1.0 + aggregate_zeta * aggregate_zeta) - aggregate_zeta) / omega;
-    const char* stability_name = aggregate_zeta > .1 ? "damping" : "stability";
     const double travel_dt = .1 * params.radius_m /
         std::max(double(maximum_speed) + double(gravity.length()) * dt, 1e-8);
-    const std::array<std::pair<double, const char*>, 3> bounds{{
-        {accuracy_dt, "accuracy"}, {stability_dt, stability_name}, {travel_dt, "travel"}}};
-    const auto& limiting = *std::min_element(bounds.begin(), bounds.end(),
+    // The three bounds for contact springs scaled by `scale` (the bridge is
+    // a capillary force law, not a spring the step can soften).
+    struct Bounds {
+        double accuracy = 0.0, stability = 0.0, k_effective = 0.0, aggregate_zeta = 0.0;
+        const char* source = "contact";
+        const char* stability_name = "stability";
+    };
+    const auto bounds_at = [&](double scale) {
+        Bounds b;
+        const double k = contact_k * scale;
+        const double kt = params.tangential_stiffness_ratio * k;
+        const std::array<std::pair<double, const char*>, 4> springs{{
+            {k, "contact"}, {3.5 * kt, "tangential"},
+            {rolling_factor * mu_r * mu_r * k, "rolling"}, {bridge_stiffness, "bridge"}}};
+        for (const auto& spring : springs) {
+            if (spring.first > b.k_effective) {
+                b.k_effective = spring.first;
+                b.source = spring.second;
+            }
+        }
+        b.accuracy = 3.14159265358979 * std::sqrt(.5 * m / k) / params.contact_resolution;
+        const double normal_damping = 2.0 * zeta * std::sqrt(k * m);
+        // Only the NORMAL dashpot is explicit. The sliding dashpot is capped in
+        // the shader so the whole contact budget cannot reverse a slip within
+        // one substep (sim_matter_grain.glsl contact(): min(c v, v / (BUDGET dt
+        // 1/m_t))) - unconditionally stable, so it sets no bound. Counting it
+        // here (7 c_t per contact) was the "damping" limit: an absolute 4 N s/m
+        // on an 8 mm grain read as zeta ~4.5 and cost 2622 substeps per frame
+        // where the normal dashpot alone needs ~710 (measured 2026-10-08, 1.3M
+        // grains). With fewer substeps the cap may engage: slip then decays in
+        // ~BUDGET substeps instead of one, still far below a frame.
+        const double damping_rate = budget * 2.0 * normal_damping / m;
+        // Spring and dashpot together: symplectic Euler on x'' = -w^2 x - 2 z w x'
+        // is stable for w^2 h^2 + 4 z w h < 4, i.e. h < (2/w)(sqrt(1+z^2) - z).
+        // Half of that, as the undamped bound always had (z = 0 gives the old
+        // 1/w). The two bounds used to be applied separately, the dashpot one at
+        // .5 / rate = 1/(4 z w), which is half the combined limit at large z and
+        // set the substep of every damped scene (234 substeps per frame at 16k).
+        const double omega = std::sqrt(2.0 * budget * b.k_effective / m);
+        b.aggregate_zeta = damping_rate / (2.0 * omega);
+        b.stability = (std::sqrt(1.0 + b.aggregate_zeta * b.aggregate_zeta) -
+                       b.aggregate_zeta) / omega;
+        b.stability_name = b.aggregate_zeta > .1 ? "damping" : "stability";
+        return b;
+    };
+    const auto substeps_for = [&](double step) { return std::ceil(dt / step - 1e-9); };
+    // The ping-pong must end in the bank 0 buffers: an even count, at most
+    // the authored ceiling rounded down to even.
+    const double max_steps = double(std::max(2, params.max_substeps - (params.max_substeps & 1)));
+    Bounds bounds = bounds_at(1.0);
+    const double requested = substeps_for(
+        std::min({bounds.accuracy, bounds.stability, travel_dt}));
+    auto& cfl = runtime.last_cfl;
+    cfl = {};
+    cfl.measured = true;
+    cfl.minimum_mass_kg = m;
+    cfl.contact_stiffness_n_m = contact_k;
+    cfl.bridge_stiffness_n_m = bridge_stiffness;
+    cfl.minimum_bridge_volume_m3 = std::isfinite(minimum_bridge_volume) ? minimum_bridge_volume : 0.0;
+    cfl.travel_dt_s = travel_dt;
+    cfl.contacts_assumed = cfl_contacts;
+    cfl.requested_substeps = requested;
+    cfl.max_substeps = static_cast<uint32_t>(params.max_substeps);
+    // Over the ceiling: soften the contact springs until the STABILITY bound
+    // fits, instead of holding the step. Industrial DEM does exactly this by
+    // hand (Young's modulus lowered 100-1000x; bulk flow is insensitive to it,
+    // the step grows as sqrt). Accuracy (collision resolution) and travel
+    // (10% of a radius per substep) are accuracy bounds, not stability ones:
+    // past the ceiling they are capped and reported, never held.
+    // The scale is quantised to quarter octaves so a frame-to-frame wobble in
+    // the lightest grain does not change the force law (and wake sleepers)
+    // every frame. Below 1e-3 the overlaps would no longer be contacts.
+    constexpr double kMinimumStiffnessScale = 1.0e-3;
+    double scale = 1.0;
+    if (!std::isfinite(requested) || substeps_for(bounds.stability) > max_steps) {
+        const auto fits = [&](double s) { return substeps_for(bounds_at(s).stability) <= max_steps; };
+        if (!fits(kMinimumStiffnessScale)) {
+            const Bounds soft = bounds_at(kMinimumStiffnessScale);
+            char text[400];
+            std::snprintf(text, sizeof(text),
+                "grain %s bound needs %.0f substeps per frame > max_substeps %d even with the "
+                "contact springs softened %.0fx: the %s stiffness (%.0f N/m) sets it at radius "
+                "%.4f m. %s",
+                soft.stability_name, substeps_for(soft.stability), params.max_substeps,
+                1.0 / kMinimumStiffnessScale, soft.source, soft.k_effective, params.radius_m,
+                std::strcmp(soft.source, "bridge") == 0
+                    ? "Liquid bridges on the wettest-but-smallest grains set it; raise the "
+                      "substep limit."
+                    : "Raise the substep limit.");
+            error = text;
+            cfl.effective_stiffness_n_m = soft.k_effective;
+            cfl.effective_source = soft.source;
+            cfl.aggregate_damping_ratio = soft.aggregate_zeta;
+            cfl.accuracy_dt_s = soft.accuracy;
+            cfl.stability_dt_s = soft.stability;
+            cfl.stiffness_scale = float(kMinimumStiffnessScale);
+            return false;
+        }
+        double low = kMinimumStiffnessScale, high = 1.0;  // fits(low), !fits(high)
+        for (int i = 0; i < 40; ++i) {
+            const double mid = std::sqrt(low * high);
+            (fits(mid) ? low : high) = mid;
+        }
+        scale = std::max(kMinimumStiffnessScale,
+            std::exp2(std::floor(4.0 * std::log2(low)) / 4.0));
+        bounds = bounds_at(scale);
+    }
+    const std::array<std::pair<double, const char*>, 3> limits{{
+        {bounds.accuracy, "accuracy"}, {bounds.stability, bounds.stability_name},
+        {travel_dt, "travel"}}};
+    const auto& limiting = *std::min_element(limits.begin(), limits.end(),
         [](const auto& a, const auto& b) { return a.first < b.first; });
-    const double requested = std::ceil(dt / limiting.first - 1e-9);
-    if (!std::isfinite(requested) || requested > params.max_substeps) {
-        // Say what fits. Stability and accuracy substeps scale with sqrt(k):
-        // the stiffness that fits the cap is k (cap / needed)^2. A smaller
-        // radius at the same N/m is a stiffer material for a lighter grain
-        // (mass ~ r^3), which is the usual way to get here.
-        const double ratio = std::isfinite(requested) ? params.max_substeps / requested : 0.0;
-        char text[320];
-        std::snprintf(text, sizeof(text),
-            "grain %s bound needs %.0f substeps per frame > max_substeps %d at radius %.4f m. "
-            "Lower Contact stiffness to <= %.0f N/m, or raise the substep limit.",
-            limiting.second, requested, params.max_substeps, params.radius_m,
-            std::strcmp(limiting.second, "travel") == 0 ? params.stiffness_n_m
-                : params.stiffness_n_m * ratio * ratio);
-        error = text;
-        return false;
-    }
-    // Even: the ping-pong must end in the bank 0 buffers.
-    auto substeps = static_cast<uint32_t>(std::max(2.0, requested));
+    double needed = substeps_for(limiting.first);
+    cfl.capped = needed > max_steps;
+    needed = std::min(needed, max_steps);
+    auto substeps = static_cast<uint32_t>(std::max(2.0, needed));
     substeps += substeps & 1u;
-    if (substeps > static_cast<uint32_t>(params.max_substeps)) {
-        error = "grain CFL exceeds max_substeps after even ping-pong rounding";
-        return false;
-    }
+    std::string limiting_name = limiting.second;
+    if (scale < 1.0) limiting_name += " (stiffness adapted)";
+    if (cfl.capped) limiting_name += " (capped)";
+    const double kt = params.tangential_stiffness_ratio * contact_k * scale;
+    cfl.effective_stiffness_n_m = bounds.k_effective;
+    cfl.effective_source = bounds.source;
+    cfl.aggregate_damping_ratio = bounds.aggregate_zeta;
+    cfl.accuracy_dt_s = bounds.accuracy;
+    cfl.stability_dt_s = bounds.stability;
+    cfl.stiffness_scale = static_cast<float>(scale);
+    cfl.substeps = substeps;
 
     const bool grow_particles = !particleBuffersValid(runtime) || runtime.capacity < count ||
         runtime.neighbour_list_capacity != list_capacity ||
@@ -678,7 +767,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         constants.high[axis] = axis == 0 ? high.x : axis == 1 ? high.y : high.z;
     }
     constants.low[3] = params.radius_m;
-    constants.high[3] = params.stiffness_n_m;
+    // Softened this frame when the stability bound did not fit (cfl.stiffness_scale).
+    constants.high[3] = static_cast<float>(params.stiffness_n_m * scale);
     constants.contact[0] = dt / substeps;
     // Damping ratio; the shader scales it per contact by sqrt(k m_eff).
     constants.contact[1] = matterGrainDampingRatio(params.restitution);
@@ -955,7 +1045,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // The failed dispatch has not published host positions or reaction impulses.
     // Only the standalone DEM lane can replay safely: shared MPM/liquid clocks
     // have already advanced external owners and must refuse instead.
-    if (ok && overflow == 8u && adaptive_contacts && list_capacity < count) {
+    if (ok && overflow == 8u && can_rerun && list_capacity < count) {
         runtime.requested_list_capacity = static_cast<uint32_t>(
             std::min<std::size_t>(count, std::size_t(list_capacity) * 2));
         const bool rerun = stepMatterGrainGpu(p, low, high, params, dt, gravity, budget_bytes,
@@ -965,7 +1055,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         return rerun;
     }
     if (ok && (overflow & 1u) != 0u && (overflow & ~9u) == 0u &&
-        adaptive_contacts && contact_capacity < 128u) {
+        can_rerun && contact_capacity < 128u) {
         runtime.requested_contact_capacity = std::min(128u, contact_capacity * 2u);
         if ((overflow & 8u) != 0u) {
             runtime.requested_list_capacity = static_cast<uint32_t>(
@@ -989,7 +1079,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             "grain publication rejected nonfinite/readback state";
         return false;
     }
-    if (adaptive_contacts && diagnostics[2] > cfl_contacts) {
+    if (!can_rerun && diagnostics[2] > cfl_contacts) {
+        // Published anyway: the other owners have advanced (see cfl_contacts).
+        report.cfl_contacts_exceeded = true;
+    } else if (diagnostics[2] > cfl_contacts) {
         // More contacts than the bound assumed: those grains may have stepped
         // past their stability limit. Nothing is published; the host state is
         // untouched and history_fresh is already set, so the re-run uploads it
@@ -1047,7 +1140,13 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.substeps = static_cast<int>(substeps);
     report.dispatches = dispatched;
     report.substep_dt = dt / substeps;
-    report.limit = substeps > planned_grain_substeps ? "common CFL/travel" : limiting.second;
+    // Shared clock: the DEM substeps are a multiple of the continuum ones.
+    // Only when one DEM substep per continuum substep was more than the DEM
+    // asked for did the continuum set the DEM step.
+    report.limit = report.common_clock && report.dem_substeps_per_continuum <= 1 &&
+        substeps > planned_grain_substeps ? "common CFL/travel" : limiting_name;
+    runtime.last_cfl.substeps = substeps;
+    report.cfl = runtime.last_cfl;
     report.max_contacts = diagnostics[2];
     report.cfl_contacts = cfl_contacts;
     report.cfl_stiffness_mass_rate_s2 = maximum_contact_rate;

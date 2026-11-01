@@ -65,8 +65,8 @@ def main():
                  radius=.26, velocity=[0, 0, 0], fluid_velocity_spread=0.,
                  fluid_particles_per_second=rate, fluid_temperature_override=True,
                  fluid_temperature_kelvin=293.15, use_time_limit=True,
-                 start_time=start, end_time=end, use_particle_limit=True,
-                 max_emitted_particles=limit)
+                 start_time=start, end_time=end, limit_parcels=True,
+                 parcels=limit)
         for label, water, wet in [('dry', False, False), ('water_only', True, False),
                                   ('wet_response', True, True),
                                   ('dry_after_water', False, False)]:

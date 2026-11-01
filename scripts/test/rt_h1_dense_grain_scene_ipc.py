@@ -98,8 +98,8 @@ def main():
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE,
              domain=DOMAIN, enabled=False, phase='liquid', source_mode='point',
              fluid_substance='Sand', position=[0, 1.5, 0], radius=1.1, velocity=[0, 0, 0], fluid_velocity_spread=0.,
-             use_time_limit=True, start_time=0., end_time=1/30, use_particle_limit=True,
-             max_emitted_particles=16384, fluid_particles_per_second=16384*1.01*60,
+             use_time_limit=True, start_time=0., end_time=1/30, limit_parcels=True,
+             parcels=16384, fluid_particles_per_second=16384*1.01*60,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
         source_ready = True
         if not args.visual_only:
@@ -107,7 +107,7 @@ def main():
                 call('timeline.set_frame', frame=0)
                 call('fluid.reset')
                 call('flow_source.update', name=SOURCE, enabled=True,
-                     max_emitted_particles=count, fluid_particles_per_second=count*1.01*60)
+                     parcels=count, fluid_particles_per_second=count*1.01*60)
                 control = call('sim.control_state')
                 arm = {'requested': count, 'samples': []}
                 data['arms'].append(arm)
@@ -177,7 +177,7 @@ def main():
              granular_physical_carriers=True, virtual_grains=1)
         call('fluid.set_param', domain=DOMAIN, enabled=True, visible=True)
         call('flow_source.update', name=SOURCE, enabled=True, position=[-.6, 1.9, 0],
-             radius=.32, max_emitted_particles=16384, fluid_particles_per_second=4096.,
+             radius=.32, parcels=16384, fluid_particles_per_second=4096.,
              start_time=0., end_time=12., velocity=[0, -.1, 0])
         call('camera.set_position', position=[4.0, 2.8, 4.6])
         call('camera.set_target', target=[0, .85, 0])

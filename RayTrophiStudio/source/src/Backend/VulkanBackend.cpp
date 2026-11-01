@@ -10,6 +10,8 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanVolumePipelineProbe.h"
+#include "Backend/VulkanVolumeStageSplit.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanTransitionDiagnostics.h"
 #include "Fluid/FluidRenderProxy.h"
@@ -1587,13 +1589,9 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // the feature was never enabled on the device.
     VkPhysicalDeviceScalarBlockLayoutFeatures scalarFeatures{};
     scalarFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
-    // BISECT: enabling this coincided with the driver stalling inside
-    // vkCreateRayTracingPipelinesKHR (RT pipeline build, >1 min). Off until that is
-    // separated from the stageFlags fix; validation still reports the missing
-    // feature as spirv-val noise, which the driver tolerated before.
-    constexpr bool kEnableScalarBlockLayout = false;
-    scalarFeatures.scalarBlockLayout =
-        kEnableScalarBlockLayout ? supportedScalarFeatures.scalarBlockLayout : VK_FALSE;
+    // Match the shaders' required scalar SSBO layout. Do not leave this disabled
+    // by a pipeline-build timing bisect: vec3 members may straddle 16-byte blocks.
+    scalarFeatures.scalarBlockLayout = supportedScalarFeatures.scalarBlockLayout;
 
     // Build pNext chain conservatively.
     void** nextLink = &features2.pNext;
@@ -3469,7 +3467,8 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
 
         dst.instanceCustomIndex = src.customIndex;
         dst.mask = transformUsable ? src.mask : 0;
-        dst.instanceShaderBindingTableRecordOffset = src.sbtRecordOffset;
+        dst.instanceShaderBindingTableRecordOffset =
+            getVolumeRoutedSbtOffset(src.mask, src.sbtRecordOffset);
         dst.flags = src.frontFaceCCW ? VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR : 0;
         if (src.msfForceNoOpaque || src.opacityOverride == 2) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
         else if (src.opacityOverride == 1) dst.flags |= VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
@@ -10353,6 +10352,12 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
             if (buf.buffer) m_device->destroyBuffer(buf);
         }
         m_vdbTempBuffers.clear();
+        for (auto& [id, buf] : m_vdbFlameBuffers) {
+            (void)id;
+            if (buf.buffer) m_device->destroyBuffer(buf);
+        }
+        m_vdbFlameBuffers.clear();
+        m_vdbFlameUploadedVersions.clear();
         m_orderedVDBInstances.clear();
         // Legitimate teardown: the TLAS itself is being destroyed here, so the
         // recorded slot count must go with it or the contract check would report a
@@ -11670,7 +11675,7 @@ void VulkanBackendAdapter::updateGeometry(const std::vector<std::shared_ptr<Hitt
             uint32_t mask=vi.mask;
             if(vi.scatterGroupId>=0&&vi.scatterInstanceIndex!=UINT32_MAX){auto it=groupsById.find(vi.scatterGroupId);if(it!=groupsById.end()&&vi.scatterInstanceIndex<it->second->instances.size()){const auto& tr=it->second->instances[vi.scatterInstanceIndex];const Matrix4x4 composed=tr.toMatrix()*vi.scatterSourceTransform;for(uint32_t r=0;r<3;++r)for(uint32_t c=0;c<4;++c)out.data[r*4+c]=composed.m[r][c];out.mode=0;mask=it->second->transient?0x04u:0xffu;}}
             uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;if(vi.msfForceNoOpaque||vi.opacityOverride==2)flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;else if(vi.opacityOverride==1)flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-            out.metadata[0]=vi.customIndex;out.metadata[1]=mask;out.metadata[2]=vi.sbtRecordOffset;out.metadata[3]=flags;const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;out.blasAddressLo=static_cast<uint32_t>(address);out.blasAddressHi=static_cast<uint32_t>(address>>32u);if(!address)valid=false;
+            out.metadata[0]=vi.customIndex;out.metadata[1]=mask;out.metadata[2]=m_device->getVolumeRoutedSbtOffset(mask, vi.sbtRecordOffset);out.metadata[3]=flags;const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;out.blasAddressLo=static_cast<uint32_t>(address);out.blasAddressHi=static_cast<uint32_t>(address>>32u);if(!address)valid=false;
         }
         if(!valid)gpuBuildSources.clear();
         m_instancePreparationStats.instanceCount=static_cast<uint32_t>(allInstances.size());m_instancePreparationStats.uploadBytes=gpuBuildSources.size()*sizeof(VulkanRT::GpuTLASInstanceSource);m_instancePreparationStats.cpuPrepareMs=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-prepStart).count();
@@ -14917,7 +14922,7 @@ bool VulkanBackendAdapter::queueGpuScatterInstanceUpdate(const std::unordered_se
         uint32_t flags=vi.frontFaceCCW?VK_GEOMETRY_INSTANCE_TRIANGLE_FRONT_COUNTERCLOCKWISE_BIT_KHR:0u;
         if(vi.msfForceNoOpaque||vi.opacityOverride==2) flags|=VK_GEOMETRY_INSTANCE_FORCE_NO_OPAQUE_BIT_KHR;
         else if(vi.opacityOverride==1) flags|=VK_GEOMETRY_INSTANCE_FORCE_OPAQUE_BIT_KHR;
-        out.metadata[0]=vi.customIndex; out.metadata[1]=desiredMask; out.metadata[2]=vi.sbtRecordOffset; out.metadata[3]=flags;
+        out.metadata[0]=vi.customIndex; out.metadata[1]=desiredMask; out.metadata[2]=m_device->getVolumeRoutedSbtOffset(desiredMask, vi.sbtRecordOffset); out.metadata[3]=flags;
         const uint64_t address=m_device->m_blasList[vi.blasIndex].deviceAddress;
         out.blasAddressLo=static_cast<uint32_t>(address);
         out.blasAddressHi=static_cast<uint32_t>(address>>32u);
@@ -16005,6 +16010,7 @@ bool VulkanBackendAdapter::cloneRtObjectByNodeName(
 // renderProgressiveImpl; now run when an asynchronous build is installed (or an
 // unchanged pipeline is reused).
 void VulkanBackendAdapter::onRTPipelineInstalled() {
+    refreshVolumeStageRouting();
     // updateGeometry can run before this lazy pipeline exists. In that
     // phase point-sphere groups are deliberately omitted so they never
     // create a huge temporary triangle TLAS. Now that the procedural
@@ -18726,6 +18732,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         // Load Volume Shaders (optional — gracefully skipped if not compiled)
         std::vector<std::uint32_t> volChitSPV;
         std::vector<std::uint32_t> volIntSPV;
+        std::vector<std::uint32_t> volSurfaceSPV;
         if (std::filesystem::exists(shaderDir + "/volume_closesthit.spv") &&
             std::filesystem::exists(shaderDir + "/volume_intersection.spv")) {
             volChitSPV = loadSPV(shaderDir + "/volume_closesthit.spv");
@@ -18733,6 +18740,8 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
         } else {
             SCENE_LOG_INFO("[Vulkan] Volume shaders not found — volume rendering disabled.");
         }
+
+        VulkanRT::configureSplitVolumeShaders(shaderDir, raygenSPV, volChitSPV, volSurfaceSPV);
 
         // Load Hair Shaders
         std::vector<std::uint32_t> hairChitSPV;
@@ -18875,6 +18884,7 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             rtShaders.anyHit             = std::move(ahitSPV);
             rtShaders.volumeClosestHit   = std::move(volChitSPV);
             rtShaders.volumeIntersection = std::move(volIntSPV);
+            rtShaders.volumeSurfaceClosestHit = std::move(volSurfaceSPV);
             rtShaders.hairClosestHit     = std::move(hairChitSPV);
             rtShaders.hairIntersection   = std::move(hairIntSPV);
             rtShaders.hairAnyHit         = std::move(hairAhitSPV);
@@ -18922,6 +18932,12 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
     // camera/backend changes.
     // An empty scene is NOT this case: it has an empty TLAS and is traced.
     if (!m_device->isRTReady() || !m_device->hasTLAS()) {
+        rePresentCachedFrame();
+        return;
+    }
+    if (!VulkanRT::volumePipelineProbeAllowsScene(m_device->m_volumeCount, m_tlasVolumeSlotCount)) {
+        SCENE_LOG_ON_CHANGE("rt-ab-volume-blocked", 1,
+            "[RT Pipeline A/B] Render blocked: use a scene without volume/SDF instances.");
         rePresentCachedFrame();
         return;
     }

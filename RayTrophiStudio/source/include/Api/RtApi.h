@@ -961,6 +961,13 @@ struct CameraState {
     bool  depth_of_field = false;
     float effective_lens_radius = 0.0f;
 
+    // Radial lens distortion k applied to primary rays (Vulkan RT, OptiX, CPU;
+    // RayFusion raster does NOT apply it). |k| <= 0.001 is not applied.
+    // auto_lens: Cinema-mode Auto Lens Characteristics owns k (and CA,
+    // vignetting); setCameraLensDistortion refuses while it is active.
+    float lens_distortion = 0.0f;
+    bool  auto_lens = false;
+
     // ── Fiziksel pozlama (MEVCUT model, preset tabanli) ────────────────────
     // ★★★ Bu alanlar yeni bir model DEGIL: motorun yillardir kullandigi
     //   ISO/enstantane/f-stop preset zincirini disari acar. Carpan GORELIDIR
@@ -1000,6 +1007,9 @@ Result setCameraTarget(const Vec3& target);
 Result setCameraFov(float fov);
 Result setCameraFocusDistance(float focus_distance);
 Result setCameraAperture(float aperture);
+// k in [-0.5, 0.5]: negative = barrel, positive = pincushion. Rejected (not
+// clamped) outside the range, and while Cinema auto lens owns the value.
+Result setCameraLensDistortion(float k);
 // ★ Anahtar aciklaga DOKUNMAZ: kapatip acmak eski bulanikligi geri getirir.
 Result setCameraDepthOfField(bool enabled);
 
@@ -1580,6 +1590,7 @@ struct VolumeMarchLodInfo {
     int secondary_light_stride = 4;  // 1..16
     int secondary_step_scale = 2;    // 1..16
     int secondary_max_steps = 128;   // 0 (authored budget) or 4..511
+    int camera_max_steps = 64;       // 0 (authored budget) or 4..511
     bool secondary_radiance_cache = true;
 };
 VolumeMarchLodInfo volumeMarchLod();
@@ -1734,6 +1745,8 @@ struct VolumeSlotRow {
     int  volume_type = -1;
     bool has_density = false;
     bool has_temperature = false;
+    int density_device_local = -1; // -1 unknown, 0 host heap, 1 device-local heap
+    int temperature_device_local = -1;
     int emission_mode = 0;
     bool color_ramp_enabled = false;
     float blackbody_intensity = 0.0f;
@@ -4399,6 +4412,58 @@ Result measureGasPlume(const std::string& domain_id_or_name,
                        float density_threshold,
                        GasPlumeMeasurement& out);
 
+// Distribution of a live gas field over cells above `threshold`, and the same
+// cells pushed through the authored emission chain. Check the *_measured flags:
+// a channel that was not computed reads 0, which is not a measured zero.
+struct GasFieldPercentiles {
+    float minimum = 0.0f, p1 = 0.0f, p5 = 0.0f, p25 = 0.0f, p50 = 0.0f;
+    float p75 = 0.0f, p95 = 0.0f, p99 = 0.0f, maximum = 0.0f, mean = 0.0f;
+};
+struct GasFieldStats {
+    bool measured = false;
+    float threshold = 0.01f;
+    uint64_t active_cells = 0;
+    GasFieldPercentiles density;
+    std::vector<uint64_t> density_histogram;
+    bool flame_measured = false;
+    uint64_t burning_cells = 0;                 // active cells with flame above 1e-3
+    GasFieldPercentiles flame;                  // over those cells only
+    bool temperature_measured = false;
+    GasFieldPercentiles temperature_kelvin;
+    std::vector<uint64_t> temperature_histogram;
+    // Independent emission with a color ramp only: the chain has no other form
+    // here. Excludes the flame field, which only live dense gas publishes.
+    bool emission_measured = false;
+    GasFieldPercentiles ramp_coordinate;
+    std::vector<uint64_t> ramp_histogram;
+    GasFieldPercentiles emission_luminance;     // before the radiance limit
+    GasFieldPercentiles voxel_optical_depth;    // peak RGB, after soot burnout
+    uint64_t emitting_cells = 0;
+    uint64_t limited_cells = 0;                 // above the limiter's knee
+};
+Result measureGasFields(const std::string& domain, float density_threshold, int bins,
+                        GasFieldStats& out);
+
+// Fits the material's temperature range, and optionally its gamma, to the
+// current field. Writes the material once; it does not follow later frames.
+struct GasTemperatureFitRequest {
+    float low_percentile = 1.0f;
+    float high_percentile = 99.5f;
+    float floor_kelvin = 800.0f;      // gas below this cannot glow
+    float median_target = 0.5f;       // ramp coordinate the median lands on
+    bool fit_gamma = true;
+};
+struct GasTemperatureFit {
+    bool fitted = false;
+    float temperature_min = 0.0f;
+    float temperature_max = 0.0f;
+    float temperature_gamma = 1.0f;
+    float median_before_gamma = 0.0f;
+    uint64_t cells = 0;
+};
+Result fitGasTemperatureRange(const std::string& domain, const GasTemperatureFitRequest& request,
+                              GasTemperatureFit& out);
+
 Result getParticlePhysics(ParticlePhysicsInfo& out, const ParticleSystemRef& system = {});
 Result updateParticlePhysics(const ParticlePhysicsInfo& info,
                              const ParticleSystemRef& system = {});
@@ -4457,6 +4522,11 @@ struct FluidDomainInfo {
     double fog_latent_to_air_j = 0.0;
     double fog_autoconverted_kg = 0.0;   // fog water -> rain water, last step
     double rained_kg = 0.0;              // rain water -> liquid (parcels + absorbed)
+    // Liquid-source emission the Max Particles ceiling withheld, kg (last
+    // step / since the reset): the sources are refilling losses, not pouring
+    // their authored rate.
+    double emission_withheld_kg_step = 0.0;
+    double emission_withheld_kg_total = 0.0;
     double rain_absorbed_kg = 0.0;       // the part absorbed by liquid surface parcels
     size_t rain_parcels = 0;
     // Rain water in the air (falling or pooled), kg and cells holding it.
@@ -5128,7 +5198,7 @@ struct SimulationFlowSourceInfo {
     uint64_t producer_uid = 0; // Read-only stable timeline identity.
     std::string name;
     std::string domain;
-    std::string phase = "gas";
+    std::string phase = "auto";
     std::string source_mode = "point"; // point|object_bounds|mesh_surface
     std::string source_object;
     bool enabled = true;
@@ -5172,8 +5242,21 @@ struct SimulationFlowSourceInfo {
     bool use_time_limit = false;
     float start_time = 0.0f;
     float end_time = 5.0f;
-    bool use_particle_limit = false;
-    int max_emitted_particles = 100000;
+    // Total material this source may pour, kg (rest mass + birth pore water).
+    // Replaced use_particle_limit/max_emitted_particles (2026-10-27).
+    bool use_mass_limit = false;
+    float max_emitted_mass_kg = 100.0f;
+    // Read-only runtime: emitted since the reset, and what the domain's Max
+    // Particles ceiling withheld (last step / since the reset). withheld > 0
+    // means the source is not pouring its authored rate.
+    int total_emitted_particles = 0;
+    double total_emitted_mass_kg = 0.0;
+    // Read-only: one parcel's birth mass for this source now (grain sphere
+    // mass, or the liquid voxel/PPC mass); 0 = it pours no particles. A mass
+    // budget for N parcels is N x this.
+    double parcel_mass_kg = 0.0;
+    double withheld_mass_kg_step = 0.0;
+    double withheld_mass_kg_total = 0.0;
 };
 
 struct SimulationColliderInfo {
@@ -5261,7 +5344,7 @@ struct GasShaderSettings {
     // top (96/256/512 by viewport quality preset), so raising max_steps past
     // that does nothing there while still affecting RT and the final render.
     float voxel_step_multiplier = 0.5f;
-    int   max_steps = 256;
+    int   max_steps = 128;
     int   shadow_steps = 8;
     int   shadow_stride = 4;
     float shadow_strength = 0.8f;
@@ -5296,7 +5379,7 @@ struct FluidFogShaderSettings {
     float absorption_coefficient = 2.0f;
     Vec3  absorption_color = Vec3(0.15f, 0.42f, 0.78f);
     float voxel_step_multiplier = 1.0f;
-    int   max_steps = 256;
+    int   max_steps = 128;
     int   shadow_steps = 8;
     int   shadow_stride = 1;
     float shadow_strength = 1.0f;
@@ -5372,6 +5455,9 @@ struct FluidStateDigest {
     uint64_t position_hash = 0, velocity_hash = 0;
     double   centroid[3] = { 0.0, 0.0, 0.0 };
     double   mean_speed = 0.0;
+    bool bounds_measured = false;
+    double bounds_min[3] = {0.0, 0.0, 0.0};
+    double bounds_max[3] = {0.0, 0.0, 0.0};
     uint64_t whitewater_particles = 0;
     uint64_t whitewater_position_hash = 0;
 };

@@ -221,7 +221,8 @@ void step(FluidParticles& particles,
                                                                       dt,
                                                                       out_stats.sealed_pockets,
                                                                       out_stats.sealed_pocket_cells,
-                                                                      out_stats.interior_fluid_cells);
+                                                                      out_stats.interior_fluid_cells,
+                                                                      out_stats);
             out_stats.sealed_pockets_measured = true;
         } else {
             GridFluid::SolverParams pp{};

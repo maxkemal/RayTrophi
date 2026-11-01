@@ -9,6 +9,7 @@ namespace {
 class EnvelopeWeightCommand final : public SceneCommand {
     RigAuthoring::EnvelopeWeightState pending;
     size_t triangles = 0;
+    std::string description;
 
     void exchange(UIContext &context) {
         for (auto &model : context.scene.importedModelContexts) {
@@ -48,7 +49,8 @@ class EnvelopeWeightCommand final : public SceneCommand {
 
   public:
     explicit EnvelopeWeightCommand(RigAuthoring::EnvelopeWeightState state)
-        : pending(std::move(state)) {
+        : pending(std::move(state)),
+          description("Rebuild skin weights (" + pending.algorithm + "): " + pending.character) {
         for (const auto &part : pending.parts) {
             triangles += part.mesh->num_triangles();
         }
@@ -75,7 +77,7 @@ class EnvelopeWeightCommand final : public SceneCommand {
     }
 
     std::string getDescription() const override {
-        return "Rebuild anatomical envelope weights: " + pending.character;
+        return description;
     }
 };
 } // namespace
@@ -129,6 +131,57 @@ Result applyRigEnvelopeWeights(const std::string &character,
         return Result::success();
     } catch (const std::exception &) {
         return Result::fail("rig_envelope_failed");
+    }
+}
+
+Result previewRigGeodesicWeights(const std::string &character,
+                                 const RigAuthoring::GeodesicWeightSettings &settings,
+                                 nlohmann::json &output) {
+    output = nullptr;
+    if (!g_ctx) {
+        return Result::fail("api_not_bound");
+    }
+    if (renderJobActive()) {
+        return Result::fail("scene_locked");
+    }
+    try {
+        std::string error;
+        return RigAuthoring::previewGeodesicWeights(g_ctx->scene, character, settings, output,
+                                                    error)
+                   ? Result::success()
+                   : Result::fail(error);
+    } catch (const std::exception &) {
+        return Result::fail("rig_geodesic_failed");
+    }
+}
+
+Result applyRigGeodesicWeights(const std::string &character,
+                               const RigAuthoring::GeodesicWeightSettings &settings,
+                               uint64_t revision) {
+    if (!g_ctx) {
+        return Result::fail("api_not_bound");
+    }
+    if (renderJobActive()) {
+        return Result::fail("scene_locked");
+    }
+    if (!g_history) {
+        return Result::fail("history_not_bound");
+    }
+    try {
+        RigAuthoring::EnvelopeWeightState state;
+        nlohmann::json report;
+        std::string error;
+        if (!RigAuthoring::stageGeodesicWeights(g_ctx->scene, character, settings, revision, state,
+                                                report, error)) {
+            return Result::fail(error);
+        }
+        auto command = std::make_unique<EnvelopeWeightCommand>(std::move(state));
+        auto *recorded = command.get();
+        g_history->record(std::move(command));
+        recorded->execute(*g_ctx);
+        return Result::success();
+    } catch (const std::exception &) {
+        return Result::fail("rig_geodesic_failed");
     }
 }
 

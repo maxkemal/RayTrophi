@@ -57,7 +57,7 @@ def main():
                  tangential_stiffness_ratio=args.tangential, contact_resolution=24,
                  max_substeps=4096)
             call('flow_source.update', name=SOURCE, position=[0, .65, 0], radius=.43,
-                 velocity=[0, 0, 0], max_emitted_particles=count,
+                 velocity=[0, 0, 0], parcels=count,
                  fluid_particles_per_second=count*1.01*60, start_time=0., end_time=1/30,
                  enabled=True)
             call('perf.set_gpu_kernel_timing', enabled=True)

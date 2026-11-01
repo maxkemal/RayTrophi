@@ -1,0 +1,272 @@
+{
+  "original": {
+    "matter:Physics Domain 1:gas": {
+      "absorption_coefficient": 1.4600000381469727,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.20600000023841858,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 38.194000244140625,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.3983517289161682,
+          0.5679944753646851,
+          0.7287086844444275,
+          0.7912086248397827,
+          0.8626371622085571,
+          0.9251371622085571,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 11.111000061035156,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 2,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 232,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": false,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 0.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 4,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 4150.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 0.31299999356269836,
+      "visible": true,
+      "voxel_step_multiplier": 3.0420000553131104
+    },
+    "matter:Physics Domain 1:gas_source:14": {
+      "absorption_coefficient": 1.4600000381469727,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": 0.20600000023841858,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 38.194000244140625,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          0.3983517289161682,
+          0.5679944753646851,
+          0.7287086844444275,
+          0.7912086248397827,
+          0.8626371622085571,
+          0.9251371622085571,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.009999999776482582,
+      "density_multiplier": 11.111000061035156,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 2,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 256,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": false,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 0.0,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 8,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 4,
+      "temperature_max": 4150.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 0.31299999356269836,
+      "visible": true,
+      "voxel_step_multiplier": 0.5
+    }
+  },
+  "rows": [
+    {
+      "case": "authored",
+      "frame": 50,
+      "gpu_ms": 537.113656,
+      "dimensions": [
+        [
+          1680,
+          945
+        ]
+      ],
+      "per_path": {
+        "camera_density_samples": 10.303474678760393,
+        "secondary_density_samples": 0.0,
+        "majorant_queries": 2.5361815318720082,
+        "empty_segments_skipped": 1.6790655076845553,
+        "volume_rays": 0.9640731922398589,
+        "radiance_cache_marches": 0.3602180650037793,
+        "radiance_cache_fallbacks": 0.0,
+        "solid_probe_runs": 0.9650394305870497
+      }
+    },
+    {
+      "case": "fixed_companion",
+      "frame": 50,
+      "gpu_ms": 514.4123119999999,
+      "dimensions": [
+        [
+          1680,
+          945
+        ]
+      ],
+      "per_path": {
+        "camera_density_samples": 6.851037792894936,
+        "secondary_density_samples": 0.0,
+        "majorant_queries": 1.0819114386495339,
+        "empty_segments_skipped": 1.4212025699168556,
+        "volume_rays": 0.96458629377677,
+        "radiance_cache_marches": 0.3568956916099773,
+        "radiance_cache_fallbacks": 0.0,
+        "solid_probe_runs": 0.9655537918871252
+      }
+    },
+    {
+      "case": "fixed_general",
+      "frame": 50,
+      "gpu_ms": 458.401424,
+      "dimensions": [
+        [
+          1680,
+          945
+        ]
+      ],
+      "per_path": {
+        "camera_density_samples": 6.851037792894936,
+        "secondary_density_samples": 0.0,
+        "majorant_queries": 1.0819114386495339,
+        "empty_segments_skipped": 1.4212025699168556,
+        "volume_rays": 0.96458629377677,
+        "radiance_cache_marches": 0.3568956916099773,
+        "radiance_cache_fallbacks": 0.0,
+        "solid_probe_runs": 0.9655537918871252
+      }
+    }
+  ],
+  "material_restored": true
+}

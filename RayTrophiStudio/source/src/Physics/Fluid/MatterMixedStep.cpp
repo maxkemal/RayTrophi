@@ -37,6 +37,11 @@ MatterConstitutiveModel resolveSingleMatterModel(const FluidParticles& particles
     return resolved;
 }
 
+bool requiresMatterModelBatch(const FluidParticles& particles, bool legacy_granular) {
+    return !particles.empty() &&
+        resolveSingleMatterModel(particles, legacy_granular) != MatterConstitutiveModel::Fluid;
+}
+
 bool hasMixedMatterModels(const FluidParticles& particles, bool legacy_granular) {
     bool fluid = false, granular = false;
     for (std::size_t i = 0; i < particles.size(); ++i) {

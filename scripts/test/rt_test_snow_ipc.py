@@ -86,8 +86,8 @@ def main():
                  source_mode='point', fluid_substance=substance, position=[0, .8, 0],
                  radius=.18, velocity=[0, 0, 0], fluid_velocity_spread=0.,
                  fluid_temperature_override=True, fluid_temperature_kelvin=263.15,
-                 use_time_limit=True, use_particle_limit=True,
-                 max_emitted_particles=COUNT, start_time=0., end_time=.05,
+                 use_time_limit=True, limit_parcels=True,
+                 parcels=COUNT, start_time=0., end_time=.05,
                  fluid_particles_per_second=COUNT * 30.)
             existing.add(SOURCE)
             source_ready = True

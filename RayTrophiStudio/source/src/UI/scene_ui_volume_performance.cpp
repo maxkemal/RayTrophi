@@ -393,17 +393,20 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
     // as render.set_volume_march_lod; applied on release, like the cache.
     {
         const rtapi::VolumeMarchLodInfo lod = rtapi::volumeMarchLod();
-        static int s_lodEdit[4] = {1, 4, 2, 128};
+        static int s_lodEdit[5] = {1, 4, 2, 128, 64};
         static bool s_lodHeld = false;
         if (!s_lodHeld) {
             s_lodEdit[0] = lod.camera_light_stride;
             s_lodEdit[1] = lod.secondary_light_stride;
             s_lodEdit[2] = lod.secondary_step_scale;
             s_lodEdit[3] = lod.secondary_max_steps;
+            s_lodEdit[4] = lod.camera_max_steps;
         }
         bool radianceCache = lod.secondary_radiance_cache;
         bool cacheToggled = ImGui::Checkbox("Bounce Radiance Cache", &radianceCache);
         bool held = false, released = false;
+        ImGui::SliderInt("Camera Max Steps (RT)", &s_lodEdit[4], 0, 511);
+        held |= ImGui::IsItemActive(); released |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SliderInt("Camera Light Stride", &s_lodEdit[0], 1, 16);
         held |= ImGui::IsItemActive(); released |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SliderInt("Bounce Light Stride", &s_lodEdit[1], 1, 16);
@@ -420,16 +423,20 @@ void DrawVolumePerformancePanel(UIContext& ctx) {
             next.secondary_step_scale = s_lodEdit[2];
             // 1..3 are rejected by the core; snap them to the nearest valid.
             next.secondary_max_steps = (s_lodEdit[3] > 0 && s_lodEdit[3] < 4) ? 4 : s_lodEdit[3];
+            next.camera_max_steps = (s_lodEdit[4] > 0 && s_lodEdit[4] < 4) ? 4 : s_lodEdit[4];
             next.secondary_radiance_cache = radianceCache;
             rtapi::setVolumeMarchLod(next);
         }
         UIWidgets::HelpMarker(
-            "Vulkan RT gas march LOD. Light stride: in-scatter is evaluated every "
+            "Vulkan RT gas march LOD. Camera max steps caps the material's Max "
+            "Steps on camera rays in RT only; RayFusion keeps the material value "
+            "(0 = no cap). Light stride: in-scatter is evaluated every "
             "k density samples and held in between (1 = every sample). Bounce "
             "step scale / max steps coarsen the march only after the first "
             "bounce. Bounce radiance cache: bounce rays read a per-cell density "
             "+ lighting cache instead of marching. 1 / 1 / 1 / 0 with the cache "
-            "off is the full-quality reference. Not saved with the project.");
+            "off and camera max steps 0 is the full-quality reference. Not saved "
+            "with the project.");
     }
     ImGui::Separator();
 

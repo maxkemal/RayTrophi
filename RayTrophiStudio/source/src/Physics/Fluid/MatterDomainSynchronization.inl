@@ -6,6 +6,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
     for (std::size_t i = 0; i < grid_domains_.size(); ++i) {
         auto& domain = grid_domains_[i];
         auto& state = grid_domain_states_[i];
+        canonicalizeMatterDomain(domain, flow_sources_, static_cast<int>(i));
 
         // Do not re-derive coupling flags from the material preset here.
         // These fields are editable domain overrides; doing that every sync
@@ -33,7 +34,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             Vec3 max_p(-1.0e10f, -1.0e10f, -1.0e10f);
             bool has_particles = false;
 
-            if (simulationDomainHasLiquid(domain.type)) {
+            if (simulationDomainHasLiquid(domain)) {
                 if (!state.particles.position.empty()) {
                     for (const auto& pos : state.particles.position) {
                         min_p = Vec3::min(min_p, pos);
@@ -182,7 +183,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // through, so the requirement cannot be forgotten from the UI, from a
         // preset, or from a script. Written back to the desc so the panel and
         // the saved project agree with what the solver actually allocated.
-        if (simulationDomainHasGas(domain.type) && domain.fire_enabled) {
+        if (simulationDomainHasGas(domain) && domain.fire_enabled) {
             domain.channels |=
                 static_cast<uint32_t>(SimulationGridDomainChannelFlags::Fuel) |
                 static_cast<uint32_t>(SimulationGridDomainChannelFlags::Temperature);
@@ -209,7 +210,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // could read it — the liquid was carried rigidly with the box (below) but
         // never received the velocity impulse, so it never sloshed. Accumulate,
         // and let the consumer clear it.
-        if (!simulationDomainHasLiquid(domain.type)) {
+        if (!simulationDomainHasLiquid(domain)) {
             state.domain_motion_delta = Vec3(0.0f, 0.0f, 0.0f);
         }
 
@@ -218,7 +219,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // vector the user translated the domain → glue the seed to it. If
         // only one corner moved the user is dragging an extent → keep the
         // seed in place (its absolute world coords stay valid).
-        if (simulationDomainHasLiquid(domain.type)) {
+        if (simulationDomainHasLiquid(domain)) {
             if (domain.fluid_seed_anchor_min.x > -9.99e9f) {
                 const Vec3 delta_min = mn - domain.fluid_seed_anchor_min;
                 const Vec3 delta_max = mx - domain.fluid_seed_anchor_max;
@@ -271,7 +272,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // FluidObject seeded directly from the panel; the unified path keeps
         // the seed deferred so it applies on the next sim tick with a freshly
         // resized grid.
-        if (simulationDomainHasLiquid(domain.type) &&
+        if (simulationDomainHasLiquid(domain) &&
             domain.fluid_pending_seed && state.valid) {
             if (domain.fluid_replace_on_seed) {
                 state.particles.clear();
@@ -418,7 +419,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 state.settle_stats.pending = true;
             }
         }
-        if (simulationDomainHasLiquid(domain.type) &&
+        if (simulationDomainHasLiquid(domain) &&
             domain.fluid_pending_settle && state.valid) {
             state.settle_stats.pending = !state.particles.empty();
             domain.fluid_pending_settle = false;

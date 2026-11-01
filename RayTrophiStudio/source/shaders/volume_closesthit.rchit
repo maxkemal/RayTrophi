@@ -223,6 +223,7 @@ struct VkVolumeInstance {
     float    _uvw_pad[1];
     // Appended at byte 624; total record stride is now 672 bytes.
     float density_curve[12];
+    float emission_mask[4];
 };
 #include "volume_density_curve.glsl"
 
@@ -985,6 +986,9 @@ bool sssCustomExit(vec3 origin, vec3 dir, float tMax, out float tHit, out vec3 e
 #endif
 
 #include "volume_overlap_selection.glsl"
+// Incoming PL_CAMERA_SEGMENT flag, captured before the payload is rewritten.
+// Camera-only fire scattering and the secondary march LOD share this policy.
+bool volumeCameraSegment = true;
 #if !defined(RT_VOLUME_SURFACE_STAGE)
 #include "volume_sun_shadow_cache.glsl"
 #include "volume_light_cache.glsl"
@@ -995,11 +999,6 @@ bool sssCustomExit(vec3 origin, vec3 dir, float tMax, out float tHit, out vec3 e
 #include "volume_phase_cache.glsl"
 #include "volume_mixture.glsl"
 #endif
-
-// Whether this trace belongs to the camera segment (PL_CAMERA_SEGMENT on the
-// INCOMING payload, read in main() before shading rewrites primaryMeta). The
-// gas march LOD below coarsens only the other, later-bounce segments.
-bool volumeCameraSegment = true;
 
 #if !defined(RT_VOLUME_SURFACE_STAGE)
 #include "volume_cached_segment.glsl"

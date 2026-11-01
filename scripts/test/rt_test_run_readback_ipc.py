@@ -22,15 +22,24 @@ def main():
     assert not call('fluid.list_domains')['domains'], 'Use an empty scene'
     failures = []
 
-    def read(tag, expected):
+    def read(tag, expected, expected_frame):
         row = {d['name']: d for d in call('fluid.list_domains')['domains']}[D]
         mm = call('fluid.matter_models', domain=D)
-        frame = call('sim.control_state').get('frame')
+        digest = call('fluid.state_digest', domain=D)
+        assert digest['bounds_measured'] and digest['particles'] == expected
+        for low, center, high in zip(digest['bounds_min'], digest['centroid'],
+                                     digest['bounds_max']):
+            assert low <= center <= high, 'invalid measured particle bounds'
+        control = call('sim.control_state')
+        frame = control.get('frame')
         mass = sum(m.get('mass_kg', 0.0) for m in mm.get('models', []))
         print(tag, 'frame', frame, 'particles', row.get('particle_count'),
               'substances', len(row.get('substances') or []), 'mass', round(mass, 3), flush=True)
         if row.get('particle_count') != expected or not mass > 0.0:
             failures.append(tag)
+        if (not control.get('script_driving') or frame is None
+                or abs(frame - expected_frame) > 1):
+            failures.append(tag + ' timeline claim')
 
     call('fluid.create_domain', name=D, type='matter', domain_min=[-.3, 0, -.3],
          domain_max=[.3, .6, .3], voxel_size=.05)
@@ -48,11 +57,12 @@ def main():
             out = call('fluid.run', steps=steps, dt=1 / 60, sample_every=0, domains=[D],
                        fields=['particle_count'])
             expected = out['samples'][-1]['domains'][D]['particle_count']
+            expected_frame = steps * 24 / 60
             print('run', steps, 'last sample particles', expected, flush=True)
-            read('run%d read1' % steps, expected)
-            read('run%d read2' % steps, expected)
+            read('run%d read1' % steps, expected, expected_frame)
+            read('run%d read2' % steps, expected, expected_frame)
             time.sleep(.5)
-            read('run%d read3 +0.5s' % steps, expected)
+            read('run%d read3 +0.5s' % steps, expected, expected_frame)
         print('PASS' if not failures else 'FAIL', 'reads_after_run_match', failures, flush=True)
     finally:
         call('flow_source.remove', name='T_RunRead_src')

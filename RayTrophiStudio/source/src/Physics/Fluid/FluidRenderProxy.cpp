@@ -293,7 +293,7 @@ bool ParticleSimulationSystem::fluidResidentPositionBuffer(
     }
 
     const SimulationGridDomainState& state = grid_domain_states_[domain_index];
-    const bool matter = state.type == SimulationDomainType::Matter;
+    const bool matter = simulationDomainHasBothPhases(state);
     if (matter && domain_index >= matter_liquid_compute_buffers_.size()) {
         return false;
     }
@@ -301,7 +301,7 @@ bool ParticleSimulationSystem::fluidResidentPositionBuffer(
         ? matter_liquid_compute_buffers_[domain_index]
         : grid_domain_compute_buffers_[domain_index];
     const std::size_t count = state.particles.size();
-    if (!state.valid || !simulationDomainHasLiquid(state.type) || count == 0 ||
+    if (!state.valid || !simulationDomainHasLiquid(state) || count == 0 ||
         count > std::numeric_limits<uint32_t>::max() ||
         buffers.backend != ComputeBackendType::VulkanCompute ||
         !buffers.fluid_positions.valid() ||

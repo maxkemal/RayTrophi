@@ -1,5 +1,8 @@
 ﻿#pragma once
 #include "trace_ray.cuh"
+#include "VolumeTemperatureMapping.h"
+#include "VolumeEmissionMask.h"
+#include "VolumeEmissionTransport.h"
 #include <math_constants.h>
 
 #ifndef SCENE_EPSILON
@@ -927,14 +930,21 @@ __device__ float3 raymarch_vdb_volume(
         }
         if (!isfinite(raw_density)) raw_density = 0.0f;
         
-        float density = fmaxf((raw_density - vol.density_remap_low) / remap_range, 0.0f) * vol.density_multiplier;
-        float sigma_a = density * vol.absorption_coefficient;
-        float sigma_s = density * vol.scatter_coefficient;
+        float density = fmaxf((raw_density - vol.density_remap_low) / remap_range, 0.0f) *
+            volumeEmissionSamplingMultiplier(vol.density_multiplier, vol.emission_response[0]);
+        float sigma_a = volumeEmissionOpticalDensity(density, vol.density_multiplier,
+            vol.emission_response[0]) * vol.absorption_coefficient;
+        float sigma_s = volumeEmissionOpticalDensity(density, vol.density_multiplier,
+            vol.emission_response[0]) * vol.scatter_coefficient;
         float sigma_t = sigma_a + sigma_s;
         float sparse_cutoff = (vol.density_pad > 0.0f) ? vol.density_pad : 0.04f;
         float scatter_keep = fminf(1.0f, fmaxf(0.0f, (sigma_s * base_step) / sparse_cutoff));
-        if (sigma_t > 1e-8f) {
-            if (sigma_t <= 1e-8f) { t += base_step; steps++; continue; }
+        if (volumeEmissionSegmentActive(sigma_t, density, vol.emission_response[0])) {
+            if (!volumeEmissionSegmentActive(sigma_t, density, vol.emission_response[0])) {
+                t += base_step;
+                steps++;
+                continue;
+            }
             float step = fminf(base_step, tau_max / sigma_t);
             step = fmaxf(step, min_step);
             step = fminf(step, world_t_exit - t);
@@ -947,24 +957,32 @@ __device__ float3 raymarch_vdb_volume(
             
             // Emission
             float3 emission = make_float3(0.0f);
-            if (vol.emission_mode == 1) emission = vol.emission_color * vol.emission_intensity * density;
+            if (vol.emission_mode == 1) {
+                emission = vol.emission_color * vol.emission_intensity * density *
+                    volumeEmissionMaskFactor(density, vol.density_multiplier, vol.emission_mask);
+                emission = volumeEmissionOptInForVolume(vol, emission, vol.emission_color,
+                    density, 1.0f, 1.0f, vol.emission_intensity, false);
+            }
             else if (vol.emission_mode >= 2) {
-                float temperature = density;
+                float temperature = volumeEmissionInputDensity(density,
+                    vol.density_multiplier, vol.emission_response[0]);
                 if (temp_grid) {
                     nanovdb::FloatGrid::AccessorType temp_acc = temp_grid->getAccessor();
                     nanovdb::math::SampleFromVoxels<nanovdb::FloatGrid::AccessorType, 1, false> temp_sampler(temp_acc);
                     nanovdb::Vec3f temp_idx = temp_grid->worldToIndexF(nanovdb::Vec3f(local_pos.x, local_pos.y, local_pos.z));
                     temperature = temp_sampler(temp_idx);
                 }
-                if (!isfinite(temperature)) temperature = density;
+                if (!isfinite(temperature) && vol.density_curve[10] == 0.0f) {
+                    temperature = volumeEmissionInputDensity(density,
+                        vol.density_multiplier, vol.emission_response[0]);
+                }
                 
                 float ramp_min = fmaxf(vol.emission_pad, 0.0f);
                 float ramp_max = (vol.max_temperature > ramp_min + 1.0f)
                     ? vol.max_temperature : (ramp_min + 1500.0f);
-                float authored_kelvin = (temperature > 20.0f)
-                    ? fminf(fmaxf(temperature, ramp_min), ramp_max)
-                    : ramp_min + fminf(fmaxf(temperature, 0.0f), 1.0f) *
-                      (ramp_max - ramp_min);
+                const auto thermal = volumeMapTemperature(temperature, temperature,
+                    ramp_min, ramp_max, int(vol.density_curve[10]), temp_grid != nullptr);
+                float authored_kelvin = thermal.kelvin;
                 float kelvin = authored_kelvin * vol.temperature_scale;
                 float t_ramp = (authored_kelvin - ramp_min) /
                                fmaxf(ramp_max - ramp_min, 1.0f);
@@ -972,8 +990,18 @@ __device__ float3 raymarch_vdb_volume(
                 float ramp_t_clamped = fminf(
                     fmaxf(t_ramp * vol.temperature_scale, 0.0f), 1.0f);
                 float3 e_color = vol.color_ramp_enabled ? sample_color_ramp(vol, ramp_t_clamped) : blackbody_to_rgb(kelvin);
-                float emit_gate = (vol.color_ramp_enabled && temperature > 20.0f && t_ramp <= 0.0f) ? 0.0f : 1.0f;
-                emission = clamp_volume_radiance(e_color * (density * vol.blackbody_intensity * emit_gate), 64.0f);
+                float emit_gate = !thermal.valid ||
+                    (vol.color_ramp_enabled && temperature > 20.0f && t_ramp <= 0.0f)
+                    ? 0.0f : 1.0f;
+                emission = thermal.valid
+                    ? clamp_volume_radiance(e_color * (density * vol.blackbody_intensity *
+                        emit_gate * volumeEmissionMaskFactor(density,
+                            vol.density_multiplier, vol.emission_mask)), 64.0f)
+                    : make_float3(0.0f);
+                emission = volumeEmissionOptInForVolume(vol, emission, e_color, density,
+                    thermal.normalized, vol.color_ramp_enabled ? 1.0f :
+                        powf(fminf(fmaxf(authored_kelvin / ramp_max, 0.0f), 1.0f), 4.0f),
+                    vol.blackbody_intensity * emit_gate, true);
             }
             
             // Lighting (Sun + Scene)
@@ -1061,7 +1089,8 @@ __device__ float3 raymarch_vdb_volume(
             float3 inscatter = albedo * total_light * scattering_albedo;
             
             // CPU/Vulkan parity integration
-            accumulated_color += transmittance * (inscatter + emission) * one_minus_T;
+            accumulated_color += transmittance * volumeEmissionIntegrate(
+                inscatter + emission, emission, sigma_t, step, vol.emission_response[0]);
             transmittance *= step_transmittance;
             t += step;
             steps++;
@@ -2398,15 +2427,22 @@ __device__ float3 raymarch_gas_volume(
         // Remap
         float remap_range = vol.density_remap_high - vol.density_remap_low + 1e-6f;
         density = (density - vol.density_remap_low) / remap_range;
-        density = fmaxf(density, 0.0f) * vol.density_multiplier;
+        density = fmaxf(density, 0.0f) *
+            volumeEmissionSamplingMultiplier(vol.density_multiplier, vol.emission_response[0]);
         
-        float sigma_a = density * vol.absorption_coefficient;
-        float sigma_s = density * vol.scatter_coefficient;
+        float sigma_a = volumeEmissionOpticalDensity(density, vol.density_multiplier,
+            vol.emission_response[0]) * vol.absorption_coefficient;
+        float sigma_s = volumeEmissionOpticalDensity(density, vol.density_multiplier,
+            vol.emission_response[0]) * vol.scatter_coefficient;
         float sigma_t = sigma_a + sigma_s;
         float sparse_cutoff = (vol.density_pad > 0.0f) ? vol.density_pad : 0.04f;
         float scatter_keep = fminf(1.0f, fmaxf(0.0f, (sigma_s * base_step) / sparse_cutoff));
-        if (sigma_t > 1e-8f) {
-            if (sigma_t <= 1e-8f) { t += base_step; steps++; continue; }
+        if (volumeEmissionSegmentActive(sigma_t, density, vol.emission_response[0])) {
+            if (!volumeEmissionSegmentActive(sigma_t, density, vol.emission_response[0])) {
+                t += base_step;
+                steps++;
+                continue;
+            }
             float step = fminf(base_step, tau_max / sigma_t);
             step = fmaxf(step, min_step);
             step = fminf(step, world_t_exit - t);
@@ -2473,22 +2509,28 @@ __device__ float3 raymarch_gas_volume(
             
             float3 emission = make_float3(0.0f);
             if (vol.emission_mode == 1) { // Constant
-                emission = vol.emission_color * vol.emission_intensity * density;
+                emission = vol.emission_color * vol.emission_intensity * density *
+                    volumeEmissionMaskFactor(density, vol.density_multiplier, vol.emission_mask);
+                emission = volumeEmissionOptInForVolume(vol, emission, vol.emission_color,
+                    density, 1.0f, 1.0f, vol.emission_intensity, false);
             }
             else if (vol.emission_mode >= 2) { // Blackbody / Color Ramp / Channel-driven
-                float temperature = density; 
+                float temperature = volumeEmissionInputDensity(density,
+                    vol.density_multiplier, vol.emission_response[0]);
                 if (vol.temperature_texture) {
                     temperature = tex3D<float>(vol.temperature_texture, tex_coord.x, tex_coord.y, tex_coord.z);
-                    if (!isfinite(temperature)) temperature = density; 
+                    if (!isfinite(temperature) && vol.density_curve[10] == 0.0f) {
+                        temperature = volumeEmissionInputDensity(density,
+                        vol.density_multiplier, vol.emission_response[0]);
+                    }
                 }
                 
                 float ramp_min = fmaxf(vol.emission_pad, 0.0f);
                 float ramp_max = (vol.max_temperature > ramp_min + 1.0f)
                     ? vol.max_temperature : (ramp_min + 1500.0f);
-                float authored_kelvin = (temperature > 20.0f)
-                    ? fminf(fmaxf(temperature, ramp_min), ramp_max)
-                    : ramp_min + fminf(fmaxf(temperature, 0.0f), 1.0f) *
-                      (ramp_max - ramp_min);
+                const auto thermal = volumeMapTemperature(temperature, temperature,
+                    ramp_min, ramp_max, int(vol.density_curve[10]), vol.temperature_texture != 0);
+                float authored_kelvin = thermal.kelvin;
                 float kelvin = authored_kelvin * vol.temperature_scale;
                 float t_ramp_val = (authored_kelvin - ramp_min) /
                                    fmaxf(ramp_max - ramp_min, 1.0f);
@@ -2497,8 +2539,18 @@ __device__ float3 raymarch_gas_volume(
                     fmaxf(t_ramp_val * vol.temperature_scale, 0.0f), 1.0f);
                 if (vol.color_ramp_enabled) e_color = sample_color_ramp_gas(vol, ramp_t_clamped);
                 else e_color = blackbody_to_rgb(kelvin);
-                float emit_gate = (vol.color_ramp_enabled && temperature > 20.0f && t_ramp_val <= 0.0f) ? 0.0f : 1.0f;
-                emission = clamp_volume_radiance(e_color * density * vol.blackbody_intensity * emit_gate, 64.0f);
+                float emit_gate = !thermal.valid ||
+                    (vol.color_ramp_enabled && temperature > 20.0f && t_ramp_val <= 0.0f)
+                    ? 0.0f : 1.0f;
+                emission = thermal.valid
+                    ? clamp_volume_radiance(e_color * density * vol.blackbody_intensity *
+                        emit_gate * volumeEmissionMaskFactor(density,
+                            vol.density_multiplier, vol.emission_mask), 64.0f)
+                    : make_float3(0.0f);
+                emission = volumeEmissionOptInForVolume(vol, emission, e_color, density,
+                    thermal.normalized, vol.color_ramp_enabled ? 1.0f :
+                        powf(fminf(fmaxf(authored_kelvin / ramp_max, 0.0f), 1.0f), 4.0f),
+                    vol.blackbody_intensity * emit_gate, true);
             }
 
             float3 source =
@@ -2506,7 +2558,8 @@ __device__ float3 raymarch_gas_volume(
                 emission;
             
             // CPU/Vulkan parity integration
-            accumulated_color += source * (one_minus_T * transmittance);
+            accumulated_color += volumeEmissionIntegrate(source, emission, sigma_t, step,
+                vol.emission_response[0]) * transmittance;
             transmittance *= step_transmittance;
             t += step;
             steps++;

@@ -44,9 +44,10 @@ void VulkanBackendAdapter::syncUpscaleFrame(uint32_t width, uint32_t height,
         blockedReason = "orthographic camera is unsupported";
     } else if (m_camera.camera_mode < 0 || m_camera.camera_mode > 1) {
         blockedReason = "camera mode requires unsupported lens motion vectors";
-    } else if (m_camera.distortion != 0.0f) {
-        blockedReason = "camera lens distortion is active";
     } else if (m_camera.chromaticAberrationEnabled) {
+        // Lens distortion is supported: raygen's motion vectors invert it
+        // (motionLensPx). Chromatic aberration stays blocked: each pass shifts
+        // one random colour channel, which FSR would upscale as fringe noise.
         blockedReason = "camera chromatic aberration is enabled";
     } else if (m_camera.shake_enabled) {
         blockedReason = "camera shake is enabled";

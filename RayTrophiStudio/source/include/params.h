@@ -347,6 +347,9 @@ struct GpuVDBVolume {
     int internal_light_stride = 8;
     float emission_response[5] = {};
     float density_curve[12] = {};
+    float emission_mask[4] = {};
+    float soot_burnout[3] = {};
+    float temperature_gamma = 1.0f;
 };
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -422,6 +425,9 @@ struct GpuGasVolume {
     int internal_light_stride = 8;
     float emission_response[5] = {};
     float density_curve[12] = {};
+    float emission_mask[4] = {};
+    float soot_burnout[3] = {};
+    float temperature_gamma = 1.0f;
 };
 
 struct RayGenParams {

@@ -516,6 +516,15 @@ public:
      void addViewportMessage(const std::string& text, float duration = 2.0f, ImVec4 color = ImVec4(1,1,1,1));
      void clearViewportMessages(); // Force clear all messages
      void drawViewportMessages(UIContext& ctx, float left_offset);
+
+     // Matter domains whose mixed step is held (grains frozen, e.g. by the
+     // contact substep limit). The status bar shows it whichever panel is
+     // open, and a toast fires once when a domain becomes held; the solver
+     // panel's DEM line used to be the only place that said so.
+     // SimulationHeldAlert.cpp.
+     std::vector<std::string> held_domain_alert_keys;
+     std::vector<std::string> throttled_domain_alert_keys;  // Max Particles ceiling
+     void drawSimulationHeldStatus(UIContext& ctx);
      
      // Background Save State (0=Idle, 1=Saving, 2=Done, 3=Error)
      // Background Save State (0=Idle, 1=Saving, 2=Done, 3=Error)

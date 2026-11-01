@@ -1,4 +1,5 @@
 #include "UI/VolumeMaterialUI.h"
+#include "UI/MatterLaneControls.h"
 #include "UI/GrainMeshLibraryUI.h"
 #include "UI/SourceSplatGeometryUI.h"
 #include "Fluid/SourceSplatRenderPlan.h"
@@ -227,7 +228,7 @@ void drawSimulationDomainControls(
                 // the user can still rename the domain freely.
                 const char* type_tag =
                     domains[i].type == RayTrophiSim::SimulationDomainType::Matter ? "Matter" :
-                    (domains[i].type == RayTrophiSim::SimulationDomainType::Fluid ? "Fluid" : "Gas");
+                    (domains[i].type == RayTrophiSim::SimulationDomainType::LegacyFluid ? "Fluid" : "Gas");
                 std::snprintf(label, sizeof(label), "%s  [%s]##domain_standalone%d",
                               domains[i].name.c_str(), type_tag, i);
                 if (ImGui::Selectable(label, selected_domain_index == i)) {
@@ -252,7 +253,7 @@ void drawSimulationDomainControls(
         // and every per-view section below reads this; none re-derives it from
         // the mode combo or the bindings.
         RayTrophiSim::Fluid::FluidViewPlan view_plan;
-        if (RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
+        if (RayTrophiSim::simulationDomainHasLiquid(domain)) {
             std::vector<RayTrophiSim::Fluid::FluidViewKey> live_keys;
             const auto& states = particles->gridDomainStates();
             const std::size_t di = static_cast<std::size_t>(selected_domain_index);
@@ -282,8 +283,8 @@ void drawSimulationDomainControls(
         static bool s_fluid_auto_reseed = true;
         bool seed_settled = false;
 
-        const bool is_fluid_domain = RayTrophiSim::simulationDomainHasLiquid(domain.type);
-        const bool is_gas_domain = RayTrophiSim::simulationDomainHasGas(domain.type);
+        const bool is_fluid_domain = RayTrophiSim::simulationDomainHasLiquid(domain);
+        const bool is_gas_domain = RayTrophiSim::simulationDomainHasGas(domain);
 
         ImGui::Separator();
         // ── SUB-TABS FOR DOMAIN ──
@@ -292,62 +293,8 @@ void drawSimulationDomainControls(
             if (ImGui::BeginTabItem("Domain")) {
                 if (ImGui::SmallButton("Collapse all##DomainTab")) UIWidgets::RequestCollapseAll();
                 ImGui::Spacing();
-                // What the domain holds. The unified matter domain will derive this from
-                // its contents; until then it is the solver switch. A standard combo: the
-                // panel uses the general theme, no state-coloured buttons.
-                {
-                    int phase_idx = domain.type == RayTrophiSim::SimulationDomainType::Matter
-                        ? 2
-                        : (is_fluid_domain ? 1 : 0);
-                    const char* phase_items[] = {
-                        "Gas (smoke / fire)",
-                        "Liquid (APIC / FLIP)",
-                        "Matter (gas + liquid / granular)"
-                    };
-                    ImGui::SetNextItemWidth(-FLT_MIN);
-                    if (ImGui::Combo("Contents##DomainPhase", &phase_idx, phase_items,
-                                     IM_ARRAYSIZE(phase_items))) {
-                        const auto new_type = phase_idx == 2
-                            ? RayTrophiSim::SimulationDomainType::Matter
-                            : (phase_idx == 1
-                                ? RayTrophiSim::SimulationDomainType::Fluid
-                                : RayTrophiSim::SimulationDomainType::Gas);
-                        if (new_type != domain.type) {
-                            if (new_type == RayTrophiSim::SimulationDomainType::Matter) {
-                                const auto inherited_phase =
-                                    domain.type == RayTrophiSim::SimulationDomainType::Fluid
-                                        ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid
-                                        : RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
-                                for (auto& source : particles->flowSources()) {
-                                    if (source.domain_index == selected_domain_index) {
-                                        source.phase = inherited_phase;
-                                    }
-                                }
-                            }
-                            domain.type = new_type;
-                            // Liquid wants a sealed box by default so it pools/settles;
-                            // open walls would silently drain it. Only override the
-                            // gas-default Open - leave an already-chosen Closed/Periodic.
-                            if (RayTrophiSim::simulationDomainHasLiquid(new_type) &&
-                                domain.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Open) {
-                                domain.boundary_mode = RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
-                            }
-                            ui_ctx.start_render = true;
-                            if (scene.active_particle_system_index >= 0 &&
-                                scene.active_particle_system_index < static_cast<int>(scene.particle_systems.size())) {
-                                auto& active_sys = scene.particle_systems[static_cast<size_t>(scene.active_particle_system_index)];
-                                if (selected_domain_index >= 0 &&
-                                    selected_domain_index < static_cast<int>(active_sys.domain_last_fluid_render_mode.size())) {
-                                    active_sys.domain_last_fluid_render_mode[static_cast<size_t>(selected_domain_index)] = -1;
-                                }
-                            }
-                        }
-                    }
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Gas: smoke and fire on a grid.\n"
-                                          "Liquid: water, honey, viscous or granular matter with APIC/FLIP particles.\n"
-                                          "Matter: one domain identity, with independent gas and liquid grids.");
-                    }
+                if (RayTrophiSim::Fluid::drawMatterLaneControls(domain)) {
+                    ui_ctx.start_render = true;
                 }
 
                 if (RayTrophiSim::Fluid::drawPhaseGridControls(domain)) {
@@ -1419,19 +1366,13 @@ void drawSimulationDomainControls(
                     ImGui::TextColored(ImVec4(1.0f, 0.8f, 0.2f, 1.0f), "[%s]", source.name.c_str());
 
                     if (is_gas_domain && is_fluid_domain) {
-                        int source_phase = source.phase ==
-                            RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid ? 1 : 0;
-                        const char* source_phases[] = { "Gas", "Liquid" };
-                        if (ImGui::Combo("Emission Phase##FlowPhase", &source_phase,
-                                         source_phases, IM_ARRAYSIZE(source_phases))) {
-                            source.phase = source_phase == 1
-                                ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid
-                                : RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
+                        if (RayTrophiSim::Fluid::drawMatterSourcePhaseControl(domain, source)) {
+                            scene.clearSimFrameCache();
+                            scene.requestSimulationTimelineRenderResync();
                         }
                     }
                     const bool source_is_fluid = is_fluid_domain &&
-                        (!is_gas_domain || source.phase ==
-                            RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid);
+                        source.phase == RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid;
 
                     const char* mode_labels[] = { "Point (Sphere)", "Object Bounding Box", "Mesh Geometry Surface" };
                     int mode_idx = static_cast<int>(source.source_mode);
@@ -1834,34 +1775,37 @@ void drawSimulationDomainControls(
                             if (source.start_time > source.end_time) source.end_time = source.start_time;
                         }
                         
-                        // Particle Budget limits (only for fluid domains)
+                        // Mass budget (only for fluid domains). Script/IPC:
+                        // use_mass_limit, max_emitted_mass_kg; flow_source.list
+                        // reports total_emitted_mass_kg and withheld_mass_kg_*.
                         if (source_is_fluid) {
                             ImGui::Spacing();
-                            ImGui::Checkbox("Use Particle Budget Limit##ParticleLimit", &source.use_particle_limit);
+                            ImGui::Checkbox("Limit Emitted Mass##MassLimit", &source.use_mass_limit);
                             if (ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("Limits the total number of particles this flow source can inject.");
+                                ImGui::SetTooltip("Total material this source may pour, in kg (grain or\n"
+                                                  "parcel mass plus the water a damp grain is born with).\n"
+                                                  "Evaporation, burning or draining never return budget.");
                             }
-                            if (source.use_particle_limit) {
-                                ImGui::DragInt("Max Particle Budget##MaxParticles", &source.max_emitted_particles, 100, 1, 10000000);
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("Maximum particles allowed to spawn from this emitter.");
-                                }
-                                source.max_emitted_particles = std::max(1, source.max_emitted_particles);
-                                
-                                // Live Budget Progress Feedback HUD
-                                float progress = 0.0f;
-                                if (source.max_emitted_particles > 0) {
-                                    progress = static_cast<float>(source.total_emitted_particles) / static_cast<float>(source.max_emitted_particles);
-                                }
-                                progress = std::min(1.0f, std::max(0.0f, progress));
-                                char buf[64];
-                                sprintf(buf, "Emitted: %d / %d", source.total_emitted_particles, source.max_emitted_particles);
+                            if (source.use_mass_limit) {
+                                ImGui::DragFloat("Max Emitted Mass (kg)##MaxMass", &source.max_emitted_mass_kg,
+                                                 0.5f, 0.0f, 1.0e7f, "%.3f");
+                                source.max_emitted_mass_kg = std::max(0.0f, source.max_emitted_mass_kg);
+                                const float progress = source.max_emitted_mass_kg > 0.0f
+                                    ? std::clamp(static_cast<float>(source.total_emitted_mass_kg /
+                                          source.max_emitted_mass_kg), 0.0f, 1.0f) : 1.0f;
+                                char buf[96];
+                                std::snprintf(buf, sizeof(buf), "Emitted: %.3f / %.3f kg",
+                                              source.total_emitted_mass_kg, source.max_emitted_mass_kg);
                                 ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f), buf);
-                                if (ImGui::IsItemHovered()) {
-                                    ImGui::SetTooltip("Percentage of the particle emission budget currently utilized.");
-                                }
                             } else {
-                                ImGui::TextColored(ImVec4(0.4f, 0.8f, 0.4f, 1.0f), "Lifetime Emitted Particles: %d", source.total_emitted_particles);
+                                ImGui::Text("Emitted: %.3f kg (%d particles)",
+                                            source.total_emitted_mass_kg, source.total_emitted_particles);
+                            }
+                            if (source.withheld_mass_kg_total > 0.0) {
+                                ImGui::TextWrapped("Max Particles withheld %.3f kg (%.4f kg last step): "
+                                    "the domain is at its particle ceiling, so this source refills "
+                                    "what leaves instead of pouring its rate.",
+                                    source.withheld_mass_kg_total, source.withheld_mass_kg_step);
                             }
                         }
                         
@@ -3230,7 +3174,7 @@ void drawSimulationDomainControls(
 
                         // Per-substance LOOK. The physics half of each binding (phase,
                         // viscosity, miscibility) is edited in the Matter tab.
-                        if (domain.type != RayTrophiSim::SimulationDomainType::Matter &&
+                        if (!RayTrophiSim::simulationDomainHasBothPhases(domain) &&
                             !domain.fluid_substance_materials.empty() &&
                             UIWidgets::CollapsingHeader("Substance Look", ImGuiTreeNodeFlags_DefaultOpen)) {
                             auto& smgr = MaterialManager::getInstance();
@@ -4155,7 +4099,7 @@ void drawSimulationDomainControls(
                     // NanoVDB shader UI
                     // Fog view: its medium lives on the fog volume and is edited
                     // there; this panel keeps only the domain-level spread.
-                    if (domain.type != RayTrophiSim::SimulationDomainType::Matter && view_plan.fog &&
+                    if (!RayTrophiSim::simulationDomainHasBothPhases(domain) && view_plan.fog &&
                         UIWidgets::CollapsingHeader("Fog View##LiquidFogView",
                                                     ImGuiTreeNodeFlags_DefaultOpen)) {
                         // Same field and range as fluid.set_fog spread_voxels.
@@ -4325,11 +4269,18 @@ void drawSimulationDomainControls(
 
                 if (is_gas_domain) {
                     // Volume shader
-                    auto& gas_shader = domain.type == RayTrophiSim::SimulationDomainType::Matter
+                    auto& gas_shader = RayTrophiSim::simulationDomainHasBothPhases(domain)
                         ? RayTrophiSim::Fluid::matterGasFogShader(domain)
                         : domain.shader;
                     if (!gas_shader) {
                         gas_shader = VolumeShader::createSmokePreset();
+                    }
+                    if (RayTrophiSim::simulationDomainHasBothPhases(domain)) {
+                        ImGui::PushTextWrapPos(0.0f);
+                        ImGui::TextDisabled("Gas render: %s",
+                            RayTrophiSim::Fluid::matterGasMergeStatus(
+                                domain.matter_fog_streams).c_str());
+                        ImGui::PopTextWrapPos();
                     }
                     if (UIWidgets::CollapsingHeader("Unified Volume Shader Properties", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
@@ -4927,7 +4878,7 @@ void drawSimulationDomainControls(
         // frame-0 rewind from leaving other tanks empty; the rewind clears the
         // particles first, so replace_on_seed is irrelevant (nothing to stack on).
         if (seed_settled && s_fluid_auto_reseed && particles &&
-            RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
+            RayTrophiSim::simulationDomainHasLiquid(domain)) {
             for (auto& sys : scene.particle_systems) {
                 if (!sys.runtime) continue;
                 for (auto& d : sys.runtime->gridDomains()) {
@@ -4941,7 +4892,7 @@ void drawSimulationDomainControls(
                     // drops into the upper half of the bounds for the gizmo to have
                     // something to show — so changing grid resolution while a hose
                     // was running dumped a block of water into the tank.
-                    if (RayTrophiSim::simulationDomainHasLiquid(d.type) &&
+                    if (RayTrophiSim::simulationDomainHasLiquid(d) &&
                         (d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel ||
                          d.fluid_reseed_on_reset)) {
                         d.fluid_pending_seed = true;

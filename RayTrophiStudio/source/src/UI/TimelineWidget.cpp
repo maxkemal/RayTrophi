@@ -1,4 +1,5 @@
 #include "TimelineWidget.h"
+#include "UI/SimulationTransport.h"
 #include "scene_ui.h"
 #include "scene_data.h"
 #include "Triangle.h"
@@ -47,34 +48,7 @@ extern std::unique_ptr<Backend::IBackend> g_backend;
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 namespace {
 void drainTimelineMutationBackends(UIContext& ctx) {
-    int wait_count = 0;
-    while (rendering_in_progress.load() && wait_count < 200) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        ++wait_count;
-    }
-
-    // Particle/gas simulation owns a separate Vulkan compute command buffer and
-    // queue lifecycle from the render backend. Draining only the RT backend did
-    // not flush a recorded simulation tail; cache restore or the next Play could
-    // replace its buffers before that tail was eventually submitted. Close the
-    // simulation frame first, then wait for render/RT consumers below.
-    ctx.scene.simulation_world.compute().synchronize();
-
-    Backend::IBackend* renderBackend = g_backend
-        ? g_backend.get()
-        : ((ctx.backend_ptr && dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr) == nullptr)
-            ? ctx.backend_ptr
-            : nullptr);
-    Backend::IViewportBackend* viewportBackend = g_viewport_backend
-        ? g_viewport_backend.get()
-        : dynamic_cast<Backend::IViewportBackend*>(ctx.backend_ptr);
-
-    if (renderBackend) {
-        renderBackend->waitForCompletion();
-    }
-    if (viewportBackend && static_cast<Backend::IBackend*>(viewportBackend) != renderBackend) {
-        viewportBackend->waitForCompletion();
-    }
+    SimulationTransport::drain(ctx);
 }
 }
 
@@ -1538,25 +1512,7 @@ void TimelineWidget::drawPlaybackControls(UIContext& ctx) {
                                     ImVec4(0.46f, 0.86f, 0.92f, 1.0f),
                                     ImVec2(28.0f, 22.0f),
                                     is_playing ? "Pause" : "Play")) {
-        // Pause is a GPU mutation boundary, not just a timer toggle. The rendered
-        // viewport submits Vulkan trace + hair expand + in-place hair BLAS work
-        // asynchronously. Once is_playing becomes false, several deferred/static
-        // update paths are allowed to run in the same UI frame. Without draining
-        // first they can update or rebuild single-copy RT resources still referenced
-        // by the last playing submission, which resets the Vulkan driver. Hair is not
-        // part of SceneData::anySimulationRuntimeEnabled(), so this must not be gated
-        // by that predicate (the Stop button's old guard missed hair-only scenes).
-        if (is_playing) {
-            drainTimelineMutationBackends(ctx);
-        }
-        is_playing = !is_playing;
-        // Pressing Play at the last frame (loop off) restarts from the start —
-        // the backward jump replays from the sim cache, it does not re-bake.
-        if (is_playing && !loop_enabled && current_frame >= end_frame)
-            current_frame = start_frame;
-        ctx.scene.audio->syncTransport(
-            static_cast<double>(std::max(0, current_frame)) /
-                std::max(1, ctx.render_settings.animation_fps), is_playing);
+        setPlayback(ctx, !is_playing);
     }
     
     ImGui::SameLine();

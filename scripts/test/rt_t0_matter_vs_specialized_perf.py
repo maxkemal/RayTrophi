@@ -1,8 +1,9 @@
-"""T0: does a Matter domain carrying one phase cost what the specialized domain costs?
+"""T0/T6: compare a Matter domain with its single-lane creation presets.
 
 Decision gate for docs/dev/MADDE_TIPLERI_TASARIMI.md karar 1: the Gas and Liquid
-domain types stay until a Matter domain is measured as fast. Nothing measured
-this before 2026-10-07.
+types passed the original equality gate on 2026-10-20. After T6, gas/fluid
+are compatibility creation presets of the same Matter core; this rerun guards
+phase isolation, result equality, and the cost of an unused enabled lane.
 
 Arms (same bounds, voxel, backend, source, frame count):
   gas/gas        type='gas',    gas flow source

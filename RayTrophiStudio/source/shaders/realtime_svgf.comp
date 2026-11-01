@@ -61,6 +61,7 @@ const uint SVGF_RT_HISTORY = 2u;  // the other RT record slot holds the previous
 const uint SVGF_RT_SLOT1 = 4u;    // this dispatch's RT record is motionHistory1
 const uint SVGF_STATIC = 8u;      // still camera: input is the accumulated mean
 const uint SVGF_DEBUG_HISTORY = 16u;  // compose shows history length, not the image
+const uint SVGF_FILTERED_HISTORY = 32u;  // moving: feed back first a-trous result
 const uint MISS_MATERIAL = 0xFFFFu;
 
 const vec3 LUMA = vec3(0.2126, 0.7152, 0.0722);
@@ -369,6 +370,20 @@ void temporal(ivec2 p) {
 
 void compose(ivec2 p);
 
+void storeAtrous(ivec2 p, vec4 filtered) {
+    imageStore(outputWork, p, filtered);
+    if ((pc.historyFlags & SVGF_FILTERED_HISTORY) != 0u &&
+        (pc.historyFlags & SVGF_STATIC) == 0u && pc.stepWidth == 1u) {
+        // Reuse the first, narrow spatial pass as next frame's colour history.
+        // Later, wider passes remain display-only to limit recurrent blur.
+        // Temporal wrote the length in alpha; moments remain temporal sample
+        // statistics, not the variance propagated by the spatial filter.
+        // This invocation alone accesses nextColor[p] during this dispatch.
+        float historyLength = imageLoad(nextColor, p).a;
+        imageStore(nextColor, p, vec4(filtered.rgb, historyLength));
+    }
+}
+
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     bool inside = p.x < int(pc.width) && p.y < int(pc.height);
@@ -438,7 +453,7 @@ void main() {
     if (pc.stage == 2u) {
         vec4 center = imageLoad(inputWork, p);
         if (imageLoad(motionImage, p).z > 0.5) {
-            imageStore(outputWork, p, center);
+            storeAtrous(p, center);
             return;
         }
         float lc = dot(center.rgb, LUMA);
@@ -472,7 +487,7 @@ void main() {
                 weights += w;
             }
         }
-        imageStore(outputWork, p, vec4(sum / max(weights, 1e-6),
+        storeAtrous(p, vec4(sum / max(weights, 1e-6),
             variance / max(weights * weights, 1e-6)));
         return;
     }

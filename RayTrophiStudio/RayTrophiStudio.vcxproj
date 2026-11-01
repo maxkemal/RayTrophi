@@ -9,6 +9,18 @@
       <Configuration>Debug</Configuration>
       <Platform>Win32</Platform>
     </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseDev|ARM">
+      <Configuration>ReleaseDev</Configuration>
+      <Platform>ARM</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseDev|Win32">
+      <Configuration>ReleaseDev</Configuration>
+      <Platform>Win32</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="ReleaseDev|x64">
+      <Configuration>ReleaseDev</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
     <ProjectConfiguration Include="Release|ARM">
       <Configuration>Release</Configuration>
       <Platform>ARM</Platform>
@@ -48,6 +60,13 @@
     <WholeProgramOptimization>true</WholeProgramOptimization>
     <CharacterSet>Unicode</CharacterSet>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|Win32'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>true</UseDebugLibraries>
@@ -70,7 +89,22 @@
     <CharacterSet>Unicode</CharacterSet>
     <EnableFuzzer>false</EnableFuzzer>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|x64'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+    <EnableFuzzer>false</EnableFuzzer>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="Configuration">
+    <ConfigurationType>Application</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|ARM'" Label="Configuration">
     <ConfigurationType>Application</ConfigurationType>
     <UseDebugLibraries>false</UseDebugLibraries>
     <PlatformToolset>v143</PlatformToolset>
@@ -89,6 +123,9 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|Win32'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
@@ -98,7 +135,13 @@
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|x64'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'" Label="PropertySheets">
+    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
+  </ImportGroup>
+  <ImportGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|ARM'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros">
@@ -130,7 +173,16 @@
     <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
     <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|x64'">
+    <IncludePath>$(VULKAN_SDK)\Include;$(ProjectDir)..\vcpkg\installed\x64-windows\include;$(ProjectDir)..\vcpkg\installed\x64-windows\include\python$(RayTrophiPythonVersion);$(SDL2_ROOT)\include;$(SDL2_IMAGE_ROOT)\include;$(OIDN_ROOT)\include;$(ASSIMP_ROOT)\include;$(OPTIX_ROOT)\include;$(CUDA_PATH)\include;$(EMBREE_ROOT)\include;$(ProjectDir)source\include;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;$(ProjectDir)external\imgui;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src;$(IncludePath)</IncludePath>
+    <LibraryPath>$(VULKAN_SDK)\Lib;$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(OIDN_ROOT)\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(ASSIMP_ROOT)\lib\x64;$(CUDA_PATH)\lib\x64;$(EMBREE_ROOT)\lib;$(LibraryPath)</LibraryPath>
+    <CodeAnalysisRuleSet>kurallar.ruleset</CodeAnalysisRuleSet>
+  </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+    <IncludePath>$(SDL2_ROOT)\include;$(IncludePath)</IncludePath>
+    <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|ARM'">
     <IncludePath>$(SDL2_ROOT)\include;$(IncludePath)</IncludePath>
     <LibraryPath>$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(LibraryPath)</LibraryPath>
   </PropertyGroup>
@@ -151,6 +203,26 @@
     </CudaCompile>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -258,7 +330,70 @@
       <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
     </CudaCompile>
   </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|x64'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>false</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;RAYTROPHI_ENABLE_OZZ=1$(RayTrophiXatlasDefine);%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>Default</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <ExceptionHandling>false</ExceptionHandling>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <PrecompiledHeaderFile>stdafx.h</PrecompiledHeaderFile>
+      <EnableParallelCodeGeneration>false</EnableParallelCodeGeneration>
+      <Optimization>MaxSpeed</Optimization>
+      <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
+      <FavorSizeOrSpeed>Speed</FavorSizeOrSpeed>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <EnableFiberSafeOptimizations>true</EnableFiberSafeOptimizations>
+      <OpenMPSupport>true</OpenMPSupport>
+      <AdditionalIncludeDirectories>$(ProjectDir)external\DaisySP\Source;$(ProjectDir)external\DaisySP\Source\Utility;$(ProjectDir)external;$(ProjectDir)external\JoltPhysics;external\JoltPhysics;$(ProjectDir)source\include;source\include;$(ProjectDir)libs;$(ProjectDir)external\cgltf;$(ProjectDir)external\ozz-animation\include;$(ProjectDir)external\ozz-animation\src$(RayTrophiXatlasInclude);%(AdditionalIncludeDirectories);$(ProjectDir)source\src;$(ProjectDir)source\src\UI;$(ProjectDir)source\src\Render;$(ProjectDir)source\src\Scene;$(ProjectDir)source\src\Physics;$(ProjectDir)source\src\Math;$(ProjectDir)source\src\Core;$(ProjectDir)source\src\Utils;$(ProjectDir)source\src\Animation;$(ProjectDir)source\src\Hair;$(ProjectDir)source\src\Device</AdditionalIncludeDirectories>
+      <AdditionalOptions>/bigobj /FS /Zc:__cplusplus %(AdditionalOptions)</AdditionalOptions>
+      <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(RayTrophiPythonLib);libssl.lib;libcrypto.lib;Ws2_32.lib;Crypt32.lib;openvdb.lib;Imath-3_1.lib;Iex-3_3.lib;IlmThread-3_3.lib;OpenEXR-3_3.lib;OpenEXRCore-3_3.lib;blosc.lib;zlib.lib;lz4.lib;zstd.lib;$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;vulkan-1.lib;OpenImageDenoise_core.lib;OpenImageDenoise.lib;embree4.lib;tbb12.lib;cuda.lib;cudart.lib;cufft.lib;DirectXTex.lib;delayimp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)..\vcpkg\installed\x64-windows\lib;$(SDL2_ROOT)\lib\x64;$(SDL2_IMAGE_ROOT)\lib\x64;$(OIDN_ROOT)\lib;$(ASSIMP_ROOT)\lib\x64;$(EMBREE_ROOT)\lib;$(CUDA_PATH)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <LinkTimeCodeGeneration>Default</LinkTimeCodeGeneration>
+      <DelayLoadDLLs>nvcuda.dll;cudart64_12.dll;cufft64_11.dll;vulkan-1.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+    </Link>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>NDEBUG;_CONSOLE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <SubSystem>Console</SubSystem>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <AdditionalDependencies>$(SDL2_ROOT)\lib\x64\SDL2.lib;$(SDL2_ROOT)\lib\x64\SDL2main.lib;$(SDL2_ROOT)\lib\x64\SDL2test.lib;$(SDL2_IMAGE_ROOT)\lib\x64\SDL2_image.lib;ObjLoader.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(SDL2_ROOT)\lib\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+    </Link>
+    <CudaCompile>
+      <Include>$(ProjectDir)source\include;%(Include)</Include>
+      <AdditionalOptions>-std=c++17 %(AdditionalOptions)</AdditionalOptions>
+    </CudaCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|ARM'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
       <FunctionLevelLinking>true</FunctionLevelLinking>
@@ -283,6 +418,14 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <None Include="source\src\Physics\Fluid\APICFluidStep.inl" />
+    <ClInclude Include="source\include\Fluid\MatterIceCollider.h" />
+    <ClInclude Include="source\include\VolumeTemperatureMapping.h" />
+    <ClInclude Include="source\include\VolumeEmissionMask.h" />
+    <ClInclude Include="source\include\VolumeEmissionTransport.h" />
+    <ClInclude Include="source\include\SimulationDomainLanes.h" />
+    <ClInclude Include="source\include\Api\MatterDomainLanesApi.h" />
+    <ClInclude Include="source\include\UI\MatterLaneControls.h" />
+    <ClInclude Include="source\src\Api\RtMatterLanes.h" />
     <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h" />
     <ClInclude Include="source\include\Fluid\MatterParticleIdentity.h" />
     <ClInclude Include="source\include\Fluid\MatterSolverStages.h" />
@@ -413,6 +556,21 @@
     <ClInclude Include="external\xatlas\source\xatlas\xatlas.h" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="source\src\UI\scene_ui_nodeeditor.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_node_palette.hpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterIceCollider.cpp" />
+    <ClCompile Include="source\src\Physics\SimulationDomainLanes.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterLanes.cpp" />
+    <ClCompile Include="source\src\UI\SimulationTransport.cpp" />
+    <ClCompile Include="source\src\Api\RtApiSimulationTransport.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcSimulationTransport.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonSimulationTransport.cpp" />
+    <ClInclude Include="source\include\UI\SimulationTransport.h" />
+    <ClInclude Include="source\include\Fluid\MatterCacheRestore.h" />
+    <ClInclude Include="source\include\Fluid\FluidForceColumns.h" />
+    <ClInclude Include="source\include\Api\SimulationTransportApi.h" />
+    <ClInclude Include="source\src\Api\RtSimulationTransport.h" />
+    <ClCompile Include="source\src\Api\RtIpcMatterLanes.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonMatterLanes.cpp" />
+    <ClCompile Include="source\src\UI\MatterLaneControls.cpp" />
     <ClCompile Include="source\src\Api\RtApiPhaseGrid.cpp" />
     <ClCompile Include="source\src\Api\RtIpcPhaseGrid.cpp" />
     <ClCompile Include="source\src\Api\RtPythonPhaseGrid.cpp" />
@@ -501,6 +659,8 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
+    <ClInclude Include="source\include\Fluid\FluidLiquidAdvection.h" />
+    <ClInclude Include="source\include\Fluid\FluidDensityProjection.h" />
     <ClInclude Include="source\include\Fluid\MatterSubstanceState.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainMpmContact.h" />
     <ClInclude Include="source\include\Fluid\MatterCommonClock.h" />
@@ -647,6 +807,7 @@
     <ClInclude Include="source\include\Fluid\FluidActivePressure.h" />
     <ClInclude Include="source\include\Fluid\MatterPhaseGrid.h" />
     <ClInclude Include="source\src\Physics\Fluid\FluidGpuPressure.inl" />
+    <ClInclude Include="source\src\Physics\Fluid\MatterDensityProjection.inl" />
     <ClInclude Include="source\include\Fluid\FluidParticleSolidRecovery.h" />
     <ClInclude Include="source\include\Fluid\FluidObject.h" />
     <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h" />
@@ -1605,9 +1766,14 @@
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Spheres.cpp" />
-    <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanVolumeResidency.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanVolumeStageSplit.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp" />
     <ClCompile Include="source\src\Backend\VulkanRayGpuTiming.cpp" />
     <ClCompile Include="source\src\Api\RtRayGpuTiming.cpp" />
@@ -1664,12 +1830,24 @@
     <ClInclude Include="source\src\Api\RtScreenGiBindings.h" />
     <ClInclude Include="source\src\Api\RtIpcScreenGi.h" />
     <ClInclude Include="source\src\Api\RtPythonScreenGi.h" />
-    <ClCompile Include="source\src\Api\RtApiScreenGi.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcScreenGi.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonScreenGi.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiReflection.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcReflection.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonReflection.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiScreenGi.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcScreenGi.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonScreenGi.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiReflection.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcReflection.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonReflection.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <None Include="source\shaders\screen_gi_trace.comp" />
     <None Include="source\shaders\screen_gi_filter.comp" />
     <None Include="source\shaders\screen_gi_surface.glsl" />
@@ -1758,6 +1936,7 @@
     <ClCompile Include="source\src\Api\RtIpcPostExposure.cpp" />
     <ClCompile Include="source\src\Api\RtApiModifiers.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGasFieldStats.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp" />
     <ClCompile Include="source\src\Api\RtApiSubstance.cpp" />
     <ClCompile Include="source\src\Api\RtApiMatterExchange.cpp" />
@@ -1873,6 +2052,8 @@
     <ClInclude Include="source\include\Fluid\MatterPhaseOutputJson.h" />
     <ClInclude Include="source\include\Fluid\MatterFogFields.h" />
     <ClInclude Include="source\include\Fluid\MatterFogStreams.h" />
+    <ClInclude Include="source\include\Fluid\FogOpticalBounds.h" />
+    <ClInclude Include="source\include\Fluid\FogFieldDigest.h" />
     <ClInclude Include="source\include\Fluid\MatterFogSnapshot.h" />
     <ClInclude Include="source\include\UI\SourceSplatGeometryUI.h" />
     <ClInclude Include="source\src\Api\RtPythonSourceSplatGeometry.h" />
@@ -1940,58 +2121,213 @@
     <ClCompile Include="source\src\MeshEdit\SplineAnimation.cpp" />
     <ClCompile Include="source\src\Animation\NodeHierarchy.cpp" />
     <ClCompile Include="source\src\Import\GltfDirectReader.cpp" />
-    <ClCompile Include="source\src\Import\ModelImport.cpp"><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Import\ModelImportScene.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Import\UfbxVendor.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Import\UfbxReader.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigEditing.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigEditing.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigEditingUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigPoseViewUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigPoseView.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigPoseView.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigAnatomyUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigAnatomy.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigAnatomy.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigTemplates.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigTemplates.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\GraphRestDefaults.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigWeightMap.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigWeightMapUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigSelection.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigMirrorUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigMirror.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigMirror.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigBatchRest.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigSelection.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigWeights.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigBindingScope.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigBindMath.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigBinding.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigBinding.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigBindingUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigPreflight.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigFitting.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigFittingUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigViewportUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigSerialization.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigPosePreview.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigMappingUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\Retarget.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\ClipBinding.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiClipBinding.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcClipBinding.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonClipBinding.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\ClipBindingUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigView.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRig.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcRig.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonRig.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigViewUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\scene_ui_rig_overlay.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Import\UfbxMaterials.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Import\ObjReader.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Render\OptixMaterialTables.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Import\ModelImport.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ModelImportScene.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxVendor.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxReader.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigEditing.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEditing.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigEditingUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigPoseViewUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseView.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseView.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigAnatomyUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigAnatomy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAnatomy.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigTemplates.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigTemplates.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\GraphRestDefaults.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigWeightMap.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigWeightMapUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSelection.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigMirrorUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigMirror.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigMirror.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBatchRest.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigSelection.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigWeights.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBindingScope.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBindMath.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBinding.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigBinding.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigBindingUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPreflight.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigFitting.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigFittingUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigViewportUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSerialization.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPosePreview.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigMappingUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\Retarget.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\ClipBinding.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiClipBinding.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcClipBinding.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonClipBinding.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ClipBindingUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigView.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRig.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRig.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRig.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigViewUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_rig_overlay.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxMaterials.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ObjReader.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OptixMaterialTables.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="source\src\Animation\GeometryCache.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineObject.cpp" />
@@ -2168,6 +2504,8 @@
       <FileType>Document</FileType>
       <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='Release|x64'">--use_fast_math --expt-relaxed-constexpr --expt-extended-lambda
  %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition="'$(Configuration)|$(Platform)'=='ReleaseDev|x64'">--use_fast_math --expt-relaxed-constexpr --expt-extended-lambda
+ %(AdditionalOptions)</AdditionalOptions>
     </None>
   </ItemGroup>
   <ItemGroup>
@@ -2190,8 +2528,7 @@
   <ImportGroup Label="ExtensionTargets">
     <Import Project="$(VCTargetsPath)\BuildCustomizations\CUDA 12.6.targets" />
   </ImportGroup>
-  <Target Name="CopyEmbeddedPythonRuntime" AfterTargets="Build"
-          Condition="'$(Platform)'=='x64' and Exists('$(RayTrophiPythonTools)')">
+  <Target Name="CopyEmbeddedPythonRuntime" AfterTargets="Build" Condition="'$(Platform)'=='x64' and Exists('$(RayTrophiPythonTools)')">
     <ItemGroup>
       <RayTrophiPythonRuntime Include="$(RayTrophiPythonTools)\**\*" />
       <RayTrophiPythonDll Include="$(RayTrophiPythonBin)\python*.dll" />
@@ -2199,47 +2536,29 @@
       <RayTrophiOpenSslDll Include="$(RayTrophiPythonBin)\libssl*.dll;$(RayTrophiPythonBin)\libcrypto*.dll" />
       <RayTrophiScript Include="$(ProjectDir)..\scripts\**\*.py" />
     </ItemGroup>
-    <Copy SourceFiles="@(RayTrophiPythonRuntime)"
-          DestinationFiles="@(RayTrophiPythonRuntime->'$(OutDir)python\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(RayTrophiPythonDll)"
-          DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(RayTrophiPythonExtension)"
-          DestinationFolder="$(OutDir)python\DLLs"
-          SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(RayTrophiOpenSslDll)"
-          DestinationFolder="$(OutDir)"
-          SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(RayTrophiScript)"
-          DestinationFiles="@(RayTrophiScript->'$(OutDir)scripts\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiPythonRuntime)" DestinationFiles="@(RayTrophiPythonRuntime->'$(OutDir)python\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiPythonDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiPythonExtension)" DestinationFolder="$(OutDir)python\DLLs" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiOpenSslDll)" DestinationFolder="$(OutDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiScript)" DestinationFiles="@(RayTrophiScript->'$(OutDir)scripts\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
   <Target Name="CopyAudioDspNotices" AfterTargets="Build">
     <ItemGroup>
       <RayTrophiAudioDspNotice Include="$(ProjectDir)assets\licenses\audio_dsp\*" />
     </ItemGroup>
-    <Copy SourceFiles="@(RayTrophiAudioDspNotice)"
-          DestinationFiles="@(RayTrophiAudioDspNotice->'$(OutDir)assets\licenses\audio_dsp\%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiAudioDspNotice)" DestinationFiles="@(RayTrophiAudioDspNotice->'$(OutDir)assets\licenses\audio_dsp\%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
-  <Target Name="CopyAudioStarterAssets" AfterTargets="Build"
-          Condition="Exists('$(ProjectDir)assets\audio')">
+  <Target Name="CopyAudioStarterAssets" AfterTargets="Build" Condition="Exists('$(ProjectDir)assets\audio')">
     <ItemGroup>
       <RayTrophiAudioStarter Include="$(ProjectDir)assets\audio\**\*" />
     </ItemGroup>
-    <Copy SourceFiles="@(RayTrophiAudioStarter)"
-          DestinationFiles="@(RayTrophiAudioStarter->'$(OutDir)assets\audio\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiAudioStarter)" DestinationFiles="@(RayTrophiAudioStarter->'$(OutDir)assets\audio\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
-  <Target Name="CopyTemplatePackages" AfterTargets="Build"
-          Condition="Exists('$(ProjectDir)assets\templates')">
+  <Target Name="CopyTemplatePackages" AfterTargets="Build" Condition="Exists('$(ProjectDir)assets\templates')">
     <ItemGroup>
       <RayTrophiTemplateAsset Include="$(ProjectDir)assets\templates\**\*" />
     </ItemGroup>
-    <Copy SourceFiles="@(RayTrophiTemplateAsset)"
-          DestinationFiles="@(RayTrophiTemplateAsset->'$(OutDir)assets\templates\%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(RayTrophiTemplateAsset)" DestinationFiles="@(RayTrophiTemplateAsset->'$(OutDir)assets\templates\%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="true" />
   </Target>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigPoseAuthoringState.h" />
@@ -2254,24 +2573,63 @@
     <ClInclude Include="source\include\UI\RigFingerFKUI.h" />
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigFingerFKUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigFingerFKViewportUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKViewportUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigJointRules.h" />
     <ClInclude Include="source\include\Api\RtApiRigJointProfile.h" />
     <ClInclude Include="source\include\UI\RigJointProfileUI.h" />
-    <ClCompile Include="source\src\Animation\RigJointRules.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigJointProfile.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigJointProfileUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigJointRules.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointProfile.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigJointProfileUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigControlDisplay.h" />
@@ -2279,53 +2637,140 @@
     <ClInclude Include="source\include\Api\RtApiRigIK.h" />
     <ClInclude Include="source\include\UI\RigIKUI.h" />
     <ClInclude Include="source\src\Api\RtRigIKBindings.h" />
-    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcRigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonRigIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigIKUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigIKViewportUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRigIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRigIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigIKUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigIKViewportUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigJointLimits.h" />
     <ClInclude Include="source\include\Api\RtApiRigJointLimits.h" />
     <ClInclude Include="source\include\UI\RigJointLimitsUI.h" />
-    <ClCompile Include="source\src\Animation\RigJointLimits.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigJointLimits.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigJointLimitsUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigJointLimits.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointLimits.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigJointLimitsUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigIKChannels.h" />
     <ClInclude Include="source\include\Animation\RigIKTimeline.h" />
-    <ClCompile Include="source\src\Animation\RigIKChannels.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigIKTimeline.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigIKTimelineUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKChannels.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKTimeline.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigIKTimelineUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigChainIK.h" />
     <ClInclude Include="source\include\Animation\RigAimIK.h" />
     <ClInclude Include="source\include\Animation\RigWalkRecipe.h" />
+    <ClInclude Include="source\include\Animation\RigRomTest.h" />
+    <ClInclude Include="source\include\Animation\RigGeodesicWeights.h" />
+    <ClInclude Include="source\include\Animation\RigAutoLandmarks.h" />
     <ClInclude Include="source\include\Animation\RigEnvelopeWeights.h" />
-    <ClCompile Include="source\src\Animation\RigChainIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigAimIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigWalkRecipe.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Animation\RigEnvelopeWeights.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigChainIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAimIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigWalkRecipe.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigRomTest.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigGeodesicWeights.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAutoLandmarks.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigEnvelopeWeights.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClInclude Include="source\include\Api\RtApiRigMotion.h" />
     <ClInclude Include="source\include\Api\RtApiRigEnvelopeWeights.h" />
-    <ClCompile Include="source\src\Api\RtApiRigMotion.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigEnvelopeWeights.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigMotion.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEnvelopeWeights.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClInclude Include="source\include\UI\RigMotionRecipeUI.h" />
     <ClInclude Include="source\include\UI\RigEnvelopeOverlay.h" />
     <ClInclude Include="source\include\UI\RigEnvelopeEditorUI.h" />
-    <ClCompile Include="source\src\UI\RigMotionRecipeUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigEnvelopeOverlay.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigEnvelopeEditorUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\UI\RigMotionRecipeUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigEnvelopeOverlay.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigEnvelopeEditorUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Animation\RigSplineIK.h" />
-    <ClCompile Include="source\src\Animation\RigSplineIK.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
-    <ClCompile Include="source\src\UI\RigSplineIKUI.cpp"><PrecompiledHeader>NotUsing</PrecompiledHeader><ExceptionHandling>Sync</ExceptionHandling></ClCompile>
+    <ClCompile Include="source\src\Animation\RigSplineIK.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigSplineIKUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <None Include="source\src\Physics\Fluid\FluidGpuP2G.inl" />
@@ -2345,7 +2790,6 @@
     <None Include="source\shaders\sim_matter_clear.comp" />
     <None Include="source\shaders\sim_matter_zero_faces.comp" />
   </ItemGroup>
-
   <ItemGroup>
     <None Include="source\shaders\sim_fluid_advect_tail.glsl" />
     <None Include="source\shaders\sim_fluid_g2p.glsl" />
@@ -2405,6 +2849,7 @@
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainGeometry.cpp" />
     <ClCompile Include="source\src\Api\RtApiMatterGrain.cpp" />
     <ClCompile Include="source\src\UI\MatterGrainControls.cpp" />
+    <ClCompile Include="source\src\UI\SimulationHeldAlert.cpp" />
     <None Include="source\shaders\sim_matter_grain.glsl" />
     <None Include="source\shaders\sim_matter_grain_list_clear.comp" />
     <None Include="source\shaders\sim_matter_grain_list_build.comp" />

@@ -1,0 +1,41 @@
+{
+  "gpu": "NVIDIA GeForce RTX 3060",
+  "method": "read-only Vulkan instance, vkGetPhysicalDeviceMemoryProperties; no project build or app launch",
+  "memory_types": [
+    {
+      "index": 0,
+      "flags": 0,
+      "heap": 1
+    },
+    {
+      "index": 1,
+      "flags": 1,
+      "heap": 0
+    },
+    {
+      "index": 2,
+      "flags": 1,
+      "heap": 0
+    },
+    {
+      "index": 3,
+      "flags": 6,
+      "heap": 1
+    },
+    {
+      "index": 4,
+      "flags": 14,
+      "heap": 1
+    },
+    {
+      "index": 5,
+      "flags": 7,
+      "heap": 2
+    }
+  ],
+  "old_required_flags": 6,
+  "old_first_matching_type": 3,
+  "new_required_flags": 1,
+  "new_first_matching_type": 1,
+  "limit": "Observed physical memory ordering plus source first-match selector. Current buffer memoryTypeBits/actual old allocations were not exposed; new per-buffer diagnostics verify actual heap after build."
+}

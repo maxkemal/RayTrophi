@@ -20,6 +20,13 @@
 //     volumes with a program never use the cache.
 // A miss is never an error: the caller runs the full march for that ray.
 //
+// Independent emission stores a different quantity. j/sigma has no limit when
+// extinction vanishes (soot burnout, zero smoke multiplier), so the source
+// channels hold the coefficient sigma * inscatter + j instead of J, and the
+// density channel holds optical density after burnout. A vertex with j > 0 and
+// no optical density keeps a tiny positive density, otherwise vrcProvenEmpty
+// would discard a real emitter.
+//
 // Two coincident gas media (resolveGasOverlapSegment's companion, 2026-10-28):
 // each medium keeps its OWN slot and vertex values, and a step combines them
 //     sigma = sigma_1 + sigma_2,   J = (sigma_1 J_1 + sigma_2 J_2) / sigma,
@@ -80,6 +87,13 @@ uint volumeRadianceLightingStamp() {
 // Material terms J depends on beyond the density the slot key already covers.
 uint volumeRadianceMaterialStamp(VkVolumeInstance vol) {
     uint h = vlcMix(0x4d41544cu, floatBitsToUint(vol.scatter_coefficient));
+    h = vlcMix(h, floatBitsToUint(vol.density_curve[10]));
+    for (int k = 0; k < 4; ++k) {
+        h = vlcMix(h, floatBitsToUint(vol.emission_mask[k]));
+    }
+    h = vlcMix(h, floatBitsToUint(vol.temperature_scale));
+    h = vlcMix(h, floatBitsToUint(vol.max_temperature));
+    h = vlcMix(h, floatBitsToUint(vol._ext_reserved[6]));
     h = vlcMix(h, floatBitsToUint(vol.absorption_coefficient));
     h = vrcMixVec(h, vol.absorption_color);
     h = vrcMixVec(h, vol.scatter_color);
@@ -104,9 +118,16 @@ bool vrcComputeVertex(uint slot, VkVolumeInstance vol, vec3 p,
                       pnanovdb_buf_t buf, pnanovdb_map_handle_t mapH,
                       inout pnanovdb_readaccessor_t acc,
                       out float density, out vec3 source) {
-    density = sampleDensityAcc(vol, p, buf, mapH, acc);
+    float flags = vol._retired_cloud[0];
+    bool independent = volumeEmissionIndependent(flags);
+    float emissionDensity;
+    density = volumeEmissionOpticalDensity(
+        volumeEmissionChannelsAcc(vol, p, buf, mapH, acc, emissionDensity),
+        vol.density_multiplier, flags);
     source = vec3(0.0);
-    if (density <= 0.0) return true;
+    if (density <= 0.0 && !(independent && emissionDensity > 0.0)) return true;
+    float temperature = vol.emission_mode >= 2 ? sampleTemperature(vol, p) : 0.0;
+    density *= volumeSootScale(vol, p, emissionDensity, temperature);
     vec3 absColor = max(vol.absorption_color, vec3(0.0));
     float absPeak = max(absColor.r, max(absColor.g, absColor.b));
     vec3 absWeights = absPeak > 1e-5 ? absColor / absPeak : vec3(1.0);
@@ -160,12 +181,19 @@ bool vrcComputeVertex(uint slot, VkVolumeInstance vol, vec3 p,
     }
     vec3 emis = vec3(0.0);
     if (vol.emission_mode == 1) {
-        emis = volumeEmissionSource(vol.emission_color, 1.0, density, 1.0,
-            vol.emission_intensity, vol._retired_cloud, false);
+        emis = volumeEmissionSource(vol.emission_color, 1.0, emissionDensity, 1.0,
+            vol.emission_intensity, vol._retired_cloud, false, vol.density_multiplier) *
+            volumeEmissionMaskFactor(emissionDensity, volumeEmissionSamplingMultiplier(
+                vol.density_multiplier, flags), vol.emission_mask);
     } else if (vol.emission_mode >= 2) {
-        emis = volumeEmissionAt(vol, p, density, sampleTemperature(vol, p));
+        emis = volumeEmissionAt(vol, p, emissionDensity, temperature);
     }
-    source = inscatter + emis;
+    if (independent) {
+        source = sigmaT * inscatter + emis;
+        if (max(emis.r, max(emis.g, emis.b)) > 0.0) density = max(density, 1e-12);
+    } else {
+        source = inscatter + emis;
+    }
     return true;
 }
 
@@ -373,11 +401,15 @@ bool volumeRadianceCacheMarch(uint slot, uint companionSlot, uint slots, uint mi
             if (density <= 0.0) continue;
             vec3 s = medium.sigmaTPerDensity * density;
             sigma += s;
-            emitted += s * source;
+            emitted += volumeEmissionIndependent(volumes.v[mSlot]._retired_cloud[0])
+                ? source : s * source;
         }
-        if (max(sigma.r, max(sigma.g, sigma.b)) <= 0.0) continue;
+        if (max(sigma.r, max(sigma.g, sigma.b)) <= 0.0 &&
+            max(emitted.r, max(emitted.g, emitted.b)) <= 0.0) continue;
         vec3 segT = exp(-sigma * h);
-        rad += tr * (emitted / max(sigma, vec3(EPSILON))) * (vec3(1.0) - segT);
+        // Flag 2 selects the (1 - T) / sigma weight with its stable j*dt limit.
+        rad += tr * emitted * vec3(volumeEmissionIntegral(sigma.r, h, 2.0),
+            volumeEmissionIntegral(sigma.g, h, 2.0), volumeEmissionIntegral(sigma.b, h, 2.0));
         tr *= segT;
         if (max(tr.r, max(tr.g, tr.b)) < 0.001) break;
     }

@@ -13,7 +13,7 @@ std::size_t applyMistGasDrag(SimulationGridDomainState& fluid_state,
                              const SimulationGridDomainDesc& gas_desc,
                              const SimulationGridDomainState& gas_state,
                              float dt) {
-    if (!simulationDomainHasGas(gas_desc.type) || !gas_desc.enabled ||
+    if (!simulationDomainHasGas(gas_desc) || !gas_desc.enabled ||
         !gas_state.valid || !(dt > 0.0f) || !std::isfinite(dt)) {
         return 0;
     }

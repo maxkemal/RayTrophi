@@ -78,8 +78,8 @@ FluidCombustionExchangeStats transferFluidCombustionToGas(
     FluidCombustionExchangeStats stats;
     if (!fluid_domain.enabled || !gas_domain.enabled ||
         !fluid_domain.fluid_flammable ||
-        !simulationDomainHasLiquid(fluid_domain.type) ||
-        !simulationDomainHasGas(gas_domain.type) || !gas_domain.fire_enabled ||
+        !simulationDomainHasLiquid(fluid_domain) ||
+        !simulationDomainHasGas(gas_domain) || !gas_domain.fire_enabled ||
         !fluid_state.valid || !gas_state.valid || fluid_state.particles.empty() ||
         !(dt > 0.0f) || !std::isfinite(dt) || !gridsOverlap(liquidGrid(fluid_state), gasGrid(gas_state))) {
         return stats;

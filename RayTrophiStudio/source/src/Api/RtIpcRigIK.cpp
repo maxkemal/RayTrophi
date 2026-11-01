@@ -30,8 +30,10 @@ bool walkRecipe(const json &params, RigAuthoring::HumanWalkRecipe &output) {
     if (!params.contains("cycles") || !params["cycles"].is_number_integer()) {
         return false;
     }
-    if (params.contains("body_motion") && !params["body_motion"].is_number()) {
-        return false;
+    for (const auto *key : {"body_motion", "leg_reach", "stance_knee_deg", "heel_strike_deg", "toe_off_deg"}) {
+        if (params.contains(key) && !params[key].is_number()) {
+            return false;
+        }
     }
     output.fps = params["fps"].get<float>();
     output.cadence = params["cadence"].get<float>();
@@ -41,6 +43,24 @@ bool walkRecipe(const json &params, RigAuthoring::HumanWalkRecipe &output) {
     output.bodyBounce = params["body_bounce"].get<float>();
     output.armSwing = params["arm_swing"].get<float>();
     output.bodyMotion = params.value("body_motion", .75f);
+    output.legReach = params.value("leg_reach", .998f);
+    output.stanceKnee = params.value("stance_knee_deg", 18.f);
+    output.heelStrike = params.value("heel_strike_deg", 15.f);
+    output.toeOff = params.value("toe_off_deg", 30.f);
+    return true;
+}
+bool romSettings(const json &params, RigAuthoring::RomTestSettings &output) {
+    for (const auto *key : {"scale", "fps"}) {
+        if (params.contains(key) && !params[key].is_number()) {
+            return false;
+        }
+    }
+    if (params.contains("frames_per_motion") && !params["frames_per_motion"].is_number_integer()) {
+        return false;
+    }
+    output.scale = params.value("scale", 1.f);
+    output.fps = params.value("fps", 24.f);
+    output.framesPerMotion = params.value("frames_per_motion", 12);
     return true;
 }
 json response(const rtapi::Result &r) {
@@ -73,6 +93,30 @@ bool dispatchRigIKIpc(const std::string &method, const json &params,
             out = enqueue([c, recipe](UIContext &) {
                 json value;
                 const auto result = rtapi::previewRigHumanWalk(c, recipe, value);
+                return result.ok ? value : response(result);
+            });
+        }
+        return true;
+    }
+    if (method == "rig.preview_rom_test" || method == "rig.create_rom_clip") {
+        RigAuthoring::RomTestSettings settings;
+        const bool create = method == "rig.create_rom_clip";
+        if (!character(params) || !romSettings(params, settings) ||
+            (create &&
+             (!revision(params) || !params.contains("name") || !params["name"].is_string()))) {
+            return invalid();
+        }
+        const auto c = params.at("character").get<std::string>();
+        if (create) {
+            const auto name = params.at("name").get<std::string>();
+            const auto r = params.at("rig_revision").get<uint64_t>();
+            out = enqueue([c, name, settings, r](UIContext &) {
+                return response(rtapi::createRigRomClip(c, name, settings, r));
+            });
+        } else {
+            out = enqueue([c, settings](UIContext &) {
+                json value;
+                const auto result = rtapi::previewRigRomTest(c, settings, value);
                 return result.ok ? value : response(result);
             });
         }

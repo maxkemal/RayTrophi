@@ -57,7 +57,7 @@ def main():
              velocity=[0, 0, 0], fluid_velocity_spread=0., fluid_particles_per_second=24000.,
              fluid_temperature_override=True, fluid_temperature_kelvin=330.,
              use_time_limit=True, start_time=0., end_time=.3,
-             use_particle_limit=True, max_emitted_particles=6000)
+             limit_parcels=True, parcels=6000)
         call('timeline.set_frame', frame=0)
         call('fluid.reset')
         to_ambient = 0.0

@@ -1,14 +1,22 @@
 #define INTERNAL_VOLUME_TYPE uint
-#define INTERNAL_DENSITY(v, p) sampleField(v, volAddress(v, 232u), p)
+#define INTERNAL_DENSITY(v, p, e) sampleCameraField(v, volAddress(v, 232u), p, e)
+#define INTERNAL_OPTICAL(v, p, d, e) (volumeEmissionOpticalDensity(d, volFloat(v,72u), volFloat(v,444u)) * sootScaleAt(v, p, e))
 #define INTERNAL_EMISSION(v, p, d) emissionAt(v, p, d)
+#define INTERNAL_FLAGS(v) volFloat(v, 444u)
+#define INTERNAL_VOXEL(v) volFloat(v, 176u)
 #include "volume_internal_integral.glsl"
 #undef INTERNAL_VOLUME_TYPE
 #undef INTERNAL_DENSITY
+#undef INTERNAL_OPTICAL
 #undef INTERNAL_EMISSION
+#undef INTERNAL_FLAGS
+#undef INTERNAL_VOXEL
 
 vec3 volumeInternalLighting(uint vi, vec3 p, vec3 viewDir) {
     int steps = clamp(volInt(vi, 280u), 0, 32);
-    if (steps == 0 || volInt(vi, 256u) == 0) return vec3(0.0);
+    if (steps == 0 || volInt(vi, 256u) == 0) {
+        return vec3(0.0);
+    }
     vec3 absorption = max(volVec3(vi, 120u), vec3(0.0));
     float peak = max(absorption.r, max(absorption.g, absorption.b));
     vec3 weights = peak > 1e-5 ? absorption / peak : vec3(1.0);

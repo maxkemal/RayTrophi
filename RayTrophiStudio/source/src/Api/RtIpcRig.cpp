@@ -63,6 +63,39 @@ bool dispatchRigIpc(const std::string &method, const json &params,
                     const RtIpcTemplateEnqueue &enqueue, json &out) {
     if (dispatchRigIKIpc(method, params, enqueue, out))
         return true;
+    if (method == "rig.preview_geodesic_weights" || method == "rig.apply_geodesic_weights") {
+        RigAuthoring::GeodesicWeightSettings settings;
+        const bool apply = method == "rig.apply_geodesic_weights";
+        if (!params.contains("character") || !params["character"].is_string() ||
+            (params.contains("resolution") && !params["resolution"].is_number_integer()) ||
+            (params.contains("falloff") && !params["falloff"].is_number()) ||
+            (apply && (!params.contains("rig_revision") ||
+                       !params["rig_revision"].is_number_integer() ||
+                       (!params["rig_revision"].is_number_unsigned() &&
+                        params["rig_revision"].get<int64_t>() < 0)))) {
+            out = {{"__error", "Expected character, optional integer resolution and numeric "
+                               "falloff, and rig_revision to apply"},
+                   {"code", "invalid_parameter"}};
+            return true;
+        }
+        settings.resolution = params.value("resolution", 96);
+        settings.falloff = params.value("falloff", 2.f);
+        const auto character = params["character"].get<std::string>();
+        if (apply) {
+            const auto revision = params["rig_revision"].get<uint64_t>();
+            out = enqueue([character, settings, revision](UIContext &) {
+                auto r = rtapi::applyRigGeodesicWeights(character, settings, revision);
+                return r.ok ? json{{"ok", true}} : failure(r);
+            });
+        } else {
+            out = enqueue([character, settings](UIContext &) {
+                json value;
+                auto r = rtapi::previewRigGeodesicWeights(character, settings, value);
+                return r.ok ? value : failure(r);
+            });
+        }
+        return true;
+    }
     if (method == "rig.preview_envelope_weights") {
         RigAuthoring::EnvelopeWeightSettings settings;
         if (!params.contains("character") || !params["character"].is_string() ||
@@ -575,6 +608,13 @@ bool dispatchRigIpc(const std::string &method, const json &params,
         const std::string character=params.at("character").get<std::string>();const json anatomy=params.at("anatomy");
         out=enqueue([character,anatomy](UIContext&){auto r=rtapi::setRigAnatomy(character,anatomy);return r.ok?json{{"ok",true}}:failure(r);});return true;
     }
+    if(method=="rig.derive_limb_hints") {
+        if(!params.contains("character") || !params["character"].is_string() || (params.contains("overwrite") && !params["overwrite"].is_boolean())) {
+            out={{"__error","Expected character string and optional overwrite bool"},{"code","invalid_parameter"}};return true;
+        }
+        const std::string character=params.at("character").get<std::string>();const bool overwrite=params.value("overwrite",false);
+        out=enqueue([character,overwrite](UIContext&){json report;auto r=rtapi::deriveRigLimbHints(character,overwrite,report);return r.ok?report:failure(r);});return true;
+    }
     if(method=="rig.set_pose_view") {
         if(!params.contains("character") || !params["character"].is_string() || !params.contains("mode") || !params["mode"].is_string()) {
             out={{"__error","Expected character and mode strings"},{"code","invalid_parameter"}};return true;
@@ -594,6 +634,11 @@ bool dispatchRigIpc(const std::string &method, const json &params,
         if(!params.contains("character")||!params["character"].is_string()||!params.contains("mesh")||!params["mesh"].is_string()) {out={{"__error","Expected character and mesh strings"},{"code","invalid_parameter"}};return true;}
         const std::string character=params.at("character").get<std::string>();const std::string mesh=params.at("mesh").get<std::string>();
         out=enqueue([character,mesh](UIContext&){json value;auto r=rtapi::getRigFitSetup(character,mesh,value);return r.ok?value:failure(r);});return true;
+    }
+    if(method=="rig.auto_landmarks") {
+        if(!params.contains("character")||!params["character"].is_string()||!params.contains("mesh")||!params["mesh"].is_string()) {out={{"__error","Expected character and mesh strings"},{"code","invalid_parameter"}};return true;}
+        const std::string character=params.at("character").get<std::string>();const std::string mesh=params.at("mesh").get<std::string>();
+        out=enqueue([character,mesh](UIContext&){json value;auto r=rtapi::autoRigLandmarks(character,mesh,value);return r.ok?value:failure(r);});return true;
     }
     if(method=="rig.preview_fit") {
         if(!params.contains("character")||!params["character"].is_string()||!params.contains("mesh")||!params["mesh"].is_string()) {out={{"__error","Expected character and mesh strings"},{"code","invalid_parameter"}};return true;}

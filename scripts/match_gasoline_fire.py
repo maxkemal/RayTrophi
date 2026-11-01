@@ -277,12 +277,11 @@ rt.flow_source.create(
     radius=0.10,
     fluid_particles_per_second=1800.0,
     fluid_velocity_spread=0.14,
-    # ★ NO PARTICLE BUDGET. A budget is a hard cliff, not a rate: the source
-    # runs at full rate until the counter is spent and then stops dead, so the
-    # hose empties itself early and then wanders around dry. The valve keys
-    # below are the only thing that should decide when pouring stops. The
-    # domain's own max_particles still backstops the memory cost.
-    use_particle_limit=False,
+    # ★ NO MASS BUDGET (use_mass_limit stays off). A budget is a hard cliff,
+    # not a rate: the source runs at full rate until it is spent and then
+    # stops dead, so the hose empties itself early and then wanders around
+    # dry. The valve keys below are the only thing that should decide when
+    # pouring stops. The domain's own max_particles still backstops memory.
 )
 # Valve curve: opens once the hose is over the floor, shuts before the flame
 # front arrives, so what burns is a settled pool and not a live jet.

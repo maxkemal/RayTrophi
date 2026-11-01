@@ -77,8 +77,8 @@ def main():
         call('flow_source.update' if exists else 'flow_source.create', name=SOURCE, domain=DOMAIN,
              enabled=True, phase='liquid', source_mode='point', fluid_substance='Sand',
              position=[0, .4, 0], radius=.08,
-             velocity=[0, 0, 0], fluid_velocity_spread=0., use_particle_limit=True,
-             max_emitted_particles=300, use_time_limit=True, start_time=0., end_time=.5,
+             velocity=[0, 0, 0], fluid_velocity_spread=0., limit_parcels=True,
+             parcels=300, use_time_limit=True, start_time=0., end_time=.5,
              fluid_particles_per_second=600.)
         if FIELD not in {f.get('name') for f in call('forcefield.list')}:
             call('forcefield.create', type='wind', name=FIELD)

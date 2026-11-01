@@ -70,8 +70,8 @@ def main():
             client.call('flow_source.create', name=name, domain=domain, enabled=True,
                         phase='liquid', source_mode='point', fluid_substance=material,
                         position=position, radius=.000001, velocity=velocity,
-                        fluid_velocity_spread=0., use_particle_limit=True,
-                        max_emitted_particles=1, fluid_particles_per_second=600.,
+                        fluid_velocity_spread=0., limit_parcels=True,
+                        parcels=1, fluid_particles_per_second=600.,
                         use_time_limit=True, start_time=start, end_time=start+.1,
                         fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
             sources.append(name)

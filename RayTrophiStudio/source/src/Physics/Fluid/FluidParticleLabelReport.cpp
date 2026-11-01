@@ -6,7 +6,7 @@ namespace Fluid {
 
 ParticleLabelReport inspectParticleLabels(const SimulationGridDomainState* state) {
     ParticleLabelReport report;
-    if (!state || !state->valid || !simulationDomainHasLiquid(state->type)) {
+    if (!state || !state->valid || !simulationDomainHasLiquid(*state)) {
         return report;
     }
     report.available = true;

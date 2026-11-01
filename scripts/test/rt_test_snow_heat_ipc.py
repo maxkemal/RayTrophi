@@ -56,8 +56,8 @@ def main():
                       fluid_substance=substance, position=pos, radius=radius,
                       velocity=[0, 0, 0], fluid_velocity_spread=0.,
                       fluid_particles_per_second=rate, use_time_limit=True,
-                      start_time=start, end_time=end, use_particle_limit=True,
-                      max_emitted_particles=limit)
+                      start_time=start, end_time=end, limit_parcels=True,
+                      parcels=limit)
         if kelvin is not None:
             params.update(fluid_temperature_override=True, fluid_temperature_kelvin=kelvin)
         call('flow_source.create', **params)

@@ -26,7 +26,7 @@ MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain
                                           int domain_index, bool has_particles) {
     MatterGrainOwnership result;
     result.enabled = domain.fluid_params.grain.enabled;
-    if (domain.type != SimulationDomainType::Matter) {
+    if (domain.type != SimulationDomainType::Matter || !simulationDomainHasLiquid(domain)) {
         result.enabled = false;
         return result;
     }

@@ -15,9 +15,13 @@ struct HumanWalkRecipe {
     int cycles = 2;          // One cycle contains left and right steps.
     float stride = .35f;     // Fraction of character height.
     float stepHeight = .06f; // Fraction of character height.
-    float bodyBounce = .02f; // Fraction of character height.
+    float bodyBounce = 0.f;  // Fraction of character height, added to the stance-leg height.
     float armSwing = .7f;    // 0..1 multiplier.
     float bodyMotion = .75f; // 0..1 pelvis and torso motion.
+    float legReach = .998f;  // Largest hip-to-ankle distance as a fraction of leg length.
+    float stanceKnee = 18.f; // Loading knee flexion of the supporting leg, degrees.
+    float heelStrike = 15.f; // Toe-up degrees at heel contact.
+    float toeOff = 30.f;     // Heel-up degrees at toe-off.
 };
 
 bool inspectHumanWalkRecipe(const RayTrophi::NodeHierarchy &hierarchy, const RigAnatomy &anatomy,

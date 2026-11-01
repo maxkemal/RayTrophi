@@ -63,6 +63,20 @@ void prepare() {
     }
 }
 void discard() {cancelDrag();draft.setup=nullptr;draft.report=nullptr;draft.confirmed=false;draft.open=false;}
+bool lowConfidence(const std::string& name) {
+    if(draft.setup.is_object()&&draft.setup.contains("auto_low_confidence"))for(const auto& joint:draft.setup["auto_low_confidence"])
+        if(joint==name)return true;
+    return false;
+}
+void autoPlace() {
+    cancelDrag();if(!draft.setup.is_object()){draft.message="Prepare alignment first.";return;}
+    nlohmann::json proposal;const auto r=rtapi::autoRigLandmarks(draft.character,draft.mesh,proposal);
+    if(!r.ok){draft.message=r.error;return;}
+    draft.setup["landmarks"]=proposal["landmarks"];draft.setup["auto_low_confidence"]=proposal["low_confidence"];draft.report=nullptr;
+    const auto low=proposal["low_confidence"].size();
+    draft.message="Auto placed ("+proposal["method"].get<std::string>()+"). "+(low?std::to_string(low)+" joints need a look (amber).":std::string("All joints confident; check both views."));
+    for(const auto& warning:proposal["warnings"])draft.message+="\n"+warning.get<std::string>();
+}
 bool outsideJoint(const std::string& name) {
     if(draft.report.is_object())for(const auto& joint:draft.report["joints"])
         if(joint["name"]==name)return !joint["inside_bounds"].get<bool>();
@@ -118,6 +132,8 @@ bool updateLandmark(const std::string& name,const nlohmann::json& position) {
         if(!r.ok){draft.message=r.error;return false;}candidate=std::move(mirrored);
     }
     resolveDraftRules(candidate);
+    // A joint the user has placed by hand is no longer an unchecked guess.
+    if(draft.setup.contains("auto_low_confidence")){auto& low=draft.setup["auto_low_confidence"];for(size_t i=low.size();i>0;--i)if(low[i-1]==name)low.erase(low.begin()+static_cast<nlohmann::json::difference_type>(i-1));}
     draft.setup["landmarks"]=std::move(candidate);draft.report=nullptr;return true;
 }
 bool updateLandmarks(nlohmann::json candidate,const std::vector<std::string>& sources) {
@@ -183,7 +199,7 @@ void canvas(int plane,float height) {
         const auto name=joint["name"].get<std::string>(),parent=joint["parent"].get<std::string>();const auto p=project(marks[name]);
         const bool selected=std::find(draft.bones.begin(),draft.bones.end(),name)!=draft.bones.end();
         const bool guide=selectableGuide(name);
-        const auto color=selected?IM_COL32(255,170,45,255):(outsideJoint(name)?IM_COL32(255,95,85,255):(guide?IM_COL32(120,215,235,255):IM_COL32(95,110,125,120)));
+        const auto color=selected?IM_COL32(255,170,45,255):(outsideJoint(name)?IM_COL32(255,95,85,255):lowConfidence(name)?IM_COL32(240,200,60,255):(guide?IM_COL32(120,215,235,255):IM_COL32(95,110,125,120)));
         if(!parent.empty())draw->AddLine(project(marks[parent]),p,color,selected?2.5f:1.5f);
         draw->AddCircleFilled(p,selected?5.f:3.5f,color);
         if(draft.showLabels && selected)draw->AddText(ImVec2(p.x+8,p.y-8),color,name.c_str());
@@ -243,6 +259,7 @@ void drawRigAlignmentWindow(UIContext& ctx) {
         if(ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && ImGui::IsKeyPressed(ImGuiKey_Escape))cancelDrag();
         ImGui::BeginDisabled(ImGuizmo::IsUsing() || draft.dragPlane>=0 || draft.panPlane>=0);
         if(ImGui::Button("Prepare"))prepare();ImGui::SameLine();
+        ImGui::BeginDisabled(!draft.setup.is_object());if(ImGui::Button("Auto place"))autoPlace();ImGui::EndDisabled();ImGui::SameLine();
         if(ImGui::Button("Fit to View"))fitViews();ImGui::SameLine();ImGui::Checkbox("Top",&draft.showTop);
         ImGui::SameLine();ImGui::SetNextItemWidth(105.f);
         const char* guideModes[]={"Primary","Hands","All guides"};

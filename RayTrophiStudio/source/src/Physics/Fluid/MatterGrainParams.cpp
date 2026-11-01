@@ -358,6 +358,9 @@ std::vector<MatterGrainBlocker> matterGrainBlockers(const SimulationGridDomainDe
     if (d.type != SimulationDomainType::Matter) {
         add("not_matter", "Grains run in a Matter domain only.");
     }
+    if (!simulationDomainHasLiquid(d)) {
+        add("liquid_lane", "Grains need the liquid/particle lane enabled.");
+    }
     if (d.backend != SimulationDomainBackend::GPU_Vulkan) {
         add("backend", "Grains need the Vulkan backend.");
     }

@@ -1,0 +1,36 @@
+{
+  "date": "2026-10-28",
+  "source": "user-provided external IPC probe, same scene",
+  "section": 20,
+  "verdict": "regression; shader implementation rolled back",
+  "gpu_ms": {
+    "vapor": 545,
+    "smoke": 134,
+    "sum": 679,
+    "both": 766
+  },
+  "per_path": {
+    "camera_density_samples": {
+      "vapor": 14.9,
+      "smoke": 4.481,
+      "both": 24.794
+    },
+    "secondary_density_samples": {
+      "vapor": 0,
+      "smoke": 0,
+      "both": 0
+    },
+    "majorant_queries": {
+      "vapor": 4.27,
+      "smoke": 4.372,
+      "both": 11.542
+    },
+    "radiance_cache_fallbacks": {
+      "vapor": 0,
+      "smoke": 0,
+      "both": 0
+    }
+  },
+  "prior_section19_both_ms": 329,
+  "rollback_live_verified": false
+}

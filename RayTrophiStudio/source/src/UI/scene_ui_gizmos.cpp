@@ -332,14 +332,14 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     bool legacy_fluid_overlay_suppressed = false;
     if (particles) {
         for (const auto& gd : particles->gridDomains()) {
-            if (gd.enabled && RayTrophiSim::simulationDomainHasLiquid(gd.type)) {
+            if (gd.enabled && RayTrophiSim::simulationDomainHasLiquid(gd)) {
                 legacy_fluid_overlay_suppressed = true;
                 break;
             }
         }
         if (!legacy_fluid_overlay_suppressed) {
             for (const auto& gd_state : particles->gridDomainStates()) {
-                if (RayTrophiSim::simulationDomainHasLiquid(gd_state.type)) {
+                if (RayTrophiSim::simulationDomainHasLiquid(gd_state)) {
                     legacy_fluid_overlay_suppressed = true;
                     break;
                 }
@@ -543,7 +543,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     for (std::size_t domain_index = 0; domain_index < grid_domain_states.size(); ++domain_index) {
         const auto& state = grid_domain_states[domain_index];
 
-        if (!state.valid || !RayTrophiSim::simulationDomainHasLiquid(state.type)) {
+        if (!state.valid || !RayTrophiSim::simulationDomainHasLiquid(state)) {
             continue;
         }
         bool draw_particle_dots = false;

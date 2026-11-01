@@ -1,273 +1,273 @@
 {
   "sand_on": {
-    "seeded": 2304,
+    "seeded": 338,
     "samples": [
       {
         "motion_p95_m": 0.0,
         "motion_mean_m": 0.0,
         "motion_samples": 0,
-        "mean_speed": 0.08997779339551926,
-        "particles": 2304,
-        "com_y": 0.0978059651386048,
+        "mean_speed": 0.002757732756435871,
+        "particles": 338,
+        "com_y": 0.058466017808346385,
         "settle": {
           "settle_converged": true,
           "settle_displacement_m": 0.00019999999494757503,
-          "settle_first_p95_m": 0.0023341833148151636,
+          "settle_first_p95_m": 0.0013729818165302277,
           "settle_max_steps": 240,
-          "settle_ms": 73.7844009399414,
+          "settle_ms": 98.12539672851562,
           "settle_on_seed": true,
-          "settle_particles": 2304,
+          "settle_particles": 338,
           "settle_pending": false,
           "settle_plateau": false,
           "settle_ran": true,
-          "settle_residual_p95_m": 0.00014394006575457752,
-          "settle_steps": 5
+          "settle_residual_p95_m": 0.0001960731897270307,
+          "settle_steps": 8
         }
       },
       {
-        "motion_p95_m": 0.0014905899297446012,
-        "motion_mean_m": 0.0005543149309232831,
-        "motion_samples": 2304,
-        "mean_speed": 0.08171384781599045,
-        "particles": 2304,
-        "com_y": 0.09835128318948387
+        "motion_p95_m": 0.0001056237961165607,
+        "motion_mean_m": 4.4613374484470114e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0026320309843868017,
+        "particles": 338,
+        "com_y": 0.0584554903473727
       },
       {
-        "motion_p95_m": 0.00015220866771414876,
-        "motion_mean_m": 5.924847937421873e-05,
-        "motion_samples": 2304,
-        "mean_speed": 5.639616574626416e-06,
-        "particles": 2304,
-        "com_y": 0.09830039751065871
+        "motion_p95_m": 9.038171992870048e-05,
+        "motion_mean_m": 3.347803794895299e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0020747340749949217,
+        "particles": 338,
+        "com_y": 0.058449487901739115
       },
       {
-        "motion_p95_m": 0.0012746070278808475,
-        "motion_mean_m": 0.0006846219184808433,
-        "motion_samples": 2304,
-        "mean_speed": 0.006215113215148449,
-        "particles": 2304,
-        "com_y": 0.09761592011553427
+        "motion_p95_m": 7.123108662199229e-05,
+        "motion_mean_m": 3.060225208173506e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0020656303968280554,
+        "particles": 338,
+        "com_y": 0.05844059985505759
       },
       {
-        "motion_p95_m": 0.00018655630992725492,
-        "motion_mean_m": 8.917309605749324e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.08486711978912354,
-        "particles": 2304,
-        "com_y": 0.0976169151269915
+        "motion_p95_m": 5.672226325259544e-05,
+        "motion_mean_m": 3.2189927878789604e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0020509890746325254,
+        "particles": 338,
+        "com_y": 0.058429104893209294
       },
       {
-        "motion_p95_m": 0.0014722604537382722,
-        "motion_mean_m": 0.000496842316351831,
-        "motion_samples": 2304,
-        "mean_speed": 0.07456111907958984,
-        "particles": 2304,
-        "com_y": 0.09809151850153196
+        "motion_p95_m": 5.569401037064381e-05,
+        "motion_mean_m": 3.3289841667283326e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.002231759252026677,
+        "particles": 338,
+        "com_y": 0.05841143656874727
       },
       {
-        "motion_p95_m": 0.00020256794232409447,
-        "motion_mean_m": 9.369853796670213e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.0008980559650808573,
-        "particles": 2304,
-        "com_y": 0.09800965252682341
+        "motion_p95_m": 5.579267235589214e-05,
+        "motion_mean_m": 3.645411561592482e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.002222328446805477,
+        "particles": 338,
+        "com_y": 0.05839092248069817
       },
       {
-        "motion_p95_m": 0.0012866079341620207,
-        "motion_mean_m": 0.0006759540410712361,
-        "motion_samples": 2304,
-        "mean_speed": 0.004962284117937088,
-        "particles": 2304,
-        "com_y": 0.09733391723822633
+        "motion_p95_m": 6.35117685305886e-05,
+        "motion_mean_m": 3.619565541157499e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.002410485642030835,
+        "particles": 338,
+        "com_y": 0.05839290391080652
       },
       {
-        "motion_p95_m": 0.00019802011956926435,
-        "motion_mean_m": 9.212469012709334e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.08403181284666061,
-        "particles": 2304,
-        "com_y": 0.09731839115958475
+        "motion_p95_m": 5.755289748776704e-05,
+        "motion_mean_m": 4.235294181853533e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.002715395065024495,
+        "particles": 338,
+        "com_y": 0.05837328769487038
       },
       {
-        "motion_p95_m": 0.0014493530616164207,
-        "motion_mean_m": 0.0005015702336095273,
-        "motion_samples": 2304,
-        "mean_speed": 0.07549235224723816,
-        "particles": 2304,
-        "com_y": 0.0977990272545209
+        "motion_p95_m": 5.90158742852509e-05,
+        "motion_mean_m": 4.1020572098204866e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.002568672876805067,
+        "particles": 338,
+        "com_y": 0.058357299283455476
       },
       {
-        "motion_p95_m": 0.00020234283874742687,
-        "motion_mean_m": 9.132921695709229e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.00025788793573156,
-        "particles": 2304,
-        "com_y": 0.09771370922516745
+        "motion_p95_m": 4.067671761731617e-05,
+        "motion_mean_m": 4.024522058898583e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0025383206084370613,
+        "particles": 338,
+        "com_y": 0.05833871109333968
       },
       {
-        "motion_p95_m": 0.0012872748775407672,
-        "motion_mean_m": 0.0006681596860289574,
-        "motion_samples": 2304,
-        "mean_speed": 0.00832896213978529,
-        "particles": 2304,
-        "com_y": 0.09704576542286408
+        "motion_p95_m": 4.431658817338757e-05,
+        "motion_mean_m": 4.041872307425365e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0021907102782279253,
+        "particles": 338,
+        "com_y": 0.058314402047654895
       },
       {
-        "motion_p95_m": 0.00018850498599931598,
-        "motion_mean_m": 8.979905396699905e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.08335956186056137,
-        "particles": 2304,
-        "com_y": 0.09705481937956195
+        "motion_p95_m": 3.7607627746183425e-05,
+        "motion_mean_m": 2.0819998098886572e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0013845881912857294,
+        "particles": 338,
+        "com_y": 0.05830632591587021
       },
       {
-        "motion_p95_m": 0.0014403759269043803,
-        "motion_mean_m": 0.00047192611964419484,
-        "motion_samples": 2304,
-        "mean_speed": 0.0711759701371193,
-        "particles": 2304,
-        "com_y": 0.09749751648913245
+        "motion_p95_m": 7.11905158823356e-05,
+        "motion_mean_m": 1.5106815226317849e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0011879611993208528,
+        "particles": 338,
+        "com_y": 0.05830949202135824
       },
       {
-        "motion_p95_m": 0.00022188723960425705,
-        "motion_mean_m": 0.00010086369729833677,
-        "motion_samples": 2304,
-        "mean_speed": 0.0028301251586526632,
-        "particles": 2304,
-        "com_y": 0.09741888707056501
+        "motion_p95_m": 5.801483348477632e-05,
+        "motion_mean_m": 1.2883021554443985e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0009801285341382027,
+        "particles": 338,
+        "com_y": 0.0583078219450614
       },
       {
-        "motion_p95_m": 0.0012708923313766718,
-        "motion_mean_m": 0.0006483061006292701,
-        "motion_samples": 2304,
-        "mean_speed": 0.007274186238646507,
-        "particles": 2304,
-        "com_y": 0.09677096416551963
+        "motion_p95_m": 5.244382919045165e-05,
+        "motion_mean_m": 1.2389379662636202e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.000838245265185833,
+        "particles": 338,
+        "com_y": 0.058307457246856265
       },
       {
-        "motion_p95_m": 0.00021422009740490466,
-        "motion_mean_m": 9.656110341893509e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.08130054920911789,
-        "particles": 2304,
-        "com_y": 0.0967570516420438
+        "motion_p95_m": 4.252390135661699e-05,
+        "motion_mean_m": 1.1071703738707583e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0007431181729771197,
+        "particles": 338,
+        "com_y": 0.0583080302968004
       },
       {
-        "motion_p95_m": 0.001424427260644734,
-        "motion_mean_m": 0.00047286110930144787,
-        "motion_samples": 2304,
-        "mean_speed": 0.07273781299591064,
-        "particles": 2304,
-        "com_y": 0.09720090521414526
+        "motion_p95_m": 3.18575075652916e-05,
+        "motion_mean_m": 9.433651030121837e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.000625492655672133,
+        "particles": 338,
+        "com_y": 0.058307850281515014
       },
       {
-        "motion_p95_m": 0.00021165709767956287,
-        "motion_mean_m": 9.683903044788167e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.001529700355604291,
-        "particles": 2304,
-        "com_y": 0.09711644870506253
+        "motion_p95_m": 2.3927364964038134e-05,
+        "motion_mean_m": 9.09043683350319e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.0005233155679889023,
+        "particles": 338,
+        "com_y": 0.05830786243279481
       },
       {
-        "motion_p95_m": 0.0012794466456398368,
-        "motion_mean_m": 0.0006479761213995516,
-        "motion_samples": 2304,
-        "mean_speed": 0.00883585587143898,
-        "particles": 2304,
-        "com_y": 0.09646875622716929
+        "motion_p95_m": 2.2000076569383964e-05,
+        "motion_mean_m": 8.053793862927705e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.000507911725435406,
+        "particles": 338,
+        "com_y": 0.05830774980889269
       },
       {
-        "motion_p95_m": 0.00018561995238997042,
-        "motion_mean_m": 9.015634714160115e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.08207601308822632,
-        "particles": 2304,
-        "com_y": 0.09647817925115816
+        "motion_p95_m": 1.6369542208849452e-05,
+        "motion_mean_m": 6.652188403677428e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.0004331095260567963,
+        "particles": 338,
+        "com_y": 0.058307879262730566
       },
       {
-        "motion_p95_m": 0.0014198740245774388,
-        "motion_mean_m": 0.0004613666096702218,
-        "motion_samples": 2304,
-        "mean_speed": 0.0701877549290657,
-        "particles": 2304,
-        "com_y": 0.09690806049141229
+        "motion_p95_m": 1.4678139450552408e-05,
+        "motion_mean_m": 6.236472927412251e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.0003798171819653362,
+        "particles": 338,
+        "com_y": 0.05830791630071292
       },
       {
-        "motion_p95_m": 0.00022091266873758286,
-        "motion_mean_m": 0.00010483531514182687,
-        "motion_samples": 2304,
-        "mean_speed": 0.0034281506668776274,
-        "particles": 2304,
-        "com_y": 0.09682803059733186
+        "motion_p95_m": 1.5222693946270738e-05,
+        "motion_mean_m": 5.725924438593211e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.00036215834552422166,
+        "particles": 338,
+        "com_y": 0.05830789540932905
       },
       {
-        "motion_p95_m": 0.0012641007779166102,
-        "motion_mean_m": 0.0006348672322928905,
-        "motion_samples": 2304,
-        "mean_speed": 0.008273947983980179,
-        "particles": 2304,
-        "com_y": 0.09619353616651283
+        "motion_p95_m": 1.576554132043384e-05,
+        "motion_mean_m": 5.457338374981191e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.00032542410190217197,
+        "particles": 338,
+        "com_y": 0.05830794843409719
       },
       {
-        "motion_p95_m": 0.00022549329150933772,
-        "motion_mean_m": 9.781153494259343e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.08055973052978516,
-        "particles": 2304,
-        "com_y": 0.09618471452952491
+        "motion_p95_m": 1.1523227840370964e-05,
+        "motion_mean_m": 4.444078058440937e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.0002573106612544507,
+        "particles": 338,
+        "com_y": 0.05830786476385664
       },
       {
-        "motion_p95_m": 0.0014071399345993996,
-        "motion_mean_m": 0.0004587839648593217,
-        "motion_samples": 2304,
-        "mean_speed": 0.07090731710195541,
-        "particles": 2304,
-        "com_y": 0.09661149942376636
+        "motion_p95_m": 1.0992835996148642e-05,
+        "motion_mean_m": 3.942295734304935e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.00024822462000884116,
+        "particles": 338,
+        "com_y": 0.058307952324710983
       },
       {
-        "motion_p95_m": 0.0002229405363323167,
-        "motion_mean_m": 0.00010265567834721878,
-        "motion_samples": 2304,
-        "mean_speed": 0.0010271264472976327,
-        "particles": 2304,
-        "com_y": 0.09652015365643118
+        "motion_p95_m": 1.0069062227557879e-05,
+        "motion_mean_m": 3.68872474609816e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.00020756651065312326,
+        "particles": 338,
+        "com_y": 0.05830796009491711
       },
       {
-        "motion_p95_m": 0.0012675321195274591,
-        "motion_mean_m": 0.000631825823802501,
-        "motion_samples": 2304,
-        "mean_speed": 0.012123292312026024,
-        "particles": 2304,
-        "com_y": 0.09588862433356045
+        "motion_p95_m": 8.442332728009205e-06,
+        "motion_mean_m": 2.891598114729277e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.00018333904154133052,
+        "particles": 338,
+        "com_y": 0.05830788098760609
       },
       {
-        "motion_p95_m": 0.00019219983369112015,
-        "motion_mean_m": 9.430811769561842e-05,
-        "motion_samples": 2304,
-        "mean_speed": 0.0798240527510643,
-        "particles": 2304,
-        "com_y": 0.09590872881338142
+        "motion_p95_m": 6.3504344325338025e-06,
+        "motion_mean_m": 2.9322820864763344e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.0001887555990833789,
+        "particles": 338,
+        "com_y": 0.05830784552019724
       },
       {
-        "motion_p95_m": 0.0013746200129389763,
-        "motion_mean_m": 0.0004245462187100202,
-        "motion_samples": 2304,
-        "mean_speed": 0.06448813527822495,
-        "particles": 2304,
-        "com_y": 0.09628716889748519
+        "motion_p95_m": 5.816226803290192e-06,
+        "motion_mean_m": 2.7455696454126155e-06,
+        "motion_samples": 338,
+        "mean_speed": 0.00016534284804947674,
+        "particles": 338,
+        "com_y": 0.0583078564756368
       }
     ]
   },
   "sand_off": {
-    "seeded": 2304,
+    "seeded": 338,
     "samples": [
       {
         "motion_p95_m": 0.0,
         "motion_mean_m": 0.0,
         "motion_samples": 0,
-        "mean_speed": 0.015988187864422798,
-        "particles": 2304,
-        "com_y": 0.0987634827676074,
+        "mean_speed": 0.1299082338809967,
+        "particles": 338,
+        "com_y": 0.0613950144488519,
         "settle": {
           "settle_converged": false,
           "settle_displacement_m": 0.00019999999494757503,
@@ -284,236 +284,236 @@
         }
       },
       {
-        "motion_p95_m": 0.001011247979477048,
-        "motion_mean_m": 0.0006984518258832395,
-        "motion_samples": 2304,
-        "mean_speed": 0.027904586866497993,
-        "particles": 2304,
-        "com_y": 0.09806611828104095
+        "motion_p95_m": 0.004106968641281128,
+        "motion_mean_m": 0.0024911612272262573,
+        "motion_samples": 338,
+        "mean_speed": 0.16392453014850616,
+        "particles": 338,
+        "com_y": 0.05894413847233772
       },
       {
-        "motion_p95_m": 0.0005317135946825147,
-        "motion_mean_m": 0.00025492574786767364,
-        "motion_samples": 2304,
-        "mean_speed": 0.08500025421380997,
-        "particles": 2304,
-        "com_y": 0.09828487651609284
+        "motion_p95_m": 0.003291199216619134,
+        "motion_mean_m": 0.0011910406174138188,
+        "motion_samples": 338,
+        "mean_speed": 0.07984401285648346,
+        "particles": 338,
+        "com_y": 0.05795162084606098
       },
       {
-        "motion_p95_m": 0.0008457036456093192,
-        "motion_mean_m": 0.00021039764396846294,
-        "motion_samples": 2304,
-        "mean_speed": 0.025401366874575615,
-        "particles": 2304,
-        "com_y": 0.09838042705609949
+        "motion_p95_m": 0.0020524736028164625,
+        "motion_mean_m": 0.001138045103289187,
+        "motion_samples": 338,
+        "mean_speed": 0.03947129845619202,
+        "particles": 338,
+        "com_y": 0.058906728225435016
       },
       {
-        "motion_p95_m": 0.0006744000129401684,
-        "motion_mean_m": 0.00027111530653201044,
-        "motion_samples": 2304,
-        "mean_speed": 0.03729487583041191,
-        "particles": 2304,
-        "com_y": 0.09813967547959
+        "motion_p95_m": 0.0012702345848083496,
+        "motion_mean_m": 0.0006376000237651169,
+        "motion_samples": 338,
+        "mean_speed": 0.04668555036187172,
+        "particles": 338,
+        "com_y": 0.05846193614663808
       },
       {
-        "motion_p95_m": 0.0007117564091458917,
-        "motion_mean_m": 0.0003055923734791577,
-        "motion_samples": 2304,
-        "mean_speed": 0.028968770056962967,
-        "particles": 2304,
-        "com_y": 0.09795326589339
+        "motion_p95_m": 0.0013606251450255513,
+        "motion_mean_m": 0.00048001069808378816,
+        "motion_samples": 338,
+        "mean_speed": 0.03486759215593338,
+        "particles": 338,
+        "com_y": 0.05828375369861454
       },
       {
-        "motion_p95_m": 0.0003500476886983961,
-        "motion_mean_m": 0.000146427599247545,
-        "motion_samples": 2304,
-        "mean_speed": 0.044151175767183304,
-        "particles": 2304,
-        "com_y": 0.09782565785682587
+        "motion_p95_m": 0.001289185369387269,
+        "motion_mean_m": 0.00037224392872303724,
+        "motion_samples": 338,
+        "mean_speed": 0.023497961461544037,
+        "particles": 338,
+        "com_y": 0.05830316888113348
       },
       {
-        "motion_p95_m": 0.0008636091370135546,
-        "motion_mean_m": 0.00028935071895830333,
-        "motion_samples": 2304,
-        "mean_speed": 0.05877392739057541,
-        "particles": 2304,
-        "com_y": 0.09786835733391157
+        "motion_p95_m": 0.00101077847648412,
+        "motion_mean_m": 0.000288997107418254,
+        "motion_samples": 338,
+        "mean_speed": 0.018935520201921463,
+        "particles": 338,
+        "com_y": 0.05820382968935915
       },
       {
-        "motion_p95_m": 0.0004583908594213426,
-        "motion_mean_m": 0.0001555570197524503,
-        "motion_samples": 2304,
-        "mean_speed": 0.02803843468427658,
-        "particles": 2304,
-        "com_y": 0.0978499664536736
+        "motion_p95_m": 0.0009819009574130177,
+        "motion_mean_m": 0.0002519474655855447,
+        "motion_samples": 338,
+        "mean_speed": 0.016281722113490105,
+        "particles": 338,
+        "com_y": 0.058216027733621854
       },
       {
-        "motion_p95_m": 0.0008437460637651384,
-        "motion_mean_m": 0.00031912841950543225,
-        "motion_samples": 2304,
-        "mean_speed": 0.021850451827049255,
-        "particles": 2304,
-        "com_y": 0.09753880376954151
+        "motion_p95_m": 0.0009660401265136898,
+        "motion_mean_m": 0.00023148723994381726,
+        "motion_samples": 338,
+        "mean_speed": 0.014999567531049252,
+        "particles": 338,
+        "com_y": 0.0581312051880553
       },
       {
-        "motion_p95_m": 0.0005442083929665387,
-        "motion_mean_m": 0.00019582717504817992,
-        "motion_samples": 2304,
-        "mean_speed": 0.06093239784240723,
-        "particles": 2304,
-        "com_y": 0.09745378601168239
+        "motion_p95_m": 0.0011335224844515324,
+        "motion_mean_m": 0.0002224382187705487,
+        "motion_samples": 338,
+        "mean_speed": 0.014852609485387802,
+        "particles": 338,
+        "com_y": 0.058084940328400524
       },
       {
-        "motion_p95_m": 0.0007701758877374232,
-        "motion_mean_m": 0.0002304315275978297,
-        "motion_samples": 2304,
-        "mean_speed": 0.05373222380876541,
-        "particles": 2304,
-        "com_y": 0.0975938739490072
+        "motion_p95_m": 0.0013601884711533785,
+        "motion_mean_m": 0.00022575595357920974,
+        "motion_samples": 338,
+        "mean_speed": 0.013369574211537838,
+        "particles": 338,
+        "com_y": 0.05801057856882645
       },
       {
-        "motion_p95_m": 0.00031606206903234124,
-        "motion_mean_m": 0.00014188505883794278,
-        "motion_samples": 2304,
-        "mean_speed": 0.028462395071983337,
-        "particles": 2304,
-        "com_y": 0.09757784560939496
+        "motion_p95_m": 0.0013408962404355407,
+        "motion_mean_m": 0.00019864643400069326,
+        "motion_samples": 338,
+        "mean_speed": 0.011089238338172436,
+        "particles": 338,
+        "com_y": 0.057957213184625433
       },
       {
-        "motion_p95_m": 0.0006485817721113563,
-        "motion_mean_m": 0.00036975694820284843,
-        "motion_samples": 2304,
-        "mean_speed": 0.011993368156254292,
-        "particles": 2304,
-        "com_y": 0.0972120733745466
+        "motion_p95_m": 0.0008730354020372033,
+        "motion_mean_m": 0.00017027274589054286,
+        "motion_samples": 338,
+        "mean_speed": 0.011033686809241772,
+        "particles": 338,
+        "com_y": 0.05793608063776819
       },
       {
-        "motion_p95_m": 0.0005122398142702878,
-        "motion_mean_m": 0.00018583665951155126,
-        "motion_samples": 2304,
-        "mean_speed": 0.06592459976673126,
-        "particles": 2304,
-        "com_y": 0.0970761000563319
+        "motion_p95_m": 0.0007725891191512346,
+        "motion_mean_m": 0.0001569373271195218,
+        "motion_samples": 338,
+        "mean_speed": 0.010547081008553505,
+        "particles": 338,
+        "com_y": 0.057897444560947496
       },
       {
-        "motion_p95_m": 0.0009469148353673518,
-        "motion_mean_m": 0.0002984126622322947,
-        "motion_samples": 2304,
-        "mean_speed": 0.05741335079073906,
-        "particles": 2304,
-        "com_y": 0.09730062968606032
+        "motion_p95_m": 0.000748025078792125,
+        "motion_mean_m": 0.0001672892685746774,
+        "motion_samples": 338,
+        "mean_speed": 0.01046786829829216,
+        "particles": 338,
+        "com_y": 0.0578514770301577
       },
       {
-        "motion_p95_m": 0.0003151767305098474,
-        "motion_mean_m": 0.0001263175072381273,
-        "motion_samples": 2304,
-        "mean_speed": 0.014209690503776073,
-        "particles": 2304,
-        "com_y": 0.09718467412633576
+        "motion_p95_m": 0.0008176323026418686,
+        "motion_mean_m": 0.00016355978732462972,
+        "motion_samples": 338,
+        "mean_speed": 0.010010353289544582,
+        "particles": 338,
+        "com_y": 0.057793100662088565
       },
       {
-        "motion_p95_m": 0.0010269398335367441,
-        "motion_mean_m": 0.00043751104385592043,
-        "motion_samples": 2304,
-        "mean_speed": 0.03441628813743591,
-        "particles": 2304,
-        "com_y": 0.0968057925381344
+        "motion_p95_m": 0.0003502075851429254,
+        "motion_mean_m": 0.00012641673674806952,
+        "motion_samples": 338,
+        "mean_speed": 0.00817388016730547,
+        "particles": 338,
+        "com_y": 0.05776555535311883
       },
       {
-        "motion_p95_m": 0.0002860592503566295,
-        "motion_mean_m": 0.00012840397539548576,
-        "motion_samples": 2304,
-        "mean_speed": 0.05855754762887955,
-        "particles": 2304,
-        "com_y": 0.09684008553709746
+        "motion_p95_m": 0.0004048433911520988,
+        "motion_mean_m": 0.00011186243500560522,
+        "motion_samples": 338,
+        "mean_speed": 0.007013609632849693,
+        "particles": 338,
+        "com_y": 0.057757261402067286
       },
       {
-        "motion_p95_m": 0.0009896107949316502,
-        "motion_mean_m": 0.0002859446976799518,
-        "motion_samples": 2304,
-        "mean_speed": 0.04756109043955803,
-        "particles": 2304,
-        "com_y": 0.09693787323802415
+        "motion_p95_m": 0.00045115206739865243,
+        "motion_mean_m": 0.00010953608580166474,
+        "motion_samples": 338,
+        "mean_speed": 0.0072312261909246445,
+        "particles": 338,
+        "com_y": 0.05771764539204226
       },
       {
-        "motion_p95_m": 0.0003238998760934919,
-        "motion_mean_m": 0.00014486683357972652,
-        "motion_samples": 2304,
-        "mean_speed": 0.03105003386735916,
-        "particles": 2304,
-        "com_y": 0.09687752674631146
+        "motion_p95_m": 0.00019663268176373094,
+        "motion_mean_m": 0.00011202214955119416,
+        "motion_samples": 338,
+        "mean_speed": 0.007497990969568491,
+        "particles": 338,
+        "com_y": 0.05767817939108116
       },
       {
-        "motion_p95_m": 0.0008618910214863718,
-        "motion_mean_m": 0.0003542366321198642,
-        "motion_samples": 2304,
-        "mean_speed": 0.011985604651272297,
-        "particles": 2304,
-        "com_y": 0.09654671352126973
+        "motion_p95_m": 0.00022804454783909023,
+        "motion_mean_m": 7.78191169956699e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.005315485876053572,
+        "particles": 338,
+        "com_y": 0.057650491953469246
       },
       {
-        "motion_p95_m": 0.0004413301357999444,
-        "motion_mean_m": 0.00017885261331684887,
-        "motion_samples": 2304,
-        "mean_speed": 0.05885141342878342,
-        "particles": 2304,
-        "com_y": 0.09638279883577348
+        "motion_p95_m": 0.00021748270955868065,
+        "motion_mean_m": 7.358266157098114e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.004332258831709623,
+        "particles": 338,
+        "com_y": 0.05764425904682931
       },
       {
-        "motion_p95_m": 0.0011296335142105818,
-        "motion_mean_m": 0.00032362734782509506,
-        "motion_samples": 2304,
-        "mean_speed": 0.06985129415988922,
-        "particles": 2304,
-        "com_y": 0.09664579839366327
+        "motion_p95_m": 0.0001311630621785298,
+        "motion_mean_m": 5.989095370750874e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0046060169115662575,
+        "particles": 338,
+        "com_y": 0.057625525124018376
       },
       {
-        "motion_p95_m": 0.00022589528816752136,
-        "motion_mean_m": 0.000104420272691641,
-        "motion_samples": 2304,
-        "mean_speed": 0.0062522017396986485,
-        "particles": 2304,
-        "com_y": 0.09657455738303931
+        "motion_p95_m": 0.00016779069846961647,
+        "motion_mean_m": 6.766294973203912e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0049309260211884975,
+        "particles": 338,
+        "com_y": 0.05760604739409582
       },
       {
-        "motion_p95_m": 0.0011219432344660163,
-        "motion_mean_m": 0.0004796346474904567,
-        "motion_samples": 2304,
-        "mean_speed": 0.027164079248905182,
-        "particles": 2304,
-        "com_y": 0.09609627949791688
+        "motion_p95_m": 0.00013560143997892737,
+        "motion_mean_m": 7.6193806307856e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.004485132172703743,
+        "particles": 338,
+        "com_y": 0.05757816939355707
       },
       {
-        "motion_p95_m": 0.00027019009576179087,
-        "motion_mean_m": 0.0001184895882033743,
-        "motion_samples": 2304,
-        "mean_speed": 0.0674171969294548,
-        "particles": 2304,
-        "com_y": 0.09613431390140334
+        "motion_p95_m": 0.0001361588219879195,
+        "motion_mean_m": 5.3829899115953594e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0031163368839770555,
+        "particles": 338,
+        "com_y": 0.05756304357421288
       },
       {
-        "motion_p95_m": 0.0011429506121203303,
-        "motion_mean_m": 0.0002971326175611466,
-        "motion_samples": 2304,
-        "mean_speed": 0.053033746778964996,
-        "particles": 2304,
-        "com_y": 0.09633960571770554
+        "motion_p95_m": 0.00013621362450066954,
+        "motion_mean_m": 5.020606840844266e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.003101966343820095,
+        "particles": 338,
+        "com_y": 0.05756697268638562
       },
       {
-        "motion_p95_m": 0.000308563670841977,
-        "motion_mean_m": 0.00013483849761541933,
-        "motion_samples": 2304,
-        "mean_speed": 0.0210666973143816,
-        "particles": 2304,
-        "com_y": 0.09626090185881586
+        "motion_p95_m": 8.187334606191143e-05,
+        "motion_mean_m": 3.904428012901917e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.00236453115940094,
+        "particles": 338,
+        "com_y": 0.05756088386471632
       },
       {
-        "motion_p95_m": 0.001017488189972937,
-        "motion_mean_m": 0.0004267871263436973,
-        "motion_samples": 2304,
-        "mean_speed": 0.013207189738750458,
-        "particles": 2304,
-        "com_y": 0.09584086439460622
+        "motion_p95_m": 8.296527084894478e-05,
+        "motion_mean_m": 3.502906110952608e-05,
+        "motion_samples": 338,
+        "mean_speed": 0.0025997853372246027,
+        "particles": 338,
+        "com_y": 0.05756018436982255
       }
     ]
   },
@@ -524,14 +524,14 @@
         "motion_p95_m": 0.0,
         "motion_mean_m": 0.0,
         "motion_samples": 0,
-        "mean_speed": 0.009289739653468132,
+        "mean_speed": 0.009289744310081005,
         "particles": 2304,
         "settle": {
           "settle_converged": true,
           "settle_displacement_m": 0.00019999999494757503,
           "settle_first_p95_m": 0.0,
           "settle_max_steps": 240,
-          "settle_ms": 22.424999237060547,
+          "settle_ms": 32.994998931884766,
           "settle_on_seed": true,
           "settle_particles": 2304,
           "settle_pending": false,
@@ -542,206 +542,206 @@
         }
       },
       {
-        "motion_p95_m": 0.00022741834982298315,
-        "motion_mean_m": 0.00010996894707204774,
+        "motion_p95_m": 0.00020152101933490485,
+        "motion_mean_m": 0.00012558371236082166,
         "motion_samples": 2304,
-        "mean_speed": 0.018900062888860703,
+        "mean_speed": 0.018900061026215553,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.00047883641673251987,
-        "motion_mean_m": 0.00025863805785775185,
+        "motion_p95_m": 0.0004344928602222353,
+        "motion_mean_m": 0.0002739272313192487,
         "motion_samples": 2304,
-        "mean_speed": 0.029843255877494812,
+        "mean_speed": 0.02888902649283409,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0007441948400810361,
-        "motion_mean_m": 0.0004136537609156221,
+        "motion_p95_m": 0.00072908477159217,
+        "motion_mean_m": 0.000421996257500723,
         "motion_samples": 2304,
-        "mean_speed": 0.04086681455373764,
+        "mean_speed": 0.03888937830924988,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0010329775977879763,
-        "motion_mean_m": 0.0005661628092639148,
+        "motion_p95_m": 0.0010704346932470798,
+        "motion_mean_m": 0.0005568377673625946,
         "motion_samples": 2304,
-        "mean_speed": 0.05153638496994972,
+        "mean_speed": 0.04872777312994003,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0013799673179164529,
-        "motion_mean_m": 0.0006978181190788746,
+        "motion_p95_m": 0.0012961194152012467,
+        "motion_mean_m": 0.0007170828757807612,
         "motion_samples": 2304,
-        "mean_speed": 0.06034443527460098,
+        "mean_speed": 0.058366578072309494,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0015609553083777428,
-        "motion_mean_m": 0.0008639442967250943,
+        "motion_p95_m": 0.0015482474118471146,
+        "motion_mean_m": 0.0008647357462905347,
         "motion_samples": 2304,
-        "mean_speed": 0.07244814932346344,
+        "mean_speed": 0.06785371154546738,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0018237996846437454,
-        "motion_mean_m": 0.000997278024442494,
+        "motion_p95_m": 0.0018312307074666023,
+        "motion_mean_m": 0.0010006428929045796,
         "motion_samples": 2304,
-        "mean_speed": 0.08190733194351196,
+        "mean_speed": 0.07714288681745529,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.002083349507302046,
-        "motion_mean_m": 0.0011306172236800194,
+        "motion_p95_m": 0.002057081088423729,
+        "motion_mean_m": 0.0011261152103543282,
         "motion_samples": 2304,
-        "mean_speed": 0.09154441952705383,
+        "mean_speed": 0.08613045513629913,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0023830831050872803,
-        "motion_mean_m": 0.001236044685356319,
+        "motion_p95_m": 0.0024982017930597067,
+        "motion_mean_m": 0.0012449832865968347,
         "motion_samples": 2304,
-        "mean_speed": 0.09921356290578842,
+        "mean_speed": 0.09452322125434875,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.002711620880290866,
-        "motion_mean_m": 0.0013318348210304976,
+        "motion_p95_m": 0.0027019574772566557,
+        "motion_mean_m": 0.0013528320705518126,
         "motion_samples": 2304,
-        "mean_speed": 0.1061200350522995,
+        "mean_speed": 0.10284273326396942,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0027494996320456266,
-        "motion_mean_m": 0.001441219006665051,
+        "motion_p95_m": 0.002983388490974903,
+        "motion_mean_m": 0.0014490012545138597,
         "motion_samples": 2304,
-        "mean_speed": 0.11436643451452255,
+        "mean_speed": 0.11057271808385849,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0030670056585222483,
-        "motion_mean_m": 0.0014933616621419787,
+        "motion_p95_m": 0.0032727522775530815,
+        "motion_mean_m": 0.001541322679258883,
         "motion_samples": 2304,
-        "mean_speed": 0.11852088570594788,
+        "mean_speed": 0.11722029745578766,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003118984866887331,
-        "motion_mean_m": 0.0015801332192495465,
+        "motion_p95_m": 0.0033776406198740005,
+        "motion_mean_m": 0.0016387334326282144,
         "motion_samples": 2304,
-        "mean_speed": 0.12474732846021652,
+        "mean_speed": 0.12423519790172577,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0033845053985714912,
-        "motion_mean_m": 0.0016459102043882012,
+        "motion_p95_m": 0.003426201641559601,
+        "motion_mean_m": 0.0017245373455807567,
         "motion_samples": 2304,
-        "mean_speed": 0.12952002882957458,
+        "mean_speed": 0.12978632748126984,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003405135590583086,
-        "motion_mean_m": 0.0017449392471462488,
+        "motion_p95_m": 0.00355911604128778,
+        "motion_mean_m": 0.0018045800970867276,
         "motion_samples": 2304,
-        "mean_speed": 0.13721221685409546,
+        "mean_speed": 0.13440267741680145,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0035798882599920034,
-        "motion_mean_m": 0.0018263342790305614,
+        "motion_p95_m": 0.003687969408929348,
+        "motion_mean_m": 0.0018433445366099477,
         "motion_samples": 2304,
-        "mean_speed": 0.1430152952671051,
+        "mean_speed": 0.1386791467666626,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003553078044205904,
-        "motion_mean_m": 0.0018784197745844722,
+        "motion_p95_m": 0.0035906443372368813,
+        "motion_mean_m": 0.001932611339725554,
         "motion_samples": 2304,
-        "mean_speed": 0.14777712523937225,
+        "mean_speed": 0.14303089678287506,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0038199645932763815,
-        "motion_mean_m": 0.001932951738126576,
+        "motion_p95_m": 0.0038670869544148445,
+        "motion_mean_m": 0.0019809857476502657,
         "motion_samples": 2304,
-        "mean_speed": 0.15011653304100037,
+        "mean_speed": 0.1443244218826294,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003916696645319462,
-        "motion_mean_m": 0.0019794057589024305,
+        "motion_p95_m": 0.0039044541772454977,
+        "motion_mean_m": 0.0020367498509585857,
         "motion_samples": 2304,
-        "mean_speed": 0.15358375012874603,
+        "mean_speed": 0.14734889566898346,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0037716899532824755,
-        "motion_mean_m": 0.0020585497841238976,
+        "motion_p95_m": 0.003906678408384323,
+        "motion_mean_m": 0.0020793562289327383,
         "motion_samples": 2304,
-        "mean_speed": 0.1611861139535904,
+        "mean_speed": 0.15316660702228546,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003915553912520409,
-        "motion_mean_m": 0.002027150010690093,
+        "motion_p95_m": 0.0040090372785925865,
+        "motion_mean_m": 0.002123901154845953,
         "motion_samples": 2304,
-        "mean_speed": 0.15851423144340515,
+        "mean_speed": 0.15667934715747833,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003970762714743614,
-        "motion_mean_m": 0.0021367939189076424,
+        "motion_p95_m": 0.00400262838229537,
+        "motion_mean_m": 0.0021271510049700737,
         "motion_samples": 2304,
-        "mean_speed": 0.166036456823349,
+        "mean_speed": 0.15873582661151886,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0042045991867780685,
-        "motion_mean_m": 0.002094063675031066,
+        "motion_p95_m": 0.004176182206720114,
+        "motion_mean_m": 0.0021567041985690594,
         "motion_samples": 2304,
-        "mean_speed": 0.16170577704906464,
+        "mean_speed": 0.1606927216053009,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004293459467589855,
-        "motion_mean_m": 0.0022225480061024427,
+        "motion_p95_m": 0.004207109101116657,
+        "motion_mean_m": 0.0021752160973846912,
         "motion_samples": 2304,
-        "mean_speed": 0.1717376410961151,
+        "mean_speed": 0.16262637078762054,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0042305816896259785,
-        "motion_mean_m": 0.002163560362532735,
+        "motion_p95_m": 0.004182104486972094,
+        "motion_mean_m": 0.002155184280127287,
         "motion_samples": 2304,
-        "mean_speed": 0.1681947410106659,
+        "mean_speed": 0.16348379850387573,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004231651779264212,
-        "motion_mean_m": 0.002216083463281393,
+        "motion_p95_m": 0.0041769626550376415,
+        "motion_mean_m": 0.002208444755524397,
         "motion_samples": 2304,
-        "mean_speed": 0.170518696308136,
+        "mean_speed": 0.1636648327112198,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004394841380417347,
-        "motion_mean_m": 0.0021889740601181984,
+        "motion_p95_m": 0.004211073275655508,
+        "motion_mean_m": 0.0022075222805142403,
         "motion_samples": 2304,
-        "mean_speed": 0.166669100522995,
+        "mean_speed": 0.16524295508861542,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004531326238065958,
-        "motion_mean_m": 0.0023129915352910757,
+        "motion_p95_m": 0.0043110898695886135,
+        "motion_mean_m": 0.0022900570183992386,
         "motion_samples": 2304,
-        "mean_speed": 0.17229269444942474,
+        "mean_speed": 0.16439767181873322,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004492585081607103,
-        "motion_mean_m": 0.0022179249208420515,
+        "motion_p95_m": 0.004209668841212988,
+        "motion_mean_m": 0.0022417311556637287,
         "motion_samples": 2304,
-        "mean_speed": 0.16780661046504974,
+        "mean_speed": 0.1668410450220108,
         "particles": 2304
       }
     ]
@@ -753,7 +753,7 @@
         "motion_p95_m": 0.0,
         "motion_mean_m": 0.0,
         "motion_samples": 0,
-        "mean_speed": 0.009240841493010521,
+        "mean_speed": 0.00924084521830082,
         "particles": 2304,
         "settle": {
           "settle_converged": false,
@@ -771,236 +771,236 @@
         }
       },
       {
-        "motion_p95_m": 0.00022711185738444328,
-        "motion_mean_m": 0.0001099261426134035,
+        "motion_p95_m": 0.00020152101933490485,
+        "motion_mean_m": 0.00012553835404105484,
         "motion_samples": 2304,
-        "mean_speed": 0.018905699253082275,
+        "mean_speed": 0.018905701115727425,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0004788316146004945,
-        "motion_mean_m": 0.0002587265335023403,
+        "motion_p95_m": 0.00043453709804452956,
+        "motion_mean_m": 0.0002740121854003519,
         "motion_samples": 2304,
-        "mean_speed": 0.029848823323845863,
+        "mean_speed": 0.028894618153572083,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0007450542179867625,
-        "motion_mean_m": 0.00041374622378498316,
+        "motion_p95_m": 0.0007296581752598286,
+        "motion_mean_m": 0.00042208866216242313,
         "motion_samples": 2304,
-        "mean_speed": 0.040871720761060715,
+        "mean_speed": 0.03889422491192818,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0010331283556297421,
-        "motion_mean_m": 0.0005662487237714231,
+        "motion_p95_m": 0.0010703753214329481,
+        "motion_mean_m": 0.0005569211789406836,
         "motion_samples": 2304,
-        "mean_speed": 0.05154123529791832,
+        "mean_speed": 0.048732537776231766,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0013801143504679203,
-        "motion_mean_m": 0.0006978957098908722,
+        "motion_p95_m": 0.0012962849577888846,
+        "motion_mean_m": 0.0007171591860242188,
         "motion_samples": 2304,
-        "mean_speed": 0.0603492446243763,
+        "mean_speed": 0.058371372520923615,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0015611231792718172,
-        "motion_mean_m": 0.0008640160667710006,
+        "motion_p95_m": 0.0015483183087781072,
+        "motion_mean_m": 0.0008648076327517629,
         "motion_samples": 2304,
-        "mean_speed": 0.07245296239852905,
+        "mean_speed": 0.0678585097193718,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.001823754282668233,
-        "motion_mean_m": 0.0009973463602364063,
+        "motion_p95_m": 0.001831055385991931,
+        "motion_mean_m": 0.001000709948129952,
         "motion_samples": 2304,
-        "mean_speed": 0.08191213011741638,
+        "mean_speed": 0.07714764773845673,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.002083525527268648,
-        "motion_mean_m": 0.0011306826490908861,
+        "motion_p95_m": 0.002071841387078166,
+        "motion_mean_m": 0.0011235465062782168,
         "motion_samples": 2304,
-        "mean_speed": 0.09154912829399109,
+        "mean_speed": 0.0861351415514946,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.002383330836892128,
-        "motion_mean_m": 0.0012361063854768872,
+        "motion_p95_m": 0.0024834393989294767,
+        "motion_mean_m": 0.001267020357772708,
         "motion_samples": 2304,
-        "mean_speed": 0.09921813011169434,
+        "mean_speed": 0.09459801763296127,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0027119009755551815,
-        "motion_mean_m": 0.0013318932615220547,
+        "motion_p95_m": 0.0026657069101929665,
+        "motion_mean_m": 0.00135908299125731,
         "motion_samples": 2304,
-        "mean_speed": 0.10612441599369049,
+        "mean_speed": 0.10296464711427689,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0027496719267219305,
-        "motion_mean_m": 0.0014412755845114589,
+        "motion_p95_m": 0.003090223530307412,
+        "motion_mean_m": 0.0014722313499078155,
         "motion_samples": 2304,
-        "mean_speed": 0.11437072604894638,
+        "mean_speed": 0.11039487272500992,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.00306723196990788,
-        "motion_mean_m": 0.0014934171922504902,
+        "motion_p95_m": 0.0030960270669311285,
+        "motion_mean_m": 0.0015269005671143532,
         "motion_samples": 2304,
-        "mean_speed": 0.11852510273456573,
+        "mean_speed": 0.11712241172790527,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0031190989539027214,
-        "motion_mean_m": 0.0015801864210516214,
+        "motion_p95_m": 0.0034674699418246746,
+        "motion_mean_m": 0.0016208216547966003,
         "motion_samples": 2304,
-        "mean_speed": 0.12475147843360901,
+        "mean_speed": 0.12322016805410385,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003384491428732872,
-        "motion_mean_m": 0.001645910320803523,
+        "motion_p95_m": 0.0033652835991233587,
+        "motion_mean_m": 0.0017319625476375222,
         "motion_samples": 2304,
-        "mean_speed": 0.12952406704425812,
+        "mean_speed": 0.1291930228471756,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0033975583501160145,
-        "motion_mean_m": 0.0017478781519457698,
+        "motion_p95_m": 0.003589017316699028,
+        "motion_mean_m": 0.0017888116417452693,
         "motion_samples": 2304,
-        "mean_speed": 0.13736046850681305,
+        "mean_speed": 0.13396181166172028,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0035482340026646852,
-        "motion_mean_m": 0.0018172689015045762,
+        "motion_p95_m": 0.0038162015844136477,
+        "motion_mean_m": 0.0018799803219735622,
         "motion_samples": 2304,
-        "mean_speed": 0.14294423162937164,
+        "mean_speed": 0.1365581899881363,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0036028227768838406,
-        "motion_mean_m": 0.0018701327499002218,
+        "motion_p95_m": 0.003592000575736165,
+        "motion_mean_m": 0.001910306978970766,
         "motion_samples": 2304,
-        "mean_speed": 0.14722426235675812,
+        "mean_speed": 0.14225852489471436,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0038673451635986567,
-        "motion_mean_m": 0.001928188488818705,
+        "motion_p95_m": 0.0036250173579901457,
+        "motion_mean_m": 0.0019739114213734865,
         "motion_samples": 2304,
-        "mean_speed": 0.1501321792602539,
+        "mean_speed": 0.1459960639476776,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003962239716202021,
-        "motion_mean_m": 0.0019822223111987114,
+        "motion_p95_m": 0.003859961871057749,
+        "motion_mean_m": 0.0020196372643113136,
         "motion_samples": 2304,
-        "mean_speed": 0.15340502560138702,
+        "mean_speed": 0.1476719230413437,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.00377452839165926,
-        "motion_mean_m": 0.0020674029365181923,
+        "motion_p95_m": 0.0038506058044731617,
+        "motion_mean_m": 0.0020332669373601675,
         "motion_samples": 2304,
-        "mean_speed": 0.1616814285516739,
+        "mean_speed": 0.1523495465517044,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003948403522372246,
-        "motion_mean_m": 0.002060111379250884,
+        "motion_p95_m": 0.003980344161391258,
+        "motion_mean_m": 0.0021174170542508364,
         "motion_samples": 2304,
-        "mean_speed": 0.1597345620393753,
+        "mean_speed": 0.15595465898513794,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.003973603714257479,
-        "motion_mean_m": 0.0021491909865289927,
+        "motion_p95_m": 0.004072718322277069,
+        "motion_mean_m": 0.0021186929661780596,
         "motion_samples": 2304,
-        "mean_speed": 0.16666755080223083,
+        "mean_speed": 0.15908055007457733,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004204921890050173,
-        "motion_mean_m": 0.002105965744704008,
+        "motion_p95_m": 0.0041563804261386395,
+        "motion_mean_m": 0.002154130721464753,
         "motion_samples": 2304,
-        "mean_speed": 0.16334041953086853,
+        "mean_speed": 0.16112838685512543,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004265362862497568,
-        "motion_mean_m": 0.0022522397339344025,
+        "motion_p95_m": 0.004206265788525343,
+        "motion_mean_m": 0.002172895008698106,
         "motion_samples": 2304,
-        "mean_speed": 0.173946812748909,
+        "mean_speed": 0.16353818774223328,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.0043213944882154465,
-        "motion_mean_m": 0.0021632921416312456,
+        "motion_p95_m": 0.004147053230553865,
+        "motion_mean_m": 0.0021874611265957355,
         "motion_samples": 2304,
-        "mean_speed": 0.16667889058589935,
+        "mean_speed": 0.16408149898052216,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004216810688376427,
-        "motion_mean_m": 0.002240617061033845,
+        "motion_p95_m": 0.0042273360304534435,
+        "motion_mean_m": 0.0022210092283785343,
         "motion_samples": 2304,
-        "mean_speed": 0.1719820499420166,
+        "mean_speed": 0.1651536077260971,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004361883271485567,
-        "motion_mean_m": 0.0021915745455771685,
+        "motion_p95_m": 0.0042113494127988815,
+        "motion_mean_m": 0.002202703384682536,
         "motion_samples": 2304,
-        "mean_speed": 0.1672389954328537,
+        "mean_speed": 0.16478517651557922,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004616837948560715,
-        "motion_mean_m": 0.0023251939564943314,
+        "motion_p95_m": 0.004326569382101297,
+        "motion_mean_m": 0.0022755940444767475,
         "motion_samples": 2304,
-        "mean_speed": 0.17294740676879883,
+        "mean_speed": 0.16456225514411926,
         "particles": 2304
       },
       {
-        "motion_p95_m": 0.004391903057694435,
-        "motion_mean_m": 0.0022433109115809202,
+        "motion_p95_m": 0.004168870858848095,
+        "motion_mean_m": 0.0022490734700113535,
         "motion_samples": 2304,
-        "mean_speed": 0.16960792243480682,
+        "mean_speed": 0.16615886986255646,
         "particles": 2304
       }
     ]
   },
   "summary": {
-    "sand_on_peak_p95_m": 0.0014905899297446012,
-    "sand_off_peak_p95_m": 0.0011429506121203303,
-    "sand_on_com_drift_m": 0.002462658855923422,
-    "water_on_peak_p95_m": 0.004531326238065958,
-    "water_off_peak_p95_m": 0.004616837948560715,
+    "sand_on_peak_p95_m": 0.0001056237961165607,
+    "sand_off_peak_p95_m": 0.004106968641281128,
+    "sand_on_com_drift_m": 0.00015969189247617283,
+    "water_on_peak_p95_m": 0.0043110898695886135,
+    "water_off_peak_p95_m": 0.004326569382101297,
     "sand_settle": {
       "settle_converged": true,
       "settle_displacement_m": 0.00019999999494757503,
-      "settle_first_p95_m": 0.0023341833148151636,
+      "settle_first_p95_m": 0.0013729818165302277,
       "settle_max_steps": 240,
-      "settle_ms": 73.7844009399414,
+      "settle_ms": 98.12539672851562,
       "settle_on_seed": true,
-      "settle_particles": 2304,
+      "settle_particles": 338,
       "settle_pending": false,
       "settle_plateau": false,
       "settle_ran": true,
-      "settle_residual_p95_m": 0.00014394006575457752,
-      "settle_steps": 5
+      "settle_residual_p95_m": 0.0001960731897270307,
+      "settle_steps": 8
     },
     "water_settle": {
       "settle_converged": true,
       "settle_displacement_m": 0.00019999999494757503,
       "settle_first_p95_m": 0.0,
       "settle_max_steps": 240,
-      "settle_ms": 22.424999237060547,
+      "settle_ms": 32.994998931884766,
       "settle_on_seed": true,
       "settle_particles": 2304,
       "settle_pending": false,
@@ -1012,8 +1012,8 @@
   },
   "verdicts": {
     "settle_ran": true,
-    "grains_at_rest": false,
-    "grains_control_moves": false,
+    "grains_at_rest": true,
+    "grains_control_moves": true,
     "liquid_at_rest": false,
     "liquid_control_moves": true
   }

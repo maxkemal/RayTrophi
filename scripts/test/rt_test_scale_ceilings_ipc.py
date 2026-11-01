@@ -117,7 +117,7 @@ def main():
          domain=GRAIN, enabled=True, phase='liquid', source_mode='point',
          fluid_substance='Sand', position=[0, 2.2, 0], radius=args.source_radius, velocity=[0, 0, 0],
          fluid_velocity_spread=0., use_time_limit=True, start_time=0., end_time=args.window_frames/60,
-         use_particle_limit=True, max_emitted_particles=args.grains,
+         limit_parcels=True, parcels=args.grains,
          fluid_particles_per_second=args.grains * 1.01 * 60 / args.window_frames,
          fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
     call('timeline.set_frame', frame=0)

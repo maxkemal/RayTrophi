@@ -1,0 +1,20 @@
+[
+  {
+    "case": "hidden",
+    "gpu_ms": 31.346069333333332,
+    "camera_per_path": 0.0,
+    "volume_rays_per_path": 0.0
+  },
+  {
+    "case": "coarse_fixed",
+    "gpu_ms": 908.002296,
+    "camera_per_path": 14.189947341899723,
+    "volume_rays_per_path": 1.4887989417989418
+  },
+  {
+    "case": "reference_again",
+    "gpu_ms": 1152.96544,
+    "camera_per_path": 45.77365936004031,
+    "volume_rays_per_path": 1.488811539430587
+  }
+]

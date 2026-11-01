@@ -13,6 +13,9 @@ Global
 		Release|ARM = Release|ARM
 		Release|x64 = Release|x64
 		Release|x86 = Release|x86
+		ReleaseDev|ARM = ReleaseDev|ARM
+		ReleaseDev|x64 = ReleaseDev|x64
+		ReleaseDev|x86 = ReleaseDev|x86
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.Debug|ARM.ActiveCfg = Debug|ARM
@@ -27,6 +30,12 @@ Global
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.Release|x64.Build.0 = Release|x64
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.Release|x86.ActiveCfg = Release|Win32
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.Release|x86.Build.0 = Release|Win32
+		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|ARM.ActiveCfg = ReleaseDev|ARM
+		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|ARM.Build.0 = ReleaseDev|ARM
+		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x64.ActiveCfg = ReleaseDev|x64
+		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x64.Build.0 = ReleaseDev|x64
+		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x86.ActiveCfg = ReleaseDev|Win32
+		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x86.Build.0 = ReleaseDev|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

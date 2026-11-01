@@ -515,6 +515,14 @@ void SceneUI::drawVolumetricPanel(UIContext& ctx) {
     // -------------------------------------------------------------
     // BOTTOM SECTION: CONTEXTUAL PROPERTIES
     // -------------------------------------------------------------
+    // A live Fog stream can be retired by a representation change while its
+    // shared pointer is still selected. Do not keep editing the removed object.
+    if (selection.selected.type == SelectableType::VDBVolume &&
+        selection.selected.vdb_volume && selection.selected.vdb_volume->transient &&
+        std::find(scene.vdb_volumes.begin(), scene.vdb_volumes.end(),
+            selection.selected.vdb_volume) == scene.vdb_volumes.end()) {
+        selection.clearSelection();
+    }
     if (selection.selected.type == SelectableType::GasVolume && selection.selected.gas_volume) {
         ImGui::TextDisabled("Legacy GasVolume properties are no longer edited here. Use Simulations > Domains.");
     }

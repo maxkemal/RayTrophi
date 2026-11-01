@@ -93,10 +93,12 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // other versions remain unsupported.
 // v17 adds per-particle flow-source provenance after the particle IDs.
 // v18 adds stable gas-source density/fuel ownership for independent live VDBs.
-constexpr uint32_t kVersion = 18u;
+// v19 records Matter lane ownership; specialized Gas/Fluid caches are rejected.
+constexpr uint32_t kVersion = 19u;
 constexpr bool supportsVersion(uint32_t version) {
     return version == 11u || version == 12u || version == 13u || version == 14u ||
-           version == 15u || version == 16u || version == 17u || version == kVersion;
+           version == 15u || version == 16u || version == 17u || version == 18u ||
+           version == kVersion;
 }
 
 // Absolute path of the per-system, per-frame binary file inside cache_dir.

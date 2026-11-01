@@ -20,6 +20,10 @@ namespace Fluid {
 // The domain's substance, or nullptr when the name is not in the library.
 const SubstanceProfile* domainSubstance(const APICSolverParams& params);
 
+// Resolve the continuum's constitutive law from its canonical particle substance.
+// The domain default remains the fallback for untagged particles and liquids.
+void resolveParticleGranularPhysics(APICSolverParams& params, const FluidParticles& particles);
+
 // Writes the substance's physics into `params`: kinematic viscosity (0 when it
 // is below what the voxel can resolve and the thermal chain is off), the
 // granular skeleton and granular_enabled, the freeze point (melt_kelvin; never

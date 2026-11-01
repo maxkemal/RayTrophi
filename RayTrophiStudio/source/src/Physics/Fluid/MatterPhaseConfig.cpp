@@ -150,7 +150,7 @@ bool setPhaseGrid(SimulationGridDomainDesc& domain, GridPhase phase, bool inheri
                   const Vec3& bounds_min, const Vec3& bounds_max, float voxel,
                   std::string& error) {
     const bool present = phase == GridPhase::Gas
-        ? simulationDomainHasGas(domain.type) : simulationDomainHasLiquid(domain.type);
+        ? simulationDomainHasGas(domain) : simulationDomainHasLiquid(domain);
     if (!present) {
         error = "requested phase is absent from this domain";
         return false;
@@ -182,11 +182,11 @@ PhaseLayouts resolvePhaseLayouts(const SimulationGridDomainDesc& domain,
     PhaseLayouts result;
     // Same knob as the main grid, no hidden ceiling (MatterDomainSynchronization).
     const int cap = std::max(domain.max_auto_resolution, 32);
-    if (simulationDomainHasGas(domain.type)) {
+    if (simulationDomainHasGas(domain)) {
         result.gas = makeLayout(domain.gas_phase_grid, logical_min, logical_max,
                                nx, ny, nz, voxel, cap);
     }
-    if (simulationDomainHasLiquid(domain.type)) {
+    if (simulationDomainHasLiquid(domain)) {
         result.liquid = makeLayout(domain.liquid_phase_grid, logical_min, logical_max,
                                   nx, ny, nz, voxel, cap);
     }
@@ -237,7 +237,9 @@ void synchronizePhaseStorage(SimulationGridDomainState& state,
                              const PhaseLayouts& layouts) {
     const bool sparse = domain.use_sparse_tiles ||
         domain.backend == SimulationDomainBackend::CPU_SparseVDB;
-    const bool gas = simulationDomainHasGas(domain.type);
+    const bool gas = simulationDomainHasGas(domain);
+    const bool lanes_changed = simulationDomainHasGas(state) != gas ||
+        simulationDomainHasLiquid(state) != simulationDomainHasLiquid(domain);
     const auto& primary_layout = gas ? layouts.gas : layouts.liquid;
     const bool hydrate_primary = state.valid && state.channels == domain.channels &&
         state.type == domain.type && state.grid.nx == primary_layout.nx &&
@@ -247,9 +249,10 @@ void synchronizePhaseStorage(SimulationGridDomainState& state,
         state.grid.pressure.size() != primary_layout.cells();
     const bool primary_changed = syncGrid(state.grid,
         gas ? layouts.gas : layouts.liquid, gas, sparse,
-        !state.valid || state.channels != domain.channels || state.type != domain.type);
+        !state.valid || state.channels != domain.channels || state.type != domain.type ||
+        lanes_changed);
     const bool secondary_changed = syncGrid(state.matter_liquid_grid,
-        domain.type == SimulationDomainType::Matter ? layouts.liquid : PhaseLayout{},
+        simulationDomainHasBothPhases(domain) ? layouts.liquid : PhaseLayout{},
         false, sparse);
     if ((primary_changed && !hydrate_primary) || state.channels != domain.channels ||
         state.type != domain.type) {
@@ -270,6 +273,8 @@ void synchronizePhaseStorage(SimulationGridDomainState& state,
         state.gas_inventory_error.clear();
         state.gas_phase_pending_momentum.clear();
     }
+    state.gas_lane_enabled = simulationDomainHasGas(domain);
+    state.liquid_lane_enabled = simulationDomainHasLiquid(domain);
     if (primary_changed || secondary_changed) {
         ++state.version;
     }
@@ -287,10 +292,10 @@ bool phaseStorageMatches(const SimulationGridDomainState& state,
             std::abs(grid.voxel_size - layout.voxel) <= 1e-6f &&
             grid.pressure.size() == layout.cells();
     };
-    if (!matches(state.grid, simulationDomainHasGas(domain.type) ? layouts.gas : layouts.liquid)) {
+    if (!matches(state.grid, simulationDomainHasGas(domain) ? layouts.gas : layouts.liquid)) {
         return false;
     }
-    return domain.type != SimulationDomainType::Matter ||
+    return !simulationDomainHasBothPhases(domain) ||
         matches(state.matter_liquid_grid, layouts.liquid);
 }
 
@@ -300,7 +305,9 @@ nlohmann::json phaseSettingsJson(const SimulationGridDomainDesc& domain) {
             {"offset_min", vectorJson(setting.offset_min)},
             {"offset_max", vectorJson(setting.offset_max)}, {"voxel", setting.voxel_size}};
     };
-    return {{"version", 1}, {"gas", encode(domain.gas_phase_grid)},
+    return {{"version", 2}, {"gas_lane_enabled", simulationDomainHasGas(domain)},
+            {"liquid_lane_enabled", simulationDomainHasLiquid(domain)},
+            {"gas", encode(domain.gas_phase_grid)},
             {"liquid", encode(domain.liquid_phase_grid)}};
 }
 
@@ -309,7 +316,8 @@ void loadPhaseSettings(const nlohmann::json& object, SimulationGridDomainDesc& d
         return;
     }
     const auto& grids = object.at("phase_grids");
-    if (!grids.is_object() || grids.value("version", 0) != 1) {
+    if (!grids.is_object() || (grids.value("version", 0) != 1 &&
+        grids.value("version", 0) != 2)) {
         throw std::runtime_error("unsupported phase_grids schema");
     }
     const auto decode = [](const nlohmann::json& value) {
@@ -325,6 +333,15 @@ void loadPhaseSettings(const nlohmann::json& object, SimulationGridDomainDesc& d
     };
     const auto gas = decode(grids.at("gas"));
     const auto liquid = decode(grids.at("liquid"));
+    if (grids.value("version", 0) == 2) {
+        const bool gas_enabled = grids.at("gas_lane_enabled").get<bool>();
+        const bool liquid_enabled = grids.at("liquid_lane_enabled").get<bool>();
+        if (!gas_enabled && !liquid_enabled) {
+            throw std::runtime_error("saved Matter domain has no enabled lane");
+        }
+        domain.gas_lane_enabled = gas_enabled;
+        domain.liquid_lane_enabled = liquid_enabled;
+    }
     domain.gas_phase_grid = gas;
     domain.liquid_phase_grid = liquid;
 }
@@ -362,9 +379,9 @@ nlohmann::json phaseGridInfo(const SimulationGridDomainDesc& domain,
     };
     const bool live = state && state->valid;
     nlohmann::json result{{"domain", domain.name},
-        {"gas", encode(simulationDomainHasGas(domain.type), domain.gas_phase_grid,
+        {"gas", encode(simulationDomainHasGas(domain), domain.gas_phase_grid,
             layouts.gas, live ? &gasGrid(*state) : nullptr, kGasWorkingBytesPerCell)},
-        {"liquid", encode(simulationDomainHasLiquid(domain.type), domain.liquid_phase_grid,
+        {"liquid", encode(simulationDomainHasLiquid(domain), domain.liquid_phase_grid,
             layouts.liquid, live ? &liquidGrid(*state) : nullptr, kLiquidWorkingBytesPerCell)},
         {"estimated_working_bytes", layouts.working_bytes},
         {"budget_mb", domain.resource_budget_mb},
@@ -378,6 +395,8 @@ uint64_t hashPhaseSettings(uint64_t hash, const SimulationGridDomainDesc& domain
     const auto mix = [](uint64_t value, uint64_t next) {
         return value ^ (next + 0x9e3779b97f4a7c15ull + (value << 6) + (value >> 2));
     };
+    hash = mix(hash, simulationDomainHasGas(domain));
+    hash = mix(hash, simulationDomainHasLiquid(domain));
     for (const auto* setting : {&domain.gas_phase_grid, &domain.liquid_phase_grid}) {
         hash = mix(hash, setting->override_enabled);
         if (!setting->override_enabled) {

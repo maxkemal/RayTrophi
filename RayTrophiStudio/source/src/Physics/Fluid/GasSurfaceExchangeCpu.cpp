@@ -19,8 +19,8 @@ bool exchangeGasSurfaceCpu(
         return false;
     }
     if (!(dt > 0) || !liquid_domain.enabled || !gas_domain.enabled ||
-        !simulationDomainHasLiquid(liquid_domain.type) ||
-        !simulationDomainHasGas(gas_domain.type) || !liquid.valid || !gas.valid ||
+        !simulationDomainHasLiquid(liquid_domain) ||
+        !simulationDomainHasGas(gas_domain) || !liquid.valid || !gas.valid ||
         liquid.particles.empty() || !gridsOverlap(liquidGrid(liquid), gasGrid(gas))) {
         return true;
     }

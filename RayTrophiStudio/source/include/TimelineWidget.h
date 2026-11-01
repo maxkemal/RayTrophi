@@ -134,6 +134,7 @@ public:
     int getStartFrame() const { return start_frame; }
     int getEndFrame() const { return end_frame; }
     bool isPlaying() const { return is_playing; }
+    void setPlayback(UIContext& context, bool playing);
     void pausePlayback() { is_playing = false; }
     void resetForProjectLoad() {
         is_playing = false;

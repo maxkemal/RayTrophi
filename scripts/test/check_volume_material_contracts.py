@@ -1,6 +1,7 @@
 """Non-build wiring/ABI checks. These do not validate compiled CPU/GPU execution."""
 
 from pathlib import Path
+from volume_shader_source import read_volume_shader
 import re
 import unittest
 import xml.etree.ElementTree as ET
@@ -10,7 +11,7 @@ SOURCE = ROOT / "RayTrophiStudio/source"
 
 
 def read(path):
-    return (SOURCE / path).read_text(encoding="utf-8")
+    return read_volume_shader(SOURCE / path)
 
 
 class VolumeMaterialContracts(unittest.TestCase):
@@ -32,7 +33,7 @@ class VolumeMaterialContracts(unittest.TestCase):
             offsets[name] = offset
             offset += size * int(count or 1)
         self.assertEqual(offsets["_retired_cloud"], 444)
-        self.assertEqual((offset + 15) // 16 * 16, 672)
+        self.assertEqual((offset + 15) // 16 * 16, 688)
         preview = read("shaders/material_preview_volume.frag")
         self.assertIn("volFloat(vi, 444u + uint(k) * 4u)", preview)
 
@@ -43,17 +44,17 @@ class VolumeMaterialContracts(unittest.TestCase):
                      "raygen.rgen", "volume_intersection.rint"):
             self.assertIn("float density_curve[12]", read("shaders/" + file))
         rt = read("shaders/volume_closesthit.rchit")
-        self.assertEqual(rt.count("volumeDensityCurve("), 5)
+        self.assertIn("volumeDensityChannels(normalized, vol.density_curve", rt)
         self.assertIn("volumeDensityCurve(max((leafMax", rt)
-        self.assertIn("volumeDensityCurve(max((blockMax", rt)
+        self.assertIn("volumeDensitySupport(max((blockMax", rt)
         self.assertIn("volumeDensityCurve(max((density",
                       read("shaders/closesthit.rchit"))
         for file in ("material_preview_volume_fields.glsl",
                      "surface_sdf_shadow_query.glsl", "material_preview_sdf_surface.frag"):
-            self.assertIn("STRIDE_WORDS = 168u", read("shaders/" + file))
+            self.assertIn("STRIDE_WORDS = 172u", read("shaders/" + file))
         preview = read("shaders/material_preview_volume_fields.glsl")
         self.assertIn("624u + uint(i)*4u", preview)
-        self.assertIn("previewDensityCurve(vi, max((blockMax", preview)
+        self.assertIn("previewDensityCurve(vi, normalized)", preview)
         self.assertEqual(read("src/Render/VolumetricRenderer.cpp").count(
             "density.curve.pack(gv.density_curve)"), 3)
         self.assertEqual(read("src/Backend/VulkanBackend_Volumes.cpp").count(
@@ -65,12 +66,14 @@ class VolumeMaterialContracts(unittest.TestCase):
         preview = read("shaders/material_preview_volume.frag")
         for text in (rt, preview):
             self.assertIn('#include "volume_material_response.glsl"', text)
-        self.assertIn("volumeEmissionAt(vol, samplePos, density, temperature)", rt)
+        self.assertIn("volumeEmissionAt(vol, samplePos, emissionDensity, temperature)", rt)
         self.assertIn("volumeEmissionSource(", read("shaders/volume_internal_rt.glsl"))
         self.assertEqual(preview.count("volumeEmissionSource("), 2)
         helper = read("shaders/volume_material_response.glsl")
-        self.assertIn("response[0] < 0.5", helper)
-        self.assertIn("density <= 0.0", helper)
+        self.assertIn("volumeEmissionChannel", helper)
+        core = read("include/VolumeEmissionTransport.h")
+        self.assertIn("(int(response[0]) & 1) == 0", core)
+        self.assertIn("density <= 0.0", core)
 
     def test_internal_light_transport_and_controls(self):
         rt = read("shaders/volume_internal_rt.glsl")
@@ -81,8 +84,11 @@ class VolumeMaterialContracts(unittest.TestCase):
         self.assertIn("sampleHG(", rt)
         self.assertIn("phaseDual(", preview)
         integral = read("shaders/volume_internal_integral.glsl")
-        self.assertIn("INTERNAL_EMISSION(volume, p, density)", integral)
-        self.assertIn("throughput *= segmentT", integral)
+        self.assertIn("INTERNAL_EMISSION(volume, p, emissionDensity)", integral)
+        self.assertIn("throughput *= exp(-sigma * dt)", integral)
+        # Steps set reach: a first segment of distance/steps made energy budget-dependent.
+        self.assertIn("INTERNAL_SEGMENT_GROWTH", integral)
+        self.assertIn("INTERNAL_VOXEL(volume)", integral)
         self.assertNotIn("emissive_list_address", integral)
         bindings = read("src/Scene/VolumeMaterialAuthoring.cpp")
         self.assertIn('k == "internal_light_steps"', bindings)

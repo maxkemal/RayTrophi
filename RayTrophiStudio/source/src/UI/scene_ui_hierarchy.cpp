@@ -2237,7 +2237,28 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     selected_lens = 0; // Reset to Custom
                     cam.markDirty();
                 }
-                
+
+                // Lens distortion: visible in every mode. It used to have no live
+                // control at all while still being saved, restored and written by
+                // Auto Lens Characteristics. Same field as camera.set_lens_distortion.
+                {
+                    const bool autoLens = cam.auto_lens_characteristics &&
+                                          cam.camera_mode == CameraMode::Cinema;
+                    float dist = cam.distortion;
+                    ImGui::BeginDisabled(autoLens);
+                    if (ImGui::SliderFloat("Lens Distortion", &dist, -0.5f, 0.5f, "%.3f")) {
+                        cam.distortion = dist;
+                        cam.markDirty();
+                    }
+                    ImGui::EndDisabled();
+                    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip(autoLens ?
+                            "Set by Cinema Auto Lens Characteristics (turn it off to edit)." :
+                            "Radial lens bend of the path-traced image: negative = barrel, "
+                            "positive = pincushion, 0 = off. RayFusion does not apply it.");
+                    }
+                }
+
 
                 
 

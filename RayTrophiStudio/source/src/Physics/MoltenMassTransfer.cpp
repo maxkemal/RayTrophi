@@ -157,7 +157,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
         for (std::size_t i = 0; i < grid_domains_.size() && i < grid_domain_states_.size(); ++i) {
             const auto& desc = grid_domains_[i];
             const auto& state = grid_domain_states_[i];
-            if (!desc.enabled || !simulationDomainHasLiquid(desc.type) ||
+            if (!desc.enabled || !simulationDomainHasLiquid(desc) ||
                 !state.valid || !contains(state, center)) continue;
             if (!request.preferred_domain.empty() && desc.name != request.preferred_domain) continue;
             domain_index = i;
@@ -167,7 +167,7 @@ void ParticleSimulationSystem::processMoltenMassTransfers(
             !request.configure_domain_chemistry) {
             for (std::size_t i = 0; i < grid_domains_.size() && i < grid_domain_states_.size(); ++i) {
                 if (grid_domains_[i].enabled &&
-                    simulationDomainHasLiquid(grid_domains_[i].type) &&
+                    simulationDomainHasLiquid(grid_domains_[i]) &&
                     grid_domain_states_[i].valid && contains(grid_domain_states_[i], center)) {
                     domain_index = i;
                     break;

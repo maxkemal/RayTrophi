@@ -5,6 +5,8 @@
 #include "RtAudioBindings.h"
 #include "RtWeatherEffectsBindings.h"
 #include "RtPhaseGrid.h"
+#include "RtMatterLanes.h"
+#include "RtSimulationTransport.h"
 #include "RtMatterModels.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
@@ -1532,6 +1534,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
     registerSubstanceSplatGeometry(fluid);
     rtpy::registerPhaseGridBindings(fluid);
+    rtpy::registerMatterLaneBindings(fluid);
     rtpy::registerMatterModelBindings(fluid);
     auto py_create_domain = [](const std::string& name, const py::tuple& domain_min, const py::tuple& domain_max, float voxel_size, const std::string& type) -> py::dict {
         Vec3 dmin = vec3FromPython(domain_min);
@@ -1565,6 +1568,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fog_evaporated_kg"] = info.fog_evaporated_kg;
         d["fog_latent_to_air_j"] = info.fog_latent_to_air_j;
         d["rained_kg"] = info.rained_kg;
+        d["emission_withheld_kg_step"] = info.emission_withheld_kg_step;
+        d["emission_withheld_kg_total"] = info.emission_withheld_kg_total;
         d["rain_parcels"] = info.rain_parcels;
         d["fog_autoconverted_kg"] = info.fog_autoconverted_kg;
         d["rain_absorbed_kg"] = info.rain_absorbed_kg;
@@ -1923,6 +1928,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["fog_evaporated_kg"] = info.fog_evaporated_kg;
             d["fog_latent_to_air_j"] = info.fog_latent_to_air_j;
             d["rained_kg"] = info.rained_kg;
+        d["emission_withheld_kg_step"] = info.emission_withheld_kg_step;
+        d["emission_withheld_kg_total"] = info.emission_withheld_kg_total;
             d["rain_parcels"] = info.rain_parcels;
             d["fog_autoconverted_kg"] = info.fog_autoconverted_kg;
             d["rain_absorbed_kg"] = info.rain_absorbed_kg;
@@ -2263,6 +2270,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fog_evaporated_kg"] = info.fog_evaporated_kg;
         d["fog_latent_to_air_j"] = info.fog_latent_to_air_j;
         d["rained_kg"] = info.rained_kg;
+        d["emission_withheld_kg_step"] = info.emission_withheld_kg_step;
+        d["emission_withheld_kg_total"] = info.emission_withheld_kg_total;
         d["rain_parcels"] = info.rain_parcels;
         d["fog_autoconverted_kg"] = info.fog_autoconverted_kg;
         d["rain_absorbed_kg"] = info.rain_absorbed_kg;
@@ -3106,6 +3115,61 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["turbulence_speed"] = s.turbulence_speed;
         return d;
     };
+    gas.def("field_stats", [](const std::string& domain, float density_threshold, int bins) -> py::dict {
+        rtapi::GasFieldStats s;
+        requireResult(rtapi::measureGasFields(domain, density_threshold, bins, s));
+        const auto percentiles = [](const rtapi::GasFieldPercentiles& p) {
+            py::dict d;
+            d["min"] = p.minimum; d["p1"] = p.p1; d["p5"] = p.p5; d["p25"] = p.p25;
+            d["p50"] = p.p50; d["p75"] = p.p75; d["p95"] = p.p95; d["p99"] = p.p99;
+            d["max"] = p.maximum; d["mean"] = p.mean;
+            return d;
+        };
+        py::dict d;
+        d["measured"] = s.measured;
+        d["threshold"] = s.threshold;
+        d["active_cells"] = s.active_cells;
+        d["density"] = percentiles(s.density);
+        d["density_histogram"] = s.density_histogram;
+        d["flame_measured"] = s.flame_measured;
+        d["burning_cells"] = s.burning_cells;
+        d["flame"] = percentiles(s.flame);
+        d["temperature_measured"] = s.temperature_measured;
+        d["temperature_kelvin"] = percentiles(s.temperature_kelvin);
+        d["temperature_histogram"] = s.temperature_histogram;
+        d["emission_measured"] = s.emission_measured;
+        d["ramp_coordinate"] = percentiles(s.ramp_coordinate);
+        d["ramp_histogram"] = s.ramp_histogram;
+        d["emission_luminance"] = percentiles(s.emission_luminance);
+        d["voxel_optical_depth"] = percentiles(s.voxel_optical_depth);
+        d["emitting_cells"] = s.emitting_cells;
+        d["limited_cells"] = s.limited_cells;
+        return d;
+    }, py::arg("domain"), py::arg("density_threshold") = 0.01f, py::arg("bins") = 64,
+       "Distribution of a live gas field and of the same cells through the emission chain. "
+       "Check measured, temperature_measured and emission_measured first.");
+    gas.def("fit_temperature_range", [](const std::string& domain, float low_percentile,
+                                        float high_percentile, float floor_kelvin,
+                                        float median_target, bool fit_gamma) -> py::dict {
+        rtapi::GasTemperatureFitRequest request;
+        request.low_percentile = low_percentile;
+        request.high_percentile = high_percentile;
+        request.floor_kelvin = floor_kelvin;
+        request.median_target = median_target;
+        request.fit_gamma = fit_gamma;
+        rtapi::GasTemperatureFit f;
+        requireResult(rtapi::fitGasTemperatureRange(domain, request, f));
+        py::dict d;
+        d["temperature_min"] = f.temperature_min;
+        d["temperature_max"] = f.temperature_max;
+        d["temperature_gamma"] = f.temperature_gamma;
+        d["median_before_gamma"] = f.median_before_gamma;
+        d["cells"] = f.cells;
+        return d;
+    }, py::arg("domain"), py::arg("low_percentile") = 1.0f, py::arg("high_percentile") = 99.5f,
+       py::arg("floor_kelvin") = 800.0f, py::arg("median_target") = 0.5f,
+       py::arg("fit_gamma") = true,
+       "Fit the material's temperature range and gamma to the current field. Writes once.");
     gas.def("measure_plume", [](const std::string& domain, float density_threshold) -> py::dict {
         rtapi::GasPlumeMeasurement m;
         requireResult(rtapi::measureGasPlume(domain, density_threshold, m));
@@ -3350,6 +3414,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["position_hash"] = hex(dg.position_hash); d["velocity_hash"] = hex(dg.velocity_hash);
         d["centroid"] = py::make_tuple(dg.centroid[0], dg.centroid[1], dg.centroid[2]);
         d["mean_speed"] = dg.mean_speed;
+        d["bounds_measured"] = dg.bounds_measured;
+        d["bounds_min"] = py::make_tuple(dg.bounds_min[0], dg.bounds_min[1], dg.bounds_min[2]);
+        d["bounds_max"] = py::make_tuple(dg.bounds_max[0], dg.bounds_max[1], dg.bounds_max[2]);
         d["whitewater_particles"] = dg.whitewater_particles;
         d["whitewater_position_hash"] = hex(dg.whitewater_position_hash);
         return d;
@@ -3677,8 +3744,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["grain_birth_saturation"] = s.grain_birth_saturation;
         d["use_time_limit"] = s.use_time_limit;
         d["start_time"] = s.start_time; d["end_time"] = s.end_time;
-        d["use_particle_limit"] = s.use_particle_limit;
-        d["max_emitted_particles"] = s.max_emitted_particles;
+        d["use_mass_limit"] = s.use_mass_limit;
+        d["max_emitted_mass_kg"] = s.max_emitted_mass_kg;
+        d["total_emitted_particles"] = s.total_emitted_particles;
+        d["total_emitted_mass_kg"] = s.total_emitted_mass_kg;
+        d["parcel_mass_kg"] = s.parcel_mass_kg;
+        d["withheld_mass_kg_step"] = s.withheld_mass_kg_step;
+        d["withheld_mass_kg_total"] = s.withheld_mass_kg_total;
         return d;
     };
     auto apply_flow_kwargs = [](rtapi::SimulationFlowSourceInfo& s,
@@ -3703,7 +3775,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_FLOW_KW(grain_birth_saturation, float);
         RT_FLOW_KW(use_time_limit, bool);
         RT_FLOW_KW(start_time, float); RT_FLOW_KW(end_time, float);
-        RT_FLOW_KW(use_particle_limit, bool); RT_FLOW_KW(max_emitted_particles, int);
+        for (const char* retired : {"use_particle_limit", "max_emitted_particles"}) {
+            if (kw.contains(retired)) {
+                throw py::value_error(std::string(retired) + " was retired: the source "
+                    "budget is mass now (use_mass_limit, max_emitted_mass_kg)");
+            }
+        }
+        RT_FLOW_KW(use_mass_limit, bool); RT_FLOW_KW(max_emitted_mass_kg, float);
 #undef RT_FLOW_KW
         if (kw.contains("position")) s.position = vec3FromPython(kw["position"]);
         if (kw.contains("velocity")) s.velocity = vec3FromPython(kw["velocity"]);
@@ -5271,6 +5349,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["fov"]            = s.fov;
         d["focus_distance"] = s.focus_distance;
         d["aperture"]       = s.aperture;
+        d["lens_distortion"] = s.lens_distortion;
+        d["auto_lens"]       = s.auto_lens;
         d["auto_exposure"]          = s.auto_exposure;
         d["use_physical_exposure"]  = s.use_physical_exposure;
         d["iso_preset_index"]       = s.iso_preset_index;
@@ -5296,6 +5376,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setCameraFocusDistance(py::cast<float>(kwargs["focus_distance"])));
         if (kwargs.contains("aperture"))
             requireResult(rtapi::setCameraAperture(py::cast<float>(kwargs["aperture"])));
+        if (kwargs.contains("lens_distortion"))
+            requireResult(rtapi::setCameraLensDistortion(py::cast<float>(kwargs["lens_distortion"])));
         // ★ AF: kamera odagini YAZAN bir arac oldugu icin kamera setter'lariyla
         //   ayni yerde duruyor; kapilarini `viewport.get_af` raporlar.
         if (kwargs.contains("af_area_mode") || kwargs.contains("af_focus_mode") ||
@@ -5762,6 +5844,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("path"));
 
     py::module_ timeline = module.def_submodule("timeline", "Timeline controls");
+    rtpy::registerSimulationTransportBindings(timeline, sim);
     timeline.def("get_frame", &rtapi::currentFrame);
     timeline.def("set_frame", [](int frame) { requireResult(rtapi::setFrame(frame)); }, py::arg("frame"));
 
@@ -5872,14 +5955,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["secondary_step_scale"] = l.secondary_step_scale;
         d["secondary_max_steps"] = l.secondary_max_steps;
         d["secondary_radiance_cache"] = l.secondary_radiance_cache;
+        d["camera_max_steps"] = l.camera_max_steps;
         return d;
     }, "Vulkan RT gas march LOD: in-scatter stride on the camera segment and on "
-       "later bounces, and the later-bounce step scale / step cap.");
+       "later bounces, the later-bounce step scale / step cap, and the camera step cap.");
     render.def("set_volume_march_lod", [](py::object camera_light_stride,
                                           py::object secondary_light_stride,
                                           py::object secondary_step_scale,
                                           py::object secondary_max_steps,
-                                          py::object secondary_radiance_cache) {
+                                          py::object secondary_radiance_cache,
+                                          py::object camera_max_steps) {
         rtapi::VolumeMarchLodInfo l = rtapi::volumeMarchLod();
         if (!camera_light_stride.is_none()) l.camera_light_stride = camera_light_stride.cast<int>();
         if (!secondary_light_stride.is_none()) l.secondary_light_stride = secondary_light_stride.cast<int>();
@@ -5887,14 +5972,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if (!secondary_max_steps.is_none()) l.secondary_max_steps = secondary_max_steps.cast<int>();
         if (!secondary_radiance_cache.is_none())
             l.secondary_radiance_cache = secondary_radiance_cache.cast<bool>();
+        if (!camera_max_steps.is_none()) l.camera_max_steps = camera_max_steps.cast<int>();
         requireResult(rtapi::setVolumeMarchLod(l));
     }, py::arg("camera_light_stride") = py::none(),
        py::arg("secondary_light_stride") = py::none(),
        py::arg("secondary_step_scale") = py::none(),
        py::arg("secondary_max_steps") = py::none(),
        py::arg("secondary_radiance_cache") = py::none(),
+       py::arg("camera_max_steps") = py::none(),
        "Set the gas march LOD; omitted fields keep their value. 1/1/1/0 with the "
-       "radiance cache off is the full-quality reference march. Resets "
+       "radiance cache off and camera_max_steps=0 is the full-quality reference march. Resets "
        "accumulation; not saved with the project.");
     render.def("get_settings", [] {
         const rtapi::RenderBudgetInfo b = rtapi::renderBudget();
@@ -6255,6 +6342,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["volume_type"] = s.volume_type;
                 e["has_density"] = s.has_density;
                 e["has_temperature"] = s.has_temperature;
+                e["density_device_local"] = s.density_device_local;
+                e["temperature_device_local"] = s.temperature_device_local;
                 e["emission_mode"] = s.emission_mode;
                 e["color_ramp_enabled"] = s.color_ramp_enabled;
                 e["blackbody_intensity"] = s.blackbody_intensity;

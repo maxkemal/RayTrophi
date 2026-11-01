@@ -118,8 +118,8 @@ def main():
                      radius=radius, velocity=[0, 0, 0], fluid_velocity_spread=0.0,
                      fluid_particles_per_second=rate, fluid_temperature_override=True,
                      fluid_temperature_kelvin=293.15, use_time_limit=True,
-                     start_time=0.0, end_time=0.3, use_particle_limit=True,
-                     max_emitted_particles=limit)
+                     start_time=0.0, end_time=0.3, limit_parcels=True,
+                     parcels=limit)
             call("timeline.set_frame", frame=0)
             call("fluid.reset")
             record("fixture_config", domain=call("fluid.get", domain=DOMAIN),

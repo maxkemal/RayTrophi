@@ -431,7 +431,7 @@ public:
     struct QualitySettings {
         float step_size = 0.15f;          ///< Legacy/custom fixed world-space step
         float voxel_step_multiplier = 0.5f; ///< Primary sample spacing in voxels
-        int max_steps = 256;              ///< Maximum steps per ray (the real cost ceiling)
+        int max_steps = 128;              ///< Maximum steps per ray (the real cost ceiling)
         int shadow_steps = 8;              ///< Steps for self-shadowing
         int shadow_stride = 4;             ///< Reuse one shadow result across N primary samples
         int internal_light_steps = 0;      ///< 0 disables emission-to-smoke transport

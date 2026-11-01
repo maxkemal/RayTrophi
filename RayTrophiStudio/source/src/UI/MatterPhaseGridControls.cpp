@@ -32,6 +32,9 @@ bool drawPhaseGridControls(SimulationGridDomainDesc& domain) {
     ImGui::TextWrapped("Independent grids follow the same domain. Changes restart the simulation.");
     for (GridPhase phase : {GridPhase::Gas, GridPhase::Liquid}) {
         const bool gas = phase == GridPhase::Gas;
+        if (gas ? !simulationDomainHasGas(domain) : !simulationDomainHasLiquid(domain)) {
+            continue;
+        }
         const auto& setting = gas ? domain.gas_phase_grid : domain.liquid_phase_grid;
         const auto& layout = gas ? layouts.gas : layouts.liquid;
         ImGui::PushID(gas ? "gas_phase" : "liquid_phase");

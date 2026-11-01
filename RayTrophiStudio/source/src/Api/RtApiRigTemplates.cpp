@@ -4,6 +4,7 @@
 #include "Animation/RigPreflight.h"
 #include "Animation/RigWeights.h"
 #include "Animation/RigFitting.h"
+#include "Animation/RigAutoLandmarks.h"
 #include "Animation/RigSerialization.h"
 #include <exception>
 namespace rtapi {
@@ -14,6 +15,10 @@ Result listRigFitTargets(nlohmann::json& output) {
 Result getRigFitSetup(const std::string& character,const std::string& mesh,nlohmann::json& output) {
     output=nullptr;if(!g_ctx)return Result::fail("api_not_bound");if(renderJobActive())return Result::fail("scene_locked");
     try{std::string error;return RigAuthoring::fitSetup(g_ctx->scene,character,mesh,output,error)?Result::success():Result::fail(error);}catch(const std::exception&){return Result::fail("rig_fit_failed");}
+}
+Result autoRigLandmarks(const std::string& character,const std::string& mesh,nlohmann::json& output) {
+    output=nullptr;if(!g_ctx)return Result::fail("api_not_bound");if(renderJobActive())return Result::fail("scene_locked");
+    try{std::string error;return RigAuthoring::autoLandmarks(g_ctx->scene,character,mesh,output,error)?Result::success():Result::fail(error);}catch(const std::exception&){return Result::fail("rig_auto_landmarks_failed");}
 }
 Result previewRigFit(const std::string& character,const std::string& mesh,const nlohmann::json& landmarks,bool confirmed,nlohmann::json& output) {
     output=nullptr;if(!g_ctx)return Result::fail("api_not_bound");if(renderJobActive())return Result::fail("scene_locked");

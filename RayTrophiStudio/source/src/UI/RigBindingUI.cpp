@@ -136,6 +136,41 @@ void drawRigBinding(UIContext &ctx, const std::string &character, const std::str
                 "Capsule radii limit distant limb influence. Vertices outside all "
                 "capsules fall back to their nearest bone so no vertex is unweighted.");
             ImGui::TextDisabled("Selected bone: amber boundary. Other bones: cyan boundary.");
+            ImGui::Separator();
+            ImGui::TextUnformatted("Geodesic voxel weights");
+            static RigAuthoring::GeodesicWeightSettings geodesic;
+            static nlohmann::json geodesicPreview;
+            bool geodesicChanged =
+                ImGui::SliderInt("Voxel resolution", &geodesic.resolution, 32, 256);
+            geodesicChanged |=
+                ImGui::SliderFloat("Distance falloff", &geodesic.falloff, .5f, 8.f, "%.2f");
+            if (geodesicChanged)
+                geodesicPreview = nullptr;
+            if (ImGui::Button("Preview geodesic weights")) {
+                const auto result =
+                    rtapi::previewRigGeodesicWeights(character, geodesic, geodesicPreview);
+                draft.message = result.ok ? "" : result.error;
+            }
+            if (geodesicPreview.is_object()) {
+                ImGui::Text("Voxels %.4g | interior %llu | fallback %llu | bones outside %llu",
+                            geodesicPreview["voxel_size"].get<double>(),
+                            geodesicPreview["interior_voxels"].get<unsigned long long>(),
+                            geodesicPreview["fallback_vertices"].get<unsigned long long>(),
+                            geodesicPreview["bones_outside_mesh"].get<unsigned long long>());
+                if (!geodesicPreview["closed_volume"].get<bool>())
+                    ImGui::TextWrapped("Open mesh: distances run along the surface shell only.");
+                ImGui::SameLine();
+                if (ImGui::Button("Apply geodesic weights")) {
+                    const auto revision = geodesicPreview["rig_revision"].get<uint64_t>();
+                    const auto result = rtapi::applyRigGeodesicWeights(character, geodesic, revision);
+                    draft.message =
+                        result.ok ? "Geodesic weights applied (one undo step)" : result.error;
+                    geodesicPreview = nullptr;
+                }
+            }
+            ImGui::TextWrapped("Distance is measured through the body, not through the air, so an "
+                               "arm does not pull the torso beside it. Takes a few seconds; check "
+                               "with the range of motion test.");
         }
         if (!draft.message.empty())
             ImGui::TextWrapped("%s", draft.message.c_str());

@@ -121,6 +121,9 @@ struct SimulationForceFieldComputeBuffer {
     std::size_t stride_bytes = sizeof(PackedForceField);
     std::size_t size_bytes = 0;
     uint64_t source_version = 0;
+    // Conservative for external buffer producers; SimulationWorld publishes
+    // the exact requirement from its packed snapshot on every upload.
+    bool fluid_surface_columns_required = true;
 
     bool valid() const { return buffer.valid() && count > 0 && size_bytes > 0; }
 };
