@@ -1,6 +1,16 @@
 # NEXT BUILD CHECKS
 
-## İç ışık rayQuery denemesi — 2026-11-01 (en önce)
+## Katı yoklamaları rayQuery REDDEDİLDİ — 2026-11-01 (en önce)
+
+★ Kod geri alındı ama kurulu `.spv` hâlâ reddedilen denemedir. Shader paketini yeniden
+derle, C++ gerekmez. Derlemezsen gaz yaklaşık 3,5 kat yavaş çalışır ve hata vermez.
+
+1. 69. kare, burn malzemesi, iç ışık kapalı: ~105 ms. 300 ms üstüyse eski `.spv` yüklü.
+2. Aynı karede iç ışık 8 adım: ~120 ms. 250 ms civarıysa `ca9ac44b` öncesi bir shader.
+
+Neden yavaşladığı bulunmadı; handoff notunun başında.
+
+## İç ışık rayQuery denemesi — 2026-11-01
 
 ★ KOŞULDU, madde 1–3 tamam: 1 adım 245 → 110 ms, 32 adım ~290 → 136 ms, görüntü
 sayıları aynı, test PASS. Kalan yalnız madde 4 (elle).
@@ -10,9 +20,6 @@ sayıları aynı, test PASS. Kalan yalnız madde 4 (elle).
 3. `python scripts/test/rt_test_pyro_internal_ipc.py --domain "Nuclear Gas" --out <scratchpad>`
    PASS ve p50 değerleri aynı (.636 civarı).
 4. Gaz içine katı koy: ateş ışığı katıdan geçmemeli. Bu sahnede yalnız zemin var, ölçülmedi.
-
-★ EN SİNSİ SONUÇ: Alpha'lı geometri artık ateş ışığını opak gibi keser. Yaprak veya
-ızgara arkasındaki duman hatasız biraz karanlık kalır; bug diye raporlanmaz.
 
 Adım için 8 kullan: ışık 32 ile aynı, maliyet eşit ya da düşük. 1–2 adım ateşe ulaşmaz.
 
