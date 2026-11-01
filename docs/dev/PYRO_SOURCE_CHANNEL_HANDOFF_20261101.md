@@ -2,6 +2,27 @@
 
 > **Durum:** AKTİF — pyro tepki zinciri; dört parti canlı ölçüldü, beşinci parti (eklemeli flame, iç ışık + burnout, panel) yazıldı, derlenmedi; duman renk rampası ve koyu nokta bulgusu açık
 
+## Handoff: solid probes on rayQuery REJECTED, 2026-11-01
+
+Tried and reverted, no code from it remains. solid_probe_runs equals volume_rays
+(3.98 M at frame 69), one nested trace per volume ray, so the march probe, surface
+probe, rwSolidDistance and seatOutsideBand were moved to one inline query helper.
+
+Frame 69, internal light off: 100..109 ms before, 276..460 ms after, about 3.5x
+slower. Frame 30: 73 to 160 ms. Frame 12: 51 to 77 ms. Image identical, test PASS.
+Repeated 6 times: 358..460 ms, with the GPU at 100% and 1965 MHz, 61 C, no other load.
+Cold RT pipeline went from 341 to 455 s.
+
+Not explained. What stands: the same inline query inside the gather saved 140 ms,
+and inside the march entry cost over 170 ms, so an inline query is not simply cheaper
+here. The reason was not measured; do not retry this without finding it. Worth
+knowing for that: the old march probe searched with any-hit accept-all, the query
+searched for the closest hit with the opaque flag. No fallback traces ran, since
+internal light stayed cheap through the same helper.
+
+The march probe stays a nested trace. It is not proven to be the cost it looked like:
+the +140 ms lesson belongs to the gather, not to every nested trace.
+
 ## Handoff: internal light step fix and cost, 2026-11-01
 
 Step fix MEASURED, in commit 34214c0d: rt_test_pyro_internal_ipc.py PASS on rebuilt
@@ -43,10 +64,11 @@ Fire pixels and p50 match to three digits; test PASS. Internal light now costs a
 the volume closest hit, and that is the lesson: a nested traceRay in this shader is
 not the price of one ray.
 
-Accepted change: alpha-tested geometry blocks fire light as if opaque. A device
-without rayQuery fails the pipeline: the capability is optional in VulkanBackend.cpp
-and no fallback exists. Not checked: a solid inside the gas (scene has only the
-ground), panel, RayFusion.
+A device without rayQuery fails the pipeline: the capability is optional in
+VulkanBackend.cpp and no fallback exists. Not checked: a solid inside the gas (scene
+has only the ground), panel, RayFusion. Correction: commit ca9ac44b says alpha-tested
+geometry now blocks fire light. Wrong, it always did: volumeSolidProbeCandidate
+accepts every triangle whatever its material.
 
 ## Handoff: internal light and additive flame MEASURED, 2026-11-01
 
