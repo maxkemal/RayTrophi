@@ -56,7 +56,7 @@ void SceneData::syncDomainFogVolume(ParticleSystemObject& system, std::size_t d,
     using RayTrophiSim::Fluid::FluidView;
     if (d >= system.domain_fog_vdb_ids.size() || d >= system.domain_fog_volumes.size()) return;
     const bool matter_gas =
-        desc.type == RayTrophiSim::SimulationDomainType::Matter;
+        RayTrophiSim::simulationDomainHasBothPhases(desc);
     if (matter_gas) {
         if (system.domain_fog_vdb_ids[d] >= 0 || system.domain_fog_volumes[d]) {
             removeFogDomainVolume(system, d);

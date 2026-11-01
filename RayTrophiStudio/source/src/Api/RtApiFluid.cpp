@@ -8,11 +8,13 @@
  */
 
 #include "RtApiInternal.h"
+#include "RtManualSimulationStep.h"
 #include "Api/SourceSplatGeometryApi.h"
 #include "Fluid/MatterGrain.h"
 #include "Fluid/GasInventoryGpu.h"
 #include <exception>
 #include "Fluid/MatterSubstanceState.h"
+#include "Fluid/FluidPhysicalMass.h"
 #include "Fluid/MatterEmissionBudget.h"
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidFogDensity.h"
@@ -53,23 +55,18 @@ const char* fluidRenderModeName(RayTrophiSim::Fluid::FluidRenderMode mode) {
 }
 
 const char* domainTypeName(RayTrophiSim::SimulationDomainType type) {
-    using Type = RayTrophiSim::SimulationDomainType;
-    switch (type) {
-        case Type::Gas: return "gas";
-        case Type::Matter: return "matter";
-        case Type::Fluid:
-        default: return "fluid";
-    }
+    (void)type;
+    return "matter";
 }
 
 void fillDomainPhases(const RayTrophiSim::SimulationGridDomainDesc& domain,
                       FluidDomainInfo& info) {
     info.type = domainTypeName(domain.type);
     info.phases.clear();
-    if (RayTrophiSim::simulationDomainHasGas(domain.type)) {
+    if (RayTrophiSim::simulationDomainHasGas(domain)) {
         info.phases.emplace_back("gas");
     }
-    if (RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
+    if (RayTrophiSim::simulationDomainHasLiquid(domain)) {
         info.phases.emplace_back(domain.fluid_params.granular_enabled
                                      ? "granular"
                                      : "liquid");
@@ -252,7 +249,7 @@ void fillFluidViews(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.particle_labels = RayTrophiSim::Fluid::inspectParticleLabels(state);
     info.hidden_particles = 0;
     info.label_routes.clear();
-    if (!RayTrophiSim::simulationDomainHasLiquid(d.type)) return;
+    if (!RayTrophiSim::simulationDomainHasLiquid(d)) return;
     info.label_routes = RayTrophiSim::Fluid::labelRoutesToNames(d.fluid_label_routes);
     const std::vector<RayTrophiSim::Fluid::FluidViewKey> live = state
         ? RayTrophiSim::Fluid::cachedDistinctViewKeys(state->particles, state->version)
@@ -619,6 +616,8 @@ Result fillFluidDensityStats(const RayTrophiSim::SimulationGridDomainState& stat
     info.fog_evaporated_kg = gs.fog_evaporated_kg;
     info.fog_latent_to_air_j = gs.fog_latent_to_air_j;
     info.rained_kg = gs.rained_kg;
+    info.emission_withheld_kg_step = state.emission_withheld_kg_step;
+    info.emission_withheld_kg_total = state.emission_withheld_kg_total;
     info.rain_parcels = gs.rain_parcels;
     info.fog_autoconverted_kg = gs.fog_autoconverted_kg;
     info.rain_absorbed_kg = gs.rain_absorbed_kg;
@@ -768,7 +767,7 @@ RayTrophiSim::SimulationGridDomainDesc* findGasDomainDesc(
     auto& domains = g_ctx->scene.ensureParticleSimulationSystem().gridDomains();
     auto it = std::find_if(domains.begin(), domains.end(),
         [&info](const auto& d) { return d.name == info.name; });
-    if (it == domains.end() || !RayTrophiSim::simulationDomainHasGas(it->type)) {
+    if (it == domains.end() || !RayTrophiSim::simulationDomainHasGas(*it)) {
         out_error = Result::fail("gas domain not found: " + domain_id_or_name);
         return nullptr;
     }
@@ -788,7 +787,7 @@ RayTrophiSim::SimulationGridDomainDesc* findLiquidDomainDesc(
     auto& domains = g_ctx->scene.ensureParticleSimulationSystem().gridDomains();
     auto it = std::find_if(domains.begin(), domains.end(),
         [&info](const auto& d) { return d.name == info.name; });
-    if (it == domains.end() || !RayTrophiSim::simulationDomainHasLiquid(it->type)) {
+    if (it == domains.end() || !RayTrophiSim::simulationDomainHasLiquid(*it)) {
         out_error = Result::fail("liquid (fluid) domain not found: " + domain_id_or_name);
         return nullptr;
     }
@@ -1172,7 +1171,7 @@ Result getGasShaderSettings(const std::string& domain_id_or_name,
     Result error;
     auto* domain = findGasDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
-    const auto& gas_shader = domain->type == RayTrophiSim::SimulationDomainType::Matter
+    const auto& gas_shader = RayTrophiSim::simulationDomainHasBothPhases(*domain)
         ? RayTrophiSim::Fluid::matterGasFogShader(*domain)
         : domain->shader;
     if (!gas_shader) {
@@ -1239,7 +1238,7 @@ Result updateGasShaderSettings(const std::string& domain_id_or_name,
     Result error;
     auto* domain = findGasDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
-    auto& gas_shader = domain->type == RayTrophiSim::SimulationDomainType::Matter
+    auto& gas_shader = RayTrophiSim::simulationDomainHasBothPhases(*domain)
         ? RayTrophiSim::Fluid::matterGasFogShader(*domain)
         : domain->shader;
 
@@ -1411,7 +1410,7 @@ Result getFluidFogShaderSettings(const std::string& domain_id_or_name,
     Result error;
     auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
-    if (domain->type == RayTrophiSim::SimulationDomainType::Matter) {
+    if (RayTrophiSim::simulationDomainHasBothPhases(*domain)) {
         return Result::fail("Matter Fog uses independent volume.get_material/set_material targets");
     }
     out_settings = FluidFogShaderSettings{};
@@ -1431,7 +1430,7 @@ Result updateFluidFogShaderSettings(const std::string& domain_id_or_name,
     Result error;
     auto* domain = findLiquidDomainDesc(domain_id_or_name, error);
     if (!domain) return error;
-    if (domain->type == RayTrophiSim::SimulationDomainType::Matter) {
+    if (RayTrophiSim::simulationDomainHasBothPhases(*domain)) {
         return Result::fail("Matter Fog uses independent volume.get_material/set_material targets");
     }
     if (!domain->fluid_fog_shader)
@@ -1694,8 +1693,8 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
     }
     const auto domain_type = is_matter
         ? RayTrophiSim::SimulationDomainType::Matter
-        : (is_gas ? RayTrophiSim::SimulationDomainType::Gas
-                  : RayTrophiSim::SimulationDomainType::Fluid);
+        : (is_gas ? RayTrophiSim::SimulationDomainType::LegacyGas
+                  : RayTrophiSim::SimulationDomainType::LegacyFluid);
 
     // 1. Ensure high-level Physics UI Panel domain descriptor exists
     auto& p_sys = g_ctx->scene.ensureParticleSimulationSystem();
@@ -1733,6 +1732,11 @@ Result createFluidDomain(const std::string& name, Vec3 domain_min, Vec3 domain_m
         grid_dom->bounds_min = domain_min;
         grid_dom->bounds_max = domain_max;
         if (voxel_size > 0.001f) grid_dom->voxel_size = voxel_size;
+    }
+
+    if (grid_dom) {
+        RayTrophiSim::canonicalizeMatterDomain(*grid_dom, p_sys.flowSources(),
+            static_cast<int>(grid_dom - p_sys.gridDomains().data()));
     }
 
     // ★ A GAS domain gets NO legacy FluidObject.
@@ -2071,7 +2075,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
             // id/editor visibility from it. Live particles and rheology remain
             // grid-domain authoritative: the mirror intentionally owns no
             // independently stepped particle copy.
-            if (RayTrophiSim::simulationDomainHasLiquid(d.type)) {
+            if (RayTrophiSim::simulationDomainHasLiquid(d)) {
                 if (auto* obj = g_ctx->scene.findFluidObjectByName(d.name)) {
                     info.id = obj->id;
                     info.visible = obj->visible;
@@ -2087,7 +2091,7 @@ Result listFluidDomains(std::vector<rtapi::FluidDomainInfo>& out_domains) {
                 const auto& all = system.runtime->gridDomains();
                 const auto& states = system.runtime->gridDomainStates();
                 const std::size_t index = static_cast<std::size_t>(&d - all.data());
-                if (RayTrophiSim::simulationDomainHasLiquid(d.type)) {
+                if (RayTrophiSim::simulationDomainHasLiquid(d)) {
                     fillFluidSurfaceDetail(d, index < system.domain_sdf_stats.size()
                                                   ? &system.domain_sdf_stats[index] : nullptr,
                                            info);
@@ -2491,7 +2495,7 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
             // isosurface -- the request and the picture disagreed. A gas
             // domain keeps the plain Volume value (its route ignores it).
             const bool liquid = obj ||
-                (grid_dom && RayTrophiSim::simulationDomainHasLiquid(grid_dom->type));
+                (grid_dom && RayTrophiSim::simulationDomainHasLiquid(*grid_dom));
             grid_mode = liquid ? RayTrophiSim::Fluid::FluidRenderMode::VolumeFog
                                : RayTrophiSim::Fluid::FluidRenderMode::Volume;
         } else {
@@ -2825,7 +2829,7 @@ Result getGasDomainSettings(const std::string& domain_id_or_name, GasDomainSetti
     auto& domains = g_ctx->scene.ensureParticleSimulationSystem().gridDomains();
     auto it = std::find_if(domains.begin(), domains.end(),
         [&info](const auto& d) { return d.name == info.name; });
-    if (it == domains.end() || !RayTrophiSim::simulationDomainHasGas(it->type))
+    if (it == domains.end() || !RayTrophiSim::simulationDomainHasGas(*it))
         return Result::fail("gas domain not found: " + domain_id_or_name);
 
     switch (it->quality_profile) {
@@ -2891,7 +2895,7 @@ Result updateGasDomainSettings(const std::string& domain_id_or_name, const GasDo
     auto& domains = g_ctx->scene.ensureParticleSimulationSystem().gridDomains();
     auto it = std::find_if(domains.begin(), domains.end(),
         [&info](const auto& d) { return d.name == info.name; });
-    if (it == domains.end() || !RayTrophiSim::simulationDomainHasGas(it->type))
+    if (it == domains.end() || !RayTrophiSim::simulationDomainHasGas(*it))
         return Result::fail("gas domain not found: " + domain_id_or_name);
 
     std::string profile = s.quality_profile;
@@ -2984,7 +2988,7 @@ Result measureGasPlume(const std::string& domain_id_or_name,
     if (!desc) consider(g_ctx->scene.ensureParticleSimulationSystem());
 
     if (!desc) return Result::fail("gas domain not found: " + domain_id_or_name);
-    if (!RayTrophiSim::simulationDomainHasGas(desc->type))
+    if (!RayTrophiSim::simulationDomainHasGas(*desc))
         return Result::fail("not a gas domain: " + domain_id_or_name);
 
     // ★ Everything below this point leaves `measured` false rather than
@@ -3142,7 +3146,7 @@ Result getCombustibleFluidSettings(
     auto it=std::find_if(domains.begin(),domains.end(),
         [&info](const auto& d){return d.name==info.name;});
     if(it==domains.end() ||
-       !RayTrophiSim::simulationDomainHasLiquid(it->type))
+       !RayTrophiSim::simulationDomainHasLiquid(*it))
         return Result::fail("fluid domain not found: "+domain_id_or_name);
     out.enabled=it->fluid_flammable;
     out.auto_ignite=it->fluid_auto_ignite;
@@ -3169,7 +3173,7 @@ Result updateCombustibleFluidSettings(
     auto it=std::find_if(domains.begin(),domains.end(),
         [&info](const auto& d){return d.name==info.name;});
     if(it==domains.end() ||
-       !RayTrophiSim::simulationDomainHasLiquid(it->type))
+       !RayTrophiSim::simulationDomainHasLiquid(*it))
         return Result::fail("fluid domain not found: "+domain_id_or_name);
     // The chemistry is the domain's default substance (fuel_profile is
     // resolved from it every step); refresh it now so this call reads it.
@@ -3251,7 +3255,8 @@ void finalizeFluidRenderProxyStats(
 
 SimulationFlowSourceInfo flowInfoFromDesc(
     const RayTrophiSim::SimulationFlowSourceDesc& source,
-    const std::vector<RayTrophiSim::SimulationGridDomainDesc>& domains) {
+    const std::vector<RayTrophiSim::SimulationGridDomainDesc>& domains,
+    const std::vector<RayTrophiSim::SimulationGridDomainState>* states = nullptr) {
     SimulationFlowSourceInfo out;
     out.producer_uid = source.timeline_uid;
     out.name = source.name;
@@ -3294,9 +3299,8 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     // The same routing as MatterDomainSources.inl: a domain with a gas phase
     // turns a non-liquid source into density, not particles.
     const bool pours_particles = birth_domain &&
-        RayTrophiSim::simulationDomainHasLiquid(birth_domain->type) &&
-        (!RayTrophiSim::simulationDomainHasGas(birth_domain->type) ||
-         source.phase == RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid);
+        RayTrophiSim::simulationDomainHasLiquid(*birth_domain) &&
+        source.phase == RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid;
     if (!pours_particles) {
         out.fluid_birth_kelvin = 0.0f;
     }
@@ -3315,18 +3319,39 @@ SimulationFlowSourceInfo flowInfoFromDesc(
         }
     }
     if (pours_particles) {
-        out.fluid_birth_model = RayTrophiSim::Fluid::matterConstitutiveModelName(
-            RayTrophiSim::Fluid::substanceBirthModel(
-                RayTrophiSim::Fluid::substanceTag(source.fluid_substance),
-                birth_domain->fluid_params, out.fluid_birth_kelvin));
+        const auto& params = birth_domain->fluid_params;
+        const uint32_t tag = RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
+        const auto model = RayTrophiSim::Fluid::substanceBirthModel(
+            tag, params, out.fluid_birth_kelvin);
+        out.fluid_birth_model = RayTrophiSim::Fluid::matterConstitutiveModelName(model);
+        // One parcel's birth mass, by the emitter's own rule (grain sphere
+        // mass, or the voxel/PPC mass on the live liquid grid when there is
+        // one): what a mass budget is sized with.
+        const auto* substance = RayTrophiSim::Fluid::domainSubstance(params);
+        const bool legacy = params.granular_enabled && !params.grain.enabled;
+        if (RayTrophiSim::Fluid::substanceTransportOwner(tag, model, params) ==
+            RayTrophiSim::Fluid::MatterTransportOwner::Grain) {
+            out.parcel_mass_kg = RayTrophiSim::Fluid::matterGrainRestMassKg(
+                params.grain, tag, substance, model, params.granular_enabled);
+        } else {
+            const auto index = static_cast<std::size_t>(source.domain_index);
+            const float voxel = states && index < states->size() && (*states)[index].valid
+                ? (*states)[index].voxel_size : birth_domain->voxel_size;
+            out.parcel_mass_kg = RayTrophiSim::Fluid::fluidParticleRestMassKg(
+                tag, substance, voxel, params.particles_per_cell, model, legacy);
+        }
     }
     out.splat_geometry = source.splat_geometry;
     out.grain_birth_saturation = source.grain_birth_saturation;
     out.use_time_limit = source.use_time_limit;
     out.start_time = source.start_time;
     out.end_time = source.end_time;
-    out.use_particle_limit = source.use_particle_limit;
-    out.max_emitted_particles = source.max_emitted_particles;
+    out.use_mass_limit = source.use_mass_limit;
+    out.max_emitted_mass_kg = source.max_emitted_mass_kg;
+    out.total_emitted_particles = source.total_emitted_particles;
+    out.total_emitted_mass_kg = source.total_emitted_mass_kg;
+    out.withheld_mass_kg_step = source.withheld_mass_kg_step;
+    out.withheld_mass_kg_total = source.withheld_mass_kg_total;
     return out;
 }
 
@@ -3338,14 +3363,14 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     bool mode_ok = false;
     out.name = info.name.empty() ? "Flow Source" : info.name;
     out.domain_index = domain_index;
-    const std::string phase = lowerCopy(info.phase);
-    if (phase.empty() || phase == "gas") {
-        out.phase = RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
-    } else if (phase == "liquid" || phase == "fluid") {
-        out.phase = RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid;
-    } else {
-        return Result::fail("flow source phase must be gas or liquid");
+    bool liquid_phase = false;
+    std::string phase_error;
+    if (!RayTrophiSim::resolveMatterSourcePhase(runtime.gridDomains()[domain_index],
+            info.phase, liquid_phase, phase_error)) {
+        return Result::fail(phase_error);
     }
+    out.phase = liquid_phase ? RayTrophiSim::SimulationFlowSourceDesc::Phase::Liquid
+                            : RayTrophiSim::SimulationFlowSourceDesc::Phase::Gas;
     out.source_mode = flowModeFromString(info.source_mode, mode_ok);
     if (!mode_ok) return Result::fail("unknown flow source_mode: " + info.source_mode);
     out.source_name = info.source_object;
@@ -3392,8 +3417,11 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     out.use_time_limit = info.use_time_limit;
     out.start_time = info.start_time;
     out.end_time = std::max(info.start_time, info.end_time);
-    out.use_particle_limit = info.use_particle_limit;
-    out.max_emitted_particles = std::max(0, info.max_emitted_particles);
+    if (!std::isfinite(info.max_emitted_mass_kg) || info.max_emitted_mass_kg < 0.0f) {
+        return Result::fail("max_emitted_mass_kg must be a finite mass >= 0 kg");
+    }
+    out.use_mass_limit = info.use_mass_limit;
+    out.max_emitted_mass_kg = info.max_emitted_mass_kg;
     return Result::success();
 }
 
@@ -3584,7 +3612,7 @@ Result listSimulationFlowSources(std::vector<SimulationFlowSourceInfo>& out) {
     out.clear();
     out.reserve(runtime.flowSources().size());
     for (const auto& source : runtime.flowSources())
-        out.push_back(flowInfoFromDesc(source, runtime.gridDomains()));
+        out.push_back(flowInfoFromDesc(source, runtime.gridDomains(), &runtime.gridDomainStates()));
     return Result::success();
 }
 
@@ -3594,7 +3622,7 @@ Result getSimulationFlowSource(const std::string& name, SimulationFlowSourceInfo
     const auto it = std::find_if(runtime.flowSources().begin(), runtime.flowSources().end(),
         [&name](const auto& source) { return source.name == name; });
     if (it == runtime.flowSources().end()) return Result::fail("flow source not found: " + name);
-    out = flowInfoFromDesc(*it, runtime.gridDomains());
+    out = flowInfoFromDesc(*it, runtime.gridDomains(), &runtime.gridDomainStates());
     return Result::success();
 }
 
@@ -3610,7 +3638,7 @@ Result createSimulationFlowSource(const SimulationFlowSourceInfo& info,
     Result converted = flowDescFromInfo(info, runtime, desc);
     if (!converted.ok) return converted;
     auto& created = runtime.addFlowSource(desc);
-    out = flowInfoFromDesc(created, runtime.gridDomains());
+    out = flowInfoFromDesc(created, runtime.gridDomains(), &runtime.gridDomainStates());
     invalidateScriptSimulation();
     return Result::success();
 }
@@ -3815,6 +3843,8 @@ Result stepFluidSimulation(float dt) {
     if (previousMode == RayTrophiSim::SimulationMode::Paused)
         g_ctx->scene.simulation_world.setMode(RayTrophiSim::SimulationMode::Realtime);
     g_ctx->scene.simulation_world.stepOnce(dt);
+    g_ctx->scene.preserveScriptSimulationPreview();
+    publishManualSimulationStep(*g_ctx, dt);
     if (previousMode == RayTrophiSim::SimulationMode::Paused)
         g_ctx->scene.simulation_world.setMode(previousMode);
     const std::string inventory_error = RayTrophiSim::Fluid::gasInventoryStepError(g_ctx->scene);

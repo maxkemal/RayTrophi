@@ -1,0 +1,31 @@
+{
+  "rows": [
+    {
+      "case": "no_emission_16",
+      "frame": 49,
+      "gpu_ms": 573.2231039999999,
+      "per_path": {
+        "camera_density_samples": 10.105856638951877,
+        "secondary_density_samples": 0.0,
+        "volume_rays": 1.189482489292013,
+        "solid_probe_runs": 1.1907275132275132,
+        "majorant_queries": 1.8167621567145376,
+        "radiance_cache_fallbacks": 0.0
+      }
+    },
+    {
+      "case": "zero_density_16",
+      "frame": 49,
+      "gpu_ms": 24.07467,
+      "per_path": {
+        "camera_density_samples": 0.0,
+        "secondary_density_samples": 0.0,
+        "volume_rays": 0.0,
+        "solid_probe_runs": 0.0,
+        "majorant_queries": 0.0,
+        "radiance_cache_fallbacks": 0.0
+      }
+    }
+  ],
+  "restored": true
+}

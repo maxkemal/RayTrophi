@@ -133,6 +133,39 @@ class GasSourceContracts(unittest.TestCase):
             self.assertIn(f"source\\src\\Physics\\Fluid\\{name}.cpp", entries)
             self.assertIn(f"source\\include\\Fluid\\{name}.h", entries)
 
+    def test_backend_switch_holds_instead_of_exiting(self):
+        device = read("src/Physics/Fluid/GasInventoryDevice.cpp")
+        self.assertNotIn('throw std::runtime_error("gas inventory backend switch', device)
+        self.assertIn("gas inventory unreadable at backend switch", device)
+
+    def test_merge_state_reaches_panel_and_scripting(self):
+        self.assertIn("matterGasMergeStatus", read("src/UI/scene_ui_simulation_domains.cpp"))
+        self.assertIn('"gas_render_merge"', read("src/Api/RtApiMatterFogInspection.cpp"))
+
+    def test_invisible_cull_spares_emission_and_precedes_the_merge(self):
+        publisher = read("src/Physics/Fluid/MatterFogPublisher.cpp")
+        cull = publisher.split("void cullInvisibleFogBlocks(", 1)[1]
+        self.assertIn("shader.emission.mode != VolumeEmissionMode::None", cull)
+        sync = publisher.split("void SceneData::syncMatterFogStreams(", 1)[1]
+        self.assertLess(sync.index("cullInvisibleFogBlocks("), sync.index("mergeGasFields("))
+
+    def test_paused_scene_republishes_when_the_merge_key_moves(self):
+        scene = read("include/scene_data.h")
+        self.assertLess(scene.index("if (matterFogMergeChanged()) force_simulation_render_sync_"),
+                        scene.index("const bool force_resync = force_simulation_render_sync_;"))
+        publisher = read("src/Physics/Fluid/MatterFogPublisher.cpp")
+        self.assertIn("stream.gas_merge_requested != wanted", publisher)
+        self.assertIn('const std::string wanted = key + "|" + bounds;', publisher)
+        trigger = publisher.split("bool SceneData::matterFogMergeChanged()", 1)[1]
+        self.assertLess(trigger.index("ImGui::IsMouseDown"), trigger.index("bool changed = false;"))
+
+    def test_merged_gas_keeps_the_authored_material_editable(self):
+        volume = read("include/VDBVolume.h")
+        self.assertIn("return authored_shader ? authored_shader : volume_shader;", volume)
+        publisher = read("src/Physics/Fluid/MatterFogPublisher.cpp")
+        self.assertEqual(publisher.count("setPublishedShader("), 2)
+        self.assertNotIn("->setShader(", publisher)
+
     def test_scale_is_not_refused_and_a_refusal_never_leaves_the_frame_loop(self):
         source = read("src/Physics/Fluid/GasSourceProvenance.cpp")
         self.assertNotIn("256u * 1024u", source)

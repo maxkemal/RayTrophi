@@ -8,6 +8,7 @@ namespace RayTrophiSim::Fluid {
 MatterConstitutiveModel resolveSingleMatterModel(const FluidParticles& particles,
                                                  bool legacy_granular);
 bool hasMixedMatterModels(const FluidParticles& particles, bool legacy_granular);
+bool requiresMatterModelBatch(const FluidParticles& particles, bool legacy_granular);
 std::size_t estimateMixedMatterWorkingSet(const FluidParticles& particles,
                                          const FluidSim::FluidGrid& grid);
 bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,

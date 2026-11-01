@@ -37,7 +37,7 @@ def main():
     assert "granular_index[slot] = index;" in shader
     assert "atomicAdd(count[resolved == 3u ? 2 : 3], 1u)" in shader
     specs = {
-        "p2g": (10, 40), "g2p": (12, 72), "stress_update": (18, 68),
+        "p2g": (10, 40), "g2p": (12, 72), "stress_update": (18, 100),
         "stress_p2g": (9, 52), "settle": (5, 36), "advect": (11, 84),
         "occupancy": (6, 40), "contact": (19, 16), "copy": (2, 4),
         "clear": (1, 4), "zero_faces": (4, 36), "pores": (13, 40),
@@ -127,6 +127,15 @@ def main():
                   "granular_strain_rate", "granular_overburden_pressure",
                   "granular_young_modulus_for_load", "granular_load_measured"]:
         assert "stats." + field in driver
+    forces = read("src/Physics/ParticleSimulation.cpp")
+    assert "Fluid::fluidForcesNeedColumns(force_buffer, global_wind)" in forces
+    assert "constants.column_nx = surface_columns ? state.grid.nx : 0;" in forces
+    assert "constants.column_nz = surface_columns ? state.grid.nz : 0;" in forces
+    assert "if (vulkan_force_kernel && surface_columns)" in forces
+    assert "Fluid::packedForcesNeedFluidColumns(packed)" in read("src/Physics/SimulationWorld.cpp")
+    force_shader = read("shaders/sim_fluid_particle_forces.comp")
+    assert "f.enabled==0||f.type!=0||f.fluid_surface_drag==0" in force_shader
+    assert "pc.column_nx>0&&pc.column_nz>0" in force_shader
     print("PASS: 13 GPU ABIs, indexed stages, contact ordering, budget, canonical commit, API wiring")
 
 

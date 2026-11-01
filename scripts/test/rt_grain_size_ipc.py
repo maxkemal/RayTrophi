@@ -25,7 +25,7 @@ def main():
         ipc.call("flow_source.create", name=source, domain=domain, phase="liquid",
                  fluid_substance="Sand", source_mode="point", position=[0, 4, 0],
                  radius=0.5, velocity=[0, 0, 0], fluid_velocity_spread=0.0,
-                 enabled=False, use_particle_limit=True, max_emitted_particles=24,
+                 enabled=False, limit_parcels=True, parcels=24,
                  use_time_limit=False, fluid_particles_per_second=240)
         made_source = True
         results = []

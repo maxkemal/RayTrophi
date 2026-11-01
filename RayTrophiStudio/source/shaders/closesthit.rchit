@@ -388,6 +388,7 @@ struct VkVolumeInstance {
     float    _uvw_pad[1];
     // Appended at byte 624; total record stride is now 672 bytes.
     float density_curve[12];
+    float emission_mask[4];
 };
 #include "volume_density_curve.glsl"
 

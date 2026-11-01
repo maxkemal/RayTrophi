@@ -26,6 +26,7 @@ constexpr uint32_t kSvgfRtHistory = 2u;  // RT record slots hold this and the pr
 constexpr uint32_t kSvgfRtSlot1 = 4u;    // this dispatch's RT record is motionHistory1
 constexpr uint32_t kSvgfStatic = 8u;     // still camera: spatial-only over the accumulation
 constexpr uint32_t kSvgfDebugHistory = 16u;  // compose shows history length
+constexpr uint32_t kSvgfFilteredHistory = 32u;  // first a-trous result, moving frames only
 // 0-11 images, 12 statistics, 13-14 RT records, 15 Welford M2, 16 still-noise counters
 constexpr uint32_t kBindings = 17;
 constexpr uint32_t kSlots = 2;
@@ -475,7 +476,8 @@ void VulkanRealtimeDenoiser::begin(VulkanDevice& device, VkCommandBuffer cmd,
     const bool still = s.staticFrame && !moving;
     const uint32_t flags = (consecutive ? kSvgfHistory : 0u) |
         (rtHistory ? kSvgfRtHistory : 0u) | ((rtWriteSlot & 1u) ? kSvgfRtSlot1 : 0u) |
-        (still ? kSvgfStatic : 0u) | (s.settings.debug_history ? kSvgfDebugHistory : 0u);
+        (still ? kSvgfStatic : 0u) | (s.settings.debug_history ? kSvgfDebugHistory : 0u) |
+        (moving ? kSvgfFilteredHistory : 0u);
     // Moving: filtered only. Still frame: the shader blends per pixel by
     // measured noise alone (no host floor). Warm bridge after a stop (OIDN
     // on): fade over 8 samples.

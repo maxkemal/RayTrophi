@@ -37,8 +37,10 @@ rt.collider.create(
 rt.flow_source.create(
     FLOW, FLUID, position=(-0.5, 1.5, 0.0), velocity=(1.0, -1.5, 0.0),
     radius=0.12, fluid_particles_per_second=100.0,
-    use_particle_limit=True, max_emitted_particles=2000,
 )
+# The source budget is mass (kg): 2000 parcels of this source.
+rt.flow_source.update(FLOW, use_mass_limit=True,
+                      max_emitted_mass_kg=2000 * rt.flow_source.get(FLOW)["parcel_mass_kg"])
 rt.flow_source.create(
     PILOT, GAS, position=(0.2, 0.2, 0.0), radius=0.2,
     density=0.02, temperature=2.0, fuel=0.1,

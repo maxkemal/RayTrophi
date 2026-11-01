@@ -1,5 +1,13 @@
 # Hacim ışık geçirgenlik önbelleği (volume light cache)
 
+2026-10-30 kaynak güncellemesi (derleme/GPU kabulü bekliyor): ortak mixture yolu
+artık sabit sahne ışıkları için aynı kalıcı cache'i, her gazın kendi slotu ve RGB
+extinction'ı ile kullanıyor. Ambient/graph/noise/random-walk kapsamı değişmedi.
+Doldurma sayısı en az materyalin authored shadow_steps değeri olacak şekilde
+4..64 oldu; çağrı başına dört hücre sınırı korunuyor (en çok 256 örnek).
+Aşağıdaki 4..32/128 sayıları önceki kabulün tarihsel bütçesidir. Ayrıntılar:
+[İki gaz mixture light-cache düzeltmesi](RT_GAS_MIXTURE_LIGHT_CACHE_20261030.md).
+
 > **Durum:** REFERANS — 2026-10-25; V1 canlı kabul edildi (~%14 hız, görüntü kullanıcı gözüyle aynı), `enabled` A/B anahtarı söküldü (bu son adım derlenmedi). Ölçümler §10–§11.
 
 ## Devir notu (2026-10-25)

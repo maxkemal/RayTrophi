@@ -78,11 +78,17 @@ def main():
         # material lives in grain_* fields, liquids carry surface tension.
         assert by_name["Snow"]["category"] == "granular" and by_name["Snow"]["builtin"]
         assert rows["Snow"]["granular_transport"] == "mpm"
-        assert rows["Snow"]["granular_compaction_hardening"] > 0.0
-        assert rows["Snow"]["granular_compaction_limit"] > 0.0
+        assert rows["Snow"]["granular_snow_plasticity"] is True
+        assert rows["Snow"]["granular_snow_hardening"] > 0.0
+        assert 0.0 < rows["Snow"]["granular_snow_critical_compression"] < 1.0
+        assert 0.0 < rows["Snow"]["granular_snow_critical_stretch"] < 1.0
+        assert (0.0 < rows["Snow"]["granular_snow_min_hardening"]
+                <= rows["Snow"]["granular_snow_max_hardening"])
         assert rows["Sand"]["granular_compaction_hardening"] == 0.0
         assert math.isclose(rows["Sand"]["grain_friction"], 0.5, abs_tol=1e-6)
-        assert rows["Sand"]["grain_water_capacity_fraction"] == 0.0
+        # Sand retains pore water; the built-in capacity is 10% of grain volume.
+        assert math.isclose(rows["Sand"]["grain_water_capacity_fraction"], 0.1,
+                            abs_tol=1e-6)
         assert math.isclose(rows["Water"]["liquid_surface_tension_n_m"], 0.072, abs_tol=1e-6)
         assert {"Honey", "Chocolate", "Mud"}.issubset(rows)
         # P5 2026-10-19: the quench chemistry is retired; water is just not a fuel.

@@ -39,8 +39,8 @@ def vacuous(label, reason):
 
 
 domains = rt.fluid.list_domains()
-fluids = [d["name"] for d in domains if d.get("type") == "fluid"]
-gases = [d["name"] for d in domains if d.get("type") == "gas"]
+fluids = [d["name"] for d in domains if bool(set(d.get("phases", [])) & {"liquid", "granular"})]
+gases = [d["name"] for d in domains if "gas" in d.get("phases", [])]
 if not fluids:
     log("no fluid domain -- run rt_setup_sim_graph_scene.py first")
     raise SystemExit(0)

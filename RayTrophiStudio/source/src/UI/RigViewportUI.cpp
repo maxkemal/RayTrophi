@@ -63,10 +63,12 @@ void drawRigRestGizmo(UIContext& ctx,int shadingMode,bool enabled,bool& hit) {
     ImGuizmo::BeginFrame();
     if(!drag.error.empty())ImGui::GetForegroundDrawList()->AddText(ImVec2(30,90),IM_COL32(255,120,80,255),drag.error.c_str());
     auto& io=ImGui::GetIO();
-    // Floating authoring windows own their mouse gestures.
-    // ImGuizmo requests WantCaptureMouse for its own hover/drag. Testing that
-    // flag here hides the gizmo on the next frame and can prevent drag startup.
-    if(!drag.active && ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow))return;
+    // Floating authoring windows own their mouse gestures, but the selected bone's gizmo stays
+    // drawn while the pointer is over a dock or popup: returning early here made it vanish and
+    // reappear on every pass between viewport and panel. Ownership only blocks drag startup.
+    // (ImGuizmo requests WantCaptureMouse for its own hover/drag, so that flag cannot be used.)
+    const bool uiOwnsMouse=!drag.active && (ImGui::IsWindowHovered(ImGuiHoveredFlags_AnyWindow) ||
+        ImGui::IsPopupOpen("",ImGuiPopupFlags_AnyPopupId|ImGuiPopupFlags_AnyPopupLevel));
     if(drag.blocked){if(!ImGui::IsMouseDown(0))drag.blocked=false;else return;}
     RigAuthoring::BoneView bone;
     if(!RigAuthoring::selectedBone(ctx.scene,bone) || (editing && bone.character!=(posing?ctx.scene.rigView.pose.character:ctx.scene.rigView.edit_character))){if(drag.active)cancel();return;}
@@ -121,6 +123,10 @@ void drawRigRestGizmo(UIContext& ctx,int shadingMode,bool enabled,bool& hit) {
     ImGuizmo::Manipulate(view,projection,operation,
         (scaling || ctx.selection.transform_space==TransformSpace::Local)?ImGuizmo::LOCAL:ImGuizmo::WORLD,matrix);
     const bool usingNow=ImGuizmo::IsUsing();
+    if(uiOwnsMouse) {
+        if(usingNow){ImGuizmo::Enable(false);ImGuizmo::Enable(true);drag.blocked=ImGui::IsMouseDown(0);}
+        return;
+    }
     hit=hit || usingNow || ImGuizmo::IsOver();
     if(usingNow && !drag.active) {
         drag.initialGizmo=world;drag.delta=Matrix4x4::identity();drag.bones=RigAuthoring::selectedBones(ctx.scene);drag.pivot=ctx.scene.rigView.selection_pivot;

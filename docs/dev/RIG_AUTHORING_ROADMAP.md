@@ -1,5 +1,15 @@
 # Rig ve hareket yazarlığı — görsel iskelet, auto-rig ve animasyon
 
+> **Durum:** AKTİF 2026-10-29 — Walk v2 W1–W4 derlendi ve canlı ölçüldü (§11.7):
+> diz 28° sabit (pergel yürüyüşü) + parmak zemine giriyordu; W1b düzeltmesi (diz
+> profili, parmak bükülmesi, üst gövde gecikmesi) derlendi, ölçüldü; W1c (bounce 0,
+> pelvis eğrisi yumuşatma) + anatomi v8 (bükülme ipuçları, ayak pivotları, §11.8)
+> + R2 ROM testi (§11.9) + rig gizmosu panelde kaybolma düzeltmesi + R1 otomatik işaret
+> ve R3 geodezik ağırlık (§11.10) **derlenmedi** —
+> kullanıcı kararı: derleme ve testler planın sonunda tek turda.
+> Teşhis §11.1: Human Walk'ın ana kökü bacak erişim taşmasıydı. Sıradaki: şablon v4,
+> hızlı rig yolu R1–R8, W5. Aşağıdaki eski durum satırı tarihseldir.
+
 > **Status (2026-09-16):** Multipart fit/bind, rest mirror, Pose/FK, hand/foot IK,
 > joint overlays and the first in-place humanoid walk are user-confirmed. Timed
 > IK/contact/bake, chain/spline/aim controls and gait body-motion refinements are
@@ -3413,3 +3423,304 @@ Two-bone controls measure their root-mid-tip world length; scalar groups measure
 the longest authored anchor-to-driven-bone chain. Visual opacity remains low
 while idle and strengthens on hover/selection, keeping dense rigs readable
 without returning to a permanent slider shelf.
+
+---
+
+## 11. 2026-10-28 revizyonu — yürüyüş teşhisi, şablon v4 ve hızlı rig yolu
+
+> Bu bölüm **kod okumasıdır**; canlı ölçüm yapılmadı. Sayılar şablon
+> koordinatlarından (`RigTemplates.cpp`) ve tarifin varsayılanlarından hesaplandı.
+> Rig Studio ayrı paneli denendi ve doğru yapı olmadığı için kaldırıldı; aşağıdaki
+> hiçbir öneri ikinci bir çalışma yüzeyi açmaz (bkz. §5, §8: sağ dock + viewport).
+
+### 11.1 Human Walk neden hatalı görünüyor
+
+Kullanıcı gözlemi: hazır yürüyüş "çok hatalı". Şüphe iskelet yapısıydı. Okuma
+sonucu: **asıl kök tarifte, iskelet ikinci sırada** — ama iskeletin iki eksiği
+tarifin düzeltilmesini de sınırlıyor (11.3).
+
+**K1 ★★★★ Bacak erişimi taşıyor; pelvis hiç alçalmıyor.**
+Şablonda bacak dinlenimde neredeyse tam düz: Thigh `(.055,.515,-.004)` → Shin
+`(.055,.285,.014)` → Foot `(.055,.045,0)` (`RigTemplates.cpp:52-54`, detailed'da
+`:178-182`). Uzunluklar l1 = .2307h, l2 = .2404h, toplam L = .4711h; kalça–bilek
+dinlenim mesafesi .4700h → bacak **%99,8 açık**. Tarif pelvisi yalnızca
+**yukarı** oynatır (bounce, `RigWalkRecipe.cpp:270-282`), hiç aşağı indirmez;
+ayak hedefi ise bilek dinlenim yüksekliğinde ±stride/2 = ±.175h ileri-geri gider
+(`moveFoot`, `:179-197`).
+
+- Erişimin bittiği yatay mesafe: √(L² − .47²) ≈ **.032h** (1,8 m karakterde ~6 cm).
+  Yani varsayılan adımın **büyük kısmında hedef erişilemez**.
+- Uç noktada istenen mesafe √(.47² + .175²) = .5015h → %6,5 taşma; bounce (+.02h)
+  bunu büyütür.
+- İki kemik çözücü sert kırpar: `d = min(scale, distance)` (`RigIK.cpp:446-447`).
+  Sonuç: diz kilitli düz, ayak hedefin gerisinde ve **yerden ~.029h (~5 cm) havada**;
+  topuk vuruşu ve ayak kaldırmada diz "pop" yapar, ayak kayar.
+
+★ **Sinsi taraf:** önden bakınca yürüyüş makul görünür; havada kalan ayak ve kilitli
+diz yalnızca yandan görünür. `inspectIKPose` zaten `target_error_world` raporluyor
+(`RigIK.cpp:584`), ama tarif bunu toplamıyor — ölçü aleti var, okuyan yok.
+
+**K2 ★★★ Ayak yuvarlanması (foot roll) yok.** Duruş fazında ayak düz kayar; salınımda
+yalnızca bilek etrafında en fazla ~4° eğilir (`:191`). Topuk vuruşu (parmak yukarı,
+topuk pivotu), topuk kalkışı (top/ball pivotu) ve parmak itişi (uç pivotu) yok,
+çünkü şablonda **topuk ve ayak tabanı pivotu tanımlı değil**. Robotik, düz tabanlı
+adımın sebebi bu.
+
+**K3 ★★ Gövde dönüşleri sabit eksenlerde.** Ayaklar iskeletten türetilen
+`context.forward/left` ile hareket ederken pelvis/omurga/göğüs/baş/köprücük
+dönüşleri sabit `Vec3(0,1,0)`, `(0,0,1)`, `(1,0,0)` eksenlerinde ve **ebeveyn
+uzayında** uygulanıyor (`:284, :289, :295, :301, :308`). Şablonun eklemleri
+dönüşsüz (yalnız öteleme) ve +Z'ye baktığı için şablonda tutarlı; ama yönlendirilmiş
+kemikli **import edilmiş humanoid**'de ya da başka yöne bakan rig'de eğim/yaw yanlış
+eksene gider.
+
+**K4 ★★ Diz bükülme düzlemi kırılgan.** Bacak polü dinlenimdeki bükülmeden türetilir
+(`matchIKPose`, `RigIK.cpp:322-336`). Şablonda diz yalnızca .016h önde. Oturtma
+sonrası diz düz ya da hafif arkada kalırsa `perpendicular(axis)` keyfi bir yön seçer
+→ diz yana veya geriye bükülür. Hata vermez.
+
+**K5 ★ Eklem limitleri IK'dan SONRA.** `constrainJointPose` (`:337`) çözülmüş pozu
+kırpar; hinge'de swing konisi 0 olduğu için bükülme ekseni hinge ekseninden saparsa
+ayak hedeften sessizce ayrılır. Yalnızca kullanıcının limit tanımladığı rig'lerde
+devreye girer; ölçülmedi.
+
+**Sonuç — iskelet mi?** Topoloji (pelvis, omurga, boyun, köprücük, kol, bacak,
+ayak/parmak) yaygın oyun humanoid'leriyle aynı seviyede ve yürüyüş için **yeterli**.
+İskeletin asıl eksikleri: (a) **eklem yönelim çerçevesi yok** — şablon yalnız öteleme
+yazıyor (`RigTemplates.cpp:372`), (b) **topuk/top pivotu yok**, (c) bükülme yönü
+ipucu yok, (d) twist kemiği yok. K1 iskelet değiştirilerek düzelmez; K2 ve K4
+iskelet eki olmadan düzgün çözülemez.
+
+### 11.2 Walk v2 — sıralı düzeltme (W1–W5)
+
+| Adım | İş | Neyi çözer |
+|---|---|---|
+| **W1** | Kare başına **pelvis yükseklik çözümü**: her bacak için izin verilen erişim `k·L` (k≈.97); pelvis Y = min(dinlenim, en kısıtlı bacağın izin verdiği yükseklik), bounce bunun üstüne. Ortak çözücüye **yumuşak diz** (soft IK) seçeneği — germe değil, son %3'te yumuşak yaklaşma. | K1 |
+| **W2** | Anatomide **ayak pivotları** (topuk, top, uç) — deform kemiği değil, işaret (landmark). Duruş fazı: topuk vuruşu (topuk pivotu, parmak ~15° yukarı) → düz → topuk kalkışı (top pivotu) → parmak itişi (uç pivotu). Aynı pivotlar Pose'daki ayak kontrolünün foot roll'u olur. | K2 |
+| **W3** | Bütün gövde dönüşleri **karakter çerçevesinde** (forward/left/up) tanımlanır, her kemiğin ebeveyn uzayına çevrilerek uygulanır. Sabit eksen kalmaz. | K3 |
+| **W4** | Zincir başına **bükülme ipucu** (`bend_hint`: diz ileri, dirsek geri) anatomide; pol dinlenim bükülmesinden değil bu ipucundan + karakter çerçevesinden türetilir. | K4 |
+| **W5** | Faz modeli (contact/down/passing/up), destek ayağı üzerinde kütle merkezi, ardından root motion + spline yürüme/koşma (Faz 9). | doğallık |
+
+**Kabul sayıları** (`rig.preview_human_walk` çıktısına eklenir — UI, Python, IPC aynı):
+- `max_reach_ratio` < .98 (her kare, her bacak)
+- `foot_target_error_max` < .005h
+- `ground_penetration_max` ≤ 0; duruş fazında `stance_slip_max` (ayağın doğrusal
+  kayıştan sapması) < .003h
+- döngü sınırında poz farkı ≈ 0 (mevcut kontrol korunur)
+
+★ **En sinsi sonuç:** W1'in yumuşak diz kısmı K1'i *gizleyebilir* — ayak yine
+hedefe varmaz ama diz pop'u kaybolur ve "düzeldi" sanılır. Bu yüzden
+`max_reach_ratio` ve `foot_target_error_max` **raporun zorunlu alanı**; yumuşak diz
+pelvis çözümünün yerine geçemez.
+
+### 11.3 Humanoid şablon v4
+
+1. **Eklem yönelim çerçeveleri.** Birincil eksen çocuğa doğru (kemik boyunca),
+   ikincil eksen bükülme ekseni; konumlardan + `bend_hint`'ten türetilir ve **oturtmadan
+   sonra yeniden hesaplanır**. Limitler, sürülen kontroller (parmak curl ekseni
+   şu an sabit Z varsayıyor), FK gizmosu ve klip aktarımı buna dayanır. Kural 5:
+   yerel eksenin anlamı değiştiği için anatomi sürümü artar ve eksen alanının adı
+   değişir; eski veri yeni anlamla okunmaz.
+2. **Ayak pivotları** (W2) ve **bükülme ipuçları** (W4) anatomi metadatası olur.
+3. **Twist kemikleri** (üst kol, ön kol, uyluk) isteğe bağlı detay seviyesi;
+   dönüşü kemik boyunca paylaştırır, bilek/omuz büzülmesini azaltır.
+4. `humanoid` ve `humanoid_detailed` aynı bacak/kol kodunu kopyalıyor
+   (`RigTemplates.cpp:33-62` ve `:136-253`): tek kurucu + detay seviyesi.
+   Fırsatçı temizlik — ayrı göç projesi değil.
+
+### 11.4 Hızlı ve kullanıcı dostu rig yolu (R1–R8)
+
+Hedef akış: **mesh seç → otomatik işaret (yalnız düşük güvenlileri düzelt) → bağla →
+otomatik test klibi + rapor → poz/animasyon.** Elle adım sayısı ölçülen hedeftir.
+
+| # | Öneri | Plandaki yeri |
+|---|---|---|
+| R1 | **Otomatik işaret yerleştirme + güven skoru.** Preflight simetri düzlemi, boy, uçlar (el/ayak/baş) ve darlıklardan bilek/dirsek/diz adayları üretir; viewport yalnız düşük güvenlileri vurgular. Yedek: kullanıcı 6–8 noktaya tıklar (çene, bilekler, dirsekler, dizler, kasık), gerisi şablondan. | Faz 4'ü genişletir; §5'teki "güven skoru" sözünün kodu |
+| R2 | **Hareket aralığı (ROM) test klibi + deformasyon raporu.** Bağlama sonrası her eklem limit içinde sırayla bükülür; eklem başına hacim kaybı, twist büzülmesi, iç içe geçme ve kötü bölgeler listesi döner. Ajan rig kalitesini panelsiz ölçer. | Yeni; Faz 3'ün kabul aletini genelleştirir |
+| R3 | **Geodezik voksel bağlama** (Dionne & de Lasa) birincil ağırlık yöntemi. Çok parçalı / kaynaksız (ardışık üçlü) flat SoA meshlerde ısı difüzyonundan daha sağlam. Kapsül taban kalır; çıktı en güçlü-4 sözleşmesinden geçer. Yanına ağırlık yumuşatma fırçası, ayna ağırlık, komşudan ağırlık çalma (sculpt tint yeniden kullanılır). | Faz 5'in yerine geçer |
+| R4 | **Dual quaternion skinning** seçeneği + twist kemikleri (11.3/3). Kodda DQS var mı doğrulanmadı. | Yeni |
+| R5 | **Dock aşama şeridi:** `Kurulum → Oturt → Bağla → Test → Poz/Animasyon`, her aşamada durum rozeti (bitti / **eskidi** / eksik). Bağlamadan sonra rest değişirse "eskidi" görünür. Rig Studio'nun hızlı seçim menüsü fikri panel değil **viewport sağ tık/kısayol** olarak. | §8 dock tasarımına ek |
+| R6 | Kontrol katmanı eksikleri: foot roll (=W2), COG/kök kontrolü, **poz kütüphanesi + ayna poz**, seçim setleri. Hepsi kontrol tanımı verisiyle, şablon kimliğine bakmadan. | "Viewport hand controls" sonrası sıra |
+| R7 | **Tek tık klip aktarma:** içe alınan klibi rol tabanlı eşlemeyle yeni rig'e oturt, ayak temaslarını IK ile koru. Hızlı rig'in "çalıştı" anı. | Faz 0B / 10 |
+| R8 | **`rig.auto_rig`** bileşik işlem: preflight → oturt → bağla → ROM testi → kalite raporu; ara adımlar ayrıca çağrılabilir. Sonuç kullanıcının düzelteceği normal rig verisi. | §7 öneri tablosu |
+
+**Kural 1 — beş dokunuş.** Her yeni işlem çekirdek API + IPC dispatch + Python +
+capability + descriptor overlay ile teslim edilir. Önerilen adlar (henüz yok):
+`rig.detect_landmarks`, `rig.rom_test`, `rig.auto_weights` (yöntem: `capsule` |
+`geodesic_voxel`), `rig.set_foot_pivots`, `rig.auto_rig`, `anim.retarget_clip`.
+
+### 11.5 Önerilen sıra
+
+1. **W1 + W3** (küçük; yürüyüşün en görünür hatası; mevcut şablonla çalışır)
+2. **Şablon v4 çerçeve + pivot + bend_hint** (11.3/1-2) → **W2 + W4**
+3. **R2 ROM testi** (R1 ve R3'ü ölçebilmek için önce)
+4. **R1** otomatik işaret, **R3** geodezik ağırlık
+5. **R5** aşama şeridi, **R6** kontroller, **R7** aktarma, **R8** bileşik çağrı
+6. W5 faz modeli + root motion
+
+**Temizlik — YAPILDI (2026-10-28):** Rig Studio kalıntıları söküldü: 20 dosya
+(`UI/RigStudioUI*`, `Animation/RigStudioServices|RigStudioContext`,
+`AnimationGraphComposition`, `AnimationSource`, `ImportedClipSource`,
+`MotionRecipeSource`, `SemanticTagResolver`). Hiçbiri vcxproj'da değildi ve yalnız
+birbirine bağlıydı. `RigFingerFK*` canlı (viewport kullanıyor), korundu. Bir hareket
+kaynağı soyutlaması gerekirse W5/R7 sırasında gerçek tüketicisiyle yeniden kurulur.
+
+### 11.6 W1–W4 teslimi (2026-10-28, kaynakta, derlenmedi)
+
+- **W1:** `evaluateWalk` her karede gövde pozunu örnekler, iki bacak için
+  kalça–hedef mesafesini `leg_reach × bacak boyu`na sığdıracak pelvis düşüşünü
+  bulur (`solvePelvisDrop`), düşüşü pelvis ebeveyn uzayına çevirip uygular; kol
+  hedefleri de aynı miktarda iner. Hiçbir pelvis yüksekliğinin yetmediği kare
+  `unreachable_frames` sayılır, gövde indirilmez. Yumuşak diz (soft IK) **eklenmedi** —
+  K1'i gizleyebileceği için önce ölçü.
+- **W2:** pivotlar `left/right_leg.toe` ve `.toe_tip` rollerinden; topuk bileğin
+  zemin izdüşümünün `.3 × bilek→top` gerisinde. Rol yoksa tahmin edilir ve
+  `foot_pivots_estimated=true`. Duruş: topuk rocker'ı (ilk %16, `heel_strike_deg`
+  → 0), düz taban, %60'tan sonra top etrafında `toe_off_deg`'e kadar topuk
+  kalkışı. Salınım, duruş sonu ile sonraki topuk temasını uçlarından birleştirir
+  (sıçrama yok). Pitch ekseni `forward × up`; pozitif = parmak yukarı.
+- **Ölçü:** önizleme artık klip ile **aynı** kare değerlendirmesini koşar ve
+  `metrics` döner (`max_reach_ratio`, `unreachable_frames`,
+  `foot_target_error_max/_fraction`, `ground_penetration_max`,
+  `pelvis_drop_min/max`); `kind` = `human_walk_in_place_v2`. `stance_slip_max`
+  henüz yok.
+- Yeni tarif alanları: `leg_reach` .85..1 (.97), `heel_strike_deg` 0..30 (15),
+  `toe_off_deg` 0..60 (30) — panel, Python, IPC, descriptor overlay.
+- **W3:** pelvis/omurga/göğüs/baş/köprücük dönüşleri ve gövde ötelemesi karakter
+  çerçevesinde (up, ayak→parmak forward, omuz farkı left) tanımlanır;
+  `rotateInCharacterFrame` deltayı o anki ebeveyn dünya dönüşüyle eşleştirerek
+  (`P⁻¹·D·P`) yerel uzaya taşır, ebeveyn çocuktan önce uygulanır. Şablonda sonuç
+  pratikte aynı; fark yönlendirilmiş kemikli içe alınmış rig'de.
+- **W4:** yürüyüşte diz polü her karede kalça–hedef orta noktasının
+  `bacak boyu` kadar önünde, pelvis yaw'ıyla dönen ileri yönde (`placeKneePoles`).
+  Dinlenim bükülmesine bağımlılık yürüyüşten kalktı; **Pose modundaki IK
+  kontrolleri hâlâ** `matchIKPose`'un dinlenim bükülmesini kullanır — kalıcı
+  `bend_hint` şablon v4 ile gelir.
+- Önizleme alanları: `body_frame` = `character`, `knee_pole` = `character_forward`.
+- Pivotlar henüz kalıcı/düzenlenebilir değil; şablon v4'te anatomi metadatası olur.
+  Kontrol listesi: `NEXT_BUILD_CHECKS.md` en üst bölüm.
+
+### 11.7 W1b — canlı ölçüm ve "robotik yürüyüş" kökü (2026-10-29)
+
+**İlk canlı ölçüm (2026-10-29, W1–W4 derlemesi, `humanoid_detailed`, 1,8 m, varsayılanlar):**
+`max_reach_ratio` .970, `foot_target_error` 1,9e-7 m, `unreachable_frames` 0,
+pelvis düşüşü 2,8–7,2 cm → W1 sayısal olarak PASS. **İki FAIL, ikisi de gözle görülen
+"robotik" his:** (1) basan bacakta diz bütün basma fazı boyunca **28,1°'de sabit** —
+pelvis çözümü bacağı her karede tam `leg_reach`=.97 sınırına çiviliyordu (.97 = 28°
+diz, kosinüs kuralı), bacak bükük bir değnek gibi pergel yürüyüşü yapıyordu; kalça hiç
+geriye açılmıyordu (min +5°). (2) `ground_penetration_max` 3,99 cm: topuk top
+etrafında kalkarken parmaklar bükülmediği için uç zemine giriyordu. Salınım dizi tepesi
+74°, dirsek 25–57°, ayak yuvarlanması (topuk 15°, kalkış 30°) beklendiği gibi.
+
+**W1b düzeltmesi (2026-10-29, derlenmedi):** pelvis yüksekliğini artık basan bacağın
+**diz bükülme profili** belirler: temasta ~5°, `stance_knee_deg` (18°) yükleme
+bükülmesi, topuk kalkmadan önce ~6°; bacaklar destek ağırlığıyla harmanlanır.
+`leg_reach` yalnız tavan (varsayılan .97 → **.995**), `body_bounce` bunun üstüne eklenir
+(varsayılan .02 → **.01**, çünkü dikey hareketi artık geometri üretiyor). Parmak kemiği
+topuk kalkışında ayak pitch'ine karşı bükülür, salınımın ilk üçte birinde düzelir
+(`toe_bend`); uç ölçümü parmak kemiğinden yapılır. Göğüs ve kollar pelvisi döngünün
+%5'i kadar geriden izler (`upper_body_lag`). Yeni alan `stance_knee_deg` 0..35 her
+katmanda. Ölçüm aracı: `scripts/test/rt_probe_human_walk_ipc.py` (6 eşik).
+
+**W1b canlı (2026-10-29, ikinci derleme):** prob 6/6 PASS verdi ama **yanlış**: diz
+f0–f13 boyunca 11,5°'de sabitti (= `leg_reach` .995 tavanı). Testin pencere hatası
+itiş öncesi kareleri de sayıyordu. Kök: diz profili bacak boyunu **milimetre**
+değiştiriyor (18° ile 11,5° arası ~6 mm), `body_bounce` .01h ise **1,8 cm** ekliyordu —
+zıplama pelvisi tavana itip profili eziyordu. Derlemesiz doğrulandı (IPC'den
+`body_bounce=0`, `leg_reach=.998`): diz temasta 7,3° → yükte 17,8° → itiş öncesi 7,3° →
+salınım tepesi 70°, penetration 1e-7, hata 1e-7. Aynı tabloda yeni bulgu: pelvis
+temas anında **tek karede 3–3,4 cm düşüyor** (her adımda "küt" oturma) — öndeki
+bacak tavana son anda yetişip pelvisi çekiyor.
+
+**W1c (2026-10-29, derlenmedi):** pelvis düşüşü iki geçişte: önce kare başına ham
+düşüş, sonra döngüsel **genişlet (max, r) + kutu bulanıklığı (r)**, r = döngünün
+%8'i. Sonuç hiçbir karede ham değerin altında değil → her erişim tavanı hâlâ tutar.
+Varsayılanlar: `body_bounce` **0**, `leg_reach` **.998**. Prob düzeltildi: diz değişimi
+yalnız temas→topuk kalkışı penceresinde ölçülür, yeni eşik **pelvis adımı ≤ .006h/kare**.
+
+### 11.8 Şablon v4, ilk dilim: anatomi v8 (2026-10-29)
+
+**Şablon v4 / anatomi v8 (2026-10-29, derlenmedi):** iki kalıcı anatomi alanı —
+`bend_hints` (zincir başına rig uzayında bükülme yönü) ve `foot_pivots` (bacak
+zincirinin üçüncü kemiğine, bileğe göre topuk/top/uç, bileğin dinlenim çerçevesinde).
+`IKControl.bendHint` → `matchIKPose` polü dinlenim bükülmesi yerine ipucundan kurar
+(K4 artık **Pose IK'da da** kapalı, kontroller yeniden oluşturulunca). Yürüyüş kayıtlı
+pivotları okur; kayıt yoksa aynı ortak `deriveFootPivots` ile türetir; kayıt parmaklarla
+.02h'den fazla ayrışırsa `foot_pivots_differ_from_toes` raporlanır (refit sonrası bayat
+kayıt sessiz kalmasın). Şablonlar: humanoid/detaylı → diz +Z, dirsek −Z, ayak pivotları
+(boyla ölçekli); kuş → bacak +Z. Eski rig'ler için `rig.derive_limb_hints`
+(UI düğmesi + Python + IPC): ileri yönü **ayaklardan** ölçer (bilek→parmak), sabit
+eksen yok. Panel: Rig anatomy → "Bend hints and foot pivots" (doldur / yeniden türet /
+Enter ile düzenle / sil); zincir silinince ona bağlı ipucu ve pivotlar da silinir.
+Eklem yönelim çerçeveleri bu partide **yok** — parmak curl eksenleri, limit eksenleri
+ve bind matrisleri yerel eksene bağlı; ayrı parti.
+
+Kalan v4: eklem yönelim çerçeveleri (11.3/1), twist kemikleri (11.3/3), iki humanoid
+kurucunun birleştirilmesi (11.3/4). Sonraki plan sırası: R2 ROM test klibi.
+
+### 11.9 R2 — ROM test klibi ve deformasyon raporu (2026-10-29)
+
+**R2 ROM testi (2026-10-29, derlenmedi):** yeni çekirdek `Animation/RigRomTest`
+(vcxproj'a eklendi). Her uzuv zinciri için kök swing ±60 / spread ±45 / twist ±45, orta
+eklem 110° bükülme (bükülme ipucundan **uzağa** katlanır: diz öne gider, baldır geriye),
+uç eklem twist ±60 / flex ±45; her spine/neck/head rolü flex ±30, yan ±25, twist ±35.
+Eksenler kemikten + bükülme ipucundan + ayaklardan ölçülen karakter çerçevesinden
+kurulur, sabit eksen yok; yazılmış eklem limitleri her pozu kırpar (`limited`). Deri
+CPU'da `pose · rest⁻¹` ile bind pozisyonları ve kayıtlı flat ağırlık satırlarından
+hesaplanır; her geçerli üçgen için alan oranı: < .5 **sıkışma** (çökme, şeker ambalajı),
+> 2 **gerilme**; normali baskın kemiğinin taşıyacağı yöne ters dönen üçgen **katlanma**.
+`rig.preview_rom_test` (salt okunur, her modda) satır başına hareket, kemik, açı, en
+kötü mesh/vertex/kemik ve klipteki tepe karesini verir; `rig.create_rom_clip` aynı
+hareketleri dinlenim/tepe/dinlenim anahtarlarıyla klibe yazar (tek geri alma adımı).
+Panel: Pose → Quick Motion → "Range of motion test" (kontrol / klip üret / en kötü 10
+tablosu). Yürüyüşün klip yayınlama gövdesi ortak `publishAuthoredClip`'e taşındı.
+Ölçüm aracı: `scripts/test/rt_probe_rig_rom_ipc.py`.
+
+**Gizmo düzeltmesi (2026-10-29, derlenmedi):** kemik/rig gizmosu fare bir panelin
+üstüne geçince **kayboluyordu** — `RigViewportUI` panel hover'ında çizmeden dönüyordu.
+Artık IK gizmosu gibi: her zaman çizilir, panel fareyi tuttuğunda yalnız sürükleme
+başlatılamaz.
+
+Sınırlar: hacim değil üçgen alanı ölçülür (açık mesh'te hacim tanımsız); iç içe geçme
+(kendi kendine kesişme) yok; DQS ve twist kemiği (R4) yok — şeker ambalajı bugün
+yalnızca **teşhis** edilir. Sonraki plan sırası: R1 otomatik işaret + R3 geodezik
+ağırlık; ikisi de bu raporla ölçülecek.
+
+### 11.10 R1 otomatik işaret + R3 geodezik voksel ağırlık (2026-10-29)
+
+**R1 otomatik işaret (2026-10-29, derlenmedi):** `Animation/RigAutoLandmarks`,
+`rig.auto_landmarks` (salt okunur) + Python + Alignment penceresinde **"Auto place"**.
+`get_fit_setup` ile aynı uzay ve biçim → doğrudan `preview_fit` / `commit_fit`'e girer.
+Şablonun sınır kutusuna ölçeklenmiş halinden başlar. Humanoid: baş tepesi en yüksek
+noktalardan, ayak ucu/top/bilek her taraftaki en alçak banttan, el ucu kalçanın
+üstündeki en yanal noktadan (T ve A poz), dirsek/bilek omuz→el çizgisinde, diz kalça→
+bilek çizgisinde; her eklem kendi kesitinin ortasına çekilir ve kesit yoğunluğu + ne
+kadar kaydığıyla puanlanır. Parmaklar tespit edilen kol yönüne ve uzunluğuna taşınır,
+bilerek .45 (eşiğin altı) — eller hep bir bakış ister. Diğer aileler: her eklem ebeveyn
+kemiğine dik kesitte ortalanır. Mesh −Z'ye bakıyorsa (`forward_check`) tüm güvenler
+.3'e kırpılır. Panelde düşük güvenliler **amber**; elle taşınan eklem listeden düşer.
+
+**R3 geodezik voksel ağırlık (2026-10-29, derlenmedi):** `Animation/RigGeodesicWeights`
+(Dionne & de Lasa 2013). Bağlı mesh'ler bind pozisyonlarında birlikte vokselleşir
+(çözünürlük 32..256, varsayılan 96): üçgenler yüzey, dış kenardan taşma doldurma = dışarı,
+kalan = iç. Her deforme eden kemik (envelope ile aynı segmentler, root hariç) yalnız
+**katı** vokseller içinde 26 komşulu Dijkstra ile mesafe büyütür (boyun yarısına kadar);
+vertex en yakın 4 kemiği tutar, ağırlık = max(d, ½ voksel)^-falloff, sonra ortak en
+güçlü-4 sözleşmesi. Açık mesh taşar → yalnız yüzey kabuğu mesafe taşır
+(`closed_volume` false), yine kullanılır. `rig.preview_geodesic_weights` (salt okunur) /
+`rig.apply_geodesic_weights` (envelope ile **aynı** ağır geri alma komutu; algoritma
+`geodesic_voxel_v1` projeye yazılır, yükleyici kabul eder; envelope yarıçapları ve
+profiller korunur). Panel: Skin binding → envelope bölümünün altında "Geodesic voxel
+weights". Ölçüm aracı: `scripts/test/rt_probe_rig_auto_ipc.py [--apply]`.
+
+Sınırlar: R1 eksen onayını kaldırmaz (fit hâlâ +Y yukarı / +Z ileri varsayar), dirsek ve
+diz bükülmüş pozda düz çizgi tahmini zayıflar (kesit ortalaması kısmen düzeltir), dört
+ayaklı/böcek için yalnız kesit ortalaması var. R3 UI iş parçacığında koşar; ağırlık
+yumuşatma fırçası, ayna ağırlık ve komşudan çalma (§11.4 R3 eki) yazılmadı. Sonraki
+plan sırası: R5 aşama şeridi, R6 kontroller, R7 klip aktarma, R8 `rig.auto_rig`.
+
+★ **Ders:** §11.2'deki "en sinsi sonuç" uyarısı tersinden doğrulandı. W1 metrikleri
+kusursuzdu (erişim .970, hata 1e-7) ve tam da bu yüzden yanlıştı: tavana sürekli
+yapışan bir oran, sınırın **kısıt olarak değil hedef olarak** kullanıldığını gösterir.
+Bir kabul eşiği "≤" diye yazıldığında, değerin eşiğe **yapışık** durması ayrı bir
+FAIL'dir. Ölçüm aracı bu yüzden diz açısının **değişimini** de istiyor.

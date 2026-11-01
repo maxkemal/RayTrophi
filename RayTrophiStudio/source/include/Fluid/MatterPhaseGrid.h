@@ -9,7 +9,7 @@ namespace RayTrophiSim::Fluid {
 // The liquid solver temporarily owns state.grid. Consumers must select by
 // phase identity rather than assume the gas or liquid is in a fixed slot.
 inline bool liquidUsesSecondaryGrid(const SimulationGridDomainState& state) {
-    return state.type == SimulationDomainType::Matter && !state.matter_liquid_active;
+    return simulationDomainHasBothPhases(state) && !state.matter_liquid_active;
 }
 
 inline FluidSim::FluidGrid& liquidGrid(SimulationGridDomainState& state) {
@@ -32,7 +32,7 @@ inline const FluidSim::FluidGrid& gasGrid(const SimulationGridDomainState& state
 
 inline void translatePhaseGrids(SimulationGridDomainState& state, const Vec3& delta) {
     state.grid.origin += delta;
-    if (state.type == SimulationDomainType::Matter) {
+    if (simulationDomainHasBothPhases(state)) {
         state.matter_liquid_grid.origin += delta;
     }
 }
@@ -81,7 +81,7 @@ public:
           bounds_min_(state.bounds_min), bounds_max_(state.bounds_max),
           nx_(state.resolution_x), ny_(state.resolution_y), nz_(state.resolution_z),
           voxel_size_(state.voxel_size) {
-        if (state.type != SimulationDomainType::Matter || state.matter_liquid_active) {
+        if (!simulationDomainHasBothPhases(state) || state.matter_liquid_active) {
             return;
         }
         std::swap(state.grid, state.matter_liquid_grid);

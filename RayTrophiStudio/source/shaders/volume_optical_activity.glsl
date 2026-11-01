@@ -1,5 +1,6 @@
 #ifndef VOLUME_OPTICAL_ACTIVITY_GLSL
 #define VOLUME_OPTICAL_ACTIVITY_GLSL
+#include "../include/VolumeEmissionTransport.h"
 
 // Metadata-only proof shared by intersection and overlap membership. Never
 // disable a slot: the same domain may publish an independent SurfaceSDF or
@@ -11,9 +12,10 @@ bool volumeOpticallyInert(VkVolumeInstance v) {
     // an unresolved binding conservatively; the intersection stage has no
     // material-program descriptors. Also retain non-finite metadata.
     if (!(v._reserved[1] <= 0.5)) return false;
-    // All current non-graph emission responses are zero at zero density.
+    // Independent j remains supported by the source field when smoke M is zero.
     // Exact zero only: weak media must retain their authored optical depth.
-    if (v.density_multiplier == 0.0) return true;
+    if (v.density_multiplier == 0.0 &&
+        !(volumeEmissionIndependent(v._retired_cloud[0]) && v.emission_mode != 0)) return true;
     // Do not assume emission is coupled to extinction. Preserve an emitting
     // medium even if the ordinary extinction coefficients are both zero.
     return v.scatter_coefficient == 0.0 && v.absorption_coefficient == 0.0 &&

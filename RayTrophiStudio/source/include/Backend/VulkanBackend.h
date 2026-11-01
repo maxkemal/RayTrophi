@@ -595,6 +595,7 @@ public:
 
     // ── VRAM accounting (see VramCategory) ──
     VramAllocationReport vramAllocationReport() const;
+    int bufferDeviceLocal(const BufferHandle& buffer) const;
     // Call right after a successful vkAllocateMemory on this device.
     void noteMemoryAllocated(VkDeviceMemory memory, uint64_t bytes, uint32_t memoryTypeIndex,
                              VramCategory category);
@@ -811,10 +812,11 @@ public:
     /// Returns the SBT hit-region offset for hair instances.
     /// 1 if no volume shaders loaded, 2 if volume shaders present.
     uint32_t getHairSbtOffset() const { return m_hasVolumeShaders ? 2u : 1u; }
+    uint32_t getVolumeRoutedSbtOffset(uint32_t mask, uint32_t original) const;
 
     /// Returns the SBT hit-region offset for foam point-sphere instances.
     /// Hit region order: triangle(0), [volume], [hair], [sphere] — sphere is
-    /// always last, so its offset is 1 + the optional groups before it.
+    /// before the optional appended SurfaceSDF group; its existing offset stays stable.
     uint32_t getSphereSbtOffset() const {
         return 1u + (m_hasVolumeShaders ? 1u : 0u) + (m_hasHairShaders ? 1u : 0u);
     }
@@ -951,6 +953,7 @@ public:
     struct RTPipelineShaderSet {
         std::vector<std::uint32_t> raygen, miss, closestHit, anyHit;
         std::vector<std::uint32_t> volumeClosestHit, volumeIntersection;
+        std::vector<std::uint32_t> volumeSurfaceClosestHit;
         std::vector<std::uint32_t> hairClosestHit, hairIntersection, hairAnyHit;
         std::vector<std::uint32_t> shadowMiss;
         // The sphere hit group reuses closestHit (gl_HitKindEXT tells them apart).
@@ -1313,6 +1316,7 @@ public:
     bool m_rtPipelineReady = false;
     std::unique_ptr<VulkanRayGpuTiming> m_rayGpuTiming;
     bool m_hasVolumeShaders = false; // Whether pipeline includes volume procedural hit group
+    bool m_hasSurfaceVolumeShader = false;
     bool m_hasHairShaders = false; // Whether pipeline includes hair procedural hit group
     bool m_hasSphereShaders = false; // Whether pipeline includes foam point-sphere procedural hit group
     bool m_hasShadowMiss = false; // Whether a shadow miss shader is at miss index 1
@@ -1917,7 +1921,8 @@ void setVolumeLightCacheMaxCells(int maxCells);
 //   secondary_max_steps  step budget off the camera segment (0 = authored)
 //   secondary_radiance_cache  bounce rays cross the box on the radiance cache
 //                        (cell-sized lookups) instead of the full march (§13)
-// 1 / 1 / 1 / 0 without the radiance cache reproduces the march before this
+//   camera_max_steps     step budget on the camera segment (0 = authored)
+// 1 / 1 / 1 / 0 / 0 without the radiance cache reproduces the march before this
 // setting existed.
 struct VolumeMarchLod {
     // 1 since the 2026-10-25 A/B: a camera stride of 2 bought nothing on the
@@ -1930,12 +1935,16 @@ struct VolumeMarchLod {
     int secondary_step_scale = 2;
     int secondary_max_steps = 128;
     bool secondary_radiance_cache = true;
+    // 64 since the 2026-11-01 nuclear-scene A/B: at M=3 it costs 120 ms against
+    // 230 at the authored 121, with +1% mean cap luminance. 32 drifts +7..+26%.
+    // RayFusion has no temporal jitter and keeps the authored budget.
+    int camera_max_steps = 64;
 };
 VolumeMarchLod volumeMarchLod();
 void setVolumeMarchLod(const VolumeMarchLod& lod);
 // bits 0-3 camera stride-1, 4-7 secondary stride-1, 8-11 step scale-1,
-// 12-20 secondary max steps (0 = no cap), 21 secondary radiance cache.
-// Mirrors volume_closesthit.rchit.
+// 12-20 secondary max steps (0 = no cap), 21 secondary radiance cache,
+// 22-30 camera max steps (0 = no cap). Mirrors volume_closesthit.rchit.
 uint32_t packVolumeMarchLod(const VolumeMarchLod& lod);
 
 // Maximum number of texture descriptor slots available to shaders.
@@ -2451,6 +2460,8 @@ public:
         int  volume_type = -1;
         bool has_density = false;    // vdb_grid_address != 0
         bool has_temperature = false;// vdb_temp_address != 0 (SDF: foam rides this)
+        int density_device_local = -1; // -1 unknown, 0 host heap, 1 device-local heap
+        int temperature_device_local = -1;
         int emission_mode = 0;
         bool color_ramp_enabled = false;
         float blackbody_intensity = 0.0f;
@@ -3102,6 +3113,8 @@ protected:
     bool shouldUseInteractiveViewport() const;
     // RT pipeline build hand-over (VulkanRTPipelineBuild.cpp compiles on a worker).
     void onRTPipelineInstalled();
+    void refreshVolumeStageRouting();
+    bool refreshVolumeStageMask(std::size_t instanceIndex);
     bool drawRasterWhileRTPipelineUnavailable(void* s, int width, int height, void* fb, void* tex);
     void leaveRTPipelineRasterFallback();
     bool ensureInteractiveViewportResources(const std::string& shaderDir, int width, int height);
@@ -3901,9 +3914,11 @@ private:
     std::unordered_map<int, VulkanRT::BufferHandle> m_vdbBuffers;
     // NanoVDB temperature grid device buffers mapped by vdb_id (fire/blackbody)
     std::unordered_map<int, VulkanRT::BufferHandle> m_vdbTempBuffers;
+    std::unordered_map<int, VulkanRT::BufferHandle> m_vdbFlameBuffers;
     // Mapped content versions for NanoVDB grids to prevent redundant CPU-to-GPU kopyalama
     std::unordered_map<int, uint32_t> m_vdbUploadedVersions;
     std::unordered_map<int, uint32_t> m_vdbTempUploadedVersions;
+    std::unordered_map<int, uint32_t> m_vdbFlameUploadedVersions;
     // Material-coordinate (UVW) field device buffers, mapped by vdb_id, plus the
     // producer version last uploaded. Same lifecycle as the NanoVDB buffers
     // above and torn down with them — a device buffer that outlives its vdb_id

@@ -8,6 +8,8 @@
  */
 
 #include "Fluid/APICFluidSolver.h"
+#include "Fluid/FluidLiquidAdvection.h"
+#include "Fluid/FluidDensityProjection.h"
 #include "Atmosphere/AtmosphereClimate.h"
 #include "Fluid/FluidParticleSeedPattern.h"
 #include "Fluid/FluidParticleRedistribution.h"
@@ -901,13 +903,14 @@ static void gridToParticle(FluidParticles& parts,
 //
 // Reference: Bridson "Fluid Simulation for Computer Graphics", ch. 5
 // (variational pressure solve, simplified for uniform-density water).
-static size_t projectPressureFreeSurface(const FluidParticles& parts,
+size_t projectPressureFreeSurface(const FluidParticles& parts,
                                          FluidSim::FluidGrid& grid,
                                          const APICSolverParams& params,
                                          float dt,
                                          size_t& out_sealed_pockets,
                                          size_t& out_sealed_cells,
-                                         size_t& out_interior_cells) {
+                                         size_t& out_interior_cells,
+                                         APICSolverStats& pressure_stats) {
     out_sealed_pockets = 0;
     out_sealed_cells = 0;
     out_interior_cells = 0;
@@ -1564,7 +1567,10 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
         }
     }
 
+    const float initial_r_inf = r_inf;
+    pressure_stats.pressure_cg_max_iterations = max_iterations;
     const float abs_tol = 1e-6f;
+    pressure_stats.pressure_cg_final_relative_residual = r_inf > abs_tol ? 1.0 : 0.0;
     if (r_inf <= abs_tol) {
         // Already divergence-free (e.g. fresh seed before any forces). Skip
         // straight to gradient subtraction — pressure remains zero.
@@ -1739,6 +1745,9 @@ static size_t projectPressureFreeSurface(const FluidParticles& parts,
                 r[c] -= alpha * As[c];
                 new_r_inf = std::max(new_r_inf, std::abs(r[c]));
             }
+            pressure_stats.pressure_cg_iterations = iter_used;
+            pressure_stats.pressure_cg_final_relative_residual =
+                initial_r_inf > 0.0f ? new_r_inf / initial_r_inf : 0.0;
             if (new_r_inf <= tolerance) break;
 
             applyPreconditioner();
@@ -2289,6 +2298,7 @@ static int advectParticles(FluidParticles& parts,
     // wall. Bit 1 of `flags` marks a particle as having flowed out.
     const APICSolverParams::BoundaryMode boundary = params.boundary;
     const Vec3 span = gmax - gmin;
+    const LiquidAdvectionSupport liquid_support(parts, grid, !params.granular_enabled);
     constexpr uint32_t FLAG_OUTFLOW = 1u << 1;
 
     for (int s = 0; s < substeps; ++s) {
@@ -2325,18 +2335,12 @@ static int advectParticles(FluidParticles& parts,
                 // merely about how each one is computed.
                 pn = p0 + parts.velocity[pi] * sub_dt;
             } else {
-                // RK2 midpoint using grid velocity (more stable than forward Euler
-                // for free-surface flow, negligible cost on CPU).
-                Vec3 g0 = (p0 - grid.origin) * invH;
-                Vec3 v0(sampleMACComponent(grid, 0, g0),
-                        sampleMACComponent(grid, 1, g0),
-                        sampleMACComponent(grid, 2, g0));
-                Vec3 pmid = p0 + v0 * (0.5f * sub_dt);
-                Vec3 gm   = (pmid - grid.origin) * invH;
-                Vec3 vm(sampleMACComponent(grid, 0, gm),
-                        sampleMACComponent(grid, 1, gm),
-                        sampleMACComponent(grid, 2, gm));
-                pn = p0 + vm * sub_dt;
+                pn = liquid_support.midpoint(p0, parts.velocity[pi], sub_dt,
+                    [&](const Vec3& point) {
+                        return Vec3(sampleMACComponent(grid, 0, point),
+                                    sampleMACComponent(grid, 1, point),
+                                    sampleMACComponent(grid, 2, point));
+                    });
             }
 
             // ── Interior solid collision ─────────────────────────────────────

@@ -61,7 +61,7 @@ def main():
     client = RtIpc()
     try:
         info = client.call("fluid.get", domain=args.domain)
-        assert info["type"] == "fluid", "select a liquid domain, not a gas domain"
+        assert bool(set(info.get("phases", [])) & {"liquid", "granular"}), "select a liquid domain, not a gas domain"
         report = check_report(info, not args.allow_unclassified)
         listed = client.call("fluid.list_domains")["domains"]
         matches = [item for item in listed if item["name"] == info["name"]]

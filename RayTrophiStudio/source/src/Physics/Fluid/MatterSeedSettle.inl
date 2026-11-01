@@ -145,7 +145,7 @@ void ParticleSimulationSystem::settleGridDomains(const SimulationContext& contex
         auto& state = grid_domain_states_[i];
         if (!state.settle_stats.pending) continue;
         if (!state.valid || state.particles.empty() ||
-            !simulationDomainHasLiquid(state.type)) {
+            !simulationDomainHasLiquid(state)) {
             state.settle_stats.pending = false;
             continue;
         }

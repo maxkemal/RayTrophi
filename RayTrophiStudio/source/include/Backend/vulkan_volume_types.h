@@ -136,9 +136,7 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // smoke above it — both are hot — so without this the fire core has no
     // distinct emission. 0 when the domain publishes no flame grid.
     uint64_t flame_address;
-    // Emitting-block list for volume emission NEE: [0] = count, [1..] = block
-    // indices into the majorant grid. Lets a scatter sample aim straight at the
-    // fire instead of waiting for a random bounce to land in it.
+    // Retired emitting-block NEE list. Kept zero to preserve the shared ABI.
     uint64_t emissive_list_address;
     float    emissive_capacity;   // entries the list can hold (0 = unavailable)
     // SDF isosurface material: 1-based MaterialManager id, 0 = none. Claimed from
@@ -148,9 +146,10 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     float    iso_material_index;
     // SDF isosurface, FULLY CLAIMED: [0]=pore amount, [1]=world units per pore
     // cell, [2]=pore size variation, [3]=coordinate space
-    // (0=Material, 1=Domain, 2=World). No headroom left in this block — the
-    // next field that needs a home grows the struct, which is the five-file
-    // edit described below.
+    // (0=Material, 1=Domain, 2=World). Any other source_type never reads those:
+    // [0]=soot burnout strength, [1]=start, [2]=end, [3]=temperature gamma. No headroom left in this
+    // block — the next field that needs a home grows the struct, which is the
+    // five-file edit described below.
     float    _accel_reserved[4];
 
     // ── Material coordinate (UVW) RESIDUAL grid ─────────────────────────────
@@ -222,14 +221,17 @@ struct VK_VOL_ALIGN(16) VkVolumeInstance {
     // and a stride disagreement here does not fail — it shifts every volume
     // after the first and reads the neighbour's fields as this one's.
     float    _uvw_pad[1];
-    // Appended at byte 624; total record stride is now 672 bytes.
-    // [0..8] density curve, [9] RT mixture adaptive policy, [10..11] reserved.
+    // Appended at byte 624. [10] = temperature units, [11] = flame boost. The
+    // full stride is 688 including the emission-mask tail.
+    // [0..8] density curve, [9] adaptive policy, [10..11] the policies above.
     float density_curve[12];
+    // Appended at byte 672: enabled, center, width, strength. No voxel allocation.
+    float emission_mask[4];
 };
 
-// Compile-time size check (672 bytes). Growing this is a five-file edit — see
+// Compile-time size check (688 bytes). Growing this is a five-file edit — see
 // the UVW block above for the list and the reason.
-static_assert(sizeof(VkVolumeInstance) == 672, "VkVolumeInstance must be 672 bytes");
+static_assert(sizeof(VkVolumeInstance) == 688, "VkVolumeInstance must be 688 bytes");
 
 /**
  * @struct VkVolumeParams

@@ -4,9 +4,11 @@
 // Sampling and graph evaluation are shared by camera and shadow consumers.
 // Graphs still run on zero input density and can create extinction there.
 bool mfSampleMaterial(uint index, vec3 position, vec3 direction, bool includeEmission,
-    out MfOpticalResponse response, out float density, out float temperature) {
+    out MfOpticalResponse response, out float density, out float temperature,
+    out float emissionDensity) {
     response = mfReadOpticalResponse(index);
     density = 0.0;
+    emissionDensity = 0.0;
     temperature = 0.0;
     if (!gasOverlapCandidate(volumes.v[index])) {
         return false;
@@ -22,13 +24,19 @@ bool mfSampleMaterial(uint index, vec3 position, vec3 direction, bool includeEmi
     if (!cameraFast && !shadowFast && !mfContains(volumes.v[index], position)) {
         return false;
     }
-    density = mfDensity(index, position, cameraFast);
+    if (includeEmission && program == MATPROG_NONE &&
+        volumeEmissionIndependent(volumes.v[index]._retired_cloud[0])) {
+        density = mfDensityChannels(index, position, cameraFast, emissionDensity);
+    } else {
+        density = mfDensity(index, position, cameraFast);
+        emissionDensity = density;
+    }
     if (mfInShadow) {
         mfShadowSamples++;
     } else {
         mfSamples++;
     }
-    if (density <= 0.0 && program == MATPROG_NONE) {
+    if (density <= 0.0 && emissionDensity <= 0.0 && program == MATPROG_NONE) {
         return false;
     }
     // A shadow graph can read temperature even though it does not emit light.
@@ -60,6 +68,7 @@ bool mfSampleMaterial(uint index, vec3 position, vec3 direction, bool includeEmi
         max(volumes.v[index].voxel_size, 1e-6), normalized, cam.waterTime);
     if ((material.volumeWritten & 1u) != 0u) {
         density = max(material.volumeDensity, 0.0);
+        emissionDensity = density;
     }
     if ((material.volumeWritten & 2u) != 0u) {
         response.scatterColor = material.volumeScatterColor;
@@ -90,18 +99,19 @@ bool mfSampleMaterial(uint index, vec3 position, vec3 direction, bool includeEmi
 
 MfTerms mfEvaluate(uint index, vec3 position, vec3 direction, bool includeEmission) {
     MfOpticalResponse response;
-    float density, temperature;
+    float density, temperature, emissionDensity;
     if (!mfSampleMaterial(index, position, direction, includeEmission,
-            response, density, temperature)) {
+            response, density, temperature, emissionDensity)) {
         return MfTerms(vec3(0.0), vec3(0.0), vec3(0.0), 0.0, 0.0, 0.0, 0.0);
     }
-    return mfOpticalTerms(index, response, position, density, temperature, includeEmission);
+    return mfOpticalTerms(index, response, position, density, emissionDensity,
+        temperature, includeEmission);
 }
 
 vec3 mfShadowExtinction(uint index, vec3 position, vec3 direction) {
     MfOpticalResponse response;
-    float density, temperature;
-    if (!mfSampleMaterial(index, position, direction, false, response, density, temperature)) {
+    float density, temperature, emissionDensity;
+    if (!mfSampleMaterial(index, position, direction, false, response, density, temperature, emissionDensity)) {
         return vec3(0.0);
     }
     // No edge from this consumer to emission/ramp/blackbody evaluation.

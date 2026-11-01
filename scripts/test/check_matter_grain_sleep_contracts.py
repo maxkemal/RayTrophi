@@ -81,7 +81,14 @@ def check_source():
     # No added GPU storage/dispatch or changed push/descriptor ABI.
     assert len(re.findall(r'binding\s*=\s*(\d+)', shader)) == 17
     assert 'static_assert(sizeof(Constants) == 128);' in host
-    assert '5 * capacity * sizeof(uint32_t)' in host
+    # Map + owner + four occupancy words + rest + skipped-time word.
+    assert '8 * capacity * sizeof(uint32_t)' in host
+    assert 'uint(history_blocks.length()) / 8u < pc.substep.y' in shader
+    assert shader.index('uint(history_blocks.length()) / 8u') < shader.index(
+        'uint entry = history_blocks[i];')
+    assert 'uint ownerWord() { return pc.substep.y+7u*g_block; }' in shader
+    assert 'uint rest_word = ownerWord()+5u;' in shader
+    assert 'uint elapsed_word = ownerWord()+6u;' in shader
 
 
 def check_physical_specification():

@@ -1,4 +1,4 @@
-﻿# Simulation node graph â€” Faz N7, render binding.
+# Simulation node graph â€” Faz N7, render binding.
 #
 # WHAT THIS PINS DOWN
 # -------------------
@@ -38,8 +38,8 @@ def vacuous(label, reason):
 
 
 domains = rt.fluid.list_domains()
-gases = [d["name"] for d in domains if d.get("type") == "gas"]
-fluids = [d["name"] for d in domains if d.get("type") == "fluid"]
+gases = [d["name"] for d in domains if "gas" in d.get("phases", [])]
+fluids = [d["name"] for d in domains if bool(set(d.get("phases", [])) & {"liquid", "granular"})]
 log("gas domains: %s   fluid domains: %s" % (gases, fluids))
 
 if not gases:

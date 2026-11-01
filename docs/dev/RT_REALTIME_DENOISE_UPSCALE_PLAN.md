@@ -1,6 +1,50 @@
 # Vulkan RT + RayFusion: hareket halinde hız — denoise, temporal, upscale planı
 
-> **Durum:** AKTİF — 2026-10-27. B1–B4b CANLI (B4b: kullanıcı duruş birikimi "çok kaliteli"; canlı IPC: hareket 20/20 FSR active, input svgf). **B4c yazıldı, DERLENMEDİ** (yalnız C++): sahne animasyonu SVGF/FSR için hareket.
+## SVGF kalite eki — ilk à-trous geçmişi (2026-10-27)
+
+YAZILDI, DERLENMEDİ: hareket karelerinde ilk à-trous geçişinin rengi mevcut
+`nextColor` tamponuna yazılır. Önceden burada yalnız temporal renk saklanıyordu.
+Amaç sonraki kareye daha temiz renk taşımak; kalite artışı henüz ölçülmedi.
+Son geniş geçişler yalnız görüntüye gider. Temporal momentler/history length,
+reprojection doğrulaması, reactive bypass ve ham birikim değiştirilmedi.
+Yeni flag 32 yalnız moving/forceMoving'de açılır; durağan ve OIDN warm-bridge
+karelerinde kapalıdır, donmuş geçmiş yeniden filtrelenmez. ABI boyutu, descriptor
+sayısı, tamponlar ve dispatch sayısı aynı. İlk geçişte piksel başına bir ek history
+okuması/yazması yapılır; mevcut compute bariyeri sonraki geçişe görünür kılar.
+UI/Python/IPC aynı SVGF çekirdeğini kullanır; yeni ayar veya ayrı işlem eklenmedi.
+Kabul listesi: `NEXT_BUILD_CHECKS.md` en üstte. İlk test FSR kapalı, sonra açık.
+
+Bu SVGF uygulaması proje içi Vulkan compute kodudur; NVIDIA runtime/SDK çağırmaz.
+SVGF araştırması: https://research.nvidia.com/labs/rtr/publication/schied2017spatiotemporal/
+Marka bazında canlı kabul ayrı doğrulanmalıdır; algoritma NVIDIA donanımına bağlı değildir.
+
+> **Durum:** AKTİF — 2026-10-27. B1–B4c CANLI ve `e44153d9` ile pushlandı (kullanıcı: son kare temiz, akışkanlar FSR'da hayaletsiz). **B4d yazıldı, DERLENMEDİ**: lens distortion için hız vektörü tersi + FSR distortion kapısı kaldırıldı.
+
+## DEVİR NOTU — B4d (2026-10-27)
+
+**ÖNCE:** `NEXT_BUILD_CHECKS.md` en üstündeki B4d listesi. `raygen.rgen` + C++.
+Distortion raygen'de birincil ışının uv'sine uygulanıyor (c·(1+k|c|²)), ama hız
+vektörleri `motionProject` ile pinhole izdüşümünden geliyordu → kenarlara doğru
+yanlış, bu yüzden FSR distortion açıkken kapalıydı. Yeni `motionLensPx`:
+pinhole pikselini Newton (4 adım) ile distortion'ın tersinden geçirir; iki uç
+da güncel k ile; harita katlanırsa (1+3kr² ≤ 0) vektör geçersiz → reddedilir.
+SVGF geçmiş araması da aynı pikselleri kullandığı için distortion'lı sahnede
+SVGF de daha uzun geçmiş kazanmalı. CA kapısı KALDI (kanal başına rastgele
+kayma). Shake kapısı doğrulanmadı, Sonra listesinde.
+glslc sözdizimi (çıktısız) temiz.
+
+**Aynı parti — gizli distortion:** kullanıcı "panelde distortion yok ama FSR
+kapanıyor" dedi. Kod araştırması: model 3 RT yolunda doğru (RayFusion
+uygulamıyor); canlı panel yoktu, değer projede saklanıyordu ve iki çelişen
+otomatik formül vardı. Proje anahtarı `lens_distortion`'a taşındı (eski okunmaz:
+kayıtlı projeler açılmadan sıfırlanmış olur), `Camera.cpp` formülü söküldü,
+panel + IPC `camera.set_lens_distortion` eklendi. Kontrol 6–8.
+
+**B4c sonrası canlı (bu oturum, derlendi):** skin sahnesi ortalama geçmiş
+23.7 (önce 1.0); SVGF 10.5 ms tam çözünürlük (merkez okuma düzenlemesi à-trous'ta
+yalnız %4: sürücü zaten birleştiriyordu); SVGF açık/kapalı 50/64 trace/s.
+SVGF'yi ucuzlatma (uzun geçmişte daha az à-trous, paketli G-buffer) kullanıcı
+kararıyla ERTELENDİ.
 
 ## DEVİR NOTU — B4c (2026-10-27)
 
@@ -58,7 +102,7 @@ açıkken de kapatılamaz (eskiden yalnız SVGF kuralıyla dolaylı korunuyordu)
 Gelecek sağlayıcı (kare başı OIDN vb.) aynı guard altında raw'a compose eder
 ve `m_upscaleInput`'u yazar; OIDN'in Vulkan↔OIDN harici bellek köprüsü YOK.
 
-**Sonra:** filtreli geçmiş geri beslemesi (Schied); iç mekan varyans azaltma;
+**Sonra:** filtreli geçmiş geri beslemesinin canlı kabulü; iç mekan varyans azaltma;
 RayFusion için FSR (TAA'nın yerine; raster derinlik girdisi, matriste jitter,
 overlay sırası) — ayrı plan bölümü.
 
@@ -128,7 +172,7 @@ DLL file version 1.0.1.41314, FSR provider sürümü değildir; provider API'den
   Context ilk uygun hareket karesinde tembel kurulur; duran karede ilk sorgunun
   available=false olması tek başına donanım uyumsuzluğu değildir.
 - Yalnız görünür Vulkan Rendered + standart perspektif/lens + SVGF + motion AOV.
-  Final/debug/ortho/distortion/CA/shake/raster tam çözünürlük; bunların son moving
+  Final/debug/ortho/CA/shake/raster tam çözünürlük (distortion B4d'de desteklendi); bunların son moving
   frame'inden kalan active bayrağı raster paneline taşınmaz. SDK kapısı mantıksal
   storage-image özellikleri, Vulkan >=1.2, formatlar ve context sonucuna bakar.
 - Kapasite full display'dir; RT/SVGF aktif düşük dikdörtgende, FSR/tonemap/readback

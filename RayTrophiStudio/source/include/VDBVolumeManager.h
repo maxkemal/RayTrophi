@@ -104,6 +104,7 @@ struct VDBVolumeData {
     void* internal_openvdb_temperature = nullptr; // openvdb::FloatGrid::Ptr (Temperature)
     
     void* internal_nano_handle = nullptr;         // nanovdb::GridHandle (Density)
+    void* internal_nano_flame_handle = nullptr;       // nanovdb::GridHandle (live reaction field)
     void* internal_nano_temperature_handle = nullptr; // nanovdb::GridHandle (Temperature)
 };
 
@@ -143,7 +144,7 @@ public:
     // Update existing volume data (for animation sequences)
     bool updateVolume(int volume_id, const std::string& filepath, void* stream = nullptr);
 
-    int registerOrUpdateLiveVolume(int existing_id, const std::string& name, int res_x, int res_y, int res_z, float voxel_size, const float* density_ptr, const float* temp_ptr, void* stream = nullptr);
+    int registerOrUpdateLiveVolume(int existing_id, const std::string& name, int res_x, int res_y, int res_z, float voxel_size, const float* density_ptr, const float* temp_ptr, void* stream = nullptr, const float* flame_ptr = nullptr);
 
     // Write a dense float simulation grid to a .vdb file. Any channel pointer may
     // be null to omit that grid. Used to export grid-domain gas/fire.
@@ -169,6 +170,8 @@ public:
     size_t getHostGridSize(int volume_id) const;
     void* getHostTemperatureGrid(int volume_id) const;
     size_t getHostTemperatureGridSize(int volume_id) const;
+    void* getHostFlameGrid(int volume_id) const;
+    size_t getHostFlameGridSize(int volume_id) const;
     uint32_t getContentVersion(int volume_id) const;
     // Keeps NanoVDB host handles alive while a backend uploads or analyzes
     // them. Sequence replacement uses the same mutex.

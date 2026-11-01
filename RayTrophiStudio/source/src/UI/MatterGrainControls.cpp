@@ -366,6 +366,21 @@ void drawMatterGrainReport(const SimulationGridDomainDesc& domain,
     const auto& r = state->fluid_stats.grain_report;
     ImGui::Text("DEM: %d substeps (%.2e s), limited by %s", r.substeps, r.substep_dt,
         r.limit.c_str());
+    if (r.cfl.measured) {
+        // What set the substep (grain_diagnostics.cfl_terms over IPC).
+        ImGui::Text("Stiffest spring: %s %.0f N/m, %u contacts assumed",
+            r.cfl.effective_source.c_str(), r.cfl.effective_stiffness_n_m,
+            r.cfl.contacts_assumed);
+        if (r.cfl.stiffness_scale < 1.0f) {
+            ImGui::TextWrapped("Contact springs softened x%.2f this frame to fit the substep "
+                "limit (%u asked for %.0f).", r.cfl.stiffness_scale, r.cfl.max_substeps,
+                r.cfl.requested_substeps);
+        }
+    }
+    if (r.common_clock && r.dem_substeps_per_continuum > 0) {
+        ImGui::Text("Shared clock: %u continuum substeps x %u DEM substeps",
+            r.common_continuum_substeps, r.dem_substeps_per_continuum);
+    }
     ImGui::Text("Grains %zu, liquid parcels %zu, MPM parcels %zu",
         r.grains, r.liquid_parcels, r.mpm_parcels);
     if (r.mpm_parcels > 0) {

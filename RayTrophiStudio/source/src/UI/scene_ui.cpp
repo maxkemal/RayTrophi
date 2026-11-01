@@ -4760,6 +4760,8 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
                 std::string sel_str = "Selected: " + ctx.selection.selected.name;
                 drawPill(sel_str.c_str(), ImVec4(0.4f, 0.8f, 1.0f, 1.0f), true);
             }
+            // A held Matter step, whichever panel is open (SimulationHeldAlert.cpp).
+            drawSimulationHeldStatus(ctx);
             // drawPill moves the cursor via SetCursorScreenPos without submitting an
             // item; anchor it so ImGui 1.92 doesn't warn about extending boundaries.
             ImGui::Dummy(ImVec2(0.0f, 0.0f));
@@ -9143,7 +9145,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     
     bool changed = false;
     ImGui::PushID(shader.get());
-    changed |= drawPhysicalVolumeMaterialUI(*shader);
+    changed |= drawVolumePresetsUI(*shader);
 
     // Homogeneous Volume Material Graph output.  This is the first vertical
     // slice of the graph runtime: enabled sockets override VolumeShader values
@@ -9248,8 +9250,12 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
     // ─────────────────────────────────────────────────────────────────────────
     // DENSITY
     // ─────────────────────────────────────────────────────────────────────────
-    if (UIWidgets::BeginSection("Density", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
+    if (UIWidgets::BeginSection("Smoke", ImVec4(0.4f, 0.7f, 1.0f, 1.0f))) {
         ImGui::Indent();
+        changed |= drawSmokeAppearanceUI(*shader);
+        if (ImGui::SliderFloat("Density Multiplier", &shader->density.multiplier, 0.0f, 100.0f)) changed = true;
+        changed |= drawVolumeDensityRampUI(*shader);
+        if (ImGui::TreeNode("Density Field")) {
         // Channel Selection
         std::vector<std::string> grids;
         if (vdb) grids = vdb->getAvailableGrids();
@@ -9269,7 +9275,6 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             ImGui::EndCombo();
         }
         
-        if (ImGui::SliderFloat("Multiplier", &shader->density.multiplier, 0.0f, 100.0f)) changed = true;
         if (ImGui::DragFloatRange2("Remap", &shader->density.remap_low, &shader->density.remap_high, 0.01f, 0.0f, 1.0f)) {
             shader->density.remap_high = (std::max)(
                 shader->density.remap_high, shader->density.remap_low + 1.0e-4f);
@@ -9287,19 +9292,11 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
                 "Currently evaluated by the CPU volume marcher. GPU RT paths\n"
                 "do not yet carry this field in the volume instance ABI.");
         }
-        
-        ImGui::Unindent();
-        UIWidgets::EndSection();
-    }
+            ImGui::TreePop();
+        }
 
-    // ─────────────────────────────────────────────────────────────────────────
-    // SCATTERING & ABSORPTION
-    // ─────────────────────────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-    // SCATTERING & ABSORPTION
-    // ─────────────────────────────────────────────────────────────────────────
-    if (UIWidgets::BeginSection("Scattering & Absorption", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
-        ImGui::Indent();
+        // The stored truth behind Color, Opacity and Depth Tint above.
+        if (ImGui::TreeNode("Physical Coefficients")) {
         float col[3] = { shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z };
         if (ImGui::ColorEdit3("Scattering Color", col)) {
             shader->scattering.color = Vec3(col[0], col[1], col[2]);
@@ -9308,8 +9305,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         if (ImGui::DragFloat("Scattering Coeff (1/unit)", &shader->scattering.coefficient,
                              0.01f, 0.0f, 100.0f, "%.4f")) changed = true;
         UIWidgets::HelpMarker("Physical sigma_s per world unit at density 1. It controls extinction and the probability that removed light is scattered rather than absorbed.");
-        if (ImGui::SliderFloat("Anisotropy (G)", &shader->scattering.anisotropy, -0.99f, 0.99f)) changed = true;
-        
+
         ImGui::Separator();
         float abs_col[3] = { shader->absorption.color.x, shader->absorption.color.y, shader->absorption.color.z };
         if (ImGui::ColorEdit3("Absorption Color", abs_col)) {
@@ -9327,15 +9323,27 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             shader->scattering.coefficient / sigmaTUi;
         ImGui::TextDisabled("At density 1: mean free path %.4g units, scattering albedo %.3f",
                             1.0f / sigmaTUi, scatteringAlbedoUi);
-        
-        if (ImGui::TreeNode("Advanced Scattering")) {
+            ImGui::TreePop();
+        }
+        ImGui::Unindent();
+        UIWidgets::EndSection();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // LIGHTING
+    // ─────────────────────────────────────────────────────────────────────────
+    if (UIWidgets::BeginSection("Lighting", ImVec4(0.8f, 0.5f, 1.0f, 1.0f))) {
+        ImGui::Indent();
+        changed |= drawFireLightingUI(*shader);
+        if (ImGui::SliderFloat("Anisotropy (G)", &shader->scattering.anisotropy, -0.99f, 0.99f)) changed = true;
+        {
             if (ImGui::SliderFloat("Back Scatter G", &shader->scattering.anisotropy_back, -0.99f, 0.0f)) changed = true;
             if (ImGui::SliderFloat("Lobe Mix", &shader->scattering.lobe_mix, 0.0f, 1.0f)) changed = true;
             if (ImGui::SliderFloat("Multi-Scatter Isotropization", &shader->scattering.multi_scatter, 0.0f, 1.0f)) changed = true;
             UIWidgets::HelpMarker("Energy-conserving approximation: blends the normalized dual-HG phase toward an isotropic lobe. It is most visible when Forward/Back G are non-zero; with an already isotropic phase it intentionally has little effect.");
             // Same fields and ranges as fluid.set_fog_shader / gas.set_shader random_walk*.
             if (ImGui::Checkbox("Path-Traced Multiple Scattering", &shader->scattering.random_walk)) changed = true;
-            UIWidgets::HelpMarker("Vulkan RT: a random walk of real scattering events replaces the single-scatter march; Multi-Scatter Isotropization is ignored while on. Needed for bright high-albedo media (snow, cloud, foam). Slower and noisier per sample. Emissive volumes and Volume Graph materials keep the march.");
+            UIWidgets::HelpMarker("Vulkan RT: a random walk of real scattering events replaces the single-scatter march; Multi-Scatter Isotropization is ignored while on. Needed for bright high-albedo media (snow, cloud, foam). Slower and noisier per sample. Emissive volumes gather fire along every flight, at several times the cost; final renders only. Volume Graph materials keep the march.");
             ImGui::BeginDisabled(!shader->scattering.random_walk);
             if (ImGui::SliderInt("Max Scatter Events", &shader->scattering.random_walk_max_events, 8, 512)) {
                 shader->scattering.random_walk_max_events =
@@ -9349,19 +9357,15 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
             }
             UIWidgets::HelpMarker("Events walked with the true phase before the walk switches to the equivalent isotropic medium (scattering x (1 - G)). Forward-peaked media such as snow need ~1/(1-G) times fewer events after the switch, with the same diffuse look. Raise it if the near-surface forward glow looks wrong; set it to Max Scatter Events to keep the walk exact.");
             ImGui::EndDisabled();
-            ImGui::TreePop();
         }
         ImGui::Unindent();
         UIWidgets::EndSection();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // EMISSION (FIRE CONTROLS)
+    // FIRE
     // ─────────────────────────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-    // EMISSION (FIRE CONTROLS)
-    // ─────────────────────────────────────────────────────────────────────────
-    if (UIWidgets::BeginSection("Emission / Fire", ImVec4(1.0f, 0.5f, 0.2f, 1.0f))) {
+    if (UIWidgets::BeginSection("Fire", ImVec4(1.0f, 0.5f, 0.2f, 1.0f))) {
         ImGui::Indent();
         const char* modes[] = { "None", "Constant", "Blackbody", "Channel" };
         int mode = static_cast<int>(shader->emission.mode);
@@ -9482,17 +9486,15 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
                 }
             }
         }
+        changed |= drawFireResponseUI(*shader);
         ImGui::Unindent();
         UIWidgets::EndSection();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // RAY MARCHING QUALITY
+    // QUALITY
     // ─────────────────────────────────────────────────────────────────────────
-    // ─────────────────────────────────────────────────────────────────────────
-    // RAY MARCHING QUALITY
-    // ─────────────────────────────────────────────────────────────────────────
-    if (UIWidgets::BeginSection("Ray Marching Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
+    if (UIWidgets::BeginSection("Quality", ImVec4(0.7f, 0.7f, 0.7f, 1.0f), false)) { // Closed by default
         ImGui::Indent();
         changed |= drawVolumeAdaptiveStepping(*shader);
         // ★ THE PRESET COMBO WAS REMOVED 2026-09-20, and rule 5 is why.
@@ -9519,6 +9521,17 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         shader->quality.max_steps = (std::max)(16, (std::min)(shader->quality.max_steps, 1024));
         shader->quality.shadow_steps = (std::max)(0, (std::min)(shader->quality.shadow_steps, 48));
         shader->quality.shadow_stride = (std::max)(1, (std::min)(shader->quality.shadow_stride, 16));
+        ImGui::Unindent();
+        UIWidgets::EndSection();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // DATA
+    // ─────────────────────────────────────────────────────────────────────────
+    if (volumeShaderHasGasDomain(ctx, shader) &&
+        UIWidgets::BeginSection("Data", ImVec4(0.6f, 0.8f, 0.8f, 1.0f), false)) {
+        ImGui::Indent();
+        changed |= drawGasTemperatureFitUI(ctx, shader);
         ImGui::Unindent();
         UIWidgets::EndSection();
     }

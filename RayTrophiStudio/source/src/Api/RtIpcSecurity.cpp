@@ -338,7 +338,11 @@ uint32_t requiredCapabilities(const std::string& method) {
     // know whether its own measurement was invalidated - gating it any higher
     // would make the honest path the privileged one.
     if (method == "sim.control_state") return Read;
+    if (method == "timeline.transport" || method == "sim.get_mode") return Read;
+    if (method == "timeline.play" || method == "timeline.pause" ||
+        method == "sim.set_mode") return SceneWrite;
     if (method == "fluid.matter_models") return Read;
+    if (method == "fluid.get_lanes") return Read;
     if (method == "fluid.inspect_fog_fields") return Read;
     if (method == "fluid.grain_reference") return Read;
     if (method == "fluid.grain_settings") return Read;
@@ -472,7 +476,8 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "rig.preview_bind" || method == "rig.preview_fit" ||
         method == "rig.preflight" || method == "rig.weight_stats" ||
         method == "rig.suggest_joint_profile" ||
-        method == "rig.preview_envelope_weights")
+        method == "rig.preview_envelope_weights" || method == "rig.preview_rom_test" ||
+        method == "rig.auto_landmarks" || method == "rig.preview_geodesic_weights")
         return Read;
     // Read-only methods whose names miss the substring heuristics below.
     if (method == "material.info" || method == "material.of_object" ||
@@ -503,6 +508,8 @@ uint32_t requiredCapabilities(const std::string& method) {
         // gas. namespace and is graded SceneWrite -- and a measurement that
         // needs write authority is a measurement scripts stop taking.
         method == "gas.measure_plume" ||
+        // Same reason: it reads the stepped grid and writes nothing.
+        method == "gas.field_stats" ||
         // Same reason: "step_stats" matches none of the substring heuristics
         // below, so it would fall through to the gas. namespace and be
         // graded SceneWrite. It reads last step's timers and mutates nothing.

@@ -11,6 +11,7 @@ Gate: the snow drops in the mixed run at least half as far as alone.
 Empty scene, Pause first.
 """
 from rt_ipc import RtIpc
+from rt_probe_grain_clock_ipc import clock_consistent
 
 DT = 1 / 60
 DOMAIN = 'T_MpmDem'
@@ -40,10 +41,25 @@ def main():
                 call('flow_source.update', name=name, enabled=name in enabled)
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
-            call('fluid.run', steps=40, dt=DT, sample_every=0, domains=[DOMAIN])
+            result = call('fluid.run', steps=40, dt=DT, sample_every=0, domains=[DOMAIN],
+                          fields=['particle_count'])
+            expected = result['samples'][-1]['domains'][DOMAIN]['particle_count']
+            control_before = call('sim.control_state')
             digest = call('fluid.state_digest', domain=DOMAIN)
-            status = call('fluid.matter_models', domain=DOMAIN)['mixed_execution']['status']
-            return digest['particles'], digest['centroid'][1], status
+            models = call('fluid.matter_models', domain=DOMAIN)
+            status = models['mixed_execution']['status']
+            runtime = (models.get('grain_diagnostics') or {}).get('runtime') or {}
+            clock = runtime.get('common_clock') or {}
+            control_after = call('sim.control_state')
+            print('probe', sorted(enabled), 'run_particles', expected,
+                  'digest_particles', digest['particles'],
+                  'control_before', control_before, 'control_after', control_after,
+                  flush=True)
+            if digest['particles'] != expected:
+                raise AssertionError('state_digest changed after fluid.run: '
+                                     f'{expected} -> {digest["particles"]}')
+            return (digest['particles'], digest['centroid'][1], status, clock,
+                    runtime.get('substep_limit'))
 
         snow = probe({'T_MpmDem_snow'})
         sand = probe({'T_MpmDem_sand'})
@@ -55,10 +71,14 @@ def main():
         drop_alone = BIRTH_Y - snow[1]
         drop_mixed = BIRTH_Y - snow_mixed_y
         checks = {
-            'snow_falls_alone': drop_alone > .2,
+            'snow_falls_alone': snow[0] > 0 and drop_alone > .2,
             'mixed_run_uses_shared_clock': 'MPM + grain' in both[2],
-            'equal_counts': both[0] == snow[0] + sand[0],
-            'snow_falls_beside_sand': drop_mixed >= .5 * drop_alone,
+            'mixed_clock_schedule': clock_consistent(both[3], both[4]) is True,
+            'equal_counts': snow[0] > 0 and sand[0] > 0
+                            and both[0] == snow[0] + sand[0],
+            'snow_falls_beside_sand': snow[0] > 0 and sand[0] > 0
+                                     and both[0] == snow[0] + sand[0]
+                                     and drop_mixed >= .5 * drop_alone,
         }
         for key, passed in checks.items():
             print('PASS' if passed else 'FAIL', key, flush=True)

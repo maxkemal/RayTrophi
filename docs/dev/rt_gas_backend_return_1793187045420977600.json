@@ -1,0 +1,306 @@
+{
+  "timeline.get_frame": 0,
+  "render.rt_pipeline_status": {
+    "available": true,
+    "awaiting_install": false,
+    "backend": "vulkan",
+    "build_count": 1,
+    "cache_hit": null,
+    "cache_loaded": true,
+    "cache_loaded_bytes": 12197739,
+    "cache_path": "C:\\Users\\maxkemal\\AppData\\Local\\RayTrophiStudio\\vk_pipeline_cache\\rt_pipeline_10de_2503.bin",
+    "cache_reject_reason": "",
+    "compile_seconds": 0.1655196,
+    "deferred_threads": 13,
+    "error": "",
+    "rt_pipeline_state": "ready",
+    "stage_seconds": [
+      {
+        "seconds": 0.0034318,
+        "stage": "raygen"
+      },
+      {
+        "seconds": 0.0003704,
+        "stage": "miss"
+      },
+      {
+        "seconds": 0.0001374,
+        "stage": "shadow_miss"
+      },
+      {
+        "seconds": 0.015925500000000002,
+        "stage": "closesthit"
+      },
+      {
+        "seconds": 0.00045880000000000004,
+        "stage": "shadow_anyhit"
+      },
+      {
+        "seconds": 0.042382500000000004,
+        "stage": "volume_closesthit"
+      },
+      {
+        "seconds": 0.00024680000000000004,
+        "stage": "volume_intersection"
+      },
+      {
+        "seconds": 0.0004104,
+        "stage": "hair_closesthit"
+      },
+      {
+        "seconds": 0.00011980000000000001,
+        "stage": "hair_intersection"
+      },
+      {
+        "seconds": 0.0001066,
+        "stage": "hair_shadow_anyhit"
+      },
+      {
+        "seconds": 8.64e-05,
+        "stage": "sphere_intersection"
+      },
+      {
+        "seconds": 0.0002613,
+        "stage": "photon"
+      },
+      {
+        "seconds": 0.012139800000000001,
+        "stage": "cloud_callable"
+      }
+    ]
+  },
+  "render.volume_slots": {
+    "available": true,
+    "backends": [
+      {
+        "instance_count": 1,
+        "is_vulkan": true,
+        "role": "render",
+        "slots": [
+          {
+            "aabb_max": [
+              31974.66015625,
+              11022.30078125,
+              33999.30078125
+            ],
+            "aabb_min": [
+              -14698.62109375,
+              46.62027359008789,
+              -28764.541015625
+            ],
+            "blackbody_intensity": 10.0,
+            "color_ramp_enabled": false,
+            "density_device_local": 1,
+            "emission_mode": 0,
+            "has_contents": true,
+            "has_density": true,
+            "has_temperature": false,
+            "is_active": 1,
+            "name": "Cumulonimbus Field 8.f216.eighth",
+            "packet_order": false,
+            "published": true,
+            "slot": 0,
+            "source": "nanovdb",
+            "stable_key": 1,
+            "temperature_device_local": -1,
+            "temperature_max": 1500.0,
+            "temperature_min": 0.0,
+            "temperature_scale": 1.0,
+            "vdb_id": 17,
+            "volume_type": 2
+          }
+        ],
+        "upload_serial": 68
+      },
+      {
+        "instance_count": 1,
+        "is_vulkan": true,
+        "role": "viewport",
+        "slots": [
+          {
+            "aabb_max": [
+              31974.66015625,
+              11022.30078125,
+              33999.30078125
+            ],
+            "aabb_min": [
+              -14698.62109375,
+              46.62027359008789,
+              -28764.541015625
+            ],
+            "blackbody_intensity": 10.0,
+            "color_ramp_enabled": false,
+            "density_device_local": 1,
+            "emission_mode": 0,
+            "has_contents": true,
+            "has_density": true,
+            "has_temperature": false,
+            "is_active": 1,
+            "name": "",
+            "packet_order": true,
+            "published": false,
+            "slot": 0,
+            "source": "nanovdb",
+            "stable_key": 0,
+            "temperature_device_local": -1,
+            "temperature_max": 1500.0,
+            "temperature_min": 0.0,
+            "temperature_scale": 1.0,
+            "vdb_id": 17,
+            "volume_type": 2
+          }
+        ],
+        "upload_serial": 598
+      }
+    ],
+    "domains": []
+  },
+  "camera.get": {
+    "aperture": 0.0,
+    "auto_exposure": true,
+    "auto_lens": false,
+    "depth_of_field": false,
+    "effective_lens_radius": 0.0,
+    "ev_compensation": 0.0,
+    "exposure_factor": 1.0,
+    "f_number": 2.0,
+    "focus_distance": 2.2570581436157227,
+    "fov": 40.0,
+    "fstop_preset_index": 4,
+    "iso_preset_index": 1,
+    "iso_value": 100.0,
+    "lens_distortion": 0.0,
+    "position": [
+      6.9899187088012695,
+      2.1463589668273926,
+      0.2445378303527832
+    ],
+    "shutter_preset_index": 1,
+    "shutter_seconds": 0.0002500000118743628,
+    "target": [
+      5.808902740478516,
+      1.2455389499664307,
+      -1.45488440990448
+    ],
+    "up": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "use_physical_exposure": false
+  },
+  "render.get_settings": {
+    "debug_view": 0,
+    "debug_view_name": "off",
+    "diffuse_bounces": 4,
+    "effective_diffuse_bounces": 4,
+    "effective_max_bounces": 10,
+    "effective_transmission_bounces": 8,
+    "max_bounces": 10,
+    "motion_profile_active": false,
+    "rr_start_bounce": 3,
+    "transmission_bounces": 8
+  },
+  "materials": {
+    "vdb:17": {
+      "absorption_coefficient": 0.10000000149011612,
+      "absorption_color": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "adaptive_stepping": true,
+      "anisotropy": -0.3479999899864197,
+      "back_anisotropy": -0.30000001192092896,
+      "blackbody_intensity": 10.0,
+      "color_ramp": [
+        [
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.20000000298023224,
+          0.10000000149011612,
+          0.0,
+          0.0,
+          0.30000001192092896
+        ],
+        [
+          0.4000000059604645,
+          0.800000011920929,
+          0.20000000298023224,
+          0.0,
+          0.699999988079071
+        ],
+        [
+          0.699999988079071,
+          1.0,
+          0.6000000238418579,
+          0.10000000149011612,
+          0.8999999761581421
+        ],
+        [
+          1.0,
+          1.0,
+          1.0,
+          0.800000011920929,
+          1.0
+        ]
+      ],
+      "density_curve": {
+        "enabled": true,
+        "values": [
+          0.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0,
+          1.0
+        ]
+      },
+      "density_cutoff": 0.0,
+      "density_multiplier": 18.621000289916992,
+      "density_power": 1.0,
+      "density_remap_high": 1.0,
+      "density_remap_low": 0.0,
+      "emission_color": [
+        1.0,
+        0.5,
+        0.10000000149011612
+      ],
+      "emission_exposure_ev": 0.0,
+      "emission_mode": 0,
+      "emission_saturation": 1.0,
+      "emission_strength": 0.0,
+      "exact_scatter_events": 4,
+      "internal_light_steps": 0,
+      "internal_light_stride": 8,
+      "lobe_mix": 0.699999988079071,
+      "max_scatter_events": 32,
+      "max_steps": 16,
+      "multi_scatter": 0.30000001192092896,
+      "ramp_enabled": false,
+      "random_walk": false,
+      "response_enabled": false,
+      "scatter_coefficient": 1.8200000524520874,
+      "scatter_color": [
+        0.8999999761581421,
+        0.8999999761581421,
+        0.9200000166893005
+      ],
+      "shadow_steps": 4,
+      "shadow_strength": 0.800000011920929,
+      "shadow_stride": 3,
+      "temperature_max": 1500.0,
+      "temperature_min": 0.0,
+      "temperature_power": 1.0,
+      "temperature_scale": 1.0,
+      "voxel_step_multiplier": 0.2070000022649765
+    }
+  }
+}

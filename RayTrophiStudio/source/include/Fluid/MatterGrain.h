@@ -133,7 +133,45 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 29: runtime-sized Verlet lists; mixed sizes start wider and dry overflows retry.
 // 30: runtime-sized contact history with four mask words and matching CFL bounds.
 // 31: neighbour hash buckets hold 32 grains (contact-born dense seed).
-inline constexpr uint32_t kMatterGrainShaderRevision = 31;
+// 32: no liquid bridge below kMatterGrainBridgeMinVolumeFraction.
+inline constexpr uint32_t kMatterGrainShaderRevision = 33;
+// Smallest pendular bridge, as a fraction of the smaller grain's volume
+// (BRIDGE_MIN_VOLUME_FRACTION in sim_matter_grain.glsl; the host CFL uses the
+// same floor). Less water than this is an adsorbed film, not a bridge:
+// capillary cohesion of wet sand sets in near 0.1 % liquid by volume, which
+// over ~6 bridges per grain is ~1e-4 of a grain per bridge. A volume fraction
+// is scale-free, so it holds for coarse-grained grains as well. Without it the
+// bridge stiffness F0 2.1 sqrt(R/V) grew without bound as V -> 0: the first
+// milligrams of water on a newly wetted grain set the substep of the whole
+// shared clock (322 -> 554 substeps per frame, 2026-10-27).
+inline constexpr float kMatterGrainBridgeMinVolumeFraction = 1.0e-4f;
+
+// What set this frame's grain substep (stepMatterGrainGpu). Written before the
+// step decides, so a held frame reports it too (the runtime keeps a copy that
+// survives the held step's stats reset).
+struct MatterGrainCflTerms {
+    bool measured = false;
+    double minimum_mass_kg = 0.0;          // lightest grain (with its pore water)
+    double contact_stiffness_n_m = 0.0;    // k at the lightest grain, before scaling
+    double bridge_stiffness_n_m = 0.0;     // 0 = dry frame
+    double minimum_bridge_volume_m3 = 0.0; // smallest bridge the step can form; 0 = dry
+    double effective_stiffness_n_m = 0.0;  // max of the four below, after scaling
+    std::string effective_source;          // contact | tangential | rolling | bridge
+    double aggregate_damping_ratio = 0.0;
+    double accuracy_dt_s = 0.0;
+    double stability_dt_s = 0.0;
+    double travel_dt_s = 0.0;
+    uint32_t contacts_assumed = 0;
+    // Substeps the unscaled force law asked for, and what ran.
+    double requested_substeps = 0.0;
+    uint32_t substeps = 0;
+    uint32_t max_substeps = 0;
+    // < 1: the contact springs were softened this frame so the stability
+    // bound fits max_substeps (instead of holding the step).
+    float stiffness_scale = 1.0f;
+    // accuracy / travel asked for more than max_substeps and were capped.
+    bool capped = false;
+};
 // Neighbour hash: one table of fixed-capacity buckets, filled only when the
 // neighbour lists are rebuilt (docs/dev/DEM_VERLET_LISTESI.md).
 // ★ 32, not 16: the hash cell is 2r + rupture cap + skin = 3r when wet, and
@@ -226,6 +264,14 @@ struct MatterGrainStepReport {
     uint32_t cfl_contacts = 0;
     double cfl_stiffness_mass_rate_s2 = 0.0;
     bool cfl_budget_retry = false;
+    // A frame that cannot be re-run (shared clock, active MPM contact)
+    // measured more contacts than the bound assumed. The next frame's bound
+    // uses the measurement; this frame stepped on the smaller assumption.
+    bool cfl_contacts_exceeded = false;
+    MatterGrainCflTerms cfl;
+    // Shared clock: continuum substeps and DEM substeps run inside each.
+    uint32_t common_continuum_substeps = 0;
+    uint32_t dem_substeps_per_continuum = 0;
     // Cost counters of the last substep, summed over grains: neighbour-list
     // entries read, grain-grain contacts found, contact-history slots read,
     // grains with no contact at all, collider BVH nodes visited.
@@ -386,6 +432,8 @@ struct MatterGrainGpuRuntime {
     // maximum + 4, clamped to [12, kMatterGrainContactBudget]. A frame that
     // measures more is re-run at the full budget (stepMatterGrainGpu).
     uint32_t cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+    // Last frame's substep terms, also when that frame was held.
+    MatterGrainCflTerms last_cfl;
     bool history_fresh = true;
     // The device liquid-coupling rows are known to be all zero (a dry frame's
     // upload landed and nothing coupled has written them since).

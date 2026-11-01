@@ -1,0 +1,270 @@
+{
+  "frame": 50,
+  "fields": {
+    "builder_peak_dense_bytes_bound": 20353792,
+    "carrier_max_abs_density_error": 0.0,
+    "carrier_reference_max_density": 0.0,
+    "domain": "Physics Domain 1",
+    "fields": [
+      {
+        "active_cells": 50548,
+        "carrier_count": 0,
+        "density_sum": 114.66999398929039,
+        "kind": "gas_aggregate",
+        "material_target": "matter:Physics Domain 1:gas",
+        "name": "Physics Domain 1 / Vapor / Unattributed Gas",
+        "optical_bounds": {
+          "conservative_fallback": false,
+          "empty": false,
+          "end_voxel": [
+            80,
+            64,
+            80
+          ],
+          "first_voxel": [
+            0,
+            0,
+            16
+          ]
+        },
+        "phase": "gas",
+        "producer_name": "Vapor / Unattributed Gas",
+        "producer_uid": 0,
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 615.6905517578125,
+        "temperature_min_kelvin": 231.43157958984375,
+        "temperature_samples": 50548,
+        "vdb_id": 18,
+        "visible": true
+      },
+      {
+        "active_cells": 7180,
+        "carrier_count": 0,
+        "density_sum": 293.4928643854656,
+        "kind": "gas_source",
+        "material_target": "matter:Physics Domain 1:gas_source:14",
+        "name": "Physics Domain 1 / Point Flow Source 4",
+        "optical_bounds": {
+          "conservative_fallback": false,
+          "empty": false,
+          "end_voxel": [
+            86,
+            24,
+            56
+          ],
+          "first_voxel": [
+            56,
+            0,
+            24
+          ]
+        },
+        "phase": "gas",
+        "producer_name": "Point Flow Source 4",
+        "producer_uid": 14,
+        "published": true,
+        "substance_tag": 0,
+        "temperature_max_kelvin": 403.9577331542969,
+        "temperature_min_kelvin": 281.5,
+        "temperature_samples": 7180,
+        "vdb_id": 19,
+        "visible": true
+      }
+    ],
+    "gas_max_abs_density_error": 5.960464477539063e-08,
+    "gas_snapshot": "host",
+    "grid": [
+      86,
+      86,
+      86
+    ],
+    "render_connected": true,
+    "state_version": 135
+  },
+  "slots": {
+    "available": true,
+    "backends": [
+      {
+        "instance_count": 2,
+        "is_vulkan": true,
+        "role": "render",
+        "slots": [
+          {
+            "aabb_max": [
+              4.651163101196289,
+              3.720930337905884,
+              4.651163101196289
+            ],
+            "aabb_min": [
+              0.0,
+              0.0,
+              0.930232584476471
+            ],
+            "blackbody_intensity": 38.194000244140625,
+            "color_ramp_enabled": false,
+            "emission_mode": 2,
+            "has_contents": true,
+            "has_density": true,
+            "has_temperature": true,
+            "is_active": 1,
+            "name": "Physics Domain 1 / Vapor / Unattributed Gas",
+            "packet_order": false,
+            "published": true,
+            "slot": 0,
+            "source": "other",
+            "stable_key": 1,
+            "temperature_max": 4150.0,
+            "temperature_min": 0.0,
+            "temperature_scale": 0.31299999356269836,
+            "vdb_id": 18,
+            "volume_type": 2
+          },
+          {
+            "aabb_max": [
+              5.0,
+              1.3953489065170288,
+              3.2558140754699707
+            ],
+            "aabb_min": [
+              3.2558140754699707,
+              0.0,
+              1.3953489065170288
+            ],
+            "blackbody_intensity": 38.194000244140625,
+            "color_ramp_enabled": false,
+            "emission_mode": 2,
+            "has_contents": true,
+            "has_density": true,
+            "has_temperature": true,
+            "is_active": 1,
+            "name": "Physics Domain 1 / Point Flow Source 4",
+            "packet_order": false,
+            "published": true,
+            "slot": 1,
+            "source": "other",
+            "stable_key": 2,
+            "temperature_max": 4150.0,
+            "temperature_min": 0.0,
+            "temperature_scale": 0.31299999356269836,
+            "vdb_id": 19,
+            "volume_type": 2
+          }
+        ],
+        "upload_serial": 31
+      },
+      {
+        "instance_count": 2,
+        "is_vulkan": true,
+        "role": "viewport",
+        "slots": [
+          {
+            "aabb_max": [
+              4.651163101196289,
+              3.720930337905884,
+              4.651163101196289
+            ],
+            "aabb_min": [
+              0.0,
+              0.0,
+              0.930232584476471
+            ],
+            "blackbody_intensity": 38.194000244140625,
+            "color_ramp_enabled": false,
+            "emission_mode": 2,
+            "has_contents": true,
+            "has_density": true,
+            "has_temperature": true,
+            "is_active": 1,
+            "name": "",
+            "packet_order": true,
+            "published": false,
+            "slot": 0,
+            "source": "other",
+            "stable_key": 0,
+            "temperature_max": 4150.0,
+            "temperature_min": 0.0,
+            "temperature_scale": 0.31299999356269836,
+            "vdb_id": 18,
+            "volume_type": 2
+          },
+          {
+            "aabb_max": [
+              5.0,
+              1.3953489065170288,
+              3.2558140754699707
+            ],
+            "aabb_min": [
+              3.2558140754699707,
+              0.0,
+              1.3953489065170288
+            ],
+            "blackbody_intensity": 38.194000244140625,
+            "color_ramp_enabled": false,
+            "emission_mode": 2,
+            "has_contents": true,
+            "has_density": true,
+            "has_temperature": true,
+            "is_active": 1,
+            "name": "",
+            "packet_order": true,
+            "published": false,
+            "slot": 1,
+            "source": "other",
+            "stable_key": 0,
+            "temperature_max": 4150.0,
+            "temperature_min": 0.0,
+            "temperature_scale": 0.31299999356269836,
+            "vdb_id": 19,
+            "volume_type": 2
+          }
+        ],
+        "upload_serial": 53
+      }
+    ],
+    "domains": [
+      {
+        "domain": "Physics Domain 1",
+        "domain_index": 0,
+        "fog_vdb_id": -1,
+        "fog_volume_name": "",
+        "has_fog_volume": false,
+        "has_volume": false,
+        "render_mode": "particles",
+        "system": "Particle System 1",
+        "type": "matter",
+        "vdb_id": -1,
+        "volume_name": ""
+      }
+    ]
+  },
+  "gpu_ms": {
+    "vapor": 446,
+    "smoke": 78,
+    "sum": 524,
+    "both": 573
+  },
+  "per_path": {
+    "camera_density_samples": {
+      "vapor": 20.1,
+      "smoke": 2.717,
+      "both": 23.827
+    },
+    "secondary_density_samples": {
+      "vapor": 0,
+      "smoke": 0,
+      "both": 0
+    },
+    "majorant_queries": {
+      "vapor": 2.343,
+      "smoke": 1.247,
+      "both": 3.605
+    },
+    "radiance_cache_fallbacks": {
+      "vapor": 0,
+      "smoke": 0,
+      "both": 0
+    }
+  },
+  "source_release_spv_sha256": "68af48527e15d6ecd07d55bfc4d08e3158df7fcde2c9ee35eb2216050c9a943c",
+  "comparison_note": "Current frame 50 vapor AABB fraction .515; prior 329ms snapshot had .11269. No timeline change performed. No controlled old/new shader A/B."
+}

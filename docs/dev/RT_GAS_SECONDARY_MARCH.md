@@ -1,25 +1,70 @@
 # Vulkan RT: ikincil sekmelerde gaz march'ı
 
-> **Durum:** AKTİF — 2026-10-25; march LOD + sekme ışınları için radyans önbelleği varsayılan açık (düzlemli nükleer sahne −%53). Geçirgenliğe göre büyüyen adım SÖKÜLDÜ (§14); derleme bekliyor.
+> **Durum:** §24 doğal GPU probu düzeltildi; aynı hash ile 256/16=611/572ms, kalan per-entry maliyet açık. §23 ölçüm kimliği eklendi; reload sonrası gaz dağılımı ve kamera farkı doğrulandı, kök açık. §21 VRAM doğrulandı, birlikte 280 ms. §22 karışım Max Steps düzeltmesi kaynakta hazır, shader DERLENMEDİ. §20 geri alındı. §20.2 CANLI: kare 50, buhar kutusu %51.5, birlikte 573 ms. Kalan maliyet açık. §19 CANLI: kutu %93 → %11; birlikte GPU 329 ms (önceki oturum 1052 ms). Görsel kabul açık. §17 canlı: cache çalışıyor ama toplam maliyet yüksek. §18.1 küçük düzeltmeler DERLENMEDİ. Önceki ölçüm — 2026-10-28: çakışan iki gaz akışının maliyeti (§15–16b). §16 derlendi, canlıda bu sahneye ETKİSİZ: sahne genel karışım yolunda. Sıradaki iş aşağıdaki devir notunda.
 
-## Devir notu
+## Devir notu (2026-10-28 — bu işi devralan ajan buradan başlasın)
 
-- **Nerede kaldı:** büyüyen adım söküldü (kod; canlıda IPC ile kapatıldı),
-  radyans önbelleği varsayılan açık. Derleme bekliyor.
-- **Sıradaki (açık kalemler):**
-  - zemindeki +%5'in kaynağı (izotropik faz ya da iki dokunuşlu ambient
-    gölgesi), ölçülmedi;
-  - kalan ~20 M kamera örneği. Doğru bir değişken adım, segmentin üst sınır
-    yoğunluğunu (majorant) okumalı.
-- **Dokunulacak dosyalar:**
-  - `volume_closesthit.rchit` (adım kurulumu ~4109–4119, ambient gölgesi ~4697);
-  - `volume_instrumentation.glsl` ve `VulkanVolumeInstrumentation.h`;
-  - RtApi + IPC + Python + panel (dört dokunuş);
-  - descriptor overlay.
-- **Bağlam:** önceki adım (iç içe katı izi, "Seçenek A") gerileme yaptı ve geri
-  alındı. Bkz. RT_GAS_OPTICAL_PERFORMANCE.md §"Seçenek A ölçüldü". Ders: hacim
-  closest-hit'ine iz ya da büyük yük ekleme. Bu tasarım yalnız döngü sınırlarını
-  ve bir dalı değiştirir.
+**İş:** iki canlı gaz akışı (Matter domain'inin kaynak başına yayınladığı ayrı
+RT hacimleri: "Vapor / Unattributed Gas" + "Point Flow Source 4") üst üste
+binince RT 1 fps'e düşüyor. Ayrı ayrı 598 + 112 ms/örnek, birlikte 1157 ms
+(§16b). Hedef: birlikte ≈ ayrı ayrı toplamı.
+
+**Sahne ve ölçüm (derlemesiz):** `E:\rt_k\matter4emiter.rtp`, kare ~38–39,
+Vulkan Rendered viewport, kamerayı oynatma. Ölçüm tek komut:
+`python scripts/test/rt_probe_gas_overlap_cost_ipc.py` (görünürlüğü
+`volume.set_material visible` ile değiştirir, sonunda geri alır). Kabul:
+"both" satırında `secondary_density_samples` ~0 (bugün 3.33/yol) ve GPU ms
+"sum" sütununa yakın.
+
+**Kök (kodda doğrulandı):** çakışan segmentte iki yol var.
+- Hızlı companion yolu: `volume_closesthit.rchit`, march gövdesi. §16 burada
+  radyans önbelleğini çakışmaya açtı (derlendi, doğru, statik kontrolle
+  sabitlendi) ama bu sahne oraya HİÇ girmiyor.
+- Genel karışım: `shadeFogMixture` (`volume_mixture.glsl` ~544). Çağrı
+  `volume_closesthit.rchit` ~4097'de; kapı `matterFogNeedsGeneralMixture`
+  (`volume_mixture.glsl` ~85–107). Üyelerden biri emissifse
+  (`emission_mode != 0`; bu sahnede ikisi de blackbody = 2), eğri uyarlamalı adım
+  isterse, random walk/program varsa ya da faz/adım ayarları farklıysa bu yola
+  gider. Bu yol sekme ışınlarında radyans önbelleğini kullanmıyor; ikincil
+  örnekler ve maliyet buradan.
+
+**Seçenekler (kullanıcıya sorulmadı, sıra önerisi):**
+1. Derlemesiz deneme: buharın emisyonunu kapat (kullanıcı "buhar blackbody
+   istemez" dedi): `volume.set_material target="matter:Physics Domain 1:gas"
+   settings={"emission_mode": 0}` (anahtar adını `volume.get_material`
+   çıktısından doğrula). Ama eğri (`density_curve[9]` uyarlamalı) da kapıyı
+   açabilir; probe ile hangi yola girdiğini sayaçlardan anla
+   (`radiance_cache_marches` artar mı). Kalıcı çözüm değil: duman gerçekten
+   emissif olursa (yangın) yine genel yol.
+2. Kalıcı: `shadeFogMixture` sekme ışınlarında (kamera segmenti değil,
+   `worldData.w.volumeMarchLod` bit 21 açıkken) üyelerin radyans önbelleğini
+   N üyeyle okusun: §16'daki birleştirme σ = Σσᵢ, J = Σσᵢ·Jᵢ / σ, her üye kendi
+   yuvası (`volumeLightCacheSlot(index)`), kutusu dışında sıfır. Örnek:
+   `volume_radiance_cache.glsl` → `volumeRadianceCacheMarch` (iki üyeli; döngüyü
+   N'e genelle). Karışımın üye listesi `mf*` globallerinde (`mfCount`,
+   MF_CAPACITY 16). Emisyon önbellekte J'nin içinde zaten var.
+
+**Kurallar (bu dosyada tekrar öğrenildi):**
+- Doldurma (`volumeRadianceCacheFetch` → `vrcComputeVertex`, ışık döngüsü)
+  TEK çağrı yerinden: üye döngüsü + tablodan (`volumes.v[i]`) okuma. İki çağrı
+  yeri ışık döngüsünü gömer. Taban: derleme 206 sn, `volume_closesthit.spv`
+  982,912 B (`render.rt_pipeline_status` → `compile_seconds`); >%10 artış FAIL.
+  Ağır yeni kod callable'a (RT_SHADER_COMPILE_LOAD.md).
+- Bir ortam için tek köşe varyantı (companion'a özel varyant aynı hücreleri
+  paylaşır, birbirini yeniden doldurur).
+- OptiX dondurulmuş: dokunma. Derlemeyi (C++ ve `compile_shaders.bat`)
+  kullanıcı alır. Kontrol: `check_volume_march_lod_contracts.py`; partiyi
+  NEXT_BUILD_CHECKS'e sıralı listeyle bitir.
+- Geçmiş: aynı sorun 10-24'te ölçüldü (MATTER_VOLUME_STREAMS_PLAN_20261024.md
+  "Live RT regression"); kaynak başına malzeme denemesi 10-21'de geri alındı
+  (GAS_SOURCE_MATERIAL_RENDER_AUDIT.md, derleme 314 → 495 sn). Tek hacim (B
+  yolu) kullanıcı kararıyla ertelendi: üç+ akış gerekirse.
+
+**Ayrı açık (bu işin dışı):** buhar tek başına 366–598 ms (yol başına 19–35
+kamera örneği; soluk pus 41k hücrede, `occupiedLocalBox` `> 0` eşiği). Host
+tarafı `viewport.render_frames` ms/kare GPU'nun 5–10×'i, kökü ölçülmedi.
+
+Eski devir notu (2026-10-25, büyüyen adım / ~20 M kamera örneği): §14.
 
 ## 1. Sorun
 
@@ -613,3 +658,581 @@ Kullanıcı kararı: büyüyen adım söküldü, radyans önbelleği varsayılan
   22–31. bitler boş.
 - Kontrol script'i, iki değişken adımdan biri majorant sınırı olmadan geri
   gelirse FAIL eder.
+
+## 15. Canlı ölçüm: kaynak başına gaz akışları üst üste binince maliyet 2.5× (2026-10-28)
+
+Sahne: kullanıcının 4 emitterli Matter sahnesi (`E:\rt_k\matter4emiter.rtp`,
+86³ ızgara, 5.8 cm), kare 39, Vulkan RT viewport. Kullanıcı gözlemi: gaz
+görünmezken 50 fps, görünürken 2 fps; buhar ve duman domain'in küçük bir
+kısmında. Matter domain'i gazı **kaynak başına iki ayrı RT hacmi** olarak
+yayınlıyor: "Vapor / Unattributed Gas" (artık: kaynama buharı + atfedilmemiş
+gaz) ve "Point Flow Source 4" (duman). İkisinin de malzemesi aynı (yoğunluk
+çarpanı 11.1, kesme 0.01, eğri ilk segmentte ~2.8× büyütüyor, blackbody).
+
+Ölçüm (`render.gpu_timing_stats` kamera RT dispatch'i, bir örnek;
+`volume.set_material visible` ile A/B):
+
+| görünür | GPU ms/örnek | kamera yoğunluk örneği/yol | ikincil/yol |
+|---|---|---|---|
+| hiçbiri | 12.5 | 0 | 0 |
+| yalnız duman | 43 | 2.1 | 0.0 |
+| yalnız buhar | 265 | 19.0 | 0.05 |
+| **ikisi** | **790** | 21–22 | 1.3–2.1 |
+
+- **Toplamın 2.5 katı:** örnek sayısı toplama yakın (21 ≈ 19 + 2), ama süre
+  265 + 43 = 308 yerine 790. Üst üste binen iki hacimde **örnek başına
+  maliyet ~3×**. İkincil (sekme) yoğunluk örnekleri yol başına 0.05 → 2.1
+  (45×). Kök ölçülmedi; adaylar: çakışan hacimlerde her adımın iki ızgara ve
+  iki malzeme okuması, gaz↔gaz devirleri (`gas_handoffs` 0.2 → 0.3,
+  `teleports` 0.39 → 0.47), ikinci hacmin emisyonu yüzünden sekme ışınlarının
+  hacme girmesi.
+- **Buhar kutusu neredeyse bütün domain:** `occupiedLocalBox`
+  (VDBVolume.cpp) kutuyu `> 0` olan her hücreyle büyütüyor; buhar 41,283
+  hücrede, ortalama 0.0015 (duman 3,622 hücre, ortalama 0.069). Ama asıl
+  maliyet kutu değil: buharın kesmesini 0.01 → 0.2'ye çıkarmak örnek
+  sayısını değiştirmedi (20.95 → 20.74), süreyi 798 → 563 ms indirdi. Yani
+  march bu adımları atıyor; süre kesmeyi geçen örneklerin gölgelendirmesinden.
+  8³ majorant atlaması (`empty_segments_skipped` 19.5/yol) zaten çalışıyor.
+- İlk karede tek seferlik ~2.4 s/kare (ışık önbelleği dolumu / yükleme);
+  sonraki örnekler yukarıdaki gibi.
+- Kural 1 açığı: örnek başına maliyetin hangi hacim sayısında alındığı
+  (1 / ≥2 hacim çakışması) sayılmıyor; kök bu yüzden aday listesinde.
+
+Sonraki ölçüm: çakışma sayacı (adım başına kaç gaz hacmi örneklendi) ve
+ikincil ışınların hangi hacme girdiği; düzeltme adayı iki akışı RT'de tek
+hacim + akış başına malzeme ağırlığı olarak örneklemek.
+
+### 15b. Kullanıcı tahminleri sınandı (2026-10-28, aynı sahne, ısınmalı 6 kare ortalaması)
+
+| yol başına | buhar | duman | toplam | ikisi |
+|---|---|---|---|---|
+| GPU ms/örnek | 366 | 86 | 451 | **964** |
+| hacim ışını | 1.22 | 0.32 | 1.54 | 1.42 |
+| sekme sınırına takılan yol | 0.028 | 0.042 | 0.070 | 0.023 |
+| kamera yoğunluk örneği | 34.6 | 3.7 | 38.3 | 39.3 |
+| **ikincil yoğunluk örneği** | **0** | **0** | **0** | **3.33** |
+| majorant sorgusu | 2.7 | 0.8 | 3.5 | 5.2 |
+
+- "Her gaz hacmi için tekrar ışın" ÇÜRÜDÜ: ikisi birlikte hacim ışını toplamdan az.
+- "Işık iki hacim arasında sekme sınırına kadar" ÇÜRÜDÜ: sınıra takılan yol en az
+  ikisi birlikteyken (%2.3).
+- Fark ikincil (sekme) march'ta: tek hacimde sekme ışını radyans önbelleğiyle
+  karşılanıyor (0 yoğunluk örneği); iki hacim birlikteyken 3.3 örnek/yol, yani
+  bir gaz hacminde başlayan sekme ışını ötekini açık march'la, ışık adımlarıyla
+  yürüyor (aday, doğrudan ölçülmedi: önbellek hacim başına). Tek hacim + akış
+  başına malzeme ağırlığı bunu da kaldırır (önbellek birleşik ortamı kapsar).
+- Ölçüm notu: ilk koşuda (§15) buhar 19 kamera örneği/yol, burada 34.6; kamera
+  ya da yakınsama farkı. Host ms/kare (render_frames) GPU'nun 5–10×'i (4.7 s);
+  görünürlük değişiminin tetiklediği yeniden kurulum mu, ölçüm yöntemi mi, açık.
+
+## 16. Çakışmada radyans önbelleği (A yolu, 2026-10-28; yalnız shader, derlenmedi)
+
+§15b'nin kökü kodda: `volume_closesthit.rchit` önbelleği `!hasCompanion`
+kapısıyla çakışmada kapatıyordu; sekme ışınları ikinci gaz hacmini açık march'la
+yürüyordu. Boş bölge atlaması ise çakışmada zaten iki alanı birlikte sınıyor
+(`volume_companion_empty.glsl`); kamera örnekleri bu yüzden toplama eşitti.
+Kullanıcı kararı: önce A (bu yol), tek hacim (B) ancak üç ve daha fazla akış
+gerekirse.
+
+- `volumeRadianceCacheMarch(slot, companionSlot, slots, ...)`: her ortam kendi
+  ışık önbelleği yuvasından okur; adımda σ = σ₁ + σ₂,
+  J = (σ₁J₁ + σ₂J₂)/σ (toplanan ortamlar için kesin). Kutusu dışında companion
+  sıfır sayılır (köşe araması kenara kıstırırdı).
+- Tek doldurma çağrı yeri: iki ortam iki adımlık bir döngüde aynı
+  `volumeRadianceCacheFetch` çağrısından geçer, hacim tablodan okunur. İki
+  çağrı yeri ışık döngüsünü bu aşamaya iki kez gömerdi.
+- Bilinen yaklaşıklıklar (yalnız sekme ışını): her J yalnız kendi ortamıyla
+  gölgelenir (tam march companion'ın ışık march'ını çarpar); companion'ın kendi
+  emisyonu J'sinde vardır, tam kamera march'ı onu atlar (overlap sınırı).
+  Companion'a özel ikinci bir köşe varyantı bilerek yok: aynı hücreleri paylaşır,
+  iki varyant birbirini yeniden doldururdu.
+- Taban: `volume_closesthit.spv` 977,104 B (2026-10-27 23:08). Pipeline derleme
+  süresi `render.rt_pipeline_status` → `stage_seconds` ile ölçülecek.
+- Kontrol: `check_volume_march_lod_contracts.py` (çakışma kapısı ve tek çağrı
+  yeri sabitlendi).
+
+### 16b. Canlı (2026-10-28): derleme iyi, kazanç YOK — sahne genel karışım yolunda
+
+- Pipeline derleme 206 sn (taban 314 sn), `volume_closesthit.spv` 977,104 →
+  982,912 B (+%0.6). Tek çağrı yeri kuralı tuttu.
+- `rt_probe_gas_overlap_cost_ipc.py`: buhar 598, duman 112, ikisi 1157 ms;
+  ikincil yoğunluk örneği hâlâ 3.33/yol, `radiance_cache_fallbacks` 0.
+- Kök: `matterFogNeedsGeneralMixture` (volume_mixture.glsl) iki üyeden biri
+  emissifse (`emission_mode != 0`) ya da eğri uyarlamalı adım isterse çakışmayı
+  `shadeFogMixture`'a yollar. Bu sahnede buhar da duman da blackbody → §16'nın
+  düzelttiği companion yolu hiç çalışmıyor. §16 doğru ama bu sahneye dokunmuyor.
+- Sıradaki iş: `shadeFogMixture` sekme ışınlarında radyans önbelleğini N üyeyle
+  okusun (§16'daki σ ağırlıklı birleştirme, üye döngüsüyle; tek çağrı yeri).
+  Ayrıca buharın blackbody istememesi (malzeme emisyonu kapalı) onu emissif
+  saymaktan çıkarır; bu tek başına sahneyi companion yoluna geri alabilir.
+
+
+## 17. Genel karışımın sekme önbelleği — 2026-10-28 (kaynak hazır, derlenmedi)
+
+§16b açığı için tek ortak giriş `volume_cached_segment.glsl` eklendi.
+Closest-hit, genel karışıma ayrılmadan önce bu girişi çağırır. Kamera,
+malzeme programı ve random-walk üyeleri tam integratörde kalır. Emisyon
+ve adaptif kamera adımı artık sekme önbelleğini tek başına engellemez.
+Genel karışım 16 yuvaya kadar adayları aynı konumda okur; her üyenin kendi
+kutusu dışında katkısı sıfırdır. Extinction ve sigma-ağırlıklı kaynak
+birleşir. Önbellek eksikse tam karışım çalışır; yarım radyans kullanılmaz.
+
+Doldurma hâlâ TEK march/fetch çağrı yerinden geçer. Dinamik aggregate
+array eklenmedi; ilk iki üyenin sabitleri scalar olarak tutulur, ek üyeler
+scalar fallback kullanır. Emisyon önbellekteki J'dedir. Önceki cache
+bedelleri sürer: izotropik faz, üyenin kendi gölgesi, emitter NEE eksikliği.
+Yeni hız veya derleme süresi ölçülmedi; §16b tabanı 206 sn / 982,912 B.
+
+Aynı partide Matter Fog yayıncısı, yeni snapshot'ta bulunmayan akışın canlı
+VDB/manager/world kaydını kaldırır. Kalıcı `matter_fog_streams` materyali
+saklanır; Fog'a dönünce geri kullanılır. Böylece Fog → SDF/Splat geçişinde
+VDB panelde artık kayıt kalmaz; kaldırılmış transient seçim de temizlenir.
+UI/Python/IPC aynı yayıncıdan geçer, yeni API düğmesi eklenmedi.
+
+Statik: march LOD, mixture adaptive (10), material (10), optical (22),
+empty rejection (7), light cache ve overlap/cache lifecycle (3) geçti.
+Derleme ve canlı kabul: NEXT_BUILD_CHECKS'in ilk partisi.
+
+
+## 18. Canlı §17: cache çalışıyor, toplam maliyet hâlâ yüksek — 2026-10-28
+
+Kullanıcı derledi ve uygulama açıkken dış named-pipe IPC ile ölçüldü.
+Pipeline ready, hata yok, compile_seconds = 219.734 sn (206 sn tabana +%6.7).
+1680×945 RT viewport. Malzemeler: scatter_coefficient=0, absorption=1.46,
+emission_mode=2, adaptive=true, voxel step=.5, density multiplier=11.111.
+
+| yol başına / GPU örneği | buhar | duman | ayrı toplamı | birlikte |
+|---|---:|---:|---:|---:|
+| GPU ms | 771 | 185 | 956 | 1052 |
+| kamera density | 37.518 | 7.057 | 44.575 | 46.093 |
+| ikincil density | 0 | 0 | 0 | 0 |
+| radiance cache march | .498 | .209 | .707 | .595 |
+| cache fallback | 0 | 0 | 0 | 0 |
+
+Önceki 'genel karışım cache'i atlıyor' açığı kapandı. Ancak kullanıcı
+şikâyeti çözülmedi. Eski sahne/kamera/pencereyle doğrudan hız farkı
+hesaplanamaz; aynı koşudaki birlikte maliyet ayrı toplamından yaklaşık %10
+fazla. Buhar tek başına bile 771 ms. Yeni kök kanıtı olmadan cache yolunu
+tekrar değiştirmeyin.
+
+Kısa A/B (ayarlar her partinin sonunda finally ile geri yüklendi):
+- baseline: 1052 ms, kamera 45.77 örnek/yol;
+- emission_mode=0 (ikisi): 1139 ms, 45.67 örnek/yol; belirgin kazanç yok;
+- adaptive=false: 802 ms, 14.19 örnek/yol;
+- adaptive=false + emission=0: 780 ms, 12.34 örnek/yol;
+- gaz görünmez: 31.35 ms;
+- yeniden baseline: 1153 ms, 45.77 örnek/yol (süre gürültüsü var).
+
+**Ölçüm sınırı:** `primaryStep()` adaptive=false iken voxel multiplier yerine
+legacy world `step_size` kullanır. Bu A/B yalnız adaptif hesap maliyetini
+ölçmez, örnek aralığını da değiştirir. Bu nedenle adaptive=false üzerinde
+voxel multiplier=4 denemesi etkisizdi (14.19 örnek/yol); bunu '8× daha
+seyrek march' diye yorumlamayın. Kayıtlar:
+`rt_gas_camera_cost_20261028.json`, `rt_gas_camera_floor_20261028.json`.
+
+### 18.1 Kaynakta bulunan iki gereksiz iş (DERLENMEDİ)
+
+- mfEvaluate, graph yokken density=0 olsa bile sıcaklık ve optik terimleri
+  hesaplıyordu. Kanonik sampler sonrası kesin sıfırda erken dönüş eklendi;
+  graph'ların boş kaynakta yoğunluk üretmesi korunuyor, sayaç aynı yerde.
+- mfAdaptiveSpan ilk iki düz kamera üyesinin ray/box dönüşümlerini her adımda
+  tekrar kuruyordu. Başta hazırlanan mfCameraRay/Interval kullanılıyor;
+  random-walk yeni uçuş için eski dönüşüm hesabını koruyor.
+
+Bunlar kaliteyi veya örnek kafesini değiştirmez. Henüz kazanç ölçülmedi;
+ana yavaşlığın tamamını çözdükleri iddia edilmiyor. Statik optical (22),
+mixture adaptive (10), overlap/cache (5), march LOD geçti.
+
+
+## 19. Materyale göre güvenli Fog kutusu — 2026-10-28 (C++, DERLENMEDİ)
+
+Canlı gözlem (§18.1 kullanıcı tarafından derlendi, anlamlı kazanç yok):
+86³ domain'de buhar raw-positive 51,374 hücre (%8.08); AABB [0,0,0] →
+[5,4.651163,5], domain hacminin %93.02'si. Duman kutusu daha küçük.
+Pipeline compile_seconds=223.908 sn. Bu durum kutunun geniş olduğunu kanıtlar;
+toplam GPU maliyetinin tamamının yalnız kutudan geldiğini kanıtlamaz.
+
+`Fluid/FogOpticalBounds.h` ortak çekirdeği, raw > 0 yerine kanonik
+remap → monoton yoğunluk eğrisi → cutoff sırasıyla aday köşeleri sınırlar.
+Multiplier cutoff'tan SONRA geldiği için cutoff karşılaştırmasına çarpılmaz;
+kesin sıfır multiplier/scale katkısız sayılır. CPU/GPU yuvarlama sınırında
+küçük güvenlik payı vardır. Trilinear ham değer köşelerin konveks birleşimidir;
+monoton dönüşümde aktif örneğin en az bir aktif köşesi olmalıdır. Bu köşelerin
+bir voksel komşuluğu korunur, kutu 8'lik bloklara dışarı yuvarlanır. Fizik
+alanları, sıcaklık, yoğunluk verisi ve step ayarları değiştirilmez.
+
+Graph, aktif materyal programı, noise, edge falloff, geçersiz/nonmonoton
+parametre veya remap edilmiş pozitif background varsa tam grid korunur.
+Tüm hücreler kesin katkısızsa canlı kayıt saklanır ama optik görünürlük kapatılır;
+yazarın `appearance.visible` tercihi değiştirilmez. Aynı state.version'da bile
+yoğunluk politikası/scale değişirse yayıncı anahtarı kutuyu tekrar hesaplatır.
+Böylece cutoff azaltma/eğri değiştirme eski dar kutuda takılmaz. Materyal
+anahtarı yalnız başarılı yayında güncellenir.
+
+Mevcut UI/Python/IPC materyal servisi aynı yayıncıya gider. Yeni ayar eklenmedi.
+Mevcut `fluid.inspect_fog_fields` / `rt.fluid.inspect_fog_fields` aynı çekirdekten
+`optical_bounds` döndürür: `first_voxel`, exclusive `end_voxel`, `empty`,
+`conservative_fallback`. `render.volume_slots` yayımlanmış gerçek AABB'yi verir.
+
+Statik/nümerik Python kontrolleri geçti. Gerçek C++ çekirdek regresyonu
+`scripts/test/fog_optical_bounds_test.cpp` eklendi, derleme yasağı nedeniyle
+çalıştırılmadı. Canlı kazanç henüz ölçülmedi. Görünür katkılı köşeler gerçekten
+bütün alana dağılmışsa tek AABB yine geniş kalabilir; böyle bir sonuçta keyfi
+threshold yükseltmek yerine blok bazlı optik boşluk atlaması değerlendirilir.
+
+
+### 19.1 Canlı: dar kutu yayımlandı, GPU maliyeti belirgin düştü (2026-10-28)
+
+Kullanıcı C++ build aldı; `rt_probe_fog_bounds_ipc.py` çıktısı hem render hem
+viewport backend'de yeni AABB'leri doğruladı. Buhar kutusu domain'in
+%11.269'u (önce %93.02), duman %2.656; ikisinde conservative_fallback=false.
+Raw-active oranlar sırasıyla %7.852 ve %1.050. Buhar voxel kutusu [0,0,16] →
+[80,16,72]; duman [64,0,24] → [86,24,56].
+
+Açık uygulamada dış IPC, `rt_probe_gas_overlap_cost_ipc.py --frames 4`:
+
+| | yalnız buhar | yalnız duman | ayrı toplam | birlikte |
+|---|---:|---:|---:|---:|
+| GPU ms/RT örneği | 261 | 84 | 345 | 329 |
+| kamera density/yol | 6.536 | 2.839 | 9.375 | 10.745 |
+| ikincil density/yol | 0 | 0 | 0 | 0 |
+| cache fallback/yol | 0 | 0 | 0 | 0 |
+
+Önceki oturum 771/185/1052 ms ile kıyaslandığında birlikte yaklaşık %69
+azalma (3.2 kat), kamera density 46.09 → 10.75/yol. Bu, aynı build'de
+eski-kutu/yeni-kutu toggle A/B değildir; güncel raw occupancy biraz farklı.
+Kesin nedensel hız oranı diye sunulmaz. Güncel tek koşuda birlikte maliyet
+ayrı toplamından büyük değil; çakışma kabulü geçti. Görüntü/ince kenarlar,
+materyal değişiminde yeniden genişleme ve hareketli plume görsel kabulü
+henüz yapılmadı. Görünürlükler probe finally bloğunda tekrar açıldı.
+Kayıt: `rt_gas_optical_bounds_live_20261028.json`.
+
+
+## 20. Zayıf blokta bütçeli optik integrasyon (2026-10-28, shader; DERLENMEDİ)
+
+Amaç: cutoff'u geçen ama optik katkısı küçük bölgelerde tek noktadaki
+"düşük yoğunluk" tahmini yerine BÜTÜN leaf/tile majorant'ını kullanmak.
+Yeni modül: `volume_mixture_optical_blocks.glsl`. Hacim verisi değiştirilmez,
+zayıf bölgenin emilimi/emisyonu sıfırlanmaz; geniş segment tek midpoint'te
+Beer–Lambert ile integre edilir. Mevcut kesin boşluk atlaması önce çalışır.
+
+Uygunluk bilinçli dar: live Matter NanoVDB (source_type=6, live sparse
+metadata), adaptive açık, scatter_coefficient TAM sıfır, random-walk kapalı,
+graph/noise yok, nonlinear emission response yok, flame yok. Güncel ölçülen
+sahnenin gazları scatter=0 ve legacy blackbody olduğundan uygundur. Saçılmalı
+gazda gelen ışığa güvenli üst sınır olmadığı için mevcut integratör korunur;
+"her gaz optimize edildi" iddiası yok.
+
+- Leaf maksimumu HAS_MIN_MAX ile doğrulanır; live inactive tolerance 1e-6
+  üst sınırına dahil edilir. Sabit tile tek değeriyle sınırlanır.
+- Leaf/tile'ın son voksel slab'ı hariç tutulur; komşu leaf'teki ince yapı
+  veya sıcak kaynak görünmeden geçilemez. Her üyenin AABB giriş/çıkışı
+  segmenti keser; bütün örtüşen üyelerin sigma/source üst sınırı toplanır.
+- Monoton remap/curve/cutoff/fade/multiplier sırası majorant'a uygulanır.
+  Sigma üst sınırı = density_max * absorption_coefficient (RGB ağırlığı ≤1).
+- Legacy constant emission J üst sınırı = max(color)*strength*density_max.
+  Blackbody RGB ve normalize T^4 ≤1 olduğundan üst sınır intensity*density_max;
+  HDR ramp stoplarının kanal maksimumu da hesaba katılır. Bu bound sıcaklık
+  örneği okumaz; dar sıcak bir pik bu yüzden kaybolamaz. Bilinmeyen response
+  veya geçersiz source bound varsa normal adım.
+- Ayrı hata bütçeleri: optik derinlik 0.001, yerel yayılan radyans kanal
+  başına 0.001. İkisi de düz hacim SEGMENTİ boyunca tüketilir, her blokta
+  yenilenmez. h ≤ tau_left/sigma_max ve h ≤ emission_left/source_rate_max.
+  Her iki integral de [0, bound*h] aralığında olduğundan midpoint hatası
+  aralığın genişliğiyle sınırlıdır. Delta T ≤ delta tau.
+- Bu SON piksel parlaklık hatası garantisi değildir: sonraki çok parlak bir
+  yüzeyin radyansı küçük transmittance hatasını büyütebilir. Bir yol birden
+  fazla hacim segmentine girerse bütçe her segmentte ayrı geçerlidir.
+- En fazla 16*baseStep; kanıtlı span baseStep'ten büyük değilse eski yol.
+  Bütçe bitince normal adım geri gelir. Optik olarak kalın blok uzatılamaz.
+
+Tek non-scattering Matter hacmi de aynı midpoint integratörüne bağlandı;
+blok kanıtı çıkmazsa authored max_steps ve sabit baseStep korunur. Bu tek
+hacimde örnek konumlarını eski jitter kafesinden midpoint kafesine taşır;
+yoğunluk homojen değilken aynı bit görüntü beklenmez, görsel kabul gerekir.
+Karışımda eski hücre-adaptif yol fallback'tir. Kamera/sekme cache ayrımı
+korundu, random-walk flights bu bütçeyi kullanmaz. Ağır cache fill hâlâ tek
+çağrı yerinde; yeni modülde ışık/temperature döngüsü yok.
+
+UI/Python/IPC mevcut `adaptive_stepping` materyal işlemiyle aynı politikayı
+kullanır; yeni ayar/komut veya yeni validation semantiği eklenmedi. Tooltip
+kapsamı anlatacak biçimde güncellendi. OptiX koduna dokunulmadı.
+
+Statik/nümerik: `check_volume_optical_block_contracts.py` (4; dar spike,
+pozitif emisyon bound'u, üç üye ve tekrarlanan blok bütçesi, source wiring),
+mixture adaptive (10), optical (22), march LOD geçti. Shader derlenmedi ve
+GPU kazancı ölçülmedi. Özellikle 0.001'lik koruyucu bütçe nedeniyle her
+cutoff-üstü bölgenin uzatılması beklenmez; önemli emisyon/emilim korunur.
+
+
+### 20.1 CANLI FAIL — geri alındı (2026-10-28)
+
+Kullanıcı aynı sahnede §20'yi derledi. Dış IPC sonuçları:
+
+| | yalnız buhar | yalnız duman | ayrı toplam | birlikte |
+|---|---:|---:|---:|---:|
+| GPU ms/örnek | 545 | 134 | 679 | 766 |
+| kamera density/yol | 14.900 | 4.481 | 19.381 | 24.794 |
+| majorant query/yol | 4.270 | 4.372 | 8.642 | 11.542 |
+| ikincil density / cache fallback | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+
+§19 referansı birlikte 329 ms / 10.745 kamera density / 4.463 majorant query
+idi. §20 süreyi yaklaşık 2.33 katına çıkardı. Optik hata sınırının matematiksel
+olarak güvenli olması performans iyileştirmesi anlamına gelmedi. Kodda ek
+blok sorguları ve tek hacmi başka integratöre yönlendirme vardı; ikisi birlikte
+geri alındı. Hangisinin yüzde kaç maliyet yarattığı ayrı ölçülmedi.
+
+- `volume_mixture_optical_blocks.glsl` silindi; include, bütçe, span çağrıları
+  ve `matterFogBoundedSingle` yönlendirmesi çıkarıldı.
+- Tek hacim yeniden önceki sabit march yolunda. Genel karışım önceki
+  hücre-adaptif yolunda. UI tooltip önceki doğru açıklamaya döndü.
+- §19 materyale göre dar kutu ve §17 sekme cache'i KORUNDU. Erken sıfır
+  dönüşü ve kamera transform reuse de korundu.
+- `check_volume_optical_block_contracts.py` artık bu geri almayı ve başarılı
+  yolların korunmasını denetler; geçmeyen özelliği başarılı göstermez.
+
+Geri alma kaynakta hazır, kullanıcı shader derlemesi sonrası canlı doğrulanmalı.
+329 ms'ye dönüldüğü henüz ölçülmedi. Bu başarısız denemeyi yeniden eklemeyin.
+Bir sonraki mimari değişiklikten önce GPU profiler/sayaçla sıcak iş ayrılmalı;
+yeni bir spekülatif optimizasyon veya yeni kalite kaybı eklenmedi.
+Kayıt: `rt_gas_optical_blocks_regression_20261028.json`.
+
+
+### 20.2 Geri alma sonrası canlı: kare 50, genişlemiş buhar kutusu (2026-10-28)
+
+Kullanıcı geri almayı derledi, maliyet hâlâ yüksek dedi. Dış IPC okumasında
+kare 50; buharın kanonik kutusu [0,0,16] → [80,64,80], yani domain'in
+%51.52'si. Önceki 329 ms snapshot'ında kutu [0,0,16] → [80,16,72], %11.27
+idi. Materyal ayarları aynı; fallback=false, genişleme gerçek optik sınır
+hesabından geliyor. Yoğunluk alanının uzamsal dağılımı aynı kabul edilemez.
+
+`rt_probe_gas_overlap_cost_ipc.py --frames 4` güncel tek koşu:
+- buhar 446, duman 78, toplam 524, birlikte 573 ms;
+- kamera density 20.100 / 2.717 / 23.827 (birlikte);
+- majorant query 2.343 / 1.247 / 3.605;
+- ikincil density ve cache fallback bütün koşullarda sıfır.
+
+§20 kullanıcı çıktısı 766 ms / 11.542 majorant query idi. Son sorgular
+geri alma sonrası 3.605'e indi. Fakat bu da kontrollü aynı-frame eski/yeni
+shader A/B değildir. §20.1'in '329 -> 766 tamamen kod regresyonu' yorumu
+fazla kesindi; eldeki kanıt maliyet artışını gösterir, alan/kare farkının
+payını ayırmaz. Başarısız deneme geri alınmış kalır.
+
+Kaynakta emekli semboller yok; source ve x64/Release volume_closesthit.spv
+SHA256 aynı, boyut 993,388 B. Pipeline ready/hatasız. IPC yüklü shader hash'i
+vermediğinden bunlar runtime bytecode kimliğinin doğrudan kanıtı değildir.
+Kullanıcının timeline'ı değiştirilmedi; ölçüm öncesi/sonrası kare 50 idi.
+Görünürlükler geri açıldı. Kayıt: rt_gas_rollback_frame50_20261028.json.
+
+Sonuç: 329 ms'ye dönüş genel bir garanti değil; artan optik kutu kamera
+march işini artırıyor. Kalan yavaşlık hâlâ açık. Yeni shader denemesi yapılmadı.
+
+
+## 21. NanoVDB örnekleme belleği: host heap yerine device-local (2026-10-28, C++; DERLENMEDİ)
+
+Kullanıcı aynı sahnede OptiX total süreyi ~110 ms ölçtü. OptiX yolu dondurulmuş,
+sadece okundu. ray_color.cuh VDB yolu ile Vulkan optik hesapları birebir aynı
+değil: OptiX örnekleme kodunda Vulkan yoğunluk eğrisi ve joint-mixture yolunun
+eşdeğeri yok; legacy emisyon tepkisi de farklı. Bu yüzden 110 ms eşit görüntü
+kalitesinde kontrollü backend benchmark'ı diye sunulmaz; çok değerli bir ipucu.
+
+Kullanıcı Vulkan'a geçti (kare 50), dış IPC ile aynı oturumda üç ölçüm yapıldı.
+Authored 537 ms; no-emission/fixed companion 514 ms, no-emission/fixed phase
+mismatch 458 ms. Son ikisinde density/ray/probe sayıları BİREBİR aynıydı
+(kamera density=6.851/yol, solid probes=.9655/yol), o yüzden bu ölçüm genel
+karışımın daha pahalı olduğuna kanıt üretmedi. Saçılma sıfır olduğundan faz
+farkı optik sonucu etkilemez; tüm materyaller/sayaçlar finally ile geri alındı,
+get_material eşitliği doğrulandı. Kayıt: rt_gas_integrator_parity_20261028.json.
+
+### 21.1 Kaynakta somut bellek yerleşimi açığı
+
+VulkanBackend_Volumes.cpp yoğunluk ve sıcaklık NanoVDB buffer'larını
+CPU_TO_GPU ile açıyordu. translateMemoryLocation bu isteği yalnız
+HOST_VISIBLE|HOST_COHERENT olarak çeviriyor. findMemoryType ilk uyanı seçiyor;
+device-local tercih etmiyor. Yorumdaki 'host-visible, device-local BAR'
+varsayımı kod tarafından garanti edilmiyordu.
+
+Kullanıcının RTX 3060 cihazında read-only Vulkan memory enumeration:
+- type 3: flags=6 (host-visible/coherent), heap 1, device-local DEĞİL;
+- type 4: flags=14, heap 1, yine host;
+- type 5: flags=7, heap 2, host-visible device-local.
+
+Dolayısıyla eski seçim, buffer memoryTypeBits type 3'e izin veriyorsa,
+VRAM yerine sistem belleği seçiyor. Bu, her NanoVDB ağaç/değer okumasına PCIe
+maliyeti yükleyebilir. Eski allocation'ın gerçek memoryTypeBits/heap'i o
+build'de IPC'ye açık değildi; 'aktif eski buffer kesin RAM'de' iddiası yok.
+Kaynak ve cihaz sıralaması bu yolu doğrular. Kayıt: rt_gas_memory_types_20261028.json.
+
+### 21.2 Düzeltme ve doğrulama yüzeyi
+
+İki sıcak NanoVDB buffer allocation'ı GPU_ONLY (=DEVICE_LOCAL zorunlu)
+yapıldı. uploadBuffer'ın mevcut staging/copy yolu kullanılır; content version,
+50% over-allocation, senkronizasyon, lifetime/sweep aynı kalır. Buffer verisi,
+shader, örnek sayısı, opacity/emission ve geometrik atlama politikası değişmez.
+OptiX koduna dokunulmadı.
+
+Yeni küçük VulkanVolumeResidency.cpp, allocator'ın mevcut tracked heap bilgisini
+okur. `render.volume_slots` ve Python `rt.render.volume_slots()` her slotta
+`density_device_local` / `temperature_device_local` döndürür: 1 device-local,
+0 host heap, -1 unknown/not managed NanoVDB. Gerçek yayımlanmış GPU adresi
+buffer haritalarıyla eşleştirilir; VDB id churn'ü yanlış yerleşim raporlamaz.
+Yeni kullanıcı ayarı veya authored işlem yok; mevcut tanı API'si genişledi.
+
+Statik: residency (4), Fog bounds (4), material (10), march LOD geçti.
+C++ build ve gerçek bellek/süre kabulü açık. İlk upload ve sim/playback'te
+staging submit/wait maliyeti artabilir; bunu steady GPU dispatch süresinden
+ayrı ölçmek gerekir. Bu parti yeni boş-kutu algoritması eklemez; önce
+mevcut örneklerin bellek erişiminin maliyetini düzeltir. Yeni shader build
+gerekmiyor. Ajan build çalıştırmadı ve uygulama başlatmadı.
+
+
+## 22. Genel karışım Max Steps ayarını uygulamıyordu (2026-10-28; shader, DERLENMEDİ)
+
+Kullanıcı 256 → 16 değişiminin hız/kaliteye etkisiz olduğunu bildirdi.
+Kaynakta doğrulandı: shadeFogMixture, max_steps alanını hiç okumadan
+baseStep'i 2048 ve adaptif döngüyü 8192 limitleriyle kuruyordu. UI/Python/IPC
+ayarı taşıyordu; normal tek-hacim yolu zaten authored cap'i kullanıyordu.
+Ayrıca son VRAM çıktısı iki backend/dört grid için device_local=1;
+birlikte son GPU 280 ms (buhar185/duman84), kamera density9.482/yol,
+ikincil density/fallback0. Bu kullanıcı ölçümü §21 canlı tabanıdır.
+
+Yeni düz karışım yürüyüşünde ray interval'ine gerçekten değen üyelerin en
+düşük max_steps değeri ortak değerlendirme bütçesidir. Her joint sample her
+üyeyi değerlendirdiği için bu seçim her üyenin iş tavanına uyar. Off-ray
+üyeler bütçeyi düşürmez. Gölge ve random-walk event budget'ları ayrıdır.
+
+Base kafes bu bütçeye göre kurulur. Adaptif örnek kalan aralığı kalan sample
+sayısına bölen coverageFloor'dan kısa olamaz. Son örnek tüm kuyruğu kapsar;
+bütçe azaldığında gazın sonu kesilmez, çözünürlük düşer. Kesin boş atlamalar
+optik örnek bütçesi tüketmez. Adaptif hedef bütçe yüzünden kabalaştırıldığında
+mevcut step_budget_exhausted sayacı bunu raporlar. Yerel voxel hata sınırı
+bu durumda garanti edilmez: yazarın açık work cap'i daha önceliklidir.
+
+UI/script/IPC aynı mevcut max_steps ayarını kullanır; validation16..1024
+aynı kaldı, yeni API/ayar yok. Sekme radyans cache'i ayrı cell-walk politikası
+kullanır; bu cap düz kamera yoğunluk integrasyonunu sınırlar. Tek hacimde
+zaten 16'dan az gereken ışın varsa 256→16 fark yaratmayabilir. Sayaçtaki
+density_samples bir joint sample başına birden çok üye sayabilir; ray başına
+ham okuma sayısını ortak sample limitiyle karıştırmayın.
+
+Statik/nümerik testler: mixture_step_budget(4), adaptive(10), march LOD,
+rollback(2) geçti. Yeni A/B: rt_probe_gas_max_steps_ipc.py; 256/16/256_repeat,
+sonunda orijinal cap'ler ve instrumentation geri yüklenir. GPU/kalite kabulü
+kullanıcı shader build'inden sonra; ajan derlemedi.
+
+
+## 23. Oturumlar arasında farklı gaz snapshot'ları / ölçüm kimliği (2026-10-28)
+
+Kullanıcı §22 sonucu: 256=625.61 ms,16=488.73 ms,256-repeat=603.80 ms;
+kamera density25.6192185689 →8.8473335853 →25.6192185689. İki256 koşusunun
+ray/sample/budget/fallback sayaçları BİREBİR aynı. Bu koşu kendi içinde
+yapısal olarak stabil, ~%3.5 GPU süre farkı var; 16cap işlevsel. Oturumlar
+arasında ise kutuların/alanların aynı olduğuna dair koruma eksikti.
+
+İlk read-only mevcut durum, kare50: buhar active51,105, density_sum118.19437,
+box[0,0,16]→[80,64,72] (%45.08). İkinci okumada server stopping döndü;
+uygulama yeniden başlatılmadı. Kullanıcı yeniden yükledi ve daha hızlı dedi.
+Yeni read-only iki snapshot kendi arasında stabil:
+- kare50, buhar active63,072, density_sum126.15447;
+- buhar box[0,0,8]→[86,8,64] (%6.06);
+- duman active16,789, density_sum358.4213;
+- kamera pozisyonu aynı, target önce[.2827,-.4387,.3550], sonra
+  [1.0305,-.3562,2.0471]; focus_distance da farklı (DoF kapalı).
+
+Demek ki aynı dosya/kare numarası aynı render girdisini garanti etmemiş:
+hem gaz dağılımı hem kamera değişmiş. Yeniden simülasyon/cache/backend restore
+hangisinin dağılım farkını yarattığı henüz kanıtlanmadı; bunu 'boş hücre eleme
+rastgele çalışıyor' veya 'yalnız kamera farkı' diye kesinleştirmeyin. Daha çok
+raw-active hücre varken kutu çok küçülebilir: cutoff üstü hücrelerin KONUMU
+ve dağılımı belirleyicidir. Yeni kayıt: rt_gas_reloaded_snapshot_20261028.json.
+
+### 23.1 Ölçüm koruması (Python hazır; tam voxel hash'i için C++ build açık)
+
+`gas_probe_snapshot.py`: kare, ray-kamera ayarları, gaz alanı özeti/hash'i,
+materyal (A/B değişkeni max_steps hariç), gerçek render-backend AABB'leri ve
+residency kimliği alınır. VDB id/upload serial/state-version churn'u kimlik
+olarak kullanılmaz; state_versions ayrıca kaydedilir. Fark varsa MaxSteps
+probu INVALID diyerek abort eder ve finally ayarları geri yükler. Her ölçüm
+öncesi/sonrası kimlik, GPU çözünürlüğü denetlenir. Raporlar benzersiz dosya
+adlarına kaydedilir; eski oturum dosyasının üzerine yazılmaz.
+
+Mevcut eski executable'da hash yoksa açıkça summary_only raporlanır. Bu mod
+farkı yakalayabilir ama eşit toplamın eşit voxel düzeni olduğunu kanıtlamaz.
+Mevcut `fluid.inspect_fog_fields` / Python eşdeğerine density_hash ve
+temperature_hash eklendi (C++ DERLENMEDİ): tüm float voxel bitlerinden,
+source-empty sıcaklıklar dahil, sabit byte sıralı FNV-1a64. Yalnız on-demand
+inspection'da hesaplanır; per-frame renderer'a ek maliyet eklemez. Yeni
+Fluid/FogFieldDigest.h projeye kayıtlı. Fizik/render algoritması değişmedi.
+
+`check_gas_probe_snapshot.py` 4 test: cap/id değişimi kabul, eşit toplamda
+farklı field hash ret, kamera değişimi ret, eski build summary etiketleme.
+Yeni shader denemesi eklenmedi. Sonraki performans oranları yalnız aynı
+snapshot kimliği/çözünürlükte raporlanmalı; sim/cache restore determinizmi
+ayrı araştırma olarak açık.
+
+
+## 24. Güncel ayar doğrulaması ve ölçüm yolu düzeltmesi (2026-10-28)
+
+Kullanıcı açık sahnede yüksek maliyet/etkisiz quality bildirdi. Kare49,
+1680×945, Vulkan ready, iki NanoVDB grid çifti device_local=1. Aynı full voxel
+hash'leri/kamera/materyal (max_steps hariç)/AABB ile kontrollü A/B yapıldı;
+scene_signature=74cc36820de778bae7da58a9d8f1fc7712778f7e471067ea95225f634c3e35fe.
+
+İlk eski prob yöntemi:256=733,16=603,256repeat=746ms, density32.642→10.191→32.642.
+Emisyon0/16=573ms, density0=24ms. Sayaç off/on/off=732/755/755ms; atomikler
+bu farkın tek kökü değil. Low power-state anlık gözlendi (210/810MHz), ama
+başka örneklerde1980/7301MHz'e yükseldi; power-state tek kök diye sunulmaz.
+
+**Ölçüm kusuru:** viewport.render_frames, ana iş parçacığında
+renderer.render_progressive_pass(nullptr, nullptr, scene,1,0) çağırıyor;
+normal Vulkan display döngüsü beklenmiyor. Timestamp'ler GPU işi olsa da bu
+çağrılar normal sürekli RT akışına ek iş/idle aralıkları karıştırabiliyor.
+Eski probun baştan beri saf interaktif RT benchmark'ı gibi sunulması yanlıştı.
+Doğal GPU/counters-off8 sample ortalaması567ms ve çok daha dar aralık verdi.
+
+Yeni gas_probe_sampling.py doğrudan timestamp capture sayısını bekler,
+8warmup sonrası örnek alır; hiçbir viewport.render_frames çağrısı yok.
+Süre pass'inde volume counters kapalı, sayaçlar AYRI doğal pass'te toplanır.
+Frame/timeout kontrolleri ve finally cleanup var. İki ana gas probu ortak
+helper'a geçti, overlap probu gerçek eski visibility/instrumentation durumunu
+restore eder. Yeni SamplingContracts2 ve SnapshotContracts4 test geçti.
+
+Düzeltilen probun AYNI voxel/kamera kimliğiyle canlı sonucu:
+-256:610.668ms, camera density32.8763/yol;
+-16:571.648ms, camera density10.3093/yol;
+-256repeat:605.929ms, camera density32.8763/yol.
+İkincil density/fallback0. Orijinal materyaller geri yüklendi (RESTORED True).
+Kayıt rt_gas_max_steps_1793185733859251700.json.
+
+Sonuç: MaxSteps GPU'da çalışıyor, okuma sayısını~%69 düşürüyor; doğal akışta
+süre kazancı yalnız~%6. Kalan sabit/per-entry GPU maliyeti açık. Shadow/stride
+ayarları scatter_coefficient=0 sahnede ana in-scatter işini değiştirmez.
+Sadece MaxSteps düşürerek kalan500+ms'yi çözme varsayımı geçerli değil.
+Yeni shader veya C++ optimizasyonu yapılmadı; bu tur sadece ölçüm düzeltmesi.
+
+
+## 25. Import VDB / OptiX yön bağımlı kaybolma: adım uzayı ve coverage audit'i
+
+Kullanıcı: density curve kapatınca düzelmedi; Max Steps yüksekken de aynı;
+üst/yan bakışta hacim yok gibi, alttan dolu. Negatif yön AABB kodu okundu:
+min/max slab hesabı işaretleri koruyor; basit negatif-yön hatası bulunmadı.
+
+Somut ayrı defect adayı: VolumetricRenderer renderVoxelSize'ı Vulkan'da
+worldVoxelSize, OptiX'te native getVoxelSize seçiyor; gv.step_size bundan
+üretiliyor. OptiX raymarch_vdb_volume ise requested_step'i world chord ile
+bölüp required_steps/march_step_limit hesaplıyor. SONRA quality clamp,
+base_step'i world_voxel_size veya world_extent/16'ya küçültebiliyor;
+march_step_limit buna göre yeniden hesaplanmıyor. Kaynakta bu sıra doğrulandı.
+
+Sayısal örnek (sahnenin ölçülmüş ölçeği değil): world chord8, native voxel100,
+scale.001, multiplier.207. Requested20.7, required_steps3. Son clamp step.5;
+3 adım yalnız1.5/8 kapsıyor. Cap16/256/1024 aynı sonucu veriyor. Yoğunluk
+kolonun alt1.5 birimindeyse alttan görünür, üstten prefix boş kalır. Kullanıcı
+gözlemiyle uyumlu bir mekanizma; mevcut VDB'nin actual scale/chord değerleri
+henüz doğrudan IPC'de okunamadığından bu sahnedeki tek kök diye sunulmaz.
+
+`scripts/test/check_optix_vdb_step_space_audit.py`3 read-only/nümerik audit
+geçti; test implementasyonun hâlâ bu sırada olduğunu belgeliyor, düzeltme testi
+değil. OptiX/CUDA/renderer koduna değişiklik yapılmadı, build çalıştırılmadı.
+Native/world step birliği ve SON adım uzunluğuna göre kalan aralığın tam
+kapsanması birlikte ele alınmalı; sadece authored cap artırmak yeterli değil.

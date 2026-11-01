@@ -45,6 +45,7 @@
       "notes": [
         "Sand also asks for grains; one grain material per domain: T: H1_Grain_Runtime Sand grains's is used."
       ],
+      "origin": "flow source 'H1_Grain_Runtime_Source'",
       "reset_pending": false,
       "substance": "T: H1_Grain_Runtime Sand grains",
       "wanted": true,

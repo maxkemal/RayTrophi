@@ -71,8 +71,8 @@ def main():
         client.call("flow_source.create", name=source, domain=domain, phase="liquid",
                     source_mode="point", position=[1.5, 1.2, 1.5], radius=0.0001,
                     fluid_substance="Soil", velocity=[0, 0, 0], fluid_velocity_spread=0.0,
-                    fluid_particles_per_second=60.0, use_particle_limit=True,
-                    max_emitted_particles=1, fluid_temperature_override=True,
+                    fluid_particles_per_second=60.0, limit_parcels=True,
+                    parcels=1, fluid_temperature_override=True,
                     fluid_temperature_kelvin=293.15)
         source_created = True
         results = []

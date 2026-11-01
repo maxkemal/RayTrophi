@@ -72,14 +72,14 @@ def main():
              velocity=[0, 0, 0], fluid_velocity_spread=0., fluid_particles_per_second=24000.,
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15,
              use_time_limit=True, start_time=0., end_time=.5,
-             use_particle_limit=True, max_emitted_particles=12000)
+             limit_parcels=True, parcels=12000)
         created_sources.append(WATER)
         call('flow_source.create', name=GRAVEL, domain=DOMAIN, phase='liquid',
              source_mode='point', fluid_substance='Gravel', position=[0, .6, 0], radius=.1,
              velocity=[0, 0, 0], fluid_velocity_spread=0., fluid_particles_per_second=1000.,
              fluid_temperature_override=True, fluid_temperature_kelvin=args.hot,
              use_time_limit=True, start_time=.6, end_time=1.,
-             use_particle_limit=True, max_emitted_particles=400)
+             limit_parcels=True, parcels=400)
         created_sources.append(GRAVEL)
         # 1 cm: tau = C / (h_eff A) ~ 36 s in water (h_eff 130 W/(m^2 K) with the
         # grain's own r/(5k) resistance), so ~10 K of the 67 K go in 6 s. At 2 cm

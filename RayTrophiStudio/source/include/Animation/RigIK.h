@@ -13,6 +13,9 @@ struct IKControl {
     std::string solver = "two_bone";
     Vec3 aimAxis = Vec3(0, 1, 0);
     Vec3 upAxis = Vec3(0, 0, 1);
+    // Rig-space direction the middle joint bends toward (anatomy bend hint); zero = derive
+    // the bend plane from the rest pose.
+    Vec3 bendHint = Vec3(0, 0, 0);
 };
 std::vector<std::string> ikControlBones(const IKControl&);
 struct IKPose {

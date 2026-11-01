@@ -1,8 +1,12 @@
 #include "SimulationWorld.h"
+#include "Fluid/FluidForceColumns.h"
 
 #include "ForceField.h"
 
 namespace RayTrophiSim {
+
+static_assert(static_cast<int>(Physics::ForceFieldType::Wind) == 0,
+              "Packed Wind type must match the fluid surface-force shader");
 
 uint32_t toSimulationSystemMask(SimulationSystemKind kind) {
     return static_cast<uint32_t>(kind);
@@ -427,6 +431,8 @@ void SimulationWorld::uploadForceFieldSnapshotToCompute() {
     force_compute_buffer_.stride_bytes = sizeof(PackedForceField);
     force_compute_buffer_.size_bytes = required_bytes;
     force_compute_buffer_.source_version = force_snapshot_.version();
+    force_compute_buffer_.fluid_surface_columns_required =
+        Fluid::packedForcesNeedFluidColumns(packed);
 
     if (!force_compute_buffer_.buffer.valid() ||
         !compute_context_.uploadBuffer(force_compute_buffer_.buffer, packed.data(), required_bytes)) {

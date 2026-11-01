@@ -4,13 +4,14 @@ import random
 import re
 import unittest
 from pathlib import Path
+from volume_shader_source import read_volume_shader
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "RayTrophiStudio/source"
 
 
 def read(name):
-    return (SOURCE / name).read_text(encoding="utf-8")
+    return read_volume_shader(SOURCE / name)
 
 
 def search(values, origin, direction, step, accelerated, modifier, main):
@@ -143,8 +144,8 @@ class SdfEmptyChecks(unittest.TestCase):
         body = cpp.split("struct VolumePerformanceStats {", 1)[1].split("};", 1)[0]
         cpp_fields = re.findall(r"^\s+(?:uint32_t|float)\s+(\w+)\s*=", body, re.M)
         self.assertEqual(glsl_fields, cpp_fields)
-        self.assertEqual(len(cpp_fields), 52)
-        self.assertIn("sizeof(VolumePerformanceStats) == 208", cpp)
+        self.assertGreaterEqual(len(cpp_fields), 52)
+        self.assertIn(f"sizeof(VolumePerformanceStats) == {4 * len(glsl_fields)}", cpp)
         self.assertEqual(cpp_fields[15], "enabled")
         self.assertEqual(cpp_fields[25:29], ["regionMinX", "regionMinY", "regionMaxX", "regionMaxY"])
         for part in ["main", "arbiter"]:

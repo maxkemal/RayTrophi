@@ -18,6 +18,8 @@ const char* matterExchangeKindName(MatterExchangeKind kind) {
         case MatterExchangeKind::Drainage: return "drainage";
         case MatterExchangeKind::Precipitation: return "precipitation";
         case MatterExchangeKind::Autoconversion: return "autoconversion";
+        case MatterExchangeKind::Emission: return "emission";
+        case MatterExchangeKind::EmissionWithheld: return "emission_withheld";
     }
     return "unknown";
 }
@@ -43,8 +45,15 @@ void MatterExchangeLedger::record(MatterExchangeRecord record) {
 MatterExchangeSummary MatterExchangeLedger::summary() const {
     MatterExchangeSummary out;
     out.step = step_;
-    out.events = records_.size();
     for (const MatterExchangeRecord& record : records_) {
+        // Emission enters through the domain boundary and a withheld emission
+        // never existed: both are listed in records(), but the summary stays
+        // the balance of exchanges between phases and owners.
+        if (record.kind == MatterExchangeKind::Emission ||
+            record.kind == MatterExchangeKind::EmissionWithheld) {
+            continue;
+        }
+        ++out.events;
         out.source_mass_kg += record.source_mass_kg;
         out.target_mass_kg += record.target_mass_kg;
         out.source_energy_j += record.source_energy_j;

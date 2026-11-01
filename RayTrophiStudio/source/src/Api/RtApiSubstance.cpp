@@ -88,7 +88,7 @@ void refreshDomainMaterials() {
         }
         const auto scale = system.runtime->worldThermal().scale();
         for (auto& domain : system.runtime->gridDomains()) {
-            if (RayTrophiSim::simulationDomainHasLiquid(domain.type)) {
+            if (RayTrophiSim::simulationDomainHasLiquid(domain)) {
                 RayTrophiSim::Fluid::resolveGridDomainSubstancePhysics(
                     domain, domain.voxel_size, scale, error);
             }

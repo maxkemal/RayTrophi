@@ -590,7 +590,7 @@ rt.fluid.remove_domain("TestLiquidDomain")
 assert hasattr(rt, "gas"), "rt.gas submodule must exist"
 gas_domain = rt.gas.create_domain("TestSmokeDomain", domain_min=(-1, 0, -1), domain_max=(1, 2, 1), voxel_size=0.1)
 assert gas_domain["name"] == "TestSmokeDomain"
-assert gas_domain["type"] == "gas"
+assert gas_domain["type"] == "matter" and gas_domain["phases"] == ["gas"]
 assert gas_domain["boundary"] == "open"
 rt.fluid.remove_domain("TestSmokeDomain")
 

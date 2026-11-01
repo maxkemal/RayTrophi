@@ -10,6 +10,7 @@
 #include "SimCache.h"
 #include "Fluid/GasSourceCache.h"
 #include "PerfProfile.h"
+#include "globals.h"
 
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/FluidParticleLabels.h"
@@ -372,6 +373,8 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
     std::size_t inventory_index = 0;
     for (const auto& d : domains) {
         writePod(os, static_cast<uint32_t>(d.type));
+        writePod(os, static_cast<uint8_t>(simulationDomainHasGas(d)));
+        writePod(os, static_cast<uint8_t>(simulationDomainHasLiquid(d)));
         writePod(os, d.channels);
         writePod(os, static_cast<uint8_t>(d.valid ? 1 : 0));
         writePod(os, d.max_density);
@@ -565,6 +568,20 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         uint8_t valid_u = 0;
         if (!readPod(is, type_u)) return false;
         d.type = static_cast<SimulationDomainType>(type_u);
+        if (d.type != SimulationDomainType::Matter) {
+            SCENE_LOG_WARN("[SimCache] legacy Gas/Fluid cache rejected: rebake for Matter lanes");
+            out_domains.clear();
+            return false;
+        }
+        if (version >= 19u) {
+            uint8_t gas = 0, liquid = 0;
+            if (!readPod(is, gas) || !readPod(is, liquid) || gas > 1 || liquid > 1 ||
+                (!gas && !liquid)) {
+                return false;
+            }
+            d.gas_lane_enabled = gas != 0;
+            d.liquid_lane_enabled = liquid != 0;
+        }
         if (!readPod(is, d.channels)) return false;
         if (!readPod(is, valid_u)) return false;
         d.valid = (valid_u != 0);
@@ -593,7 +610,7 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         // Keep the legacy allocation path for specialized domains.
         {
             RTPERF_FRAME_SCOPE("sim.cache.disk.allocate_primary_grid");
-            d.grid.allocate_gas_channels = simulationDomainHasGas(d.type);
+            d.grid.allocate_gas_channels = simulationDomainHasGas(d);
             if (d.type == SimulationDomainType::Matter) {
                 d.grid.nx = gnx;
                 d.grid.ny = gny;

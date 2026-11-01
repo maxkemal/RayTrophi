@@ -30,6 +30,7 @@ struct MatterFogLiveStream {
     // Its density is already physical, so it renders with this neutral shader.
     std::shared_ptr<VolumeShader> merged_shader;
     std::string gas_merge_key;
+    std::string gas_merge_requested;
 };
 
 using MatterFogLiveStreams = std::map<FogFieldKey, MatterFogLiveStream>;
@@ -41,5 +42,7 @@ MatterFogAppearances readFogAppearances(const nlohmann::json& domain);
 MatterFogAppearance& ensureFogAppearance(MatterFogAppearances& appearances,
     const FogFieldKey& key, const std::shared_ptr<VolumeShader>& legacy);
 std::shared_ptr<VolumeShader>& matterGasFogShader(SimulationGridDomainDesc& domain);
+// One sentence for the panel and scripting: why gas renders merged or separate.
+std::string matterGasMergeStatus(const MatterFogAppearances& appearances);
 
 } // namespace RayTrophiSim::Fluid

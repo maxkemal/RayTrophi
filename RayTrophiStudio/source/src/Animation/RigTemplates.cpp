@@ -23,7 +23,17 @@ struct Definition {
     void fit(const std::string& bone,const std::string& start,const std::string& end,float position) {
         anatomy.fitRules.push_back({bone,start,end,position});
     }
+    void bend(const std::string& chain,Vec3 direction){anatomy.bendHints.push_back({chain,direction});}
+    // Height-normalized ankle offsets; buildRigTemplate scales them with the joints.
+    void pivots(const std::string& chain,Vec3 heel,Vec3 ball,Vec3 tip){anatomy.footPivots.push_back({chain,heel,ball,tip});}
 };
+// Humanoid ankle at y .045, toe joint .025 lower and .095 ahead, toe tip .14 ahead; the heel
+// sits behind the ankle by .3 of the ankle-to-ball distance, matching deriveFootPivots.
+void humanoidLimbHints(Definition& d,const std::string& side) {
+    d.bend(side+"_leg",Vec3(0,0,1));
+    d.bend(side+"_arm",Vec3(0,0,-1));
+    d.pivots(side+"_leg",Vec3(0,-.025f,-.0285f),Vec3(0,-.025f,.095f),Vec3(0,-.025f,.14f));
+}
 Definition basic(bool chain) {
     Definition d;d.id=chain?"chain3":"root";d.label=chain?"Three-joint chain":"Root";d.family="custom";
     d.add("Root","",Vec3(0,0,0));
@@ -31,7 +41,7 @@ Definition basic(bool chain) {
     return d;
 }
 Definition humanoid() {
-    Definition d;d.id="humanoid";d.label="Humanoid (T rest)";d.family="humanoid";d.version=3;
+    Definition d;d.id="humanoid";d.label="Humanoid (T rest)";d.family="humanoid";d.version=4;
     // Height-normalized fitting seed with a mild sagittal spine profile,
     // forward knee/elbow hints and symmetric level arms. This is not a fitted bind pose.
     // Joint axes and IK bend preferences belong to the later control layer.
@@ -55,6 +65,7 @@ Definition humanoid() {
         d.add(s+"Toe",s+"Foot",Vec3(x*.055f,.02f,.095f),role+"_leg.toe");
         d.add(s+"ToeEnd",s+"Toe",Vec3(x*.055f,.02f,.14f),role+"_leg.toe_tip");
         d.chain(role+"_leg",{s+"Thigh",s+"Shin",s+"Foot",s+"Toe",s+"ToeEnd"});
+        humanoidLimbHints(d,role);
     }
     for(const char* name:{"Clavicle","UpperArm","Forearm","Hand","HandEnd","Thigh","Shin","Foot","Toe","ToeEnd"})
         d.pair(std::string("Left")+name,std::string("Right")+name);
@@ -138,7 +149,7 @@ Definition detailedHumanoid() {
     definition.id = "humanoid_detailed";
     definition.label = "Humanoid Detailed";
     definition.family = "humanoid";
-    definition.version = 2;
+    definition.version = 3;
 
     definition.add("Root", "", Vec3(0, 0, 0), "root");
     definition.add("Pelvis", "Root", Vec3(0, .53f, 0), "pelvis");
@@ -187,6 +198,7 @@ Definition detailedHumanoid() {
                        Vec3(direction * .055f, .02f, .14f), roleSide + "_leg.toe_tip");
         definition.chain(roleSide + "_leg", {side + "Thigh", side + "Shin", side + "Foot",
                                                side + "Toe", side + "ToeEnd"});
+        humanoidLimbHints(definition, roleSide);
     }
     for (const char* name : {"Clavicle", "UpperArm", "Forearm", "Hand", "HandEnd",
                              "Thigh", "Shin", "Foot", "Toe", "ToeEnd"}) {
@@ -309,7 +321,7 @@ Definition insect() {
     return d;
 }
 Definition avian() {
-    Definition d;d.id="avian";d.label="Avian (spread wings)";d.family="avian";d.defaultHeight=.6f;
+    Definition d;d.id="avian";d.label="Avian (spread wings)";d.family="avian";d.defaultHeight=.6f;d.version=2;
     // Generic bird layout: paired articulated wings are independent of the leg chains.
     // This is a fitting seed, not a universal bird/bat/insect anatomy or flight solver.
     d.add("Root","",Vec3(0,0,0),"root");d.add("Pelvis","Root",Vec3(0,.43f,-.08f),"pelvis");
@@ -336,6 +348,7 @@ Definition avian() {
         d.add(s+"Toe",s+"Ankle",Vec3(x*.075f,0,.08f),role+"_leg.toe");
         d.add(s+"ToeEnd",s+"Toe",Vec3(x*.075f,0,.20f),role+"_leg.toe_tip");
         d.chain(role+"_leg",{s+"Thigh",s+"Knee",s+"Ankle",s+"Toe",s+"ToeEnd"});
+        d.bend(role+"_leg",Vec3(0,0,1));
     }
     for(const char* joint:{"WingShoulder","WingElbow","WingWrist","WingTip","WingEnd","Thigh","Knee","Ankle","Toe","ToeEnd"})
         d.pair(std::string("Left")+joint,std::string("Right")+joint);
@@ -377,6 +390,7 @@ bool buildRigTemplate(const std::string& id,const std::string& character,float h
     for(auto& rule:a.fitRules) {
         rule.bone=prefix+rule.bone;rule.start=prefix+rule.start;rule.end=prefix+rule.end;
     }
+    for(auto& pivot:a.footPivots){pivot.heel=pivot.heel*height;pivot.ball=pivot.ball*height;pivot.tip=pivot.tip*height;}
     for (auto& control : a.drivenControls) {
         control.anchor = prefix + control.anchor;
         for (auto& driver : control.drivers)

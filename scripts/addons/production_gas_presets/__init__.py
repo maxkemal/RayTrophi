@@ -123,7 +123,11 @@ def add_api_routing_test():
         velocity=(1.4, -2.2, 0.0), radius=0.14,
         fluid_particles_per_second=160.0,
         fluid_velocity_spread=0.10,
-        use_particle_limit=True, max_emitted_particles=12000,
+    )
+    # The source budget is mass (kg): the 12000 parcels this preset poured.
+    rt.flow_source.update(
+        "Addon Liquid Flow", use_mass_limit=True,
+        max_emitted_mass_kg=12000 * rt.flow_source.get("Addon Liquid Flow")["parcel_mass_kg"],
     )
     rt.flow_source.create(
         "Addon Gas Pilot", gas_name,

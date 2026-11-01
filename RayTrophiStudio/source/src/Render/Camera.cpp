@@ -137,30 +137,12 @@ void Camera::update_camera_vectors() {
     origin = lookfrom;
     fov = vfov;
 
-    // ---------------- PHYSICAL LENS DEFECTS (Auto-Calculated) ----------------
-    // Calculate distortion based on estimated focal length (assuming 35mm full frame)
-    // f = h / (2 * tan(vfov/2))
-    // We use a fixed sensor height reference (24mm) to map "Wide Angle" feel consistently.
-    // This allows the distortion to feel "physically correct" relative to standard FOV.
-    
-    if (auto_lens_characteristics) {
-        // Note: theta is already calculated above as (vfov * PI / 180)
-        float est_f = (24.0f / 2.0f) / tan(theta / 2.0f);
-        
-        if (est_f < 50.0f) {
-             // Barrel Distortion for Wide Angle (< 50mm)
-             // Quadratic curve: stronger effect as f decreases (e.g. 16mm is visible)
-             float ratio = (50.0f - est_f) / 50.0f;
-             distortion = -0.25f * (ratio * ratio); 
-        } else {
-             // Pincushion Distortion for Telephoto (> 50mm)
-             // Linear, mild effect
-             float ratio = (est_f - 50.0f) / 200.0f;
-             distortion = 0.05f * ratio;
-             if (distortion > 0.05f) distortion = 0.05f; // Cap at max
-        }
-    }
-    // -------------------------------------------------------------------------
+    // Auto lens characteristics have ONE owner: calculateLensCharacteristics(),
+    // which only acts in Cinema mode (where its panel lives). A second,
+    // FOV-based formula used to run here in EVERY mode and overwrite the same
+    // `distortion` field: a flag left on after leaving Cinema bent every Pro
+    // frame with no visible control, and the two formulas disagreed.
+    calculateLensCharacteristics();
 
     updateFrustumPlanes();
 }

@@ -79,7 +79,7 @@ class NanoOpticalContracts(unittest.TestCase):
         helper = shader.split("float mfShadowEmptyStep(", 1)[1].split(
             "// Each material's authored shadow budget", 1)[0]
         for guard in ["!mfShadowIndexPath", "v._uvw_pad[0] < 0.5",
-                      "v._ext_reserved[7] >= 0.5", "volumeNanoRemap(v, 1e-6)",
+                      "v._ext_reserved[7] >= 0.5", "volumeNanoSupportRemap(v, 1e-6)",
                       "!= MATPROG_NONE"]:
             self.assertIn(guard, helper)
         self.assertEqual(helper.count("return nanoEmptyIndexStep("), 2)
@@ -168,7 +168,7 @@ class NanoOpticalContracts(unittest.TestCase):
             shader = (SHADERS / name).read_text(encoding="utf-8")
             self.assertNotIn("source_material_address", shader)
         layout = (SHADERS.parent / "include/Backend/vulkan_volume_types.h").read_text(encoding="utf-8")
-        self.assertIn("sizeof(VkVolumeInstance) == 672", layout)
+        self.assertIn("sizeof(VkVolumeInstance) == 688", layout)
 
     def test_solid_probe_is_order_independent_and_does_not_terminate(self):
         import itertools

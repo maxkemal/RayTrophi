@@ -14,6 +14,7 @@ Source check only; the shader build is the user's.
 """
 
 import os
+from volume_shader_source import read_volume_shader
 import re
 import sys
 
@@ -24,6 +25,8 @@ fails = []
 
 
 def read(*p):
+    if os.path.basename(os.path.join(*p)) == 'volume_closesthit.rchit':
+        return read_volume_shader(os.path.join(*p))
     with open(os.path.join(*p), encoding="utf-8", errors="replace") as f:
         return f.read()
 
@@ -47,14 +50,17 @@ pack = vol[vol.index("uint32_t packVolumeMarchLod"):]
 pack = pack[:pack.index("\n}\n")]
 for frag in ("camera_light_stride, 1, 16) - 1u)", "secondary_light_stride, 1, 16) - 1u) << 4)",
              "secondary_step_scale, 1, 16) - 1u) << 8)", "secondary_max_steps, 0, 511) << 12)",
-             "((lod.secondary_radiance_cache ? 1u : 0u) << 21)"):
+             "((lod.secondary_radiance_cache ? 1u : 0u) << 21)",
+             "camera_max_steps, 0, 511) << 22)"):
     check(frag in pack, "packVolumeMarchLod layout changed: " + frag)
 
 vch = read(SH, "volume_closesthit.rchit")
 for frag in ("int(marchLod & 15u) + 1", "int((marchLod >> 4) & 15u) + 1",
              "float(((marchLod >> 8) & 15u) + 1u)", "int((marchLod >> 12) & 511u)",
-             "((marchLod >> 21) & 1u) != 0u"):
+             "int((marchLod >> 22) & 511u)"):
     check(frag in vch, "volume_closesthit decode differs from the pack: " + frag)
+check("worldData.w.volumeMarchLod >> 22) & 511u" in read(SH, "volume_mixture_adaptive.glsl"),
+      "fog mixture does not honour the camera step cap")
 check("volumeCameraSegment = (pathFlags & PL_CAMERA_SEGMENT) != 0u;" in vch,
       "volume_closesthit main() does not classify the segment")
 check(re.search(r"\(step % (shadowStride|ambientShadowStride)\) == 0", vch) is None,
@@ -71,9 +77,22 @@ check("segStride" not in vch and "adaptiveStepping" not in vch and
 check("float dt = min(baseStep, tFar - t);" in vch and vch.count("volumeShadowDue(step, ") == 4,
       "march segment or shadow refresh changed from the fixed-lattice form")
 # Radiance cache (§13).
+route = read(SH, "volume_cached_segment.glsl")
 check('#include "volume_radiance_cache.glsl"' in vch and
-      "volumeRadianceCacheMarch(volIdx, vol, rayOrigin, rayDir, tNear, tFar," in vch and
-      "if (cached) t = tFar;" in vch, "bounce rays are not routed through the radiance cache")
+      '#include "volume_cached_segment.glsl"' in vch and
+      "bool segmentCached = volumeCachedSegment(" in vch and
+      "if (segmentCached)" in vch, "bounce segments are not routed through the shared cache")
+check(route.count("volumeRadianceCacheMarch(") == 1 and
+      "((marchLod >> 21) & 1u) == 0u" in route and
+      "volumeCameraSegment ||" in route,
+      "shared cache entry lost its single call site or camera/setting guard")
+check(vch.index("bool segmentCached = volumeCachedSegment(") <
+      vch.index("        shadeFogMixture("), "general mixture still bypasses the cache")
+check("program != MATPROG_NONE || v.random_walk_enabled > 0.5" in route,
+      "programmed/random-walk members must retain the full integrator")
+mixture = read(SH, "volume_mixture.glsl")
+check("mfContinue(cachedRadiance, cachedTransmission" in mixture,
+      "general mixture does not consume the cached segment")
 lc = read(SH, "volume_light_cache.glsl")
 check("const uint VLC_LIGHT_CHANNELS = 6u;" in lc and
       "lightIndex >= int(VLC_LIGHT_CHANNELS) - 1" in lc,
@@ -84,6 +103,15 @@ check(all(rc.index("entries.e[iD + %du] = " % k) < pub for k in (1, 2, 3)),
       "radiance vertex publishes density (the claim channel) before its source channels")
 check("atomicCompSwap(words.w[iD * 2u], filling, seen);" in rc,
       "an aborted radiance fill does not release its claim (vertex stuck as 'filling')")
+march = rc[rc.index("bool volumeRadianceCacheMarch("):]
+check(march.count("volumeRadianceCacheFetch(") == 1 and
+      "volumeEmissionIntegral(sigma.r, h, 2.0)" in march and "? source : s * source" in march,
+      "radiance march: one fetch call site and extinction-weighted source")
+
+check("mixtureCount > 0u ? min(mixtureCount, 16u) : slots" in march and
+      "!gasOverlapCandidate(volumes.v[mSlot])" in march and
+      "mixtureCount > 0u || m == 1u" in march,
+      "general cache must cover all candidates and reject samples outside each box")
 
 backend = read(SRC, "src", "Backend", "VulkanBackend.cpp")
 check("gw.volumeMarchLod = packVolumeMarchLod(volumeMarchLod());" in backend,

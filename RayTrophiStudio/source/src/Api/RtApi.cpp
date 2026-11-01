@@ -1,4 +1,4 @@
-﻿#include "PostProcess/PostService.h"
+#include "PostProcess/PostService.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -11,6 +11,7 @@
 */
 #include "Api/RtApi.h"
 #include "RtApiInternal.h"
+#include "RtManualSimulationStep.h"
 #include "Backend/VulkanRecoveryPolicy.h"
 
 #include <deque>
@@ -1850,6 +1851,7 @@ VolumeMarchLodInfo volumeMarchLod() {
     out.secondary_step_scale = lod.secondary_step_scale;
     out.secondary_max_steps = lod.secondary_max_steps;
     out.secondary_radiance_cache = lod.secondary_radiance_cache;
+    out.camera_max_steps = lod.camera_max_steps;
     return out;
 }
 
@@ -1863,12 +1865,15 @@ Result setVolumeMarchLod(const VolumeMarchLodInfo& lod) {
         return Result::fail("secondary_step_scale must be in [1, 16]");
     if (lod.secondary_max_steps != 0 && !in(lod.secondary_max_steps, 4, 511))
         return Result::fail("secondary_max_steps must be 0 or in [4, 511]");
+    if (lod.camera_max_steps != 0 && !in(lod.camera_max_steps, 4, 511))
+        return Result::fail("camera_max_steps must be 0 or in [4, 511]");
     Backend::VolumeMarchLod b;
     b.camera_light_stride = lod.camera_light_stride;
     b.secondary_light_stride = lod.secondary_light_stride;
     b.secondary_step_scale = lod.secondary_step_scale;
     b.secondary_max_steps = lod.secondary_max_steps;
     b.secondary_radiance_cache = lod.secondary_radiance_cache;
+    b.camera_max_steps = lod.camera_max_steps;
     Backend::setVolumeMarchLod(b);
     for (auto* backend : vulkanBackendsForStats()) backend->refreshVolumeMarchLod();
     return Result::success();
@@ -2093,6 +2098,8 @@ VolumeSlotsInfo volumeSlots() {
                 r.volume_type = d.volume_type;
                 r.has_density = d.has_density;
                 r.has_temperature = d.has_temperature;
+                r.density_device_local = d.density_device_local;
+                r.temperature_device_local = d.temperature_device_local;
                 r.emission_mode = d.emission_mode;
                 r.color_ramp_enabled = d.color_ramp_enabled;
                 r.blackbody_intensity = d.blackbody_intensity;
@@ -2118,7 +2125,7 @@ VolumeSlotsInfo volumeSlots() {
             row.system = system.name;
             row.domain_index = static_cast<int>(d);
             row.domain = descs[d].name;
-            const bool fluid = RayTrophiSim::simulationDomainHasLiquid(descs[d].type);
+            const bool fluid = RayTrophiSim::simulationDomainHasLiquid(descs[d]);
             row.type = descs[d].type == RayTrophiSim::SimulationDomainType::Matter
                 ? "matter"
                 : (fluid ? "fluid" : "gas");
@@ -2593,6 +2600,8 @@ Result getCamera(CameraState& out) {
     // ★★★ UYGULANAN buyukluk: kapi kapaliysa 0. `aperture`e bakip "bulaniklik
     //   var" diye olcmek, anahtari gormemek demektir.
     out.effective_lens_radius = cam->effectiveLensRadius();
+    out.lens_distortion = cam->distortion;
+    out.auto_lens = cam->auto_lens_characteristics && cam->camera_mode == CameraMode::Cinema;
     out.auto_exposure = cam->auto_exposure;
     out.use_physical_exposure = cam->use_physical_exposure;
     out.iso_preset_index = cam->iso_preset_index;
@@ -2688,6 +2697,22 @@ Result setCameraAperture(float aperture) {
     Camera* cam = activeCamera();
     if (!cam) return Result::fail("no active camera in the scene");
     cam->aperture = aperture;
+    cameraChanged(*cam);
+    return Result::success();
+}
+
+Result setCameraLensDistortion(float k) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (!std::isfinite(k) || k < -0.5f || k > 0.5f)
+        return Result::fail("lens_distortion must be finite and in [-0.5, 0.5]");
+    Camera* cam = activeCamera();
+    if (!cam) return Result::fail("no active camera in the scene");
+    // The auto calculation would overwrite the value on the next update: a
+    // setter that "succeeds" and then reverts is worse than a refusal.
+    if (cam->auto_lens_characteristics && cam->camera_mode == CameraMode::Cinema)
+        return Result::fail("Cinema Auto Lens Characteristics owns lens_distortion; turn it off first");
+    cam->distortion = k;
     cameraChanged(*cam);
     return Result::success();
 }
@@ -3767,12 +3792,7 @@ Result stepPhysicsSimulation(float dt) {
         // 24 fps matches the value scene_ui.cpp passes to
         // updateSimulationTimeline. It is hardcoded there too; if that ever
         // becomes a scene setting, both sites have to read it.
-        const int frame = g_ctx->scene.claimPhysicsStep(dt, 24.0f,
-                                                        ui.timeline.getCurrentFrame());
-        ui.timeline.setCurrentFrame(frame);
-        g_ctx->scene.timeline.current_frame = frame;
-        g_ctx->render_settings.animation_current_frame = frame;
-        g_ctx->render_settings.animation_playback_frame = frame;
+        publishManualSimulationStep(*g_ctx, dt);
     }
     return Result::success();
 }

@@ -755,7 +755,7 @@ static const MethodRegistration reg_camera_frame_selected(desc_camera_frame_sele
 static const MethodDescriptor desc_camera_get = {
     "camera.get", "camera",
     "Return camera position, target, up vector, field of view, focus distance, aperture and the physical exposure state",
-    "EXPOSURE IS A RELATIVE MODEL, NOT AN ABSOLUTE PHOTOMETRIC ONE. The textbook formula 1/(1.2*2^EV100) assumes scene radiance in cd/m2; this engine's light intensities are arbitrary, so the multiplier is a ratio against a calibrated baseline (0.00003125) chosen to avoid a black viewport. Do not 'fix' it into the absolute formula - every scene would go black and the symptom would read as 'too dark', not 'wrong formula'. 'iso_value', 'shutter_seconds', 'f_number' and 'exposure_factor' are DERIVED read-only outputs, not settings: a preset INDEX is not a measurement, and exposure_factor is the number actually handed to the shaders. 'aperture' is the depth-of-field dial and does NOT affect exposure; 'fstop_preset_index' is the exposure/lens dial and does NOT affect depth of field. PRIORITY ORDER, and it is the most common reason these dials look dead: the exposure MODE now lives in the post chain, not on the camera. Read post.get_exposure 'mode' - only 'physical' reads ISO/shutter/f-stop; under 'manual' and 'auto_histogram' they are NOT read and the camera term is 1.0. Set it first with post.configure_exposure {\"settings\":{\"mode\":\"physical\"}}. The camera's own auto_exposure / use_physical_exposure flags are LEGACY: syncDisplay forces both in physical mode, so toggling them does not change the Vulkan or Rendered image. These setters still SUCCEED because they really do write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor for the multiplier ACTUALLY applied (it is g_display_post.camera_exposure, so it reads 1.0 whenever the mode is not physical).",
+    "EXPOSURE IS A RELATIVE MODEL, NOT AN ABSOLUTE PHOTOMETRIC ONE. The textbook formula 1/(1.2*2^EV100) assumes scene radiance in cd/m2; this engine's light intensities are arbitrary, so the multiplier is a ratio against a calibrated baseline (0.00003125) chosen to avoid a black viewport. Do not 'fix' it into the absolute formula - every scene would go black and the symptom would read as 'too dark', not 'wrong formula'. 'iso_value', 'shutter_seconds', 'f_number' and 'exposure_factor' are DERIVED read-only outputs, not settings: a preset INDEX is not a measurement, and exposure_factor is the number actually handed to the shaders. 'aperture' is the depth-of-field dial and does NOT affect exposure; 'fstop_preset_index' is the exposure/lens dial and does NOT affect depth of field. PRIORITY ORDER, and it is the most common reason these dials look dead: the exposure MODE now lives in the post chain, not on the camera. Read post.get_exposure 'mode' - only 'physical' reads ISO/shutter/f-stop; under 'manual' and 'auto_histogram' they are NOT read and the camera term is 1.0. Set it first with post.configure_exposure {\"settings\":{\"mode\":\"physical\"}}. The camera's own auto_exposure / use_physical_exposure flags are LEGACY: syncDisplay forces both in physical mode, so toggling them does not change the Vulkan or Rendered image. These setters still SUCCEED because they really do write the setting - the image not moving is the model's precedence, not a fault. Read camera.get exposure_factor for the multiplier ACTUALLY applied (it is g_display_post.camera_exposure, so it reads 1.0 whenever the mode is not physical). lens_distortion is the applied radial k; auto_lens = Cinema Auto Lens Characteristics currently owns it.",
     "read", "Read", false, "any",
     "camera|get",
     nullptr,
@@ -994,6 +994,22 @@ static const MethodDescriptor desc_camera_set_iso_preset = {
     true
 };
 static const MethodRegistration reg_camera_set_iso_preset(desc_camera_set_iso_preset);
+
+static const MethodParam params_camera_set_lens_distortion[] = {
+    {"lens_distortion", "number", true, "Finite, inclusive range -0.5..0.5; rejected (not clamped) outside it. |k| <= 0.001 is not applied.", nullptr, nullptr},
+};
+static const MethodDescriptor desc_camera_set_lens_distortion = {
+    "camera.set_lens_distortion", "camera",
+    "Set the radial lens distortion k of the active camera (negative = barrel, positive = pincushion, 0 = off)",
+    "Applied to primary rays by Vulkan RT, OptiX and the CPU tracer; RayFusion raster does NOT apply it, so Rendered and RayFusion views differ while k != 0. Refused while Cinema-mode Auto Lens Characteristics owns the value (camera.get auto_lens = true). Saved under the project key 'lens_distortion'; the old key 'distortion' is deliberately not read (it had no control for years and old projects carried invisible bends). Motion vectors invert the distortion, so FSR stays available.",
+    "write", "SceneWrite", false, "any",
+    "camera|set|lens|distortion|barrel|pincushion",
+    "camera.get|render.upscale_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_camera_set_lens_distortion, 1,
+    true
+};
+static const MethodRegistration reg_camera_set_lens_distortion(desc_camera_set_lens_distortion);
 
 static const MethodParam params_camera_set_lens_weather[] = {
     {"patch", "object", true, "enabled bool; coating bare|hydrophobic; hood_deg 0..89; diameter_mm 10..200; seed uint32. Temperature is inherited from world climate.", nullptr, nullptr},
@@ -1404,16 +1420,16 @@ static const MethodParam params_flow_source_create[] = {
     {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
     {"grain_birth_saturation", "any", false, "", nullptr, nullptr},
     {"inherit_velocity", "any", false, "", nullptr, nullptr},
-    {"max_emitted_particles", "any", false, "", nullptr, nullptr},
+    {"max_emitted_mass_kg", "any", false, "", nullptr, nullptr},
     {"start_time", "any", false, "", nullptr, nullptr},
-    {"use_particle_limit", "any", false, "", nullptr, nullptr},
+    {"use_mass_limit", "any", false, "", nullptr, nullptr},
     {"use_time_limit", "any", false, "", nullptr, nullptr},
     {"velocity_coupling", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_flow_source_create = {
     "flow_source.create", "flow_source",
     "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
-    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state.",
+    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. Matter lanes: phase=auto (creation default) chooses gas when enabled, otherwise liquid. Explicit gas/liquid targeting a disabled lane is rejected unchanged. Legacy project sources migrate from the old domain type.",
     "write", "SceneWrite", false, "FlowSourceInfo",
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
@@ -1442,7 +1458,7 @@ static const MethodRegistration reg_flow_source_get(desc_flow_source_get);
 static const MethodDescriptor desc_flow_source_list = {
     "flow_source.list", "flow_source",
     "List every emitter with its settings",
-    " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state.",
+    " particle_pool_weight is the authored share of free slots. pool_requested_particles/pool_granted_particles report requested and allocated slots of the last injection, not per-source live ownership; rewind clears these diagnostics. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. total_emitted_mass_kg/total_emitted_particles count what the source poured since the reset. withheld_mass_kg_step/_total: mass the domain's Max Particles ceiling kept the source from emitting; > 0 means the source refills what leaves the domain instead of pouring its authored rate (also an emission_withheld ledger record).",
     "read", "Read", false, "FlowSourceInfo[]",
     "flow_source|flow|source|list|simulation|emitter|inventory",
     nullptr,
@@ -1502,7 +1518,7 @@ static const MethodParam params_flow_source_update[] = {
     {"fuel", "any", false, "", nullptr, nullptr},
     {"grain_birth_saturation", "any", false, "", nullptr, nullptr},
     {"inherit_velocity", "any", false, "", nullptr, nullptr},
-    {"max_emitted_particles", "any", false, "", nullptr, nullptr},
+    {"max_emitted_mass_kg", "any", false, "", nullptr, nullptr},
     {"parent_object", "any", false, "", nullptr, nullptr},
     {"phase", "any", false, "", nullptr, nullptr},
     {"position", "any", false, "", nullptr, nullptr},
@@ -1511,7 +1527,7 @@ static const MethodParam params_flow_source_update[] = {
     {"source_object", "any", false, "", nullptr, nullptr},
     {"start_time", "any", false, "", nullptr, nullptr},
     {"temperature", "any", false, "", nullptr, nullptr},
-    {"use_particle_limit", "any", false, "", nullptr, nullptr},
+    {"use_mass_limit", "any", false, "", nullptr, nullptr},
     {"use_time_limit", "any", false, "", nullptr, nullptr},
     {"velocity", "any", false, "", nullptr, nullptr},
     {"velocity_coupling", "any", false, "", nullptr, nullptr},
@@ -1520,7 +1536,7 @@ static const MethodParam params_flow_source_update[] = {
 static const MethodDescriptor desc_flow_source_update = {
     "flow_source.update", "flow_source",
     "Update fields of an existing emitter, keeping everything you do not send",
-    "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state.",
+    "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. Matter lanes: phase=auto (creation default) chooses gas when enabled, otherwise liquid. Explicit gas/liquid targeting a disabled lane is rejected unchanged. Legacy project sources migrate from the old domain type.",
     "write", "SceneWrite", false, "any",
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
@@ -1648,6 +1664,22 @@ static const MethodDescriptor desc_fluid_get_fog_shader = {
 };
 static const MethodRegistration reg_fluid_get_fog_shader(desc_fluid_get_fog_shader);
 
+static const MethodParam params_fluid_get_lanes[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_get_lanes = {
+    "fluid.get_lanes", "fluid",
+    "Read canonical Matter lane switches and actual grid storage",
+    "Gas and liquid are creation presets of Matter. Single-phase domains use only the primary grid. Read-only; no step/reset. measured=false means storage counts are not live.",
+    "read", "Read", false, "type, preset, lane switches, measured, primary_cells and secondary_cells",
+    "fluid|get|lanes|matter|lane|read",
+    "fluid.set_lanes|fluid.get_phase_grids",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_get_lanes, 1,
+    true
+};
+static const MethodRegistration reg_fluid_get_lanes(desc_fluid_get_lanes);
+
 static const MethodParam params_fluid_get_phase_grids[] = {
     {"domain", "string", true, "", nullptr, nullptr},
 };
@@ -1773,7 +1805,7 @@ static const MethodParam params_fluid_inspect_fog_fields[] = {
 static const MethodDescriptor desc_fluid_inspect_fog_fields = {
     "fluid.inspect_fog_fields", "fluid",
     "Inspect carrier, vapor and per-source gas Fog fields from live Matter state",
-    "Read-only on-demand diagnostic, shared with rt.fluid.inspect_fog_fields(domain). Does not step, reset, save, change routes or publish render volumes. Requires initialized Matter state. Carrier fields group by substance and physical phase; untagged carriers use the domain default substance. Matter gas flow sources retain passive density/fuel ownership under stable producer_uid; gas_source fields use material targets matter:<domain>:gas_source:<uid>. Vapor and unattributed producers remain in matter:<domain>:gas. Gas fields share the physical temperature; gas_max_abs_density_error measures their partition against authoritative density. Up to eight source identities plus the residual stream, with a 256 MiB provenance budget. Old aggregate caches require resimulation for historical source attribution. Returns density sums, active cells, physical temperature ranges and maximum per-cell carrier density error versus legacy aggregate deposition. Vulkan resident gas is downloaded on demand; failed reads reject. Matter virtual temperature is converted through the world/domain thermal scale and authoritative vapour inventory using the existing physical humidity inversion, not field times 3000. Missing temperatures return null ranges. Builder budget 128 MiB, additional snapshot/reference budget 128 MiB; at most 32 fields. Unknown parameters reject. render_connected reports whether populated fields have live VDB bindings; each field includes its stable material target, VDB ID and publication/visibility state. This reports publication, not an image-quality acceptance.",
+    "Read-only on-demand diagnostic, shared with rt.fluid.inspect_fog_fields(domain). Does not step, reset, save, change routes or publish render volumes. Requires initialized Matter state. Carrier fields group by substance and physical phase; untagged carriers use the domain default substance. Matter gas flow sources retain passive density/fuel ownership under stable producer_uid; gas_source fields use material targets matter:<domain>:gas_source:<uid>. Vapor and unattributed producers remain in matter:<domain>:gas. Gas fields share the physical temperature; gas_max_abs_density_error measures their partition against authoritative density. Up to eight source identities plus the residual stream, with a 256 MiB provenance budget. Old aggregate caches require resimulation for historical source attribution. Returns density sums, active cells, physical temperature ranges and maximum per-cell carrier density error versus legacy aggregate deposition. Vulkan resident gas is downloaded on demand; failed reads reject. Matter virtual temperature is converted through the world/domain thermal scale and authoritative vapour inventory using the existing physical humidity inversion, not field times 3000. Missing temperatures return null ranges. Builder budget 128 MiB, additional snapshot/reference budget 128 MiB; at most 32 fields. Unknown parameters reject. render_connected reports whether populated fields have live VDB bindings; each field includes its stable material target, VDB ID and publication/visibility state. Every field includes density_hash and temperature_hash (FNV-1a of all float voxel bits in fixed byte order) for snapshot identity across runs. Each published field also reports optical_bounds (exclusive voxel limits, empty, conservative_fallback) computed by the shared material-aware render-bounds core. This reports publication, not an image-quality acceptance.",
     "read", "Read", false, "object",
     "fluid|inspect|fog|fields",
     "fluid.get_phase_output|fluid.state_digest",
@@ -1786,7 +1818,7 @@ static const MethodRegistration reg_fluid_inspect_fog_fields(desc_fluid_inspect_
 static const MethodDescriptor desc_fluid_list_domains = {
     "fluid.list_domains", "fluid",
     "List every fluid and gas domain with its full settings",
-    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour. Rain and non-condensable gas (2026-10-11 part 4): gas_rain_kg/gas_rain_cells is rain water in the air (gas_rain_centroid its mass-weighted centre, world space); it rides the gas velocity (wind drift, updrafts) and falls through it at its terminal speed. gas_foreign_kg/gas_foreign_cells is non-condensable gas (fuel vapour, combustion products, any boiled substance other than condensable_substance): never part of gas_phase_mass_kg, never condenses. Surface evaporation/condensation runs only for condensable_substance parcels. The gas temperature field holds the virtual temperature (steam reads ~600 K); saturation and surface exchange convert it to air temperature with the cell's vapour mass.",
+    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour. Rain and non-condensable gas (2026-10-11 part 4): gas_rain_kg/gas_rain_cells is rain water in the air (gas_rain_centroid its mass-weighted centre, world space); it rides the gas velocity (wind drift, updrafts) and falls through it at its terminal speed. gas_foreign_kg/gas_foreign_cells is non-condensable gas (fuel vapour, combustion products, any boiled substance other than condensable_substance): never part of gas_phase_mass_kg, never condenses. Surface evaporation/condensation runs only for condensable_substance parcels. The gas temperature field holds the virtual temperature (steam reads ~600 K); saturation and surface exchange convert it to air temperature with the cell's vapour mass. emission_withheld_kg_step/_total: liquid-source mass the Max Particles ceiling withheld (summed over the domain's sources); > 0 = the ceiling, not the sources, sets emission.",
     "read", "Read", false, "FluidDomainInfo[]",
     "fluid|list|domains|simulation|inventory",
     "fluid.get",
@@ -1871,7 +1903,7 @@ static const MethodParam params_fluid_run[] = {
 static const MethodDescriptor desc_fluid_run = {
     "fluid.run", "fluid",
     "Step the simulation N times in one call and return sampled domain rows",
-    "For tests: per-step fluid.step + fluid.list_domains pays about two frames of IPC cadence per step (measured 269 frames for 120 steps). steps (>= 1), dt (default 1/60), sample_every (0 = only the last step), domains (names, default all), fields (keys of a fluid.list_domains row to keep, default all), sum_fields (summed over every step: ledgers such as thermal_grain_heat_to_liquid_j), max_fields (maximum over every step). Returns samples [{step, domains: {name: row}}], sums {name: {field: total}}, max {name: {field: peak}}. Stops at the first failing step with steps_done.",
+    "For tests: per-step fluid.step + fluid.list_domains pays about two frames of IPC cadence per step (measured 269 frames for 120 steps). steps (>= 1), dt (default 1/60), sample_every (0 = only the last step), domains (names, default all), fields (keys of a fluid.list_domains row to keep, default all), sum_fields (summed over every step: ledgers such as thermal_grain_heat_to_liquid_j), max_fields (maximum over every step). Returns samples [{step, domains: {name: row}}], sums {name: {field: total}}, max {name: {field: peak}}. Stops at the first failing step with steps_done. Each completed world step advances the same manual timeline claim as fluid.step; subsequent paused reads retain that state until the user scrubs or plays.",
     "write", "SceneWrite", false, "any",
     "fluid|run|simulation|test",
     nullptr,
@@ -2052,6 +2084,24 @@ static const MethodDescriptor desc_fluid_set_label_views = {
     true
 };
 static const MethodRegistration reg_fluid_set_label_views(desc_fluid_set_label_views);
+
+static const MethodParam params_fluid_set_lanes[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"gas_lane_enabled", "boolean", true, "", nullptr, nullptr},
+    {"liquid_lane_enabled", "boolean", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_set_lanes = {
+    "fluid.set_lanes", "fluid",
+    "Enable gas and/or liquid through the shared Matter lane service",
+    "Both switches are required, and at least one must be true. Changing populated domains or disabling a lane used by a source/DEM substance is rejected unchanged. Reset live content and retarget or remove sources first. No-op requests preserve state. On a successful change only this domain layout is synchronized; the frame cache is invalidated. UI uses this same service.",
+    "write", "SceneWrite", false, "Same fields as fluid.get_lanes",
+    "fluid|set|lanes|matter|lane|write",
+    "fluid.get_lanes|fluid.reset|flow_source.update",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_lanes, 3,
+    true
+};
+static const MethodRegistration reg_fluid_set_lanes(desc_fluid_set_lanes);
 
 static const MethodParam params_fluid_set_param[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -2338,7 +2388,7 @@ static const MethodParam params_fluid_state_digest[] = {
 static const MethodDescriptor desc_fluid_state_digest = {
     "fluid.state_digest", "fluid",
     "Bit-exact fingerprint of a liquid domain's live particle state: count, FNV position/velocity hashes, centroid, mean speed, whitewater count/hash",
-    "For determinism probes (Faz 2-W gate: enabling whitewater must leave the primary hashes unchanged). Hashes are hex strings; centroid/mean_speed are the tolerant view when runs are not bit-identical.",
+    "For determinism probes (Faz 2-W gate: enabling whitewater must leave the primary hashes unchanged). Hashes are hex strings; centroid/mean_speed are the tolerant view when runs are not bit-identical. bounds_min/max are canonical particle-center extrema in meters (not surface bounds); bounds_measured is false for empty or unstepped domains, whose bounds arrays are zero placeholders. Nonfinite particle positions reject the query. Python and IPC read the same core digest service.",
     "write", "SceneWrite", false, "any",
     "fluid|state|digest|determinism|measure|verify|whitewater",
     "fluid.get|fluid.step|fluid.reset",
@@ -2354,7 +2404,7 @@ static const MethodParam params_fluid_step[] = {
 static const MethodDescriptor desc_fluid_step = {
     "fluid.step", "fluid",
     "Advance the fluid solver by one timestep",
-    "For scripted work prefer timeline.set_frame, which advances every solver consistently.",
+    "Steps the registered simulation world once. Like physics.step, advances the playhead at 24 fps and holds the manual-step claim until the user scrubs or plays; sim.control_state reports script_driving. Python and IPC use the same step service.",
     "write", "SceneWrite", false, "any",
     "fluid|step|simulation|advance",
     nullptr,
@@ -2565,6 +2615,45 @@ static const MethodDescriptor desc_gas_create_domain = {
     true
 };
 static const MethodRegistration reg_gas_create_domain(desc_gas_create_domain);
+
+static const MethodParam params_gas_field_stats[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"bins", "int", false, "", "64", nullptr},
+    {"density_threshold", "float", false, "", "0.01", nullptr},
+};
+static const MethodDescriptor desc_gas_field_stats = {
+    "gas.field_stats", "gas",
+    "Measure percentiles and histograms of a live gas field and of the same cells through the emission chain",
+    "Read-only over cells above density_threshold (default 0.01, bins default 64). Check `measured`, `temperature_measured` and `emission_measured` first: a channel not computed reads 0, which is not a measured zero. Emission needs independent_emission and an enabled color ramp, and omits the flame field. `limited_cells` counts cells above the radiance limiter's knee; emission_luminance is before the limit; voxel_optical_depth is peak RGB after soot burnout. Temperature is solver heat x 3000. `flame` covers burning cells only, above 1e-3; `flame_measured` false means the field is not on the host.",
+    "write", "SceneWrite", false, "any",
+    "gas|field|stats|measure|verify|volume|temperature|emission|histogram",
+    "gas.measure_plume|gas.fit_temperature_range",
+    nullptr, nullptr, nullptr, nullptr,
+    params_gas_field_stats, 3,
+    true
+};
+static const MethodRegistration reg_gas_field_stats(desc_gas_field_stats);
+
+static const MethodParam params_gas_fit_temperature_range[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"fit_gamma", "any", false, "", nullptr, nullptr},
+    {"floor_kelvin", "any", false, "", nullptr, nullptr},
+    {"high_percentile", "any", false, "", nullptr, nullptr},
+    {"low_percentile", "any", false, "", nullptr, nullptr},
+    {"median_target", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_gas_fit_temperature_range = {
+    "gas.fit_temperature_range", "gas",
+    "Fit a gas material's temperature range and gamma to the current field",
+    "Writes temperature_min/max from low_percentile (default 1) and high_percentile (99.5) over cells at or above floor_kelvin (800), and, with fit_gamma, temperature_gamma so the median lands on median_target (0.5). Writes once and does not follow later frames, so a sequence does not flicker; fit on a representative frame. Resets accumulation.",
+    "write", "SceneWrite", false, "any",
+    "gas|fit|temperature|range|material|emission",
+    "gas.field_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_gas_fit_temperature_range, 6,
+    true
+};
+static const MethodRegistration reg_gas_fit_temperature_range(desc_gas_fit_temperature_range);
 
 static const MethodParam params_gas_get[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -7125,6 +7214,7 @@ static const MethodRegistration reg_render_set_volume_light_cache(desc_render_se
 
 static const MethodParam params_render_set_volume_march_lod[] = {
     {"camera_light_stride", "int", false, "", "0", nullptr},
+    {"camera_max_steps", "int", false, "", "0", nullptr},
     {"secondary_light_stride", "int", false, "", "0", nullptr},
     {"secondary_max_steps", "int", false, "", "0", nullptr},
     {"secondary_radiance_cache", "bool", false, "", nullptr, nullptr},
@@ -7133,12 +7223,12 @@ static const MethodParam params_render_set_volume_march_lod[] = {
 static const MethodDescriptor desc_render_set_volume_march_lod = {
     "render.set_volume_march_lod", "render",
     "Set the Vulkan RT gas march LOD; omitted fields keep their value",
-    "Ranges: camera_light_stride and secondary_light_stride 1..16, secondary_step_scale 1..16, secondary_max_steps 0 or 4..511, secondary_radiance_cache bool. Out-of-range values are rejected, not clamped. Resets accumulation. Process state, not saved with the project. Use 1/1/1/0 with the radiance cache off for the reference image.",
+    "Ranges: camera_light_stride and secondary_light_stride 1..16, secondary_step_scale 1..16, secondary_max_steps and camera_max_steps 0 or 4..511, secondary_radiance_cache bool. Out-of-range values are rejected, not clamped. Resets accumulation. Process state, not saved with the project. Use 1/1/1/0 with the radiance cache off and camera_max_steps 0 for the reference image.",
     "render", "Render", false, "any",
     "render|set|volume|march|lod|performance",
     "render.volume_march_lod|render.volume_stats",
     nullptr, nullptr, nullptr, nullptr,
-    params_render_set_volume_march_lod, 5,
+    params_render_set_volume_march_lod, 6,
     true
 };
 static const MethodRegistration reg_render_set_volume_march_lod(desc_render_set_volume_march_lod);
@@ -7241,7 +7331,7 @@ static const MethodRegistration reg_render_volume_light_cache(desc_render_volume
 static const MethodDescriptor desc_render_volume_march_lod = {
     "render.volume_march_lod", "render",
     "Report the Vulkan RT gas march LOD (in-scatter stride on camera/bounce segments, bounce step scale and cap)",
-    "Applies to the straight gas/fog march only (not random walk, fog mixture or SurfaceSDF). camera_light_stride / secondary_light_stride: in-scatter is evaluated every k density samples and held in between; density and transmittance stay per sample. secondary_step_scale / secondary_max_steps: density step multiplier and step cap after the first bounce (0 = authored budget). secondary_radiance_cache: bounce rays cross the box on cell-sized lookups of a per-vertex density + source-radiance cache stored in the light cache grid (isotropic phase, no area lights, no material program or companion); a missing vertex falls back to the full march (radiance_cache_marches / radiance_cache_fallbacks in render.volume_stats). 1/1/1/0 with the cache off is the exact full-quality march. Camera vs secondary sample counts are in render.volume_stats (camera_* / secondary_*). docs/dev/RT_GAS_SECONDARY_MARCH.md.",
+    "Applies to the straight gas/fog march only (not random walk, fog mixture or SurfaceSDF). camera_light_stride / secondary_light_stride: in-scatter is evaluated every k density samples and held in between; density and transmittance stay per sample. camera_max_steps: step cap on the camera segment in Vulkan RT, including the fog mixture (0 = authored budget); RayFusion keeps the authored budget. secondary_step_scale / secondary_max_steps: density step multiplier and step cap after the first bounce (0 = authored budget). secondary_radiance_cache: bounce rays cross the box on cell-sized lookups of a per-vertex density + source-radiance cache stored in the light cache grid (isotropic phase, no area lights, no material program or companion); a missing vertex falls back to the full march (radiance_cache_marches / radiance_cache_fallbacks in render.volume_stats). 1/1/1/0 with the cache off is the exact full-quality march. Camera vs secondary sample counts are in render.volume_stats (camera_* / secondary_*). docs/dev/RT_GAS_SECONDARY_MARCH.md.",
     "read", "Read", false, "any",
     "render|volume|march|lod|performance",
     "render.set_volume_march_lod|render.volume_stats",
@@ -7254,7 +7344,7 @@ static const MethodRegistration reg_render_volume_march_lod(desc_render_volume_m
 static const MethodDescriptor desc_render_volume_slots = {
     "render.volume_slots", "render",
     "List every TLAS volume slot per Vulkan backend (identity key, name, vdb id, published, is_active, source type, density/temperature channels, AABB) and which volume each grid domain owns",
-    "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id.",
+    "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. density_device_local and temperature_device_local report the actual tracked allocation heap: 1=device-local, 0=host heap, -1=unknown or not a managed NanoVDB buffer. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id.",
     "render", "Render", false, "VolumeSlotsInfo",
     "render|volume|slots|diagnostics|backend|verify|identity",
     "render.volume_tables|fluid.get",
@@ -7379,6 +7469,25 @@ static const MethodDescriptor desc_rig_apply_envelope_weights = {
 };
 static const MethodRegistration reg_rig_apply_envelope_weights(desc_rig_apply_envelope_weights);
 
+static const MethodParam params_rig_apply_geodesic_weights[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"resolution", "integer", false, "", "96", nullptr},
+    {"falloff", "float", false, "", "2.0", nullptr},
+    {"rig_revision", "integer", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_apply_geodesic_weights = {
+    "rig.apply_geodesic_weights", "rig",
+    "Apply geodesic voxel skin weights to every bound mesh in one undo step",
+    "Matching rig_revision, authored binding. Replaces the flat skin rows of all bound meshes through the same heavy undo command as rig.apply_envelope_weights, bumps the rig revision, invalidates CPU/GPU skinning, and records algorithm geodesic_voxel_v1 in the native project (rig.get_binding reports it). Envelope radii and per-bone profiles are kept for a later switch back.",
+    "write", "SceneWrite", false, "ok",
+    "rig|apply|geodesic|weights|skin|voxel|binding",
+    "rig.preview_geodesic_weights|rig.get_binding|rig.preview_rom_test",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_apply_geodesic_weights, 4,
+    true
+};
+static const MethodRegistration reg_rig_apply_geodesic_weights(desc_rig_apply_geodesic_weights);
+
 static const MethodParam params_rig_apply_pose_preview[] = {
     {"character", "any", false, "", nullptr, nullptr},
 };
@@ -7394,6 +7503,23 @@ static const MethodDescriptor desc_rig_apply_pose_preview = {
     true
 };
 static const MethodRegistration reg_rig_apply_pose_preview(desc_rig_apply_pose_preview);
+
+static const MethodParam params_rig_auto_landmarks[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"mesh", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_auto_landmarks = {
+    "rig.auto_landmarks", "rig",
+    "Propose fit landmarks with per-joint confidence; feed the result to rig.preview_fit",
+    "Read-only. Same fit space and landmark format as rig.get_fit_setup (+Y up, +Z forward, +X character left), so landmarks go straight into rig.preview_fit then rig.commit_fit. Starts from the template scaled into the mesh bounds. humanoid_sections_v1: head top from the highest points, foot tip/ball/ankle from the lowest band per side, hand tip from the most lateral point above the hips (T or A pose), shoulder/elbow/wrist along shoulder-to-hand, hip/knee along hip-to-ankle, spine/neck/head centred in horizontal sections; every joint is re-centred in its cross-section and scored by section density and how far it moved. Finger joints follow the detected arm direction and length and are marked .45 so the hands always get a look. Other families: each joint centred in the section across its parent bone (generic_sections_v1). forward_check -Z caps every confidence at .3: the mesh faces away from the fit axes. Confidence below .5 is listed in low_confidence; fit-rule joints are derived exactly as preview_fit does. Errors as rig.get_fit_setup.",
+    "read", "Read", false, "{character, mesh, rig_revision, method, forward_check, landmarks{bone:[x,y,z]}, joints[{name, role, confidence, source, moved_from_template, fit_editable}], low_confidence[], low_confidence_threshold, mean_confidence, warnings[], axes}",
+    "rig|auto|landmarks|fit|detect|humanoid|confidence|alignment",
+    "rig.get_fit_setup|rig.preview_fit|rig.commit_fit|rig.preflight",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_auto_landmarks, 2,
+    true
+};
+static const MethodRegistration reg_rig_auto_landmarks(desc_rig_auto_landmarks);
 
 static const MethodParam params_rig_bake_ik_channels[] = {
     {"character", "string", true, "", nullptr, nullptr},
@@ -7598,16 +7724,20 @@ static const MethodParam params_rig_create_human_walk_clip[] = {
     {"body_bounce", "float", true, "", nullptr, nullptr},
     {"arm_swing", "float", true, "", nullptr, nullptr},
     {"body_motion", "float", false, "", "0.75", nullptr},
+    {"leg_reach", "float", false, "", "0.998", nullptr},
+    {"stance_knee_deg", "float", false, "", "18.0", nullptr},
+    {"heel_strike_deg", "float", false, "", "15.0", nullptr},
+    {"toe_off_deg", "float", false, "", "30.0", nullptr},
 };
 static const MethodDescriptor desc_rig_create_human_walk_clip = {
     "rig.create_human_walk_clip", "rig",
     "Generate a loopable editable humanoid walk clip",
-    "Owned bound humanoid in Pose mode, matching revision, no render job or pending preview. Generates every frame through canonical anatomy-derived two-bone limb IK and shared joint limits, then stores ordinary rigid local bone keys. Feet retain planted orientation with swing toe pitch; the pelvis transfers weight laterally, tilts and yaws while mapped spine bones counter-rotate. Optional mapped head and clavicle roles stabilize gaze and involve the shoulder girdle. body_motion 0..1 controls pelvis/torso naturalization and defaults to .75 when omitted. Reusing a name atomically replaces only an editable rig-authored clip for the same character in one undo step; imported clips still return rig_pose_clip_name_conflict. The clip is in-place and actor-placement independent; no persistent IK targets or controls are added. Height fractions: stride .05..0.80, step_height 0..0.25, body_bounce 0..0.15; arm_swing/body_motion 0..1, cadence 20..300 steps/min, cycles 1..8, fps 1..120. Maximum 1000 frames and 100000 frame-joint samples. Native project persistence stores it. Errors include rig_walk_requires_humanoid, rig_walk_requires_humanoid_roles, rig_walk_requires_humanoid_limbs, rig_walk_invalid_recipe, rig_walk_sample_limit, rig_walk_invalid_height, rig_pose_clip_name_conflict, rig_pose_preview_active and rig_edit_stale_revision.",
+    "Owned bound humanoid in Pose mode, matching revision, no render job or pending preview. Generates every frame through canonical anatomy-derived two-bone limb IK and shared joint limits, then stores ordinary rigid local bone keys. The pelvis height follows a stance-leg knee flexion profile (stance_knee_deg) capped by leg_reach (otherwise the IK clamps and the foot hangs above its target), toes bend during heel rise, chest and arms trail the pelvis, and the foot rolls over heel and ball pivots derived from the toe roles (heel_strike_deg, toe_off_deg); body rotations use the rig-derived character frame and knee poles face the pelvis direction, so a straight or hyperextended fitted knee cannot fold sideways; the pelvis transfers weight laterally, tilts and yaws while mapped spine bones counter-rotate. Optional mapped head and clavicle roles stabilize gaze and involve the shoulder girdle. body_motion 0..1 controls pelvis/torso naturalization and defaults to .75 when omitted. Reusing a name atomically replaces only an editable rig-authored clip for the same character in one undo step; imported clips still return rig_pose_clip_name_conflict. The clip is in-place and actor-placement independent; no persistent IK targets or controls are added. Height fractions: stride .05..0.80, step_height 0..0.25, body_bounce 0..0.15; arm_swing/body_motion 0..1, leg_reach .85..1, stance_knee_deg 0..35, heel_strike_deg 0..30, toe_off_deg 0..60, cadence 20..300 steps/min, cycles 1..8, fps 1..120. Maximum 1000 frames and 100000 frame-joint samples. Native project persistence stores it. Errors include rig_walk_requires_humanoid, rig_walk_requires_humanoid_roles, rig_walk_requires_humanoid_limbs, rig_walk_invalid_recipe, rig_walk_sample_limit, rig_walk_invalid_height, rig_pose_clip_name_conflict, rig_pose_preview_active and rig_edit_stale_revision.",
     "write", "SceneWrite", false, "ok; selects the new authored bone clip",
     "rig|create|human|walk|clip|animation|gait|recipe|generate|humanoid",
     "rig.preview_human_walk|rig.get_pose_state|rig.insert_pose_keys|rig.create_controls",
     nullptr, nullptr, nullptr, nullptr,
-    params_rig_create_human_walk_clip, 11,
+    params_rig_create_human_walk_clip, 15,
     true
 };
 static const MethodRegistration reg_rig_create_human_walk_clip(desc_rig_create_human_walk_clip);
@@ -7652,6 +7782,27 @@ static const MethodDescriptor desc_rig_create_pose_clip = {
 };
 static const MethodRegistration reg_rig_create_pose_clip(desc_rig_create_pose_clip);
 
+static const MethodParam params_rig_create_rom_clip[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"rig_revision", "integer", true, "", nullptr, nullptr},
+    {"scale", "float", false, "", "1.0", nullptr},
+    {"frames_per_motion", "integer", false, "", "12", nullptr},
+    {"fps", "float", false, "", "24.0", nullptr},
+    {"name", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_create_rom_clip = {
+    "rig.create_rom_clip", "rig",
+    "Bake the range-of-motion test into an editable rig clip",
+    "Same motions as rig.preview_rom_test, keyed rest / peak / rest with frames_per_motion frames each (peak in the middle), so row.frame_peak in the preview report is where to look. Pose mode, matching rig_revision, no pending preview; replaces a same-name rig-authored clip in one undo step, imported names return rig_pose_clip_name_conflict.",
+    "write", "SceneWrite", false, "ok; selects the new authored bone clip",
+    "rig|create|rom|clip|range|motion|test|deformation|generate",
+    "rig.preview_rom_test|rig.get_pose_state|rig.create_human_walk_clip",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_create_rom_clip, 6,
+    true
+};
+static const MethodRegistration reg_rig_create_rom_clip(desc_rig_create_rom_clip);
+
 static const MethodParam params_rig_delete_bone[] = {
     {"character", "any", false, "Owned rig name", nullptr, nullptr},
     {"bone", "any", false, "Existing prefixed bone key", nullptr, nullptr},
@@ -7668,6 +7819,23 @@ static const MethodDescriptor desc_rig_delete_bone = {
     true
 };
 static const MethodRegistration reg_rig_delete_bone(desc_rig_delete_bone);
+
+static const MethodParam params_rig_derive_limb_hints[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"overwrite", "bool", false, "", "False", nullptr},
+};
+static const MethodDescriptor desc_rig_derive_limb_hints = {
+    "rig.derive_limb_hints", "rig",
+    "Fill limb bend hints and leg foot pivots in the rig anatomy (anatomy v8)",
+    "Writes through set_anatomy, so it is one undoable step and persists in native projects. Without overwrite it only fills chains that have no record. Foot pivots (heel/ball/tip offsets from the leg chain's third bone, in its rest frame) come from the chain's toe and toe-tip joints; the heel sits behind the ankle by .3 of the ankle-to-ball distance; chains without toe joints are guessed from leg length and listed in pivots_estimated. Bend hints for humanoid legs/arms use the character forward measured from the feet (ankle to toe), never a fixed axis, so imported rigs facing any direction get knees forward and elbows back; forward_assumed=true means no leg had a toe joint and +Z was used. Other families keep their rest bend only when it is clearly readable (mid joint off the root-tip line by more than 2% of the chain length). IK controls copy the hint when they are created, so recreate controls afterwards; preview_human_walk reads hints and pivots directly and reports foot_pivots_source and foot_pivots_differ_from_toes (true after a refit that moved the toes: re-run with overwrite).",
+    "write", "SceneWrite", false, "{character, foot_pivots_set[], bend_hints_set[], pivots_estimated[], forward[3], forward_assumed}",
+    "rig|derive|limb|hints|anatomy|bend|hint|knee|elbow|pole|foot|pivot|heel|toe|walk|ik",
+    "rig.get_anatomy|rig.set_anatomy|rig.create_controls|rig.preview_human_walk",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_derive_limb_hints, 2,
+    true
+};
+static const MethodRegistration reg_rig_derive_limb_hints(desc_rig_derive_limb_hints);
 
 static const MethodParam params_rig_edit_pose_key[] = {
     {"character", "string", true, "Active Pose character", nullptr, nullptr},
@@ -8353,6 +8521,25 @@ static const MethodDescriptor desc_rig_preview_fit = {
 };
 static const MethodRegistration reg_rig_preview_fit(desc_rig_preview_fit);
 
+static const MethodParam params_rig_preview_geodesic_weights[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"resolution", "integer", false, "", "96", nullptr},
+    {"falloff", "float", false, "", "2.0", nullptr},
+    {"rig_revision", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_preview_geodesic_weights = {
+    "rig.preview_geodesic_weights", "rig",
+    "Preview geodesic voxel skin weights (distance through the body, Dionne & de Lasa)",
+    "Read-only, same full computation as apply. Requires an authored binding. All registered bound meshes are voxelized together at bind positions (resolution voxels along the largest extent, 32..256): triangles are rasterized as surface, the outside is flood-filled from the padded border and the rest is interior; closed_volume false means the mesh leaked and only the surface shell carries distance (still usable). Each deforming bone (same segments as the envelope weights, root role excluded) grows a 26-neighbour Dijkstra distance through solid voxels only, up to half the rig height; a vertex keeps its four nearest bones and weight = max(d, half a voxel)^-falloff, then the shared strongest-four contract. bones_outside_mesh counts bones whose segment touched no solid voxel (seeded from the nearest one); fallback_vertices were reached by no bone and got their straight-line nearest bone. Takes seconds on a full character; measure the result with rig.preview_rom_test.",
+    "read", "Read", false, "{character, rig_revision, algorithm geodesic_voxel_v1, resolution, falloff, voxel_size, grid[3], surface_voxels, interior_voxels, closed_volume, vertex_count, part_count, bone_count, fallback_vertices, bones_outside_mesh, influence_counts[]}",
+    "rig|preview|geodesic|weights|skin|voxel|binding|heat|automatic",
+    "rig.apply_geodesic_weights|rig.preview_envelope_weights|rig.preview_rom_test|rig.weight_stats",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_preview_geodesic_weights, 4,
+    true
+};
+static const MethodRegistration reg_rig_preview_geodesic_weights(desc_rig_preview_geodesic_weights);
+
 static const MethodParam params_rig_preview_human_walk[] = {
     {"character", "string", true, "", nullptr, nullptr},
     {"rig_revision", "any", true, "", nullptr, nullptr},
@@ -8364,17 +8551,21 @@ static const MethodParam params_rig_preview_human_walk[] = {
     {"body_bounce", "float", true, "", nullptr, nullptr},
     {"arm_swing", "float", true, "", nullptr, nullptr},
     {"body_motion", "float", false, "", "0.75", nullptr},
+    {"leg_reach", "float", false, "", "0.998", nullptr},
+    {"stance_knee_deg", "float", false, "", "18.0", nullptr},
+    {"heel_strike_deg", "float", false, "", "15.0", nullptr},
+    {"toe_off_deg", "float", false, "", "30.0", nullptr},
     {"name", "any", false, "", nullptr, nullptr},
 };
 static const MethodDescriptor desc_rig_preview_human_walk = {
     "rig.preview_human_walk", "rig",
     "Validate and describe a humanoid in-place walk recipe",
-    "Read-only validation for the first quick-motion recipe. Requires active Pose on an owned bound humanoid with canonical pelvis, left/right ankle roles and left/right arm/leg chains. Recipe values are height fractions, except cadence in steps/minute, fps and cycles. body_motion 0..1 controls pelvis/torso naturalization and defaults to .75 when omitted. Reports planted foot orientation, pelvis sway and availability of upper-spine counter rotation, head stabilization and shoulder-girdle motion from optional mapped roles. It does not mutate pose, clips, controls or history. The v1 recipe has no root motion, path, footprints, terrain query or contact channel.",
+    "Read-only validation for the first quick-motion recipe. Requires active Pose on an owned bound humanoid with canonical pelvis, left/right ankle roles and left/right arm/leg chains. Recipe values are height fractions, except cadence in steps/minute, fps and cycles. body_motion 0..1 controls pelvis/torso naturalization and defaults to .75 when omitted. Runs the same per-frame evaluation as create_human_walk_clip without storing keys, so metrics describe exactly what would be baked. v2: the pelvis height follows a stance-leg knee flexion profile (about 5 deg at contact, stance_knee_deg 0..35 loading flexion, nearly straight before heel rise) and leg_reach (.85..1, default .998) only caps any hip-to-ankle distance; the per-frame drop is then dilated and box-blurred over .08 of a cycle so the pelvis never thuds down at contact while every cap still holds. body_bounce is added on top and should normally stay 0: a centimetre of bounce outweighs the millimetres the knee profile changes leg length by and pins the knee to the cap. Toes bend to stay on the ground while the heel rises (toe_bend) and the chest/arms trail the pelvis by upper_body_lag of a cycle; and the foot rolls over ground pivots (heel rocker heel_strike_deg 0..30, heel rise about the ball to toe_off_deg 0..60). Pivots come from the toe/toe_tip roles (heel is placed behind the ankle); foot_pivots_estimated is true when a toe role is missing. metrics: max_reach_ratio (hip-to-target over leg length after the pelvis solve), unreachable_frames, foot_target_error_max and _fraction (solved ankle vs target after joint limits; non-zero means the foot hangs short of its target), ground_penetration_max (heel/ball/tip below their rest ground), pelvis_drop_min/max. Body deltas (pelvis, spine, chest, head, clavicles) are expressed in the character frame derived from the rig (up, ankle-to-toe forward, shoulder left) and converted into each bone parent space (body_frame=character), so imported rigs with oriented bones turn about the same axes as the template. Knee poles come from the pelvis-facing direction, not the rest bend (knee_pole=character_forward). Also reports pelvis sway and availability of upper-spine counter rotation, head stabilization and shoulder-girdle motion from optional mapped roles. It does not mutate pose, clips, controls or history. No root motion, path, footprints, terrain query or contact channel yet.",
     "write", "SceneWrite", false, "Recipe plan with frames, duration, world-scaled motion values and requirements",
     "rig|preview|human|walk|animation|gait|recipe|humanoid",
     "rig.create_human_walk_clip|rig.get_anatomy|rig.get_pose_state|rig.get_controls",
     nullptr, nullptr, nullptr, nullptr,
-    params_rig_preview_human_walk, 11,
+    params_rig_preview_human_walk, 15,
     true
 };
 static const MethodRegistration reg_rig_preview_human_walk(desc_rig_preview_human_walk);
@@ -8415,6 +8606,27 @@ static const MethodDescriptor desc_rig_preview_pose_transform = {
     true
 };
 static const MethodRegistration reg_rig_preview_pose_transform(desc_rig_preview_pose_transform);
+
+static const MethodParam params_rig_preview_rom_test[] = {
+    {"character", "string", true, "", nullptr, nullptr},
+    {"rig_revision", "any", true, "", nullptr, nullptr},
+    {"scale", "float", false, "", "1.0", nullptr},
+    {"frames_per_motion", "integer", false, "", "12", nullptr},
+    {"fps", "float", false, "", "24.0", nullptr},
+    {"name", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_rig_preview_rom_test = {
+    "rig.preview_rom_test", "rig",
+    "Range-of-motion test: bend every limb and spine joint and measure how the bound skin deforms",
+    "Read-only, any mode; requires an authored binding (rig_rom_requires_authored_binding). Motions per limb chain: root swing +-60, spread +-45, twist +-45 about axes built from the bone and its bend hint (character forward without one), middle joint bend 110 folding away from the hint, end joint twist +-60 and flex +-45; every spine/neck/head role flexes +-30, side-bends +-25 and twists +-35 about the character frame measured from the feet. scale (.1..1.5) multiplies all angles; authored joint limits clamp each pose (limited=true). The skin is evaluated on the CPU as pose * inverse(rest) over bind positions and the stored flat skin rows (renormalized like the CPU skinner), and every rest-valid triangle reports its area ratio: below .5 pinched (collapse, candy-wrapper), above 2 stretched; folded counts triangles whose normal turned against the one their dominant bone would carry. Each row names the motion, bone, angle, worst mesh/vertex/bone and its peak frame in the matching rig.create_rom_clip clip. unknown_influences > 0 means skin rows reference indices this rig does not own. Cost is motions x vertices; limit 4e8.",
+    "read", "Read", false, "{kind, motions, meshes, vertices, triangles, thresholds, summary{min_area_ratio, pinched_motions, stretched_motions, folded_motions, limited_motions, unknown_influences}, worst[10], rows[]}",
+    "rig|preview|rom|test|range|motion|deformation|weights|skin|pinch|candy|wrapper|fold|quality",
+    "rig.create_rom_clip|rig.weight_stats|rig.apply_envelope_weights|rig.apply_bone_envelope|rig.derive_limb_hints",
+    nullptr, nullptr, nullptr, nullptr,
+    params_rig_preview_rom_test, 6,
+    true
+};
+static const MethodRegistration reg_rig_preview_rom_test(desc_rig_preview_rom_test);
 
 static const MethodParam params_rig_remove_ik_key[] = {
     {"character", "any", true, "", nullptr, nullptr},
@@ -9747,6 +9959,19 @@ static const MethodDescriptor desc_sim_control_state = {
 };
 static const MethodRegistration reg_sim_control_state(desc_sim_control_state);
 
+static const MethodDescriptor desc_sim_get_mode = {
+    "sim.get_mode", "sim",
+    "Read timeline/live simulation mode and playback/cache state",
+    "Returns the same read-only state as timeline.transport. timeline mode bakes/scrubs and stops when playback stops; live mode free-runs while playback is paused.",
+    "read", "Read", false, "any",
+    "sim|get|mode|simulation|read",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_sim_get_mode(desc_sim_get_mode);
+
 static const MethodParam params_sim_move_domain[] = {
     {"delta", "vec3", true, "", nullptr, nullptr},
     {"domain", "string", true, "", nullptr, nullptr},
@@ -9763,6 +9988,22 @@ static const MethodDescriptor desc_sim_move_domain = {
     true
 };
 static const MethodRegistration reg_sim_move_domain(desc_sim_move_domain);
+
+static const MethodParam params_sim_set_mode[] = {
+    {"mode", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_sim_set_mode = {
+    "sim.set_mode", "sim",
+    "Select timeline bake/scrub or live free-run simulation",
+    "mode must be exactly timeline or live; unknown values reject before mutation. Uses the same core as both Simulation Mode panels, drains GPU consumers on change and releases manual-step ownership. Same-mode requests are no-ops. Final render jobs reject mutations. Returns timeline.transport state; does not change playing.",
+    "write", "SceneWrite", false, "any",
+    "sim|set|mode|simulation|write",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_sim_set_mode, 1,
+    true
+};
+static const MethodRegistration reg_sim_set_mode(desc_sim_set_mode);
 
 static const MethodParam params_sim_cache_bake[] = {
     {"cache_dir", "string", true, "", nullptr, nullptr},
@@ -11426,6 +11667,32 @@ static const MethodDescriptor desc_timeline_get_frame = {
 };
 static const MethodRegistration reg_timeline_get_frame(desc_timeline_get_frame);
 
+static const MethodDescriptor desc_timeline_pause = {
+    "timeline.pause", "timeline",
+    "Pause ordinary UI timeline playback",
+    "Same core as the Pause button: drains simulation and render consumers before changing playback and synchronizes audio. Leaves the playhead in place. In live mode, paused playback still permits free-run simulation; use sim.set_mode timeline to freeze simulation. Final render jobs reject the operation. Returns timeline.transport state.",
+    "write", "SceneWrite", false, "any",
+    "timeline|pause|simulation|write",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_timeline_pause(desc_timeline_pause);
+
+static const MethodDescriptor desc_timeline_play = {
+    "timeline.play", "timeline",
+    "Start ordinary UI timeline playback",
+    "Same core as the Play button: releases manual-step ownership, resumes audio transport and restarts at the start frame if already at the end with loop disabled. Uses the real viewport frame loop; does not call fluid.run. Final render jobs reject the operation. Returns timeline.transport state.",
+    "write", "SceneWrite", false, "any",
+    "timeline|play|simulation|write",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_timeline_play(desc_timeline_play);
+
 static const MethodParam params_timeline_set_frame[] = {
     {"frame", "int", true, "", nullptr, nullptr},
 };
@@ -11441,6 +11708,19 @@ static const MethodDescriptor desc_timeline_set_frame = {
     true
 };
 static const MethodRegistration reg_timeline_set_frame(desc_timeline_set_frame);
+
+static const MethodDescriptor desc_timeline_transport = {
+    "timeline.transport", "timeline",
+    "Read real timeline playback, simulation mode and cache state",
+    "Read-only. playing/frame describe the UI timeline; mode is timeline or live. script_driving identifies manual-step ownership. cache contains valid, baking, ram_frames, has_range, first_frame, last_frame and budget_reached. Does not step or restore the scene.",
+    "read", "Read", false, "any",
+    "timeline|transport|simulation|read",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_timeline_transport(desc_timeline_transport);
 
 static const MethodDescriptor desc_undo = {
     "undo", "undo",

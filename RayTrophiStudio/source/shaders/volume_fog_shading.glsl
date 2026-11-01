@@ -169,7 +169,8 @@
     bool generalMixture = (hasCompanion &&
         matterFogOverlap(rayOrigin, rayDir, tNear, volCount) &&
         matterFogNeedsGeneralMixture(volIdx, companionIdx, volCount)) ||
-        (vol.random_walk_enabled > 0.5 && matterFogJointWalk(volIdx, volCount));
+        (vol.random_walk_enabled > 0.5 &&
+            (vol.emission_mode != 0 || matterFogJointWalk(volIdx, volCount)));
     vec3 cachedRadiance, cachedTransmission;
     bool segmentCached = volumeCachedSegment(volIdx, companionIdx, volCount, generalMixture,
         rayOrigin, rayDir, tNear, tFar, vdbBuf, vdbMapH, vdbAcc,
@@ -182,15 +183,16 @@
     }
 
     // Path-traced multiple scattering replaces the march below when the volume
-    // asks for it. The march stays for what the walk does not model: emission,
-    // Volume Graph programs (they may rewrite density per sample, which the
-    // walk's flights and shadows would not see), an overlapping companion
-    // medium, and a layered SDF surface inside the box.
+    // asks for it. Emitters took the mixture walk above, which gathers emission
+    // along every flight. The march stays for Volume Graph programs (they may
+    // rewrite density per sample, which the walk's flights and shadows would
+    // not see), an overlapping companion medium, and a layered SDF surface
+    // inside the box.
     {
         bool rwProgram = vol._reserved[1] > 0.5 &&
             matProgramOffset(uint(vol._reserved[1] - 1.0)) != MATPROG_NONE;
         if (vol.random_walk_enabled > 0.5 && !hasCompanion && !rwProgram &&
-            vol.emission_mode == 0 && layeredSurfaceT <= 0.0) {
+            layeredSurfaceT <= 0.0) {
             volumeRandomWalk(vol, rayOrigin, rayDir, tNear, tFar, solidT >= 0.0,
                              selectedVolumeSpan, vdbBuf, vdbMapH, vdbAcc);
             return;
@@ -211,7 +213,8 @@
     int lightStride = volumeCameraSegment
         ? int(marchLod & 15u) + 1 : int((marchLod >> 4) & 15u) + 1;
     float lodStepScale = volumeCameraSegment ? 1.0 : float(((marchLod >> 8) & 15u) + 1u);
-    int lodStepCap = volumeCameraSegment ? 0 : int((marchLod >> 12) & 511u);
+    int lodStepCap = volumeCameraSegment
+        ? int((marchLod >> 22) & 511u) : int((marchLod >> 12) & 511u);
     // Bit 21: bounce rays read the radiance cache (§13).
     float stepSize = max(vol.step_size, 1e-4) * lodStepScale;
     float marchDist = tFar - tNear;
@@ -305,103 +308,17 @@
     // sampler would have shaded.
     float denseSkipCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
 
-    // ── Volume emission NEE: pick one emitting block for this ray ─────────────
-    // Fire already lights the smoke, but only when a scattered ray happens to
-    // land inside it — that is the noise. Aiming a sample straight at a burning
-    // block turns the same energy into a converged image instead of fireflies.
-    //
-    // The emitter is chosen ONCE PER RAY and its radiance evaluated once, for the
-    // same reason the scene-light pair is: the transmittance toward it is cached
-    // across strided steps, so a per-step re-pick would pair one emitter's
-    // radiance with another's visibility. Variance is resolved across samples.
-    vec3  emitterPos = vec3(0.0);
-    vec3  emitterRadiance = vec3(0.0);
-    float emitterMinRadius = 1e-4;
-    bool  hasEmitter = false;
-    float cachedEmitterShadow = 1.0;
-    bool  cachedEmitterShadowValid = false;
+    // One source-space proposal, shared by all lighting updates on this ray.
     vec3 cachedInternalLight = vec3(0.0);
     bool cachedInternalLightValid = false;
-    if (vol.emissive_list_address != 0 && vol.emissive_capacity >= 1.0 &&
-        vol.majorant_address != 0 && vol.emission_mode >= 2) {
-        DenseGasEmissiveList elist = DenseGasEmissiveList(vol.emissive_list_address);
-        uint emitterCount = elist.entries[0];
-        // The producer keeps counting past capacity so the overflow is visible;
-        // only the stored prefix may be indexed.
-        uint usable = min(emitterCount, uint(vol.emissive_capacity));
-        if (usable > 0u) {
-            uint pick = uint(floor(rnd(payload.seed) * float(usable)));
-            pick = min(pick, usable - 1u);
-            uint blockIndex = elist.entries[1u + pick];
-
-            ivec3 bdim = ivec3(vol.majorant_dim[0] + 0.5,
-                               vol.majorant_dim[1] + 0.5,
-                               vol.majorant_dim[2] + 0.5);
-            if (bdim.x > 0 && bdim.y > 0 && bdim.z > 0) {
-                ivec3 b = ivec3(int(blockIndex) % bdim.x,
-                                (int(blockIndex) / bdim.x) % bdim.y,
-                                int(blockIndex) / (bdim.x * bdim.y));
-                float blockWorld = vol.majorant_block * max(vol.voxel_size, 1e-6);
-                emitterMinRadius = max(blockWorld * 0.5, 1e-4);
-                vec3 gridOrigin = vec3(vol._ext_reserved[3], vol._ext_reserved[4],
-                                       vol._ext_reserved[5]);
-                // Jitter inside the block so a coarse block grid does not read as
-                // a lattice of point lights.
-                vec3 jitterUVW = vec3(rnd(payload.seed), rnd(payload.seed), rnd(payload.seed));
-                vec3 localEmitter = gridOrigin + (vec3(b) + jitterUVW) * blockWorld;
-                emitterPos.x = vol.transform[0]*localEmitter.x + vol.transform[1]*localEmitter.y
-                             + vol.transform[2]*localEmitter.z + vol.transform[3];
-                emitterPos.y = vol.transform[4]*localEmitter.x + vol.transform[5]*localEmitter.y
-                             + vol.transform[6]*localEmitter.z + vol.transform[7];
-                emitterPos.z = vol.transform[8]*localEmitter.x + vol.transform[9]*localEmitter.y
-                             + vol.transform[10]*localEmitter.z + vol.transform[11];
-
-                float ed = sampleDensityAcc(vol, emitterPos, vdbBuf, vdbMapH, vdbAcc);
-                float et = sampleTemperature(vol, emitterPos);
-                if (ed > 0.0 && et > 0.0) {
-                    float rangeMin = max(vol._ext_reserved[6], 0.0);
-                    float rangeMax = (vol.max_temperature > rangeMin + 1.0)
-                        ? vol.max_temperature : (rangeMin + 1500.0);
-                    // Units come from the volume, not the sample - see the
-                    // note in the main march below.
-                    bool eKelvinUnits = (vol.volume_type == 4 && vol.source_type == 5);
-                    float eKelvin = (eKelvinUnits || et > 20.0)
-                        ? clamp(et, rangeMin, rangeMax)
-                        : mix(rangeMin, rangeMax, clamp(et, 0.0, 1.0));
-                    vec3 eColor;
-                    float eRadiance = 1.0;
-                    if (vol.color_ramp_enabled != 0 && vol.ramp_stop_count > 0) {
-                        float tr = clamp((eKelvin - rangeMin) / max(rangeMax - rangeMin, 1.0), 0.0, 1.0);
-                        eColor = sampleColorRamp(vol, clamp(tr * vol.temperature_scale, 0.0, 1.0));
-                    } else {
-                        eColor = blackbodyToRGB(eKelvin * vol.temperature_scale);
-                        // T^4 radiance - see the note in the main march below.
-                        eRadiance = pow(clamp(eKelvin / rangeMax, 0.0, 1.0), 4.0);
-                    }
-                    vec3 eEmis = volumeEmissionSource(eColor, eRadiance, ed,
-                        clamp((eKelvin - rangeMin) / max(rangeMax - rangeMin, 1.0), 0.0, 1.0),
-                        vol.blackbody_intensity, vol._retired_cloud, true);
-                    float eReaction = sampleFlame(vol, emitterPos);
-                    eEmis *= (1.0 + eReaction);   // matches the march's reaction boost
-                    // Radiant intensity of the block: emission per unit length
-                    // (sigma_t * emis, the march's source term) times the block
-                    // volume it stands for. Uniform pick over `usable` emitters
-                    // makes the estimator weight `usable`.
-                    float eSigmaT = ed * (vol.scatter_coefficient + vol.absorption_coefficient);
-                    float blockVolume = blockWorld * blockWorld * blockWorld;
-                    emitterRadiance = eEmis * eSigmaT * blockVolume * float(usable);
-                    hasEmitter = any(greaterThan(emitterRadiance, vec3(1e-6)));
-                }
-            }
-        }
-    }
 
     // Jitter first sample to reduce banding. Mix in ray state so horizon rays do
     // not share coherent step planes across neighboring pixels.
     float rayJitter = fract(sin(dot(rayOrigin + rayDir * 17.0, vec3(12.9898, 78.233, 37.719)) + float(payload.seed) * 0.000173) * 43758.5453);
     VolumePhaseCache phaseCache = volumePhaseCache();
     bool nanoIndexPath = vol.volume_type == 2 && vdbBuf.address != 0 &&
-        vol._ext_reserved[7] < 0.5 && volumeProgram == MATPROG_NONE;
+        vol._ext_reserved[7] < 0.5 && volumeProgram == MATPROG_NONE &&
+        !(volumeEmissionIndependent(vol._retired_cloud[0]) && vol.density_multiplier <= 0.0);
     VolumeNanoRay primaryNanoRay;
     if (nanoIndexPath) {
         primaryNanoRay = volumeNanoRay(vol, rayOrigin, rayDir, vdbBuf, vdbMapH);
@@ -484,9 +401,10 @@
         }
         
         #include "volume_companion_empty.glsl"
+        float emissionDensity;
         float density = nanoIndexPath
-            ? volumeNanoDensity(vol, primaryNanoRay, t, vdbBuf, vdbAcc)
-            : sampleDensityAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc);
+            ? volumeNanoDensityChannels(vol, primaryNanoRay, t, vdbBuf, vdbAcc, emissionDensity)
+            : volumeEmissionChannelsAcc(vol, samplePos, vdbBuf, vdbMapH, vdbAcc, emissionDensity);
         measuredDensitySamples++;
         #include "volume_rt_empty_sample.glsl"
         float temperature = !needsTemperature ? 0.0 : (temperaturePrepared
@@ -526,7 +444,11 @@
             if ((vp.volumeWritten & (1u << 7)) != 0u) stepAnisotropy = clamp(vp.volumeAnisotropy, -0.99, 0.99);
             if ((vp.volumeWritten & (1u << 8)) != 0u) stepMultiScatter = clamp(vp.volumeMultiScatter, 0.0, 1.0);
         }
-        float sigma_s_local = density * sigma_s_coeff;
+        if (volumeProgram != MATPROG_NONE) emissionDensity = density;
+        float opticalDensity = volumeEmissionOpticalDensity(density,
+            vol.density_multiplier, vol._retired_cloud[0]) *
+            volumeSootScale(vol, samplePos, emissionDensity, temperature);
+        float sigma_s_local = opticalDensity * sigma_s_coeff;
         // Companion medium: extinction adds, scattering colour and phase are
         // mixed by each medium's share of the scattering coefficient.
         float compDensity = 0.0;
@@ -555,7 +477,7 @@
         vec3 absorptionWeights = absorptionPeak > 1e-5
             ? authoredAbsorption / absorptionPeak
             : vec3(1.0);
-        vec3 sigma_a_local = density * sigma_a_coeff * absorptionWeights
+        vec3 sigma_a_local = opticalDensity * sigma_a_coeff * absorptionWeights
                            + compDensity * comp.absorption_coefficient * compAbsWeights;
         vec3 sigma_t_rgb = vec3(sigma_s_local) + sigma_a_local;
         float sigma_t_local = dot(
@@ -563,7 +485,7 @@
         // Let low-density regions survive based on scattering optical depth, not
         // raw density alone. This means increasing scatter can actually keep thin
         // edges visible instead of them being discarded by a fixed density gate.
-        if (sigma_t_local <= EPSILON) {
+        if (sigma_t_local <= EPSILON && !volumeEmissionIndependent(vol._retired_cloud[0])) {
             step++;
             t = tNear + (float(step) + rayJitter) * baseStep;
             continue;
@@ -608,10 +530,12 @@
         // Energy-stable integration: multiply by one_minus_sampleT (bounded by 1) instead of dt.
         vec3 emis = vec3(0.0);
         if (vol.emission_mode == 1) {
-            emis = volumeEmissionSource(stepEmissionColor, 1.0, density, 1.0,
-                stepEmissionStrength, vol._retired_cloud, false);
+            emis = volumeEmissionSource(stepEmissionColor, 1.0, emissionDensity, 1.0,
+                stepEmissionStrength, vol._retired_cloud, false, vol.density_multiplier) *
+                volumeEmissionMaskFactor(emissionDensity, volumeEmissionSamplingMultiplier(
+                    vol.density_multiplier, vol._retired_cloud[0]), vol.emission_mask);
         } else if (vol.emission_mode >= 2) {
-            emis = volumeEmissionAt(vol, samplePos, density, temperature);
+            emis = volumeEmissionAt(vol, samplePos, emissionDensity, temperature);
         }
 
         // ── In-Scattering (Direct Lighting) ──
@@ -743,44 +667,6 @@
                     }
                 }
             
-                // ── Fire (volume emission) NEE ──────────────────────────────
-                // Same estimator shape as a scene light: analytic 1/r^2 across the
-                // segment, phase toward the emitter, and the medium's own
-                // transmittance in between. Without this the fire only reaches the
-                // surrounding smoke through random bounces, which is exactly the
-                // noise the user sees.
-                if (hasEmitter) {
-                    vec3 toEmitter = emitterPos - samplePos;
-                    float emitterDist = length(toEmitter);
-                    if (emitterDist > emitterMinRadius * 0.5) {
-                        vec3 emitterDir = toEmitter / max(emitterDist, 1e-4);
-                        float ePhase = dualLobeHG(dot(rayDir, emitterDir), stepAnisotropy,
-                                                  vol.scatter_anisotropy_back, vol.scatter_lobe_mix);
-                        vec3 eAlbedoRGB = vec3(sigma_s_local) / max(sigma_t_rgb, vec3(EPSILON));
-                        ePhase = mix(ePhase, 1.0 / (4.0 * PI),
-                                     clamp(stepMultiScatter *
-                                           dot(eAlbedoRGB, vec3(0.2126, 0.7152, 0.0722)), 0.0, 1.0));
-                        // Strided like the other shadow terms; the emitter is
-                        // ray-constant so the cached value stays valid for it.
-                        if (!cachedEmitterShadowValid || volumeShadowDue(step, shadowStride, lightStride)) {
-                            cachedEmitterShadow = lightMarchAcc(
-                                vol, samplePos, emitterDir,
-                                min(emitterDist, max(baseStep,
-                                    volumeExitDistance(vol, samplePos, emitterDir))),
-                                vdbBuf, vdbMapH, vdbAcc, -1.0)
-                                * companionLightMarch(
-                                    hasCompanion, comp, samplePos, emitterDir, emitterDist,
-                                    baseStep, compBuf, compMapH, compAcc, -1.0);
-                            cachedEmitterShadowValid = true;
-                        }
-                        float eFalloff = volSegmentInvSqAverageExt(
-                            rayOrigin, rayDir, emitterPos, t, t + dt, emitterMinRadius);
-                        float selfFade = clamp(emitterDist / max(emitterMinRadius * 2.0, 1e-3), 0.0, 1.0);
-                        inscatter += emitterRadiance * eFalloff * ePhase * selfFade
-                                   * cachedEmitterShadow * stepScatterColor * eAlbedoRGB;
-                    }
-                }
-
                 // Sun/sky light contribution (if Nishita sky active)
                 if (worldData.w.mode == 2) {
                     vec3 sunDir = normalize(worldData.w.sunDir);
@@ -885,10 +771,12 @@
                 heldInscatter = inscatter;
                 heldInscatterStep = step;
             }
-            accumulated_radiance += transmittance * (inscatter + emis) * one_minus_sampleT;
+            accumulated_radiance += transmittance * volumeEmissionIntegrate(
+                inscatter + emis, emis, sigma_t_rgb, dt, vol._retired_cloud[0]);
         } else if (any(greaterThan(emis, vec3(0.0)))) {
             // Emission-only medium segment
-            accumulated_radiance += transmittance * emis * one_minus_sampleT;
+            accumulated_radiance += transmittance * volumeEmissionIntegrate(
+                emis, emis, sigma_t_rgb, dt, vol._retired_cloud[0]);
         }
         
         // Update transmittance

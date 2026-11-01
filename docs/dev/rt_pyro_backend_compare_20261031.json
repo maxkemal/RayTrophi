@@ -1,0 +1,938 @@
+[
+  {
+    "label": "optix_adaptive_on",
+    "context": {
+      "frame": 74,
+      "camera": {
+        "aperture": 0.6885108947753906,
+        "auto_exposure": true,
+        "auto_lens": false,
+        "depth_of_field": false,
+        "effective_lens_radius": 0.0,
+        "ev_compensation": 0.0,
+        "exposure_factor": 1.0,
+        "f_number": 4.039999961853027,
+        "focus_distance": 46.32639694213867,
+        "fov": 30.799999237060547,
+        "fstop_preset_index": 0,
+        "iso_preset_index": 1,
+        "iso_value": 100.0,
+        "lens_distortion": 0.0,
+        "position": [
+          54.345359802246094,
+          5.432232856750488,
+          6.316337585449219
+        ],
+        "shutter_preset_index": 1,
+        "shutter_seconds": 0.0002500000118743628,
+        "target": [
+          8.219161987304688,
+          8.390320777893066,
+          3.192380428314209
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "use_physical_exposure": false
+      },
+      "material": {
+        "absorption_coefficient": 1.7200000286102295,
+        "absorption_color": [
+          0.17491751909255981,
+          0.16423773765563965,
+          0.15355795621871948
+        ],
+        "adaptive_stepping": true,
+        "anisotropy": 0.9900000095367432,
+        "back_anisotropy": -0.30000001192092896,
+        "blackbody_intensity": 16.66699981689453,
+        "color_ramp": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.20000000298023224,
+            0.10000000149011612,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ],
+          [
+            0.4000000059604645,
+            0.800000011920929,
+            0.20000000298023224,
+            0.0,
+            0.699999988079071
+          ],
+          [
+            0.699999988079071,
+            1.0,
+            0.6000000238418579,
+            0.10000000149011612,
+            0.8999999761581421
+          ],
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.800000011920929,
+            1.0
+          ]
+        ],
+        "density_curve": {
+          "enabled": false,
+          "values": [
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 10.416999816894531,
+        "density_power": 0.25,
+        "density_remap_high": 1.0,
+        "density_remap_low": 0.0,
+        "emission_color": [
+          1.0,
+          0.5,
+          0.10000000149011612
+        ],
+        "emission_exposure_ev": 7.333000183105469,
+        "emission_mode": 2,
+        "emission_saturation": 1.5829999446868896,
+        "emission_strength": 0.0,
+        "exact_scatter_events": 4,
+        "internal_light_steps": 0,
+        "internal_light_stride": 8,
+        "lobe_mix": 0.699999988079071,
+        "max_scatter_events": 32,
+        "max_steps": 192,
+        "multi_scatter": 0.8500000238418579,
+        "ramp_enabled": true,
+        "random_walk": false,
+        "response_enabled": false,
+        "scatter_coefficient": 0.8399999737739563,
+        "scatter_color": [
+          0.8877887725830078,
+          0.8702087998390198,
+          0.8702087998390198
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "temperature_power": 1.5549999475479126,
+        "temperature_scale": 1.3370000123977661,
+        "temperature_units": 1,
+        "voxel_step_multiplier": 0.699999988079071
+      }
+    },
+    "runs": [
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 185.58333333324603
+      },
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 185.58333333324603
+      }
+    ],
+    "view_before": {
+      "accumulation_complete": true,
+      "available": true,
+      "backend": "optix",
+      "capture_enabled": false,
+      "frame_available": false,
+      "height": 0,
+      "ms_per_sample": 0.0,
+      "rendering_active": false,
+      "samples": 128,
+      "shading": "rendered",
+      "width": 0
+    },
+    "context_unchanged": true,
+    "optix": [
+      true,
+      {
+        "accumulated_samples": 36,
+        "adaptive_sampling": true,
+        "available": true,
+        "buffer_w_center": 4.0,
+        "buffer_w_max": 36.0,
+        "buffer_w_mean": 4.647023677825928,
+        "buffer_w_read": true,
+        "first_cuda_error": 0,
+        "first_cuda_error_site": "",
+        "image_h": 945,
+        "image_w": 1680,
+        "last_wipe_from": [
+          0,
+          0
+        ],
+        "last_wipe_to": [
+          0,
+          0
+        ],
+        "min_samples": 1,
+        "prev_zero_pixels": 0,
+        "read_h": 945,
+        "read_w": 1680,
+        "reset_buffers_calls": 4,
+        "samples_per_pixel": 1,
+        "set_render_params_calls": 9,
+        "set_render_params_reason": "backend",
+        "variance_threshold": 0.009999999776482582,
+        "wipe_camera": 8,
+        "wipe_count": 4,
+        "wipe_resolution": 0
+      }
+    ],
+    "svgf": [
+      true,
+      {
+        "atrous_iterations": 4,
+        "atrous_ms": 0.0,
+        "available": false,
+        "debug_history": false,
+        "dispatches": 0,
+        "epoch": 0,
+        "firefly_clip": 3.0,
+        "gpu_timing_available": false,
+        "history_length_mean": 0.0,
+        "history_max": 24,
+        "history_resets": 0,
+        "mode": "svgf",
+        "motion_source": "none",
+        "moving": false,
+        "presenting": false,
+        "reason": "Vulkan render backend required",
+        "sample": 0,
+        "scene_motion": true,
+        "scene_reset_streak": 0,
+        "static_active": false,
+        "still_complete": false,
+        "still_filtered_fraction": -1.0,
+        "still_noise": 0.019999999552965164,
+        "temporal_ms": 0.0,
+        "total_ms": 0.0,
+        "variance_ms": 0.0
+      }
+    ]
+  },
+  {
+    "label": "optix_adaptive_off",
+    "context": {
+      "frame": 74,
+      "camera": {
+        "aperture": 0.6885108947753906,
+        "auto_exposure": true,
+        "auto_lens": false,
+        "depth_of_field": false,
+        "effective_lens_radius": 0.0,
+        "ev_compensation": 0.0,
+        "exposure_factor": 1.0,
+        "f_number": 4.039999961853027,
+        "focus_distance": 46.32639694213867,
+        "fov": 30.799999237060547,
+        "fstop_preset_index": 0,
+        "iso_preset_index": 1,
+        "iso_value": 100.0,
+        "lens_distortion": 0.0,
+        "position": [
+          54.345359802246094,
+          5.432232856750488,
+          6.316337585449219
+        ],
+        "shutter_preset_index": 1,
+        "shutter_seconds": 0.0002500000118743628,
+        "target": [
+          8.219161987304688,
+          8.390320777893066,
+          3.192380428314209
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "use_physical_exposure": false
+      },
+      "material": {
+        "absorption_coefficient": 1.7200000286102295,
+        "absorption_color": [
+          0.17491751909255981,
+          0.16423773765563965,
+          0.15355795621871948
+        ],
+        "adaptive_stepping": true,
+        "anisotropy": 0.9900000095367432,
+        "back_anisotropy": -0.30000001192092896,
+        "blackbody_intensity": 16.66699981689453,
+        "color_ramp": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.20000000298023224,
+            0.10000000149011612,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ],
+          [
+            0.4000000059604645,
+            0.800000011920929,
+            0.20000000298023224,
+            0.0,
+            0.699999988079071
+          ],
+          [
+            0.699999988079071,
+            1.0,
+            0.6000000238418579,
+            0.10000000149011612,
+            0.8999999761581421
+          ],
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.800000011920929,
+            1.0
+          ]
+        ],
+        "density_curve": {
+          "enabled": false,
+          "values": [
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 10.416999816894531,
+        "density_power": 0.25,
+        "density_remap_high": 1.0,
+        "density_remap_low": 0.0,
+        "emission_color": [
+          1.0,
+          0.5,
+          0.10000000149011612
+        ],
+        "emission_exposure_ev": 7.333000183105469,
+        "emission_mode": 2,
+        "emission_saturation": 1.5829999446868896,
+        "emission_strength": 0.0,
+        "exact_scatter_events": 4,
+        "internal_light_steps": 0,
+        "internal_light_stride": 8,
+        "lobe_mix": 0.699999988079071,
+        "max_scatter_events": 32,
+        "max_steps": 192,
+        "multi_scatter": 0.8500000238418579,
+        "ramp_enabled": true,
+        "random_walk": false,
+        "response_enabled": false,
+        "scatter_coefficient": 0.8399999737739563,
+        "scatter_color": [
+          0.8877887725830078,
+          0.8702087998390198,
+          0.8702087998390198
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "temperature_power": 1.5549999475479126,
+        "temperature_scale": 1.3370000123977661,
+        "temperature_units": 1,
+        "voxel_step_multiplier": 0.699999988079071
+      }
+    },
+    "runs": [
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 212.2083333330617
+      },
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 212.24999999988844
+      }
+    ],
+    "view_before": {
+      "accumulation_complete": false,
+      "available": true,
+      "backend": "optix",
+      "capture_enabled": false,
+      "frame_available": false,
+      "height": 0,
+      "ms_per_sample": 0.0,
+      "rendering_active": true,
+      "samples": 42,
+      "shading": "rendered",
+      "width": 0
+    },
+    "context_unchanged": true,
+    "optix": [
+      true,
+      {
+        "accumulated_samples": 36,
+        "adaptive_sampling": false,
+        "available": true,
+        "buffer_w_center": 36.0,
+        "buffer_w_max": 36.0,
+        "buffer_w_mean": 36.0,
+        "buffer_w_read": true,
+        "first_cuda_error": 0,
+        "first_cuda_error_site": "",
+        "image_h": 945,
+        "image_w": 1680,
+        "last_wipe_from": [
+          0,
+          0
+        ],
+        "last_wipe_to": [
+          0,
+          0
+        ],
+        "min_samples": 1,
+        "prev_zero_pixels": 0,
+        "read_h": 945,
+        "read_w": 1680,
+        "reset_buffers_calls": 5,
+        "samples_per_pixel": 1,
+        "set_render_params_calls": 10,
+        "set_render_params_reason": "adaptive",
+        "variance_threshold": 0.009999999776482582,
+        "wipe_camera": 11,
+        "wipe_count": 4,
+        "wipe_resolution": 0
+      }
+    ],
+    "svgf": [
+      true,
+      {
+        "atrous_iterations": 4,
+        "atrous_ms": 0.0,
+        "available": false,
+        "debug_history": false,
+        "dispatches": 0,
+        "epoch": 0,
+        "firefly_clip": 3.0,
+        "gpu_timing_available": false,
+        "history_length_mean": 0.0,
+        "history_max": 24,
+        "history_resets": 0,
+        "mode": "svgf",
+        "motion_source": "none",
+        "moving": false,
+        "presenting": false,
+        "reason": "Vulkan render backend required",
+        "sample": 0,
+        "scene_motion": true,
+        "scene_reset_streak": 0,
+        "static_active": false,
+        "still_complete": false,
+        "still_filtered_fraction": -1.0,
+        "still_noise": 0.019999999552965164,
+        "temporal_ms": 0.0,
+        "total_ms": 0.0,
+        "variance_ms": 0.0
+      }
+    ]
+  },
+  {
+    "label": "vulkan_adaptive_off",
+    "context": {
+      "frame": 74,
+      "camera": {
+        "aperture": 0.6885108947753906,
+        "auto_exposure": true,
+        "auto_lens": false,
+        "depth_of_field": false,
+        "effective_lens_radius": 0.0,
+        "ev_compensation": 0.0,
+        "exposure_factor": 1.0,
+        "f_number": 4.039999961853027,
+        "focus_distance": 46.32639694213867,
+        "fov": 30.799999237060547,
+        "fstop_preset_index": 0,
+        "iso_preset_index": 1,
+        "iso_value": 100.0,
+        "lens_distortion": 0.0,
+        "position": [
+          54.345359802246094,
+          5.432232856750488,
+          6.316337585449219
+        ],
+        "shutter_preset_index": 1,
+        "shutter_seconds": 0.0002500000118743628,
+        "target": [
+          8.219161987304688,
+          8.390320777893066,
+          3.192380428314209
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "use_physical_exposure": false
+      },
+      "material": {
+        "absorption_coefficient": 1.7200000286102295,
+        "absorption_color": [
+          0.17491751909255981,
+          0.16423773765563965,
+          0.15355795621871948
+        ],
+        "adaptive_stepping": true,
+        "anisotropy": 0.9900000095367432,
+        "back_anisotropy": -0.30000001192092896,
+        "blackbody_intensity": 16.66699981689453,
+        "color_ramp": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.20000000298023224,
+            0.10000000149011612,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ],
+          [
+            0.4000000059604645,
+            0.800000011920929,
+            0.20000000298023224,
+            0.0,
+            0.699999988079071
+          ],
+          [
+            0.699999988079071,
+            1.0,
+            0.6000000238418579,
+            0.10000000149011612,
+            0.8999999761581421
+          ],
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.800000011920929,
+            1.0
+          ]
+        ],
+        "density_curve": {
+          "enabled": false,
+          "values": [
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 10.416999816894531,
+        "density_power": 0.25,
+        "density_remap_high": 1.0,
+        "density_remap_low": 0.0,
+        "emission_color": [
+          1.0,
+          0.5,
+          0.10000000149011612
+        ],
+        "emission_exposure_ev": 7.333000183105469,
+        "emission_mode": 2,
+        "emission_saturation": 1.5829999446868896,
+        "emission_strength": 0.0,
+        "exact_scatter_events": 4,
+        "internal_light_steps": 0,
+        "internal_light_stride": 8,
+        "lobe_mix": 0.699999988079071,
+        "max_scatter_events": 32,
+        "max_steps": 192,
+        "multi_scatter": 0.8500000238418579,
+        "ramp_enabled": true,
+        "random_walk": false,
+        "response_enabled": false,
+        "scatter_coefficient": 0.8399999737739563,
+        "scatter_color": [
+          0.8877887725830078,
+          0.8702087998390198,
+          0.8702087998390198
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "temperature_power": 1.5549999475479126,
+        "temperature_scale": 1.3370000123977661,
+        "temperature_units": 1,
+        "voxel_step_multiplier": 0.699999988079071
+      }
+    },
+    "runs": [
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 500.0
+      },
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 499.3750000000243
+      }
+    ],
+    "view_before": {
+      "accumulation_complete": false,
+      "available": true,
+      "backend": "vulkan",
+      "capture_enabled": false,
+      "frame_available": false,
+      "height": 0,
+      "ms_per_sample": 0.0,
+      "rendering_active": true,
+      "samples": 17,
+      "shading": "rendered",
+      "width": 0
+    },
+    "context_unchanged": true,
+    "optix": [
+      true,
+      {
+        "accumulated_samples": 0,
+        "adaptive_sampling": false,
+        "available": false,
+        "buffer_w_center": -1.0,
+        "buffer_w_max": -1.0,
+        "buffer_w_mean": -1.0,
+        "buffer_w_read": false,
+        "first_cuda_error": 0,
+        "first_cuda_error_site": "",
+        "image_h": 0,
+        "image_w": 0,
+        "last_wipe_from": [
+          0,
+          0
+        ],
+        "last_wipe_to": [
+          0,
+          0
+        ],
+        "min_samples": 0,
+        "prev_zero_pixels": 0,
+        "read_h": 0,
+        "read_w": 0,
+        "reset_buffers_calls": 0,
+        "samples_per_pixel": 0,
+        "set_render_params_calls": 0,
+        "set_render_params_reason": "",
+        "variance_threshold": 0.0,
+        "wipe_camera": 0,
+        "wipe_count": 0,
+        "wipe_resolution": 0
+      }
+    ],
+    "svgf": [
+      true,
+      {
+        "atrous_iterations": 4,
+        "atrous_ms": 6.080512,
+        "available": true,
+        "debug_history": false,
+        "dispatches": 88,
+        "epoch": 31,
+        "firefly_clip": 3.0,
+        "gpu_timing_available": true,
+        "history_length_mean": 37.0,
+        "history_max": 24,
+        "history_resets": 5,
+        "mode": "svgf",
+        "motion_source": "none",
+        "moving": false,
+        "presenting": true,
+        "reason": "",
+        "sample": 37,
+        "scene_motion": true,
+        "scene_reset_streak": 0,
+        "static_active": true,
+        "still_complete": false,
+        "still_filtered_fraction": 0.3524074074074074,
+        "still_noise": 0.019999999552965164,
+        "temporal_ms": 2.284992,
+        "total_ms": 9.68688,
+        "variance_ms": 0.564224
+      }
+    ]
+  },
+  {
+    "label": "vulkan_adaptive_off_svgf_off",
+    "context": {
+      "frame": 74,
+      "camera": {
+        "aperture": 0.6885108947753906,
+        "auto_exposure": true,
+        "auto_lens": false,
+        "depth_of_field": false,
+        "effective_lens_radius": 0.0,
+        "ev_compensation": 0.0,
+        "exposure_factor": 1.0,
+        "f_number": 4.039999961853027,
+        "focus_distance": 46.32639694213867,
+        "fov": 30.799999237060547,
+        "fstop_preset_index": 0,
+        "iso_preset_index": 1,
+        "iso_value": 100.0,
+        "lens_distortion": 0.0,
+        "position": [
+          54.345359802246094,
+          5.432232856750488,
+          6.316337585449219
+        ],
+        "shutter_preset_index": 1,
+        "shutter_seconds": 0.0002500000118743628,
+        "target": [
+          8.219161987304688,
+          8.390320777893066,
+          3.192380428314209
+        ],
+        "up": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "use_physical_exposure": false
+      },
+      "material": {
+        "absorption_coefficient": 1.7200000286102295,
+        "absorption_color": [
+          0.17491751909255981,
+          0.16423773765563965,
+          0.15355795621871948
+        ],
+        "adaptive_stepping": true,
+        "anisotropy": 0.9900000095367432,
+        "back_anisotropy": -0.30000001192092896,
+        "blackbody_intensity": 16.66699981689453,
+        "color_ramp": [
+          [
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.20000000298023224,
+            0.10000000149011612,
+            0.0,
+            0.0,
+            0.30000001192092896
+          ],
+          [
+            0.4000000059604645,
+            0.800000011920929,
+            0.20000000298023224,
+            0.0,
+            0.699999988079071
+          ],
+          [
+            0.699999988079071,
+            1.0,
+            0.6000000238418579,
+            0.10000000149011612,
+            0.8999999761581421
+          ],
+          [
+            1.0,
+            1.0,
+            1.0,
+            0.800000011920929,
+            1.0
+          ]
+        ],
+        "density_curve": {
+          "enabled": false,
+          "values": [
+            0.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "density_cutoff": 0.007000000216066837,
+        "density_multiplier": 10.416999816894531,
+        "density_power": 0.25,
+        "density_remap_high": 1.0,
+        "density_remap_low": 0.0,
+        "emission_color": [
+          1.0,
+          0.5,
+          0.10000000149011612
+        ],
+        "emission_exposure_ev": 7.333000183105469,
+        "emission_mode": 2,
+        "emission_saturation": 1.5829999446868896,
+        "emission_strength": 0.0,
+        "exact_scatter_events": 4,
+        "internal_light_steps": 0,
+        "internal_light_stride": 8,
+        "lobe_mix": 0.699999988079071,
+        "max_scatter_events": 32,
+        "max_steps": 192,
+        "multi_scatter": 0.8500000238418579,
+        "ramp_enabled": true,
+        "random_walk": false,
+        "response_enabled": false,
+        "scatter_coefficient": 0.8399999737739563,
+        "scatter_color": [
+          0.8877887725830078,
+          0.8702087998390198,
+          0.8702087998390198
+        ],
+        "shadow_steps": 8,
+        "shadow_strength": 0.8999999761581421,
+        "shadow_stride": 4,
+        "temperature_max": 20000.0,
+        "temperature_min": 1340.0,
+        "temperature_power": 1.5549999475479126,
+        "temperature_scale": 1.3370000123977661,
+        "temperature_units": 1,
+        "voxel_step_multiplier": 0.699999988079071
+      }
+    },
+    "runs": [
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 489.5833333333333
+      },
+      {
+        "from_sample": 8,
+        "to_sample": 32,
+        "wall_ms_per_iteration": 490.2500000001358
+      }
+    ],
+    "view_before": {
+      "accumulation_complete": false,
+      "available": true,
+      "backend": "vulkan",
+      "capture_enabled": false,
+      "frame_available": false,
+      "height": 0,
+      "ms_per_sample": 0.0,
+      "rendering_active": true,
+      "samples": 122,
+      "shading": "rendered",
+      "width": 0
+    },
+    "context_unchanged": true,
+    "optix": [
+      true,
+      {
+        "accumulated_samples": 0,
+        "adaptive_sampling": false,
+        "available": false,
+        "buffer_w_center": -1.0,
+        "buffer_w_max": -1.0,
+        "buffer_w_mean": -1.0,
+        "buffer_w_read": false,
+        "first_cuda_error": 0,
+        "first_cuda_error_site": "",
+        "image_h": 0,
+        "image_w": 0,
+        "last_wipe_from": [
+          0,
+          0
+        ],
+        "last_wipe_to": [
+          0,
+          0
+        ],
+        "min_samples": 0,
+        "prev_zero_pixels": 0,
+        "read_h": 0,
+        "read_w": 0,
+        "reset_buffers_calls": 0,
+        "samples_per_pixel": 0,
+        "set_render_params_calls": 0,
+        "set_render_params_reason": "",
+        "variance_threshold": 0.0,
+        "wipe_camera": 0,
+        "wipe_count": 0,
+        "wipe_resolution": 0
+      }
+    ],
+    "svgf": [
+      true,
+      {
+        "atrous_iterations": 4,
+        "atrous_ms": 6.075392,
+        "available": true,
+        "debug_history": false,
+        "dispatches": 172,
+        "epoch": 31,
+        "firefly_clip": 3.0,
+        "gpu_timing_available": true,
+        "history_length_mean": 121.0,
+        "history_max": 24,
+        "history_resets": 6,
+        "mode": "off",
+        "motion_source": "none",
+        "moving": false,
+        "presenting": false,
+        "reason": "",
+        "sample": 121,
+        "scene_motion": true,
+        "scene_reset_streak": 0,
+        "static_active": false,
+        "still_complete": false,
+        "still_filtered_fraction": 0.31428445452254977,
+        "still_noise": 0.019999999552965164,
+        "temporal_ms": 2.870816,
+        "total_ms": 10.26512,
+        "variance_ms": 0.566272
+      }
+    ]
+  }
+]

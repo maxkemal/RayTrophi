@@ -67,7 +67,11 @@ void drawRigAnatomy(UIContext& ctx,const std::string& character) {
         }
         if(chainIndex>=0){std::string path;for(const auto& b:chains[chainIndex]["bones"]){if(!path.empty())path+=" -> ";path+=shortName(b.get<std::string>());}ImGui::TextWrapped("%s",path.c_str());}
         if(editMetadata) {
-            ImGui::BeginDisabled(chainIndex<0);if(ImGui::Button("Remove selected chain")){edited["chains"].erase(edited["chains"].begin()+chainIndex);chainIndex=-1;apply=true;}ImGui::EndDisabled();
+            ImGui::BeginDisabled(chainIndex<0);if(ImGui::Button("Remove selected chain")){
+                // Hints and pivots are keyed by chain name; leaving them would make the save fail validation.
+                const auto removed=edited["chains"][chainIndex]["name"].get<std::string>();
+                for(const char* key:{"bend_hints","foot_pivots"})if(edited.contains(key)){auto& rows=edited[key];for(size_t i=rows.size();i>0;--i)if(rows[i-1]["chain"]==removed)rows.erase(rows.begin()+static_cast<nlohmann::json::difference_type>(i-1));}
+                edited["chains"].erase(edited["chains"].begin()+chainIndex);chainIndex=-1;apply=true;}ImGui::EndDisabled();
             if(ImGui::TreeNode("Build chain")) {
                 ImGui::InputText("Chain identifier",chainName,sizeof(chainName));ImGui::BeginDisabled(selected.empty());if(ImGui::Button("Append selected bone"))draft.push_back(selected);ImGui::EndDisabled();
                 std::string path;for(const auto& b:draft){if(!path.empty())path+=" -> ";path+=shortName(b);}ImGui::TextWrapped("%s",path.empty()?"Select joints from base to tip":path.c_str());
@@ -75,6 +79,25 @@ void drawRigAnatomy(UIContext& ctx,const std::string& character) {
                 if(ImGui::Button("Save chain")){edited["chains"].push_back({{"name",chainName},{"bones",draft}});apply=true;}ImGui::EndDisabled();ImGui::TreePop();
             }
         }
+    }
+    if(UIWidgets::CollapsingHeader("Bend hints and foot pivots")) {
+        ImGui::TextWrapped("Knees and elbows bend toward these rig-space directions (IK controls and Walk read them). Foot pivots are heel, ball and tip offsets from the ankle in its rest frame; refit the rest pose, then re-derive.");
+        auto derive=[&](bool overwrite){nlohmann::json report;const auto r=rtapi::deriveRigLimbHints(character,overwrite,report);message=r.ok?"Derived "+std::to_string(report["bend_hints_set"].size())+" hints, "+std::to_string(report["foot_pivots_set"].size())+" pivot sets"+(report["forward_assumed"].get<bool>()?" (forward assumed +Z)":""):r.error;};
+        if(ImGui::Button("Fill missing from rig"))derive(false);ImGui::SameLine();if(ImGui::Button("Re-derive all"))derive(true);
+        ImGui::TextDisabled("Recreate IK controls afterwards so they pick up new bend hints.");
+        auto vectorRow=[&](const char* label,nlohmann::json& target){float v[3]={target[0].get<float>(),target[1].get<float>(),target[2].get<float>()};
+            if(!editMetadata){ImGui::Text("%s  %.3f  %.3f  %.3f",label,v[0],v[1],v[2]);return;}
+            if(ImGui::InputFloat3(label,v,"%.3f",ImGuiInputTextFlags_EnterReturnsTrue)){target={v[0],v[1],v[2]};apply=true;}};
+        if(edited.contains("bend_hints"))for(size_t i=0;i<edited["bend_hints"].size();++i){auto& row=edited["bend_hints"][i];ImGui::PushID(static_cast<int>(i));
+            vectorRow(row["chain"].get<std::string>().c_str(),row["direction"]);
+            if(editMetadata){ImGui::SameLine();if(ImGui::SmallButton("Remove")){edited["bend_hints"].erase(edited["bend_hints"].begin()+static_cast<nlohmann::json::difference_type>(i));apply=true;ImGui::PopID();break;}}
+            ImGui::PopID();}
+        if(edited.contains("foot_pivots"))for(size_t i=0;i<edited["foot_pivots"].size();++i){auto& row=edited["foot_pivots"][i];ImGui::PushID(static_cast<int>(1000+i));
+            ImGui::TextUnformatted(row["chain"].get<std::string>().c_str());
+            vectorRow("Heel",row["heel"]);vectorRow("Ball",row["ball"]);vectorRow("Tip",row["tip"]);
+            if(editMetadata&&ImGui::SmallButton("Remove pivots")){edited["foot_pivots"].erase(edited["foot_pivots"].begin()+static_cast<nlohmann::json::difference_type>(i));apply=true;ImGui::PopID();break;}
+            ImGui::PopID();}
+        if((!edited.contains("bend_hints")||edited["bend_hints"].empty())&&(!edited.contains("foot_pivots")||edited["foot_pivots"].empty()))ImGui::TextDisabled("No hints or pivots stored; Walk derives pivots from the toes and knees follow the character forward.");
     }
     ImGui::EndDisabled();
     if(apply){auto saved=rtapi::setRigAnatomy(character,edited);message=saved.ok?"Anatomy saved":saved.error;}

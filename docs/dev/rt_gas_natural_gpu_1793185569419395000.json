@@ -1,0 +1,64 @@
+[
+  {
+    "method": "natural GPU progression; no viewport.render_frames",
+    "gpu_ms": 567.135508,
+    "samples": [
+      {
+        "capture_index": 8,
+        "gpu_ms": 584.904736,
+        "height": 945,
+        "sample_index": 7,
+        "width": 1680
+      },
+      {
+        "capture_index": 9,
+        "gpu_ms": 562.975136,
+        "height": 945,
+        "sample_index": 8,
+        "width": 1680
+      },
+      {
+        "capture_index": 10,
+        "gpu_ms": 565.681568,
+        "height": 945,
+        "sample_index": 9,
+        "width": 1680
+      },
+      {
+        "capture_index": 11,
+        "gpu_ms": 563.352064,
+        "height": 945,
+        "sample_index": 10,
+        "width": 1680
+      },
+      {
+        "capture_index": 12,
+        "gpu_ms": 567.243712,
+        "height": 945,
+        "sample_index": 11,
+        "width": 1680
+      },
+      {
+        "capture_index": 13,
+        "gpu_ms": 565.688896,
+        "height": 945,
+        "sample_index": 12,
+        "width": 1680
+      },
+      {
+        "capture_index": 14,
+        "gpu_ms": 566.857088,
+        "height": 945,
+        "sample_index": 13,
+        "width": 1680
+      },
+      {
+        "capture_index": 15,
+        "gpu_ms": 560.380864,
+        "height": 945,
+        "sample_index": 14,
+        "width": 1680
+      }
+    ]
+  }
+]

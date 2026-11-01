@@ -1,0 +1,71 @@
+{
+  "date": "2026-10-28",
+  "build": "section 19 material-aware optical bounds",
+  "method": "external rt_probe_gas_overlap_cost_ipc.py --frames 4; GPU camera RT dispatch",
+  "bounds": {
+    "vapor": {
+      "raw_active_fraction": 0.07851981586526972,
+      "render_box_fraction": 0.11269447973134442,
+      "first_voxel": [
+        0,
+        0,
+        16
+      ],
+      "end_voxel": [
+        80,
+        16,
+        72
+      ],
+      "conservative_fallback": false
+    },
+    "smoke": {
+      "raw_active_fraction": 0.010503792118932924,
+      "render_box_fraction": 0.026563698793816898,
+      "first_voxel": [
+        64,
+        0,
+        24
+      ],
+      "end_voxel": [
+        86,
+        24,
+        56
+      ],
+      "conservative_fallback": false
+    }
+  },
+  "gpu_ms": {
+    "vapor": 261,
+    "smoke": 84,
+    "sum": 345,
+    "both": 329
+  },
+  "per_path": {
+    "camera_density_samples": {
+      "vapor": 6.536,
+      "smoke": 2.839,
+      "both": 10.745
+    },
+    "secondary_density_samples": {
+      "vapor": 0,
+      "smoke": 0,
+      "both": 0
+    },
+    "radiance_cache_fallbacks": {
+      "vapor": 0,
+      "smoke": 0,
+      "both": 0
+    },
+    "volume_rays": {
+      "vapor": 0.513,
+      "smoke": 0.206,
+      "both": 0.641
+    }
+  },
+  "previous_session_gpu_ms": {
+    "vapor": 771,
+    "smoke": 185,
+    "both": 1052
+  },
+  "comparison_limit": "Previous session reference, not a same-build old/full-bounds toggle A/B. Current raw occupancy differs slightly from earlier snapshot. No image capture or visual acceptance performed."
+}

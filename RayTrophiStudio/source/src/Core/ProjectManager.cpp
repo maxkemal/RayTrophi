@@ -791,16 +791,14 @@ static std::shared_ptr<VolumeShader> domainVolumeShaderFromJson(const json& js) 
 static const char* simulationDomainTypeToString(RayTrophiSim::SimulationDomainType type) {
     switch (type) {
         case RayTrophiSim::SimulationDomainType::Matter: return "Matter";
-        case RayTrophiSim::SimulationDomainType::Fluid: return "Fluid";
-        case RayTrophiSim::SimulationDomainType::Gas:
+        case RayTrophiSim::SimulationDomainType::LegacyFluid: return "Fluid";
+        case RayTrophiSim::SimulationDomainType::LegacyGas:
         default: return "Gas";
     }
 }
 
 static RayTrophiSim::SimulationDomainType simulationDomainTypeFromString(const std::string& value) {
-    if (value == "Matter") return RayTrophiSim::SimulationDomainType::Matter;
-    if (value == "Fluid") return RayTrophiSim::SimulationDomainType::Fluid;
-    return RayTrophiSim::SimulationDomainType::Gas;
+    return RayTrophiSim::parseSavedSimulationDomainType(value);
 }
 
 static const char* rigidBodyShapeToString(RayTrophiSim::RigidBodyShape shape) {
@@ -2814,7 +2812,8 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         j_ctx.value("rigWeightAlgorithm", std::string{});
                     if (ctx.rigWeightAlgorithm != "" &&
                         ctx.rigWeightAlgorithm != "nearest_segment" &&
-                        ctx.rigWeightAlgorithm != "anatomical_capsule_v1") {
+                        ctx.rigWeightAlgorithm != "anatomical_capsule_v1" &&
+                        ctx.rigWeightAlgorithm != "geodesic_voxel_v1") {
                         throw std::runtime_error("Invalid rig weight algorithm");
                     }
                     if (j_ctx.contains("rigEnvelopeSettings")) {
@@ -4336,7 +4335,7 @@ json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>
         c["depth_of_field"] = cam->depth_of_field;
         c["lens_weather"] = atmosphere::lensWeatherJson(cam->lens_weather);
         c["blade_count"] = cam->blade_count;
-        c["distortion"] = cam->distortion;
+        c["lens_distortion"] = cam->distortion;
         c["body_preset_index"] = cam->body_preset_index;
         c["iso_val"] = cam->iso;
         c["sensor_height_mm"] = cam->sensor_height_mm;
@@ -4389,7 +4388,12 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
         //   varsayilani, DoF'u kapatmis her eski sahneyi sessizce bulaniklastirirdi.
         cam->depth_of_field = c.value("depth_of_field", aperture > 0.001f);
 
-        cam->distortion = c.value("distortion", 0.0f);
+        // Key renamed from "distortion" (2026-10-27) and the old key is NOT read:
+        // for years the value had no live panel or IPC, but was saved/restored
+        // and could be written by Auto Lens Characteristics, so old projects
+        // carried an invisible lens bend (and it disabled FSR). Old projects load
+        // undistorted; a deliberate value is set again from the camera panel.
+        cam->distortion = c.value("lens_distortion", 0.0f);
         cam->body_preset_index = c.value("body_preset_index", 1); // Default to Full Frame (index 1)
         cam->iso = c.value("iso_val", 100);
         cam->sensor_height_mm = c.value("sensor_height_mm", 24.0f);
@@ -5830,8 +5834,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["use_time_limit"] = source.use_time_limit;
         f["start_time"] = source.start_time;
         f["end_time"] = source.end_time;
-        f["use_particle_limit"] = source.use_particle_limit;
-        f["max_emitted_particles"] = source.max_emitted_particles;
+        f["use_mass_limit"] = source.use_mass_limit;
+        f["max_emitted_mass_kg"] = source.max_emitted_mass_kg;
         f["keyframes"] = json::array();
         for (const auto& [frame, key] : source.keyframes) {
             f["keyframes"].push_back({
@@ -6389,8 +6393,16 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
         source.start_time = item.value("start_time", source.start_time);
         source.end_time = item.value("end_time", source.end_time);
-        source.use_particle_limit = item.value("use_particle_limit", source.use_particle_limit);
-        source.max_emitted_particles = item.value("max_emitted_particles", source.max_emitted_particles);
+        source.use_mass_limit = item.value("use_mass_limit", source.use_mass_limit);
+        source.max_emitted_mass_kg = item.value("max_emitted_mass_kg", source.max_emitted_mass_kg);
+        // The count budget is not converted: a parcel's mass depends on the
+        // voxel, PPC and substance at the time it was born. Say it was dropped.
+        if (item.value("use_particle_limit", false)) {
+            SCENE_LOG_WARN("[ProjectManager] Flow source '" + source.name + "': its particle "
+                "budget (" + std::to_string(item.value("max_emitted_particles", 0)) +
+                " particles) was retired; the source budget is mass now. Set Max Emitted "
+                "Mass (kg) on the source to limit it again.");
+        }
         if (item.contains("keyframes") && item["keyframes"].is_array()) {
             for (const auto& key_item : item["keyframes"]) {
                 if (!key_item.is_object()) continue;
@@ -6429,6 +6441,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         }
         source.fluid_emit_accumulator = 0.0f;
         source.total_emitted_particles = 0;
+        source.total_emitted_mass_kg = 0.0;
+        source.withheld_mass_kg_step = 0.0;
+        source.withheld_mass_kg_total = 0.0;
         // Motion state is runtime-only: arm the sentinel so the first step
         // after load inherits zero rather than differencing against a
         // default-constructed position.
@@ -6816,7 +6831,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         }
         if (item.contains("fluid_fog_shader")) {
             domain.fluid_fog_shader = domainVolumeShaderFromJson(item["fluid_fog_shader"]);
-        } else if (RayTrophiSim::simulationDomainHasLiquid(domain.type) &&
+        } else if (RayTrophiSim::simulationDomainHasLiquid(domain) &&
                    domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog &&
                    domain.shader) {
             // Saved before the fog view had its own shader: a fog-mode liquid
@@ -6934,15 +6949,14 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             for (const auto& domain_item : *domains) {
                 if (domain_item.is_object()) system.runtime->addGridDomain(parseDomain(domain_item));
             }
-            // Sync states from descs so each domain's STATE carries its restored
-            // type (Gas/Fluid) + grid metadata immediately (default states are Gas).
-            system.runtime->synchronizeGridDomainsNow();
         }
         if (flow_sources && flow_sources->is_array()) {
             for (const auto& flow_item : *flow_sources) {
                 if (flow_item.is_object()) system.runtime->addFlowSource(parseFlowSource(flow_item));
             }
         }
+        // Legacy type migration must see all sources before becoming Matter.
+        system.runtime->synchronizeGridDomainsNow();
         SceneData::applyParticleSystemEnabledState(system);
         scene.particle_systems.push_back(std::move(system));
     };

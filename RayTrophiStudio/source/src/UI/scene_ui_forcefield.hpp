@@ -22,6 +22,7 @@
 #pragma once
 
 #include "scene_ui.h"
+#include "UI/SimulationTransport.h"
 #include "Api/RtApi.h"
 #include "ui_modern.h"
 #include "ForceField.h"
@@ -190,13 +191,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         int sim_mode = g_sim_timeline_mode ? 0 : 1;
         ImGui::SetNextItemWidth(-FLT_MIN);
         if (ImGui::Combo("##SimGlobalMode", &sim_mode, sim_modes, IM_ARRAYSIZE(sim_modes))) {
-            drainSimulationMutationBackends();
-            g_sim_timeline_mode = (sim_mode == 0);
-            ui_ctx.renderer.resetCPUAccumulation();
-            if (ui_ctx.backend_ptr) {
-                ui_ctx.backend_ptr->resetAccumulation();
-            }
-            ui_ctx.start_render = true;
+            SimulationTransport::setTimelineMode(ui_ctx, sim_mode == 0);
         }
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("Timeline: play to bake, scrub to replay; stopped = frozen.\nLive: continuous free-run preview (heavier).");
@@ -1084,7 +1079,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                     particles->gridDomains().end(),
                     [](const RayTrophiSim::SimulationGridDomainDesc& domain) {
                         return domain.enabled &&
-                               RayTrophiSim::simulationDomainHasGas(domain.type);
+                               RayTrophiSim::simulationDomainHasGas(domain);
                     });
                 if (has_gas_domain) {
                     ImGui::TextColored(
@@ -1370,13 +1365,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             int sim_mode = g_sim_timeline_mode ? 0 : 1;
             const char* sim_modes[] = { "Timeline (bake/scrub)", "Live Update (free-run)" };
             if (ImGui::Combo("Simulation Mode##Fluid", &sim_mode, sim_modes, IM_ARRAYSIZE(sim_modes))) {
-                drainSimulationMutationBackends();
-                g_sim_timeline_mode = (sim_mode == 0);
-                ui_ctx.renderer.resetCPUAccumulation();
-                if (ui_ctx.backend_ptr) {
-                    ui_ctx.backend_ptr->resetAccumulation();
-                }
-                ui_ctx.start_render = true;
+                SimulationTransport::setTimelineMode(ui_ctx, sim_mode == 0);
             }
         }
 

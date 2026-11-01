@@ -1,5 +1,396 @@
 # NEXT BUILD CHECKS
 
+## İç ışık adım düzeltmesi — 2026-11-01 (en önce)
+
+Yalnız shader değişti, C++ gerekmez. Soğuk RT pipeline bekle (son ölçüm 400 sn).
+Commit'e girdi, derlenip ölçülmedi.
+
+    python scripts/test/rt_test_pyro_internal_ipc.py --domain "Nuclear Gas" --out <scratchpad>
+
+1. PASS: 69. karede `burn_lit` ve `burn_lit8` p50 farkı .03 altında. Üstündeyse adım
+   hâlâ enerji taşıyor.
+2. Görüntü: iç ışık önceki 32 adımlı halden daha koyu görünebilir. Beklenen: eski
+   değer yanlıydı. Parlaklığı `internal_light_steps` ile değil EV ile ayarla.
+3. Maliyet hâlâ açık: Rendered modda 69. karede adım 0, 1, 2 ile süre ve
+   `render.volume_stats` sayaçlarını karşılaştır. 1 adım da pahalıysa sabit kısım
+   iç yürüyüş değildir.
+
+★ EN SİNSİ SONUÇ: Az adım artık uzaktaki ışığı sessizce kaybeder. İnce dumanda çok
+düşük adım, hata vermeden ateşten uzak bölgeleri karanlık bırakır. 32 kullan.
+
+## Eklemeli flame, iç ışık + burnout, panel — 2026-11-01
+
+★ KOŞULDU: kullanıcı derledi, ajan ölçtü. Madde 5 ve 6 tamam, Smoke eşlemesi script
+tarafında PASS. Panel (1, 2, 4), senin kendi malzemenle 3. madde ve RayFusion gözle
+bakılmadı. Sayılar handoff notunun başında. `flame_emission` başlangıcı 0.05–0.5
+YANLIŞ çıktı: 0.1 ölçülemiyor, görünür etki 0.5–2. Etkisi başlıkta değil, zemin
+halkası ve gövdede; 0 bırak. Düzeltilmedi: adım sayısı enerjiyi değiştiriyor, 32
+kullan, adımı düşürmek maliyet kazandırmaz. Aşağısı ilk liste olarak duruyor.
+
+    python scripts/test/rt_test_pyro_flame_ipc.py --domain "Nuclear Gas" --out <scratchpad>
+
+Sırayla bak, hızlıdan yavaşa:
+
+1. Derleme temiz. Sık kırılma adayı: `VolumeMaterialUI.cpp` yeniden bölündü,
+   `scene_ui.cpp` içinde iç içe `TreeNode`/`TreePop` çiftleri taşındı.
+2. Panel: Smoke, Lighting, Fire, Quality bölümleri görünmeli; gaz domain'inde Data da.
+   Bir ayar kaybolduysa veya ImGui stack hatası varsa TreePop dengesi bozulmuştur.
+3. Senin mevcut malzemen (independent kapalı, internal 32/32): görüntü önceki gibi
+   kalmalı, `flame_emission` 0. Değiştiyse legacy iç ışık integrali bozulmuştur.
+   Yalnız burnout açıkken yanan hücrelerde çok hafif fark beklenen: düzeltilen hata.
+4. Duman: Color değiştir, siluet aynı kalmalı. Opacity değiştir, renk aynı kalmalı.
+   İlk düzenlemede görüntü sıçrarsa `applySmokeAppearance` eşlemesi yanlıştır.
+5. Independent aç, internal 32 kalsın, burnout .9 (.2–.6). Önce internal 0 ile kıyasla:
+   duman ateşten ışık almalı. Almıyorsa `sampleDensityChannels` kanalı boş dönüyor.
+6. Test PASS ve 69. karede `add2`, `noflame`dan farklı olmalı. Aynıysa hücreler hâlâ
+   sıfır üretiyor: `volumeFlameRadiance` veya `flame` adresi. Süre `noflame` ile yakın
+   olmalı; flame kapalıyken ek okuma yok.
+7. `flame_emission` değeri: yoğunluk şiddeti taşır, 2 çok güçlü olabilir. 0.05–0.5 ile
+   başla. Beyaza patlıyorsa bu ayardır, hata değil.
+8. Koyu noktalar: independent modda 12–30. karede bak. Legacy'de görülmemesi onları
+   temize çıkarmaz.
+9. RayFusion: iç ışık, burnout ve flame aynı yönde görünmeli. Görünmüyorsa frag'daki
+   668 ofsetine bak. M=0 elle bakış ve eski proje açılışı önceki listeden açık.
+
+★ EN SİNSİ SONUÇ: Bağımsız modda iç ışık artık açılıyor; daha önce sessizce sıfırdı.
+İç ışık adımı kayıtlı eski bir independent sahne, hatasız şekilde daha parlak ve daha
+pahalı açılır. Bug gibi raporlanmaz; `internal_light_steps` değerine bak.
+
+## Pyro flame partisi — 2026-11-01
+
+★ Bu partideki `flame_boost` artık `flame_emission`; üstteki liste geçerli.
+
+Ajan derledi (önceki yetkiyle), `rt_test_pyro_flame_ipc.py` PASS, malzeme geri
+yüklendi, proje kaydedilmedi. Ölçümden SONRA tek kaynak değişikliği yapıldı
+(`FluidDomainFogVolume.cpp` ölü blok söküldü), bu nedenle C++ yeniden derlenmeli.
+Shader değişmedi. Sayılar: handoff notunun başı.
+
+1. Derleme temiz bitmeli. Hata verirse `registerOrUpdateLiveVolume` çağrısına bak.
+2. Yeniden test: `python scripts/test/rt_test_pyro_flame_ipc.py --domain "Nuclear Gas" --out <scratchpad>`.
+   PASS ve 12. karede `boost4` p95 > `noflame` p95 görülmeli. Değilse cihaz yolundaki
+   flame adresi kopmuştur.
+3. 69. karede `boost4` ≈ `noflame` BEKLENEN sonuç: yanan hücrelerin taban emisyonu
+   sıfıra yakın. Hata sayma; `boost1` zeminde farklı çıkarsa örnek sayısı farkıdır.
+4. Önbellek oynatımı: gazı cache'ten çal, `flame_boost` 0 ve 4 karşılaştır, 12.
+   kare civarında fark görülmeli. Fark yoksa yeni NanoVDB yolu çalışmıyor; bu yol
+   hiç ölçülmedi.
+5. Koyu noktalar: 12–30. karede ilk koşuda var, geri sarınca yok. Hangi koşulda
+   çıktığı bilinmiyor; kök bulunmadan kaliteyle ilgili kesin karar verme.
+6. RayFusion: 3. madde ve aşağıdaki listedeki gözle bakışlar hâlâ açık.
+
+★ EN SİNSİ SONUÇ: Flame boost slider'ı geç karelerde hiçbir şey yapmaz ve hata
+vermez. Kullanıcı bunu "bozuk" sanabilir, oysa çarpan sıfırın üstünde çalışıyor.
+Geç karede parlaklık için `soot_burnout` kullan, boost'u yükseltme.
+
+## Pyro tepki partileri — 2026-11-01
+
+Bu parti ajan tarafından kullanıcı talimatıyla derlendi (Release + shader) ve
+`rt_test_pyro_response_ipc.py` nuke.rtp kare 69'da PASS verdi. Kalan gözle bakışlar:
+
+1. RayFusion: `temperature_gamma`, `soot_burnout` ve yumuşak sınırlayıcı aynı yönde
+   görünmeli. Görünmüyorsa frag'daki bayt ofsetleri (560..572) kaymıştır.
+2. Panel: Physical volume bölümünde "Measure field" sayıları göstermeli; "Fit
+   temperature to field" sonrası EV düşürmek gerekebilir. Fit beyazlatıyorsa bu
+   beklenen sonuç, hata değil.
+3. Eski proje: `fire_scatter_*` taşıyan bir sahne hatasız açılmalı. Hata verirse
+   okuyucu eski anahtarı reddediyordur.
+4. M=0 yayıcı: zemin ışığı kaybolmamalı. Kaybolursa `vrcProvenEmpty` işaretine bak.
+5. C++ testi `volume_material_authoring_test.cpp` düzenlendi, koşulmadı.
+
+★ EN SİNSİ SONUÇ: Random walk artık gerçekten çalışıyor, açık kalan eski sahneler
+kat kat yavaşlar ve duman gövdesi açılır. Sonuç hatasız ama farklıdır. Gerekçe
+handoff notunda: 64 spp'de kıvılcım duruyor, varsayılan yapılmadı.
+
+★ KOŞULDU: test PASS (süre %40–50 düştü, başlık aynı, zemin +0,8 ve +2,1/255).
+Madde 6 (M=0 elle bakış) ve RayFusion gözle kontrolü hâlâ açık.
+
+Derleme: yalnızca shader paketi; C++ değişmedi. Soğuk RT pipeline bekle, hazır
+olmadan testi başlatma. Tek test, Rendered modda:
+
+    python scripts/test/rt_test_pyro_bounce_cache_ipc.py --target "gas:Nuclear Gas" --out <scratchpad>
+
+Sırayla bak:
+
+1. `RESTORED True` ve sonda PASS. Değilse malzeme bozuk kalmıştır, kaydetme.
+2. `counters`: `radiance_cache_marches` sıfırdan büyük, `secondary_density_samples`
+   önbelleksiz haline göre çok düşük. Sıfırsa önbellek hiç devreye girmiyor;
+   süre kazancı başka nedendendir.
+3. `tuned`: `cache_ms`, `full_ms`in belirgin altında (sekme 32 denemesi 117 ms'ye
+   inmişti). Düşmediyse süre önbellek dolumuna gidiyor olabilir, 2. maddeye dön.
+4. `cap_cache` ≈ `cap_full`. Başlık kamera ışını, önbellek ona dokunmamalı.
+   Farklıysa sekme dışı bir yol etkilenmiştir.
+5. `ground_cache` ≈ `ground_full`, iki malzemede de (eşik 5/255). `bright` asıl
+   sınav: 2026-10-25'te zemin burada +8/255 kaymıştı.
+6. Burnout 1'de ve M=0'da zemin ışığı kaybolmamalı: vakum dalı ve sıfır yoğunluklu
+   yayıcı. Scriptte yok, yalnız M=0 için elle bakılacak.
+
+★ EN SİNSİ SONUÇ: `vrcProvenEmpty` yoğunluğa bakar. Yoğunluğu sıfır bir yayıcı
+sessizce atlanırsa ışık hatasız, makul biçimde azalır. 1e-12 işareti bunu
+önlemek için; zemin karanlıksa önce buna bak.
+
+Bilinen, bu partiden gelmeyen: `check_gas_overlap_cache_contracts`,
+`check_volume_optical_block_contracts`, `check_volume_shared_walk` birer eski
+metne bağlı FAIL veriyor (ör. `term.emission = source * term.extinction`).
+
+## Soot burnout + RT kamera step sınırı — 2026-11-01
+
+★ KOŞULDU: test PASS; madde 1, 2, 3, 5 tamam. Madde 4 tutmadı: 64 sınırı %17
+kazandırdı, kalan maliyet sekme ışınlarında (ayrıntı handoff notunun başında).
+Madde 7 (RayFusion) hâlâ gözle bakılacak. Aşağısı ilk liste olarak duruyor.
+
+Derleme: C++ VE tam shader paketi. `params.h` değişti, CUDA/OptiX da yeniden
+derlenmeli. VkVolumeInstance 688 bayt kaldı. Shader hash değiştiği için ilk
+açılışta soğuk RT pipeline bekle (son ölçüm 398,7 sn); bu ayrı bir bulgu değil.
+Pipeline hazır olmadan test başlatma.
+
+Tek test, açık sahnede, Rendered modda:
+
+    python scripts/test/rt_test_pyro_soot_steps_ipc.py --target "gas:Nuclear Gas" --out <scratchpad>
+
+Sırayla bak; sonuncular öncekilere bağlı:
+
+1. `contract` satırı hepsi true olmalı. False ise: IPC/doğrulama eksik; ölçümlere
+   geçme, sonuçlar yanlış ayarla alınmıştır.
+2. `RESTORED True` ve sonda PASS. False ise malzeme bozuk kalmıştır, kaydetme.
+3. `legacy_gate` ≈ `legacy_b0` (fark ≤ .003). Değilse burnout source-function
+   emisyonuna sızmıştır: alev kararır.
+4. `cap64_thin` süresi `cap0_thin`in yaklaşık yarısı, ortalama ±%2. Süre aynıysa
+   sınır shader'a ulaşmıyor: paket/decode kaçağı. Önceki referans 120 / 230 ms.
+5. `thin_b90` / `thin_b90_low` montajı: sıcak çekirdek içeriden parlamalı, dış
+   koyu kabuk durmalı. İkisi de `thin_b0` ile aynıysa aralık sahnedeki sıcaklığa
+   denk gelmiyor; önce `soot_burnout_start/end` değerlerini düşür, kodu suçlama.
+6. Beyaz patlama: `soot_burnout` 1'e yakınken sönüm sıfırlanır, emisyon j·dt'ye
+   geçer ve ölçek küçük kalmaz. Patlıyorsa EV düşür; bu ayar sonucudur.
+7. RayFusion'a geç, aynı malzeme: aynı yön görünmeli, step 128'de bloklaşma
+   olmamalı. Bu adım scriptte yok, gözle bakılacak.
+8. Yeni malzemede `max_steps` 128 gelmeli. Kayıtlı sahne kendi değerini (121) korur.
+
+★ EN SİNSİ SONUÇ: gölgeler burnout'u görmez. Sıcak gazın gölgesi eski yoğunlukta
+kalır ve bu, hatasız "biraz karanlık çekirdek" gibi görünür. Bilinçli sınır;
+kusur sayılıp görünmeden burnout gücünü yükseltme.
+
+Bilinen, bu partiden gelmeyen: `check_volume_march_lod_contracts.py` iki maddede
+FAIL (`volumeShadowDue` 4 yerine 3). Çalışma ağacında bu partiden önce
+değişmişti; ayrıca bakılmalı.
+
+## Latest build rejected: noisy fire / 398.7 s cold RT pipeline
+
+PYRO_SOURCE_CHANNEL_HANDOFF_20261101.md başındaki güncel bölümü önce oku.
+Kullanıcı derledi: fire ışığı aşırı gürültülü ve görsel kabul başarısız.
+SceneLog: shader cache mismatch, RT pipeline ready in 398,7 s. Yeni ayarlar
+rt_pyro_noise_startup_20261101.json içinde. Bu süre cold pipeline toplamı;
+sampler'ın tek başına payı veya warm restart süresi ölçülmedi.
+Runtime fire off driver compile yükünü kaldırmaz. Aday sayısını artırmayı
+çözüm sayma; bounded ayrı compute lighting/cache yaklaşımı öneriliyor,
+henüz uygulanmadı. Önceki 103 test GPU/derleyici performans kabulü değildir.
+
+## Source density correction / clean handoff — 2026-11-01 (en önce)
+
+PYRO_SOURCE_CHANNEL_HANDOFF_20261101.md: açık sahne 128 spp incelendi; ayarlar
+rt_pyro_handoff_live_20261101.json içinde. Canlı eğri [0,1,1,1,1,1,1,1] emisyon
+maskesini de sürüp yaklaşık raw density 0.0886 üstünü kaynaktan siliyordu.
+
+Kaynakta düzeltildi: independent_emission açıkken emission/mask pre-curve;
+extinction aynı smoke eğrisinde. Tek alan okumasından iki kanal, ek VDB lookup
+yok. RT/NanoVDB/mixture/fire/preview ve boş alan kanıtları güncellendi.
+103 non-build kontrol geçti; C++ fog bounds regression eklendi, derlenmedi.
+
+1. Kullanıcı C++ ve tam shader paketini derlemeli; ABI hâlâ 688/172.
+2. Aynı kare/ayarlar ile kaynak farkını kontrol et; açılan kaynak parlaklığı için
+   emission'ı yeniden ayarlamak gerekebilir. Smoke eğrisini değiştirmek j/mask
+   girişini düzleştirmemeli. Independent kapalı legacy aynı kalmalı.
+3. Sıfır smoke eğrisi / multiplier, farklı maskeler, ordinary/mixture/preview
+   kontrolü. Shader build ve GPU kabulü agent tarafından yapılmadı.
+4. Handoff notundaki kalan limiter, yüksek extinction, ilk saçılma sınırı ve
+   erken tükenen aday bütçesini izle. Yeni geniş performans matrisi tekrarlama.
+
+## Bağımsız emisyon + alıcıya göre kaynak seçimi — 2026-11-01 (en önce)
+
+PYRO_INDEPENDENT_EMISSION_20261101.md. Kaynakta hazır; agent build/uygulama
+açılışı/canlı sahne düzenlemesi veya yeni performans benchmark'ı yapmadı.
+
+1. Kullanıcı C++/CUDA ve tam shader paketini derlemeli:
+   ./RayTrophiStudio/compile_shaders.bat -VolumeOptimization Off
+   ABI hâlâ 688 byte/172 word. Response[0]: bit 0=response, bit 1=bağımsız j.
+   Eski SPV flags 2/3'ü yanlış yorumlar; VolumeOnly ile yetinme.
+2. Harici terminal: python scripts/test/rt_test_volume_fire_scatter_ipc.py --target "gas:Nuclear Gas"
+   Yeni boolean, aday limitleri/atomiklik/restore. C++ scalar, material authoring
+   ve fog bounds testleri güncellendi; agent derlemedi.
+3. Panelde **Emission independent of smoke multiplier** aç. Katsayı parlaklığı
+   eski yoğunlukla büyüyen S ile aynı kalmak zorunda değil: emission exposure/
+   intensity'yi bir kez ayarla. Sonra sabit tutup smoke multiplier 1/10/30/0 dene:
+   j büyümemeli; görüntü soğurmaya göre değişmeli. Sıfır extinction'da emisyon
+   kaybolmamalı. Kayıt/aç ve preset korunmasını kontrol et.
+4. **Fire lights smoke (Vulkan RT)** açık, random walk kapalı, 8 adayla başla.
+   Yerel seçim en fazla dörder aday tüketir; toplam ışın bütçesi authored 1..32.
+   32 aday her kamera adımında yeniden üretilmez. Katı/duman gölgesini ve iki
+   farklı kaynağı kontrol et; aday sayısı enerji çarpanı gibi davranmamalı.
+5. Independent j yayıcıları eski S radiance cache'ini ve aligned shared walk'ı
+   bypass eder; maliyet artışı mümkün. RT/RayFusion default'ları değiştirilmedi.
+   Legacy internal integral yeni j kipinde çalışmaz.
+
+97 non-build test + light-cache ABI kontrolü geçti. GPU ve derleyici kabulü bekliyor.
+
+## İlk saçılma build sonrası — 2026-11-01
+
+`PYRO_FIRST_SCATTER_LIVE_20261101.md`: kullanıcı derledi; yeni kontrol ve
+yaklaşık 32 ek kaynak density okuması çalışıyor. Aynı kamera/kare/post ile
+off/new/legacy karşılaştırması yapıldı, bütün ayarlar geri alındı. Performans
+benchmark'ı tekrarlanmadı. İstenen koyu kabuk/iç parıltı henüz kabul edilmedi.
+Doğrudan emisyon hâlâ smoke multiplier ile büyüyor. Sonraki kaynak işi ortak
+bağımsız j semantiği ve alıcıya göre kaynak seçimi; sadece aday artırma değil.
+RT~32 ve RayFusion>=128 kullanıcı gözlemi; paylaşılan default 32'ye çevrilmedi.
+
+## Yeni bulgu — 2026-11-01
+
+`PYRO_MARCH_DENSITY_FINDINGS_20261101.md`: kullanıcı aynı patlamada 30/256
+raymarch kalitesi arasında görünür fark olmadan yüksek maliyet farkı buldu.
+Yeni benchmark yapılmadı. Sabit/adaptive baseStep bütçeye bağlı; emisyon guard'ı
+mixture'da coarsening'i ayrıca sınırlar. Mevcut açık binary'de yeni fire kontrolü
+yok. Density multiplier emisyon response'undaki density_power'a da giriyor;
+density artınca ışığın artması yeni ilk-saçılma kodundan önce mevcut.
+İlk-saçılma kabulünde bu ayarları sabit tut; 256'yı zorunlu kalite sayma.
+
+## Alevden dumana ilk saçılma — 2026-10-31 (en önce)
+
+`PYRO_FIRST_SCATTER.md`. Yeni source-space RIS yolu kaynakta, default **kapalı**.
+Tek hacim ve genel mixture kamera march'ı; Vulkan RT. Random walk kapalı olmalı.
+Agent build, shader compile, uygulama açılışı veya yeni performans ölçümü yapmadı.
+
+1. C++ ve tam shader paketini kullanıcı derlemeli:
+   `.\RayTrophiStudio\compile_shaders.bat -VolumeOptimization Off`.
+   ABI hâlâ **688 byte / 172 word**; density_curve[11] artık aday sayısı.
+2. Harici terminal: `python scripts/test/rt_test_volume_fire_scatter_ipc.py --target "gas:Nuclear Gas"`.
+   İki ayarı restore eder; sahne kaydetmez. C++ `volume_material_authoring_test.cpp`
+   yeni kontrollerin kayıt/legacy/default/atomiklik testlerini de içerir; agent derlemedi.
+3. Patlama, aynı kare/kamera/post: random walk off, internal_light_steps=0.
+   **Fire lights smoke (Vulkan RT)** off/on, 8 adayla karşılaştır. Doğrudan
+   emisyon ve extinction tanımları korunurken çevre dumanda ışık katkısı aranır.
+4. Sahne ışıkları olmadan da çalışmalı; opak katı/duman katkıyı kesmeli;
+   kaynak emisyonu veya receiver scatter=0 olduğunda ilgili katkı gitmeli.
+   Emisyon maskesi ve kare değişimi aynı kaynağı izlemeli. 1/8/32 aday
+   enerji çarpanı gibi davranmamalı. Noise ve kalite henüz GPU'da doğrulanmadı.
+5. Volume Graph olan gas sahnelerinde bu ilk sürüm katkı üretmez. OptiX/RayFusion
+   uygulaması yok. Kalıcı cache veya tam multiscatter çözümü eklenmedi.
+   Yeni yol açıkken legacy iç integral aynı kaynakta çalışmaz; kayıt alanları tutuldu.
+
+## Density emission mask — 2026-10-31 (en önce)
+
+`PYRO_DENSITY_EMISSION_MASK.md`. Maske kaynakta hazır, default **kapalı**.
+Agent build veya uygulama açılışı çalıştırmadı; uygulama kapalı olduğu için canlı kabul yok.
+ABI değişti: VkVolumeInstance **688 byte / 172 word**. Önceki 672 bilgisi tarihsel.
+
+1. Studio kapalıyken C++/CUDA ve **tam** shader paketi derle:
+   `.\RayTrophiStudio\compile_shaders.bat -VolumeOptimization Off`.
+   VolumeOnly yeterli değil: raygen, closesthit, intersection ve preview/SDF raw
+   okuyucuları da yeni stride'ı kullanmalı. Eski binary/SPV karışımı çalıştırma.
+2. Harici terminal: `python scripts/test/rt_test_volume_emission_mask_ipc.py --target "gas:Nuclear Gas"`.
+   Dört alan round-trip, yanlış tip/aralık reddi, atomiklik ve eski malzemenin restore'u.
+   Scalar C++ testi `volume_emission_mask_test.cpp` kullanıcı tarafından build/run edilmeli.
+3. Aynı patlama/kare/kamera/128 spp: önce mask kapalı görüntüyü al. Sonra panelde
+   **Density emission mask** aç (Independent emission response açılması gerekmiyor).
+   Center 0.2, width 0.1, strength 1 başlangıç denemesi; doğru eşik sahneye bağlı.
+   Yoğun loblar kararmalı, aralıklarda sıcak alev kalmalı. Alev kaybolursa center yükselt.
+4. Duman silueti ve geçirgenliği aynı kalmalı. Maskeyi açınca duman kayboluyorsa
+   yanlışlıkla extinction maskeleniyordur. Kamera/zemin aydınlatması aynı kaynağı izlemeli;
+   maskelenen lob çevreyi hâlâ eski güçte aydınlatıyorsa cache veya NEE bayattır.
+5. Multiplier değiştirilince maskenin kendi density eşiği kaymamalı; genel optik
+   kalınlık/parlaklık yine değişir. Mask center/width güncellemesi eski cache göstermemeli.
+6. İki uyumlu Matter gazında maskeyi aç: ayrı slotlar ve nedeni görünmeli. Kapat/strength=0:
+   gizli mask ayarları farklı olsa da diğer optikler uyumluysa birleşme geri gelmeli.
+   Kaydet/aç ve preset değişiminde mask ayarları korunmalı. RT/OptiX/viewport/CPU kontrolü yap.
+7. Vulkan maliyeti: adaptifi geçici kapatıp harici terminalden
+   `python scripts/test/rt_probe_pyro_thermal_cost_ipc.py --target "gas:Nuclear Gas"`.
+   Probe termal ve constant sıfır emisyonu ABBA karşılaştırır; sonra ayarları geri yükler.
+   Çıktı termal yolun toplam fiyatıdır, tek fetch maliyeti değil. Testten sonra adaptifi
+   önceki değerine geri koy. Yeni maskenin 2x backend farkını çözdüğü henüz ölçülmedi.
+
+61 statik test ve light-cache sözleşme kontrolü geçti; C++/GPU yürütme doğrulanmadı.
+
+## Pyro optik veri yolu 1: sıcaklık birimi — 2026-10-31 (en önce)
+
+Plan: `PYRO_OPTICAL_PIPELINE_PLAN.md`. Bu parti yalnız ilk aşamadır. C++/CUDA
+ve shader derlemesi gerekir; agent derleme veya yeni canlı kabul çalıştırmadı.
+VkVolumeInstance stride değişmedi (672); density_curve[10] artık sıcaklık birimi.
+Eski binary ile yeni shader veya tersi kullanılmamalı.
+
+1. Studio kapalıyken C++/CUDA build ve tam shader paketi:
+   `.\RayTrophiStudio\compile_shaders.bat -VolumeOptimization Off`.
+   `-VolumeOnly` bu parti için yeterli değil: material_preview_volume.frag da değişti.
+2. Harici terminalden:
+   `python scripts/test/rt_test_volume_temperature_units_ipc.py --target "gas:Nuclear Gas"`.
+   Hedef farklıysa `volume.list_materials` çıktısını kullan. Test ayarları geri yükler;
+   geçerli 0/1/2 round-trip ve geçersiz değerlerin atomik reddini doğrular.
+3. Açık sahne frame 69, aynı kamera/128 spp: soğuk pus ve kırmızı/beyaz yanlış kenarlar
+   azalmalı; sıcak çekirdek kalmalı. Tam alev derinliği/HDR iyileşmesi henüz beklenmez:
+   ramp endpoint ve 64 limiti sonraki aşamalardır. NEE artık kamera ile aynı emisyon
+   değerlendiricisini ve limiti kullanır; çevre aydınlığında fark olabilir.
+4. VDB paneli Temperature units: Source default (0), Kelvin (1), Normalized range (2).
+   Live sim source default Kelvin'dir; ithal birimi bilinmeyen VDB legacy kalır.
+   Normalize 0..1 ithal VDB'de 2 seç; kaydet/aç ve preset sonrası değer korunmalı.
+   Kelvin/Normalized modunda eksik veya sıfır sıcaklık yoğunluk üzerinden parlamamalı.
+5. RT / viewport / CPU / CUDA yollarında aynı birim anlamını kontrol et. Kelvin 20 ve
+   20.01 sıcaklıkları artık farklı birim dallarına düşmemeli. Eski importer/malzemeler
+   için legacy 0 kontrolü de yapılmalı. Son sıcak pikselin kaybolması yanlış metadata
+   veya yanlış kaynak birimi belirtisi olabilir; cutoff yükselterek gizleme.
+6. Birleşik Matter akışlarında birim ayarını değiştir: uyumsuz akış ayrılmalı; iki
+   kaynak tekrar uyumlu yapılınca birleşmeli. Yeni birimle cache bayat kalmamalı.
+
+Standalone scalar test: `scripts/test/volume_temperature_mapping_test.cpp` kullanıcı
+tarafından C++17 ile build/run edilmeli. NaN/Inf, eksik/soğuk alan, normalize ve
+Kelvin sürekliliği/monotonluğu kapsanır. Agent bunu derlemedi.
+Non-build: yeni temperature sözleşmesi 7, material 10, optical bounds 5 kontrolü ve
+light-cache sözleşme kontrolü geçti.
+
+## VDB panelinin domain malzemesine bağı — 2026-10-31 (en önce)
+
+C++ build gerekir; agent build veya uygulama çalıştırmadı. Shader değişmedi.
+`getShader` düzeltmesine rağmen panel `getOrCreateShader` ile nötr render kopyasına
+gidiyordu. Artık ikisi de yazılı kaynak malzemesini verir; canlı malzeme ataması
+domain'in pointer bağını korur. Kırpma anahtarı saçılma/soğurma/emisyon türünü de izler.
+
+1. Sahneyi duraklatılmış aç; hiçbir gizle/göster veya cutoff düzenlemesi yapmadan
+   slot sayısı, kutu ve GPU süresini kaydet. İlk yayın da ince blok kırpmasından geçer.
+2. Birleşik VDB panelindeki multiplier/cutoff ile aynı kaynağın
+   `volume.get_material` (`matter:<domain>:<field>`) değerlerini karşılaştır.
+   Panel düzenlemesi iki hedefte de aynı görünmeli; kare değişince ve kaydet/aç sonrası kalmalı.
+3. Cutoff sürüklemesini bırakınca kutu yenilenmeli. Saçılma/soğurma ve emisyon None
+   geçişlerinde de kırpma yenilenmeli. Yalnız bir kaynak optiği değişirse birleşme ayrılabilir.
+4. Birleşik hacmin paneli yalnız adında gösterilen kaynağı düzenler; açıklama görünmeli.
+   Diğer kaynak ayarını ayrıca doğrula. Görsel fark ve ince taban buharı kaybını kontrol et.
+
+Statik kontroller: `python scripts/test/check_fog_optical_bounds_contracts.py` (5),
+`python scripts/test/check_volume_material_contracts.py` (10) geçti.
+
+## İnce buhar, Solid çökmesi, birleşme durumu — 2026-10-31 (önce bu)
+
+★ **Ek:** panelde cutoff değişince kutu gizle/göster olmadan hemen küçülmeli. Küçülmüyorsa yayın isteği çalışmıyor.
+Sürüklerken yayın olmaz: slider ve eğri kesilmemeli, kutu fare bırakılınca güncellenir. Bırakınca güncellenmiyorsa istek kaçıyor.
+
+C++ derlemesi gerekir, shader değişmedi. Önceki iki partinin (panel, yayın isteği) kontrolleri de bununla gelir.
+
+1. **Solid + Play.** Uygulama kapanmamalı. Gaz durursa `inventory_error` dolu demektir: reset ister, doğru davranış.
+   Kapanırsa `StartupCrash.log` son `[FATAL]` satırına bak.
+2. **Durum satırı.** Gaz paneli "Gas render: ..." göstermeli; emisyon farklıyken sebebi yazmalı.
+3. **İnce buhar.** `Physics Domain 1` frame 52: kutu üstü 4.19'dan belirgin inmeli, süre ~210 ms'den düşmeli.
+4. **★ Sessiz hata:** tabandaki ince buhar katmanı kaybolursa eşik fazladır (`kInvisibleBlockOpticalDepth`).
+   Hata vermez, kimse bug diye raporlamaz.
+5. **Etkisizlik.** Süre değişmediyse tutamlar eşikten kalındır ya da gaz emissive'dir; kırpma atlanır.
+
+## Birleşik gazda malzeme sıfırlanması — 2026-10-31 (önce bu)
+
+★ **Ek:** duraklatılmışken panel düzenlemesi artık birleşmeyi yeniler (`matterFogMergeChanged`). Uyumsuz
+malzemede slot ikiye çıkmalı; açılışta uyumlu akışlar kare beklemeden birleşmeli. `scene_data.h` değişti,
+tam derleme bekle. Yayın her karede tekrarlanıyorsa (FPS düşer) istek kilidi çalışmıyordur.
+
+C++ derlemesi gerekir, `VDBVolume.h` değişti, geniş derleme bekle. Shader değişmedi.
+
+1. **Panel doğru değeri gösteriyor.** Birleşik sahnede gazı seç: çarpan gerçek değerde olmalı, 1.0 değil.
+   1.0 görünüyorsa panel hâlâ nötr kopyayı okuyor.
+2. **Ayar kalıcı.** Çarpanı değiştir, başka kareye geç, geri dön: değer kalmalı, görüntü de değişmiş olmalı.
+3. **Renk değişimi.** Yalnız bir akışın rengini değiştir: gaz slotu ikiye çıkmalı, maliyet artar. Bu doğru.
+4. **★ Sessiz hata:** panelde değer kalıyor ama görüntü değişmiyorsa birleşme anahtarı yenilenmiyordur.
+
 ## Gaz akışı birleştirme aşama 1 — 2026-10-30 (önce bu)
 
 ★ **Canlı sonuç:** 1–3 ve 5 tamam: 262 → ~135 ms. **Madde 4 (görüntü) gözle yapılmadı**; JPEG farkı p99 19.

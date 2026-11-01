@@ -24,7 +24,7 @@ def select_domain(client, requested):
         return requested
     result = checked_call(client, "fluid.list_domains")
     domains = [item for item in result["domains"]
-               if item.get("type") in ("fluid", "matter")]
+               if bool(set(item.get("phases", [])) & {"liquid", "granular"})]
     if len(domains) != 1:
         names = ", ".join(item["name"] for item in domains) or "none"
         raise RtIpcError(f"Specify a liquid domain name; available domains: {names}")

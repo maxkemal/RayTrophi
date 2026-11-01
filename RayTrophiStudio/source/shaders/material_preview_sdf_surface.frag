@@ -7,7 +7,7 @@
 // Realtime SurfaceSDF compositor. The producer and Vulkan RT keep ownership of
 // the field; this pass reads the exact same VkVolumeInstance bytes through a raw
 // uint view. Raw access is intentional: there is no fifth private copy of the
-// 672-byte volume struct whose stride could silently drift from the RT ABI.
+// 688-byte volume struct whose stride could silently drift from the RT ABI.
 
 layout(location = 0) in vec2 vNdc;
 layout(location = 0) out vec4 outColor;
@@ -84,7 +84,7 @@ layout(push_constant) uniform MaterialPreviewPushConstants {
 } pc;
 
 const float PI = 3.14159265358979323846;
-const uint VOLUME_STRIDE_WORDS = 168u;
+const uint VOLUME_STRIDE_WORDS = 172u;
 
 uint volWord(uint volumeIndex, uint byteOffset) {
     return volumeWords[volumeIndex * VOLUME_STRIDE_WORDS + (byteOffset >> 2u)];

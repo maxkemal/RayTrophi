@@ -1,4 +1,5 @@
 #pragma once
+#include "SimulationDomainLanes.h"
 #include "Fluid/MatterFogStreams.h"
 #include "Fluid/SourceSplatGeometry.h"
 #include "Fluid/MatterAudioTelemetry.h"
@@ -101,27 +102,13 @@ enum class ParticleExecutionPolicy {
     CPU
 };
 
-// Tag for what kind of solver a grid domain feeds. Gas is the legacy gas/smoke
-// path through GridFluid::step (advect → projection → buoyancy → fire). Fluid
-// is the APIC liquid path (P2G → projection → G2P → advect particles). All
-// shared infra (bounds, voxel_size, transform/gizmo, flow sources, colliders,
-// serialization, timeline cache) lives on the same domain — the type just
-// picks the per-step solver.
+// Matter is the live domain identity. Legacy values retain their serialized
+// numbers solely for migration; lane switches select the actual solvers.
 enum class SimulationDomainType {
-    Gas = 0,
-    Fluid = 1,
+    LegacyGas = 0,
+    LegacyFluid = 1,
     Matter = 2
 };
-
-inline bool simulationDomainHasGas(SimulationDomainType type) {
-    return type == SimulationDomainType::Gas ||
-           type == SimulationDomainType::Matter;
-}
-
-inline bool simulationDomainHasLiquid(SimulationDomainType type) {
-    return type == SimulationDomainType::Fluid ||
-           type == SimulationDomainType::Matter;
-}
 
 enum class SimulationDomainBackend {
     CPU_Dense     = 0,
@@ -329,16 +316,14 @@ inline int effectiveTurbulenceOctaves(int requested, float scale,
 
 struct SimulationGridDomainDesc {
     std::string name = "Physics Domain";
-    // Defaults to Gas so existing projects deserialize unchanged. Fluid domains
-    // are created explicitly from the UI (or migrated from legacy FluidObject).
-    SimulationDomainType type = SimulationDomainType::Gas;
+    // Gas/Liquid are lane presets; legacy enum values are accepted only on load.
+    SimulationDomainType type = SimulationDomainType::Matter;
+    bool gas_lane_enabled = true;
+    bool liquid_lane_enabled = true;
     SimulationDomainBackend backend = SimulationDomainBackend::CPU_Dense;
     SimulationGridDomainSourceMode source_mode = SimulationGridDomainSourceMode::ManualBox;
-    // Struct default stays Open so gas/smoke domains (the default type) let
-    // their medium leave the box and existing projects deserialize unchanged.
-    // Fluid domains are switched to Closed at creation/type-conversion in the UI
-    // so liquid pools instead of silently draining through the walls.
-    SimulationGridDomainBoundaryMode boundary_mode = SimulationGridDomainBoundaryMode::Open;
+    // Gas creation presets explicitly select Open; Matter starts as a container.
+    SimulationGridDomainBoundaryMode boundary_mode = SimulationGridDomainBoundaryMode::Closed;
     std::string source_name;
     bool enabled = true;
     bool preserve_voxel_size_on_resize = true;
@@ -1161,7 +1146,9 @@ struct SimulationMotionProbe {
 struct SimulationGridDomainState {
     // Mirror of the desc's type so consumers (renderer, timeline cache, UI)
     // can branch on type without holding a desc reference.
-    SimulationDomainType type = SimulationDomainType::Gas;
+    SimulationDomainType type = SimulationDomainType::Matter;
+    bool gas_lane_enabled = true;
+    bool liquid_lane_enabled = true;
     Vec3 bounds_min = Vec3(-2.5f, 0.0f, -2.5f);
     Vec3 bounds_max = Vec3(2.5f, 5.0f, 2.5f);
     int resolution_x = 0;
@@ -1242,6 +1229,11 @@ struct SimulationGridDomainState {
     //
     // Reset with the simulation, not per frame — it is a running total.
     std::size_t burned_particles = 0;
+    // Emission the Max Particles ceiling withheld, summed over this domain's
+    // liquid sources: last step and since the reset (kg). > 0 means the
+    // sources are not pouring their authored rate (MatterDomainSources.inl).
+    double emission_withheld_kg_step = 0.0;
+    double emission_withheld_kg_total = 0.0;
     std::size_t active_density_cells = 0;
     float max_density = 0.0f;
     // Inclusive active-density cell bounds. Empty when max < min. Used by the
@@ -1812,9 +1804,23 @@ struct SimulationFlowSourceDesc {
     bool use_time_limit = false;
     float start_time = 0.0f;
     float end_time = 5.0f;
-    bool use_particle_limit = false;
-    int max_emitted_particles = 100000;
+    // What this source may pour in total, in kilograms (rest mass plus birth
+    // pore water). Replaced the particle-count budget (2026-10-27): parcels
+    // differ in mass (voxel/PPC for liquid, sphere mass for grains), so a
+    // count was not an amount of material. Evaporation, burning or draining
+    // never return budget: it counts what was emitted. The last parcel may
+    // overshoot by at most its own mass.
+    bool use_mass_limit = false;
+    float max_emitted_mass_kg = 100.0f;
+    // Runtime, reset with the simulation.
     int total_emitted_particles = 0;
+    double total_emitted_mass_kg = 0.0;
+    // Mass the domain's Max Particles ceiling kept this source from emitting,
+    // this step and since the reset. At the ceiling a source no longer pours
+    // its authored rate: it refills whatever leaves the domain (evaporates,
+    // burns, drains), which is why the withheld mass is reported.
+    double withheld_mass_kg_step = 0.0;
+    double withheld_mass_kg_total = 0.0;
     std::map<int, Keyframe> keyframes;
 };
 
@@ -2274,6 +2280,7 @@ struct ParticleSimulationRuntimeState {
     std::vector<float> flow_emit_accumulators;
     std::vector<uint64_t> flow_emit_sample_serials;
     std::vector<int> flow_total_emitted_particles;
+    std::vector<double> flow_total_emitted_mass_kg;
     std::vector<Vec3> previous_collider_centers;
     std::vector<uint8_t> previous_collider_center_valid;
     std::vector<Matrix4x4> previous_collider_transforms;

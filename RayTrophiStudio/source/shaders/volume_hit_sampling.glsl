@@ -1,3 +1,5 @@
+#include "volume_density_channels.glsl"
+
 #define PNANOVDB_GLSL
 #define PNANOVDB_BUF_CUSTOM
 
@@ -447,8 +449,9 @@ float denseGasEmptyBlockStep(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir,
     // would reject blocks the sampler would have kept (or worse, skip blocks it
     // would have shaded) whenever the multiplier is not 1.
     float blockMax = mg.blocks[bi];
-    float remapped = volumeDensityCurve(max((blockMax - vol.density_remap_low) /
-                         max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0), vol.density_curve);
+    float remapped = volumeDensitySupport(max((blockMax - vol.density_remap_low) /
+        max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0),
+        vol.density_curve, vol._retired_cloud[0]);
     if (remapped > cutoff) return 0.0;   // block has content — march it
 
     // Slab exit of this block, in object units (== world units for a rigid
@@ -601,12 +604,11 @@ float sampleTemperature(VkVolumeInstance vol, vec3 worldPos) {
 }
 
 // Combustion reaction rate (GridFluid's bounded `interaction` field) at a world
-// position. Live dense gas only. Uses exactly the transform + pivot chain
+// position, from live dense gas or its published NanoVDB grid. Uses exactly the transform + pivot chain
 // sampleTemperature applies, so the reaction lines up with the temperature it
 // modulates instead of being offset by the pivot on a moved domain.
 float sampleFlame(VkVolumeInstance vol, vec3 worldPos) {
     if (vol.flame_address == 0) return 0.0;
-    if (!(vol.volume_type == 4 && vol.source_type == 5)) return 0.0;
     vec3 localPos;
     localPos.x = vol.inv_transform[0]*worldPos.x + vol.inv_transform[1]*worldPos.y
                + vol.inv_transform[2]*worldPos.z + vol.inv_transform[3];
@@ -618,7 +620,10 @@ float sampleFlame(VkVolumeInstance vol, vec3 worldPos) {
     localPos.x -= vol.pivot_offset[0];
     localPos.y -= vol.pivot_offset[1];
     localPos.z -= vol.pivot_offset[2];
-    return clamp(sampleDenseGasFloat(vol.flame_address, vol, localPos), 0.0, 1.0);
+    if (vol.volume_type == 4 && vol.source_type == 5) {
+        return clamp(sampleDenseGasFloat(vol.flame_address, vol, localPos), 0.0, 1.0);
+    }
+    return clamp(sampleNanoVDBFloatTrilinear(vol.flame_address, localPos), 0.0, 1.0);
 }
 
 float applyMaterialDensityNoise(VkVolumeInstance vol, vec3 localPos, float density) {
@@ -640,14 +645,16 @@ float applyMaterialDensityNoise(VkVolumeInstance vol, vec3 localPos, float densi
 // cloud) ignore the accessor params. Caller must guarantee buf/mapH are valid when
 // vol.volume_type == 2 && vol.vdb_grid_address != 0; otherwise the accessor args are
 // untouched.
-float sampleDensityAccMode(
+float sampleDensityAccChannels(
     VkVolumeInstance vol,
     vec3 worldPos,
     pnanovdb_buf_t buf,
     pnanovdb_map_handle_t mapH,
     inout pnanovdb_readaccessor_t acc,
-    bool applyOpticalControls)
+    bool applyOpticalControls,
+    out float emissionDensity)
 {
+    emissionDensity = 0.0;
     #include "volume_density_read_gate.glsl"
     vec3 localPos;
     localPos.x = vol.inv_transform[0] * worldPos.x + vol.inv_transform[1] * worldPos.y
@@ -700,22 +707,20 @@ float sampleDensityAccMode(
     }
 
     density = applyMaterialDensityNoise(vol, localPos, density);
-    float remappedDensity = volumeDensityCurve(
-        max((density - vol.density_remap_low) /
-            max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0),
-        vol.density_curve);
-    float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
-    if (remappedDensity <= densityCutoff) {
-        return 0.0;
-    }
-    // A binary cutoff changes from empty to full extinction in one sample.
-    // Against aerial perspective that discontinuity reads as a dark contour at
-    // the sparse topology boundary. Preserve the authored rejection threshold,
-    // then feather only the narrow band immediately above it.
-    float cutoffFade = densityCutoff > 0.0
-        ? smoothstep(densityCutoff, densityCutoff * 2.0, remappedDensity)
-        : 1.0;
-    return remappedDensity * vol.density_multiplier * cutoffFade;
+    float normalized = max((density - vol.density_remap_low) /
+        max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    vec2 channels = volumeDensityChannels(normalized, vol.density_curve,
+        max(vol._reserved[0], 0.0), vol.density_multiplier, vol._retired_cloud[0]);
+    emissionDensity = channels.y;
+    return channels.x;
+}
+
+float sampleDensityAccMode(VkVolumeInstance vol, vec3 worldPos,
+    pnanovdb_buf_t buf, pnanovdb_map_handle_t mapH,
+    inout pnanovdb_readaccessor_t acc, bool applyOpticalControls) {
+    float unusedEmission;
+    return sampleDensityAccChannels(vol, worldPos, buf, mapH, acc,
+        applyOpticalControls, unusedEmission);
 }
 
 float sampleDensityAcc(
@@ -877,7 +882,8 @@ float sampleIsoField(VkVolumeInstance vol, vec3 worldPos, pnanovdb_buf_t buf,
 // ============================================================
 // Density Sampling — supports homogeneous and procedural noise
 // ============================================================
-float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
+float sampleDensityChannels(VkVolumeInstance vol, vec3 worldPos, out float emissionDensity) {
+    emissionDensity = 0.0;
     // Transform world pos → object space
     vec3 localPos;
     localPos.x = vol.inv_transform[0] * worldPos.x + vol.inv_transform[1] * worldPos.y 
@@ -934,19 +940,19 @@ float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
     
     density = applyMaterialDensityNoise(vol, localPos, density);
     // Apply density remap (No upper clamp, matches OptiX fmaxf)
-    float remappedDensity = volumeDensityCurve(
-        max((density - vol.density_remap_low) /
-            max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0),
-        vol.density_curve);
-    float densityCutoff = (vol._reserved[0] > 0.0) ? vol._reserved[0] : 0.0;
-    if (remappedDensity <= densityCutoff) {
-        return 0.0;
-    }
+    float normalized = max((density - vol.density_remap_low) /
+        max(vol.density_remap_high - vol.density_remap_low, EPSILON), 0.0);
+    vec2 channels = volumeDensityChannels(normalized, vol.density_curve,
+        max(vol._reserved[0], 0.0), volumeEmissionSamplingMultiplier(
+            vol.density_multiplier, vol._retired_cloud[0]), vol._retired_cloud[0]);
+    emissionDensity = channels.y;
+    return channels.x;
+}
 
-    float cutoffFade = densityCutoff > 0.0
-        ? smoothstep(densityCutoff, densityCutoff * 2.0, remappedDensity)
-        : 1.0;
-    return remappedDensity * vol.density_multiplier * cutoffFade;
+float sampleDensity(VkVolumeInstance vol, vec3 worldPos) {
+    float unusedEmission;
+    return volumeEmissionOpticalDensity(sampleDensityChannels(vol, worldPos, unusedEmission),
+        vol.density_multiplier, vol._retired_cloud[0]);
 }
 
 // Accessor-aware lightMarch. Reuses the caller's density-grid accessor so the

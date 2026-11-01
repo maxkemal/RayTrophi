@@ -186,7 +186,7 @@ float mfAdaptiveSpan(vec3 origin, vec3 direction, float t, float remaining,
         slope += bound.x * (scatter + max(v.absorption_coefficient, 0.0));
         // Temperature/ramp emission is an independent field. Do not coarsen it
         // based only on a smooth density field; keep its authored resolution.
-        bool densityPresent = volumeNanoRemap(v, bound.y) > max(v._reserved[0], 0.0);
+        bool densityPresent = volumeNanoSupportRemap(v, bound.y) > max(v._reserved[0], 0.0);
         if (v.emission_mode != 0 && densityPresent) {
             span = min(span, baseStep);
         }
@@ -220,6 +220,8 @@ float mfBudgetedSpan(vec3 origin, vec3 direction, float t, float remaining,
 // authored work ceiling governs an overlap. Unrelated/off-ray slots do not.
 int mfCameraStepBudget(vec3 origin, vec3 direction, float nearT, float farT) {
     int budget = 2048;
+    int cameraCap = volumeCameraSegment ? int((worldData.w.volumeMarchLod >> 22) & 511u) : 0;
+    if (cameraCap > 0) budget = cameraCap;
     for (uint i = 0u; i < mfCount; ++i) {
         VkVolumeInstance v = volumes.v[i];
         if (!gasOverlapCandidate(v)) continue;

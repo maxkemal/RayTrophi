@@ -1,5 +1,6 @@
 #include "scene_data.h"
 #include "Fluid/FluidDomainSubstance.h"
+#include "Fluid/FluidPhysicalMass.h"
 #include "MaterialStateField.h"
 #include "Fluid/MatterPhaseConfig.h"
 
@@ -543,7 +544,7 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
 
                 RayTrophiSim::SimulationGridDomainDesc liquid;
                 liquid.name="Burning Fuel Liquid";
-                liquid.type=RayTrophiSim::SimulationDomainType::Fluid;
+                liquid.type=RayTrophiSim::SimulationDomainType::LegacyFluid;
                 liquid.backend=
                     RayTrophiSim::SimulationDomainBackend::GPU_Vulkan;
                 liquid.boundary_mode=
@@ -769,8 +770,13 @@ SceneData::ParticleSystemObject& SceneData::addParticleSystemPreset(
                 liquid_jet.use_time_limit = true;
                 liquid_jet.start_time = 0.0f;
                 liquid_jet.end_time = 8.0f;
-                liquid_jet.use_particle_limit = true;
-                liquid_jet.max_emitted_particles = 42000;
+                // The 42000-parcel budget this preset had, in kg of its oil.
+                liquid_jet.use_mass_limit = true;
+                liquid_jet.max_emitted_mass_kg = 42000.0f * RayTrophiSim::Fluid::fluidParticleRestMassKg(
+                    RayTrophiSim::Fluid::substanceTag("Oil"),
+                    RayTrophiSim::Fluid::domainSubstance(liquid.fluid_params), liquid.voxel_size,
+                    liquid.fluid_params.particles_per_cell,
+                    RayTrophiSim::Fluid::MatterConstitutiveModel::Fluid);
                 rt->addFlowSource(liquid_jet);
 
                 // A short pilot ignites the pool after it has had time to reach

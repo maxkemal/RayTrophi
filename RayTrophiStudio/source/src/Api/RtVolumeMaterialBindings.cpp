@@ -41,10 +41,10 @@ std::vector<Target> targets(UIContext& ctx) {
     }
     auto& domains = ctx.scene.ensureParticleSimulationSystem().gridDomains();
     for (auto& domain : domains) {
-        if (!RayTrophiSim::simulationDomainHasGas(domain.type)) {
+        if (!RayTrophiSim::simulationDomainHasGas(domain)) {
             continue;
         }
-        if (domain.type == RayTrophiSim::SimulationDomainType::Matter) {
+        if (RayTrophiSim::simulationDomainHasBothPhases(domain)) {
             for (auto& [key, appearance] : domain.matter_fog_streams) {
                 auto* slot = &appearance;
                 const std::string name = domain.name + " / " +
@@ -64,7 +64,7 @@ std::vector<Target> targets(UIContext& ctx) {
             }
             continue;
         }
-        auto* slot = domain.type == RayTrophiSim::SimulationDomainType::Matter
+        auto* slot = RayTrophiSim::simulationDomainHasBothPhases(domain)
             ? &domain.fluid_fog_shader : &domain.shader;
         result.push_back({"gas:" + domain.name, domain.name, *slot,
             [slot](auto shader) { *slot = shader; }});
@@ -171,7 +171,36 @@ const MethodDescriptor setDescriptor = {
     "are rejected. adaptive_stepping also selects bounded variable steps in RT mixtures; "
     "noise/programmed fields keep fixed steps and emissive fields do not coarsen. "
     "Presets preserve density "
-    "scale and channel names. Vulkan RT random walk; RayFusion uses bounded approximation.",
+    "scale and channel names. temperature_units is 0=source default, 1=Kelvin, "
+    "2=normalized authored range. Source default resolves live simulation VDBs to Kelvin; "
+    "unidentified imports retain legacy inference. Explicit units never substitute density "
+    "for a missing/cold temperature field. emission_mask_enabled is independent of "
+    "response_enabled. emission_mask_center (0..100000), emission_mask_width "
+    "(0.000001..100000) and emission_mask_strength (0..1) shape inverse smoothstep "
+    "on evaluated density divided by its effective multiplier. The mask suppresses "
+    "emission before limiting, preserves extinction, and keeps active masked sources "
+    "separate during gas merging. independent_emission (boolean, default false) interprets emission as coefficient j "
+    "from density before the smoke curve and multiplier, including its density mask. "
+    "Remap and cutoff remain shared. Extinction still attenuates emitted light; "
+    "zero extinction uses j*distance. Available in RT, preview and CPU/CUDA camera integration. "
+    "Independent of response_enabled. "
+    "soot_burnout (0..1, default 0) removes that share of extinction in hot gas, fading in "
+    "between soot_burnout_start and soot_burnout_end (0..1, end above start) on the color "
+    "ramp's temperature coordinate. Needs independent_emission; Vulkan RT and RayFusion "
+    "camera and bounce segments only, shadow rays keep full extinction. "
+    "temperature_gamma (0.1..8, default 1) raises the normalized temperature before the "
+    "color ramp, heat response and soot burnout read it; Vulkan RT and RayFusion only. "
+    "flame_emission (0 or more, default 0) adds radiance from the live reaction field on "
+    "top of the thermal term, colored by the ramp at the hotter of the two; soot burnout "
+    "also clears smoke where the flame burns. 0 with burnout off does not publish the "
+    "field. Vulkan RT and RayFusion. "
+    "smoke_color (albedo 0..1), smoke_opacity (total extinction per density, 0..10000) and "
+    "smoke_tint (depth tint 0..1) are an appearance view of the four scatter and absorption "
+    "values: color and opacity move independently, and they cannot be combined with raw "
+    "scatter or absorption keys in one call. "
+    "Fire lights smoke through internal_light_steps (Vulkan RT and RayFusion, with or "
+    "without independent emission) or through random_walk in Vulkan RT, which gathers "
+    "emission along every flight.",
     "write", "SceneWrite", false, "object", "volume|gas|vdb|material|scattering|emission",
     "volume.get_material", "volume.list_materials", nullptr, "volume.get_material",
     "render_accumulation", params, 2, true

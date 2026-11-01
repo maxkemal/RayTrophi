@@ -4,7 +4,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 
 // Realtime participating-media pass. It deliberately consumes the same raw
-// 672-byte VkVolumeInstance table as Vulkan RT (binding 20): simulation, VDB,
+// 688-byte VkVolumeInstance table as Vulkan RT (binding 20): simulation, VDB,
 // scripting and both renderers therefore have one volume-data authority.
 
 layout(location = 0) in vec2 vNdc;
@@ -103,19 +103,61 @@ vec3 rampColor(uint vi,float t){
     return prev;
 }
 
+float thermalGammaAt(uint vi){
+    float gamma=volFloat(vi,572u);
+    return volInt(vi,428u)==4 || gamma<=0.0 ? 1.0 : gamma;
+}
+
+// Soot burnout, mirroring volumeSootScale in volume_internal_rt.glsl. The extra
+// temperature read exists only on materials that enable it.
+float sootScaleAt(uint vi,vec3 p,float density){
+    float strength=volFloat(vi,560u);
+    if(strength<=0.0 || volInt(vi,256u)<2 || volInt(vi,428u)==4)return 1.0;
+    float flags=volFloat(vi,444u);
+    uint64_t tempAddress=volAddress(vi,240u);
+    bool hasTemp=tempAddress!=0ul;
+    float inputDensity=volumeEmissionInputDensity(density,volFloat(vi,72u),flags);
+    float temp=hasTemp?sampleRawField(vi,tempAddress,p):inputDensity;
+    bool denseHeat=hasTemp && volInt(vi,168u)==4 && volInt(vi,428u)==5;
+    if(denseHeat)temp*=3000.0;
+    float lo=max(volFloat(vi,488u),0.0);
+    float hi=volFloat(vi,268u)>lo+1.0?volFloat(vi,268u):lo+1500.0;
+    int units=volumeResolveTemperatureUnits(int(volFloat(vi,664u)),denseHeat);
+    VolumeTemperatureSample thermal=volumeMapTemperature(temp,inputDensity,lo,hi,units,hasTemp);
+    if(!thermal.valid)return 1.0;
+    float heat=volumeSootExtinctionScale(
+        clamp(pow(thermal.normalized,thermalGammaAt(vi))*max(volFloat(vi,260u),0.001),0.0,1.0),
+        strength,volFloat(vi,564u),volFloat(vi,568u),flags);
+    uint64_t flameAddress=volAddress(vi,536u);
+    if(flameAddress==0ul || !volumeEmissionIndependent(flags))return heat;
+    return min(heat,1.0-strength*clamp(sampleRawField(vi,flameAddress,p),0.0,1.0));
+}
+
 vec3 emissionAt(uint vi,vec3 p,float density){
     int mode=volInt(vi,256u);
     if(mode<=0)return vec3(0);
+    float maskParameters[4];
+    for (int k = 0; k < 4; ++k) {
+        maskParameters[k] = volFloat(vi, 672u + uint(k) * 4u);
+    }
+    float mask = volumeEmissionMaskFactor(density, volumeEmissionSamplingMultiplier(
+        volFloat(vi,72u), volFloat(vi,444u)), maskParameters);
+    if (mask <= 0.0) {
+        return vec3(0.0);
+    }
     float response[5];
     for (int k = 0; k < 5; ++k) response[k] = volFloat(vi, 444u + uint(k) * 4u);
     if(mode==1)return volumeEmissionSource(volVec3(vi,136u),1.0,density,1.0,
-        volFloat(vi,148u),response,false);
+        volFloat(vi,148u),response,false,volFloat(vi,72u)) * mask;
     uint64_t tempAddress=volAddress(vi,240u);
     uint64_t flameAddress=volAddress(vi,536u);
     bool hasTemp=tempAddress!=0ul;
-    float temp=hasTemp?sampleRawField(vi,tempAddress,p):density;
-    bool kelvinUnits=hasTemp && volInt(vi,168u)==4 && volInt(vi,428u)==5;
-    if(kelvinUnits)temp*=3000.0;
+    float temp=hasTemp?sampleRawField(vi,tempAddress,p):
+        volumeEmissionInputDensity(density,volFloat(vi,72u),response[0]);
+    bool denseHeat = hasTemp && volInt(vi,168u) == 4 && volInt(vi,428u) == 5;
+    if (denseHeat) {
+        temp *= 3000.0;
+    }
     // An authored temperature/flame field is authoritative: empty/cold cells
     // must not glow through the legacy density fallback.
     float flame=flameAddress!=0ul?clamp(sampleRawField(vi,flameAddress,p),0.0,1.0):0.0;
@@ -142,9 +184,15 @@ vec3 emissionAt(uint vi,vec3 p,float density){
     // The units are not a property of the sample, they are a property of the
     // VOLUME - and the same flag that applied the x3000 already knows. Ask that
     // instead of guessing per sample.
-    float kelvin=(kelvinUnits||temp>20.0)?clamp(temp,lo,hi)
-                                         :mix(lo,hi,clamp(temp,0.0,1.0));
-    float u=clamp((kelvin-lo)/max(hi-lo,1.0),0.0,1.0);
+    int units = volumeResolveTemperatureUnits(int(volFloat(vi, 664u)), denseHeat);
+    VolumeTemperatureSample thermal = volumeMapTemperature(temp,
+        volumeEmissionInputDensity(density,volFloat(vi,72u),response[0]),
+        lo, hi, units, hasTemp);
+    if (!thermal.valid) {
+        return vec3(0.0);
+    }
+    float kelvin = thermal.kelvin;
+    float u = pow(thermal.normalized, thermalGammaAt(vi));
     float scale=max(volFloat(vi,260u),0.001);
     bool useRamp=volInt(vi,272u)!=0;
     vec3 c=useRamp?rampColor(vi,clamp(u*scale,0.0,1.0)):blackbody(kelvin*scale);
@@ -169,10 +217,14 @@ vec3 emissionAt(uint vi,vec3 p,float density){
     // ramp is a statement about the FINAL colour, so scaling it
     // by T^4 would fight the author instead of helping them.
     float radiance=useRamp?1.0:pow(clamp(kelvin/hi,0.0,1.0),4.0);
-    vec3 e=volumeEmissionSource(c,radiance,density,u,volFloat(vi,264u),response,true)
-        *(1.0+flame);
-    float l=dot(e,vec3(0.2126,0.7152,0.0722));
-    return l>64.0?e*(64.0/l):e;
+    vec3 e=volumeEmissionSource(c,radiance,density,u,volFloat(vi,264u),response,true,volFloat(vi,72u))*mask;
+    float flameGain=volFloat(vi,668u);
+    if(flameGain>0.0 && flame>0.0){
+        float flameHot=max(clamp(u*scale,0.0,1.0),flame);
+        e+=(useRamp?rampColor(vi,flameHot):blackbody(hi*flameHot))*mask*
+            volumeFlameRadiance(flame,flameGain,volFloat(vi,264u),response);
+    }
+    return e*volumeEmissionLimitScale(dot(e,vec3(0.2126,0.7152,0.0722)),response[0]);
 }
 
 bool evalLight(uint index,vec3 p,out vec3 l,out vec3 radiance){
@@ -296,21 +348,24 @@ void main(){
                 float skip=denseEmptyBlockStep(vi,p,rd,dt,cutoff);
                 if(skip>dt*1.01){t+=skip;continue;}
             }
-            float density=sampleField(vi,volAddress(vi,232u),p);
-            if(density<=0.0){t+=dt;continue;}
+            float emissionDensity;
+            float density = sampleCameraField(vi, volAddress(vi,232u), p, emissionDensity);
+            if(density<=0.0 && emissionDensity<=0.0){t+=dt;continue;}
             firstContributionT=min(firstContributionT,t);
             int s=shaded; ++shaded; t+=dt;
-            if(workbench){
+            if(workbench && !volumeEmissionIndependent(volFloat(vi,444u))){
                 float extinction=max(volFloat(vi,100u)+volFloat(vi,132u),0.35);
                 float sampleAlpha=1.0-exp(-density*extinction*dt);
                 vec3 authoredColor=max(volVec3(vi,88u),vec3(0.12));
                 vec3 simpleColor=authoredColor*(0.35+0.65*clamp(density,0.0,1.0));
-                simpleColor+=emissionAt(vi,p,density);
+                simpleColor+=emissionAt(vi,p,emissionDensity);
                 accum+=trans*simpleColor*sampleAlpha;
                 trans*=vec3(1.0-sampleAlpha);
                 continue;
             }
-            float sigmaS = max(volFloat(vi,100u), 0.0) * density;
+            float opticalDensity = volumeEmissionOpticalDensity(density,
+                volFloat(vi,72u), volFloat(vi,444u)) * sootScaleAt(vi,p,emissionDensity);
+            float sigmaS = max(volFloat(vi,100u), 0.0) * opticalDensity;
             vec3 scatterColor = clamp(volVec3(vi,88u), vec3(0.0), vec3(1.0));
             // Match RT: legacy black absorption means neutral extinction,
             // while a tint selects the wavelengths removed by the medium.
@@ -320,10 +375,10 @@ void main(){
                                        max(absorptionColor.g, absorptionColor.b));
             vec3 absorptionWeights = absorptionPeak > 1e-5
                 ? absorptionColor / absorptionPeak : vec3(1.0);
-            vec3 sigmaA = absorptionWeights * max(volFloat(vi,132u),0.0) * density;
-            vec3 sigmaT=max(vec3(sigmaS)+sigmaA,vec3(1e-6));
+            vec3 sigmaA = absorptionWeights * max(volFloat(vi,132u),0.0) * opticalDensity;
+            vec3 sigmaT=max(vec3(sigmaS)+sigmaA,vec3(0.0));
             vec3 sampleT=exp(-sigmaT*dt), oneMinusT=vec3(1)-sampleT;
-            vec3 albedo = vec3(sigmaS) / sigmaT;
+            vec3 albedo = vec3(sigmaS) / max(sigmaT,vec3(1e-6));
             vec3 scatterWeight=oneMinusT*albedo*scatterColor;
             vec3 skyDirection = normalize(vec3(-rd.x * 0.35, 1.0, -rd.z * 0.35));
             if (cachedSkyShadow < 0.0 || (s % max(stride, 8)) == 0) {
@@ -345,7 +400,7 @@ void main(){
                 }
                 light+=rad*phaseDual(dot(rd,l),vi)*cachedShadows[li];
             }
-            vec3 emis = emissionAt(vi,p,density);
+            vec3 emis = emissionAt(vi,p,emissionDensity);
             if (volInt(vi, 280u) > 0 && volInt(vi, 256u) > 0) {
                 int internalStride = clamp(volInt(vi, 284u), 1, 32);
                 if (!cachedInternalLightValid || (s % internalStride) == 0) {
@@ -354,7 +409,8 @@ void main(){
                 }
                 light += cachedInternalLight;
             }
-            vec3 emissionSegment = oneMinusT * emis;
+            vec3 emissionSegment = volumeEmissionIntegrate(emis, emis, sigmaT, dt,
+                volFloat(vi,444u));
             accum+=trans*(scatterWeight*light + emissionSegment);
             trans*=sampleT;
         }

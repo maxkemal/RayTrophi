@@ -213,6 +213,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"cfl_contacts_per_grain", report->cfl_contacts},
             {"cfl_stiffness_mass_rate_s2", report->cfl_stiffness_mass_rate_s2},
             {"cfl_contact_budget_retry", report->cfl_budget_retry},
+            {"cfl_contacts_exceeded", report->cfl_contacts_exceeded},
             {"neighbour_list_builds", report->list_rebuilds},
             {"neighbour_list_capacity", report->neighbour_list_capacity},
             {"neighbour_list_retries", report->neighbour_list_retries},
@@ -263,6 +264,8 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                     ? "shared_transport_contact_advection" : "continuum_frame_then_dem_substep_contact"}}},
             {"common_clock", {{"enabled", report->common_clock},
                 {"transport_steps", report->substeps},
+                {"continuum_substeps", report->common_continuum_substeps},
+                {"dem_substeps_per_continuum", report->dem_substeps_per_continuum},
                 {"continuum_grid_steps", report->liquid_substeps},
                 {"liquid_reaction_on_gpu", report->liquid_reaction_on_gpu},
                 {"liquid_support", report->liquid_support_dynamic
@@ -315,6 +318,24 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                 {"max_saturation", report->max_grain_saturation},
                 {"bridge_model", "willett_2000_pendular"}}}};
     }
+    // What set the substep; present on a held frame too (no runtime block then).
+    nlohmann::json cfl_terms = nullptr;
+    if (report && report->cfl.measured) {
+        const auto& c = report->cfl;
+        cfl_terms = {{"minimum_mass_kg", c.minimum_mass_kg},
+            {"contact_stiffness_n_m", c.contact_stiffness_n_m},
+            {"bridge_stiffness_n_m", c.bridge_stiffness_n_m},
+            {"minimum_bridge_volume_m3", c.minimum_bridge_volume_m3},
+            {"effective_stiffness_n_m", c.effective_stiffness_n_m},
+            {"effective_source", c.effective_source},
+            {"aggregate_damping_ratio", c.aggregate_damping_ratio},
+            {"accuracy_dt_s", c.accuracy_dt_s}, {"stability_dt_s", c.stability_dt_s},
+            {"travel_dt_s", c.travel_dt_s}, {"contacts_assumed", c.contacts_assumed},
+            {"requested_substeps", c.requested_substeps}, {"substeps", c.substeps},
+            {"max_substeps", c.max_substeps}, {"stiffness_scale", c.stiffness_scale},
+            {"capped", c.capped},
+            {"bridge_min_volume_fraction", kMatterGrainBridgeMinVolumeFraction}};
+    }
     return {{"transport_owner", params.enabled ? "grain" : "mpm"},
         {"solver", history ? "force_dem_cundall_strack_candidate"
                            : "force_dem_viscous_sliding_candidate"},
@@ -323,6 +344,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
         {"contact_budget", report && report->substeps > 0 ? report->contact_history_capacity :
             (matterGrainMaximumRadius(params) > params.radius_m ? 64u :
                 static_cast<uint32_t>(kMatterGrainContactBudget))}, {"runtime", runtime},
+        {"cfl_terms", cfl_terms},
         {"rolling_model", params.rolling_friction > 0.0f ? "epsd2_spring" : "none"},
         {"pile", matterGrainPileProfile(centres, params.radius_m)},
         {"neighbour_structure", "verlet_list_fixed_buckets"},

@@ -20,7 +20,12 @@ enum class MatterExchangeKind : uint8_t {
     Absorption,
     Drainage,
     Precipitation,  // rain water -> liquid parcels (no phase change)
-    Autoconversion  // fog water -> rain water inside the air (no phase change)
+    Autoconversion, // fog water -> rain water inside the air (no phase change)
+    // A flow source poured mass into the domain (source = the emitter).
+    Emission,
+    // Mass a flow source would have poured but the domain's Max Particles
+    // ceiling withheld. Never created: recorded balanced, as a report.
+    EmissionWithheld
 };
 
 const char* matterExchangeKindName(MatterExchangeKind kind);

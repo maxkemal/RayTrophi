@@ -1,0 +1,41 @@
+{
+  "rows": [
+    {
+      "case": "256",
+      "frame": 50,
+      "gpu_ms": 625.6131760000001,
+      "per_path": {
+        "camera_density_samples": 25.619218568909044,
+        "camera_volume_rays": 0.6850608465608465,
+        "secondary_density_samples": 0.0,
+        "step_budget_exhausted": 0.061652179390274627,
+        "radiance_cache_fallbacks": 0.0
+      }
+    },
+    {
+      "case": "16",
+      "frame": 50,
+      "gpu_ms": 488.728792,
+      "per_path": {
+        "camera_density_samples": 8.847333585285966,
+        "camera_volume_rays": 0.6850736961451247,
+        "secondary_density_samples": 0.0,
+        "step_budget_exhausted": 0.07996510456034266,
+        "radiance_cache_fallbacks": 0.0
+      }
+    },
+    {
+      "case": "256_repeat",
+      "frame": 50,
+      "gpu_ms": 603.80076,
+      "per_path": {
+        "camera_density_samples": 25.619218568909044,
+        "camera_volume_rays": 0.6850608465608465,
+        "secondary_density_samples": 0.0,
+        "step_budget_exhausted": 0.061652179390274627,
+        "radiance_cache_fallbacks": 0.0
+      }
+    }
+  ],
+  "restored": true
+}

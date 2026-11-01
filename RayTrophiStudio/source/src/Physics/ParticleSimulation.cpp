@@ -3,6 +3,9 @@
 #include "Fluid/MatterAudioTelemetry.h"
 #include "Fluid/FluidCacheRestore.h"
 #include "Fluid/FluidDomainSubstance.h"
+#include "Fluid/FluidDensityProjection.h"
+#include "Fluid/FluidForceColumns.h"
+#include "Fluid/MatterIceCollider.h"
 #include "Fluid/MatterGpuRuntime.h"
 #include "Fluid/MatterGrainBirth.h"
 #include "Fluid/MatterGrainCoupling.h"
@@ -1935,8 +1938,9 @@ bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
     constants.grid_origin[0] = state.grid.origin.x;
     constants.grid_origin[1] = state.grid.origin.y;
     constants.grid_origin[2] = state.grid.origin.z;
-    constants.column_nx = state.grid.nx;
-    constants.column_nz = state.grid.nz;
+    const bool surface_columns = Fluid::fluidForcesNeedColumns(force_buffer, global_wind);
+    constants.column_nx = surface_columns ? state.grid.nx : 0;
+    constants.column_nz = surface_columns ? state.grid.nz : 0;
     constants.voxel_size = state.grid.voxel_size;
 
     const bool vulkan_force_kernel =
@@ -1959,7 +1963,7 @@ bool runGpuFluidParticleIntegrateForces(SimulationGridDomainState& state,
     cmd.buffers = buffers;
     // The surface columns are also what the climate wind drags against, so a
     // scene with no force field still needs them once the world has a wind.
-    if (vulkan_force_kernel && (constants.force_count > 0u || global_wind)) {
+    if (vulkan_force_kernel && surface_columns) {
         ComputeDispatch columns;
         columns.constants = &constants;
         columns.constants_size = sizeof(constants);
@@ -2582,6 +2586,7 @@ static_assert(sizeof(FluidViscosityGpuConstants) == 52,
 #include "Fluid/FluidGpuViscosity.inl"
 
 #include "Fluid/FluidGpuPressure.inl"
+#include "Fluid/MatterDensityProjection.inl"
 
 // GPU G2P gather.
 // Expects vel_x/y/z already uploaded (post-pressure) and, for FLIP,
@@ -5702,10 +5707,10 @@ bool ParticleSimulationSystem::hasActiveGridSimulation() const {
     }
     for (const auto& state : grid_domain_states_) {
         if (!state.valid) continue;
-        if (simulationDomainHasLiquid(state.type) && !state.particles.empty()) {
+        if (simulationDomainHasLiquid(state) && !state.particles.empty()) {
             return true;
         }
-        if (simulationDomainHasGas(state.type) &&
+        if (simulationDomainHasGas(state) &&
             (state.active_density_cells > 0 || Fluid::gasInventoryHasContent(state))) {
             return true;
         }
@@ -5733,6 +5738,9 @@ void ParticleSimulationSystem::clear() {
         source.fluid_emit_accumulator = 0.0f;
         source.fluid_emit_sample_serial = 0;
         source.total_emitted_particles = 0;
+        source.total_emitted_mass_kg = 0.0;
+        source.withheld_mass_kg_step = 0.0;
+        source.withheld_mass_kg_total = 0.0;
         source.pool_requested_particles = 0;
         source.pool_granted_particles = 0;
         // Re-arm the parent motion sampler. Without this a rewind measures the
@@ -5789,6 +5797,7 @@ ParticleSimulationRuntimeState ParticleSimulationSystem::captureRuntimeState() c
         state.flow_emit_accumulators.push_back(source.fluid_emit_accumulator);
         state.flow_emit_sample_serials.push_back(source.fluid_emit_sample_serial);
         state.flow_total_emitted_particles.push_back(source.total_emitted_particles);
+        state.flow_total_emitted_mass_kg.push_back(source.total_emitted_mass_kg);
     }
 
     state.previous_collider_centers = prev_collider_centers_;
@@ -5814,6 +5823,9 @@ void ParticleSimulationSystem::restoreRuntimeState(const ParticleSimulationRunti
     for (std::size_t i = 0; i < flow_count; ++i) {
         flow_sources_[i].fluid_emit_accumulator = state.flow_emit_accumulators[i];
         flow_sources_[i].total_emitted_particles = state.flow_total_emitted_particles[i];
+        // A restored frame resumes the kg budget where that frame left it.
+        flow_sources_[i].total_emitted_mass_kg = i < state.flow_total_emitted_mass_kg.size()
+            ? state.flow_total_emitted_mass_kg[i] : 0.0;
         flow_sources_[i].pool_requested_particles = 0;
         flow_sources_[i].pool_granted_particles = 0;
         flow_sources_[i].fluid_emit_sample_serial = i < state.flow_emit_sample_serials.size()
@@ -6064,7 +6076,7 @@ ParticleSimulationSystem::captureGridDomainStatesForCache(
         // cached frame with stale velocity does not fail, it resumes slightly
         // wrong when you scrub back to it.
         if (!state.valid ||
-            !simulationDomainHasGas(state.type) ||
+            !simulationDomainHasGas(state) ||
             buffers.backend != ComputeBackendType::VulkanCompute) {
             continue;
         }
@@ -6168,7 +6180,7 @@ SimulationGasGpuFieldView ParticleSimulationSystem::gasGpuFieldView(
     }
     const auto& state = grid_domain_states_[domain_index];
     const auto& buffers = grid_domain_compute_buffers_[domain_index];
-    if (!state.valid || !simulationDomainHasGas(state.type) ||
+    if (!state.valid || !simulationDomainHasGas(state) ||
         buffers.backend != ComputeBackendType::VulkanCompute ||
         !buffers.gpu_resident_fields_valid) {
         return view;
@@ -6216,7 +6228,7 @@ bool ParticleSimulationSystem::downloadGasDenseFields(
     // identical is the point: the mirror must describe the SAME grid the live
     // addresses describe, or the two consumers disagree about where the smoke
     // is and only one of them looks wrong.
-    if (!state.valid || !simulationDomainHasGas(state.type) ||
+    if (!state.valid || !simulationDomainHasGas(state) ||
         buffers.backend != ComputeBackendType::VulkanCompute ||
         !buffers.gpu_resident_fields_valid) {
         return false;
@@ -6259,7 +6271,7 @@ bool ParticleSimulationSystem::downloadGasPressureField(
     }
     const auto& state = grid_domain_states_[domain_index];
     const auto& buffers = grid_domain_compute_buffers_[domain_index];
-    if (!state.valid || !simulationDomainHasGas(state.type)) return false;
+    if (!state.valid || !simulationDomainHasGas(state)) return false;
     if (!buffers.pressure.valid()) return false;
 
     // ★ The ledger decides where the current copy is, NOT the vector's size.
@@ -6304,7 +6316,7 @@ const SimulationGpuFoamRenderBuffer* ParticleSimulationSystem::gridDomainFoamRen
         return nullptr;
     }
     const bool matter = domain_index < grid_domain_states_.size() &&
-        grid_domain_states_[domain_index].type == SimulationDomainType::Matter;
+        simulationDomainHasBothPhases(grid_domain_states_[domain_index]);
     const auto& compute_buffers =
         matter && domain_index < matter_liquid_compute_buffers_.size()
             ? matter_liquid_compute_buffers_[domain_index]
@@ -6319,7 +6331,7 @@ bool ParticleSimulationSystem::exportGridDomainToVDB(std::size_t domain_index,
         return false;
     }
     const SimulationGridDomainState& state = grid_domain_states_[domain_index];
-    if (!state.valid || !simulationDomainHasGas(state.type)) {
+    if (!state.valid || !simulationDomainHasGas(state)) {
         return false;
     }
     const FluidSim::FluidGrid& grid = state.grid;
@@ -6524,6 +6536,11 @@ void ParticleSimulationSystem::resetGridDomainStates() {
 }
 
 void ParticleSimulationSystem::setGridDomainStates(std::vector<SimulationGridDomainState> states) {
+    std::string lane_error;
+    if (!validateMatterCacheLanes(states, grid_domains_, lane_error)) {
+        SCENE_LOG_WARN("[SimCache] " + lane_error);
+        return;
+    }
     // Same contract as resetGridDomainStates: a cached-frame restore rewinds the
     // particle SoA and (alongside it) the MSF snapshot, so any transfer request
     // still in flight belongs to a future that has just been undone.
@@ -7033,7 +7050,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         matter_liquid_compute_buffers_.resize(grid_domain_states_.size());
         for (std::size_t i = 0; i < grid_domain_states_.size(); ++i) {
             if (i < grid_domains_.size() &&
-                simulationDomainHasGas(grid_domains_[i].type) &&
+                simulationDomainHasGas(grid_domains_[i]) &&
                 grid_domains_[i].backend == SimulationDomainBackend::GPU_Vulkan) {
                 ensureGridDomainComputeBuffers(
                     *context.compute,
@@ -7041,7 +7058,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                     grid_domain_states_[i].grid);
             }
             if (i < grid_domains_.size() &&
-                grid_domains_[i].type != SimulationDomainType::Matter) {
+                !simulationDomainHasBothPhases(grid_domains_[i])) {
                 releaseGridDomainComputeBuffers(
                     *context.compute, matter_liquid_compute_buffers_[i]);
             }
@@ -7177,7 +7194,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 }
                 // Particle SoA → grid deposit is gas-only (writes into
                 // density/temperature/velocity which Fluid uses as scratch).
-                if (!simulationDomainHasGas(state.type)) {
+                if (!simulationDomainHasGas(state)) {
                     continue;
                 }
                 const Vec3 mn = state.bounds_min;
@@ -7467,14 +7484,14 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                 if (!grid_domain_states_[d].valid) continue;
                 if (d >= grid_domains_.size()) continue;
                 const auto& domain = grid_domains_[d];
-                if (simulationDomainHasGas(domain.type)) {
+                if (simulationDomainHasGas(domain)) {
                     ambient_ceiling =
                         std::max(ambient_ceiling, domain.fire_max_temperature);
                 }
                 // A gas lane is the box's own air: sim_msf_gather trades the
                 // surface film with it, so the ambient pass must not add a second
                 // one against the room (2026-10-19).
-                const bool gas_air = domain.enabled && simulationDomainHasGas(domain.type);
+                const bool gas_air = domain.enabled && simulationDomainHasGas(domain);
                 if (!domain.thermal_override_enabled && !gas_air) continue;
                 MaterialStateFieldSystem::AmbientZone zone;
                 const Vec3 mn = grid_domain_states_[d].bounds_min;
@@ -7521,6 +7538,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
     }
 
     std::vector<uint8_t> fluid_phase_transferred(grid_domains_.size(), 0u);
+    const auto fluid_gas_owner = resolveMatterGasExchangeOwners(grid_domains_, grid_domain_states_);
     for (std::size_t i = 0; i < grid_domain_states_.size(); ++i) {
         auto& state = grid_domain_states_[i];
         if (!state.valid) {
@@ -7545,7 +7563,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // grid is used as scratch (vel_x/vel_y/vel_z + pressure/divergence);
         // density/temperature/fuel channels are untouched. Idle gate: skip
         // when there are no particles to advance.
-        if (simulationDomainHasLiquid(state.type)) {
+        if (simulationDomainHasLiquid(state)) {
             if (state.particles.empty()) {
                 state.fluid_stats = Fluid::APICSolverStats{};
                 state.fluid_transfer_stats = {};
@@ -7584,6 +7602,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             }
         }
 
+        if (!simulationDomainHasGas(state)) {
+            continue;
+        }
+
         // Skip idle domains (no content, no source, no particles) so empty
         // grids do not pay for a full projection every frame. (Coarse gate;
         // sparse-tile activity tracking is a later optimization.)
@@ -7615,12 +7637,12 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
                                    Fluid::ParticleLabel::Mist;
                         });
         if (!has_source && i < grid_domains_.size() &&
-            simulationDomainHasGas(grid_domains_[i].type)) {
+            simulationDomainHasGas(grid_domains_[i])) {
             const auto& gas_domain=grid_domains_[i];
             for(const auto& candidate:grid_domains_) {
                 // A thermally active liquid under this gas needs it as its air.
                 const bool thermal_air = candidate.fluid_params.thermal_liquid_enabled;
-                if(!candidate.enabled || !simulationDomainHasLiquid(candidate.type) ||
+                if(!candidate.enabled || !simulationDomainHasLiquid(candidate) ||
                    (!thermal_air && (!candidate.fluid_flammable ||
                     (!candidate.fluid_auto_ignite && !has_content)))) continue;
                 const Vec3 overlap_min=
@@ -7938,8 +7960,7 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             for (std::size_t fluid_index = 0;
                  fluid_index < grid_domains_.size() &&
                  fluid_index < grid_domain_states_.size(); ++fluid_index) {
-                const bool same_matter = fluid_index == i && matter_domain;
-                if ((!same_matter && fluid_index == i) ||
+                if (fluid_gas_owner[fluid_index] != static_cast<int>(i) ||
                     fluid_phase_transferred[fluid_index] ||
                     !grid_domain_states_[fluid_index].valid) {
                     continue;
@@ -8718,10 +8739,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         // The step's single readback already ran, just before the field
         // publication above - which is the first host consumer, not this scan.
         const auto analysis_begin = SimulationClock::now();
-        const bool is_gas_state = simulationDomainHasGas(state.type);
+        const bool is_gas_state = simulationDomainHasGas(state);
         const std::size_t cells =
             static_cast<std::size_t>(state.grid.getCellCount());
-        const bool is_fluid_state = simulationDomainHasLiquid(state.type);
+        const bool is_fluid_state = simulationDomainHasLiquid(state);
         const bool want_density =
             (is_gas_state || is_fluid_state) &&
             hasGridChannel(state.channels, SimulationGridDomainChannelFlags::Density) &&
@@ -9695,7 +9716,7 @@ void ParticleSimulationSystem::routeSurfaceWaterVapour(
         for (std::size_t d = 0; d < grid_domains_.size() && d < grid_domain_states_.size(); ++d) {
             auto& state = grid_domain_states_[d];
             if (!grid_domains_[d].enabled || !state.valid ||
-                !simulationDomainHasGas(grid_domains_[d].type)) {
+                !simulationDomainHasGas(grid_domains_[d])) {
                 continue;
             }
             const auto& gas = Fluid::gasGrid(state);
@@ -10317,7 +10338,9 @@ bool ParticleSimulationSystem::validateGpuFluidMGPCG(SimulationComputeContext* c
     const float dt = 1.0f / 60.0f;
 
     SimulationGridDomainState st;
-    st.type = SimulationDomainType::Fluid;
+    st.type = SimulationDomainType::Matter;
+    st.gas_lane_enabled = false;
+    st.liquid_lane_enabled = true;
     st.grid.resize(N, N, N, h, Vec3(0.0f, 0.0f, 0.0f));
     auto& g = st.grid;
 

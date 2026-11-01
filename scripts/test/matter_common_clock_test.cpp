@@ -9,6 +9,14 @@ int main() {
     std::string error;
     uint32_t steps = 0;
     MatterCommonClockHooks clock;
+    clock.authored_max_substeps = 512;
+    clock.contact_substeps = 512;
+    assert(resolveMatterCommonSubsteps(40.0, &clock, steps, error) && steps == 64);
+    clock.contact_substeps = 502;
+    assert(resolveMatterCommonSubsteps(40.0, &clock, steps, error) && steps == 42);
+    clock.contact_substeps = 80;
+    assert(resolveMatterCommonSubsteps(40.0, &clock, steps, error) && steps == 40);
+    clock.contact_substeps = 0;
     clock.minimum_substeps = 190;
     clock.authored_max_substeps = 512;
     assert(resolveMatterCommonSubsteps(16.0, &clock, steps, error) && steps == 190);
@@ -24,6 +32,29 @@ int main() {
     assert(!resolveMatterCommonSubsteps(-1.0, &clock, steps, error));
     assert(!resolveMatterCommonSubsteps(double(std::numeric_limits<int>::max()),
         &clock, steps, error));
+
+    // Independent exhaustive oracle: select the first even continuum count
+    // whose rounded DEM product fits. No CFL interval may become longer.
+    for (uint32_t limit = 2; limit <= 128; ++limit) {
+        for (uint32_t contact = 2; contact <= limit; contact += 2) {
+            for (uint32_t requested = 2; requested <= limit; requested += 2) {
+                uint32_t expected = requested;
+                while (expected <= limit &&
+                       expected * ((contact + expected - 1) / expected) > limit) {
+                    expected += 2;
+                }
+                uint32_t actual = requested;
+                assert(fitMatterContactSubsteps(contact, limit, actual, error));
+                assert(actual == expected && actual >= requested);
+                assert(actual * ((contact + actual - 1) / actual) <= limit);
+            }
+        }
+    }
+    uint32_t invalid = 0;
+    assert(!fitMatterContactSubsteps(8, 16, invalid, error));
+    invalid = 4;
+    assert(!fitMatterContactSubsteps(9, 16, invalid, error));
+    assert(invalid == 4);
 
     // Multirate grid refresh never exceeds the requested CFL interval. Contact
     // and both geometries still advance every micro tick, exactly one frame.

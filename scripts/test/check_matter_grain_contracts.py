@@ -29,13 +29,22 @@ def main():
     assert 'static_assert(sizeof(Constants) == 128)' in gpu
     # Host CFL, history slots and the overflow gate share one contact budget.
     budget = int(re.search(r'kMatterGrainContactBudget = (\d+);', header).group(1))
-    assert f'const uint SLOTS = {budget}u;' in shader and f'const float BUDGET = {budget}.0;' in shader
+    assert budget > 0 and budget <= 128
+    assert '#define SLOTS historyCapacity()' in shader
+    assert '#define BUDGET float(historyCapacity())' in shader
+    assert 'return uint(masses[2u * pc.meta.x + 3u]);' in shader
+    assert 'masses[2 * count + 3] = static_cast<float>(contact_capacity);' in gpu
+    assert 'count * uint64_t(contact_capacity) * 7 > UINT32_MAX' in gpu
     revision = int(re.search(r'kMatterGrainShaderRevision = (\d+);', header).group(1))
     assert f'const uint REVISION = {revision}u;' in shader
     assert 'diagnostics[1] != kMatterGrainShaderRevision' in gpu
     assert 'g_contacts > SLOTS) atomicOr(diagnostics[0],1u);' in shader
     assert '48.0' not in shader, 'old 48-contact bound left in shader'
-    assert gpu.index(' CFL exceeds max_substeps') < gpu.index('ensureParticles(compute, runtime')
+    # Current policy reports adaptation/capping and refuses a stability bound
+    # that still fails at the minimum stiffness, before allocating particle data.
+    assert gpu.index('contact springs softened %.0fx') < gpu.index('ensureParticles(compute, runtime')
+    assert 'if (!fits(kMinimumStiffnessScale))' in gpu
+    assert 'cfl.capped = needed > max_steps;' in gpu
     assert 'substeps += substeps & 1u;' in gpu
     begin = gpu.index('const auto dispatch_stage =')
     end = gpu.index('std::vector<Vec3> new_position(count), new_velocity(count);')
@@ -53,14 +62,16 @@ def main():
     capacity = int(re.search(r'kMatterGrainBucketCapacity = (\d+);', header).group(1))
     assert f'const uint BUCKET = {capacity}u;' in shader
     list_capacity = int(re.search(r'kMatterGrainListCapacity = (\d+);', header).group(1))
-    assert f'const uint LIST = {list_capacity}u;' in shader
+    assert list_capacity > 0
+    assert 'return uint(masses[2u * pc.meta.x + 2u]);' in shader
+    assert 'masses[2 * count + 2] = static_cast<float>(list_capacity);' in gpu
     assert 'kMatterGrainBucketTables = 1;' in header
     # Rebuild trigger: forced on substep 0, raised by the step for k+1, word k+2
     # zeroed by list_clear of k (last read in k-1, next written in k+1).
     assert 'diagnostics[12] = 1u;' in gpu
     assert 'if (i == 0u) diagnostics[flagWord(pc.substep.x+2u)] = 0u;' in shader
     assert 'uint next_flag = flagWord(pc.substep.x+1u);' in shader
-    assert 'float half_skin = .5*(pc.wet.x-2.0*r-pc.wet.z);' in shader
+    assert 'float half_skin = .25 * pc.low_radius.w;' in shader
     assert 'kMatterGrainListSkinRadii * params.radius_m' in gpu
     step_section = shader[shader.index('#elif defined(GRAIN_STEP)'):]
     assert 'bucket_counts' not in step_section, 'the step reads neighbours from the list only'
@@ -73,8 +84,9 @@ def main():
     # only for its owner id and never on the frame the host marks it FRESH.
     assert '} else if (history_blocks[ownerWord()] == ids[i]) {' in shader
     assert 'if (pc.substep.x == 0u) history_blocks[i] = g_block;' in shader
-    assert 'uint open_slots = ~(g_old_mask|g_allocated) & ((1u<<SLOTS)-1u);' in shader
-    assert 'history_blocks[ownerWord()+1u] = g_touched|g_allocated;' in shader
+    assert 'uvec4 g_old_mask = uvec4(0u);' in shader
+    assert 'uint open_slots = ~(g_old_mask[word] | g_allocated[word]) & valid;' in shader
+    assert 'history_blocks[ownerWord()+1u+word] = g_touched[word] | g_allocated[word];' in shader
     # Sleeping grains (revision 24): last-substep contact audits, physical
     # eligibility and one CAS commit preserve a concurrent neighbour audit request.
     assert 'if (sleepOn() && valid_block && can_sleep && input_slow) {' in shader
@@ -88,13 +100,14 @@ def main():
     assert 'runtime.collider_velocity_offset == 0 && !common_driver &&' in gpu
     assert '"sleep_speed_m_s"' in read('src/Physics/Fluid/MatterGrainParams.cpp')
     assert 'fluid.set_grain_settings(sleep=...)' in read('src/UI/MatterGrainControls.cpp')
-    assert 'kMatterGrainContactBudget * 7 * sizeof(uint32_t)' in gpu
+    assert 'capacity * historyBytesPerGrain(contact_capacity)' in gpu
     assert 'constants.history_blocks = static_cast<uint32_t>(runtime.capacity);' in gpu
     # The map the next frame reads through moves only with a publication.
     assert gpu.index('runtime.published_ids = p.particle_id;') < gpu.index('runtime.history_block[i] = blocks[i] & ~kFreshHistoryBlock;')
     assert 'tangential = kt > 0.0 && coulomb > 0.0 ? -(ft-damping)/kt : vec3(0.0);' in shader
     assert 'rolling = limit > 0.0 ? -(rt-roll_damping)/kr : vec3(0.0);' in shader
-    assert '2.8125 * mu_r * mu_r * k' in gpu
+    assert 'maximum_radius > params.radius_m ? 5.625 : 2.8125' in gpu
+    assert 'rolling_factor * mu_r * mu_r * k' in gpu
     assert 'nodes[stack[--size]]' in shader and 'patch_count == 8u' in shader
     assert 'manifold_count == 4u' in shader
     assert 'runtime.collider_fingerprint != fingerprint' in gpu
@@ -117,14 +130,15 @@ def main():
     # Collider faces are bounded by index width only (no 4096 budget, 2026-10-08).
     assert 'Fluid::kMatterGrainMaxColliderFaces' in read('src/Physics/Fluid/MatterGrainStep.inl')
     births = read('src/Physics/Fluid/MatterDomainSources.inl')
-    assert births.index('grain_filter.accept(spawn_pos)') < births.index('state.particles.emit(')
-    assert 'nullptr, nullptr, grain_rest_mass, emit_model);' in births
+    assert births.index('grain_filter.accept(spawn_pos, birth_radius)') < births.index('state.particles.emit(')
+    assert 'grain_birth ? grain_rest_mass * std::pow(' in births
+    assert 'birth_radius / fluid_domain.fluid_params.grain.radius_m, 3.0f)' in births
     assert 'ensureMatterGrainRestMasses(' in step
     assert 'source.fluid_emit_sample_serial += attempts;' in births
     assert 'source.fluid_emit_accumulator += static_cast<float>(emit_count -' in births
     birth_filter = read('src/Physics/Fluid/MatterGrainBirth.cpp')
-    assert 'cells_[own].push_back(p);' in birth_filter
-    assert 'p.y < low_.y + radius_' in birth_filter
+    assert 'cells_[own].push_back({p, radius});' in birth_filter
+    assert 'p.y < low_.y + radius' in birth_filter
     api = read('src/Api/RtApiMatterGrain.cpp')
     assert api.index('patchMatterGrainParams(') < api.index('d.fluid_params.grain = candidate')
     for method in ('grain_settings', 'set_grain_settings'):
@@ -214,7 +228,9 @@ def main():
     # Matter tab shows the substance's material read-only; the domain edits none of it.
     assert 'p.fluid_coupling' in ui and 's->grain_restitution' in ui and 'p.restitution' not in ui
     bridge = read('src/Physics/ParticleRenderBridge.cpp')
-    assert 'const float d = grain ? diam : liquid_diam;' in bridge
+    assert 'const float d = GF::splatCarrierDiameter(' in bridge
+    assert 'float splatCarrierDiameter(' in read('src/Physics/Fluid/GrainMeshNear.cpp')
+    assert 'return dem ? 2.0f * matterGrainRadius(domain.fluid_params.grain, particles, index)' in read('src/Physics/Fluid/GrainMeshNear.cpp')
     assert '--coexist-only' in runtime_test
     # B9a: device history is valid only for the state it was published with.
     assert 'std::memcmp(&was, &p.position[i], sizeof(Vec3)) != 0' in gpu
@@ -268,7 +284,9 @@ def main():
     # B6: wet grains.
     assert 'return ivec3(floor((p-pc.low_radius.xyz)/pc.wet.x));' in shader
     assert 'void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force)' in shader
-    assert 'if (d < 2.0*r+pc.wet.z && d > 1e-9) bridge(i,j,d,separation/d,r,f);' in shader
+    assert 'float effective_radius = r * rj / sum_radius;' in shader
+    assert 'if (d < sum_radius+pc.wet.z && d > 1e-9)' in shader
+    assert 'bridge(i,j,d,separation/d,2.0*effective_radius,f);' in shader
     # Hash cell = list cutoff: the bridge reach stays inside it (plus the skin).
     assert 'constants.wet[0] = 2.0f * params.radius_m + rupture_cap +' in gpu
     assert 'coupling_rows[12 * i + 11] = p.pore_water_mass_kg[i] / 1000.0f;' in gpu
@@ -300,7 +318,12 @@ def main():
                    'Solid phase cannot run with grains yet.'):
         assert reason in panel, reason
     assert 'const bool reseed_locked = fp.granular_enabled || fp.grain.enabled;' in panel
-    assert 'ownership.blockers' in ui and 'ImGui::DragFloat' not in ui and 'ImGui::SliderFloat' not in ui
+    assert 'ownership.blockers' in ui
+    material_ui = ui[ui.index('void drawMatterGrainMaterial('):ui.index('void drawMatterGrainSolver(')]
+    assert 'ImGui::DragFloat' not in material_ui and 'ImGui::SliderFloat' not in material_ui
+    # Size-distribution authoring is a domain operation; material friction and
+    # restitution remain read-only substance properties.
+    assert 'rtapi::matterGrainSettings(domain.name, matterGrainParamsToJson(p), true)' in ui
     # 2026-10-09: no grain switch. Grains follow the substances in reach of the
     # domain; the step decides before the sources emit, panel and IPC read the
     # same struct, and a wanted-but-blocked DEM names its blockers.
@@ -361,6 +384,9 @@ def main():
     common = read('src/Physics/Fluid/MatterGpuStep.inl')
     assert common.index('clock->contact(substep') < common.index('runGpuFluidAdvectTail(')
     assert 'substep % grid_stride == 0' in common
+    assert 'clock.contact_substeps = minimum;' in coordinator
+    assert 'fitMatterContactSubsteps(hooks->contact_substeps' in read(
+        'include/Fluid/MatterCommonClock.h')
     assert 'request > 4096' not in common
     assert 'bool publish_velocity = true' in read('src/Physics/ParticleSimulation.cpp')
     liquid_gpu = read('src/Physics/Fluid/MatterGrainFluidGpuCoupling.cpp')
@@ -376,7 +402,7 @@ def main():
     assert 'fieldLeader(c)' in liquid_shader
     assert 'storage_->handles[i] = buffers_[i]' in liquid_gpu
     assert 'compute_.getBufferSize(buffers_[i])' in liquid_gpu
-    assert 'liquid_contact.react(index, step_dt' in coordinator
+    assert 'liquid_contact.react(first, step_dt' in coordinator
     assert 'mpm_contact.publish(report, error, !shared_clock)' in coordinator
     for stage in ('clear', 'hash', 'cells', 'solid', 'refresh', 'delta', 'reaction', 'apply'):
         kernel = f'sim_grain_fluid_{stage}'

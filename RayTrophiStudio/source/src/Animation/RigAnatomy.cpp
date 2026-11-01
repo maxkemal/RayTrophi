@@ -1,7 +1,9 @@
 #include "Animation/RigAnatomy.h"
 #include "Animation/RigDrivenControls.h"
 #include "Animation/NodeHierarchy.h"
+#include "Animation/RigPosePreview.h"
 #include "json.hpp"
+#include <algorithm>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -32,6 +34,28 @@ bool fields(const nlohmann::json& value, std::initializer_list<const char*> allo
             return false;
     }
     return true;
+}
+bool finiteVector(const Vec3& v) {
+    return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
+}
+bool readVector(const nlohmann::json& value, Vec3& output) {
+    if (!value.is_array() || value.size() != 3 || !value[0].is_number() || !value[1].is_number() ||
+        !value[2].is_number())
+        return false;
+    output = Vec3(value[0].get<float>(), value[1].get<float>(), value[2].get<float>());
+    return true;
+}
+nlohmann::json writeVector(const Vec3& v) {
+    return {v.x, v.y, v.z};
+}
+const RigChain* findChain(const RigAnatomy& a, const std::string& name) {
+    for (const auto& chain : a.chains)
+        if (chain.name == name)
+            return &chain;
+    return nullptr;
+}
+bool legChain(const std::string& name) {
+    return name.size() >= 4 && name.compare(name.size() - 4, 4, "_leg") == 0;
 }
 }
 bool validateRigAnatomy(const RigAnatomy& a, const RayTrophi::NodeHierarchy& h,
@@ -165,6 +189,23 @@ bool validateRigAnatomy(const RigAnatomy& a, const RayTrophi::NodeHierarchy& h,
             }
         }
     }
+    std::unordered_set<std::string> hinted, pivoted;
+    for (const auto& hint : a.bendHints) {
+        if (!findChain(a, hint.chain) || !hinted.insert(hint.chain).second ||
+            !finiteVector(hint.direction) || hint.direction.length_squared() < 1e-8f) {
+            error = "rig_anatomy_invalid_bend_hint";
+            return false;
+        }
+    }
+    for (const auto& pivot : a.footPivots) {
+        const auto* chain = findChain(a, pivot.chain);
+        if (!chain || !legChain(pivot.chain) || chain->bones.size() < 3 ||
+            !pivoted.insert(pivot.chain).second || !finiteVector(pivot.heel) ||
+            !finiteVector(pivot.ball) || !finiteVector(pivot.tip)) {
+            error = "rig_anatomy_invalid_foot_pivot";
+            return false;
+        }
+    }
     return validateJointRules(a.joints, h, error) && validateIKControls(a.controls, h, error);
 }
 nlohmann::json serializeRigAnatomy(const RigAnatomy& a) {
@@ -210,6 +251,19 @@ nlohmann::json serializeRigAnatomy(const RigAnatomy& a) {
         result["version"] = 7;
         result["control_rig"] = serializeRigDrivenControls(a.drivenControls);
     }
+    if (!a.bendHints.empty() || !a.footPivots.empty()) {
+        auto hints = nlohmann::json::array(), pivots = nlohmann::json::array();
+        for (const auto& hint : a.bendHints)
+            hints.push_back({{"chain", hint.chain}, {"direction", writeVector(hint.direction)}});
+        for (const auto& pivot : a.footPivots)
+            pivots.push_back({{"chain", pivot.chain},
+                              {"heel", writeVector(pivot.heel)},
+                              {"ball", writeVector(pivot.ball)},
+                              {"tip", writeVector(pivot.tip)}});
+        result["version"] = 8;
+        result["bend_hints"] = std::move(hints);
+        result["foot_pivots"] = std::move(pivots);
+    }
     return result;
 }
 bool deserializeRigAnatomy(const nlohmann::json& value, const RayTrophi::NodeHierarchy& h,
@@ -218,11 +272,13 @@ bool deserializeRigAnatomy(const nlohmann::json& value, const RayTrophi::NodeHie
     RigAnatomy a;
     try {
         if (!fields(value, {"version", "family", "roles", "symmetry", "chains", "joint_profile",
-                            "controls", "fit_rules", "control_rig"}) ||
+                            "controls", "fit_rules", "control_rig", "bend_hints",
+                            "foot_pivots"}) ||
             !value.contains("version") || !value.at("version").is_number_integer() ||
             (value.at("version") != 1 && value.at("version") != 2 && value.at("version") != 3 &&
              value.at("version") != 4 && value.at("version") != 5 &&
-             value.at("version") != 6 && value.at("version") != 7) ||
+             value.at("version") != 6 && value.at("version") != 7 &&
+             value.at("version") != 8) ||
             !value.contains("family") || !value.at("family").is_string()) {
             error = "rig_anatomy_invalid_schema";
             return false;
@@ -338,8 +394,13 @@ bool deserializeRigAnatomy(const nlohmann::json& value, const RayTrophi::NodeHie
             error = "rig_anatomy_invalid_schema";
             return false;
         }
-        if (value.at("version") == 7) {
-            if (!value.contains("control_rig") || !value.at("control_rig").is_array() ||
+        if ((value.at("version") == 7 && !value.contains("control_rig")) ||
+            (value.at("version") < 7 && value.contains("control_rig"))) {
+            error = "rig_anatomy_invalid_schema";
+            return false;
+        }
+        if (value.contains("control_rig")) {
+            if (!value.at("control_rig").is_array() ||
                 value.at("control_rig").empty() || value.at("control_rig").size() > 4096) {
                 error = "rig_anatomy_invalid_schema";
                 return false;
@@ -400,8 +461,37 @@ bool deserializeRigAnatomy(const nlohmann::json& value, const RayTrophi::NodeHie
                 }
                 a.drivenControls.push_back(std::move(control));
             }
-        } else if (value.contains("control_rig")) {
+        }
+        if (value.at("version") < 8 && (value.contains("bend_hints") || value.contains("foot_pivots"))) {
             error = "rig_anatomy_invalid_schema";
+            return false;
+        }
+        for (const auto& item : value.value("bend_hints", nlohmann::json::array())) {
+            RigBendHint hint;
+            if (!fields(item, {"chain", "direction"}) || !item.contains("chain") ||
+                !item.at("chain").is_string() || !item.contains("direction") ||
+                !readVector(item.at("direction"), hint.direction)) {
+                error = "rig_anatomy_invalid_schema";
+                return false;
+            }
+            hint.chain = item.at("chain").get<std::string>();
+            a.bendHints.push_back(std::move(hint));
+        }
+        for (const auto& item : value.value("foot_pivots", nlohmann::json::array())) {
+            RigFootPivot pivot;
+            if (!fields(item, {"chain", "heel", "ball", "tip"}) || !item.contains("chain") ||
+                !item.at("chain").is_string() || !item.contains("heel") ||
+                !readVector(item.at("heel"), pivot.heel) || !item.contains("ball") ||
+                !readVector(item.at("ball"), pivot.ball) || !item.contains("tip") ||
+                !readVector(item.at("tip"), pivot.tip)) {
+                error = "rig_anatomy_invalid_schema";
+                return false;
+            }
+            pivot.chain = item.at("chain").get<std::string>();
+            a.footPivots.push_back(std::move(pivot));
+        }
+        if (a.bendHints.size() > 1024 || a.footPivots.size() > 1024) {
+            error = "rig_anatomy_limit";
             return false;
         }
         if (!validateRigAnatomy(a, h, error))
@@ -506,6 +596,8 @@ bool buildLimbIKControls(const RigAnatomy& anatomy, const RayTrophi::NodeHierarc
         }
         controls.push_back(
             {chain.name, chain.bones[first], chain.bones[first + 1], chain.bones[first + 2]});
+        if (const auto* hint = findBendHint(anatomy, chain.name))
+            controls.back().bendHint = hint->direction.normalize();
     }
     if (controls.empty()) {
         error = "rig_ik_no_limb_chains";
@@ -514,6 +606,70 @@ bool buildLimbIKControls(const RigAnatomy& anatomy, const RayTrophi::NodeHierarc
     if (!validateIKControls(controls, h, error))
         return false;
     output = std::move(controls);
+    return true;
+}
+
+const RigBendHint* findBendHint(const RigAnatomy& a, const std::string& chain) {
+    for (const auto& hint : a.bendHints)
+        if (hint.chain == chain)
+            return &hint;
+    return nullptr;
+}
+const RigFootPivot* findFootPivot(const RigAnatomy& a, const std::string& chain) {
+    for (const auto& pivot : a.footPivots)
+        if (pivot.chain == chain)
+            return &pivot;
+    return nullptr;
+}
+bool deriveFootPivots(const RigAnatomy& anatomy, const RayTrophi::NodeHierarchy& h,
+                      const std::string& chainName, RigFootPivot& output, bool& estimated,
+                      std::string& error) {
+    error.clear();
+    const auto* chain = findChain(anatomy, chainName);
+    if (!chain || !legChain(chainName) || chain->bones.size() < 3) {
+        error = "rig_anatomy_invalid_foot_pivot";
+        return false;
+    }
+    std::vector<PreviewJoint> joints;
+    if (!sampleRigPose(h, nullptr, 0, joints, error))
+        return false;
+    auto position = [&](const std::string& bone) {
+        const auto& m = joints[static_cast<size_t>(h.find(bone) - h.nodes.data())].world;
+        return Vec3(m.m[0][3], m.m[1][3], m.m[2][3]);
+    };
+    const Vec3 up(0, 1, 0);
+    const auto hip = position(chain->bones[0]);
+    const auto knee = position(chain->bones[1]);
+    const auto ankle = position(chain->bones[2]);
+    const float leg = (knee - hip).length() + (ankle - knee).length();
+    if (!std::isfinite(leg) || leg < 1e-6f) {
+        error = "rig_anatomy_invalid_foot_pivot";
+        return false;
+    }
+    estimated = chain->bones.size() < 5;
+    Vec3 forward(0, 0, 1);
+    Vec3 ball, tip;
+    if (chain->bones.size() > 3) {
+        ball = position(chain->bones[3]);
+        auto flat = ball - ankle;
+        flat -= up * Vec3::dot(flat, up);
+        if (flat.length_squared() > 1e-12f)
+            forward = flat.normalize();
+    } else {
+        ball = ankle + forward * (leg * .12f) - up * (leg * .05f);
+    }
+    tip = chain->bones.size() > 4 ? position(chain->bones[4]) : ball + forward * (leg * .06f);
+    const float ground = (std::min)(Vec3::dot(ball, up), Vec3::dot(tip, up));
+    auto toGround = [&](const Vec3& p) { return p - up * (Vec3::dot(p, up) - ground); };
+    const float reach = (std::max)(0.f, Vec3::dot(ball - ankle, forward));
+    const auto& restWorld = joints[static_cast<size_t>(h.find(chain->bones[2]) - h.nodes.data())].world;
+    auto rest = Quaternion::fromMatrix(restWorld);
+    rest.normalize();
+    const auto inverse = rest.conjugate();
+    output.chain = chainName;
+    output.heel = inverse.rotate(toGround(ankle) - forward * (reach * .3f) - ankle);
+    output.ball = inverse.rotate(toGround(ball) - ankle);
+    output.tip = inverse.rotate(toGround(tip) - ankle);
     return true;
 }
 }

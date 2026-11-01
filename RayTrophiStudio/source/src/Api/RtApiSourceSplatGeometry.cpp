@@ -1,4 +1,4 @@
-﻿#include "RtApiInternal.h"
+#include "RtApiInternal.h"
 #include "Api/SourceSplatGeometryApi.h"
 #include "Fluid/GrainMeshNear.h"
 #include "Fluid/SourceSplatRenderPlan.h"
@@ -246,7 +246,7 @@ Result getSubstanceSplatGeometry(const std::string& domain, const std::string& s
         if (value.name != domain) {
             continue;
         }
-        if (!RayTrophiSim::simulationDomainHasLiquid(value.type)) {
+        if (!RayTrophiSim::simulationDomainHasLiquid(value)) {
             return Result::fail("substance Splat geometry requires a liquid/Matter domain");
         }
         const auto found = value.fluid_substance_splat_geometry.find(substance);

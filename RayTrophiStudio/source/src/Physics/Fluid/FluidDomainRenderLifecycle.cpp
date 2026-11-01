@@ -8,7 +8,7 @@ bool SceneData::hasAuthoritativeGridFluidDomain(const std::string& name) const {
     for (const auto& system : particle_systems) {
         if (!system.runtime) continue;
         for (const auto& domain : system.runtime->gridDomains()) {
-            if (RayTrophiSim::simulationDomainHasLiquid(domain.type) &&
+            if (RayTrophiSim::simulationDomainHasLiquid(domain) &&
                 domain.name == name) {
                 return true;
             }

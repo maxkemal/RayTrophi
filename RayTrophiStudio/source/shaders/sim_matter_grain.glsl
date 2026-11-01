@@ -72,7 +72,7 @@ const uint BUCKET = 32u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 31u;
+const uint REVISION = 33u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -264,10 +264,16 @@ vec3 carry(vec3 previous, vec3 n) {
 // s = S sqrt(R / V), rupture at S = V^(1/3) (capped by the hash skin).
 // Each grain shares its water among ~6 bridges (random packing coordination).
 // Central force only, equal and opposite by symmetry of the pair.
+// Below BRIDGE_MIN_VOLUME_FRACTION of the smaller grain's volume the water is
+// an adsorbed film, not a bridge (kMatterGrainBridgeMinVolumeFraction; the
+// host CFL floors the smallest bridge at the same value).
+const float BRIDGE_MIN_VOLUME_FRACTION = 1.0e-4;
 uint g_bridges = 0u;
 void bridge(uint i, uint j, float d, vec3 n, float r, inout vec3 force) {
     float volume = (coupling[3u*i+2u].w+coupling[3u*j+2u].w)/12.0;
     if (volume <= 0.0 || pc.wet.y <= 0.0) return;
+    float smaller = min(radius(i), radius(j));
+    if (volume < BRIDGE_MIN_VOLUME_FRACTION * 4.18879020 * smaller * smaller * smaller) return;
     float gap = max(d-radius(i)-radius(j),0.0);
     float real_radius = masses[2u * pc.meta.x];
     float prefactor = pc.wet.y * (real_radius > 0.0 ? max(1.0, r / real_radius) : 1.0);
@@ -445,9 +451,10 @@ void main() {
     if (i >= pc.meta.x) return;
     // Proves the fused-step SPIR-V ran; the host refuses publication otherwise.
     if (i == 0u) diagnostics[1] = REVISION;
-    // Reject an old host's three-word metadata before indexing the new layout.
+    // Map + owner/four masks/rest/elapsed: eight words per allocated grain.
+    // Divide the length so a malformed capacity cannot wrap the guard product.
     // The descriptor/push ABI is unchanged, so reflection alone cannot catch it.
-    if (uint(history_blocks.length()) < 5u*pc.substep.y ||
+    if (uint(history_blocks.length()) / 8u < pc.substep.y ||
         uint(diagnostics.length()) < AUDIO_HEADER_WORDS ||
         (audioTelemetryEnabled() && uint(diagnostics.length()) <
             AUDIO_HEADER_WORDS + AUDIO_WORDS_PER_GRAIN * pc.meta.x)) {

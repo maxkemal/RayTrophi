@@ -85,7 +85,22 @@ class RtIpc:
         tool layer once let an error branch fall through without returning,
         so the engine did the work and the caller was told it failed. A test
         harness that can silently drop an error is not an instrument.
+
+        Test-side parcel budget for flow_source.create / flow_source.update:
+        `parcels=N` (and optionally `limit_parcels=True/False`). The engine's
+        source budget is MASS since 2026-10-27 (use_mass_limit,
+        max_emitted_mass_kg); a test that needs exactly N grains sizes it
+        here from the source's own parcel_mass_kg, after the call. Without
+        limit_parcels an update keeps the source's current on/off state.
         """
+        if method in ("flow_source.create", "flow_source.update") and (
+                "parcels" in params or "limit_parcels" in params):
+            return self._call_with_parcel_budget(method, params)
+        if self.__dict__.get("_parcel_budgets"):
+            if method.startswith(self._SETTINGS_PREFIXES):
+                self._parcel_budgets_dirty = True
+            elif method in self._SIZING_TRIGGERS and self.__dict__.get("_parcel_budgets_dirty"):
+                self._size_parcel_budgets()
         self._id += 1
         msg = {"id": self._id, "method": method}
         if params:
@@ -112,6 +127,47 @@ class RtIpc:
         if "error" in resp:
             raise RtIpcError("%s: %s" % (method, resp["error"]))
         return resp.get("result")
+
+    # A parcel's mass follows the domain's settings (grain radius, voxel,
+    # PPC), which tests often change AFTER creating the source. The budgets
+    # are remembered and re-sized from the live parcel_mass_kg before the
+    # next reset/step/run that follows any settings change.
+    _SIZING_TRIGGERS = ("fluid.reset", "fluid.step", "fluid.run", "fluid.settle",
+                        "timeline.set_frame", "timeline.play")
+    _SETTINGS_PREFIXES = ("fluid.set_", "flow_source.", "substance.", "fluid.create_domain")
+
+    def _call_with_parcel_budget(self, method, params):
+        params = dict(params)
+        parcels = params.pop("parcels", None)
+        limit = params.pop("limit_parcels", None)
+        result = self.call(method, **params)
+        name = params.get("name") or (result or {}).get("name")
+        if limit is not None:
+            self.call("flow_source.update", name=name, use_mass_limit=bool(limit))
+        if parcels is not None:
+            self.__dict__.setdefault("_parcel_budgets", {})[name] = int(parcels)
+            self._size_parcel_budgets()
+        return result
+
+    def _size_parcel_budgets(self):
+        budgets = self.__dict__.get("_parcel_budgets") or {}
+        if not budgets:
+            return
+        for source in self.call("flow_source.list"):
+            parcels = budgets.get(source["name"])
+            if parcels is None:
+                continue
+            mass = float(source.get("parcel_mass_kg") or 0.0)
+            if mass <= 0.0:
+                continue  # pours no particles (yet): sized again after the next change
+            # The engine stops once the poured mass reaches the budget, so
+            # half a parcel short of N lands exactly on N parcels.
+            budget = (parcels - 0.5) * mass
+            if abs(float(source.get("max_emitted_mass_kg", 0.0)) - budget) > 1e-9 * budget:
+                self.call("flow_source.update", name=source["name"],
+                          max_emitted_mass_kg=budget)
+        # Its own list/update calls must not mark the budgets stale again.
+        self._parcel_budgets_dirty = False
 
     def try_call(self, method, /, **params):
         """(ok, result_or_message). For cases where the REFUSAL is the result."""

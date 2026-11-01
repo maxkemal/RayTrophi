@@ -72,10 +72,32 @@
     <Filter Include="Kaynak Dosyalar\MeshEdit">
       <UniqueIdentifier>{8c5b1f2a-94d3-4e7b-a1c6-3f0e9d27b541}</UniqueIdentifier>
     </Filter>
+    <ClInclude Include="source\include\Fluid\MatterIceCollider.h" />
+    <ClInclude Include="source\include\SimulationDomainLanes.h" />
+    <ClInclude Include="source\include\Api\MatterDomainLanesApi.h" />
+    <ClInclude Include="source\include\UI\MatterLaneControls.h" />
+    <ClInclude Include="source\src\Api\RtMatterLanes.h" />
     <ClInclude Include="source\include\SubstanceLibrary.h" />
     <ClInclude Include="source\include\SubstanceCatalogue.h" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterIceCollider.cpp" />
+    <ClCompile Include="source\src\Physics\SimulationDomainLanes.cpp" />
+    <ClCompile Include="source\src\Api\RtApiMatterLanes.cpp" />
+    <ClCompile Include="source\src\UI\SimulationTransport.cpp" />
+    <ClCompile Include="source\src\Api\RtApiSimulationTransport.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcSimulationTransport.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonSimulationTransport.cpp" />
+    <ClInclude Include="source\include\UI\SimulationTransport.h" />
+    <ClInclude Include="source\include\Fluid\MatterCacheRestore.h" />
+    <ClInclude Include="source\include\Fluid\FluidForceColumns.h" />
+    <ClInclude Include="source\include\Api\SimulationTransportApi.h" />
+    <ClInclude Include="source\src\Api\RtSimulationTransport.h" />
+    <ClCompile Include="source\src\Api\RtIpcMatterLanes.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonMatterLanes.cpp" />
+    <ClCompile Include="source\src\UI\MatterLaneControls.cpp" />
     <ClCompile Include="source\src\Physics\SubstanceCatalogue.cpp" />
     <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
+    <ClInclude Include="source\include\Fluid\FluidLiquidAdvection.h" />
+    <ClInclude Include="source\include\Fluid\FluidDensityProjection.h" />
     <ClInclude Include="source\include\Fluid\MatterSubstanceState.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainMpmContact.h" />
     <ClInclude Include="source\include\Fluid\MatterCommonClock.h" />
@@ -130,6 +152,17 @@
     <ClCompile Include="source\src\UI\GrainGeneratorUI.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <None Include="source\shaders\volume_overlap_selection.glsl" />
+    <None Include="source\shaders\screen_gi_trace.comp" />
+    <None Include="source\shaders\screen_gi_filter.comp" />
+    <None Include="source\shaders\screen_gi_surface.glsl" />
+    <None Include="source\shaders\material_preview_screen_gi.glsl" />
+    <None Include="source\shaders\rayfusion_probe_bounce.glsl" />
+    <None Include="source\shaders\rayfusion_probe_trace_beta.comp" />
+    <None Include="external\imgui-knobs\LICENSE" />
+    <None Include="external\imgui-knobs\UPSTREAM.txt" />
+    <None Include="external\imgui-knobs\COMPATIBILITY.md" />
+    <None Include="source\shaders\sim_audio_gas_flow.comp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterPhaseSettings.h">
@@ -196,21 +229,6 @@
     <ClInclude Include="source\include\PostProcess\VulkanExposure.h" />
     <ClInclude Include="source\src\Device\post_exposure.cuh" />
     <ClInclude Include="source\src\Api\RtPostBindings.h" />
-    <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h">
-      <Filter>Header Files\Api</Filter>
-    </ClInclude>
-    <ClInclude Include="source\src\Api\RtAgentLifecycleManager.h">
-      <Filter>Header Files\Api</Filter>
-    </ClInclude>
-    <ClInclude Include="source\src\Api\RtIpcWorkflowRecipes.h">
-      <Filter>Header Files\Api</Filter>
-    </ClInclude>
-    <ClInclude Include="source\src\Api\RtIpcMethodRegistry.h">
-      <Filter>Header Files\Api</Filter>
-    </ClInclude>
-    <ClInclude Include="source\src\Api\RtPythonAgent.h">
-      <Filter>Header Files\Api</Filter>
-    </ClInclude>
     <ClInclude Include="resource.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
@@ -218,9 +236,6 @@
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\AreaLight.h">
-      <Filter>Kaynak Dosyalar\header_file</Filter>
-    </ClInclude>
-    <ClInclude Include="source\include\AssimpLoader.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Camera.h">
@@ -472,6 +487,7 @@
     <ClInclude Include="source\include\Fluid\MatterPhaseGrid.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\src\Physics\Fluid\MatterDensityProjection.inl" />
     <ClInclude Include="source\src\Physics\Fluid\FluidGpuPressure.inl">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -956,20 +972,11 @@
     <ClInclude Include="source\include\UI\CloudMaterialUI.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
-    <ClInclude Include="source\include\UI\viewport_realtime_quality_panel.hpp">
-      <Filter>Ãœst Bilgi DosyalarÄ±</Filter>
-    </ClInclude>
     <ClInclude Include="source\include\UI\HierarchyLiveObjectView.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\UI\TemplateHubUI.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
-    </ClInclude>
-    <ClInclude Include="source\include\Template\StartupPreferences.h">
-      <Filter>Header Files\Template</Filter>
-    </ClInclude>
-    <ClInclude Include="source\include\Template\PathUtils.h">
-      <Filter>Header Files\Template</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Template\UserTemplateManager.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
@@ -1008,6 +1015,573 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\SimulationComputeVulkanContext.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcAgentDiscovery.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtAgentLifecycleManager.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPythonAgent.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcWorkflowRecipes.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcMethodRegistry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiKinematicCollider.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRasterDiagnostics.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtRasterDiagnosticsBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtUi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MaterialGraphApply.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtUiBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPyCommon.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\KinematicColliderSource.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\KinematicColliderScene.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\KinematicColliderSerialization.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\KinematicColliderVoxelizer.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\KinematicColliderAuthoringUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\KinematicColliderOverlay.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\GizmoOcclusion.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MaterialStateField.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MatterExchangeLedger.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MaterialDamagePattern.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\MeltSurfaceFlow.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\SurfaceField.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\AnimationKeys.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\NodeHierarchy.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\ImportedModel.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\GltfDirectReader.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\ModelImport.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\UfbxReader.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigEditing.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigEditing.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigEditingUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigPoseViewUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigPoseView.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigPoseView.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigAnatomyUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigAnatomy.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigAnatomy.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigTemplates.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigTemplates.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\SkinWeightContract.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\GraphRestDefaults.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RootMotionUnroll.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigWeightMap.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\ScalarFieldOverlay.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigWeightMapUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigSelection.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigMirrorUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigMirror.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigMirror.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigBatchRest.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigMeshSpace.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigSelection.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigWeights.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigBindingScope.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigBindMath.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigBinding.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigBinding.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigBindingUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigPreflight.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigFitting.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigFittingUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigViewportUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigSerialization.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigPosePreview.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\ClipBindingUIState.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigMappingUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\Retarget.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\ClipBinding.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiClipBinding.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\ClipBindingUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtClipBindingBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigView.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRig.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigViewUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtRigBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\UfbxSkeletonSeeds.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\ObjReader.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Import\ModelProbe.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\OptixMaterialTables.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\AnimationData.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Import\UfbxMaterials.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\CloudParams.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\CloudBoltGeometry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\VulkanMotionHistory.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\StormGizmoUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\viewport_realtime_quality_panel.hpp">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Template\StartupPreferences.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Template\PathUtils.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\RayFusion\ScreenGi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiScreenGi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiDenoiser.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiMotion.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\ScreenGiUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtScreenGiBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcScreenGi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPythonScreenGi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\RayFusion\ProbeBounce.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\SourceSplatGeometry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\SourceSplatGeometryJson.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\SourceSplatRenderPlan.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\SourceSplatGeometryApi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\MatterPhaseOutputApi.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterPhaseOutputJson.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\SourceSplatGeometryUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPythonSourceSplatGeometry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcSourceSplatGeometry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Viewport\ViewportPresentationStats.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigPoseAuthoringState.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigPoseAuthoringMath.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigPoseAuthoring.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigBoneCurves.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigClipRuntimeSync.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigTimelineProjection.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigDrivenControls.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigPoseAuthoring.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigPoseAuthoringUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigFingerFKUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigJointRules.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigJointProfile.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigJointProfileUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigControlDisplay.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigIK.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigIK.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigIKUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtRigIKBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigJointLimits.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigJointLimits.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigJointLimitsUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigIKChannels.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigIKTimeline.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigChainIK.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigAimIK.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigWalkRecipe.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigRomTest.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigGeodesicWeights.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigAutoLandmarks.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigEnvelopeWeights.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigMotion.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiRigEnvelopeWeights.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigMotionRecipeUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigEnvelopeOverlay.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\RigEnvelopeEditorUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Animation\RigSplineIK.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioClips.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioTimelineMix.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioArrangementPreview.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioClipBatch.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioTracks.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioClipRuntime.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioTelemetryPolicy.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioSynthesis.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioPcm.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioOffline.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioCapture.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioWorkspaceState.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioWorkspaceUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioIcon.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="external\imgui-knobs\imgui-knobs.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\MatterAudioTelemetry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioDesignDsp.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\ObjectSubstance.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\AcousticMaterial.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AcousticScene.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AcousticPreview.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AcousticGpu.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Core\FatalSignalTrace.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\AcousticGpuPass.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AcousticBoundary.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AcousticSurface.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\AcousticSurfacePass.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AcousticRenderDebug.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtObjectSubstanceBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\LensWeatherSettings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\LensWeatherState.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Atmosphere\LensWeatherService.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Backend\LensWeatherGpu.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\LensWeatherUI.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtLensWeatherBindings.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioDesignJobs.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioDesignPanels.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioClipEnvelopeEditor.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioTrackPanels.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioDesignView.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Audio\AudioSoundDesign.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\AudioSoundDesignerUI.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
   </ItemGroup>
@@ -1134,21 +1708,6 @@
     </CudaCompile>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp">
-      <Filter>Source Files\Api</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Api\RtAgentLifecycleManager.cpp">
-      <Filter>Source Files\Api</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp">
-      <Filter>Source Files\Api</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcMethodDescriptors.cpp">
-      <Filter>Source Files\Api</Filter>
-    </ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp">
-      <Filter>Source Files\Api</Filter>
-    </ClCompile>
     <ClCompile Include="source\src\Physics\GasSimulator.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
@@ -1519,9 +2078,6 @@
     <ClCompile Include="source\src\Physics\SurfaceFlowField.cpp">
       <Filter>Kaynak Dosyalar\Physics</Filter>
     </ClCompile>
-    <ClCompile Include="source\src\Utils\AssimpLoader.cpp">
-      <Filter>Kaynak Dosyalar\Utils</Filter>
-    </ClCompile>
     <ClCompile Include="source\src\Utils\SceneSerializer.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
@@ -1592,6 +2148,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFluid.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGasFieldStats.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp">
@@ -1840,6 +2399,9 @@
     <ClCompile Include="source\src\UI\scene_ui_viewport.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\SimulationHeldAlert.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_world.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
@@ -2020,6 +2582,8 @@
     <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeResidency.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanVolumeStageSplit.cpp" />
     <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -2617,11 +3181,743 @@
     <ClCompile Include="source\src\UI\TemplateHubUI.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAgentLifecycleManager.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMethodDescriptors.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterGpuTimers.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterStageTimings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterStageInstrumentation.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewVolumeShadow.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewProbeField.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionProbeOverlay.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionSceneAS.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewRtShadow.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionProbeTrace.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ScreenGi.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ObjectPick.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\Autosave.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterTaa.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewReflection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiScreenGi.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcScreenGi.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonScreenGi.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiReflection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcReflection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonReflection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionBounce.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\SelectionOutlineUpload.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\RayFusion\ProbeField.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\RayFusion\ProbeFieldChecks.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRayFusion.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRayFusion.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRayFusion.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewCoverage.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Template\StartupPreferences.cpp">
-      <Filter>Kaynak Dosyalar\Template</Filter>
+      <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Template\UserTemplateManager.cpp">
-      <Filter>Kaynak Dosyalar\Template</Filter>
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFracture.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDebris.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMassTransfer.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcFracture.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcParticle.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonFracture.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonParticle.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonKinematicCollider.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonPressure.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonDebris.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonMassTransfer.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcViewportCutout.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtUi.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAddons.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPyScene.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiLights.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtVolumeMaterialBindings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\VolumeMaterialAuthoring.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\VolumeMaterialUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiWeatherEffects.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtWeatherEffectsBindings.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSelect.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMaterial.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiNodes.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\MaterialGraphApply.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SourceSplatRenderPlan.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSourceSplatGeometry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterPhaseOutput.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonSourceSplatGeometry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSourceSplatGeometry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SourceSplatGeometryUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderSource.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderScene.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderSerialization.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\KinematicColliderAuthoringUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\KinematicColliderOverlay.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\GizmoOcclusion.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\NodeHierarchy.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\GltfDirectReader.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ModelImport.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ModelImportScene.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxVendor.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxReader.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigEditing.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEditing.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigEditingUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigPoseViewUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseView.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseView.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigAnatomyUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigAnatomy.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAnatomy.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigTemplates.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigTemplates.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\GraphRestDefaults.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigWeightMap.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigWeightMapUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSelection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigMirrorUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigMirror.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigMirror.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBatchRest.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigSelection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigWeights.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBindingScope.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBindMath.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigBindingUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPreflight.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigFitting.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigFittingUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigViewportUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSerialization.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPosePreview.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigMappingUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\Retarget.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\ClipBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiClipBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcClipBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonClipBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ClipBindingUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigView.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRig.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRig.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRig.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigViewUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_rig_overlay.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxMaterials.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ObjReader.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OptixMaterialTables.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MaterialStateField.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MaterialDamagePattern.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MeltSurfaceFlow.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MaterialMassBudget.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MoltenMassTransfer.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SurfaceField.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ThermalFractureBridge.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ThermalFractureSerialization.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasStructuralImpulseBridge.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasPressurePulse.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\AshDebrisSystem.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\FractureSourceAdapter.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ViewportPresentationStats.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigFingerFKViewportUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigJointRules.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointProfile.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigJointProfileUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRigIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRigIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigIKUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigIKViewportUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigJointLimits.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointLimits.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigJointLimitsUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKChannels.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKTimeline.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigIKTimelineUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigChainIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAimIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigWalkRecipe.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigRomTest.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigGeodesicWeights.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAutoLandmarks.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigEnvelopeWeights.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigMotion.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEnvelopeWeights.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigMotionRecipeUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigEnvelopeOverlay.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigEnvelopeEditorUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSplineIK.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\RigSplineIKUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GranularContact.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GranularReference.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGrainReference.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui-knobs\imgui-knobs.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioWorkspaceState.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioWorkspaceUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioTimelineUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioMixerStripUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClips.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioArrangementPreview.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTimelineMix.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClipBatch.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTracks.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClipRuntime.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTelemetryPolicy.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignEffects.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignLayers.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignAnalysis.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticScene.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\FatalSignalTrace.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuPass.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuIdle.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuRasterIdle.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticGpuPreview.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticPreview.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticTrace.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticBoundary.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AcousticBoundaryUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticSurfacePass.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticSurfaceScene.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticRenderDebug.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticRenderDebugBackend.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AcousticRenderDebugUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioAcousticUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticMaterial.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstance.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstanceAuthoring.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstanceHistory.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcObjectSubstance.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ObjectSubstanceUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignSpectral.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LensWeatherState.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LensWeatherService.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\LensWeatherCamera.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanLensWeather.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcLensWeather.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\LensWeatherUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignJobs.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioSoundDesign.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDspModules.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioDesignPanels.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioClipEnvelopeEditor.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioTrackPanels.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioDesignGenerationCanvas.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\AudioSoundDesignerUI.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioSynthesis.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioPcm.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioOffline.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioCapture.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAudioTelemetry.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAudioGasGpu.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -2643,115 +3939,6 @@
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigPoseAuthoringState.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigPoseAuthoringMath.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigPoseAuthoring.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigBoneCurves.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigClipRuntimeSync.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigTimelineProjection.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigDrivenControls.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Api\RtApiRigPoseAuthoring.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigPoseAuthoringUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigFingerFKUI.h"><Filter>Header Files</Filter></ClInclude>
-  </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigPoseAuthoringUI.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigFingerFKUI.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigFingerFKViewportUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigJointRules.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Api\RtApiRigJointProfile.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigJointProfileUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Animation\RigJointRules.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigJointProfile.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigJointProfileUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigControlDisplay.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigIK.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Api\RtApiRigIK.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigIKUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\src\Api\RtRigIKBindings.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonRigIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigIKUI.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigIKViewportUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigJointLimits.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Api\RtApiRigJointLimits.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigJointLimitsUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Animation\RigJointLimits.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigJointLimits.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigJointLimitsUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigIKChannels.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigIKTimeline.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Animation\RigIKChannels.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigIKTimeline.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigIKTimelineUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigChainIK.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigAimIK.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigWalkRecipe.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RigEnvelopeWeights.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Animation\RigChainIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigAimIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigWalkRecipe.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Animation\RigEnvelopeWeights.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClInclude Include="source\include\Api\RtApiRigMotion.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Api\RtApiRigEnvelopeWeights.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Api\RtApiRigMotion.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiRigEnvelopeWeights.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClInclude Include="source\include\UI\RigMotionRecipeUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigEnvelopeOverlay.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\RigEnvelopeEditorUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\UI\RigMotionRecipeUI.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigEnvelopeOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigEnvelopeEditorUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\Animation\RigSplineIK.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Animation\RigSplineIK.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\RigSplineIKUI.cpp"><Filter>Source Files</Filter></ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ClInclude Include="source\include\KinematicColliderSource.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\KinematicColliderScene.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\KinematicColliderSerialization.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\KinematicColliderVoxelizer.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Animation\RootMotionUnroll.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\KinematicColliderAuthoringUI.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\KinematicColliderOverlay.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\UI\GizmoOcclusion.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\include\Api\RtApiKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\src\Api\RtIpcKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
-    <ClInclude Include="source\src\Api\RtPythonKinematicCollider.h"><Filter>Header Files</Filter></ClInclude>
-    <ClCompile Include="source\src\Physics\KinematicColliderSource.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Physics\KinematicColliderScene.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Physics\KinematicColliderSerialization.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\KinematicColliderAuthoringUI.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\KinematicColliderOverlay.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\UI\GizmoOcclusion.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
-    <ClCompile Include="source\src\Api\RtPythonKinematicCollider.cpp"><Filter>Source Files</Filter></ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\src\Api\RtFluidLabelBindings.h" />
@@ -2779,7 +3966,6 @@
     <None Include="source\shaders\sim_matter_clear.comp" />
     <None Include="source\shaders\sim_matter_zero_faces.comp" />
   </ItemGroup>
-
   <ItemGroup>
     <None Include="source\shaders\sim_fluid_advect_tail.glsl" />
     <None Include="source\shaders\sim_fluid_g2p.glsl" />
@@ -2960,6 +4146,11 @@
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterFogFields.h" />
     <ClInclude Include="source\include\Fluid\MatterFogStreams.h" />
+    <ClInclude Include="source\include\Fluid\FogOpticalBounds.h" />
+    <ClInclude Include="source\include\VolumeTemperatureMapping.h" />
+    <ClInclude Include="source\include\VolumeEmissionMask.h" />
+    <ClInclude Include="source\include\VolumeEmissionTransport.h" />
+    <ClInclude Include="source\include\Fluid\FogFieldDigest.h" />
     <ClInclude Include="source\include\Fluid\MatterFogSnapshot.h" />
     <ClCompile Include="source\src\Physics\Fluid\MatterFogFields.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterFogStreams.cpp" />

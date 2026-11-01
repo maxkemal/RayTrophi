@@ -9,7 +9,7 @@ bool inspectMatterModels(const SimulationGridDomainDesc& domain,
                          const SimulationGridDomainState* state,
                          bool include_transfer, MatterTransferFrame& frame,
                          std::string& error) {
-    if (!simulationDomainHasLiquid(domain.type)) {
+    if (!simulationDomainHasLiquid(domain)) {
         error = "domain has no particle phase";
         return false;
     }

@@ -28,12 +28,16 @@
                 ? grid_domains_[i].fluid_params
                 : Fluid::APICSolverParams{};
             Fluid::refreshMatterConstitutiveModels(state.particles, fluid_params);
+            Fluid::resolveParticleGranularPhysics(fluid_params, state.particles);
+            const float position_density_relaxation_s = fluid_params.density_relaxation_s;
+            fluid_params.density_relaxation_s = 0.0f;
             // Pore-enabled dry runs must keep the same solver when water arrives
             // or wet response is toggled; saturation zero is the neutral limit.
             const bool mixed_models = matter_domain &&
                 (fluid_params.grain.enabled || fluid_params.pore_exchange.enabled ||
                  fluid_params.pore_exchange.wet_response_enabled ||
-                 Fluid::hasMixedMatterModels(state.particles, fluid_params.granular_enabled) ||
+                 Fluid::requiresMatterModelBatch(state.particles,
+                     fluid_params.granular_enabled) ||
                  Fluid::needsMatterPoreTransport(state.particles, fluid_params.pore_exchange));
             // The grain solver owns every granular carrier; the legacy MPM
             // granular switch must not change Auto ownership, mass or radius.
@@ -267,16 +271,8 @@
                     !material_state_fields_.fields().empty()) {
                     material_state_fields_.requestReadback();
                 }
-                // The air is a gas grid when this domain has one or overlaps one:
-                // the surface then trades heat there (exchangeLiquidGasSurface).
-                bool air_through_gas = matter_domain;
-                for (std::size_t g = 0; !air_through_gas && g < grid_domains_.size(); ++g) {
-                    const auto& gd = grid_domains_[g];
-                    if (g == i || !gd.enabled || !simulationDomainHasGas(gd.type)) continue;
-                    const Vec3 lo = Vec3::max(gd.bounds_min, grid_domains_[i].bounds_min);
-                    const Vec3 hi = Vec3::min(gd.bounds_max, grid_domains_[i].bounds_max);
-                    air_through_gas = lo.x < hi.x && lo.y < hi.y && lo.z < hi.z;
-                }
+                // Use the same unique gas owner as all phase/heat producers.
+                const bool air_through_gas = fluid_gas_owner[i] >= 0;
                 Fluid::coolThermalLiquid(state.particles, state.grid, fluid_params,
                                          ambient_kelvin, dt, state.thermal_stats,
                                          &s_heat_sources, air_through_gas,
@@ -778,6 +774,13 @@
                             }
                         }
                         state.fluid_stats = Fluid::APICSolverStats{};
+                        // Keep what set the grain substep: the held frame is
+                        // the one whose reason matters (MatterGrainCflTerms).
+                        if (i < grid_domain_compute_buffers_.size() &&
+                            grid_domain_compute_buffers_[i].matter_runtime) {
+                            state.fluid_stats.grain_report.cfl =
+                                grid_domain_compute_buffers_[i].matter_runtime->grain.last_cfl;
+                        }
                         if (step_params.pore_exchange.enabled) {
                             state.fluid_stats.pore_exchange.held = true;
                             state.fluid_stats.pore_exchange.status = mixed_error;
@@ -1384,6 +1387,19 @@
             // "parcels too thin for this voxel size" (see APICSolverStats).
             state.fluid_stats.solid_phase_particles = solid_phase_particle_count;
             state.fluid_stats.solid_phase_cells     = solid_phase_cell_count;
+
+            if (!projectMatterLiquidDensity(state, step_params, position_density_relaxation_s,
+                    granular_frame_dt, context.compute,
+                    i < grid_domain_compute_buffers_.size()
+                        ? &grid_domain_compute_buffers_[i] : nullptr,
+                    fluid_gpu_requested,
+                    [&](SimulationGridDomainComputeBuffers& buffers) {
+                        return context.compute && ensureGridDomainComputeBuffers(
+                            *context.compute, buffers, state.grid);
+                    })) {
+                state.fluid_stats.gpu_fallback = true;
+                state.fluid_stats.gpu_status += "; density position projection failed";
+            }
 
             // ── Whitewater (spray/foam/bubbles) — Ihmsen 2012 ────────────────
             // Secondary render-only particles generated from the post-step liquid

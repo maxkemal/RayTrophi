@@ -120,9 +120,11 @@ void registerRigPython(py::module_& module) {
         if(value.is_discarded())throw std::invalid_argument("rig_anatomy_invalid_schema");
         require(rtapi::setRigAnatomy(character,value));
     },py::arg("character"),py::arg("anatomy"));
+    rig.def("derive_limb_hints",[](const std::string& character,bool overwrite){nlohmann::json report;require(rtapi::deriveRigLimbHints(character,overwrite,report));return py::module_::import("json").attr("loads")(report.dump());},py::arg("character"),py::arg("overwrite")=false);
     rig.def("set_pose_view",[](const std::string& character,const std::string& mode){require(rtapi::setRigPoseView(character,mode));},py::arg("character"),py::arg("mode"));
     rig.def("get_pose_view",[](const std::string& character){std::string mode,effective;require(rtapi::getRigPoseView(character,mode,effective));py::dict d;d["mode"]=mode;d["effective_mode"]=effective;return d;},py::arg("character"));
     rig.def("list_fit_targets",[](){nlohmann::json out;require(rtapi::listRigFitTargets(out));return py::module_::import("json").attr("loads")(out.dump());});
+    rig.def("auto_landmarks",[](const std::string& character,const std::string& mesh){nlohmann::json out;require(rtapi::autoRigLandmarks(character,mesh,out));return py::module_::import("json").attr("loads")(out.dump());},py::arg("character"),py::arg("mesh"));
     rig.def("get_fit_setup",[](const std::string& character,const std::string& mesh){nlohmann::json out;require(rtapi::getRigFitSetup(character,mesh,out));return py::module_::import("json").attr("loads")(out.dump());},py::arg("character"),py::arg("mesh"));
     rig.def("preview_fit",[](const std::string& character,const std::string& mesh,const py::dict& landmarks,bool confirmed){auto value=nlohmann::json::parse(py::module_::import("json").attr("dumps")(landmarks).cast<std::string>(),nullptr,false);if(value.is_discarded())throw std::invalid_argument("rig_fit_invalid_landmark");nlohmann::json out;require(rtapi::previewRigFit(character,mesh,value,confirmed,out));return py::module_::import("json").attr("loads")(out.dump());},py::arg("character"),py::arg("mesh"),py::arg("landmarks"),py::arg("axes_confirmed")=false);
     rig.def("commit_fit",[](const std::string& character,const std::string& mesh,const py::dict& preview){auto value=nlohmann::json::parse(py::module_::import("json").attr("dumps")(preview).cast<std::string>(),nullptr,false);if(value.is_discarded())throw std::invalid_argument("rig_fit_invalid_preview");require(rtapi::commitRigFit(character,mesh,value));},py::arg("character"),py::arg("mesh"),py::arg("preview"));
@@ -177,6 +179,23 @@ void registerRigPython(py::module_& module) {
         },
         py::arg("character"), py::arg("rig_revision").noconvert(), py::arg("torso_radius") = .16f,
         py::arg("limb_radius") = .065f, py::arg("extremity_radius") = .05f,
+        py::arg("falloff") = 2.f);
+    rig.def(
+        "preview_geodesic_weights",
+        [](const std::string &character, int resolution, float falloff) {
+            RigAuthoring::GeodesicWeightSettings settings{resolution, falloff};
+            nlohmann::json out;
+            require(rtapi::previewRigGeodesicWeights(character, settings, out));
+            return py::module_::import("json").attr("loads")(out.dump());
+        },
+        py::arg("character"), py::arg("resolution") = 96, py::arg("falloff") = 2.f);
+    rig.def(
+        "apply_geodesic_weights",
+        [](const std::string &character, uint64_t revision, int resolution, float falloff) {
+            RigAuthoring::GeodesicWeightSettings settings{resolution, falloff};
+            require(rtapi::applyRigGeodesicWeights(character, settings, revision));
+        },
+        py::arg("character"), py::arg("rig_revision").noconvert(), py::arg("resolution") = 96,
         py::arg("falloff") = 2.f);
     rig.def("get_envelope_overlay", []() {
         nlohmann::json out;

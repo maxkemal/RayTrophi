@@ -1,7 +1,8 @@
 #ifndef RT_PREVIEW_VOLUME_FIELDS
 #define RT_PREVIEW_VOLUME_FIELDS
+#include "../include/VolumeEmissionTransport.h"
 
-const uint VOLUME_STRIDE_WORDS = 168u;
+const uint VOLUME_STRIDE_WORDS = 172u;
 
 uint volWord(uint vi, uint byteOffset) {
     return volumeWords[vi * VOLUME_STRIDE_WORDS + (byteOffset >> 2u)];
@@ -144,7 +145,7 @@ float sampleDense(uint vi, uint64_t address, vec3 local) {
 layout(buffer_reference, std430, buffer_reference_align=4)
 readonly buffer DenseGasMajorantGrid { float blocks[]; };
 
-#include "volume_density_curve.glsl"
+#include "volume_density_channels.glsl"
 float previewDensityCurve(uint vi, float x) {
     float curve[12];
     for (int i = 0; i < 12; ++i) curve[i] = volFloat(vi, 624u + uint(i)*4u);
@@ -178,7 +179,10 @@ float denseEmptyBlockStep(uint vi, vec3 worldPos, vec3 worldDir,
     DenseGasMajorantGrid mg = DenseGasMajorantGrid(address);
     float blockMax = mg.blocks[b.x + b.y*bdim.x + b.z*bdim.x*bdim.y];
     float low = volFloat(vi,76u), high = max(volFloat(vi,80u), low+1e-6);
-    if (previewDensityCurve(vi, max((blockMax-low)/(high-low), 0.0)) > cutoff) return 0.0;
+    float normalized = max((blockMax-low)/(high-low), 0.0);
+    float support = previewDensityCurve(vi, normalized);
+    if (volumeEmissionIndependent(volFloat(vi,444u))) support = max(support, normalized);
+    if (support > cutoff) return 0.0;
 
     vec3 bmin = origin + vec3(b) * blockWorld;
     vec3 bmax = bmin + vec3(blockWorld);
@@ -232,14 +236,33 @@ float sampleRawField(uint vi, uint64_t address, vec3 worldPos) {
     return max(d,0.0);
 }
 
+vec2 sampleFieldChannels(uint vi, uint64_t address, vec3 worldPos, float multiplier) {
+    float d = sampleRawField(vi, address, worldPos);
+    float low = volFloat(vi,76u), high = max(volFloat(vi,80u), low + 1e-6);
+    float curve[12];
+    for (int i = 0; i < 12; ++i) curve[i] = volFloat(vi,624u + uint(i)*4u);
+    return volumeDensityChannels(max((d-low)/(high-low), 0.0), curve,
+        max(volFloat(vi,248u), 0.0), multiplier, volFloat(vi,444u));
+}
+
+float sampleFieldMultiplier(uint vi, uint64_t address, vec3 worldPos, float multiplier) {
+    return sampleFieldChannels(vi, address, worldPos, multiplier).x;
+}
+
+float sampleCameraField(uint vi, uint64_t address, vec3 worldPos, out float emissionDensity) {
+    vec2 channels = sampleFieldChannels(vi, address, worldPos,
+        volumeEmissionSamplingMultiplier(volFloat(vi,72u), volFloat(vi,444u)));
+    emissionDensity = channels.y;
+    return channels.x;
+}
+
 float sampleField(uint vi, uint64_t address, vec3 worldPos) {
-    float d=sampleRawField(vi,address,worldPos);
-    float low=volFloat(vi,76u), high=max(volFloat(vi,80u),low+1e-6);
-    d=previewDensityCurve(vi, max((d-low)/(high-low),0.0));
-    float cutoff=max(volFloat(vi,248u),0.0);
-    if(d<=cutoff) return 0.0;
-    float fade=cutoff>0.0?smoothstep(cutoff,cutoff*2.0,d):1.0;
-    return max(d*volFloat(vi,72u)*fade,0.0);
+    return sampleFieldMultiplier(vi, address, worldPos, volFloat(vi,72u));
+}
+
+float sampleEmissionField(uint vi, uint64_t address, vec3 worldPos) {
+    return sampleFieldMultiplier(vi, address, worldPos, volumeEmissionSamplingMultiplier(
+        volFloat(vi,72u), volFloat(vi,444u)));
 }
 
 

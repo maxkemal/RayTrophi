@@ -17,7 +17,8 @@ Vec3 point(const std::vector<float> &p) {
 } // namespace
 void registerRigIKPython(py::module_ &rig) {
     auto recipe = [](float fps, float cadence, int cycles, float stride, float stepHeight,
-                     float bodyBounce, float armSwing, float bodyMotion) {
+                     float bodyBounce, float armSwing, float bodyMotion, float legReach,
+                     float stanceKnee, float heelStrike, float toeOff) {
         RigAuthoring::HumanWalkRecipe value;
         value.fps = fps;
         value.cadence = cadence;
@@ -27,36 +28,73 @@ void registerRigIKPython(py::module_ &rig) {
         value.bodyBounce = bodyBounce;
         value.armSwing = armSwing;
         value.bodyMotion = bodyMotion;
+        value.legReach = legReach;
+        value.stanceKnee = stanceKnee;
+        value.heelStrike = heelStrike;
+        value.toeOff = toeOff;
         return value;
     };
     rig.def(
         "preview_human_walk",
         [recipe](const std::string &c, float fps, float cadence, int cycles, float stride,
-                 float stepHeight, float bodyBounce, float armSwing, float bodyMotion) {
+                 float stepHeight, float bodyBounce, float armSwing, float bodyMotion, float legReach,
+                 float stanceKnee, float heelStrike, float toeOff) {
             nlohmann::json out;
-            require(rtapi::previewRigHumanWalk(
-                c,
-                recipe(fps, cadence, cycles, stride, stepHeight, bodyBounce, armSwing, bodyMotion),
-                out));
+            require(rtapi::previewRigHumanWalk(c,
+                                               recipe(fps, cadence, cycles, stride, stepHeight,
+                                                      bodyBounce, armSwing, bodyMotion, legReach,
+                                                      stanceKnee, heelStrike, toeOff),
+                                               out));
             return py::module_::import("json").attr("loads")(out.dump());
         },
         py::arg("character"), py::arg("fps") = 30.f, py::arg("cadence") = 100.f,
         py::arg("cycles") = 2, py::arg("stride") = .35f, py::arg("step_height") = .06f,
-        py::arg("body_bounce") = .02f, py::arg("arm_swing") = .7f, py::arg("body_motion") = .75f);
+        py::arg("body_bounce") = 0.f, py::arg("arm_swing") = .7f, py::arg("body_motion") = .75f,
+        py::arg("leg_reach") = .998f, py::arg("stance_knee_deg") = 18.f,
+        py::arg("heel_strike_deg") = 15.f,
+        py::arg("toe_off_deg") = 30.f);
     rig.def(
         "create_human_walk_clip",
         [recipe](const std::string &c, const std::string &name, uint64_t revision, float fps,
                  float cadence, int cycles, float stride, float stepHeight, float bodyBounce,
-                 float armSwing, float bodyMotion) {
-            require(rtapi::createRigHumanWalkClip(
-                c, name,
-                recipe(fps, cadence, cycles, stride, stepHeight, bodyBounce, armSwing, bodyMotion),
-                revision));
+                 float armSwing, float bodyMotion, float legReach, float stanceKnee,
+                 float heelStrike, float toeOff) {
+            require(rtapi::createRigHumanWalkClip(c, name,
+                                                  recipe(fps, cadence, cycles, stride, stepHeight,
+                                                         bodyBounce, armSwing, bodyMotion,
+                                                         legReach, stanceKnee, heelStrike, toeOff),
+                                                  revision));
         },
         py::arg("character"), py::arg("name"), py::arg("rig_revision").noconvert(),
         py::arg("fps") = 30.f, py::arg("cadence") = 100.f, py::arg("cycles") = 2,
-        py::arg("stride") = .35f, py::arg("step_height") = .06f, py::arg("body_bounce") = .02f,
-        py::arg("arm_swing") = .7f, py::arg("body_motion") = .75f);
+        py::arg("stride") = .35f, py::arg("step_height") = .06f, py::arg("body_bounce") = 0.f,
+        py::arg("arm_swing") = .7f, py::arg("body_motion") = .75f, py::arg("leg_reach") = .998f,
+        py::arg("stance_knee_deg") = 18.f, py::arg("heel_strike_deg") = 15.f, py::arg("toe_off_deg") = 30.f);
+    auto romSettings = [](float scale, int framesPerMotion, float fps) {
+        RigAuthoring::RomTestSettings value;
+        value.scale = scale;
+        value.framesPerMotion = framesPerMotion;
+        value.fps = fps;
+        return value;
+    };
+    rig.def(
+        "preview_rom_test",
+        [romSettings](const std::string &c, float scale, int framesPerMotion, float fps) {
+            nlohmann::json out;
+            require(rtapi::previewRigRomTest(c, romSettings(scale, framesPerMotion, fps), out));
+            return py::module_::import("json").attr("loads")(out.dump());
+        },
+        py::arg("character"), py::arg("scale") = 1.f, py::arg("frames_per_motion") = 12,
+        py::arg("fps") = 24.f);
+    rig.def(
+        "create_rom_clip",
+        [romSettings](const std::string &c, const std::string &name, uint64_t revision,
+                      float scale, int framesPerMotion, float fps) {
+            require(rtapi::createRigRomClip(c, name, romSettings(scale, framesPerMotion, fps),
+                                            revision));
+        },
+        py::arg("character"), py::arg("name"), py::arg("rig_revision").noconvert(),
+        py::arg("scale") = 1.f, py::arg("frames_per_motion") = 12, py::arg("fps") = 24.f);
     rig.def(
         "set_ik_spline",
         [](const std::string &c, const std::string &control,

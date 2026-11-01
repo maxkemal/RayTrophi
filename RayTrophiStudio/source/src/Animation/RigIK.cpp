@@ -177,6 +177,10 @@ bool validateIKControls(const std::vector<IKControl>& controls, const RayTrophi:
             }
             continue;
         }
+        if (!finite(c.bendHint)) {
+            error = "rig_ik_invalid_bend_hint";
+            return false;
+        }
         const auto bones = ikControlBones(c);
         if ((!c.chain.empty() && (bones.size() < 4 || bones.size() > 64)) ||
             bones.front() != c.root || bones[1] != c.mid || bones.back() != c.tip) {
@@ -223,6 +227,9 @@ nlohmann::json serializeIKControls(const std::vector<IKControl>& controls) {
         if (!c.chain.empty()) {
             row["chain"] = c.chain;
         }
+        if (c.bendHint.length_squared() > 0) {
+            row["bend_hint"] = {c.bendHint.x, c.bendHint.y, c.bendHint.z};
+        }
         rows.push_back(std::move(row));
     }
     return rows;
@@ -242,8 +249,10 @@ bool deserializeIKControls(const nlohmann::json& value, const RayTrophi::NodeHie
         std::vector<IKControl> staged;
         for (const auto& row : value) {
             const bool aim = row.is_object() && row.value("solver", std::string()) == "aim";
-            if (!row.is_object() ||
-                (!aim && row.size() != 4 && !(row.size() == 5 && row.contains("chain"))) ||
+            const size_t extras = row.is_object() ? (row.contains("chain") ? 1u : 0u) +
+                                                        (row.contains("bend_hint") ? 1u : 0u)
+                                                  : 0u;
+            if (!row.is_object() || (!aim && row.size() != 4 + extras) ||
                 (aim && row.size() != 7)) {
                 error = "rig_ik_invalid_controls";
                 return false;
@@ -277,6 +286,16 @@ bool deserializeIKControls(const nlohmann::json& value, const RayTrophi::NodeHie
                 staged.back().upAxis =
                     Vec3(row["up_axis"][0].get<float>(), row["up_axis"][1].get<float>(),
                          row["up_axis"][2].get<float>());
+            }
+            if (row.contains("bend_hint")) {
+                const auto &hint = row["bend_hint"];
+                if (!hint.is_array() || hint.size() != 3 || !hint[0].is_number() ||
+                    !hint[1].is_number() || !hint[2].is_number()) {
+                    error = "rig_ik_invalid_bend_hint";
+                    return false;
+                }
+                staged.back().bendHint =
+                    Vec3(hint[0].get<float>(), hint[1].get<float>(), hint[2].get<float>());
             }
             if (row.contains("chain")) {
                 if (!row["chain"].is_array() || row["chain"].size() < 4 ||
@@ -331,6 +350,11 @@ bool matchIKPose(const RayTrophi::NodeHierarchy& h, const IKControl& c, const Ma
                   origin(joints[index(h, bones[i - 1])].world))
                      .length();
     }
+    // An anatomy bend hint decides the plane; the rest bend of a fitted, nearly straight
+    // limb is too small to trust and can point sideways or backward.
+    const auto hinted = c.bendHint - axis * Vec3::dot(c.bendHint, axis);
+    if (hinted.length_squared() > 1e-8f)
+        bend = hinted;
     if (bend.length_squared() < scale * scale * 1e-10f)
         bend = perpendicular(axis) * scale;
     auto staged = result;

@@ -3,8 +3,8 @@
 // where Snow is empty (and vice versa).
 if (hasCompanion && nanoIndexPath && compNanoIndexPath &&
     vol._uvw_pad[0] > 0.5 && comp._uvw_pad[0] > 0.5 &&
-    volumeNanoRemap(vol, 1e-6) <= max(vol._reserved[0], 0.0) &&
-    volumeNanoRemap(comp, 1e-6) <= max(comp._reserved[0], 0.0)) {
+    volumeNanoSupportRemap(vol, 1e-6) <= max(vol._reserved[0], 0.0) &&
+    volumeNanoSupportRemap(comp, 1e-6) <= max(comp._reserved[0], 0.0)) {
     vec3 primaryLocal = primaryNanoRay.localOrigin + primaryNanoRay.localDirection * t;
     vec3 companionLocal = companionNanoRay.localOrigin + companionNanoRay.localDirection * t;
     // Do not extrapolate a topology proof across an instance's clipping box.

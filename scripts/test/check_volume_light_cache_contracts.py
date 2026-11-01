@@ -12,6 +12,7 @@ This is a source check, not GLSL execution; the shader build is the user's.
 """
 
 import os
+from volume_shader_source import read_volume_shader
 import re
 import sys
 
@@ -23,6 +24,8 @@ failures = []
 
 
 def read(*parts):
+    if os.path.basename(os.path.join(*parts)) == 'volume_closesthit.rchit':
+        return read_volume_shader(os.path.join(*parts))
     with open(os.path.join(*parts), encoding="utf-8", errors="replace") as f:
         return f.read()
 

@@ -42,6 +42,16 @@ int main() {
         assert(shader.density.curve.evaluate(float(i)/100) >=
             shader.density.curve.evaluate(float(i-1)/100));
     }
+    assert(volume_material::configure(shader,
+        {{"independent_emission", true}}, error));
+    assert(volume_material::configure(shader,
+        {{"soot_burnout", 0.8f}, {"soot_burnout_start", 0.1f},
+         {"soot_burnout_end", 0.4f}}, error));
+    assert(shader.emission_response.soot_burnout == 0.8f);
+    assert(volume_material::inspect(shader).at("soot_burnout_end") == 0.4f);
+    float response[5];
+    shader.emission_response.pack(response);
+    assert(response[0] == 3.0f);
     const auto saved = shader.toJson();
     const auto roundTrip = volume_material::inspect(shader);
     assert(volume_material::configure(shader, roundTrip, error));
@@ -50,10 +60,25 @@ int main() {
     loaded.fromJson(saved);
     assert(loaded.density.curve.toJson() == shader.density.curve.toJson());
     assert(loaded.emission_response.toJson() == shader.emission_response.toJson());
+    VolumeShader presetCopy = shader;
+    assert(volume_material::configure(presetCopy, {{"preset", "physical_cloud"}}, error));
+    assert(presetCopy.emission_response.independent_emission);
     auto legacy = saved;
     legacy.erase("emission_response");
     loaded.fromJson(legacy);
     assert(!loaded.emission_response.enabled);
+    assert(!loaded.emission_response.independent_emission);
+
+    VolumeShader smoke = shader;
+    assert(volume_material::configure(smoke, {{"smoke_color", {0.6f, 0.5f, 0.4f}},
+        {"smoke_opacity", 3.0f}, {"smoke_tint", {1.0f, 0.5f, 0.25f}}}, error));
+    const auto look = volume_material::smokeAppearance(smoke);
+    assert(std::abs(look.color.x - 0.6f) < 1e-5f && std::abs(look.color.z - 0.4f) < 1e-5f);
+    assert(std::abs(look.opacity - 3.0f) < 1e-5f);
+    assert(std::abs(look.tint.y - 0.5f) < 1e-5f);
+    assert(std::abs(smoke.scattering.coefficient + smoke.absorption.coefficient - 3.0f) < 1e-5f);
+    assert(volume_material::configure(smoke, {{"smoke_opacity", 6.0f}}, error));
+    assert(std::abs(volume_material::smokeAppearance(smoke).color.y - 0.5f) < 1e-5f);
 
     const auto before = shader.toJson();
     const nlohmann::json invalid[] = {
@@ -66,6 +91,14 @@ int main() {
         {{"density_remap_high", 0.0f}}, {{"temperature_max", 0.0f}},
         {{"max_scatter_events", 8.5f}}, {{"unknown", 1}},
         {{"internal_light_steps", 33}}, {{"internal_light_stride", 0}},
+        {{"independent_emission", 1}},
+        {{"density_multiplier", 20}, {"independent_emission", "yes"}},
+        {{"soot_burnout", 1.5f}}, {{"soot_burnout_start", -0.1f}},
+        {{"temperature_gamma", 0.05f}}, {{"temperature_gamma", 9.0f}},
+        {{"flame_emission", -1.0f}}, {{"smoke_opacity", -1.0f}},
+        {{"smoke_color", {1.0f, 2.0f, 1.0f}}},
+        {{"smoke_opacity", 1.0f}, {"scatter_coefficient", 1.0f}},
+        {{"soot_burnout_start", 0.6f}, {"soot_burnout_end", 0.6f}},
         {{"emission_exposure_ev", std::numeric_limits<float>::infinity()}},
         {{"color_ramp", {{0.5f, 1, 0, 0}, {0.5f, 0, 1, 0}}}}
     };

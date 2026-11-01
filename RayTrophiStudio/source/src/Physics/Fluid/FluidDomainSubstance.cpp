@@ -1,5 +1,7 @@
 // Domain <- substance. See FluidDomainSubstance.h.
 #include "Fluid/FluidDomainSubstance.h"
+#include "Fluid/MatterSubstanceState.h"
+#include "Fluid/FluidParticles.h"
 
 #include "MaterialStateField.h"
 #include "SubstanceLibrary.h"
@@ -15,6 +17,55 @@ namespace Fluid {
 
 const SubstanceProfile* domainSubstance(const APICSolverParams& params) {
     return tryFindSubstance(params.default_substance);
+}
+
+namespace {
+void applyGranularSubstancePhysics(APICSolverParams& params, const SubstanceProfile& substance) {
+    const auto* s = &substance;
+    params.granular_friction_angle_degrees = s->granular_friction_degrees;
+    params.granular_cohesion = s->granular_cohesion;
+    params.granular_dilatancy_degrees = s->granular_dilatancy_degrees;
+    params.granular_young_modulus = s->granular_young_modulus;
+    params.granular_poisson_ratio = s->granular_poisson_ratio;
+    params.granular_tensile_cutoff = s->granular_tensile_cutoff;
+    params.granular_hardening = s->granular_hardening;
+    params.granular_compaction_hardening = s->granular_compaction_hardening;
+    params.granular_compaction_limit = s->granular_compaction_limit;
+    params.granular_fracture_strain = s->granular_fracture_strain;
+    params.granular_damage_rate = s->granular_damage_rate;
+    params.granular_healing_rate = s->granular_healing_rate;
+    params.granular_rebonding = s->granular_rebonding;
+    params.granular_snow_plasticity = s->granular_snow_plasticity;
+    params.granular_snow_critical_compression = s->granular_snow_critical_compression;
+    params.granular_snow_critical_stretch = s->granular_snow_critical_stretch;
+    params.granular_snow_hardening = s->granular_snow_hardening;
+    params.granular_snow_max_hardening = s->granular_snow_max_hardening;
+    params.granular_snow_min_hardening = s->granular_snow_min_hardening;
+    params.granular_snow_heterogeneity = s->granular_snow_heterogeneity;
+    params.granular_snow_clump_size = s->granular_snow_clump_size;
+    params.granular_density = s->density;
+    params.granular_softening_temperature = s->granular_softening_kelvin;
+    params.granular_softening_range = s->granular_softening_range;
+    params.granular_residual_strength = s->granular_residual_strength;
+    params.granular_tack_peak = s->granular_tack_peak;
+    params.granular_thermal_conductivity = s->parcel_conduction;
+}
+} // namespace
+
+void resolveParticleGranularPhysics(APICSolverParams& params, const FluidParticles& particles) {
+    const auto count = std::min(particles.size(), particles.constitutive_model.size());
+    for (std::size_t i = 0; i < count; ++i) {
+        const auto model = static_cast<MatterConstitutiveModel>(particles.constitutive_model[i]);
+        if (model != MatterConstitutiveModel::Granular) {
+            continue;
+        }
+        const auto* profile = particleSubstance(i < particles.substance_tag.size()
+            ? particles.substance_tag[i] : kSubstanceUntagged, params);
+        if (profile && profile->granular_transport == MatterGranularTransport::Mpm) {
+            applyGranularSubstancePhysics(params, *profile);
+            return;
+        }
+    }
 }
 
 bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
@@ -45,33 +96,7 @@ bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
     }
     params.kinematic_viscosity = nu;
 
-    params.granular_friction_angle_degrees = s->granular_friction_degrees;
-    params.granular_cohesion = s->granular_cohesion;
-    params.granular_dilatancy_degrees = s->granular_dilatancy_degrees;
-    params.granular_young_modulus = s->granular_young_modulus;
-    params.granular_poisson_ratio = s->granular_poisson_ratio;
-    params.granular_tensile_cutoff = s->granular_tensile_cutoff;
-    params.granular_hardening = s->granular_hardening;
-    params.granular_compaction_hardening = s->granular_compaction_hardening;
-    params.granular_compaction_limit = s->granular_compaction_limit;
-    params.granular_fracture_strain = s->granular_fracture_strain;
-    params.granular_damage_rate = s->granular_damage_rate;
-    params.granular_healing_rate = s->granular_healing_rate;
-    params.granular_rebonding = s->granular_rebonding;
-    params.granular_snow_plasticity = s->granular_snow_plasticity;
-    params.granular_snow_critical_compression = s->granular_snow_critical_compression;
-    params.granular_snow_critical_stretch = s->granular_snow_critical_stretch;
-    params.granular_snow_hardening = s->granular_snow_hardening;
-    params.granular_snow_max_hardening = s->granular_snow_max_hardening;
-    params.granular_snow_min_hardening = s->granular_snow_min_hardening;
-    params.granular_snow_heterogeneity = s->granular_snow_heterogeneity;
-    params.granular_snow_clump_size = s->granular_snow_clump_size;
-    params.granular_density = s->density;
-    params.granular_softening_temperature = s->granular_softening_kelvin;
-    params.granular_softening_range = s->granular_softening_range;
-    params.granular_residual_strength = s->granular_residual_strength;
-    params.granular_tack_peak = s->granular_tack_peak;
-    params.granular_thermal_conductivity = s->parcel_conduction;
+    applyGranularSubstancePhysics(params, *s);
 
     params.applySubstanceProfile(*s, scale);
     params.sanitizeGranularMaterial();

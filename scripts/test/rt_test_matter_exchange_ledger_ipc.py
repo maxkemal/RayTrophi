@@ -61,6 +61,9 @@ def main():
                 "pyrolysis", "mist_to_gas", "condensation",
                 # C5 pores and the 2026-10-11 rain microphysics.
                 "absorption", "drainage", "autoconversion", "precipitation",
+                # 2026-10-27: flow-source inflow and what Max Particles withheld.
+                # Listed here, left out of the summary's balance.
+                "emission", "emission_withheld",
             }, row["kind"]
             assert row["source_mass_kg"] >= 0.0
             assert row["target_mass_kg"] >= 0.0

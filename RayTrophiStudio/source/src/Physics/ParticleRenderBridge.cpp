@@ -1149,7 +1149,7 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
 
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state  = states[d];
-            const bool is_fluid = RayTrophiSim::simulationDomainHasLiquid(state.type);
+            const bool is_fluid = RayTrophiSim::simulationDomainHasLiquid(state);
             // The one view decision (FluidViewResolver); splat vs surface vs fog
             // is never re-derived from the mode or the bindings in this file.
             RayTrophiSim::Fluid::FluidViewPlan view_plan;
@@ -1933,7 +1933,7 @@ void SceneData::syncFluidFoamRenderInstances(bool enable_rt_geometry) {
 
         for (std::size_t d = 0; d < states.size(); ++d) {
             const auto& state   = states[d];
-            const bool is_fluid = RayTrophiSim::simulationDomainHasLiquid(state.type);
+            const bool is_fluid = RayTrophiSim::simulationDomainHasLiquid(state);
             // NOTE: do NOT gate on `!state.foam.empty()`. Foam is volatile — it is
             // culled by lifetime and re-spawned constantly, so its count oscillates
             // through 0 every few frames. Gating on non-empty here tore the group

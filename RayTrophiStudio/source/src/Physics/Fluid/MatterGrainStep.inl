@@ -79,72 +79,6 @@ void appendGrainBoxCollider(const Vec3& low, const Vec3& high,
     }
 }
 
-// Held ice (P9, 2026-10-20): frozen liquid parcels are pinned outside both
-// lanes, and DEM grains collide with triangles only, so sand fell through a
-// frozen pond. The frozen cells' outer faces become a static triangle set:
-// the cells holding a frozen parcel, and each face whose neighbour holds none.
-// Cell resolution, not the parcels' exact shape: the same picture the liquid
-// sees through the solid-phase overlay. Returns the faces added.
-std::size_t appendGrainIceFaces(const SimulationGridDomainState& state,
-                                std::vector<SurfaceMeshTriangle>& out) {
-    const auto& grid = state.grid;
-    const auto& particles = state.particles;
-    const float h = grid.voxel_size;
-    if (!(h > 0.0f) || particles.flags.size() != particles.size()) return 0;
-    const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
-    const auto key = [&](int i, int j, int k) {
-        return (static_cast<int64_t>(k) * ny + j) * nx + i;
-    };
-    std::vector<int64_t> cells;
-    for (std::size_t p = 0; p < particles.size(); ++p) {
-        if (!(particles.flags[p] & Fluid::kParticleFlagFrozen)) continue;
-        const Vec3 local = (particles.position[p] - grid.origin) * (1.0f / h);
-        const int i = static_cast<int>(std::floor(local.x));
-        const int j = static_cast<int>(std::floor(local.y));
-        const int k = static_cast<int>(std::floor(local.z));
-        if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) continue;
-        cells.push_back(key(i, j, k));
-    }
-    if (cells.empty()) return 0;
-    std::sort(cells.begin(), cells.end());
-    cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
-    const auto frozen = [&](int i, int j, int k) {
-        if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return false;
-        return std::binary_search(cells.begin(), cells.end(), key(i, j, k));
-    };
-    const std::size_t before = out.size();
-    for (const int64_t c : cells) {
-        const int i = static_cast<int>(c % nx);
-        const int j = static_cast<int>((c / nx) % ny);
-        const int k = static_cast<int>(c / (static_cast<int64_t>(nx) * ny));
-        const Vec3 lo = grid.origin + Vec3(i * h, j * h, k * h);
-        for (int axis = 0; axis < 3; ++axis) {
-            for (int side = 0; side < 2; ++side) {
-                const int di = axis == 0 ? (side ? 1 : -1) : 0;
-                const int dj = axis == 1 ? (side ? 1 : -1) : 0;
-                const int dk = axis == 2 ? (side ? 1 : -1) : 0;
-                if (frozen(i + di, j + dj, k + dk)) continue;
-                // The face's two in-plane axes and its offset along `axis`.
-                const int u = (axis + 1) % 3, v = (axis + 2) % 3;
-                Vec3 corner[4];
-                for (int q = 0; q < 4; ++q) {
-                    float c3[3] = {lo.x, lo.y, lo.z};
-                    c3[axis] += side ? h : 0.0f;
-                    c3[u] += (q == 1 || q == 2) ? h : 0.0f;
-                    c3[v] += (q >= 2) ? h : 0.0f;
-                    corner[q] = Vec3(c3[0], c3[1], c3[2]);
-                }
-                SurfaceMeshTriangle t;
-                t.p0 = corner[0]; t.p1 = corner[1]; t.p2 = corner[2];
-                out.push_back(t);
-                t.p1 = corner[2]; t.p2 = corner[3];
-                out.push_back(t);
-            }
-        }
-    }
-    return out.size() - before;
-}
-
 bool runMatterGrainStep(SimulationGridDomainState& state,
     const Fluid::APICSolverParams& params, bool legacy_granular, float dt, float time_seconds,
     SimulationComputeContext* compute, SimulationGridDomainComputeBuffers& buffers,
@@ -267,7 +201,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         range.key = "held_ice";
         range.first = triangles.size();
         range.analytic = true;
-        ice_faces = appendGrainIceFaces(state, triangles);
+        ice_faces = Fluid::appendMatterIceColliderFaces(state.particles, state.grid, triangles);
         if (ice_faces > 0) {
             ranges.push_back(range);
         }
@@ -584,7 +518,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         // vacuum-calibrated acceptance (free fall, repose, CPU reference)
         // without anyone having asked for air. "Air exists where the domain
         // simulates it" - an authored domain without gas stays a vacuum.
-        if (state.type == SimulationDomainType::Matter && state.gas_stats.stepped &&
+        if (simulationDomainHasGas(state) && state.gas_stats.stepped &&
             state.gas_stats.max_speed > 1.0e-4f) {
             Fluid::exchangeMatterGrainGasDrag(grains, params.grain.radius_m,
                 Fluid::gasGrid(state), gas_air, dt, motion.external_acceleration, report, &params.grain);
@@ -616,17 +550,22 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             common_driver.run = [&](uint32_t minimum, const Fluid::MatterCommonStep& grain_step,
                                     std::string&) {
                 Fluid::MatterCommonClockHooks clock;
-                clock.minimum_substeps = minimum;
-                const double travel_request = std::ceil(
-                    (double(report.liquid_speed_max) + params.gravity.length() * dt) * dt /
-                    std::max(0.1 * double(params.grain.radius_m), 1e-12));
-                if (!std::isfinite(travel_request) ||
-                    travel_request > std::numeric_limits<int>::max() - 1.0) {
-                    error = "shared Matter clock travel request exceeds its index width";
-                    return false;
-                }
-                clock.minimum_substeps = std::max(minimum, uint32_t(travel_request));
+                // D2-2: the continuum clock runs at its own CFL and elastic
+                // wave bound only; the DEM subcycles inside each of its
+                // substeps (clock.contact). It used to take the DEM's count as
+                // its own minimum, so every liquid/MPM parcel was integrated
+                // and advected at the grain contact rate: 322 substeps in the
+                // 4-source scene for a continuum that asked for a handful.
+                // No liquid travel minimum either. It asked the liquid to move
+                // under 10% of a grain radius per refresh (2.5 mm for 25 mm
+                // grains): ~7 m/s falling water forced ~154 continuum substeps
+                // and, past the ceiling, held the domain (2026-10-27). The
+                // grains sample the liquid on its voxel grid (5.8 cm there),
+                // so the continuum's own CFL already bounds how stale that
+                // field gets, and the DEM's travel bound counts the liquid
+                // lump speed inside its own substeps (drag is implicit).
                 clock.authored_max_substeps = static_cast<uint32_t>(params.grain.max_substeps);
+                clock.contact_substeps = minimum;
                 clock.begin = [&](std::size_t continuum_bytes, std::string&) {
                     const auto used = continuum_bytes + report.working_set_bytes;
                     if (budget && used >= budget) {
@@ -668,9 +607,28 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
                 };
                 clock.contact = [&](uint32_t index, uint32_t total, float step_dt,
                                     std::string&) {
-                    return (!coupled || liquid_contact.refresh(index, step_dt, error)) &&
-                        grain_step(index, total, step_dt, error) &&
-                        (!coupled || liquid_contact.react(index, step_dt, error));
+                    // `per` DEM substeps inside this continuum substep: the
+                    // DEM's own request spread over the continuum count. The
+                    // continuum count is even, so the DEM total ends in its
+                    // canonical bank. The liquid coupling sees the DEM index
+                    // of its first substep: its grain bank parity, and 0 only
+                    // for the frame's first refresh/react (accumulator reset).
+                    // Drag accumulates over the inner substeps and is returned
+                    // to the liquid once, with its buoyancy over step_dt.
+                    const uint32_t per = std::max(1u, (minimum + total - 1u) / total);
+                    report.common_continuum_substeps = total;
+                    report.dem_substeps_per_continuum = per;
+                    const uint32_t first = index * per;
+                    const float grain_dt = step_dt / static_cast<float>(per);
+                    if (coupled && !liquid_contact.refresh(first, step_dt, error)) {
+                        return false;
+                    }
+                    for (uint32_t inner = 0; inner < per; ++inner) {
+                        if (!grain_step(first + inner, total * per, grain_dt, error)) {
+                            return false;
+                        }
+                    }
+                    return !coupled || liquid_contact.react(first, step_dt, error);
                 };
                 return step_continuum(&clock);
             };
