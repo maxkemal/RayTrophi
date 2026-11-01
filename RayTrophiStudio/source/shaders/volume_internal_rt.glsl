@@ -105,6 +105,20 @@ float volumeInternalOptical(VkVolumeInstance vol, vec3 p, float density, float e
 #undef INTERNAL_FLAGS
 #undef INTERNAL_VOXEL
 
+// Inline, because a nested trace here spills this shader's whole stack: one
+// marched voxel still cost +140 ms at frame 69 of the nuke. Solids only: volume
+// boxes stay unconfirmed candidates and alpha-tested geometry counts as opaque.
+float volumeInternalSolidDistance(vec3 origin, vec3 direction, float tMax) {
+    rayQueryEXT query;
+    rayQueryInitializeEXT(query, topLevelAS,
+        gl_RayFlagsOpaqueEXT | gl_RayFlagsTerminateOnFirstHitEXT,
+        0xF5, origin, 1e-4, direction, tMax);
+    while (rayQueryProceedEXT(query)) {}
+    if (rayQueryGetIntersectionTypeEXT(query, true) !=
+        gl_RayQueryCommittedIntersectionTriangleEXT) return -1.0;
+    return rayQueryGetIntersectionTEXT(query, true);
+}
+
 vec3 volumeInternalLighting(VkVolumeInstance vol, vec3 p, vec3 viewDir) {
     int steps = clamp(vol._ramp_pad[0], 0, 32);
     if (steps == 0 || vol.emission_mode == 0) {
@@ -115,7 +129,7 @@ vec3 volumeInternalLighting(VkVolumeInstance vol, vec3 p, vec3 viewDir) {
     vec3 direction = sampleHG(viewDir, g, payload.seed);
     float distance = volumeExitDistance(vol, p, direction);
     if (distance <= 1e-4) return vec3(0.0);
-    float solidDistance = rwSolidDistance(p, direction, distance);
+    float solidDistance = volumeInternalSolidDistance(p, direction, distance);
     if (solidDistance >= 0.0) distance = min(distance, solidDistance);
     vec3 absorption = max(vol.absorption_color, vec3(0.0));
     float peak = max(absorption.r, max(absorption.g, absorption.b));

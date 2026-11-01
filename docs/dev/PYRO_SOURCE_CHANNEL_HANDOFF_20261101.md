@@ -2,19 +2,51 @@
 
 > **Durum:** AKTİF — pyro tepki zinciri; dört parti canlı ölçüldü, beşinci parti (eklemeli flame, iç ışık + burnout, panel) yazıldı, derlenmedi; duman renk rampası ve koyu nokta bulgusu açık
 
-## Handoff: internal light step fix, 2026-11-01
+## Handoff: internal light step fix and cost, 2026-11-01
 
-Fixed, NOT rebuilt by the user and NOT measured. Shaders changed only:
-volume_internal_integral.glsl starts at one voxel and grows segments by 1.35, so
-steps sets reach, never spacing. Fewer steps should now lose far light rather than
-gain energy. Internal light therefore looks different from the numbers below: its
-.641 at 32 steps was the biased figure. rt_test_pyro_internal_ipc.py now fails if 8
-and 32 steps differ by more than .03 in p50 at the last frame.
+Step fix MEASURED, in commit 34214c0d: rt_test_pyro_internal_ipc.py PASS on rebuilt
+shaders. volume_internal_integral.glsl starts at one voxel and grows segments by
+1.35, so steps sets reach, never spacing.
 
-Cost is NOT fixed. The one-step separation could not be measured: the user was
-working in the app (Material mode), rendered frames returned 0 ms, so those numbers
-were thrown away. Nothing was changed on a guess. To finish: in Rendered mode, frame
-69, compare internal_light_steps 0, 1 and 2 with render.volume_stats counters.
+Frame 69, burn material, 32 spp, same process:
+
+| internal steps | ms | p50 | specks |
+|---|---|---|---|
+| off | 100, 105 | .622 | 38 |
+| 1 | 245, 246 | .623 | 33 |
+| 2 | 199 | .625 | 35 |
+| 8 | 199..265 | .635 | 60..72 |
+| 32 | 225..290 | .636 | 67..70 |
+
+Energy no longer depends on the budget: 8 and 32 are .636 and .637 in the test,
+frames 12 and 30 identical to three digits. 1 and 2 steps do not reach any fire.
+Use 8: same light for less or equal cost.
+
+Cost: one marched voxel already costs about +140 ms, so it is not the march and not
+extra rays (camera_volume_rays 3.09 M either way; the gather is not counted). The
+one heavy thing left per gather was the nested traceRayEXT in rwSolidDistance, from
+inside the volume closest hit. Not proven: inferred by elimination.
+
+MEASURED, confirmed: gather now uses inline rayQuery (volumeInternalSolidDistance,
+GL_EXT_ray_query in volume_closesthit.rchit). Same frame and material:
+
+| internal steps | nested trace ms | rayQuery ms | p50 before, after |
+|---|---|---|---|
+| off | 100, 105 | 105, 109 | .622, .622 |
+| 1 | 245 | 110, 113 | .623, .623 |
+| 8 | 199..265 | 119..122 | .635, .635 |
+| 32 | 225..290 | 124..136 | .636, .636 |
+
+Frame 30, 32 steps: 142 to 80 ms against 73 off. Frame 12: 56 to 54 against 51.
+Fire pixels and p50 match to three digits; test PASS. Internal light now costs about
++15% at frame 69 instead of +130..170%. The per-gather cost was the nested trace from
+the volume closest hit, and that is the lesson: a nested traceRay in this shader is
+not the price of one ray.
+
+Accepted change: alpha-tested geometry blocks fire light as if opaque. A device
+without rayQuery fails the pipeline: the capability is optional in VulkanBackend.cpp
+and no fallback exists. Not checked: a solid inside the gas (scene has only the
+ground), panel, RayFusion.
 
 ## Handoff: internal light and additive flame MEASURED, 2026-11-01
 
