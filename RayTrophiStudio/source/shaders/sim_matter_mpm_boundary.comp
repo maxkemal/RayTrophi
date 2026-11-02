@@ -1,0 +1,181 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// sim_matter_mpm_boundary.comp - the MPM lane's grid contact against domain
+// walls and colliders (docs/dev/COLLIDER_TEMAS_YUZEYI.md).
+//
+// In MPM the GRID carries contact: a parcel-level constraint cannot spread
+// stress, so a body supported only by it piles into the constraint band.
+// (2026-11-02 live: with the lane's mask holding only deep collider cells and
+// the contact done per parcel, a jelly on a plate fell from 8 cm to 1.15 cm,
+// the band's h/2, without tearing.)
+//
+// Colliders with a signed distance (grid.solid_phi) take the standard grid-SDF
+// collision, per MAC face:
+//   phi_face = mean of its two cells; contact when phi_face < 0;
+//   n = grad phi (central differences around the face);
+//   the face's full velocity: its own component plus the mean of the four
+//   neighbouring faces of each other component (read from a snapshot, so no
+//   thread reads a face another one is writing);
+//   relative to the solid: moving in -> the normal part goes and the slip
+//   shrinks by mu * |v_n| (Coulomb); moving out -> the surface's adhesion holds
+//   it: the stress to stop a face is rho * h * v_n / dt, up to the adhesion it
+//   stays, beyond it its separation slows by adhesion * dt / (rho * h).
+// The contact switches on with phi itself, not with whole cells, so a moving
+// plate carries a body continuously and the rest height is sub-voxel. A face
+// deep in a collider that holds no mass reads v = 0 and keeps its slip relative
+// to the solid: a frictionless plate drags nothing through the G2P stencil.
+//
+// Cells without a distance (domain walls, kinematic proxies) keep the old rule:
+// a face next to one takes the solid's speed only while the body moves into it.
+// Dense only: the MPM lane never owns compact pages.
+// CPU twin: APICFluidSolver.cpp enforceMpmContact.
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    uint flags;    // bit 0: out-of-domain cells are walls (closed boundary)
+    float dt;      // transfer step the grid velocity advances by
+    float density; // MPM body density, kg/m^3
+    float h;       // voxel size
+    float _pad;
+} pc;
+layout(set = 0, binding = 0) buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 1) buffer VelY { float vel_y[]; };
+layout(set = 0, binding = 2) buffer VelZ { float vel_z[]; };
+layout(set = 0, binding = 3) readonly buffer Mask { float fluid_mask[]; };
+layout(set = 0, binding = 4) readonly buffer SolidVX { float svx[]; };
+layout(set = 0, binding = 5) readonly buffer SolidVY { float svy[]; };
+layout(set = 0, binding = 6) readonly buffer SolidVZ { float svz[]; };
+layout(set = 0, binding = 7) readonly buffer ContactMu { float contact_mu[]; };
+layout(set = 0, binding = 8) readonly buffer ContactGlue { float contact_glue[]; };
+layout(set = 0, binding = 9) readonly buffer Phi { float phi[]; };
+layout(set = 0, binding = 10) readonly buffer SnapX { float snap_x[]; };
+layout(set = 0, binding = 11) readonly buffer SnapY { float snap_y[]; };
+layout(set = 0, binding = 12) readonly buffer SnapZ { float snap_z[]; };
+#include "sim_mac_lane.glsl"
+
+const float kFar = 1.0e29;
+
+bool outside(ivec3 c) {
+    return any(lessThan(c, ivec3(0))) || any(greaterThanEqual(c, ivec3(pc.nx, pc.ny, pc.nz)));
+}
+int cellIndex(ivec3 c) {
+    return (c.z * pc.ny + c.y) * pc.nx + c.x;
+}
+ivec3 unitAxis(int axis) {
+    ivec3 e = ivec3(0);
+    e[axis] = 1;
+    return e;
+}
+bool maskSolid(ivec3 c) {
+    if (outside(c)) {
+        return (pc.flags & 1u) != 0u;
+    }
+    return fluid_mask[cellIndex(c)] < -0.5;
+}
+bool hasPhi(ivec3 c) {
+    return !outside(c) && phi[cellIndex(c)] < kFar;
+}
+// A wall the distance field does not describe: domain wall, kinematic proxy.
+bool plainWall(ivec3 c) {
+    return maskSolid(c) && !hasPhi(c);
+}
+float phiAt(ivec3 c) {
+    c = clamp(c, ivec3(0), ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1));
+    float v = phi[cellIndex(c)];
+    return v >= kFar ? 2.0 * pc.h : v;
+}
+vec3 solidVelocity(ivec3 c) {
+    if (outside(c)) {
+        return vec3(0.0);
+    }
+    int q = cellIndex(c);
+    return vec3(svx[q], svy[q], svz[q]);
+}
+float snapFace(int component, ivec3 f) {
+    uint a = macAddress(component, f.x, f.y, f.z);
+    if (a == MAC_ABSENT) {
+        return 0.0;
+    }
+    return component == 0 ? snap_x[a] : (component == 1 ? snap_y[a] : snap_z[a]);
+}
+
+// The old rule, for walls without a distance.
+float plainContact(float v, ivec3 low, ivec3 high, int component) {
+    bool solid_low = maskSolid(low);
+    bool solid_high = maskSolid(high);
+    if (solid_low && solid_high) {
+        return 0.5 * (solidVelocity(low)[component] + solidVelocity(high)[component]);
+    }
+    return solid_low ? max(v, solidVelocity(low)[component])
+                     : min(v, solidVelocity(high)[component]);
+}
+
+float phiContact(float v, ivec3 low, ivec3 high, int component) {
+    float phi_low = phiAt(low);
+    float phi_high = phiAt(high);
+    float phi_face = 0.5 * (phi_low + phi_high);
+    if (phi_face >= 0.0) {
+        return v;
+    }
+    vec3 grad;
+    grad[component] = (phi_high - phi_low) / pc.h;
+    for (int k = 1; k <= 2; ++k) {
+        int a = (component + k) % 3;
+        ivec3 e = unitAxis(a);
+        grad[a] = ((phiAt(low + e) - phiAt(low - e)) + (phiAt(high + e) - phiAt(high - e))) /
+                  (4.0 * pc.h);
+    }
+    float gl = length(grad);
+    if (gl < 1e-6) {
+        return v;
+    }
+    vec3 n = grad / gl;
+    // Full velocity at this face.
+    vec3 u;
+    u[component] = v;
+    for (int k = 1; k <= 2; ++k) {
+        int a = (component + k) % 3;
+        ivec3 e = unitAxis(a);
+        u[a] = 0.25 * (snapFace(a, low) + snapFace(a, low + e) +
+                       snapFace(a, high) + snapFace(a, high + e));
+    }
+    ivec3 wall = clamp(phi_low < phi_high ? low : high, ivec3(0),
+                       ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1));
+    vec3 vs = solidVelocity(wall);
+    int q = cellIndex(wall);
+    float mu = max(contact_mu[q], 0.0);
+    float glue = max(contact_glue[q], 0.0);
+    vec3 rel = u - vs;
+    float vn = dot(rel, n);
+    vec3 vt = rel - vn * n;
+    if (vn < 0.0) {
+        float slip = length(vt);
+        if (slip > 1e-9) {
+            vt *= max(slip - mu * (-vn), 0.0) / slip;
+        }
+        rel = vt;
+    } else if (glue > 0.0) {
+        float hold = glue * pc.dt / (max(pc.density, 1.0) * pc.h);
+        rel = vt + n * max(vn - hold, 0.0);
+    }
+    return vs[component] + rel[component];
+}
+
+void main() {
+    uint lane = gl_GlobalInvocationID.x;
+    for (int component = 0; component < 3; ++component) {
+        ivec3 f;
+        uint a;
+        if (!macLaneFace(lane, component, f, a)) {
+            continue;
+        }
+        ivec3 low = f - unitAxis(component);
+        float v = snapFace(component, f);
+        float result = (plainWall(low) || plainWall(f))
+            ? plainContact(v, low, f, component)
+            : phiContact(v, low, f, component);
+        if (component == 0) vel_x[a] = result;
+        else if (component == 1) vel_y[a] = result;
+        else vel_z[a] = result;
+    }
+}

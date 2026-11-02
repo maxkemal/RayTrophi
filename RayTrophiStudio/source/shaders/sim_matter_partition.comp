@@ -19,10 +19,12 @@ void main() {
     if (resolved == 1u) {
         uint slot = atomicAdd(count[0], 1u);
         fluid_index[slot] = index;
-    } else if (resolved == 2u) {
+    } else if (resolved == 2u || resolved == 3u) {
+        // Granular (2) and elastic (3) are both MPM continua: one lane, and the
+        // lane's law (stress update mpm_law) is the lane material's.
         uint slot = atomicAdd(count[1], 1u);
         granular_index[slot] = index;
     } else {
-        atomicAdd(count[resolved == 3u ? 2 : 3], 1u);
+        atomicAdd(count[3], 1u);
     }
 }

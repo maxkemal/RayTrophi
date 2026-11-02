@@ -73,10 +73,12 @@ bool stepMatterModelBatch(FluidParticles& particles, FluidSim::FluidGrid& liquid
         if (model == MatterConstitutiveModel::Auto) {
             model = legacy_model;
         }
-        if (model != MatterConstitutiveModel::Fluid && model != MatterConstitutiveModel::Granular) {
-            error = "mixed CPU coordinator supports only resolved fluid/granular models";
+        if (model != MatterConstitutiveModel::Fluid && model != MatterConstitutiveModel::Granular &&
+            model != MatterConstitutiveModel::Elastic) {
+            error = "mixed CPU coordinator supports only resolved fluid/granular/elastic models";
             return false;
         }
+        // Elastic rides the MPM lane (1) with granular; its law is the lane's.
         const std::size_t lane = model == MatterConstitutiveModel::Fluid ? 0 : 1;
         appendSnapshot(models[lane], particles, index);
         models[lane].constitutive_model.back() = static_cast<uint8_t>(model);

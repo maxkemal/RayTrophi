@@ -39,6 +39,38 @@ bool downloadGpuGranularParticles(Fluid::FluidParticles& particles,
     return compute->endTransferBatch() && ok;
 }
 
+// grid.solid_contact_* -> device, for the MPM wall contact. Cells no collider
+// stamped read 0: frictionless and never sticky, the domain walls' rule.
+bool uploadGpuSolidContact(const FluidSim::FluidGrid& grid, SimulationComputeContext& compute,
+                           SimulationGridDomainComputeBuffers& buffers) {
+    const std::size_t cells = grid.getCellCount();
+    if (!buffers.var_contact_friction.valid() || !buffers.var_contact_adhesion.valid()) {
+        return false;
+    }
+    static std::vector<float> zeros;
+    const bool stamped = grid.solid_contact_friction.size() == cells &&
+        grid.solid_contact_adhesion.size() == cells;
+    if (!stamped) {
+        zeros.assign(cells, 0.0f);
+    }
+    bool ok = compute.uploadBuffer(buffers.var_contact_friction,
+        stamped ? grid.solid_contact_friction.data() : zeros.data(), cells * sizeof(float));
+    ok = compute.uploadBuffer(buffers.var_contact_adhesion,
+        stamped ? grid.solid_contact_adhesion.data() : zeros.data(), cells * sizeof(float)) && ok;
+    // Signed distance for the parcel contact; a grid no collider stamped is
+    // "far" everywhere.
+    if (buffers.var_solid_phi.valid()) {
+        static std::vector<float> far;
+        const bool has_phi = grid.solid_phi.size() == cells;
+        if (!has_phi) far.assign(cells, FluidSim::FluidGrid::kSolidPhiFar);
+        ok = compute.uploadBuffer(buffers.var_solid_phi,
+            has_phi ? grid.solid_phi.data() : far.data(), cells * sizeof(float)) && ok;
+    } else {
+        ok = false;
+    }
+    return ok;
+}
+
 bool downloadGpuGranularParticleState(SimulationGridDomainState& state,
     SimulationComputeContext* compute, SimulationGridDomainComputeBuffers& buffers) {
     return downloadGpuGranularParticles(state.particles, compute, buffers);
@@ -196,6 +228,7 @@ bool prepareGpuFluidMask(SimulationGridDomainState& state,
         ok = compute.uploadBuffer(buffers.var_svx, svx.data(), cells * sizeof(float)) && ok;
         ok = compute.uploadBuffer(buffers.var_svy, svy.data(), cells * sizeof(float)) && ok;
         ok = compute.uploadBuffer(buffers.var_svz, svz.data(), cells * sizeof(float)) && ok;
+        ok = uploadGpuSolidContact(state.grid, compute, buffers) && ok;
     }
     ok = compute.endTransferBatch() && ok;
     if (ok) {
@@ -372,25 +405,38 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
         gp.snow_min_hardening = fluid_params.granular_snow_min_hardening;
         gp.snow_min_plastic_jacobian =
             Fluid::Granular::snowMinPlasticJacobian(fluid_params.granular_density);
+        const bool elastic_solid = fluid_params.elastic_solid;
+        gp.elastic_solid = elastic_solid;
+        gp.elastic_yield_strain = fluid_params.elastic_yield_strain;
+        gp.elastic_relaxation_s = fluid_params.elastic_relaxation_s;
+        gp.elastic_fracture_strain = fluid_params.elastic_fracture_strain;
+        // Explicit Kelvin-Voigt cap (elasticViscosityLimit says why 1/12).
+        gp.elastic_viscosity = std::min(fluid_params.elastic_viscosity_pa_s,
+            Fluid::Granular::elasticViscosityLimit(
+                state.grid.voxel_size, dt, fluid_params.granular_density));
         const auto elastic_step = Fluid::Granular::elasticStepInfo(
             fluid_params.granular_young_modulus, state.grid.voxel_size, dt);
-        // Snow hardens per particle, so its wave limit is enforced in the
-        // kernel against the substance's real density (and flagged when hit).
-        const float snow_max_young = fluid_params.granular_snow_plasticity
+        // Snow hardens per particle and an elastic solid has its own density,
+        // so both enforce the wave limit in the kernel against the substance's
+        // real density (and flag it when hit).
+        const bool own_density_law = fluid_params.granular_snow_plasticity || elastic_solid;
+        const float snow_max_young = own_density_law
             ? Fluid::Granular::waveLimitedYoungModulus(
                   state.grid.voxel_size, dt, fluid_params.granular_density)
             : 0.0f;
         ok = Fluid::Granular::dispatchStressUpdate(
             *compute, gpu_buffers.granular, gpu_buffers.fluid_affine, n, dt, gp,
-            fluid_params.granular_snow_plasticity
-                ? std::min(fluid_params.granular_young_modulus, snow_max_young)
+            own_density_law
+                ? fluid_params.granular_young_modulus
                 : elastic_step.effective_young_modulus,
             fluid_params.granular_poisson_ratio,
             fluid_params.granular_fracture_strain,
             fluid_params.granular_damage_rate,
             fluid_params.granular_healing_rate,
             fluid_params.granular_rebonding, snow_max_young);
-        if (ok) {
+        // An elastic body is not a pile: settle's contact damping and sleep
+        // would kill a jelly's wobble, so its lane runs no settle at all.
+        if (ok && !elastic_solid) {
             // Snow: damp only slow parcels (rest jitter), never an impact
             // (SettleParams::damping_max_speed says why).
             ok = Fluid::Granular::dispatchSettle(

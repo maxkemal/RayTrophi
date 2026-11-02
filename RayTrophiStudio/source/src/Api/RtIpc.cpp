@@ -527,8 +527,12 @@ json simulationColliderToJson(const rtapi::SimulationColliderInfo& c) {
         {"bounds_max", vec3ToJson(c.bounds_max)},
         {"friction", c.friction}, {"restitution", c.restitution},
         {"thickness", c.thickness},
+        {"contact_friction", c.contact_friction},
+        {"contact_adhesion_pa", c.contact_adhesion_pa},
         {"sdf_resolution_mode", c.sdf_resolution_mode},
         {"sdf_ready", c.sdf_ready}, {"sdf_resolution", c.sdf_resolution},
+        {"sdf_dims", json::array({c.sdf_dims[0], c.sdf_dims[1], c.sdf_dims[2]})},
+        {"sdf_cooked_on_gpu", c.sdf_cooked_on_gpu}, {"sdf_cook_ms", c.sdf_cook_ms},
         {"resolved_valid", c.resolved_valid},
         {"resolved_world_min", vec3ToJson(c.resolved_world_min)},
         {"resolved_world_max", vec3ToJson(c.resolved_world_max)},
@@ -590,6 +594,8 @@ void applySimulationColliderPatch(const json& patch, rtapi::SimulationColliderIn
     vector("bounds_min", c.bounds_min); vector("bounds_max", c.bounds_max);
     flt("friction", c.friction); flt("restitution", c.restitution);
     flt("thickness", c.thickness);
+    flt("contact_friction", c.contact_friction);
+    flt("contact_adhesion_pa", c.contact_adhesion_pa);
     integer("sdf_resolution_mode", c.sdf_resolution_mode);
     boolean("gas_interaction_enabled", c.gas_interaction_enabled);
     flt("gas_density_rate", c.gas_density_rate);
@@ -968,6 +974,7 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
             {"granular_requested_young_modulus", info.granular_requested_young_modulus},
             {"granular_effective_young_modulus", info.granular_effective_young_modulus},
             {"granular_required_substeps", info.granular_required_substeps},
+            {"mpm_law", info.mpm_law},
             {"granular_solver_substeps", info.granular_solver_substeps},
             {"granular_stiffness_capped", info.granular_stiffness_capped},
             {"granular_wave_substeps", info.granular_wave_substeps},
@@ -3474,6 +3481,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"granular_requested_young_modulus", info.granular_requested_young_modulus},
                         {"granular_effective_young_modulus", info.granular_effective_young_modulus},
                         {"granular_required_substeps", info.granular_required_substeps},
+                        {"mpm_law", info.mpm_law},
                         {"granular_solver_substeps", info.granular_solver_substeps},
                         {"granular_stiffness_capped", info.granular_stiffness_capped},
                         {"granular_wave_substeps", info.granular_wave_substeps},
@@ -4235,6 +4243,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"bounds_measured", dg.bounds_measured},
                 {"bounds_min", nlohmann::json::array({dg.bounds_min[0], dg.bounds_min[1], dg.bounds_min[2]})},
                 {"bounds_max", nlohmann::json::array({dg.bounds_max[0], dg.bounds_max[1], dg.bounds_max[2]})},
+                {"bounds_p05", nlohmann::json::array({dg.bounds_p05[0], dg.bounds_p05[1], dg.bounds_p05[2]})},
+                {"bounds_p95", nlohmann::json::array({dg.bounds_p95[0], dg.bounds_p95[1], dg.bounds_p95[2]})},
                 {"whitewater_particles", dg.whitewater_particles},
                 {"whitewater_position_hash", hex(dg.whitewater_position_hash)}};
         });
@@ -7681,6 +7691,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["pressure_on_gpu"] = s.pressure_on_gpu;
             j["g2p_on_gpu"] = s.g2p_on_gpu;
             j["density_on_gpu"] = s.density_on_gpu;
+            j["collider_query_gpu"] = s.collider_query_gpu;
+            j["collider_query_ms"] = s.collider_query_ms;
+            j["collider_query_error"] = s.collider_query_error;
             j["total_ms"] = s.total_ms;
             j["p2g_ms"] = s.p2g_ms;
             j["pressure_ms"] = s.pressure_ms;

@@ -4113,6 +4113,9 @@ struct FluidStepStats {
     bool pressure_on_gpu = false;
     bool g2p_on_gpu = false;
     bool density_on_gpu = false;
+    bool collider_query_gpu = false;
+    float collider_query_ms = 0.0f;
+    std::string collider_query_error;
     float total_ms = 0.0f;
     float p2g_ms = 0.0f;
     float pressure_ms = 0.0f;
@@ -4844,6 +4847,9 @@ struct FluidDomainInfo {
     int granular_required_substeps = 1;
     int granular_solver_substeps = 1;
     bool granular_stiffness_capped = false;
+    // Law the MPM lane ran last step: "drucker_prager", "snow", "elastic", or
+    // "none" (no MPM parcel / not measured). docs/dev/ELASTIK_MPM.md.
+    std::string mpm_law = "none";
     // Which limit sized the subcycle, and whether the shader had to clamp the
     // deformation-gradient increment because it was not granted.
     int granular_wave_substeps = 1;
@@ -5273,12 +5279,21 @@ struct SimulationColliderInfo {
     float capsule_radius = 0.5f;
     Vec3 bounds_min = Vec3(-1.0f);
     Vec3 bounds_max = Vec3(1.0f);
-    float friction = 0.0f;
+    float friction = 0.0f;       // particle systems: tangential speed lost per hit, 0..1
     float restitution = 0.35f;
     float thickness = 0.0f;
+    // Contact surface for continuum bodies (docs/dev/COLLIDER_TEMAS_YUZEYI.md):
+    // Coulomb mu of the MPM lane's wall contact, and the tensile stress (Pa) the
+    // surface holds before a body lets go. Not `friction` above: that one is a
+    // per-hit speed loss fraction for particle systems, a different unit.
+    float contact_friction = 0.5f;
+    float contact_adhesion_pa = 0.0f;
     int sdf_resolution_mode = 1; // 0=32^3, 1=64^3, 2=128^3
     bool sdf_ready = false;      // read-only asynchronous cook status
     int sdf_resolution = 0;      // read-only cooked cubic resolution
+    int sdf_dims[3] = {0, 0, 0}; // read-only cooked lattice (Auto is per axis)
+    bool sdf_cooked_on_gpu = false; // read-only: P2 GPU cook, else CPU worker
+    float sdf_cook_ms = 0.0f;       // read-only: last cook's wall time
     // Read-only: the shape the solvers actually resolve THIS frame. For an
     // object-bound collider bounds_min/max above are only the authored fallback
     // box; the live shape comes from the source object, and a reader that only
@@ -5458,6 +5473,11 @@ struct FluidStateDigest {
     bool bounds_measured = false;
     double bounds_min[3] = {0.0, 0.0, 0.0};
     double bounds_max[3] = {0.0, 0.0, 0.0};
+    // 5th/95th percentile per axis: the body's extent without the few strays
+    // that set bounds_min/max (an elastic test read 0.35 vs 0.64 m width from
+    // run to run on the same shape, 2026-11-02).
+    double bounds_p05[3] = {0.0, 0.0, 0.0};
+    double bounds_p95[3] = {0.0, 0.0, 0.0};
     uint64_t whitewater_particles = 0;
     uint64_t whitewater_position_hash = 0;
 };

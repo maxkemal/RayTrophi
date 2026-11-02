@@ -98,7 +98,8 @@ def main():
                    'grain_step_ms': (runtime.get('host_ms') or {}).get('step_total'),
                    'host_ms': runtime.get('host_ms') or {},
                    'common_clock': clock,
-                   'clock_consistent': clock_consistent(clock, runtime.get('substep_limit')),
+                   # substep_limit names the limiting term; the authored cap is in cfl_terms.
+                   'clock_consistent': clock_consistent(clock, terms.get('max_substeps')),
                    'cost_last_substep': runtime.get('cost_last_substep') or {},
                    'upload_bytes': runtime.get('upload_bytes'),
                    'download_bytes': runtime.get('download_bytes'),

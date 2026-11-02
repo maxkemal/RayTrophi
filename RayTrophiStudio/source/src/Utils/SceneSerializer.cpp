@@ -264,6 +264,8 @@ json colliderToJson(const RayTrophiSim::ParticleColliderDesc& c) {
     j["restitution"] = c.restitution;
     j["friction"] = c.friction;
     j["thickness"] = c.thickness;
+    j["contact_friction"] = c.contact_friction;
+    j["contact_adhesion_pa"] = c.contact_adhesion_pa;
     j["gas_interaction_enabled"] = c.gas_interaction_enabled;
     j["gas_density_rate"] = c.gas_density_rate;
     j["gas_temperature_rate"] = c.gas_temperature_rate;
@@ -304,6 +306,8 @@ RayTrophiSim::ParticleColliderDesc jsonToCollider(const json& j) {
     if (j.contains("restitution")) c.restitution = j["restitution"];
     if (j.contains("friction")) c.friction = j["friction"];
     if (j.contains("thickness")) c.thickness = j["thickness"];
+    if (j.contains("contact_friction")) c.contact_friction = j["contact_friction"];
+    if (j.contains("contact_adhesion_pa")) c.contact_adhesion_pa = j["contact_adhesion_pa"];
     if (j.contains("gas_interaction_enabled")) c.gas_interaction_enabled = j["gas_interaction_enabled"];
     if (j.contains("gas_density_rate")) c.gas_density_rate = j["gas_density_rate"];
     if (j.contains("gas_temperature_rate")) c.gas_temperature_rate = j["gas_temperature_rate"];

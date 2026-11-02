@@ -49,6 +49,27 @@ void applyGranularSubstancePhysics(APICSolverParams& params, const SubstanceProf
     params.granular_residual_strength = s->granular_residual_strength;
     params.granular_tack_peak = s->granular_tack_peak;
     params.granular_thermal_conductivity = s->parcel_conduction;
+    params.elastic_solid = false;
+}
+
+// An Elastic substance owns the MPM lane with its own law. Its modulus, Poisson
+// ratio and density go into the granular_* fields because those are what size
+// the lane's substeps and divide its stress; the granular laws are switched
+// off. Heat softening reuses the granular_softening_* fields of the substance.
+void applyElasticSubstancePhysics(APICSolverParams& params, const SubstanceProfile& substance) {
+    applyGranularSubstancePhysics(params, substance);
+    params.granular_snow_plasticity = false;
+    params.granular_young_modulus = substance.elastic_young_modulus;
+    params.granular_poisson_ratio = substance.elastic_poisson_ratio;
+    params.elastic_solid = true;
+    params.elastic_yield_strain = substance.elastic_yield_strain;
+    params.elastic_relaxation_s = substance.elastic_relaxation_s;
+    params.elastic_viscosity_pa_s = substance.elastic_viscosity_pa_s;
+    params.elastic_fracture_strain = substance.elastic_fracture_strain;
+    params.granular_damage_rate = substance.elastic_damage_rate;
+    params.elastic_flip_blend = substance.solver_flip_blend;
+    params.granular_max_solver_substeps = std::clamp(
+        static_cast<int>(std::lround(substance.solver_granular_max_substeps)), 1, 64);
 }
 } // namespace
 
@@ -56,11 +77,17 @@ void resolveParticleGranularPhysics(APICSolverParams& params, const FluidParticl
     const auto count = std::min(particles.size(), particles.constitutive_model.size());
     for (std::size_t i = 0; i < count; ++i) {
         const auto model = static_cast<MatterConstitutiveModel>(particles.constitutive_model[i]);
-        if (model != MatterConstitutiveModel::Granular) {
+        if (model != MatterConstitutiveModel::Granular &&
+            model != MatterConstitutiveModel::Elastic) {
             continue;
         }
         const auto* profile = particleSubstance(i < particles.substance_tag.size()
             ? particles.substance_tag[i] : kSubstanceUntagged, params);
+        if (profile && model == MatterConstitutiveModel::Elastic) {
+            applyElasticSubstancePhysics(params, *profile);
+            params.sanitizeGranularMaterial();
+            return;
+        }
         if (profile && profile->granular_transport == MatterGranularTransport::Mpm) {
             applyGranularSubstancePhysics(params, *profile);
             return;
@@ -96,7 +123,11 @@ bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
     }
     params.kinematic_viscosity = nu;
 
-    applyGranularSubstancePhysics(params, *s);
+    if (s->default_constitutive_model == MatterConstitutiveModel::Elastic) {
+        applyElasticSubstancePhysics(params, *s);
+    } else {
+        applyGranularSubstancePhysics(params, *s);
+    }
 
     params.applySubstanceProfile(*s, scale);
     params.sanitizeGranularMaterial();

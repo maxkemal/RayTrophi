@@ -3,9 +3,9 @@
   "completed": true,
   "original": {
     "control": {
-      "driver": "none",
+      "driver": "user",
       "dropped_seeds": [],
-      "epoch": 0,
+      "epoch": 1195,
       "frame": 0,
       "playing": false,
       "script_driving": false,
@@ -68,9 +68,9 @@
     }
   },
   "final_control": {
-    "driver": "none",
+    "driver": "user",
     "dropped_seeds": [],
-    "epoch": 0,
+    "epoch": 1195,
     "frame": 0,
     "playing": false,
     "script_driving": false,

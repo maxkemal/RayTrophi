@@ -810,21 +810,25 @@ static void gridToParticle(FluidParticles& parts,
             for (int dj = 0; dj < 3; ++dj)
             for (int di = 0; di < 3; ++di) {
                 int gi = bx + di, gj = by + dj, gk = bz + dk;
-                if (gi < 0 || gi > xmax || gj < 0 || gj > ymax || gk < 0 || gk > zmax) continue;
+                // Past the domain edge: nearest face's value, not a dropped
+                // weight (see sim_fluid_g2p.glsl: dropping pumps a resting tank).
+                const int fi = std::clamp(gi, 0, xmax);
+                const int fj = std::clamp(gj, 0, ymax);
+                const int fk = std::clamp(gk, 0, zmax);
                 float w = wxk[di] * wyk[dj] * wzk[dk];
                 size_t face_idx;
                 float vn;
                 float vn_pre = 0.0f;
                 if (comp == 0) {
-                    face_idx = grid.velXIndex(gi, gj, gk);
+                    face_idx = grid.velXIndex(fi, fj, fk);
                     vn = grid.vel_x[face_idx];
                     if (has_flip_snapshot) vn_pre = vel_x_pre[face_idx];
                 } else if (comp == 1) {
-                    face_idx = grid.velYIndex(gi, gj, gk);
+                    face_idx = grid.velYIndex(fi, fj, fk);
                     vn = grid.vel_y[face_idx];
                     if (has_flip_snapshot) vn_pre = vel_y_pre[face_idx];
                 } else {
-                    face_idx = grid.velZIndex(gi, gj, gk);
+                    face_idx = grid.velZIndex(fi, fj, fk);
                     vn = grid.vel_z[face_idx];
                     if (has_flip_snapshot) vn_pre = vel_z_pre[face_idx];
                 }
@@ -1220,6 +1224,9 @@ size_t projectPressureFreeSurface(const FluidParticles& parts,
         // and the under-filled side acts only where all six faces open onto
         // liquid, so the free surface and wall layers are never sucked in.
         // Same formula in sim_fluid_density_relaxation.glsl and the CUDA kernel.
+        // ★★ The mean is tent-weighted (1-2-1 per axis): a box mean's negative
+        // high-frequency lobe made this term pump grid-scale count modes
+        // (2026-11-02, the GLSL says more).
         if (params.density_relaxation_s > 0.0f) {
             const float target = static_cast<float>(std::max(1, params.particles_per_cell));
             const auto fluid_at = [&](int a, int b, int c) {
@@ -1231,13 +1238,22 @@ size_t projectPressureFreeSurface(const FluidParticles& parts,
                 for (int dy = -1; dy <= 1; ++dy)
                     for (int dx = -1; dx <= 1; ++dx) {
                         if (!fluid_at(i + dx, j + dy, k + dz)) continue;
-                        sum += static_cast<float>(
+                        const float w = static_cast<float>(
+                            (2 - std::abs(dx)) * (2 - std::abs(dy)) * (2 - std::abs(dz)));
+                        sum += w * static_cast<float>(
                             proj_cell_count[grid.cellIndex(i + dx, j + dy, k + dz)]);
-                        n += 1.0f;
+                        n += w;
                     }
-            const bool interior = fluid_at(i - 1, j, k) && fluid_at(i + 1, j, k) &&
-                fluid_at(i, j - 1, k) && fluid_at(i, j + 1, k) &&
-                fluid_at(i, j, k - 1) && fluid_at(i, j, k + 1);
+            // Only an AIR face ends "interior": a wall or solid face does not
+            // (2026-11-02, sim_fluid_density_relaxation.glsl says why).
+            const auto air_at = [&](int a, int b, int c) {
+                if (a < 0 || b < 0 || c < 0 || a >= nx || b >= ny || c >= nz)
+                    return params.boundary == APICSolverParams::BoundaryMode::Open;
+                return cell[grid.cellIndex(a, b, c)] == CELL_AIR;
+            };
+            const bool interior = !air_at(i - 1, j, k) && !air_at(i + 1, j, k) &&
+                !air_at(i, j - 1, k) && !air_at(i, j + 1, k) &&
+                !air_at(i, j, k - 1) && !air_at(i, j, k + 1);
             float excess = n > 0.0f ? (sum / n - target) / target : 0.0f;
             if (!interior) excess = std::max(excess, 0.0f);
             excess = std::clamp(excess, -0.5f, 4.0f);
@@ -1919,10 +1935,200 @@ size_t projectPressureFreeSurface(const FluidParticles& parts,
 
 // Enforce no-flow through solid cells on the staggered velocity field. This
 // matches the gas solver's wall handling.
-static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverParams& params) {
+// MPM grid contact (CPU twin of sim_matter_mpm_boundary.comp, whose header
+// says why): grid-SDF collision per MAC face for colliders with a distance
+// (support, Coulomb, adhesion), the old moving/separating rule for walls
+// without one. Reads a snapshot of the face velocities while it writes them.
+namespace {
+struct MpmContact {
+    const FluidSim::FluidGrid& grid;
+    float dt, density;
+    const std::vector<float>& sx;
+    const std::vector<float>& sy;
+    const std::vector<float>& sz;
+
+    bool outside(int i, int j, int k) const {
+        return i < 0 || j < 0 || k < 0 || i >= grid.nx || j >= grid.ny || k >= grid.nz;
+    }
+    float cellField(const std::vector<float>& field, int i, int j, int k) const {
+        if (outside(i, j, k)) return 0.0f;
+        const auto c = grid.cellIndex(i, j, k);
+        return c < field.size() ? field[c] : 0.0f;
+    }
+    bool hasPhi(int i, int j, int k) const {
+        if (outside(i, j, k)) return false;
+        const auto c = grid.cellIndex(i, j, k);
+        return c < grid.solid_phi.size() && grid.solid_phi[c] < FluidSim::FluidGrid::kSolidPhiFar;
+    }
+    float phiAt(int i, int j, int k) const {
+        i = std::clamp(i, 0, grid.nx - 1); j = std::clamp(j, 0, grid.ny - 1);
+        k = std::clamp(k, 0, grid.nz - 1);
+        const auto c = grid.cellIndex(i, j, k);
+        const float v = c < grid.solid_phi.size() ? grid.solid_phi[c]
+                                                  : FluidSim::FluidGrid::kSolidPhiFar;
+        return v >= FluidSim::FluidGrid::kSolidPhiFar ? 2.0f * grid.voxel_size : v;
+    }
+    Vec3 solidVelocity(int i, int j, int k) const {
+        if (outside(i, j, k)) return Vec3(0.0f);
+        const auto c = grid.cellIndex(i, j, k);
+        return c < grid.solid_vel.size() ? grid.solid_vel[c] : Vec3(0.0f);
+    }
+    float snap(int axis, int i, int j, int k) const {
+        const int lim[3] = {grid.nx + (axis == 0), grid.ny + (axis == 1), grid.nz + (axis == 2)};
+        if (i < 0 || j < 0 || k < 0 || i >= lim[0] || j >= lim[1] || k >= lim[2]) return 0.0f;
+        return axis == 0 ? sx[grid.velXIndex(i, j, k)]
+             : axis == 1 ? sy[grid.velYIndex(i, j, k)]
+                         : sz[grid.velZIndex(i, j, k)];
+    }
+    bool plainWall(int i, int j, int k) const {
+        return grid.isSolid(i, j, k) && !hasPhi(i, j, k);
+    }
+    static float comp(const Vec3& v, int a) { return a == 0 ? v.x : (a == 1 ? v.y : v.z); }
+
+    float face(float v, const int lo[3], const int hi[3], int axis) const {
+        if (plainWall(lo[0], lo[1], lo[2]) || plainWall(hi[0], hi[1], hi[2])) {
+            const bool solid_lo = grid.isSolid(lo[0], lo[1], lo[2]);
+            const bool solid_hi = grid.isSolid(hi[0], hi[1], hi[2]);
+            const float vlo = comp(solidVelocity(lo[0], lo[1], lo[2]), axis);
+            const float vhi = comp(solidVelocity(hi[0], hi[1], hi[2]), axis);
+            if (solid_lo && solid_hi) return 0.5f * (vlo + vhi);
+            return solid_lo ? std::max(v, vlo) : std::min(v, vhi);
+        }
+        const float phi_lo = phiAt(lo[0], lo[1], lo[2]);
+        const float phi_hi = phiAt(hi[0], hi[1], hi[2]);
+        if (0.5f * (phi_lo + phi_hi) >= 0.0f) return v;
+        const float h = grid.voxel_size;
+        float g[3] = {0.0f, 0.0f, 0.0f};
+        float u[3] = {0.0f, 0.0f, 0.0f};
+        g[axis] = (phi_hi - phi_lo) / h;
+        u[axis] = v;
+        for (int step = 1; step <= 2; ++step) {
+            const int a = (axis + step) % 3;
+            int lp[3] = {lo[0], lo[1], lo[2]}, lm[3] = {lo[0], lo[1], lo[2]};
+            int hp[3] = {hi[0], hi[1], hi[2]}, hm[3] = {hi[0], hi[1], hi[2]};
+            lp[a] += 1; lm[a] -= 1; hp[a] += 1; hm[a] -= 1;
+            g[a] = ((phiAt(lp[0], lp[1], lp[2]) - phiAt(lm[0], lm[1], lm[2])) +
+                    (phiAt(hp[0], hp[1], hp[2]) - phiAt(hm[0], hm[1], hm[2]))) / (4.0f * h);
+            u[a] = 0.25f * (snap(a, lo[0], lo[1], lo[2]) + snap(a, lp[0], lp[1], lp[2]) +
+                            snap(a, hi[0], hi[1], hi[2]) + snap(a, hp[0], hp[1], hp[2]));
+        }
+        const Vec3 grad(g[0], g[1], g[2]);
+        const float gl = grad.length();
+        if (gl < 1e-6f) return v;
+        const Vec3 n = grad * (1.0f / gl);
+        const int* wall = phi_lo < phi_hi ? lo : hi;
+        const int wi = std::clamp(wall[0], 0, grid.nx - 1);
+        const int wj = std::clamp(wall[1], 0, grid.ny - 1);
+        const int wk = std::clamp(wall[2], 0, grid.nz - 1);
+        const Vec3 vs = solidVelocity(wi, wj, wk);
+        const float mu = std::max(cellField(grid.solid_contact_friction, wi, wj, wk), 0.0f);
+        const float glue = std::max(cellField(grid.solid_contact_adhesion, wi, wj, wk), 0.0f);
+        Vec3 rel = Vec3(u[0], u[1], u[2]) - vs;
+        const float vn = rel.dot(n);
+        Vec3 vt = rel - n * vn;
+        if (vn < 0.0f) {
+            const float slip = vt.length();
+            if (slip > 1e-9f) vt = vt * (std::max(slip - mu * (-vn), 0.0f) / slip);
+            rel = vt;
+        } else if (glue > 0.0f) {
+            const float hold = glue * dt / (std::max(density, 1.0f) * h);
+            rel = vt + n * std::max(vn - hold, 0.0f);
+        }
+        return comp(vs, axis) + comp(rel, axis);
+    }
+};
+
+void enforceMpmContact(FluidSim::FluidGrid& grid, float dt, float density) {
+    const auto vx = grid.vel_x, vy = grid.vel_y, vz = grid.vel_z;
+    const MpmContact contact{grid, dt, density, vx, vy, vz};
+    for (int axis = 0; axis < 3; ++axis) {
+        const int fx = grid.nx + (axis == 0), fy = grid.ny + (axis == 1), fz = grid.nz + (axis == 2);
+        const auto& src = axis == 0 ? vx : (axis == 1 ? vy : vz);
+        auto& dst = axis == 0 ? grid.vel_x : (axis == 1 ? grid.vel_y : grid.vel_z);
+        for (int k = 0; k < fz; ++k)
+        for (int j = 0; j < fy; ++j)
+        for (int i = 0; i < fx; ++i) {
+            const int hi[3] = {i, j, k};
+            int lo[3] = {i, j, k};
+            lo[axis] -= 1;
+            const std::size_t index = axis == 0 ? grid.velXIndex(i, j, k)
+                : axis == 1 ? grid.velYIndex(i, j, k) : grid.velZIndex(i, j, k);
+            dst[index] = contact.face(src[index], lo, hi, axis);
+        }
+    }
+}
+} // namespace
+
+// CPU twin of sim_matter_mpm_particle_contact.comp (S3): an MPM parcel that
+// ends inside a collider (phi < 0) goes back onto the surface and loses the
+// velocity part carrying it further in. Support, friction and adhesion are the
+// grid's (enforceMpmContact); the kernel's header says why.
+void applyMpmParticleContact(FluidParticles& particles, const FluidSim::FluidGrid& grid,
+                             const APICSolverParams& params, float dt) {
+    const std::size_t cells = grid.getCellCount();
+    if (grid.solid_phi.size() != cells || !(dt > 0.0f) || !(grid.voxel_size > 0.0f)) return;
+    const float h = grid.voxel_size;
+    const float far = 2.0f * h;
+    auto phiAt = [&](int i, int j, int k) {
+        i = std::clamp(i, 0, grid.nx - 1); j = std::clamp(j, 0, grid.ny - 1);
+        k = std::clamp(k, 0, grid.nz - 1);
+        const float v = grid.solid_phi[grid.cellIndex(i, j, k)];
+        return v >= FluidSim::FluidGrid::kSolidPhiFar ? far : v;
+    };
+    for (std::size_t p = 0; p < particles.size(); ++p) {
+        const auto model = p < particles.constitutive_model.size()
+            ? static_cast<MatterConstitutiveModel>(particles.constitutive_model[p])
+            : MatterConstitutiveModel::Auto;
+        const bool mpm = model == MatterConstitutiveModel::Granular ||
+            model == MatterConstitutiveModel::Elastic ||
+            (model == MatterConstitutiveModel::Auto && params.granular_enabled);
+        if (!mpm) continue;
+        Vec3& x = particles.position[p];
+        Vec3& v = particles.velocity[p];
+        const Vec3 g = (x - grid.origin) * (1.0f / h) - Vec3(0.5f);
+        const int bx = static_cast<int>(std::floor(g.x)), by = static_cast<int>(std::floor(g.y)),
+                  bz = static_cast<int>(std::floor(g.z));
+        const float fx = g.x - bx, fy = g.y - by, fz = g.z - bz;
+        float c[2][2][2];
+        for (int z = 0; z < 2; ++z)
+            for (int y = 0; y < 2; ++y)
+                for (int xx = 0; xx < 2; ++xx)
+                    c[z][y][xx] = phiAt(bx + xx, by + y, bz + z);
+        auto mix = [](float a, float b, float w) { return a + (b - a) * w; };
+        const float c00 = mix(c[0][0][0], c[0][0][1], fx), c01 = mix(c[0][1][0], c[0][1][1], fx);
+        const float c10 = mix(c[1][0][0], c[1][0][1], fx), c11 = mix(c[1][1][0], c[1][1][1], fx);
+        const float c0 = mix(c00, c01, fy), c1 = mix(c10, c11, fy);
+        const float d = mix(c0, c1, fz);
+        if (d >= 0.0f) continue;
+        Vec3 grad(mix(mix(c[0][0][1] - c[0][0][0], c[0][1][1] - c[0][1][0], fy),
+                      mix(c[1][0][1] - c[1][0][0], c[1][1][1] - c[1][1][0], fy), fz),
+                  mix(mix(c[0][1][0] - c[0][0][0], c[0][1][1] - c[0][0][1], fx),
+                      mix(c[1][1][0] - c[1][0][0], c[1][1][1] - c[1][0][1], fx), fz),
+                  c1 - c0);
+        const float gl = grad.length();
+        if (gl < 1e-6f) continue;
+        const Vec3 n = grad * (1.0f / gl);
+        const Vec3 inside = (x - n * (d + 0.5f * h) - grid.origin) * (1.0f / h);
+        const int si = std::clamp(static_cast<int>(std::floor(inside.x)), 0, grid.nx - 1);
+        const int sj = std::clamp(static_cast<int>(std::floor(inside.y)), 0, grid.ny - 1);
+        const int sk = std::clamp(static_cast<int>(std::floor(inside.z)), 0, grid.nz - 1);
+        const std::size_t q = grid.cellIndex(si, sj, sk);
+        const Vec3 vs = q < grid.solid_vel.size() ? grid.solid_vel[q] : Vec3(0.0f);
+        x = x - n * d;
+        const float vn = (v - vs).dot(n);
+        if (vn < 0.0f) v = v - n * vn;
+    }
+}
+
+static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverParams& params,
+                                   float dt) {
     const int thread_count = solverThreadCount(params);
     const bool grid_parallel = shouldParallelGrid(params,
         static_cast<size_t>(grid.nx) * static_cast<size_t>(grid.ny) * static_cast<size_t>(grid.nz));
+    if (params.granular_enabled) {
+        enforceMpmContact(grid, dt, params.granular_density);
+        return;
+    }
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(thread_count) if(grid_parallel)
 #endif

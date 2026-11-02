@@ -148,6 +148,7 @@ MatterOwnerSummary inspectMatterOwners(const FluidParticles& particles,
     // Static blocks (substances bound Solid) have no owner in the grain step;
     // frozen liquid does since P3/P9 (held lane, met as held-ice triangles).
     std::size_t static_blocks = 0;
+    bool elastic_mpm = false, granular_mpm = false;
     for (std::size_t index = 0; index < particles.size(); ++index) {
         const uint32_t tag = index < particles.substance_tag.size()
             ? particles.substance_tag[index] : kSubstanceUntagged;
@@ -168,10 +169,17 @@ MatterOwnerSummary inspectMatterOwners(const FluidParticles& particles,
         const auto owner = obstacle
             ? MatterTransportOwner::Obstacle : substanceTransportOwner(tag, model, params);
         ++summary.particles[static_cast<std::size_t>(owner)];
-        if (model == MatterConstitutiveModel::Elastic) {
-            summary.ready = false;
-            summary.reason = "mixed elastic MPM transport is not implemented";
+        if (owner == MatterTransportOwner::Mpm) {
+            (model == MatterConstitutiveModel::Elastic ? elastic_mpm : granular_mpm) = true;
         }
+    }
+    // The MPM lane runs ONE law per step (resolveParticleGranularPhysics takes
+    // the first MPM parcel's substance). Mixing would run the other material
+    // under the wrong law without a word, so it holds the step instead.
+    if (elastic_mpm && granular_mpm) {
+        summary.ready = false;
+        summary.reason = "one MPM material per domain: elastic and granular MPM "
+                         "parcels cannot share a domain yet";
     }
     // ★ P9 live (2026-10-20): water that froze completely held the whole
     // step here ("does not accept pinned ... carriers") - sand hung where it

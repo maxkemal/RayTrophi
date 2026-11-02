@@ -858,9 +858,31 @@ struct SceneData {
         std::shared_ptr<std::atomic<uint64_t>> serial;
         std::shared_ptr<std::atomic<bool>> busy;
         uint64_t request_serial = 0;
+        bool gpu = false;
+        float cook_ms = 0.0f;
     };
     std::mutex pending_sdf_bakes_mutex_;
     std::vector<PendingSdfBake> pending_sdf_bakes_;
+    // A cook waiting for the GPU (P2, docs/dev/COLLIDER_TEMAS_YUZEYI.md): run at
+    // the publish tick, where the compute context is safe to use; a failure
+    // hands the same job to the CPU worker.
+    struct SdfCookJob {
+        std::string node_name;
+        std::shared_ptr<RayTrophiSim::ParticleSimulationSystem> runtime;
+        std::shared_ptr<std::vector<RayTrophiSim::SurfaceMeshTriangle>> triangles;
+        Vec3 origin;
+        Vec3 extents;
+        int nx = 0, ny = 0, nz = 0;
+        std::shared_ptr<std::atomic<uint64_t>> serial;
+        std::shared_ptr<std::atomic<bool>> busy;
+        uint64_t request_serial = 0;
+    };
+    std::vector<SdfCookJob> pending_gpu_sdf_cooks_;
+    RayTrophiSim::Fluid::ColliderGpuQuery sdf_gpu_query_;
+    // Last cook, for collider.get: where it ran and how long it took.
+    bool last_sdf_cook_gpu_ = false;
+    double last_sdf_cook_ms_ = 0.0;
+    std::string last_sdf_cook_error_;
     struct MeltAppliedStamp {
         uint64_t topology = 0;
         uint64_t content = 0;
@@ -9490,6 +9512,7 @@ public:
         if (res_mode == 0) N = 32;
         else if (res_mode == 1) N = 64;
         else if (res_mode == 2) N = 128;
+        else if (res_mode == 3) N = 256;
 
         const auto* surface_cache = getSurfaceMeshCacheForObject(node_name);
         if (!surface_cache || surface_cache->empty()) {
@@ -9527,43 +9550,83 @@ public:
             bmax = Vec3::max(bmax, tri.p2);
         }
 
+        SdfCookJob job;
+        job.node_name = node_name;
+        job.runtime = target_runtime;
+        job.triangles = std::make_shared<std::vector<RayTrophiSim::SurfaceMeshTriangle>>(
+            std::move(triangles));
+        {
+            const Vec3 size = bmax - bmin;
+            const Vec3 pad = size * 0.15f;
+            job.origin = bmin - pad;
+            job.extents = size + pad * 2.0f;
+        }
+        job.nx = job.ny = job.nz = N;
+        if (res_mode == 4) {
+            // Auto: a cook cell no larger than half the finest domain voxel,
+            // per axis, so a thin plate is not cooked at its long side's step.
+            auto sys = target_runtime ? target_runtime : getParticleSimulationSystem();
+            float h = 0.0f;
+            if (sys) {
+                for (const auto& d : sys->gridDomains()) {
+                    if (!d.enabled) continue;
+                    const Vec3 e = d.bounds_max - d.bounds_min;
+                    const float hx = e.x / std::max(d.resolution_x, 1);
+                    const float hy = e.y / std::max(d.resolution_y, 1);
+                    const float hz = e.z / std::max(d.resolution_z, 1);
+                    const float hd = std::min({hx, hy, hz});
+                    if (hd > 0.0f && (h <= 0.0f || hd < h)) h = hd;
+                }
+            }
+            if (h > 0.0f) {
+                // The cook box is in the OBB's local frame, which carries the
+                // object's scale (its transform is rotation + translation): a
+                // 0.9 m sphere cooked 187^3 for h/2 = 1.25 cm, as it should.
+                const float step = 0.5f * h;
+                job.nx = std::max(16, static_cast<int>(std::ceil(job.extents.x / step)));
+                job.ny = std::max(16, static_cast<int>(std::ceil(job.extents.y / step)));
+                job.nz = std::max(16, static_cast<int>(std::ceil(job.extents.z / step)));
+            } else {
+                job.nx = job.ny = job.nz = 128;
+            }
+        }
+        job.serial = bake_serial;
+        job.busy = bake_busy;
+        job.request_serial = request_serial;
+        auto& compute = simulation_world.compute();
+        if (compute.supportsDispatch() &&
+            compute.backendType() == RayTrophiSim::ComputeBackendType::VulkanCompute) {
+            pending_gpu_sdf_cooks_.push_back(std::move(job));
+            return true;
+        }
+        launchCpuSdfCook(std::move(job));
+        return true;
+    }
+
+    // CPU cook: BVH nearest distance + three-ray parity vote per cell centre.
+    void launchCpuSdfCook(SdfCookJob job) {
         auto result_vec = std::make_shared<std::vector<float>>();
-
         g_active_sdf_bakes.fetch_add(1, std::memory_order_acquire);
-
-        std::thread([this, node_name, triangles, bmin, bmax, N, result_vec, target_runtime,
-                     bake_serial, bake_busy, request_serial]() {
-            Vec3 size = bmax - bmin;
-            Vec3 pad = size * 0.15f;
-            Vec3 origin = bmin - pad;
-            Vec3 extents = size + pad * 2.0f;
-
-            int nx = N;
-            int ny = N;
-            int nz = N;
-            result_vec->resize(static_cast<std::size_t>(nx * ny * nz), 0.0f);
-
-            // Build a triangle BVH over ALL local-space triangles (no stride
-            // decimation) so the distance field is exact and the cook costs
-            // O(cells · log tris) instead of the old O(cells · tris) brute force.
+        last_sdf_cook_gpu_ = false;
+        std::thread([this, job, result_vec]() {
+            const auto cook_start = std::chrono::steady_clock::now();
+            const int nx = job.nx, ny = job.ny, nz = job.nz;
+            const Vec3 origin = job.origin, extents = job.extents;
+            result_vec->resize(static_cast<std::size_t>(nx) * ny * nz, 0.0f);
             ColliderMeshBVH bvh;
             {
                 std::vector<ColliderMeshBVH::Triangle> bvh_tris;
-                bvh_tris.reserve(triangles.size());
-                for (const auto& tri : triangles) bvh_tris.push_back({ tri.p0, tri.p1, tri.p2 });
+                bvh_tris.reserve(job.triangles->size());
+                for (const auto& tri : *job.triangles) bvh_tris.push_back({ tri.p0, tri.p1, tri.p2 });
                 bvh.build(std::move(bvh_tris));
             }
-
             // Inside/outside by ray-parity vote over three non-axis-aligned probe
-            // directions (each ~unit length). Robust to a single ray grazing a
-            // shared edge, and far more reliable than the old single-nearest-
-            // triangle normal dot, which flipped sign on edges / thin features.
+            // directions (sim_collider_bvh_query.comp uses the same three).
             const Vec3 probe_dirs[3] = {
                 Vec3(0.5060f,  0.7071f, 0.4943f),
                 Vec3(-0.3651f, 0.5345f, 0.7625f),
                 Vec3(0.8112f, -0.2701f, 0.5184f)
             };
-
             float* out = result_vec->data();
             const float step_x = extents.x / nx, step_y = extents.y / ny, step_z = extents.z / nz;
 #ifdef _OPENMP
@@ -9585,41 +9648,80 @@ public:
                         if (bvh.countRayHits(cell_p, probe_dirs[d]) & 1) ++inside_votes;
                     }
                     if (inside_votes >= 2) dist = -dist;
-                    out[static_cast<std::size_t>(k * (nx * ny) + j * nx + i)] = dist;
+                    out[static_cast<std::size_t>(k) * nx * ny + static_cast<std::size_t>(j) * nx + i] = dist;
                 }
             }
-
             if (g_cancel_sdf_bakes.load(std::memory_order_relaxed)) {
-                if (bake_serial->load(std::memory_order_acquire) == request_serial)
-                    bake_busy->store(false, std::memory_order_release);
+                if (job.serial->load(std::memory_order_acquire) == job.request_serial)
+                    job.busy->store(false, std::memory_order_release);
                 g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
                 return;
             }
-
             // A later manual/automatic request owns publication. Discarding an
             // old result prevents a slow 128^3 cook restoring stale geometry.
-            if (bake_serial->load(std::memory_order_acquire) != request_serial) {
+            if (job.serial->load(std::memory_order_acquire) != job.request_serial) {
                 g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
                 return;
             }
-
-            // Never mutate the live collider from this detached worker. Timeline
-            // restore/step reads it on the main thread and concurrent shared_ptr /
-            // dimension writes are a real data race. Queue an immutable result;
-            // updateSimulationTimeline publishes it at its safe tick boundary.
+            // Never mutate the live collider from this detached worker; the
+            // publish tick does (updateSimulationTimeline).
             {
                 std::lock_guard<std::mutex> lock(pending_sdf_bakes_mutex_);
                 pending_sdf_bakes_.push_back(PendingSdfBake{
-                    node_name, target_runtime, result_vec, origin, extents,
-                    nx, ny, nz, bake_serial, bake_busy, request_serial
+                    job.node_name, job.runtime, result_vec, origin, extents,
+                    nx, ny, nz, job.serial, job.busy, job.request_serial, false,
+                    static_cast<float>(std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - cook_start).count())
                 });
             }
             g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
         }).detach();
-        return true;
+    }
+
+    // GPU cooks queued by rebuildSDFColliderAsync. Runs on the publish tick, so
+    // the result lands in the same queue the CPU worker fills.
+    void runPendingGpuSdfCooks() {
+        if (pending_gpu_sdf_cooks_.empty()) return;
+        std::vector<SdfCookJob> jobs;
+        jobs.swap(pending_gpu_sdf_cooks_);
+        auto& compute = simulation_world.compute();
+        for (auto& job : jobs) {
+            if (job.serial->load(std::memory_order_acquire) != job.request_serial) {
+                continue; // superseded
+            }
+            RayTrophiSim::Fluid::ColliderQueryLattice lattice;
+            const float step[3] = {job.extents.x / job.nx, job.extents.y / job.ny,
+                                   job.extents.z / job.nz};
+            const float origin[3] = {job.origin.x, job.origin.y, job.origin.z};
+            for (int r = 0; r < 3; ++r) {
+                lattice.m[r][r] = step[r];
+                lattice.m[r][3] = origin[r];
+            }
+            lattice.dims[0] = job.nx; lattice.dims[1] = job.ny; lattice.dims[2] = job.nz;
+            lattice.signed_distance = true;
+            auto grid = std::make_shared<std::vector<float>>();
+            std::string error;
+            // A cook is a one-off mesh: its BVH is evicted by later queries.
+            const bool ok = sdf_gpu_query_.query(compute, job.triangles.get(), job.request_serial,
+                                                 *job.triangles, lattice, *grid, error);
+            last_sdf_cook_ms_ = sdf_gpu_query_.lastMilliseconds();
+            if (!ok) {
+                last_sdf_cook_error_ = error;
+                launchCpuSdfCook(std::move(job));
+                continue;
+            }
+            last_sdf_cook_gpu_ = true;
+            last_sdf_cook_error_.clear();
+            std::lock_guard<std::mutex> lock(pending_sdf_bakes_mutex_);
+            pending_sdf_bakes_.push_back(PendingSdfBake{
+                job.node_name, job.runtime, grid, job.origin, job.extents,
+                job.nx, job.ny, job.nz, job.serial, job.busy, job.request_serial, true,
+                static_cast<float>(last_sdf_cook_ms_)});
+        }
     }
 
     void publishCompletedSdfBakes() {
+        runPendingGpuSdfCooks();
         std::vector<PendingSdfBake> ready;
         {
             std::lock_guard<std::mutex> lock(pending_sdf_bakes_mutex_);
@@ -9641,6 +9743,8 @@ public:
                         coll.sdf_nx = bake.nx;
                         coll.sdf_ny = bake.ny;
                         coll.sdf_nz = bake.nz;
+                        coll.sdf_cooked_on_gpu = bake.gpu;
+                        coll.sdf_cook_ms = bake.cook_ms;
                         break;
                     }
                 }

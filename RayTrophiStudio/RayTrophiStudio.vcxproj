@@ -2857,8 +2857,10 @@
     <None Include="source\shaders\sim_matter_grain_step.comp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="source\include\Fluid\ColliderGpuQuery.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainColliderBvh.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainStages.h" />
+    <ClCompile Include="source\src\Physics\Fluid\ColliderGpuQuery.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainColliderBvh.cpp" />
   </ItemGroup>
   <ItemGroup>

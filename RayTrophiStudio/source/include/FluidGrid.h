@@ -193,6 +193,17 @@ public:
     std::vector<float> solid_gas_fuel;
     std::vector<float> solid_gas_flame;
     std::vector<float> solid_gas_band;
+    // Per-solid-cell contact surface of the collider stamped there (Coulomb mu,
+    // adhesion in Pa), read by the MPM wall contact (sim_matter_mpm_boundary).
+    // Sized whenever a collider is stamped; 0 elsewhere (frictionless, no glue).
+    std::vector<float> solid_contact_friction;
+    std::vector<float> solid_contact_adhesion;
+    // Cell-centre signed distance (m) to the nearest stamped collider, negative
+    // inside (docs/dev/COLLIDER_TEMAS_YUZEYI.md): exact for analytic shapes,
+    // trilinear for a cooked SDF, distance-minus-thickness for a mesh_bvh shell.
+    // kSolidPhiFar where no collider wrote one.
+    static constexpr float kSolidPhiFar = 1.0e30f;
+    std::vector<float> solid_phi;
 
     // Variational solid coupling: fractional MAC-FACE open weights (Batty 2007),
     // quantized 0..255 (255 = fully open to fluid, 0 = fully blocked by a solid).
@@ -337,6 +348,9 @@ public:
         std::vector<float>().swap(solid_gas_fuel);
         std::vector<float>().swap(solid_gas_flame);
         std::vector<float>().swap(solid_gas_band);
+        std::vector<float>().swap(solid_contact_friction);
+        std::vector<float>().swap(solid_contact_adhesion);
+        std::vector<float>().swap(solid_phi);
         std::vector<uint8_t>().swap(u_weight);
         std::vector<uint8_t>().swap(v_weight);
         std::vector<uint8_t>().swap(w_weight);

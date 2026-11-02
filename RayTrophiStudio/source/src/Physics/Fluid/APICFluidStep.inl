@@ -148,7 +148,7 @@ void step(FluidParticles& particles,
     //     because these were already run in the first call.
     if (!params.pressure_g2p_precomputed) {
         stage_begin = SolverClock::now();
-        enforceSolidBoundaries(grid, params);
+        enforceSolidBoundaries(grid, params, dt);
         stage_end = SolverClock::now();
         out_stats.boundary_ms = elapsedMs(stage_begin, stage_end);
 
@@ -176,7 +176,7 @@ void step(FluidParticles& particles,
             applyViscosity(grid, params, dt, mask_ptr, sweeps_run);
             out_stats.viscosity_sweeps_run = sweeps_run;
             if (sweeps_run > 0) {
-                enforceSolidBoundaries(grid, params);
+                enforceSolidBoundaries(grid, params, dt);
             }
         }
         stage_end = SolverClock::now();
@@ -297,7 +297,13 @@ void step(FluidParticles& particles,
         sp.snow_max_hardening = params.granular_snow_max_hardening;
         sp.snow_min_hardening = params.granular_snow_min_hardening;
         sp.snow_min_plastic_jacobian = G::snowMinPlasticJacobian(params.granular_density);
-        if (sp.snow_plasticity) {
+        sp.elastic_solid = params.elastic_solid;
+        sp.elastic_yield_strain = params.elastic_yield_strain;
+        sp.elastic_relaxation_s = params.elastic_relaxation_s;
+        sp.elastic_fracture_strain = params.elastic_fracture_strain;
+        sp.elastic_viscosity = std::min(params.elastic_viscosity_pa_s,
+            G::elasticViscosityLimit(grid.voxel_size, dt, params.granular_density));
+        if (sp.snow_plasticity || sp.elastic_solid) {
             // Same rule as the device path (FluidGpuTransferStages.inl).
             sp.snow_max_young_modulus = G::waveLimitedYoungModulus(
                 grid.voxel_size, dt, params.granular_density);
@@ -337,9 +343,12 @@ void step(FluidParticles& particles,
                 particles.granular_plastic_increment[p],
                 flags);
             // Settle runs after the stress update on the device too, and reads
-            // the stress this step just wrote — keep the order.
-            G::settleParticle(particles.granular_stress_diag[p], settle,
-                              particles.velocity[p], flags);
+            // the stress this step just wrote — keep the order. An elastic
+            // body is not a pile: no settle (it would kill a jelly's wobble).
+            if (!sp.elastic_solid) {
+                G::settleParticle(particles.granular_stress_diag[p], settle,
+                                  particles.velocity[p], flags);
+            }
             particles.granular_material_flags[p] = flags;
         }
         (void)par;
@@ -349,6 +358,7 @@ void step(FluidParticles& particles,
         // that never ran, and the strain/compaction rows are precisely how a
         // soft-material run is told apart from a diverging one.
         G::countMaterialState(particles, out_stats);
+        out_stats.mpm_law = sp.elastic_solid ? 2 : sp.snow_plasticity ? 1 : 0;
         out_stats.granular_min_softening = 1.0f;
         for (size_t p = 0; p < particles.granular_softening.size(); ++p) {
             const float soft_p = particles.granular_softening[p];
@@ -480,6 +490,10 @@ void step(FluidParticles& particles,
                         params.cfl,
                         params.max_substeps,
                         solid_particle);
+    // MPM parcels against the colliders' true surface (S3 CPU twin).
+    if (params.granular_enabled && !params.particle_tail_precomputed) {
+        applyMpmParticleContact(particles, grid, params, dt);
+    }
     stage_end = SolverClock::now();
     out_stats.advect_ms = elapsedMs(stage_begin, stage_end);
 

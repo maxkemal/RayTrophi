@@ -138,6 +138,20 @@
             const bool force_fields_require_cpu =
                 context.force_snapshot && !context.force_snapshot->empty() &&
                 !gpu_body_force_supported;
+            // A mixed Vulkan step carrying MPM parcels (granular or elastic)
+            // integrates gravity and packed fields on its own substeps
+            // (MatterSubstepForces); only the container motion stays a frame
+            // impulse here. CPU-only fields keep the once-per-frame path.
+            const bool mpm_substep_forces = mixed_models && fluid_gpu_requested &&
+                !fluid_params.grain.enabled && !force_fields_require_cpu &&
+                std::any_of(state.particles.constitutive_model.begin(),
+                    state.particles.constitutive_model.end(), [&](auto value) {
+                        const auto model = static_cast<Fluid::MatterConstitutiveModel>(value);
+                        return model == Fluid::MatterConstitutiveModel::Granular ||
+                            model == Fluid::MatterConstitutiveModel::Elastic ||
+                            (model == Fluid::MatterConstitutiveModel::Auto &&
+                             mixed_legacy_granular);
+                    });
             if (fluid_gpu_requested &&
                 fluid_gpu_compute_available &&
                 i < grid_domain_compute_buffers_.size()) {
@@ -147,6 +161,14 @@
                         // The grain coordinator owns its forces: gravity inside
                         // the DEM substeps, and the liquid owner's forces on the
                         // liquid subset only (runMatterGrainStep).
+                    } else if (mpm_substep_forces) {
+                        if (motion_mag > 1e-7f) {
+                            for (auto& velocity : state.particles.velocity) {
+                                velocity = velocity + container_velocity_delta;
+                            }
+                        }
+                        gpu_integrated_forces =
+                            ensureGpuFluidParticleBuffers(state, context.compute, gpu_buffers);
                     } else if (!force_fields_require_cpu) {
                         // Gravity, container motion and shared body-force fields
                         // are evaluated in one GPU particle pass.
@@ -200,6 +222,28 @@
             bool has_kinematic_solids = false;
             {
             RTPERF_FRAME_SCOPE("sim.fluid.voxelize_colliders");
+            // mesh_bvh shells query their distance on the GPU (P3); a failure
+            // falls back to the CPU loop for that collider and is reported.
+            last_collider_query_gpu_ = false;
+            last_collider_query_ms_ = 0.0;
+            last_collider_query_error_.clear();
+            const std::function<bool(const ParticleColliderDesc&, const Fluid::ColliderQueryLattice&,
+                                     std::vector<float>&)> gpu_mesh_query =
+                [&](const ParticleColliderDesc& collider, const Fluid::ColliderQueryLattice& lattice,
+                    std::vector<float>& distance) {
+                    if (!context.compute || !context.compute->supportsDispatch() ||
+                        !collider.local_triangles_cache) {
+                        return false;
+                    }
+                    std::string query_error;
+                    const bool ok = collider_gpu_query_.query(*context.compute,
+                        collider.local_triangles_cache.get(), collider.last_mesh_cache_version,
+                        *collider.local_triangles_cache, lattice, distance, query_error);
+                    last_collider_query_ms_ += collider_gpu_query_.lastMilliseconds();
+                    last_collider_query_gpu_ = last_collider_query_gpu_ || ok;
+                    if (!ok) last_collider_query_error_ = query_error;
+                    return ok;
+                };
             voxelizeCollidersIntoGrid(state.grid,
                                        colliders_,
                                        collider_bounds_resolver_,
@@ -207,7 +251,8 @@
                                        &collider_velocities_,
                                        nullptr,
                                        nullptr,
-                                       true);
+                                       true,
+                                       &gpu_mesh_query);
             has_kinematic_solids = voxelizeKinematicColliders(
                 state.grid,
                 kinematic_samples,
@@ -751,12 +796,17 @@
                             granular_frame_dt, cpu_forces_applied ? nullptr : context.force_snapshot,
                             context.time_seconds, state.fluid_stats, mixed_error);
                     } else if (i < grid_domain_compute_buffers_.size()) {
+                        const MatterSubstepForces substep_forces{
+                            context.force_snapshot && !context.force_snapshot->empty()
+                                ? context.force_compute_buffer : nullptr,
+                            static_cast<float>(context.time_seconds) - granular_frame_dt};
                         ok = runMatterGpuStep(state, step_params, mixed_legacy_granular,
                             granular_frame_dt, context.compute, grid_domain_compute_buffers_[i],
                             [&](SimulationGridDomainComputeBuffers& buffers) {
                                 return context.compute && ensureGridDomainComputeBuffers(
                                     *context.compute, buffers, state.grid);
-                            }, matter_exchange_ledger_, mixed_error);
+                            }, matter_exchange_ledger_, mixed_error, nullptr,
+                            mpm_substep_forces ? &substep_forces : nullptr);
                     }
                     if (!ok) {
                         if (state.particles.particle_id == mixed_ids_before) {
@@ -981,8 +1031,13 @@
                     // fluid_mask uploaded just above. If the kernel is unavailable
                     // (missing .spv) bring the field home and let Call 1 clamp it
                     // on the host - the old path, one substep at a time.
+                    // A granular (MPM) chain takes the moving, separating
+                    // contact; its solid velocity was uploaded with the mask.
                     if (upload_ok && grid_velocity_device_only &&
-                        !runGpuFluidZeroSolidFaces(state.grid, context.compute, gpu_buffers)) {
+                        !(fluid_params.granular_enabled
+                            ? runGpuMpmSolidFaces(state.grid, context.compute, gpu_buffers, true,
+                                  dt, fluid_params.granular_density)
+                            : runGpuFluidZeroSolidFaces(state.grid, context.compute, gpu_buffers))) {
                         static bool s_warned_zero_solid_faces = false;
                         if (!s_warned_zero_solid_faces) {
                             s_warned_zero_solid_faces = true;
@@ -1387,6 +1442,9 @@
             // "parcels too thin for this voxel size" (see APICSolverStats).
             state.fluid_stats.solid_phase_particles = solid_phase_particle_count;
             state.fluid_stats.solid_phase_cells     = solid_phase_cell_count;
+            state.fluid_stats.collider_query_gpu = last_collider_query_gpu_;
+            state.fluid_stats.collider_query_ms = static_cast<float>(last_collider_query_ms_);
+            state.fluid_stats.collider_query_error = last_collider_query_error_;
 
             if (!projectMatterLiquidDensity(state, step_params, position_density_relaxation_s,
                     granular_frame_dt, context.compute,

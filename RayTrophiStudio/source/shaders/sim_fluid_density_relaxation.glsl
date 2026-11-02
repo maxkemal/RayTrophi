@@ -8,12 +8,24 @@
 // domain's walls (open boundary = air, closed = solid).
 //
 // Two-sided (2026-10-20). The 27-cell mean count is pulled to the target from
-// both sides; the under-filled side only in a cell whose six faces all open
-// onto liquid, so neither the free surface nor a wall layer is sucked in.
+// both sides; the under-filled side only in a cell with no AIR face, so the
+// free surface is never sucked in.
+// ★ 2026-11-02: walls and solids no longer end "interior". Excluding them made
+// the floor and every wall layer one-sided -- over-full pushed, under-full
+// never pulled -- and that rectified count noise into a swell: a resting
+// 12x6x12-cell tank rose 1.4 mm in 30 frames with relaxation on, 0.05 mm off.
 // There is no dead band any more: the one-sided term with a one-standard-error
 // band let a resting column sink to the band's edge at 8 parcels per cell
 // (-5 % after 600 frames, still falling) and rectified count noise into a 10 %
 // swell at 27 (D0 probe). The 27-cell mean is what keeps the noise small.
+// ★★ 2026-11-02: the mean is TENT-weighted (1-2-1 per axis), not a box. The
+// box's transform goes negative at high frequency (1/3 + 2/3 cos k = -1/3 at
+// k = pi per axis), so the correction pumped every grid-scale count mode
+// instead of damping it: a resting tank grew exponentially (0.015 -> 0.27 m/s
+// in 1.5 s), faster the shorter the relaxation time, on CPU and Vulkan alike,
+// and was still there at FLIP 0. The tent's transform ((1 + cos k)/2 per axis)
+// is never negative. A linear model of the loop grows 6600x in 2 s with the
+// box and decays with the tent at every relaxation time and frame rate.
 struct RtDensitySample {
     float mean;
     bool interior;
@@ -27,8 +39,9 @@ RtDensitySample rtDensitySample(ivec3 c) {
             for (int dx = -1; dx <= 1; ++dx) {
                 float m = rtDensityMask(c + ivec3(dx, dy, dz));
                 if (m >= 0.5) {
-                    sum += m;
-                    n += 1.0;
+                    float w = float((2 - abs(dx)) * (2 - abs(dy)) * (2 - abs(dz)));
+                    sum += w * m;
+                    n += w;
                 }
             }
         }
@@ -38,7 +51,8 @@ RtDensitySample rtDensitySample(ivec3 c) {
         for (int direction = -1; direction <= 1; direction += 2) {
             ivec3 q = c;
             q[axis] += direction;
-            if (rtDensityMask(q) < 0.5) {
+            float m = rtDensityMask(q);
+            if (m > -0.5 && m < 0.5) {
                 interior = false;
             }
         }

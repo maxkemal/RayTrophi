@@ -53,7 +53,8 @@ bool hasMixedMatterModels(const FluidParticles& particles, bool legacy_granular)
                                    : MatterConstitutiveModel::Fluid;
         }
         fluid |= model == MatterConstitutiveModel::Fluid;
-        granular |= model == MatterConstitutiveModel::Granular;
+        granular |= model == MatterConstitutiveModel::Granular ||
+            model == MatterConstitutiveModel::Elastic;
     }
     return fluid && granular;
 }
@@ -158,7 +159,12 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
     const double h = grid.voxel_size;
     const double cfl = std::clamp(static_cast<double>(params.cfl), 0.05, 1.0);
     // Snow: the hardening ceiling at the substance's density (runMatterGpuStep).
-    const auto elastic = params.granular_snow_plasticity
+    const auto elastic = params.elastic_solid
+        ? Granular::elasticStepInfo(
+              params.granular_young_modulus * Granular::kElasticWaveSizingFactor,
+              grid.voxel_size, dt, static_cast<float>(strain), 0.0f, 1.0f,
+              params.granular_density)
+        : params.granular_snow_plasticity
         ? Granular::elasticStepInfo(Granular::snowSizingYoungModulus(
               params.granular_young_modulus, params.granular_snow_max_hardening),
               grid.voxel_size, dt, static_cast<float>(strain), 0.0f, 1.0f,
@@ -188,6 +194,9 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
     }
     models[0].granular_enabled = false;
     models[1].granular_enabled = true;
+    if (params.elastic_solid) {
+        models[1].flip_blend = params.elastic_flip_blend;  // as on the device
+    }
     const auto legacy = params.granular_enabled ? MatterConstitutiveModel::Granular
                                               : MatterConstitutiveModel::Fluid;
     APICSolverStats aggregate{};
@@ -203,7 +212,8 @@ bool stepMixedMatter(FluidParticles& particles, FluidSim::FluidGrid& grid,
         if (!hasMixedMatterModels(candidate_particles, params.granular_enabled)) {
             const auto remaining = resolveSingleMatterModel(candidate_particles,
                                                             params.granular_enabled);
-            auto single = models[remaining == MatterConstitutiveModel::Granular ? 1 : 0];
+            auto single = models[remaining == MatterConstitutiveModel::Granular ||
+                                 remaining == MatterConstitutiveModel::Elastic ? 1 : 0];
             APICSolverStats tail_stats;
             step(candidate_particles, candidate_grid, single, sub_dt, forces,
                  time_seconds + substep * sub_dt, &tail_stats);

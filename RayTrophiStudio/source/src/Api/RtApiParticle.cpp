@@ -1234,6 +1234,9 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
     out.pressure_on_gpu = fluid.pressure_on_gpu;
     out.g2p_on_gpu = fluid.g2p_on_gpu;
     out.density_on_gpu = fluid.density_on_gpu;
+    out.collider_query_gpu = fluid.collider_query_gpu;
+    out.collider_query_ms = fluid.collider_query_ms;
+    out.collider_query_error = fluid.collider_query_error;
     out.total_ms = fluid.total_ms;
     out.p2g_ms = fluid.p2g_ms;
     out.pressure_ms = fluid.pressure_ms;

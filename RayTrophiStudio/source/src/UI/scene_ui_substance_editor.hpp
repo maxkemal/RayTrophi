@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Substance editor shown under every substance picker (flow source, collider).
 // Built-ins are read-only: "Derive" makes a project substance from the shown
@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace SubstanceEditorUI {
@@ -294,7 +295,25 @@ inline bool draw(const char* id, std::string& assigned,
         ImGui::SameLine();
         ImGui::TextUnformatted(label.c_str());
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Script key: %s", spec.key);
+            // Fields whose zero and small values mean very different things.
+            const std::string_view key = spec.key;
+            const char* help =
+                key == "elastic_fracture_strain"
+                    ? "0 = never tears. Otherwise the Hencky stretch it tears at,\n"
+                      "counted on how far it has been drawn out (elastic + creep/yield flow):\n"
+                      "0.1 is glass-brittle, 0.8 tears at 2.2x, 1.0 at 2.7x."
+                : key == "elastic_damage_rate"
+                    ? "How fast a parcel past the tear strain loses its tension (1/s).\n" 
+                      "Damage never heals; torn parcels still push, never pull."
+                : key == "elastic_yield_strain"
+                    ? "0 = no yield. Deviatoric Hencky strain beyond which the body\n"
+                      "flows and keeps the new shape (dough keeps the dent)."
+                : key == "elastic_relaxation_s"
+                    ? "0 = never relaxes. Maxwell creep time: a held shape sags\n"
+                      "back to rest over about this many seconds (gum)."
+                : nullptr;
+            if (help) ImGui::SetTooltip("Script key: %s%s", spec.key, help);
+            else ImGui::SetTooltip("Script key: %s", spec.key);
         }
         if (marked) {
             ImGui::SameLine();
@@ -329,6 +348,7 @@ inline bool draw(const char* id, std::string& assigned,
         {"Granular", dem ? "Granular (grains: DEM)" : "Granular (continuum: MPM)", granular,
             nullptr},
         {"Grains (DEM)", "Grain material (DEM)", dem, nullptr},
+        {"Elastic (MPM)", "Elastic solid (MPM)", model == "elastic", nullptr},
         {"Moisture", "Moisture", category == "solid" || category == "granular", nullptr},
         {"Combustion", "Burning (solid)", field_flag("combustible"), "combustible"},
         {"Liquid fuel", "Liquid fuel", category == "fuel" || field_flag("fluid_flammable"),
@@ -342,7 +362,8 @@ inline bool draw(const char* id, std::string& assigned,
         if (group == "Identity") {
             return std::string("General");
         }
-        if (group == "Liquid" || group == "Granular" || group == "Grains (DEM)") {
+        if (group == "Liquid" || group == "Granular" || group == "Grains (DEM)" ||
+            group == "Elastic (MPM)") {
             return std::string("Mechanical");
         }
         if (group == "Acoustics" || group == "Acoustic medium (fluid)") {

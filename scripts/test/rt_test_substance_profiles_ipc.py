@@ -91,6 +91,13 @@ def main():
                             abs_tol=1e-6)
         assert math.isclose(rows["Water"]["liquid_surface_tension_n_m"], 0.072, abs_tol=1e-6)
         assert {"Honey", "Chocolate", "Mud"}.issubset(rows)
+        # Elastic solids on the MPM lane (docs/dev/ELASTIK_MPM.md, 2026-11-02).
+        for name in ("Gelatin", "Dough", "Chewing Gum"):
+            assert rows[name]["default_constitutive_model"] == "elastic", (name, rows[name])
+            assert rows[name]["elastic_young_modulus"] > 0.0
+        assert rows["Gelatin"]["elastic_yield_strain"] == 0.0
+        assert rows["Dough"]["elastic_yield_strain"] > 0.0
+        assert rows["Chewing Gum"]["elastic_relaxation_s"] > 0.0
         # P5 2026-10-19: the quench chemistry is retired; water is just not a fuel.
         assert rows["Water"]["fluid_flammable"] is False
         assert not {"fluid_extinguishing", "cooling_power", "oxygen_dilution"} & set(rows["Water"])

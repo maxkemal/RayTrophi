@@ -1,5 +1,739 @@
 # NEXT BUILD CHECKS
 
+## Izgara yüzünde φ teması + GPU sorgu sağlamlığı — 2026-11-03 (YAZILDI, derlenmedi)
+
+**Derlenecek:** C++ ve iki shader: `sim_matter_mpm_boundary` (yeniden yazıldı; 13 tampon) ve
+`sim_matter_mpm_particle_contact` (sadeleşti). Yeni `.cpp` yok. glslc OK; madde
+denetimleri ve IPC yetki denetimi PASS.
+
+**İçerik:**
+- **Temas ızgarada** (MPM grid-SDF collision), yüz başına:
+  - φ_yüz iki hücrenin ortalaması, temas φ_yüz < 0 iken; n = ∇φ (yüz çevresinde merkezi fark);
+  - yüzün tam hızı: kendi bileşeni + öteki bileşenlerin 4 komşu yüz ortalaması (anlık
+    kopyadan, yarışsız);
+  - katıya göre: yaklaşma kesilir, kayma μ·|v_n| kadar azalır; ayrılırken yapışma tutar.
+  - φ'siz duvarlar (alan duvarı, kinematik proxy) eski taşı/bırak kuralında. Eski iki
+    geçiş (sürtünme + hayalet) söküldü: φ'li içteki boş yüz zaten v = 0 okuyup kayıcı
+    plakada sürükleme yapmıyor.
+- **Anlık kopya tamponları** `mpm_contact_snapshot_*` (ayrı, çünkü `scratch_vel_*` MPM
+  şeridinin FLIP tabanı).
+- **S3 yalnız güvenlik itmesi:** φ < 0'daki parçacık yüzeye konur ve içe doğru hızını
+  kaybeder. Sürtünme ve yapışma ızgarada.
+- **S4 (derin maske) kaldı.** Artık zararsız: ızgara desteği maskeden değil φ'den geliyor.
+  Maske yalnız ilerletmenin parçacığı kısmen örtülü hücreye sokmasına izin veriyor.
+- **CPU ikizi** (`enforceMpmContact`) aynı φ yüz kuralına çevrildi. CPU'da S4 yok (ortak maske).
+- **GPU sorgu sağlamlığı:** ölü tutamak denetimi (`getBufferSize == 0` ya da arka uç
+  değişti ise BVH ve çıktı yeniden kurulur). Hata mesajı dispatch / indirme / boşaltma
+  diye ayrılıyor ve nokta, üçgen, boyut bilgisini taşıyor. Başarısız BVH önbellekten
+  atılıyor.
+- **Auto çözünürlük:** ölçek düzeltmesi YAPILMADI, gerek yokmuş. OBB'nin yerel çerçevesi
+  ölçeği zaten taşıyor (187³ = 1.3 × 1.8 / 0.0125, doğru). Önceki "düzeltilecek" notu yanlıştı.
+- `rt_test_collider_phi_ipc.py`: yeni kapı `plane_keeps_height` (10 cm küp ≥ 6 cm kalmalı).
+
+**Sırayla:**
+1. `python scripts/test/rt_test_collider_phi_ipc.py`: **8/8** hedef.
+   - `plane_keeps_height` FAIL: ızgara hâlâ desteklemiyor. φ yüklenmiyor olabilir
+     (`var_solid_phi`); ya da φ_yüz < 0 eşiği iki hücre kalınlığındaki plakada da tutmuyor.
+   - `plane_on_surface` FAIL, boşluk ≈ +h/2: temas φ_yüz < 0'da açılıyor ve yüzey hücre
+     merkezinden yarım hücre kayık okunuyor. Eşiği yüzeyin tam yerine taşımak gerekebilir.
+   - `sdf_cooked_on_gpu` / `shell_on_gpu` FAIL: `collider_query_error` artık hangi adımın
+     düştüğünü söylüyor. "dispatch failed" ise pipeline ya da descriptor; "download" ise
+     transfer.
+2. `python scripts/test/rt_test_mpm_collider_ipc.py`: **8/8** hedef.
+   - ★ **En sinsi:** `frictionless_slips` FAIL (μ 0'da sakız yine sürükleniyor). İçteki boş
+     yüz mantığı doğru, ama gövdenin plakaya taşan B-spline kütlesi o yüzlere plakanın
+     hızını taşıyor olabilir. `slip_gum_x_m`'e bak.
+3. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 11/11 kalmalı.
+4. `python scripts/test/rt_matter_smoke.py --quick`: **14/14** hedef.
+5. Performans: arşiv kayalarıyla mesh_bvh GPU tablosu yeniden; slate 352 k, h 2.5 cm
+   satırı bu kez GPU'da kalmalı.
+
+## Alt-voksel temas — CANLI 2026-11-02 (exe 23:32, .spv 23:20)
+
+**Çalışan:**
+- **P3 GPU kabuk sorgusu.** mesh_bvh damga süresi, ilk turdaki tabloyla aynı düzende:
+
+  | Mesh | h | CPU (önce) | GPU |
+  |---|---|---|---|
+  | kaya 9.7 k | 2.5 cm | 57 ms | **6.7 ms** |
+  | kaya 9.7 k | 1.25 cm | 341 ms | **27.6 ms** |
+  | slate 352 k | 1.25 cm | 1240 ms | **19 ms** (65×) |
+  | slate 352 k | 2.5 cm | 174 ms | 156 ms: GPU `dispatch/download failed`, CPU'ya düştü (AÇIK) |
+
+- **P2 GPU pişirme.** Auto modda küre mesh'i 187³, 90 ms. (Not: Auto, dünya h'sini yerel
+  birimlere çevirmiyor. Ölçekli nesnede hücre sayısı ölçekle sapıyor; düzeltilecek.)
+- **P1 + S3 analitik küre:** jöle yüzeye −1.2 mm ile oturuyor (eskiden bir hücre mertebesi).
+- Elastik test zeminde 11/11.
+
+**Bozuk — kök ölçüldü: S4 (derin maske) tasarımı yanlış.**
+- Jöle analitik OBB plakada yüzeye tam oturuyor (0.1250), yırtılmıyor (kopuk 0), genişliği
+  aynı; ama yüksekliği 8 cm'den **1.15 cm'ye** iniyor. Bu, S3 bandının kalınlığı (h/2).
+  μ 0'da da aynı.
+- 2 hücre kalınlığındaki plakanın hücre merkezleri φ ≈ −h/2 ve kayan noktada eşiği (≤ −h/2)
+  kaçırıyor. MPM ızgarasında plakanın hiçbir hücresi katı değil, yani **ızgara gövdeyi
+  taşımıyor**. Parçacık başına S3 gerilme yaymaz; banda giren parçacığın yaklaşma hızını
+  keser. Bütün gövde bandın içine yığılıyor. Küre kolu derin hücreler kaldığı için geçti.
+- Aynı aileden: düzlem +17.8 mm, SDF küre −38.6 mm, kabuk −34.7 mm; collider testinde sakız
+  8 mm'ye ezildi, sürtünme taşımıyor (`rt_test_collider_phi_ipc` 3/7,
+  `rt_test_mpm_collider_ipc` 4/8).
+
+**Duman 12/14:** yalnız `mpm_collider` (4/8) ve `collider_phi` (2/7). Diğer 12 kol PASS,
+regresyon yok. ★ Dumandaki `collider_phi` koşusunda `sdf_cooked_on_gpu` ve `shell_on_gpu`
+da FAIL oldu (ilk koşuda PASS). Bir probe'da da pişirme CPU'da yapıldı (14 ms). Slate
+352 k'daki `dispatch/download failed` ile birlikte: **GPU sorgusu aralıklı başarısız
+oluyor, geri dönüş sessizce CPU'ya geçiyor.** Raporlanıyor (`collider_query_error`), ama
+kökü bilinmiyor; sonraki partide ölçülecek.
+
+**Sonraki parti (plan):** teması **ızgara yüzünde φ ile** yapmak (standart MPM grid-SDF
+collision). Yüzün φ'si (komşu hücrelerden) < 0 ise normal = ∇φ; bileşen-bileşen
+yaklaşma kesilir, Coulomb ve yapışma ızgarada uygulanır. Izgara gövdeyi taşır, yüzey
+hücreden incedir. S4 sökülür (ortak maske kalır, ama MPM ilerletmesinde hücre bloklaması
+yerine φ). S3 yalnız güvenlik itmesi olarak kalır (normal/sürtünme ızgarada). Ayrıca: Auto
+çözünürlükte h'nin yerel birimlere çevrilmesi ve 352 k'daki GPU sorgu hatası.
+
+## TEK DERLEME: alt-voksel collider teması P1+P2+P3 — 2026-11-02 gece (YAZILDI, derlenmedi)
+
+Plan ve ölçüm: [COLLIDER_TEMAS_YUZEYI.md](COLLIDER_TEMAS_YUZEYI.md).
+
+**Derlenecek:**
+- C++, **yeni `.cpp`:** `source/src/Physics/Fluid/ColliderGpuQuery.cpp` (+ `.h`); vcxproj ve
+  filters'a eklendi.
+- **Yeni shader'lar:** `sim_collider_bvh_query`, `sim_matter_mpm_particle_contact`.
+- **Değişen shader:** `sim_matter_mpm_boundary`.
+- Hepsi `compile_sim_shaders.bat` listesinde ve glslc OK.
+- Madde denetimleri (36 ızgara alanı) ve IPC yetki denetimi PASS; tanımlayıcılar üretildi.
+
+**İçerik:**
+- **P1 — `grid.solid_phi`:** hücre merkezinde collider'a işaretli uzaklık (m). Voxelizer her
+  modda yazıyor:
+  - düzlem, küre, kapsül, AABB ve OBB analitik (OBB eksen ölçekli, ortalama ölçek değil);
+  - mesh SDF **üç doğrusal** (eskiden en yakın örnek, yarım hücre kayık);
+  - mesh_bvh kabuk: mesafe − kalınlık;
+  - φ'si olmayan katı hücre (convex): −h/2.
+  Kare önbelleğinde.
+- **P2 — GPU SDF pişirme:** `rebuildSDFColliderAsync` işi kuyruğa koyuyor; publish anında
+  `sim_collider_bvh_query` işaretli modda (3 ışın parite oylaması, CPU ile aynı) çalışıyor.
+  Başarısız olursa aynı iş CPU işçisine gidiyor. Yeni çözünürlük modları: 3 = 256³,
+  4 = **Auto** (eksen başına pişirme hücresi ≤ en ince domain vokselinin yarısı).
+  `collider.get` → `sdf_dims`, `sdf_cooked_on_gpu`, `sdf_cook_ms`.
+- **P3 — mesh_bvh kabuğu GPU'da:** BVH mesh sürümü başına bir kez yükleniyor; her kare
+  hücre kutusu tek dispatch ve tek okuma. Başarısızsa CPU döngüsü çalışıyor.
+  `fluid.step_stats` → `collider_query_gpu`, `collider_query_ms`, `collider_query_error`.
+- **S3 — parçacık teması** (`sim_matter_mpm_particle_contact`, MPM şeridinde her alt adımda
+  ilerletmeden sonra; CPU ikizi `applyMpmParticleContact`): φ < 0 ise yüzeye itme; içe
+  giderken normal bileşen kesilir, kaymaya Coulomb uygulanır; ayrılırken h/2 bandında yapışma.
+- **S4 — derin maske:** MPM şeridinin ızgarası yalnız φ < −h/2 hücreleri katı sayıyor. φ'siz
+  (kinematik) hücreler katı kalıyor. Yalnız GPU'da; CPU referansı ortak maskeyi kullanıyor.
+- Önceki partinin **yapışma bandı (geçiş 2) söküldü**; işi S3 yapıyor. Duvar kernel'i 2 geçiş.
+
+**Sırayla:**
+1. `python scripts/test/rt_test_collider_phi_ipc.py`: **7/7** hedef (h = 2.5 cm, h/4 = 6 mm).
+   - `plane_on_surface` FAIL, boşluk ≈ +h/2 ya da +h: S3 çalışmıyor; jöle eskisi gibi voksel
+     maskesinde duruyor. `fluid.step_stats` ve log'da `MPM parcel collider contact failed`
+     ara; yoksa `var_solid_phi` yüklenmiyor.
+   - `plane_on_surface` FAIL, boşluk negatif (yüzeyin altında): S3 itmesi işaret hatası ya
+     da gradyan yönü ters.
+   - `sdf_cooked_on_gpu` FAIL: `sdf_cook_ms` var ve GPU değilse kuyruk CPU'ya düşmüş, log'da
+     `collider GPU query` hatası. Pişirme hiç bitmediyse publish tik'i GPU kuyruğunu çağırmıyor.
+   - `sdf_matches_analytic` FAIL, `sphere_on_surface` PASS: üç doğrusal örnekleme ya da
+     d_dünya = d_yerel / |S⁻¹n| dönüşümü yanlış. Küre mesh'inin facet'i en fazla ~4 mm sapar.
+   - `shell_on_gpu` FAIL: `collider_query_error` alanına bak (BVH kurulumu, tampon sınırı).
+2. `python scripts/test/rt_test_mpm_collider_ipc.py`: 8/8 hedef. Önce germe takılıyordu.
+   - ★ **En sinsi:** `gum_stretches` PASS ama `friction_carries` FAIL. S4 kısmen örtülü
+     hücreleri açınca ızgara sürtünmesi (geçiş 0) zayıflar. Kayan plakayı artık S3'ün
+     Coulomb'u taşımalı; taşımıyorsa S3'te sürtünme normal itkiye bağlı, durgun temasta
+     itki çok küçük kalıyor olabilir.
+   - `gum_on_plate` yükselmede boşluk h/4 altında olmalı (eskiden 2 cm).
+3. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 11/11 kalmalı; zemin alan duvarı, S3'e
+   girmiyor.
+4. `python scripts/test/rt_matter_smoke.py --quick`: **14/14** hedef (yeni `collider_phi`).
+   Collider'lı kum/kar kolları S3/S4'ten geçer.
+5. **Performans karşılaştırması** (ajan, arşiv mesh'leri `E:d model_arsiv`): ölçüm
+   tablosu aynı düzenle tekrarlanır. mesh_bvh 352 k üçgende 1240 ms'den milisaniyeler
+   mertebesine düşmeli; `collider_query_ms` ile bak. mesh_sdf Auto'da pişirme süresi
+   `sdf_cook_ms`.
+6. Gözle: senin sakız sahnen; alt ve üst collider'a yapışma 1e6 verince sakız uzar. Collider
+   panelinde SDF Resolution listesinde 256³ ve Auto var.
+
+**Bu partide YOK:** deforme mesh'te GPU refit. Mesh sürümü değişirse BVH CPU'da yeniden
+kurulup yükleniyor; sorgunun kendisi GPU'da. Ayrıca madde–collider çift birleştirmesi ve
+DEM'e collider başına sürtünme.
+
+## TEK DERLEME partisi — CANLI 2026-11-02 (exe 22:27, .spv 22:15–22:16)
+
+| Test | Sonuç |
+|---|---|
+| Madde profilleri | PASS |
+| Elastik | **11/11** (ilk kez tam): hamur 0.096 m / jöle 0.110 m, hamur hızı 0.018, jöle 0.022 |
+| Collider | **6/8** |
+| Hızlı duman | **12/13**; tek FAIL `mpm_collider` germe kolları. `elastic` dumanda ilk kez tam; regresyon yok |
+
+Collider:
+- PASS: rise (0.103/0.100 m), `friction_carries` (μ 0.8: 0.0998 m) ve **`frictionless_slips`**
+  (μ 0: −0.003 m). Hayalet yüzler sürüklemeyi bitirdi; sürtünme artık gerçekten μ'ye bağlı.
+- FAIL `gum_stretches` + `drawn_gum_tears`: sakız hiç gerilmiyor, yırtılması da bu yüzden yok.
+  Mekanizma ölçüldü (`stretch` örnekleri, kare 13–24):
+  - Sakızın tepesi plakayı 0.200 → 0.225 m'ye kadar 0.1 m/s ile izliyor (bant çalışıyor).
+  - Sonra TAM hücre sınırında (0.225) duruyor, hız kayıtta 0.1 m/s kalıyor.
+  - Plakanın voksel görüntüsü o hücreyi doldurduğu sürece advect'in katı çözümü
+    parçacığı hücreye sokmuyor. Hücre boşaldığında aradaki boşluk bir hücreyi aşmış oluyor.
+  - Hücre tabanlı yamalarla kapanmaz. **Çözüm: alt-voksel collider teması** (SDF ile
+    yüz/parçacık uzaklığı); ayrı bir parti.
+
+## TEK DERLEME partisi — 2026-11-02 gece (YAZILDI, derlenmedi)
+
+Kullanıcı isteği: derleme döngüsü çok sık. Kalan işler tek derlemeye toplandı.
+
+**Derlenecek:** C++ ve üç shader: `sim_matter_mpm_boundary`, `sim_fluid_granular_stress_update`,
+`sim_matter_stress_update`. Yeni `.cpp` yok. Üç shader glslc OK. Madde denetimleri (9 dosya)
+ve IPC yetki denetimi PASS.
+
+**İçerik:**
+1. **Hayalet yüzler** (MPM duvarı, geçiş 1): katının içindeki yüz, yanındaki açık yüzün
+   sürtünmeden geçmiş değerini alıyor. G2P artık plakanın hızını içeriden okuyup μ 0'daki
+   sakızı sürüklemiyor.
+2. **Yapışma bandı** (geçiş 2): voksel plaka bir hücre zıpladığında açılan boş hücrenin
+   gövde tarafındaki yüz, gövde ayrılırken yapışma sınırına kadar duvarın hızına tutuluyor.
+   Yaklaşmayı durdurmuyor. CPU ikizi doluluğu parçacıklardan sayıyor.
+3. **Sakız toplam uzamayla yırtılıyor:** yırtılma gerinimi = en büyük elastik asal gerinim +
+   sünme ve akmanın bıraktığı biriken çekme akışı (`fracture_history` artık bu birikimi
+   taşıyor, her adım sıfırlanmıyor). Jöle etkilenmez (sünme/akma yok). Eskiden sakız
+   yavaş çekilince gerçekçi bir eşikte hiç kopmuyor, çok küçük bir eşikte ise anında
+   dağılıyordu.
+4. **Hamur akma eşiği** 0.15 → 0.10 (`dough_keeps_dent`).
+5. **Madde editörü:** yırtılma, hasar hızı, akma ve gevşeme alanlarında "0 = kapalı" ve
+   değer anlamı tooltip'te.
+6. Collider testi 5 kola çıktı: yeni `draw` kolu (eşik 0.5, ~2.5× germe → yırtılmalı).
+   Testin temizlik hatası düzeltildi (sahne nesneyi ".001" diye yeniden adlandırınca).
+
+Adım 2–3'ün canlı sonucu (exe 22:00, `rt_test_mpm_collider_ipc.py` 5/7):
+- PASS: rise (sakız 0.103 m / 0.100), slide (μ 0.8: 0.0998 m), sağlık.
+- FAIL `frictionless_slips`: μ 0'da da 0.0998 m. Sürtünme değil, G2P'nin karesel şablonu
+  plakanın İÇİNDEKİ yüzlere uzanıp oradaki 0.1 m/s'yi okuyordu. O değeri Adım 1'de
+  "iki tarafı katı yüz = katının hızı" kuralı yazmıştı; sayısal bir sürükleme.
+- FAIL `gum_stretches`: sakız üst plakayı 4 kare izledi (tepe 0.200 → 0.210), sonra
+  bıraktı. Voksel plaka her 6 karede bir bütün hücre zıplıyor; arada sakızla plaka
+  arasında BOŞ bir hücre kalıyor ve hiçbir yüz duvara değmiyor. Yükselme kolundaki
+  2 cm'lik boşluk da aynı şey.
+- Duman (exe 22:00) 11/13: yalnız bilinen `dough_keeps_dent` ve bu iki `mpm_collider` kapısı.
+  Varsayılan μ 0.5 hiçbir kolu bozmadı.
+- Ayrıca test hatası: sahne ikinci plakayı ".001" diye yeniden adlandırınca temizlik
+  collider'ı yanlış adla silmeye çalıştı (düzeltildi).
+
+
+**Sırayla** (önce bağımsız ve hızlı olanlar):
+1. `python scripts/test/rt_test_substance_profiles_ipc.py`: PASS (Dough 0.10 okunuyor).
+2. `python scripts/test/rt_test_mpm_collider_ipc.py`: **8/8** hedef.
+   - `frictionless_slips` FAIL: sürükleme hayalet yüzlerden değil, başka bir yoldan
+     (advect'in katı çözümü ya da P2G). `slip_gum_x_m` 0.0998'den düştüyse ama hâlâ
+     0.025'ten büyükse kısmi; kaynağı ayrı ölçülmeli.
+   - ★ `friction_carries` YENİ FAIL: önceki PASS aslında sürüklemeymiş, Coulomb yolu sakıza
+     ulaşmıyor. Durgun boşluk (`p05 − lower_top`) bir hücreden küçük olmalı.
+   - `gum_stretches` FAIL ama üst boşluk küçük: bant çalışıyor, sakız iç gerilmesiyle
+     bırakıyor; yükseklik artışına bak.
+   - `drawn_gum_tears` FAIL ama `gum_stretches` de FAIL: sakız hiç gerilmediği için
+     yırtılmadı; önce germeyi çöz.
+   - ★ **En sinsi:** `intact_finite` FAIL (eşik 1'deki `stretch` kolu da yırtılıyor):
+     biriken akış ölçüsü fazla ölçüyor. Örneğin basıyla yayılma da "uzama" diye
+     sayılıyor olabilir.
+3. `python scripts/test/rt_test_elastic_mpm_ipc.py`: **11/11** hedef.
+   - `dough_keeps_dent` artık PASS olmalı; `dough_holds_body` FAIL olursa 0.10 fazla
+     akıtıyor demektir.
+   - `gelatin_intact` / `tear_tears` aynı kalmalı (jölede akış yok).
+4. `python scripts/test/rt_matter_smoke.py --quick`: **13/13** hedef.
+5. Gözle: madde editöründe Elastic alanlarının tooltip'leri; collider panelinde Contact
+   Surface; kendi sakız sahnende alt ve üst collider'a yapışma 1e6 verilince sakız uzar,
+   yırtılma eşiği 1'de kopmaz, 0.5'te uzarken kopar.
+
+**Bu partide yok, sonraki için:** FLIP 0.97'nin yavaş doğrusal rampası (2 s'de 0.06 m/s,
+kök bilinmiyor; derlemesiz ölçülebilir); DEM'e collider başına sürtünme (üçgenlerde
+collider kimliği yok); madde–collider çift birleştirmesi; alt-voksel (SDF) ızgara teması.
+
+## Collider temas yüzeyi Adım 2–3: μ + yapışma, MPM Coulomb — 2026-11-02 (YAZILDI, derlenmedi)
+
+**C++ + shader** (`sim_matter_mpm_boundary` yeniden; push 32 bayt, 9 tampon). Yeni `.cpp` yok.
+glslc OK. Madde denetimleri (9 dosya; kare önbelleği 35 alan) ve IPC yetki denetimi PASS;
+tanımlayıcılar yeniden üretildi.
+
+**Ne değişti** (ayrıntı [COLLIDER_TEMAS_YUZEYI.md](COLLIDER_TEMAS_YUZEYI.md)):
+- Collider'da `contact_friction` (μ, 0.5) ve `contact_adhesion_pa` (0): API, IPC, Python,
+  iki kayıt yolu ve panel (Material sekmesi → "Contact Surface (MPM)").
+- Hücre başına damgalanıyor; kare önbelleğinde ve voxel önbellek imzasında.
+- MPM duvarı iki geçiş: teğet Coulomb (normal itkiyle sınırlı) + normal kısıt ve
+  yapışma. CPU ikizi aynı. Alan duvarları değişmedi (sürtünmesiz, yapışmasız).
+- ★ Varsayılan μ 0.5: collider üzerindeki MPM gövdeleri (kum, kar, jöle) artık kaymıyor.
+  Eskiden collider yüzeyi teğette serbest kaymaydı.
+
+Sırayla:
+1. `python scripts/test/rt_test_mpm_collider_ipc.py`: **7/7** hedef (4 kol).
+   - `friction_carries` FAIL, `frictionless_slips` PASS: geçiş 0 hiç çalışmıyor ya da μ
+     cihaza 0 geliyor. `collider.get`'te `contact_friction` 0.8 mi? Değilse IPC/patch;
+     öyleyse yükleme (`uploadGpuSolidContact`) ya da damga.
+   - `gum_stretches` FAIL ve üst boşluk büyük: sakız üst plakadan ayrıldı. 1e6 Pa
+     yetmiyor, ya da sakızın iç gerilmesi (E 2e5, gevşeme 1.5 s) bu çekme hızında 1e6'yı
+     geçiyor. JSON'daki `stretch` örneklerinde ayrılmanın ilk karesine bak.
+   - ★ **En sinsi:** `gum_stretches` PASS ama `intact_finite` FAIL. Sakız uzarken
+     yırtılıyor (eşik 1 = 2.7× gerilme); iki plakaya da değiyor görünür. Yırtılma yapışmanın
+     değil sakızın sınırı; gerekirse test hızı/eşiği ayarı.
+2. `python scripts/test/rt_matter_smoke.py --quick`: 12/13 kalmalı (`dough_keeps_dent`).
+   `mpm_dem_clock` ve `fast_fall` collider kullanıyorsa sürtünme varsayılanı etkileyebilir.
+3. Gözle: collider panelinde iki yeni alan ve tooltip'ler; projeyi kaydet/aç, değerler
+   korunuyor. Senin sakız sahnende alt ve üst collider'a yapışma (ör. 1e6) verince sakız
+   aralarında uzamalı.
+
+## MPM hareketli duvar — CANLI 2026-11-02 (exe 16:51, .spv 16:47)
+
+`rt_test_mpm_collider_ipc.py` **5/5**:
+- Plaka 0.100 m yükseldi, sakız 0.102 m. Hız plakayla aynı (0.09–0.10 m/s).
+- Yükseklik 0.090 → 0.072 m (önce tek katmana ezilme). Kopuk parçacık yok.
+- Sakızın tabanı plaka üstünden 2 cm (`gum_on_plate`, sınır 5 cm).
+
+Hızlı duman **12/13**. Tek FAIL bilinen `dough_keeps_dent`. Kum, kar, tane, ısı, düşüş kolları
+regresyonsuz: zeminden ayrılabilme hiçbir kolu bozmadı.
+
+Açık (Adım 3): sakız taşınıyor ama iki yüzey arasında uzamıyor; bunun için yapışma
+(`adhesion`) gerekiyor. Plaka–sakız arası 2 cm boşluk, voksel adımlı collider maskesinden
+(h = 2.5 cm) geliyor.
+
+## MPM hareketli + ayrılabilir duvar (Collider temas yüzeyi, Adım 1) — 2026-11-02 (YAZILDI, derlenmedi)
+
+**C++ + yeni shader.** Yeni dosya `sim_matter_mpm_boundary.comp`; `compile_sim_shaders.bat`
+listesine ve Vulkan kernel tablosuna (7 tampon, 16 bayt) eklendi, glslc OK. Yeni `.cpp` yok.
+Madde denetimleri (8 dosya) + IPC yetki denetimi PASS. Tasarım:
+[COLLIDER_TEMAS_YUZEYI.md](COLLIDER_TEMAS_YUZEYI.md).
+
+**Ne değişti:** MPM şeridi katıya bitişik ızgara yüzlerini sıfırlıyordu. Bu yüzden
+hareketli bir collider ona duran bir duvar gibi görünüyordu ve normal yönde yapışkandı.
+Şimdi:
+- Gövde katıya (katıya GÖRE) doğru giderse yüz katının hızını alır; ayrılıyorsa kendi
+  hızını korur.
+- Alan duvarı durağan. Teğet yüzler eskisi gibi serbest kayma.
+- GPU: karma MPM şeridi + tek modelli granüler zincir. CPU: `enforceSolidBoundaries`
+  granüler dalı. Sıvı şeridi değişmedi.
+
+**Eski exe ölçümü (yeni test, 16:20 exe):** plaka 10 cm yükseldi, sakız 6.3 cm. Sakızın
+tepesi hiç kıpırdamadı, alttan ezildi ve 34. karede tek bir katmana yapıştı
+(min = max = 0.2375). Kullanıcının gördüğü "kopma" bu.
+
+Sırayla:
+1. `python scripts/test/rt_test_mpm_collider_ipc.py`: 5/5 hedef (`gum_rides`,
+   `gum_keeps_height`, `gum_intact`, `gum_on_plate`, `finite`).
+   - `gum_rides` FAIL, yükseklik korunuyor, sakız yerinde kalıyor: collider'ın hücre hızı
+     (`grid.solid_vel`) `scene.set_transform` ile hareket eden mesh_sdf collider için
+     DOLMUYOR olabilir. Yeni kural doğru, ama okuduğu hız 0. Sıradaki ölçüm bu.
+   - ★ **En sinsi:** `gum_rides` PASS ama `gum_on_plate` FAIL (sakız plakanın üstünde
+     uçuyor). Ayrılma kuralı plakanın ivmesinden fazlasını taşıyıp sakızı fırlatıyor
+     olabilir. JSON'daki `gap_m` serisine bak: büyüyorsa fırlatma.
+2. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 10/11 kalmalı. Jöle artık zeminden
+   gerçekten sekebilir (normal yönde yapışkanlık kalktı); `gelatin_calms` kayarsa sekme
+   enerjisi bu partiden.
+3. `python scripts/test/rt_matter_smoke.py --quick`: 13 kol (yeni `mpm_collider`).
+   **Kum ve kar zeminden ayrılabiliyor artık**: `fast_fall`, `p9_floor`, `mpm_dem_clock`,
+   `seed_settle` (kum dinlenmesi) dikkatle. Kum yığını zeminde zıplıyorsa çarpmanın normal
+   hızı artık sıfırlanmıyor, yalnız katıya girişi engelleniyor; bu doğru fizik ama yeni.
+4. Gözle (Play): senin sakız sahnen (eşik 1, akma 2). Sakız plakayla birlikte yükselir,
+   ezilmez. **Uzamaz:** uzama için iki yüzeye yapışma gerekir (Adım 3, `adhesion`).
+
+## Çadır yoğunluk düzeltmesi — CANLI 2026-11-02 (exe 16:20, .spv 16:15)
+
+`rt_test_seed_settle_ipc.py` **6/6**, yeni `liquid_long_rest` dahil: dinlenik suyun hızı
+1 s'de 0.047, 2 s'de **0.062 m/s** (önce 0.27, üstel). Kalan yavaş doğrusal rampa, FLIP 0.97'nin
+bilinen davranışı (gevşeme kapalıyken de 0.053). Kum değişmedi (p95 0.1 mm, merkez kayması
+0.16 mm). Duman testinin ilk 6 kolu PASS (substance, thermal_films, phase3_freeze,
+fire_steam 8/8, grain_readiness, seed_settle 6/6). Bu koşuda uygulama ~5× yavaştı:
+derleme sonrası VS ServiceHub 6.5 GB. Kalan kollar ayrı koşturuldu: p9_melt 4/4, p9_floor 2/2,
+mpm_dem_clock 5/5, run_readback 1/1, fast_fall 2/2, elastic 10/11 (bilinen `dough_keeps_dent`).
+**Toplam 11/12, regresyon yok.** Elastik alan Vulkan'da (`Mixed Vulkan: granular-only`, ~10 ms/adım);
+testteki yüksek CPU çözücüden değil, IPC turları + kare başı host işi + VS indekslemesinden (ölçülmedi).
+
+## Yoğunluk düzeltmesi: kutu ortalaması → çadır — 2026-11-02 (YAZILDI, derlenmedi)
+
+**C++ + CUDA + shader.** `sim_fluid_density_relaxation.glsl`'yi içeren her shader yeniden
+derlenmeli: `sim_fluid_cg_residual_init`, `sim_fluid_divergence_porous`,
+`sim_sparse_mac_divergence_porous` ve bütün `sim_sparse_pressure_*` (12 dosya). Hepsi
+glslc'den hatasız geçti. Tane/GPU madde denetimleri PASS (çadır ağırlığı için yeni iddia).
+`check_domain_panel_fields` FAIL eskiden beri (HEAD'de de var), bu partiyle ilgisi yok.
+
+**Kök (derlemesiz ölçüm + doğrusal model):** dinlenik tankın üstel rampasını yoğunluk
+düzeltmesinin 27 hücrelik KUTU ortalaması yapıyordu.
+- Kutu filtresinin Fourier dönüşümü yüksek frekansta negatif (eksen başına
+  1/3 + 2/3·cos π = −1/3). Bu yüzden düzeltme, ızgara ölçeğindeki parçacık sayısı
+  modlarında ters işaretle çalışıp onları büyütüyordu.
+- Ölçümlerle tutarlı: büyüme 1/gevşeme ile hızlanıyor, kare süresinden bağımsız,
+  CPU = Vulkan, FLIP 0'da da var.
+- Model (e ← e − dt/max(τ,dt)·S(e), 12³): kutu 2 s'de 6.6e3× (τ 0.05) ile 4.5e4× (τ 0.0125)
+  arası büyüyor. Çadırda (eksen başına 1-2-1; dönüşümü (1+cos k)/2 ≥ 0) her τ ve fps için
+  ~0.5–0.6'ya sönüyor.
+- **Düzeltme:** ortalama üç uygulamada (GLSL, CPU `APICFluidSolver.cpp`, CUDA) çadır
+  ağırlıklı. İç/yüzey testi ve iki yönlülük aynı.
+
+Sırayla:
+1. `python scripts/test/rt_test_seed_settle_ipc.py`: 6/6. Yeni kapı **`liquid_long_rest`**:
+   2 s / 24 fps'de dinlenik su, 2 s'deki hız < 0.08 ve < 2 × 1 s'deki. Eskiden 0.27'ye
+   çıkıyordu; şimdi ~0.05 bekleniyor (FLIP 0.97'nin bilinen yavaş doğrusal rampası, ayrı iş).
+   - Hâlâ üstel ise: shader'lar derlenmemiş olabilir (Vulkan), ya da kutu dışında ikinci
+     bir negatif lob var. CPU arka ucuyla tekrarla; CPU geçip Vulkan kalıyorsa .spv eski.
+   - ★ **En sinsi:** `liquid_at_rest` PASS, ama kütle merkezi yavaşça iniyor ya da
+     yükseliyor. Çadırın ızgara ölçeğindeki modu (k = π) hiç düzeltmez, ama söndürür de:
+     o mod artık büyümemeli. Yanlış yöne giden bir sapma ayrı bir sızıntıdır.
+2. `python scripts/test/rt_matter_smoke.py --quick`: 12'de 11 beklenir (`elastic`'in
+   `dough_keeps_dent` ayarı açık). `seed_settle` 6/6, `p9_melt` / `fire_steam` /
+   `thermal_films` değişmemeli. Islak tane (gözenekli diverjans aynı terimi kullanıyor):
+   `grain_readiness`.
+3. Ritter barajı (varsa): çadır gürültüyü kutudan biraz az bastırır (ağırlık kare toplamı
+   0.053'e karşı 0.037), yani yüzey biraz daha kıpırtılı olabilir. Ama artık rampa yok.
+
+## FLIP rampası — kare dt testi, derlemesiz (2026-11-02, exe 14:40)
+
+**Hipotez ("saf sıvıda da kare başına yerçekimi çekici") REDDEDİLDİ.** Dinlenik su tankı
+(`rt_test_seed_settle_ipc` düzeni: 0.6×0.5×0.6 m, voxel 5 cm, dolu 0.3, settle açık), 2 s.
+Değerler ortalama hız (m/s):
+
+| Süre | Fluid 24 fps | Fluid 96 fps | Matter 24 fps |
+|---|---|---|---|
+| 0.25 s | 0.0145 | 0.0126 | 0.0145 |
+| 0.50 s | 0.026 | 0.017 | 0.026 |
+| 0.75 s | 0.042 | 0.025 | 0.042 |
+| 1.00 s | 0.095 | 0.071 | 0.083 |
+| 1.50 s | **0.268** | 0.158 | 0.205 |
+| 2.00 s | 0.230 | 0.174 | 0.268 |
+
+- Kare süresini 4 kat küçültmek rampayı yalnız biraz geciktiriyor; hatanın büyük kısmı kare
+  başına itki değil.
+- ★ **Rampa doğrusal değil, ÜSTEL:** fiziksel zamanda ~0.25 s'de ikiye katlanıyor, 1–1.5 s'de
+  0.2 m/s'ye ulaşıyor. 30 karelik testler (0.5 s) bunu "yavaş rampa, 0.0006 m/s/kare" diye
+  görüyordu. Su tankı 2 s'de durgun DEĞİL. Sinsi tür: kısa kabul testi geçiyor.
+- 96 fps'de kütle merkezi 0.100 → 0.084 m düşüyor (1.6 cm), yani sıkışma ya da hacim kaybı
+  da var. 24 fps'de bu düşüş 0.004 m.
+- Fluid ve Matter domain aynı davranıyor: ortak yol (FLIP aktarımı, basınç, yoğunluk
+  düzeltmesi).
+
+### FLIP / yoğunluk taraması (2026-11-02, aynı tank, 2 s, 24 fps; Water: FLIP 0.97, gevşeme 0.05 s)
+
+Değerler ortalama hız (m/s), 0.25 s aralıklarla; `cy` = 2 s'deki kütle merkezi yüksekliği (seed 0.100).
+
+| Kol | 0.25 | 0.5 | 0.75 | 1.0 | 1.25 | 1.5 | 1.75 | 2.0 | cy |
+|---|---|---|---|---|---|---|---|---|---|
+| varsayılan | .015 | .026 | .042 | .083 | .162 | .205 | .188 | **.268** | .0944 |
+| FLIP 0.5 | .008 | .010 | .016 | .032 | .051 | .065 | .151 | .245 | .0915 |
+| FLIP 0 | .007 | .008 | .075 | .128 | .180 | .193 | .172 | .223 | .0920 |
+| **gevşeme 0** | .014 | .025 | .033 | .040 | .046 | .050 | .052 | **.053** | **.1001** |
+| FLIP 0.5 + gevşeme 0 | .008 | .010 | .009 | .010 | .009 | .011 | .011 | **.011** | .1001 |
+| gevşeme 0.2 s | .014 | .026 | .034 | .042 | .048 | .052 | .055 | .066 | .0990 |
+| gevşeme 0.0125 s | .015 | .026 | .082 | .149 | .232 | .224 | .358 | **.338** | .0866 |
+| gevşeme 0.05, 96 fps | .013 | .017 | .025 | .071 | .151 | .172 | .159 | .196 | .0845 |
+
+★ **Kök: yoğunluk KONUM düzeltmesi (`projectLiquidDensityPositions`), FLIP değil.**
+- Düzeltme kapalıyken patlama yok: hız 2 s'de 0.053 (FLIP 0.97) ya da 0.011 (FLIP 0.5)
+  m/s'de duruyor ve kütle merkezi kıpırdamıyor (0.1001).
+- Düzeltme açıkken FLIP 0 bile 0.22 m/s'ye çıkıyor. "Yalnız FLIP 0 kaldırıyordu" bulgusu
+  30 karelik (0.5 s) pencerenin yanılsamasıydı.
+- Büyüme düzeltmenin KAZANCIYLA ölçekleniyor: gevşeme 0.0125 s → 0.34 m/s, 0.05 s → 0.27,
+  0.2 s ≈ kapalı. Kare süresine bağlı değil (96 fps de patlıyor), yani sürekli zamanlı bir geri
+  besleme; ayrık adım taşması değil.
+- Bu tür bir düzeltme yoğunluk fazlasını SÖNDÜRMELİ, ama burada kütle merkezini 1–1.5 cm
+  aşağı çekiyor ve hareketi büyütüyor. Kuşkulu yer fazla yoğunluk tahmincisi (iki yönlü
+  terim + 27 hücre ortalaması + yalnız hava yüzü iç test, D2.8 partisi) ya da serbest yüzey
+  satırında bir yön/işaret hatası. Gerçek bir gevşeme kazancı artınca daha hızlı söner, daha
+  hızlı büyümez: bu, sistemin tekil/yanlış işaretli bir bileşenini düzeltmenin beslediğini
+  gösteriyor (CLAUDE.md'deki "daha çok yakınsadıkça daha sert" dersi).
+- Sıradaki (derlemesiz): düzeltmenin kaydırma alanını ve fazla yoğunluk okumasını katmanlara
+  (taban / iç / yüzey) göre ölçmek. IPC'de yoğunluk kalıntısı istatistiği varsa onu oku.
+  Yoksa küçük bir ölçüm yüzeyi gerekir (derleme).
+
+## Yerçekimi alt adımda — CANLI sonuç 2026-11-02 (exe 14:40)
+
+Elastik **10/11**, hızlı duman **11/12** (tek FAIL `elastic`). Kar/kum/tane kolları
+(`fast_fall`, `p9_floor`, `mpm_dem_clock`, `seed_settle`) PASS: alt adım yerçekimi regresyon yapmadı.
+
+| Ölçüm | 14:16 | 14:40 |
+|---|---|---|
+| Hamur son hızı | 0.171 m/s | **0.023** (dough_stops PASS) |
+| Jöle son hızı | 0.146 | **0.036** (tepeden %2) |
+| Jöle yüksekliği | 0.107 (FAIL) | **0.110** (PASS) |
+| Normal jöle kopuk parçacık | 123 | **1** (gelatin_intact PASS) |
+| Yırtılan jöle | 3584/3584 | 3584/3584 |
+
+Kalan tek FAIL **`dough_keeps_dent`**: hamur 0.1104 m, jöle 0.1100 m, fark 0.4 mm. Hamurun
+akma eşiği 0.15, 20 cm'lik düşüşte neredeyse hiç plastik akma vermiyor; jöle ile aynı yere
+oturuyor. Kod hatası değil, ayar ya da kapı sorusu. Seçenekler: eşik 0.15 → 0.08–0.10 (önceki
+0.05 bloğu 5 cm'ye akıtıyordu), ya da kapıyı "hamur ilk temasta kalıcı iz tutar" ölçüsüyle
+(yükseklik/seed oranı) yeniden tanımlamak.
+
+## MPM yerçekimi alt adımda + jöle eşiği — 2026-11-02 (YAZILDI, derlenmedi)
+
+**Yalnız C++.** Shader yok, yeni `.cpp` yok. Madde GPU/tane/gözenek denetimleri (iki bayat
+iddia önceki partinin koduna göre güncellendi; yeni bir iddia eklendi), IPC yetki denetimi PASS.
+
+Derlemesiz ölçümle bulunan kök (exe 14:16):
+- **Hamurun "hayalet" hızı bir YERÇEKİMİ ÇEKİCİ.** Karma madde adımında yerçekimi, adımdan
+  önce kare başına bir kez, kare süresiyle parçacık hızına ekleniyordu (g·1/24 = 0.41 m/s).
+  Durağan bir katı her kare zemine bu darbeyi yiyor, taban kenarı çınlıyor.
+  - Kanıt 1: saklanan hız kenarda içe doğru 0.36 m/s, gerçek yer değiştirme 0.01 m/s.
+    40 × 1 ms'lik adımla hız işaret değiştiriyor, yani gerçek bir salınım.
+  - Kanıt 2: aynı alt adım dt'siyle kararlı hız kare süresiyle orantılı: 0.168 / 0.077 /
+    0.044 m/s (kare dt 1/24, 1/48, 1/96), yani ≈ 0.4 · g · kare_dt.
+  - Önceki partideki "açık viskozite salınımı" teşhisi yanlıştı (alt adımlar 24 → 36'ya çıkınca
+    hız da 0.11 → 0.17'ye ÇIKMIŞTI).
+- **Düzeltme:** MPM parçacığı (granüler ya da elastik) taşıyan karma Vulkan adımında
+  yerçekimi ve paketli kuvvet alanları HER ALT ADIMDA kendi dt'siyle uygulanıyor
+  (`MatterSubstepForces`; tane alanının ortak saati bunu zaten böyle yapıyordu). Kare
+  başında yalnız kap hareketi kalıyor. Yalnız CPU'da çalışan alanlar (gürültü, rüzgâr
+  yüzey sürüklemesi) eski kare yolunda.
+- Gelatin yırtılma eşiği 0.6 → 0.8 (Hencky; 2.2× gerilme). Test kapısı `gelatin_intact`
+  artık "kopuk parçacık ≤ %0.5" diyor (en büyük hasar < 0.5 yerine): tek bir köşe çatlağı
+  kapıyı düşürmesin, %3'lük kenar çatlağı düşürsün.
+
+Sırayla:
+1. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 11/11 hedef.
+   - `dough_stops` hâlâ FAIL: JSON'da `dough_end_speed`'e bak. 0.17 aynı kaldıysa yeni yol
+     çalışmıyor (alanda MPM parçacığı algılanmadı ya da eski exe). Düştü ama < 0.03 değilse
+     ikinci, daha küçük bir kaynak var; kare dt'yi yarıya indirip yeniden ölç: orantılı
+     düşüyorsa hâlâ kare başına bir itki var.
+   - `gelatin_calms` / `gelatin_keeps_shape`: jölenin 3 Hz titremesi aynı çekiçle
+     besleniyordu, ikisi birlikte düzelmeli.
+   - ★ **En sinsi:** `dough_holds_body` FAIL, yani hamur birden akıyor. Yerçekimi artık alt
+     adımlarda düzgün etki ediyor; çekiç gerilmeyi kısa darbelerle yüklüyordu. Akma eşiği
+     0.15 sürekli yüke yetmeyebilir. Bu kodun bozulduğu anlamına gelmez, ayar sorusu.
+2. `python scripts/test/rt_matter_smoke.py --quick`: 12/12 hedef. **Kar ve kum MPM
+   alanları da artık yerçekimini alt adımda alıyor** (tane/DEM alanları değişmedi).
+   `fast_fall`, `p9_floor`, `mpm_dem_clock` dikkatle: düşüş hızı ya da yığın şekli değiştiyse
+   bu partiden.
+3. Gözle (Play): hamur yere oturur ve kıpırdamaz; jöle zıplar, ~1 s'de durulur, kenarı
+   çatlamaz. Kar yığını eskisi gibi.
+
+Açık hipotez, test edilmedi: saf sıvı alanlarda da yerçekimi kare başına bir kez (aynı GPU
+kuvvet geçişi, FluidDomainStep). **FLIP dinlenme rampası** bundan olabilir. Derlemesiz test:
+dinlenik tankı kare dt 1/24 ve 1/96 ile aynı süre koştur; rampa kare dt ile ölçekleniyorsa kök bu.
+
+## Elastik E1 düzeltmeleri + E2 canlı sonuç — 2026-11-02 (exe 14:16, .spv 14:03)
+
+Madde testi PASS (31 hazır). Elastik **7/11**. Hızlı duman **11/12**, tek FAIL `elastic`;
+`seed_settle` 5/5 (`liquid_settle_harmless` dahil), kar/kum/termal regresyon yok.
+
+| Kapı | Sonuç | Sayı |
+|---|---|---|
+| lane_runs_elastic, gelatin_lands, gelatin_calms, dough_holds_body, water_spreads, tear_tears, finite | PASS | yırtılan jöle 3584/3584 kopuk |
+| gelatin_keeps_shape | FAIL (kıl payı) | yükseklik 0.107 < 0.110 (0.7 × 0.157); genişlik 0.21 OK |
+| gelatin_intact | FAIL | normal jöle 20 cm'den: 8. karede 15, 48. karede 123 parçacık kopuk (~%3, kenarlar) |
+| dough_keeps_dent | FAIL | hamur 0.112, jöle 0.107 (jöle yırtılıp titrediği için alçak) |
+| dough_stops | FAIL | **0.17 m/s, 36 alt adımda; şekil 8. kareden sonra 1 mm içinde sabit** |
+
+Bulgular (sonraki partiye, burada ayıklanmadı):
+- ★ **Hamurun hayalet hızı viskozite salınımı DEĞİLMİŞ.** Alt adım 24 → 36'ya çıktı, hız
+  0.11 → 0.17'ye ÇIKTI ve 20. kareden sonra sabit (0.167–0.171). Gerçek kuvvet alt adımla
+  küçülürdü; bu sabit bir bileşen. Aday: zemin/duvar hücresinde saklanan hız, konum
+  kelepçelenirken sıfırlanmıyor (eski E1 hipotezi geri döndü). Ölçüm: hızı yüksekliğe göre
+  dilimle; yalnız alt katman taşıyorsa duvar.
+- Jöle 3 Hz civarı titremeyi sürdürüyor: hız kare kare 0.13 / 0.25 arası, yükseklik 0.094 –
+  0.139. Kalıcı kopuk kenarlar bu salınımı besliyor olabilir.
+- Yırtılma eşiği 0.6 çarpmada kenarı koparıyor. Ya eşik yükselmeli ya da kapı en büyük hasar
+  yerine kopuk ORANINA bakmalı (%3 kenar çatlağı gerçekçi olabilir).
+
+## Elastik E1 düzeltmeleri + E2 yırtılma — 2026-11-02 (YAZILDI, derlenmedi)
+
+**C++ + shader.** Shader: `sim_fluid_granular_stress_update` ve `sim_matter_stress_update`.
+Push bloğu **112 bayt kaldı** (116 indeksli): yırtılma eşiği eski pad yuvasına girdi, hasar
+hızı DP'nin `damage_rate` alanını kullanıyor (iki yasada da saniyede hasar). İki shader
+glslc'den geçti; madde GPU/wet/lane denetimleri, IPC yetki denetimi PASS, tanımlayıcılar
+güncel. Yeni `.cpp` yok.
+
+Derlemesiz ölçümle bulunan kökler (E1 canlı, eski exe):
+- **Hamurun hareketsiz 0.11 m/s'si = açık viskozitenin alt adım salınımı.** Saklanan hız
+  gerçek hareketin 6.7 katı (η=50); η=0'da bile 2.1 katı, çünkü dalga adımı tam sınırdaydı
+  (c·dt/h = 0.35). Hız η ile ölçekleniyor: 0.112 / 0.065 / 0.051 (η 50 / 10 / 0).
+  Düzeltme: elastik yasa alt adımları viskoziteye göre de boyutlandırıyor
+  (η·dt/(ρh²) ≤ 1/12) ve dalga için %50 pay bırakıyor (modül × 2.25). Çekirdekteki tavan
+  1/6'dan 1/12'ye indi; artık yalnız alt adım tavanı dolarsa devreye giriyor.
+- **Jöle kaymıyor, durulmuyor:** kütle merkezi x/z ≈ 0, dikey titreşim 2 s sonra hâlâ
+  ~0.2 m/s. η 2 → 8 Pa·s. Hamurun akma eşiği 0.05 → 0.15 (viskozitesiz 15 cm'lik blok
+  5 cm'ye akıyordu).
+- **Genişlik ölçüsü güvenilmezdi:** min/max sınırı kaçak parçacıkları izliyor, aynı jöle
+  0.35 ya da 0.64 m okunuyordu. `fluid.state_digest` artık `bounds_p05/bounds_p95` veriyor;
+  test bunları kullanıyor.
+- **E2 yırtılma:** en büyük asal Hencky gerinimi `elastic_fracture_strain`'i geçince hasar
+  `elastic_damage_rate` hızıyla birikir, iyileşmez. Hasar yalnız ÇEKME gerilmesini ve
+  viskoziteyi siler; basınç kalır, yani kopan parçalar birbirine çarpar. d ≥ 0.99
+  `granular_detached` olarak sayılır. Gelatin: eşik 0.6, hız 30.
+
+Sırayla:
+1. `python scripts/test/rt_test_substance_profiles_ipc.py`: PASS, yeni alanlar okunuyor.
+2. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 11 kapı, çıktı `%TEMP%/rt_elastic_mpm.json`.
+   - `dough_stops` FAIL (hız ≥ 0.03, şekil sabit): alt adım boyutlandırması yüklenmemiş
+     (eski exe) ya da 1/12 de yetmiyor. JSON'daki `substeps` 24'ten büyük olmalı.
+   - `gelatin_calms` FAIL: η=8 yetmiyor ya da yeni bir pompa var. Hız büyüyorsa pompa,
+     yavaş sönüyorsa ayar.
+   - `tear_tears` FAIL ama `tear_max_damage` > 0: hasar birikiyor, 0.99'a ulaşmıyor.
+     `tear_max_damage` = 0: eşik ya da hız shader'a ulaşmıyor (push alanı).
+   - ★ **En sinsi:** `gelatin_intact` FAIL, yani normal jöle 20 cm'den düşüp yırtılıyor.
+     Sayılar "jöle sağlam" görünür, ama Play'de parça parça olur. Eşiği yükselt; kodu bozuk
+     sayma.
+   - `gelatin_keeps_shape` artık yüzdeliklerden okunuyor. FAIL ederse JSON'daki `p05`/`p95`
+     serisine bak: cisim yayılıyor mu, yoksa tek bir kenar mı akıyor?
+3. Hızlı duman (`rt_matter_smoke.py --quick`): 12/12 hedef. Kar ve kumda alt adım sayısı
+   DEĞİŞMEMELİ, yeni boyutlandırma yalnız elastik yasaya ait.
+4. Gözle (Play): jöle zıplar, titrer ve ~1 s'de durulur; hamur basık kalır ve kıpırdamaz.
+   Düşük eşikli jöle çarpınca parçalara ayrılır.
+
+Hâlâ açık, bu partide yok: **FLIP rampası.** CPU'da da var (60 karede 0.032 m/s), yani
+GPU'ya özgü değil. Yoğunluk projeksiyonu açıkken ~50. karede 0.022'den 0.051'e bir sıçrama
+var; kapalıyken yalnız yavaş rampa (0.025). Kök bulunmadı.
+
+## Büyük parti canlı sonuç — 2026-11-02 (exe 12:12, .spv 12:00)
+
+Hızlı duman **11/12**. Regresyon yok; `seed_settle` dumanda ilk kez 5/5.
+
+| Ölçüm | Önce | Sonra |
+|---|---|---|
+| Su p95 tepesi | 0.89 mm/kare (20. karede sıçrama) | **0.45** (sıçrama yok) |
+| Kütle merkezi, 30 kare | +1.4 mm | **+0.1 mm** (şişme kapandı) |
+| Madde testi | — | PASS, 31 hazır madde |
+| Elastik test | — | 6/8 |
+
+Elastik: `mpm_law = elastic`, 11 alt adım (Dough 24). Jöle iniyor ve **gerçekten zıplayıp
+titriyor**: yükseklik 0.109 ile 0.213 m arasında salınıyor, sonda 0.148 (tohum 0.175). Hamur
+8. karede 0.10 m'ye basıklaşıp kalıyor. Su 0.03 m'ye yayılıyor. İki FAIL:
+1. **gelatin_keeps_shape:** genişlik her 4 karede ~3 cm artıyor (0.20 → 0.64 m), yükseklik
+   sabitken. Cisim yassılaşmıyor; tabandan sızan parçacıklar sınır kutusunu şişiriyor
+   olmalı (ölçülmedi).
+2. **gelatin_settles:** sonda hız 0.20 m/s. ★ Hamur 8. kareden sonra hiç kıpırdamıyor, ama
+   ortalama hızı sabit **0.11 m/s**: konum değişmiyor, hız değişmiyor. Aday: zemin
+   hücresindeki MPM parçacığının hızı her adım duvarın içine bakıyor, konumu da kırpılıyor.
+   Jöledeki dip hız ve tabandaki sızma aynı kökten gelebilir. İlk ölçüm: en alttaki
+   parçacıkların hız vektörü (`particle_extremes` ilk 64 parçacığı zeminden okur).
+
+Hâlâ açık: FLIP'teki yavaş rampa (30 karede 0.45 mm, eşik 0.5). Daha uzun koşuda geçmez.
+
+## Büyük parti: elastik MPM (E1) + yoğunluk şişmesi + su kapısı — 2026-11-02 (DERLENDİ, sonuç yukarıda)
+
+**C++ + CUDA + shader.** Shader paketini derle. Değişenler: `sim_fluid_granular_stress_update`,
+`sim_matter_stress_update` (push 96 → 112 / 100 → 116), `sim_matter_partition`,
+`sim_fluid_density_relaxation.glsl` içerenler (`sim_fluid_cg_residual_init`,
+`sim_sparse_pressure_*`, `*_divergence_porous`). Yeni `.cpp` yok. Statik: shader'lar
+glslc'den geçti; `check_matter_gpu_contracts` (13 ABI), wet/lane denetimleri, IPC yetki
+denetimi PASS; tanımlayıcılar güncel. Kalan `check_*` FAIL'leri bu partiden önce de vardı
+(bulut/gaz/hacim/panel). Tasarım: [ELASTIK_MPM.md](ELASTIK_MPM.md).
+
+Sırayla, hızlıdan yavaşa:
+1. **ABI.** Uygulama açılır, gaz ya da madde adımı "push constant" hatası vermez. Verirse
+   eski `.spv` ile yeni exe eşleşmemiştir: stres shader'ı 112 bayt bekliyor.
+2. `python scripts/test/rt_test_substance_profiles_ipc.py`: Gelatin/Dough/Chewing Gum
+   `elastic`, alanlar okunuyor. FAIL → madde kaydı (SubstanceLibrary alan tablosu).
+3. `python scripts/test/rt_test_seed_settle_ipc.py`: **liquid_at_rest PASS** beklenir (önce
+   0.89 mm/kare, tek karelik tepe). `liquid_settle_harmless` yeni kapı. Hâlâ ~0.9 ise duvar
+   katmanı düzeltmesi yüklenmemiş (eski `.spv`). Su seviyesi düşüyorsa (kütle merkezi
+   −1 mm'den fazla) duvar hücreleri sistematik olarak eksik doluymuş demektir; o zaman
+   "katı komşu iç hücre sayılır" kuralı yalnız alan duvarına daraltılmalı.
+4. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 8 kapı. Sıra önemli:
+   - `lane_runs_elastic` FAIL → `mpm_law` "none" ya da "drucker_prager": yasa seçilmedi
+     (resolveParticleGranularPhysics) ya da parçacık MPM şeridine girmedi (partition).
+   - ★ **En sinsi:** jöle hiç düşmüyor ya da her karede seed yerinde duruyor. Bu, sonuç
+     birleştirmenin elastik parçacığı atladığını gösterir (MatterGpuStep `mpm_parcel`).
+     Sayılar "şekli korudu" der; `gelatin_lands` bunu yakalar.
+   - `gelatin_keeps_shape` FAIL ve su gibi yayılıyorsa: gerilme P2G'ye ulaşmıyor.
+   - `gelatin_settles` FAIL (hız büyüyor): enerji pompası. Önce viskoziteyi 0 yapıp dene;
+     düzelirse açık Kelvin-Voigt tavanı yetmiyor.
+   - `dough_keeps_dent` FAIL: akma çalışmıyor ya da jöle de kalıcı ezildi.
+   - `water_spreads` FAIL ise test anlamsız: kontrol kolu bozuk.
+   Çıktı: `%TEMP%/rt_elastic_mpm.json`. Alt adım sayısını oradan yaz.
+5. Hızlı duman: `python scripts/test/rt_matter_smoke.py --quick` (artık `elastic` içeriyor).
+   Kar, kum ve su değişmemeli. `mpm_dem_clock` ve `p9_floor` farklıysa MPM yük ölçümü
+   (MatterGranularLoad) veya `has_fluid` değişikliği bir şeyi kaydırmıştır.
+6. Gözle (Play): Gelatin küpü düşer, yaylanır, titreşir ve durulur. Dough basıklaşıp kalır.
+   Chewing Gum yavaşça sarkar. Kar alanında `mpm_law` = snow, kum alanında drucker_prager.
+
+Bu partideki diğer iki düzeltme:
+- **Yoğunluk şişmesinin kökü:** iç hücre testi duvar ve katı komşuyu "yüzey" sayıyordu.
+  Zemin ve duvar katmanları tek yönlü kalıyordu: fazla dolu itiliyor, eksik dolu
+  çekilmiyordu. Gürültü bu yüzden şişmeye dönüşüyordu (30 karede +1.4 mm). Artık yalnız hava
+  komşusu iç hücreyi bozuyor. Formülün dört kopyası aynı: CPU, ortak GLSL, CUDA.
+- **Elastik kütle:** katı model `density` ile tartılır (önce `liquid_density`).
+
+Ölçülmeyen: FLIP'teki yavaş rampa (~0.0006 m/s/kare) bu partide ele alınmadı.
+
+## D2.8 canlı sonuç — 2026-11-02 (exe 11:25, dört g2p .spv yeni)
+
+Kök doğrulandı, kapı henüz geçmedi.
+
+| Ölçüm | Önce | Sonra |
+|---|---|---|
+| Su p95 tepesi (seed_settle) | 4.31 mm/kare | 0.89 mm/kare (eşik 0.5) |
+| Ortalama hız, 30. kare | 0.165 m/s | 0.023 m/s |
+| İlk adım hatası | 0.0092 m/s | 0.0009 m/s (FLIP 0 ile aynı) |
+| Ritter FLIP 0.3 | 1.11 m/s, %54 | 1.86 m/s, %23 |
+| Ritter FLIP 0.9 | 1.95 m/s, %20 | 1.97 m/s, %19 |
+| Hızlı duman | — | 10/11, yalnız seed_settle FAIL |
+
+Ritter'de 0.3'ün gerilemesi kapandı (no_regression PASS). Doğruluk kapıları (≤%15) hâlâ FAIL.
+Ön ayar değiştirilmedi.
+
+Kalan, sonraki kod partisine (test sırasında ayıklanmadı):
+1. ★ **0.89'luk tepe ve şişme = konum tabanlı yoğunluk projeksiyonu.** Yalnız tek bir kare
+   (~20.) 0.89 mm sıçrıyor, komşuları ~0.45. Kütle merkezi 30 karede +1.4 mm (FLIP 0'da da
+   aynı). `solver_density_relaxation_s=0` ile ikisi de yok: p95 ≤ 0.35 mm, kütle merkezi
+   +0.05 mm. Yani projeksiyon dinlenik ppc 4 tohumu fazla dolu sanıp genişletiyor.
+2. FLIP'te yavaş rampa kalıyor: kare başına ~0.0006 m/s, 30 karede 0.02 m/s (FLIP 0'da 0.006).
+   30 kare kapının altında, ama daha uzun koşuda büyür. İlk aday duvar sınırlayıcısı
+   (`use_solid_flip_limiter` 0.65) ve P2G'nin duvardaki kesmesi.
+3. `liquid_control_moves` artık anlamsız: su için oturtma 1 adımda ve sıfır yer değiştirmeyle
+   bitiyor, açık/kapalı kollar birebir aynı (0.8928 mm). Bu kapı önceden yalnız gürültü farkıyla
+   geçiyordu. Su kolunda kapıyı "kontrol hareket ediyor" yerine "ikisi de dinlenik" yap.
+
+## D2.8 dinlenik su: G2P duvar kesmesi — 2026-11-02 (DERLENDİ, sonuç yukarıda)
+
+**C++ + CUDA + shader.** Shader'ları derle: `sim_fluid_g2p`, `sim_sparse_mac_g2p`,
+`sim_sparse_mac_matter_g2p`, `sim_matter_g2p` (dördü de aynı `sim_fluid_g2p.glsl`).
+ABI ve push sabitleri değişmedi.
+
+Kök (derlemesiz ölçüldü): G2P, alanın dışına düşen yüzlerin ağırlığını atıyordu ve kalan
+ağırlıkları yeniden normalize etmiyordu. Duvara yarım hücreden yakın her parçacıkta
+G2P(düzgün alan) kısa kalıyor. Her adım parçacığa verilen yerçekiminin FLIP deltası ile
+geri alınması eksik kalıyordu; artan aşağı itiş duvar boyunca birikiyordu.
+Sonuç: duvarda aşağı, ortada yukarı bir konveksiyon hücresi. Kanıt: tek parçacıkta beklenen
+`eksik ağırlık 0.536 × g·dt × 0.63` = −0.0552 m/s, ölçülen −0.0552 m/s. Elenenler (hepsi
+aynı rampa): CG 2000 iterasyon (kalıntı 1e-6), yoğunluk düzeltmesi kapalı, APIC 0, sürükleme
+ve sönüm kapalı. Hız dt'den bağımsız olarak ~0.15 m/s'ye doyuyor, kütle merkezi 0.5 s'de
++4.5 mm yükseliyor (şişme). Düzeltme: alan dışındaki yüz en yakın yüzün değerini alır.
+Vulkan GLSL, CPU `APICFluidSolver.cpp` ve CUDA `fluid_g2p_gather_kernel` aynı.
+P2G dağıtımlarına dokunulmadı; orada yüz değeri normalize edilmiş ortalama.
+
+Sırayla:
+1. `python scripts/test/rt_test_seed_settle_ipc.py`: liquid_at_rest PASS (su p95 < 0.5 mm/kare;
+   önce 4.31). Ortalama hız büyümemeli, ~0.005 m/s'de kalmalı (önceki FLIP 0 kontrolüyle aynı).
+   Değişmediyse: eski `.spv` yüklü (dört g2p dosyasının zaman damgasına bak). Yarıya indiyse:
+   kalan kaynak duvar sınırlayıcısı (`use_solid_flip_limiter`, 0.65).
+2. Kütle merkezi 30 karede ±1 mm içinde (önce +4.5 mm). Hâlâ yükseliyorsa şişme ayrı bir kök.
+3. `python scripts/test/rt_test_ritter_flip_ipc.py`: cephe hızı artmalı. Eski kesme, zemindeki
+   parçacığın x-hızının PIC kısmını %12'ye varan oranda düşürüyordu; 0.3'ün gerilemesi büyük ölçüde
+   buradan olabilir. Ön ayarı bu ölçümle **değiştirme**; yalnız sayıları yaz.
+4. Hızlı duman (`rt_matter_smoke.py --quick`): bütün sıvı G2P'si değişti. fast_fall, p9,
+   mpm_dem_clock, run_readback aynı kalmalı.
+5. ★ Sinsi olan: duvar artık gerçekten kaygan (köşede önceden %50'ye varan teğet sürtünme vardı).
+   Köşelerde sıvının duvara tırmanması ya da alan dışına sızma görülürse, normal bileşenin
+   sabit uzatması yanlış demektir (yansıtma gerekir). Sayılar bunu göstermez, Play'de bak.
+
+## Madde regresyonu, 10-29 partisi — 2026-11-02 (KOŞULDU, derleme gerekmedi)
+
+Exe 11-01 14:54, 10-29 madde kaynaklarından yeni. Boş sahne, dış IPC.
+`rt_matter_smoke.py --with-legacy-project --only <14 kol>`: **13/14 PASS**.
+
+- PASS: matter_lanes 7/7, simulation_transport 8/8, substance, thermal_films 5/5,
+  phase3_freeze, fire_steam 8/8, grain_readiness, p9_melt 4/4, p9_floor 2/2,
+  run_readback, fast_fall 2/2, mpm_dem_clock 5/5 (40 continuum × 2 DEM = 80, grid 40),
+  legacy_project (Gas+Fluid → Matter, kapalı kaynak fazı, gaz shader'ı, canonical yeniden açma).
+- FAIL: seed_settle liquid_at_rest. Su p95 4.311 mm/kare, settle kapalıyken 4.327; Sand 0.106.
+  10-29 ile aynı, D2.8 açık.
+- Düzeltilen iki **test** hatası (kod değil, scripts + x64/Release kopyası):
+  1. `mixed_clock_schedule` her zaman FAIL ediyordu. Test ve `rt_probe_grain_clock_ipc.py`
+     `runtime.substep_limit` değerini tavan diye geçiriyordu. Oysa bu değer sınırlayan
+     etkenin adı (`"damping"`). Yazılan tavan `grain_diagnostics.cfl_terms.max_substeps`'te.
+  2. legacy_project `KeyError: 'shader'`. Yeni gaz domain'inin malzemesi yok
+     (`has_material:false`), yani kayıtta taşınacak shader da yok. Test artık önce
+     `volume.set_material` ile malzeme yazıyor.
+- ★ Sinsi olan: 1. hata "saat tutarsız" gibi okunuyordu, ama kapı hiçbir durumda geçemezdi.
+- Koşulmayanlar: Ritter, 4 emitter'lı hız probu, cache preflight bozuk dosya senaryosu
+  (C++ testi var, derlenmedi), gerçek tarihsel proje dosyası.
+
 ## Katı yoklamaları rayQuery REDDEDİLDİ — 2026-11-01 (en önce)
 
 ★ Kod geri alındı ama kurulu `.spv` hâlâ reddedilen denemedir. Shader paketini yeniden

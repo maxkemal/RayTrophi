@@ -42,10 +42,11 @@ layout(push_constant) uniform PC {
     // past which compression becomes permanent. 0 = off (every other material).
     float compaction_hardening;
     float compaction_limit;
-    // Stomakhin 2013 snow branch (GranularConstitutive.h snowStressUpdateParticle).
-    // Padded to 96 bytes: the Matter dispatcher appends matter_lane at the C++
-    // struct size, so this block and StressUpdateConstants must end together.
-    uint snow_plasticity;
+    // Law: 0 Drucker-Prager, 1 Stomakhin snow, 2 elastic solid
+    // (GranularConstitutive.h). Padded to 112 bytes: the Matter dispatcher
+    // appends matter_lane at the C++ struct size, so this block and
+    // StressUpdateConstants must end together.
+    uint mpm_law;
     float snow_critical_compression;
     float snow_critical_stretch;
     float snow_hardening;
@@ -53,6 +54,10 @@ layout(push_constant) uniform PC {
     float snow_max_hardening;
     float snow_min_plastic_jacobian;
     float snow_min_hardening;
+    float elastic_yield_strain;
+    float elastic_relaxation_s;
+    float elastic_viscosity;
+    float elastic_fracture_strain;  // tear threshold; the rate is damage_rate
 #ifdef MATTER_INDEXED
     uint matter_lane;
 #endif
@@ -231,6 +236,106 @@ void snowStressUpdate(uint i,mat3 C){
              (hardening_capped?64u:0u);
 }
 
+// Elastic solid. Port of elasticStressUpdateParticle; read the CPU reference's
+// header comment for the law (fixed corotated + deviatoric Hencky creep, yield
+// and Kelvin-Voigt damping) and for what each state array holds here.
+void elasticStressUpdate(uint i,mat3 C){
+    float nu=clamp(pc.poisson_ratio,-0.49,0.49);
+    float soft=clamp(softening[i],0.0,1.0);
+    if(isnan(soft)||isinf(soft))soft=1.0;
+    mat3 F=mat3(vec3(f0[i*3],f0[i*3+1],f0[i*3+2]),
+                vec3(f1[i*3],f1[i*3+1],f1[i*3+2]),
+                vec3(f2[i*3],f2[i*3+1],f2[i*3+2]));
+    mat3 dC=pc.dt*C;
+    float strain_increment=sqrt(dot(dC[0],dC[0])+dot(dC[1],dC[1])+dot(dC[2],dC[2]));
+    bool strain_limited=false;
+    if(!(strain_increment<1.0e30)){dC=mat3(0.0);strain_limited=true;}
+    else if(strain_increment>0.25){dC*=0.25/strain_increment;strain_limited=true;}
+    mat3 F_trial=(mat3(1.0)+dC)*F;
+    pv[i]=1.0;
+    float dmg=damage[i];
+    dmg=(isnan(dmg)||isinf(dmg))?0.0:clamp(dmg,0.0,1.0);
+    // Accumulated tensile flow (the CPU reference says why tearing reads it).
+    float flow=fracture_history[i];
+    flow=(isnan(flow)||isinf(flow))?0.0:clamp(flow,0.0,1000.0);
+    fracture_history[i]=flow;
+    if(!finiteMat3(F_trial)||!(determinant(F_trial)>1.0e-6)){
+        sd[i*3]=0.0;sd[i*3+1]=0.0;sd[i*3+2]=0.0;
+        ss[i*3]=0.0;ss[i*3+1]=0.0;ss[i*3+2]=0.0;
+        f0[i*3]=1.0;f0[i*3+1]=0.0;f0[i*3+2]=0.0;
+        f1[i*3]=0.0;f1[i*3+1]=1.0;f1[i*3+2]=0.0;
+        f2[i*3]=0.0;f2[i*3+1]=0.0;f2[i*3+2]=1.0;
+        yield_values[i]=0.0;plastic_increments[i]=0.0;
+        flags[i]=4u|(strain_limited?16u:0u);
+        return;
+    }
+    mat3 V;vec3 eig;
+    symmetricEigen(transpose(F_trial)*F_trial,V,eig);
+    if(determinant(V)<0.0)V[2]=-V[2];
+    vec3 sigma=sqrt(max(eig,vec3(1.0e-12)));
+    vec3 u0=(F_trial*V[0])/sigma.x;
+    vec3 u1=(F_trial*V[1])/sigma.y;
+    u0*=inversesqrt(max(dot(u0,u0),1.0e-20));
+    u1-=u0*dot(u0,u1);
+    u1*=inversesqrt(max(dot(u1,u1),1.0e-20));
+    mat3 U=mat3(u0,u1,cross(u0,u1));
+    vec3 eps=log(max(sigma,vec3(1.0e-6)));
+    float mean=(eps.x+eps.y+eps.z)/3.0;
+    vec3 dev=eps-vec3(mean);
+    vec3 trial_dev=dev;
+    if(pc.elastic_relaxation_s>0.0)dev*=exp(-pc.dt/pc.elastic_relaxation_s);
+    float dev_norm=length(dev);
+    float overshoot=0.0;
+    if(pc.elastic_yield_strain>0.0&&dev_norm>pc.elastic_yield_strain){
+        overshoot=dev_norm-pc.elastic_yield_strain;
+        dev*=pc.elastic_yield_strain/dev_norm;
+    }
+    vec3 sv=exp(dev+vec3(mean));
+    float je=sv.x*sv.y*sv.z;
+    float stretch=max(dev.x,max(dev.y,dev.z))+mean;
+    vec3 shed=trial_dev-dev;
+    flow=min(flow+max(0.0,max(shed.x,max(shed.y,shed.z))),1000.0);
+    float tear=stretch+flow;
+    if(pc.elastic_fracture_strain>0.0&&pc.damage_rate>0.0&&
+       tear>pc.elastic_fracture_strain){
+        dmg=min(1.0,dmg+pc.damage_rate*pc.dt*
+            (tear-pc.elastic_fracture_strain)/pc.elastic_fracture_strain);
+    }
+    fracture_history[i]=flow;
+    damage[i]=dmg;
+    float young=max(pc.young_modulus*soft,1.0);
+    bool capped=false;
+    if(pc.snow_max_young_modulus>0.0&&young>pc.snow_max_young_modulus){
+        young=pc.snow_max_young_modulus;
+        capped=true;
+    }
+    float mu=young/(2.0*(1.0+nu));
+    float lambda=young*nu/((1.0+nu)*(1.0-2.0*nu));
+    mat3 S=mat3(0.0);
+    mat3 F_elastic=mat3(0.0);
+    for(int k=0;k<3;++k){
+        float tau=2.0*mu*(sv[k]-1.0)*sv[k]+lambda*(je-1.0)*je;
+        if(tau>0.0)tau*=1.0-dmg;  // a tear carries no tension
+        S+=tau*outerProduct(U[k],U[k]);
+        F_elastic+=sv[k]*outerProduct(U[k],V[k]);
+    }
+    if(pc.elastic_viscosity>0.0&&pc.dt>0.0){
+        mat3 rate=dC*(1.0/pc.dt);
+        S+=(rate+transpose(rate))*(pc.elastic_viscosity*soft*je*(1.0-dmg));
+    }
+    if(!finiteMat3(S)||!finiteMat3(F_elastic)){S=mat3(0.0);F_elastic=mat3(1.0);}
+    sd[i*3]=S[0][0];sd[i*3+1]=S[1][1];sd[i*3+2]=S[2][2];
+    ss[i*3]=S[0][1];ss[i*3+1]=S[0][2];ss[i*3+2]=S[1][2];
+    f0[i*3]=F_elastic[0][0];f0[i*3+1]=F_elastic[0][1];f0[i*3+2]=F_elastic[0][2];
+    f1[i*3]=F_elastic[1][0];f1[i*3+1]=F_elastic[1][1];f1[i*3+2]=F_elastic[1][2];
+    f2[i*3]=F_elastic[2][0];f2[i*3+1]=F_elastic[2][1];f2[i*3+2]=F_elastic[2][2];
+    hardening_state[i]=clamp(max(hardening_state[i],0.0)+overshoot,0.0,1000.0);
+    yield_values[i]=overshoot;
+    plastic_increments[i]=overshoot;
+    flags[i]=(overshoot>0.0?1u:0u)|(dmg>=0.99?2u:0u)|(strain_limited?16u:0u)|
+             (capped?64u:0u);
+}
+
 #ifdef MATTER_INDEXED
 layout(set = 0, binding = 15) readonly buffer MatterIndices { uint matter_index[]; };
 layout(set = 0, binding = 16) readonly buffer MatterCounts { uint matter_count[]; };
@@ -247,7 +352,8 @@ void main() {
     mat3 C=mat3(vec3(c_data[a],c_data[a+1],c_data[a+2]),
                 vec3(c_data[a+3],c_data[a+4],c_data[a+5]),
                 vec3(c_data[a+6],c_data[a+7],c_data[a+8]));
-    if(pc.snow_plasticity!=0u){snowStressUpdate(i,C);return;}
+    if(pc.mpm_law==2u){elasticStressUpdate(i,C);return;}
+    if(pc.mpm_law==1u){snowStressUpdate(i,C);return;}
     float nu=clamp(pc.poisson_ratio,-0.49,0.49);
     // ★★ BOND STRENGTH FALLS QUADRATICALLY, STIFFNESS LINEARLY, and that
     // asymmetry is what makes a melt read as a melt: the block stops holding

@@ -1,4 +1,4 @@
-/*
+﻿/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -2979,9 +2979,15 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                 } else {
                     ImGui::Text("Mesh Reference: %s", c.source_name.c_str());
                     
-                    const char* resolutions[] = { "Low (32x32x32)", "Medium (64x64x64)", "High (128x128x128)" };
+                    const char* resolutions[] = { "Low (32x32x32)", "Medium (64x64x64)", "High (128x128x128)",
+                                                  "Very High (256x256x256)", "Auto (cell = half domain voxel)" };
                     if (ImGui::Combo("SDF Resolution##CollTab", &c.sdf_resolution_mode, resolutions, IM_ARRAYSIZE(resolutions))) {
                         scene.rebuildSDFColliderAsync(c);
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Cooked on the GPU when Vulkan compute is available (CPU otherwise).\n"
+                                          "Auto ties the cook cell to half the finest simulation voxel,\n"
+                                          "per axis, so contact is resolved below the voxel.");
                     }
                     
                     if (ImGui::Button("Force Rebuild SDF Grid##CollTabRec", ImVec2(-1, 24))) {
@@ -3017,6 +3023,21 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             ImGui::DragFloat("Friction Coefficient##CollTab",    &c.friction,    0.01f, 0.0f, 1.0f, "%.2f");
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Tangent sliding resistance applied on particle contact events.");
+            }
+            ImGui::SeparatorText("Contact Surface (MPM)");
+            ImGui::DragFloat("Contact Friction##CollTab", &c.contact_friction, 0.01f, 0.0f, 2.0f, "%.2f");
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Coulomb friction coefficient between this surface and MPM bodies\n"
+                                  "(sand, snow, jelly, dough, gum). 0 = frictionless.\n"
+                                  "Not the particle friction above: that is a per-hit speed loss.\n"
+                                  "Not derived from the render roughness map.");
+            }
+            ImGui::DragFloat("Contact Adhesion (Pa)##CollTab", &c.contact_adhesion_pa, 10.0f, 0.0f, 1.0e6f,
+                             "%.0f", ImGuiSliderFlags_Logarithmic);
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Tensile stress an MPM body must exceed to leave this surface.\n"
+                                  "0 = never sticks. Chewing gum's tack is of the order of 1e6 Pa;\n"
+                                  "the body still has to carry that stress itself. Ctrl+click for more.");
             }
             ImGui::DragFloat("Voxel Inflation Thickness##CollTab",   &c.thickness,   0.005f, 0.0f, 5.0f, "%.3f");
             if (ImGui::IsItemHovered()) {

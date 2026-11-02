@@ -345,6 +345,24 @@ struct SubstanceProfile {
     // Clump size, m (Worley cell). Held to >= 3 voxels: finer structure is
     // averaged away by the grid exactly like white noise.
     float granular_snow_clump_size = 0.12f;
+    // Elastic solid on the MPM lane (default_constitutive_model = elastic;
+    // docs/dev/ELASTIK_MPM.md). Fixed-corotated hyperelasticity, plus:
+    //   yield strain  -> Hencky von Mises plasticity (dough, clay: keeps a dent)
+    //   relaxation    -> Maxwell deviatoric creep (gum: sags and strings)
+    //   viscosity     -> Kelvin-Voigt damping (jelly: the wobble dies out)
+    // Each 0 = off; all three off is a perfectly elastic body. The
+    // granular_softening_* fields below soften it with heat, as for granular.
+    float elastic_young_modulus = 1.0e4f;      // Pa
+    float elastic_poisson_ratio = 0.40f;
+    float elastic_yield_strain = 0.0f;         // deviatoric Hencky strain
+    float elastic_relaxation_s = 0.0f;         // s
+    float elastic_viscosity_pa_s = 0.0f;       // Pa s
+    // Tearing (E2): past this principal Hencky stretch the parcel accumulates
+    // damage at elastic_damage_rate per unit relative overshoot per second, and
+    // damage removes its TENSILE stress (compression stays: torn pieces still
+    // collide). 0 = never tears.
+    float elastic_fracture_strain = 0.0f;
+    float elastic_damage_rate = 30.0f;         // 1/s
     // Thermal/burn softening of the skeleton; 0 K disables it (sand does not soften).
     float granular_softening_kelvin = 0.0f;      // K, midpoint
     float granular_softening_range = 40.0f;      // K, width

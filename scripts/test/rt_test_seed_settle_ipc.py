@@ -11,10 +11,16 @@ frame), not by the velocity column. Gates:
     REST_M and its centre of mass drifts < 2 mm;
   * grains_control_moves: unsettled Sand moves more than settled Sand;
   * liquid_at_rest: settled Water's per-frame p95 displacement stays under
-    REST_M. ★ Expected to FAIL while Water runs FLIP 0.90: a resting tank
-    keeps ~0.16 m/s of FLIP transfer noise (2026-10-19 probe: FLIP 0 gave
-    0.004 m/s). That is a solver decision, not a settle failure;
-  * liquid_control_moves: unsettled Water moves more than settled Water.
+    REST_M. Until 2026-11-02 this failed at ~0.16 m/s; the cause was not
+    FLIP noise but G2P dropping out-of-domain face weights, so FLIP returned
+    only part of each step's gravity near the walls (MATTER_ROADMAP D2.8);
+  * liquid_settle_harmless: settled Water moves no more than unsettled Water
+    (a liquid seed starts at rest, so the two arms may tie);
+  * liquid_long_rest: settled Water over 2 s at 24 fps does not grow: mean
+    speed at 2 s < 0.08 m/s and < 2x its value at 1 s. 30 frames hid an
+    EXPONENTIAL ramp (0.015 -> 0.27 m/s in 1.5 s) driven by the box-mean
+    density correction (2026-11-02, now tent-weighted). A slow linear FLIP
+    ramp (~0.05 m/s at 2 s, FLIP 0.97) is still known and passes.
 """
 import json
 from pathlib import Path
@@ -38,7 +44,7 @@ def main():
     def row(name):
         return {d['name']: d for d in call('fluid.list_domains')['domains']}[name]
 
-    def arm(label, substance, kind, settle):
+    def arm(label, substance, kind, settle, frames=FRAMES, dt=DT):
         name = 'T_SeedSettle_' + label
         call('fluid.create_domain', name=name, type=kind, domain_min=[-.3, 0, -.3],
              domain_max=[.3, .5, .3], voxel_size=.05)
@@ -50,8 +56,8 @@ def main():
             call('fluid.seed', domain=name, particles_per_cell=4, replace=True, fill_level=.3)
             seeded = row(name)['particle_count']
             samples = []
-            for frame in range(FRAMES):
-                call('fluid.step', dt=DT)
+            for frame in range(frames):
+                call('fluid.step', dt=dt)
                 r = row(name)
                 s = {'motion_p95_m': r['live_motion_p95_m'], 'motion_mean_m': r['live_motion_mean_m'],
                      'motion_samples': r['live_motion_samples'],
@@ -73,6 +79,7 @@ def main():
         sand_off = arm('sand_off', 'Sand', 'matter', False)
         water_on = arm('water_on', 'Water', 'fluid', True)
         water_off = arm('water_off', 'Water', 'fluid', False)
+        water_long = arm('water_long', 'Water', 'fluid', True, 48, 1 / 24)
 
         def peak(a):
             # Frame 0 has no previous sample to compare against.
@@ -91,6 +98,8 @@ def main():
             'sand_on_com_drift_m': max(coms) - min(coms),
             'water_on_peak_p95_m': peak(water_on),
             'water_off_peak_p95_m': peak(water_off),
+            'water_long_speed_1s': water_long['samples'][23]['mean_speed'],
+            'water_long_speed_2s': water_long['samples'][-1]['mean_speed'],
             'sand_settle': sand_on['samples'][0]['settle'],
             'water_settle': water_on['samples'][0]['settle'],
         }
@@ -102,8 +111,14 @@ def main():
                               summary['sand_on_com_drift_m'] < .002,
             'grains_control_moves': summary['sand_off_peak_p95_m'] > summary['sand_on_peak_p95_m'],
             'liquid_at_rest': summary['water_on_peak_p95_m'] < REST_M,
-            'liquid_control_moves': summary['water_off_peak_p95_m'] >
-                                    summary['water_on_peak_p95_m'],
+            # A liquid seed is already at rest: its settle is a no-op (1 step,
+            # zero displacement), so the arms can tie. The gate is that settle
+            # never makes water move MORE (2026-11-02; ties were a FAIL before).
+            'liquid_settle_harmless': summary['water_on_peak_p95_m'] <=
+                                      summary['water_off_peak_p95_m'] * 1.05,
+            'liquid_long_rest': summary['water_long_speed_2s'] < 0.08 and
+                                summary['water_long_speed_2s'] <
+                                2.0 * summary['water_long_speed_1s'],
         }
         data['verdicts'] = verdicts
         OUT.write_text(json.dumps(data, indent=2), encoding='utf-8')
