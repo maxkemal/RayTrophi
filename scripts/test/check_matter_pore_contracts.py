@@ -40,7 +40,8 @@ def main():
     assert "output_room - rest[i] * fraction[i] * (1.0 - debit)" in shader
     assert '"drainage_refills"' in read("src/Api/RtApiMatterModels.cpp")
     mass = read("src/Physics/Fluid/FluidPhysicalMass.cpp")
-    assert "model == MatterConstitutiveModel::Granular ? profile->density" in mass
+    assert "(solid ? profile->density : profile->liquid_density)" in mass
+    assert "model == MatterConstitutiveModel::Elastic" in mass
     assert "rest_mass <= 0.0f" in mass
     assert "mixed_legacy_granular);" in read("src/Physics/Fluid/FluidDomainStep.inl")
     assert "fluid_params.grain.enabled || fluid_params.pore_exchange.enabled ||" in read(

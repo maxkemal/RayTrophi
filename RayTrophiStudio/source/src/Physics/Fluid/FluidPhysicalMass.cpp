@@ -21,8 +21,13 @@ float densityForParticle(uint32_t tag, const SubstanceProfile* fallback,
         model = legacy_granular ? MatterConstitutiveModel::Granular
             : MatterConstitutiveModel::Fluid;
     }
+    // A solid skeleton (granular or elastic) weighs its solid density; only a
+    // liquid parcel uses liquid_density. The stress volume (mass / density in
+    // matterParticleDryVolume) relies on the same choice.
+    const bool solid = model == MatterConstitutiveModel::Granular ||
+        model == MatterConstitutiveModel::Elastic;
     const float density = profile
-        ? (model == MatterConstitutiveModel::Granular ? profile->density : profile->liquid_density)
+        ? (solid ? profile->density : profile->liquid_density)
         : 1000.0f;
     return std::isfinite(density) && density > 0.0f ? density : 1000.0f;
 }

@@ -9,7 +9,8 @@
 // and the G2P consumer ask this one predicate.
 bool granularFlipSnapshotWanted(const Fluid::APICSolverParams& params,
                                 const SimulationGridDomainComputeBuffers& buffers) {
-    return params.granular_enabled && params.granular_snow_plasticity &&
+    return params.granular_enabled &&
+        (params.granular_snow_plasticity || params.elastic_solid) &&
         params.flip_blend > 0.0f && buffers.matter_model.enabled &&
         buffers.scratch_vel_x.valid() && buffers.scratch_vel_y.valid() &&
         buffers.scratch_vel_z.valid();

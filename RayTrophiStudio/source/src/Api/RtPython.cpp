@@ -1747,6 +1747,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_requested_young_modulus"] = info.granular_requested_young_modulus;
         d["granular_effective_young_modulus"] = info.granular_effective_young_modulus;
         d["granular_required_substeps"] = info.granular_required_substeps;
+        d["mpm_law"] = info.mpm_law;
         d["granular_solver_substeps"] = info.granular_solver_substeps;
         d["granular_stiffness_capped"] = info.granular_stiffness_capped;
         d["granular_wave_substeps"] = info.granular_wave_substeps;
@@ -2107,6 +2108,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["granular_requested_young_modulus"] = info.granular_requested_young_modulus;
             d["granular_effective_young_modulus"] = info.granular_effective_young_modulus;
             d["granular_required_substeps"] = info.granular_required_substeps;
+            d["mpm_law"] = info.mpm_law;
             d["granular_solver_substeps"] = info.granular_solver_substeps;
             d["granular_stiffness_capped"] = info.granular_stiffness_capped;
             d["granular_wave_substeps"] = info.granular_wave_substeps;
@@ -2449,6 +2451,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["granular_requested_young_modulus"] = info.granular_requested_young_modulus;
         d["granular_effective_young_modulus"] = info.granular_effective_young_modulus;
         d["granular_required_substeps"] = info.granular_required_substeps;
+        d["mpm_law"] = info.mpm_law;
         d["granular_solver_substeps"] = info.granular_solver_substeps;
         d["granular_stiffness_capped"] = info.granular_stiffness_capped;
         d["granular_wave_substeps"] = info.granular_wave_substeps;
@@ -3038,6 +3041,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["pressure_on_gpu"] = s.pressure_on_gpu;
         d["g2p_on_gpu"] = s.g2p_on_gpu;
         d["density_on_gpu"] = s.density_on_gpu;
+        d["collider_query_gpu"] = s.collider_query_gpu;
+        d["collider_query_ms"] = s.collider_query_ms;
+        d["collider_query_error"] = s.collider_query_error;
         d["total_ms"] = s.total_ms;
         d["p2g_ms"] = s.p2g_ms;
         d["pressure_ms"] = s.pressure_ms;
@@ -3417,6 +3423,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["bounds_measured"] = dg.bounds_measured;
         d["bounds_min"] = py::make_tuple(dg.bounds_min[0], dg.bounds_min[1], dg.bounds_min[2]);
         d["bounds_max"] = py::make_tuple(dg.bounds_max[0], dg.bounds_max[1], dg.bounds_max[2]);
+        d["bounds_p05"] = py::make_tuple(dg.bounds_p05[0], dg.bounds_p05[1], dg.bounds_p05[2]);
+        d["bounds_p95"] = py::make_tuple(dg.bounds_p95[0], dg.bounds_p95[1], dg.bounds_p95[2]);
         d["whitewater_particles"] = dg.whitewater_particles;
         d["whitewater_position_hash"] = hex(dg.whitewater_position_hash);
         return d;
@@ -3854,9 +3862,14 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["bounds_max"] = vec3ToPython(c.bounds_max);
         d["friction"] = c.friction; d["restitution"] = c.restitution;
         d["thickness"] = c.thickness;
+        d["contact_friction"] = c.contact_friction;
+        d["contact_adhesion_pa"] = c.contact_adhesion_pa;
         d["sdf_resolution_mode"] = c.sdf_resolution_mode;
         d["sdf_ready"] = c.sdf_ready;
         d["sdf_resolution"] = c.sdf_resolution;
+        d["sdf_dims"] = py::make_tuple(c.sdf_dims[0], c.sdf_dims[1], c.sdf_dims[2]);
+        d["sdf_cooked_on_gpu"] = c.sdf_cooked_on_gpu;
+        d["sdf_cook_ms"] = c.sdf_cook_ms;
         d["resolved_valid"] = c.resolved_valid;
         d["resolved_world_min"] = vec3ToPython(c.resolved_world_min);
         d["resolved_world_max"] = vec3ToPython(c.resolved_world_max);
@@ -3898,6 +3911,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         RT_COLLIDER_KW(plane_y, float); RT_COLLIDER_KW(sphere_radius, float);
         RT_COLLIDER_KW(capsule_radius, float); RT_COLLIDER_KW(friction, float);
         RT_COLLIDER_KW(restitution, float); RT_COLLIDER_KW(thickness, float);
+        RT_COLLIDER_KW(contact_friction, float); RT_COLLIDER_KW(contact_adhesion_pa, float);
         RT_COLLIDER_KW(gas_interaction_enabled, bool);
         RT_COLLIDER_KW(gas_density_rate, float); RT_COLLIDER_KW(gas_temperature_rate, float);
         RT_COLLIDER_KW(gas_fuel_rate, float); RT_COLLIDER_KW(gas_flame_rate, float);

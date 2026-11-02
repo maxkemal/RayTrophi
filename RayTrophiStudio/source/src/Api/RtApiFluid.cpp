@@ -509,6 +509,11 @@ void fillFluidSolidPhase(const RayTrophiSim::SimulationGridDomainState& state,
     info.granular_requested_young_modulus = state.fluid_stats.granular_requested_young_modulus;
     info.granular_effective_young_modulus = state.fluid_stats.granular_effective_young_modulus;
     info.granular_required_substeps = state.fluid_stats.granular_required_substeps;
+    {
+        static const char* const kMpmLaws[] = {"drucker_prager", "snow", "elastic"};
+        const int law = state.fluid_stats.mpm_law;
+        info.mpm_law = law >= 0 && law <= 2 ? kMpmLaws[law] : "none";
+    }
     info.granular_solver_substeps = state.fluid_stats.granular_solver_substeps;
     info.granular_stiffness_capped = state.fluid_stats.granular_stiffness_capped;
     info.granular_wave_substeps = state.fluid_stats.granular_wave_substeps;
@@ -3472,7 +3477,14 @@ SimulationColliderInfo colliderInfoFromDesc(const RayTrophiSim::ParticleCollider
     out.friction = c.friction;
     out.restitution = c.restitution;
     out.thickness = c.thickness;
+    out.contact_friction = c.contact_friction;
+    out.contact_adhesion_pa = c.contact_adhesion_pa;
     out.sdf_resolution_mode = c.sdf_resolution_mode;
+    out.sdf_dims[0] = c.sdf_nx;
+    out.sdf_dims[1] = c.sdf_ny;
+    out.sdf_dims[2] = c.sdf_nz;
+    out.sdf_cooked_on_gpu = c.sdf_cooked_on_gpu;
+    out.sdf_cook_ms = c.sdf_cook_ms;
     out.sdf_ready = c.sdf_grid_data && !c.sdf_grid_data->empty();
     out.sdf_resolution = c.sdf_nx;
     out.gas_interaction_enabled = c.gas_interaction_enabled;
@@ -3565,7 +3577,11 @@ Result colliderDescFromInfo(const SimulationColliderInfo& info,
     out.friction = std::clamp(info.friction, 0.0f, 1.0f);
     out.restitution = std::clamp(info.restitution, 0.0f, 1.0f);
     out.thickness = std::max(0.0f, info.thickness);
-    out.sdf_resolution_mode = std::clamp(info.sdf_resolution_mode, 0, 2);
+    out.contact_friction = std::max(0.0f, info.contact_friction);
+    out.contact_adhesion_pa = std::max(0.0f, info.contact_adhesion_pa);
+    // 0..2 = 32/64/128 cubic, 3 = 256 cubic, 4 = Auto (cook cell <= half the
+    // finest domain voxel, per axis; COLLIDER_TEMAS_YUZEYI.md P2).
+    out.sdf_resolution_mode = std::clamp(info.sdf_resolution_mode, 0, 4);
     out.gas_interaction_enabled = info.gas_interaction_enabled;
     out.gas_density_rate = std::max(0.0f, info.gas_density_rate);
     out.gas_temperature_rate = std::max(0.0f, info.gas_temperature_rate);

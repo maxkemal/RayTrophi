@@ -827,7 +827,8 @@ bool partitionMatterGrainOwners(const FluidParticles& p, const APICSolverParams&
             continue;
         }
         if (model == MatterConstitutiveModel::Elastic) {
-            error = "grain domain carries an elastic carrier; no transport owner accepts it";
+            error = "grain (DEM) domain carries an elastic carrier; elastic solids run "
+                "on the MPM lane of a domain without DEM grains";
             return false;
         }
         if (isGranular(p, i, legacy_granular)) {

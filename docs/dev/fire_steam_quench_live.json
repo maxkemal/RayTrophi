@@ -70,65 +70,65 @@
       "samples": [
         {
           "step": 25,
-          "burning": 30,
-          "inerted": 206,
-          "masked": 1,
+          "burning": 23,
+          "inerted": 199,
+          "masked": 2,
           "min_oxygen": 0.0,
-          "gas_phase_mass_kg": 12.197527904125579,
-          "particles": 45324
+          "gas_phase_mass_kg": 14.081849037183781,
+          "particles": 45259
         },
         {
           "step": 50,
-          "burning": 45,
-          "inerted": 361,
-          "masked": 5,
+          "burning": 38,
+          "inerted": 297,
+          "masked": 2,
           "min_oxygen": 0.0,
-          "gas_phase_mass_kg": 6.312502447685352,
-          "particles": 47495
+          "gas_phase_mass_kg": 7.431823207931485,
+          "particles": 47365
         },
         {
           "step": 75,
-          "burning": 82,
-          "inerted": 229,
-          "masked": 5,
+          "burning": 59,
+          "inerted": 199,
+          "masked": 8,
           "min_oxygen": 0.0,
-          "gas_phase_mass_kg": 5.138527592215947,
-          "particles": 49857
+          "gas_phase_mass_kg": 5.704680654061442,
+          "particles": 49791
         },
         {
           "step": 100,
-          "burning": 197,
-          "inerted": 339,
-          "masked": 3,
+          "burning": 161,
+          "inerted": 365,
+          "masked": 5,
           "min_oxygen": 0.0,
-          "gas_phase_mass_kg": 5.108090076883209,
-          "particles": 51931
+          "gas_phase_mass_kg": 5.723213378617993,
+          "particles": 51707
         },
         {
           "step": 125,
-          "burning": 369,
-          "inerted": 466,
-          "masked": 5,
+          "burning": 374,
+          "inerted": 565,
+          "masked": 10,
           "min_oxygen": 0.0,
-          "gas_phase_mass_kg": 4.312578065887797,
-          "particles": 53667
+          "gas_phase_mass_kg": 4.438152424185004,
+          "particles": 53685
         },
         {
           "step": 150,
-          "burning": 435,
-          "inerted": 496,
-          "masked": 2,
+          "burning": 605,
+          "inerted": 750,
+          "masked": 6,
           "min_oxygen": 0.0,
-          "gas_phase_mass_kg": 3.4694507078817285,
-          "particles": 55898
+          "gas_phase_mass_kg": 3.5950194274305938,
+          "particles": 55675
         }
       ],
-      "burning_total": 23970,
-      "inerted_total": 45310,
-      "fuel_total": 2.6879999999999997,
-      "masked_total": 542,
+      "burning_total": 24063,
+      "inerted_total": 49506,
+      "fuel_total": 1.8657,
+      "masked_total": 807,
       "min_oxygen": 0.0,
-      "measured_steps": 149,
+      "measured_steps": 150,
       "ledger_mass_error_kg": 0.0,
       "ledger_energy_error_j": 0.0
     }
@@ -144,9 +144,9 @@
     "ledger_balanced": true
   },
   "reported": {
-    "burning_dry_over_wet": 0.41118064246975383,
-    "steam_masked_cells_wet": 542,
+    "burning_dry_over_wet": 0.4095914890080206,
+    "steam_masked_cells_wet": 807,
     "fuel_dry": 42.06399999999999,
-    "fuel_wet": 2.6879999999999997
+    "fuel_wet": 1.8657
   }
 }

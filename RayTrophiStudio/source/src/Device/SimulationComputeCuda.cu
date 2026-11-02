@@ -1066,14 +1066,18 @@ __global__ void fluid_g2p_gather_kernel(const DeviceVec3* positions,
         for (int dj = 0; dj < 3; ++dj)
         for (int di = 0; di < 3; ++di) {
             const int gi = bx + di, gj = by + dj, gk = bz + dk;
-            if (gi < 0 || gi > xmax || gj < 0 || gj > ymax || gk < 0 || gk > zmax) continue;
+            // Past the domain edge: nearest face's value, not a dropped
+            // weight (see sim_fluid_g2p.glsl: dropping pumps a resting tank).
+            const int fi = min(max(gi, 0), xmax);
+            const int fj = min(max(gj, 0), ymax);
+            const int fk = min(max(gk, 0), zmax);
 
             const float w = wx[di] * wy[dj] * wz[dk];
 
             int face_idx;
-            if (comp == 0)      face_idx = gi + gj*(c.nx+1) + gk*(c.nx+1)*c.ny;
-            else if (comp == 1) face_idx = gi + gj*c.nx      + gk*c.nx*(c.ny+1);
-            else                face_idx = gi + gj*c.nx      + gk*c.nx*c.ny;
+            if (comp == 0)      face_idx = fi + fj*(c.nx+1) + fk*(c.nx+1)*c.ny;
+            else if (comp == 1) face_idx = fi + fj*c.nx      + fk*c.nx*(c.ny+1);
+            else                face_idx = fi + fj*c.nx      + fk*c.nx*c.ny;
 
             const float vn = (comp==0) ? vel_x_post[face_idx]
                            : (comp==1) ? vel_y_post[face_idx]
@@ -1365,11 +1369,14 @@ __global__ void fluid_cg_residual_init_kernel(const float* divergence,
     // sim_fluid_density_relaxation.glsl. Two-sided (2026-10-20): the 27-cell
     // mean count is pulled to particles_per_cell over density_relaxation_s;
     // the under-filled side only where all six faces open onto liquid.
+    // Tent-weighted (1-2-1 per axis): a box mean pumped grid-scale modes.
     if (c.density_relaxation_s > 0.0f && c.particles_per_cell > 0) {
         const int sz = c.nx * c.ny;
         const int i = id % c.nx, j = (id / c.nx) % c.ny, k = id / sz;
+        // Out of domain = wall (closed/periodic) or air (open), as in the GLSL.
         const auto mask_at = [&](int a, int b, int d) {
-            if (a < 0 || b < 0 || d < 0 || a >= c.nx || b >= c.ny || d >= c.nz) return 0.0f;
+            if (a < 0 || b < 0 || d < 0 || a >= c.nx || b >= c.ny || d >= c.nz)
+                return c.boundary == 0 ? 0.0f : -1.0f;
             return fluid_mask[a + b * c.nx + d * sz];
         };
         float sum = 0.0f, n = 0.0f;
@@ -1377,12 +1384,23 @@ __global__ void fluid_cg_residual_init_kernel(const float* divergence,
             for (int dy = -1; dy <= 1; ++dy)
                 for (int dx = -1; dx <= 1; ++dx) {
                     const float m = mask_at(i + dx, j + dy, k + dz);
-                    if (m >= 0.5f) { sum += m; n += 1.0f; }
+                    if (m >= 0.5f) {
+                        const float w = static_cast<float>(
+                            (2 - abs(dx)) * (2 - abs(dy)) * (2 - abs(dz)));
+                        sum += w * m;
+                        n += w;
+                    }
                 }
+        // Only an AIR face ends "interior"; a wall face does not (2026-11-02,
+        // see sim_fluid_density_relaxation.glsl: wall layers rectified noise).
+        const auto air = [&](int a, int b, int d) {
+            const float m = mask_at(a, b, d);
+            return m > -0.5f && m < 0.5f;
+        };
         const bool interior =
-            mask_at(i - 1, j, k) >= 0.5f && mask_at(i + 1, j, k) >= 0.5f &&
-            mask_at(i, j - 1, k) >= 0.5f && mask_at(i, j + 1, k) >= 0.5f &&
-            mask_at(i, j, k - 1) >= 0.5f && mask_at(i, j, k + 1) >= 0.5f;
+            !air(i - 1, j, k) && !air(i + 1, j, k) &&
+            !air(i, j - 1, k) && !air(i, j + 1, k) &&
+            !air(i, j, k - 1) && !air(i, j, k + 1);
         const float target = static_cast<float>(c.particles_per_cell);
         float excess = n > 0.0f ? (sum / n - target) / target : 0.0f;
         if (!interior) excess = fmaxf(excess, 0.0f);

@@ -19,15 +19,22 @@ struct alignas(16) StressUpdateConstants {
     float hardening_coefficient=0.0f;
     float max_stored_strain=kGranularMaxStoredStrain;
     float compaction_hardening=0.0f,compaction_limit=0.0f;
-    // Stomakhin snow branch. The GLSL block carries the same fields and pad:
-    // the Matter dispatcher appends matter_lane at sizeof(this), so both must
-    // end at 96 bytes or the indexed variant reads its lane from a pad.
-    uint32_t snow_plasticity=0;
+    // Law: 0 Drucker-Prager, 1 Stomakhin snow, 2 elastic solid (ELASTIK_MPM.md).
+    // The GLSL block carries the same fields and pad: the Matter dispatcher
+    // appends matter_lane at sizeof(this), so both must end at 112 bytes or the
+    // indexed variant reads its lane from a pad. snow_max_young_modulus is the
+    // wave limit of the snow AND the elastic branch; damage_rate is the elastic
+    // tear rate too (damage per second in both laws). The tear threshold took
+    // the old pad, so the block stays 112 bytes (116 indexed), under Vulkan's
+    // guaranteed 128.
+    uint32_t mpm_law=0;
     float snow_critical_compression=0.025f,snow_critical_stretch=0.0075f;
     float snow_hardening=10.0f,snow_max_young_modulus=0.0f;
     float snow_max_hardening=5.0f,snow_min_plastic_jacobian=0.436f,snow_min_hardening=0.1f;
+    float elastic_yield_strain=0.0f,elastic_relaxation_s=0.0f,elastic_viscosity=0.0f;
+    float elastic_fracture_strain=0.0f;
 };
-static_assert(sizeof(StressUpdateConstants)==96);
+static_assert(sizeof(StressUpdateConstants)==112);
 
 struct alignas(16) StressP2GConstants {
     int nx=0,ny=0,nz=0,count=0,component=0;
@@ -299,7 +306,11 @@ inline bool dispatchStressUpdate(SimulationComputeContext& compute,
     c.hardening_coefficient=std::max(params.hardening,0.0f);
     c.compaction_hardening=std::max(params.compaction_hardening,0.0f);
     c.compaction_limit=std::max(params.compaction_limit,0.0f);
-    c.snow_plasticity=params.snow_plasticity?1u:0u;
+    c.mpm_law=params.elastic_solid?2u:(params.snow_plasticity?1u:0u);
+    c.elastic_yield_strain=std::max(params.elastic_yield_strain,0.0f);
+    c.elastic_relaxation_s=std::max(params.elastic_relaxation_s,0.0f);
+    c.elastic_viscosity=std::max(params.elastic_viscosity,0.0f);
+    c.elastic_fracture_strain=std::max(params.elastic_fracture_strain,0.0f);
     c.snow_critical_compression=std::clamp(params.snow_critical_compression,0.0f,0.9f);
     c.snow_critical_stretch=std::max(params.snow_critical_stretch,0.0f);
     c.snow_hardening=std::max(params.snow_hardening,0.0f);

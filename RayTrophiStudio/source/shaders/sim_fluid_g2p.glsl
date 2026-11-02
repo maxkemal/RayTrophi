@@ -149,13 +149,18 @@ void main() {
         for (int dj = 0; dj < 3; ++dj)
         for (int di = 0; di < 3; ++di) {
             int gi = bx+di, gj = by+dj, gk = bz+dk;
-            if (gi < 0 || gi > xmax || gj < 0 || gj > ymax || gk < 0 || gk > zmax) continue;
+            // ★ A face past the domain edge takes the nearest face's value
+            // instead of being dropped. Dropping left the weights summing to < 1
+            // within half a cell of a wall, so G2P of a uniform field fell short:
+            // FLIP removed only part of the gravity each particle got, and a
+            // resting tank pumped itself into a wall-driven convection cell.
+            int fi = clamp(gi, 0, xmax), fj = clamp(gj, 0, ymax), fk = clamp(gk, 0, zmax);
 
             float w  = wx[di] * wy[dj] * wz[dk];
-            float vn = fetch_post(comp, gi, gj, gk);
+            float vn = fetch_post(comp, fi, fj, fk);
             v_acc   += w * vn;
             if (pc.has_flip_snapshot != 0)
-                vp_acc += w * fetch_pre(comp, gi, gj, gk);
+                vp_acc += w * fetch_pre(comp, fi, fj, fk);
 
             vec3 dx = vec3(float(gi)-gx, float(gj)-gy, float(gk)-gz) * h;
             c_acc   += w * vn * dx;

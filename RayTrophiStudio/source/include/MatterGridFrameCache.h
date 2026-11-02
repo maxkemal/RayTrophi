@@ -44,6 +44,12 @@ struct MatterGridFrameCache {
         solid_gas_flame;
     LosslessArray<typename decltype(FluidSim::FluidGrid::solid_gas_band)::value_type>
         solid_gas_band;
+    LosslessArray<typename decltype(FluidSim::FluidGrid::solid_contact_friction)::value_type>
+        solid_contact_friction;
+    LosslessArray<typename decltype(FluidSim::FluidGrid::solid_contact_adhesion)::value_type>
+        solid_contact_adhesion;
+    LosslessArray<typename decltype(FluidSim::FluidGrid::solid_phi)::value_type>
+        solid_phi;
     LosslessArray<typename decltype(FluidSim::FluidGrid::u_weight)::value_type> u_weight;
     LosslessArray<typename decltype(FluidSim::FluidGrid::v_weight)::value_type> v_weight;
     LosslessArray<typename decltype(FluidSim::FluidGrid::w_weight)::value_type> w_weight;
@@ -83,6 +89,9 @@ struct MatterGridFrameCache {
         solid_gas_fuel.captureAndRelease(grid.solid_gas_fuel);
         solid_gas_flame.captureAndRelease(grid.solid_gas_flame);
         solid_gas_band.captureAndRelease(grid.solid_gas_band);
+        solid_contact_friction.captureAndRelease(grid.solid_contact_friction);
+        solid_contact_adhesion.captureAndRelease(grid.solid_contact_adhesion);
+        solid_phi.captureAndRelease(grid.solid_phi);
         u_weight.captureAndRelease(grid.u_weight);
         v_weight.captureAndRelease(grid.v_weight);
         w_weight.captureAndRelease(grid.w_weight);
@@ -119,6 +128,9 @@ struct MatterGridFrameCache {
         solid_gas_fuel.restore(grid.solid_gas_fuel);
         solid_gas_flame.restore(grid.solid_gas_flame);
         solid_gas_band.restore(grid.solid_gas_band);
+        solid_contact_friction.restore(grid.solid_contact_friction);
+        solid_contact_adhesion.restore(grid.solid_contact_adhesion);
+        solid_phi.restore(grid.solid_phi);
         u_weight.restore(grid.u_weight);
         v_weight.restore(grid.v_weight);
         w_weight.restore(grid.w_weight);
@@ -156,6 +168,9 @@ struct MatterGridFrameCache {
             solid_gas_fuel.bytes() +
             solid_gas_flame.bytes() +
             solid_gas_band.bytes() +
+            solid_contact_friction.bytes() +
+            solid_contact_adhesion.bytes() +
+            solid_phi.bytes() +
             u_weight.bytes() +
             v_weight.bytes() +
             w_weight.bytes() +
@@ -194,6 +209,9 @@ inline std::size_t fluidGridAllocationBytes(const FluidSim::FluidGrid& grid) {
         grid.solid_gas_fuel.capacity() * sizeof(typename decltype(grid.solid_gas_fuel)::value_type) +
         grid.solid_gas_flame.capacity() * sizeof(typename decltype(grid.solid_gas_flame)::value_type) +
         grid.solid_gas_band.capacity() * sizeof(typename decltype(grid.solid_gas_band)::value_type) +
+        grid.solid_contact_friction.capacity() * sizeof(typename decltype(grid.solid_contact_friction)::value_type) +
+        grid.solid_contact_adhesion.capacity() * sizeof(typename decltype(grid.solid_contact_adhesion)::value_type) +
+        grid.solid_phi.capacity() * sizeof(typename decltype(grid.solid_phi)::value_type) +
         grid.u_weight.capacity() * sizeof(typename decltype(grid.u_weight)::value_type) +
         grid.v_weight.capacity() * sizeof(typename decltype(grid.v_weight)::value_type) +
         grid.w_weight.capacity() * sizeof(typename decltype(grid.w_weight)::value_type) +

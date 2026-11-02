@@ -222,6 +222,12 @@ struct Parameters {
     float snow_max_hardening = 5.0f;           // ceiling of exp(xi (1 - J_P))
     float snow_min_hardening = 0.1f;           // floor of exp(xi (1 - J_P))
     float snow_min_plastic_jacobian = 0.436f;  // rho_snow / rho_ice
+    // Elastic solid (elasticStressUpdateParticle). Replaces both laws when on.
+    bool  elastic_solid = false;
+    float elastic_yield_strain = 0.0f;
+    float elastic_relaxation_s = 0.0f;
+    float elastic_viscosity = 0.0f;            // Pa s, already stability-capped
+    float elastic_fracture_strain = 0.0f;      // 0 = never tears; rate: damage_rate
 };
 
 // Field-for-field mirror of the shader's push constant block. Angles arrive
@@ -253,6 +259,14 @@ struct StressUpdateParams {
     float snow_max_hardening = 5.0f;
     float snow_min_plastic_jacobian = 0.436f;
     float snow_min_hardening = 0.1f;
+    // Elastic solid branch. snow_max_young_modulus is its wave limit too.
+    bool  elastic_solid = false;
+    float elastic_yield_strain = 0.0f;
+    float elastic_relaxation_s = 0.0f;
+    float elastic_viscosity = 0.0f;
+    // E2 tear threshold. The rate is damage_rate above: damage per second,
+    // the same meaning in both laws.
+    float elastic_fracture_strain = 0.0f;
 };
 
 // Flag bits. Shared vocabulary with the shader and with the stats/IPC readout.
@@ -263,7 +277,7 @@ enum : uint32_t {
     kFlagSleeping         = 8u,   // written by the settle stage
     kFlagStrainLimited    = 16u,  // dt*C had to be clamped: step was coarse
     kFlagCompactionCapped = 32u,  // stored strain capped: compaction went plastic
-    kFlagHardeningCapped  = 64u,  // snow: hardened E clamped to the wave limit
+    kFlagHardeningCapped  = 64u,  // snow/elastic: E clamped to the wave limit
 };
 
 // ── Column-major 3x3, matching GLSL mat3 exactly ─────────────────────────────
@@ -585,6 +599,192 @@ inline void snowStressUpdateParticle(const AffineC& affine,
                 (hardening_capped ? kFlagHardeningCapped : 0u);
 }
 
+// -- Elastic solid on the MPM lane (docs/dev/ELASTIK_MPM.md) -----------------
+//
+// Fixed-corotated hyperelasticity (Stomakhin 2012), the same stress the snow
+// branch uses with no clamp and no hardening, plus three optional effects that
+// all act on the DEVIATORIC Hencky strain e = ln(sigma) - tr/3 only, so none
+// of them can change the volume:
+//   relaxation_s -> e *= exp(-dt / relaxation_s): Maxwell creep. Gum sags and
+//                   strings; 0 = the body never forgets its rest shape.
+//   yield_strain -> |e| capped at yield_strain (von Mises on Hencky strain,
+//                   perfectly plastic). Dough keeps the dent; 0 = never yields.
+//   viscosity    -> Kirchhoff tau += eta J (C + C^T): Kelvin-Voigt damping of
+//                   the strain RATE. Jelly's wobble dies out; it never sets a
+//                   shape. The host caps eta at the explicit diffusion limit.
+// State reuse, same arrays as the other branches:
+//   deformation_col* = F_E (after creep and yield)
+//   plastic_volume   = 1 (unused: no volumetric plasticity)
+//   hardening        = accumulated plastic strain, sum of |e| shed at the yield
+//   damage           = tear damage 0..1 (E2): grows at damage_rate while the
+//                      TEAR STRAIN exceeds fracture_strain, never heals;
+//                      removes TENSILE principal stress only, so torn pieces
+//                      still collide
+//   fracture_history = accumulated tensile FLOW: the largest principal Hencky
+//                      strain creep and yield shed each step, summed. Tear
+//                      strain = largest elastic principal strain + this.
+//                      ★ 2026-11-02: tearing read the elastic strain only, and
+//                      creep/yield keep that small: a gum pulled slowly never
+//                      tore at a real threshold (elastic capped ~0.41 at yield
+//                      0.5), and a tiny threshold caught its resting strain and
+//                      shattered it at once. A viscoelastic body tears by how
+//                      far it has been drawn out, elastic or not.
+// Mirrors elasticStressUpdate() in sim_fluid_granular_stress_update.glsl.
+inline void elasticStressUpdateParticle(const AffineC& affine,
+                                        const StressUpdateParams& pc,
+                                        float softening,
+                                        Vec3& deformation_col0,
+                                        Vec3& deformation_col1,
+                                        Vec3& deformation_col2,
+                                        Vec3& stress_diag,
+                                        Vec3& stress_shear,
+                                        float& plastic_volume,
+                                        float& damage_state,
+                                        float& hardening_state,
+                                        float& fracture_history,
+                                        float& out_yield_value,
+                                        float& out_plastic_increment,
+                                        uint32_t& out_flags) {
+    const Mat3 C(affine.col0, affine.col1, affine.col2);
+    const float nu = std::clamp(pc.poisson_ratio, -0.49f, 0.49f);
+    const float soft = std::isfinite(softening) ? std::clamp(softening, 0.0f, 1.0f) : 1.0f;
+    Mat3 F(deformation_col0, deformation_col1, deformation_col2);
+
+    Mat3 dC = C * pc.dt;
+    const float strain_increment = frobenius(dC);
+    bool strain_limited = false;
+    if (!(strain_increment < 1.0e30f)) { dC = Mat3(); strain_limited = true; }
+    else if (strain_increment > kGranularStrainIncrementCeiling) {
+        dC = dC * (kGranularStrainIncrementCeiling / strain_increment);
+        strain_limited = true;
+    }
+    const Mat3 F_trial = (Mat3::identity() + dC) * F;
+    plastic_volume = 1.0f;
+    float damage = std::isfinite(damage_state) ? std::clamp(damage_state, 0.0f, 1.0f) : 0.0f;
+    float flow = std::isfinite(fracture_history) ? std::clamp(fracture_history, 0.0f, 1000.0f)
+                                                 : 0.0f;
+    fracture_history = flow;
+    if (!isFiniteMat(F_trial) || !(determinant(F_trial) > 1.0e-6f)) {
+        stress_diag = Vec3(0, 0, 0); stress_shear = Vec3(0, 0, 0);
+        deformation_col0 = Vec3(1, 0, 0); deformation_col1 = Vec3(0, 1, 0);
+        deformation_col2 = Vec3(0, 0, 1);
+        out_yield_value = 0.0f; out_plastic_increment = 0.0f;
+        out_flags = kFlagInvalid | (strain_limited ? kFlagStrainLimited : 0u);
+        return;
+    }
+
+    Mat3 V; Vec3 eig;
+    symmetricEigen(transpose(F_trial) * F_trial, V, eig);
+    if (determinant(V) < 0.0f) V.c[2] = V.c[2] * -1.0f;
+    const float sigma[3] = { std::sqrt(std::max(eig.x, 1.0e-12f)),
+                             std::sqrt(std::max(eig.y, 1.0e-12f)),
+                             std::sqrt(std::max(eig.z, 1.0e-12f)) };
+    Vec3 u0 = (F_trial * V.c[0]) * (1.0f / sigma[0]);
+    Vec3 u1 = (F_trial * V.c[1]) * (1.0f / sigma[1]);
+    u0 = u0 * (1.0f / std::sqrt(std::max(u0.length_squared(), 1.0e-20f)));
+    u1 = u1 - u0 * u0.dot(u1);
+    u1 = u1 * (1.0f / std::sqrt(std::max(u1.length_squared(), 1.0e-20f)));
+    const Vec3 u[3] = { u0, u1, u0.cross(u1) };
+
+    float eps[3];
+    for (int k = 0; k < 3; ++k) eps[k] = std::log(std::max(sigma[k], 1.0e-6f));
+    const float mean = (eps[0] + eps[1] + eps[2]) / 3.0f;
+    float dev[3] = { eps[0] - mean, eps[1] - mean, eps[2] - mean };
+    const float trial_dev[3] = { dev[0], dev[1], dev[2] };
+    if (pc.elastic_relaxation_s > 0.0f) {
+        const float keep = std::exp(-pc.dt / pc.elastic_relaxation_s);
+        for (float& e : dev) e *= keep;
+    }
+    const float dev_norm = std::sqrt(dev[0] * dev[0] + dev[1] * dev[1] + dev[2] * dev[2]);
+    float overshoot = 0.0f;
+    if (pc.elastic_yield_strain > 0.0f && dev_norm > pc.elastic_yield_strain) {
+        overshoot = dev_norm - pc.elastic_yield_strain;
+        const float scale = pc.elastic_yield_strain / dev_norm;
+        for (float& e : dev) e *= scale;
+    }
+    float s[3];
+    float stretch = -1.0e30f;
+    float shed = 0.0f;
+    for (int k = 0; k < 3; ++k) {
+        s[k] = std::exp(dev[k] + mean);
+        stretch = std::max(stretch, dev[k] + mean);
+        shed = std::max(shed, trial_dev[k] - dev[k]);
+    }
+    flow = std::min(flow + shed, 1000.0f);
+    const float tear = stretch + flow;
+    const float je = s[0] * s[1] * s[2];
+    if (pc.elastic_fracture_strain > 0.0f && pc.damage_rate > 0.0f &&
+        tear > pc.elastic_fracture_strain) {
+        damage = std::min(1.0f, damage + pc.damage_rate * pc.dt *
+            (tear - pc.elastic_fracture_strain) / pc.elastic_fracture_strain);
+    }
+    fracture_history = flow;
+    damage_state = damage;
+
+    float young = std::max(pc.young_modulus * soft, 1.0f);
+    bool capped = false;
+    if (pc.snow_max_young_modulus > 0.0f && young > pc.snow_max_young_modulus) {
+        young = pc.snow_max_young_modulus;
+        capped = true;
+    }
+    const float mu = young / (2.0f * (1.0f + nu));
+    const float lambda = young * nu / ((1.0f + nu) * (1.0f - 2.0f * nu));
+
+    Mat3 S;
+    Mat3 F_elastic;
+    for (int k = 0; k < 3; ++k) {
+        float tau = 2.0f * mu * (s[k] - 1.0f) * s[k] + lambda * (je - 1.0f) * je;
+        if (tau > 0.0f) tau *= 1.0f - damage;  // a tear carries no tension
+        S = S + outerProduct(u[k], u[k]) * tau;
+        F_elastic = F_elastic + outerProduct(u[k], V.c[k]) * s[k];
+    }
+    if (pc.elastic_viscosity > 0.0f && pc.dt > 0.0f) {
+        const Mat3 rate = dC * (1.0f / pc.dt);
+        S = S + (rate + transpose(rate)) * (pc.elastic_viscosity * soft * je * (1.0f - damage));
+    }
+    if (!isFiniteMat(S) || !isFiniteMat(F_elastic)) {
+        S = Mat3(); F_elastic = Mat3::identity();
+    }
+    stress_diag  = Vec3(S.at(0,0), S.at(1,1), S.at(2,2));
+    stress_shear = Vec3(S.at(0,1), S.at(0,2), S.at(1,2));
+    deformation_col0 = F_elastic.c[0];
+    deformation_col1 = F_elastic.c[1];
+    deformation_col2 = F_elastic.c[2];
+    hardening_state = std::clamp(std::max(hardening_state, 0.0f) + overshoot, 0.0f, 1000.0f);
+    out_yield_value = overshoot;
+    out_plastic_increment = overshoot;
+    out_flags = (overshoot > 0.0f ? kFlagYielded : 0u) |
+                (damage >= 0.99f ? kFlagDetached : 0u) |
+                (strain_limited ? kFlagStrainLimited : 0u) |
+                (capped ? kFlagHardeningCapped : 0u);
+}
+
+// Explicit Kelvin-Voigt stability: a viscous stress diffuses momentum with
+// coefficient eta / rho. ★ The textbook 3D bound eta dt / (rho h^2) < 1/6 is NOT
+// enough here: Dough at 0.7 of it (2026-11-02 live) kept a substep-to-substep
+// velocity flip 6.7x its real motion -- the elastic wave term shares the same
+// explicit budget, and the quadratic B-spline transfer is wider than the 7-point
+// stencil the 1/6 assumes. 1/12 is the bound the substep planner sizes for
+// (elasticViscousSubsteps); this cap only binds when the substep ceiling does.
+constexpr float kElasticViscousStability = 1.0f / 12.0f;
+inline float elasticViscosityLimit(float voxel_size, float dt, float density) {
+    const float h = std::max(voxel_size, 1.0e-6f);
+    return kElasticViscousStability * std::max(density, 1.0f) * h * h /
+           std::max(dt, 1.0e-8f);
+}
+inline int elasticViscousSubsteps(float viscosity, float voxel_size, float frame_dt,
+                                  float density) {
+    if (!(viscosity > 0.0f) || !(frame_dt > 0.0f)) return 1;
+    const float h = std::max(voxel_size, 1.0e-6f);
+    const float dt_max = kElasticViscousStability * std::max(density, 1.0f) * h * h / viscosity;
+    return std::max(1, static_cast<int>(std::ceil(frame_dt / std::max(dt_max, 1.0e-8f))));
+}
+// ★ The wave CFL every MPM law sizes for (c dt / h <= 0.35) left Dough exactly
+// on it (c = 5 m/s, 24 substeps) and its velocity flipped sign per substep at
+// 2x its motion even with no viscosity. A body that is meant to ring needs a
+// margin: the elastic law sizes for c x 1.5 (modulus x 2.25).
+constexpr float kElasticWaveSizingFactor = 2.25f;
+
 // Ice is the end of compaction: J_P bottoms out at rho_snow / rho_ice.
 constexpr float kIceDensity = 917.0f;
 inline float snowMinPlasticJacobian(float density) {
@@ -702,6 +902,14 @@ inline void stressUpdateParticle(const AffineC& affine,
                                  float& out_yield_value,
                                  float& out_plastic_increment,
                                  uint32_t& out_flags) {
+    if (pc.elastic_solid) {
+        elasticStressUpdateParticle(affine, pc, softening, deformation_col0,
+                                    deformation_col1, deformation_col2, stress_diag,
+                                    stress_shear, plastic_volume, damage_state,
+                                    hardening_state, fracture_history, out_yield_value,
+                                    out_plastic_increment, out_flags);
+        return;
+    }
     if (pc.snow_plasticity) {
         snowStressUpdateParticle(affine, pc, softening, deformation_col0,
                                  deformation_col1, deformation_col2, stress_diag,

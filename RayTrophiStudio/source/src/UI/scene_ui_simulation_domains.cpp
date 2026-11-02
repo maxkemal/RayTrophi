@@ -4725,6 +4725,10 @@ void drawSimulationDomainControls(
                         blk.Value("Granular mean bond opening", "%.3e", fs.granular_mean_fracture_history);
                         blk.Value("Granular max damage", "%.3f", fs.granular_max_damage);
                         blk.Value("Granular mean damage", "%.3f", fs.granular_mean_damage);
+                        // Same value as fluid.list_domains mpm_law.
+                        blk.Value("MPM law", "%s",
+                                  fs.mpm_law == 2 ? "elastic" : fs.mpm_law == 1 ? "snow"
+                                  : fs.mpm_law == 0 ? "drucker_prager" : "none");
                         blk.Value("Granular Young requested", "%.0f Pa", fs.granular_requested_young_modulus);
                         blk.Value("Granular Young effective", "%.0f Pa%s",
                                   fs.granular_effective_young_modulus,

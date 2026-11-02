@@ -274,9 +274,17 @@ def main():
     assert 'rtDensityExcess(sample_here, eps * ppc, ppc) -' in porous_kernel
     assert 'rtDensityExcess(sample_here, ppc, ppc)' in porous_kernel
     assert '#include "sim_fluid_density_relaxation.glsl"' in porous_kernel
+    # 2026-11-02: the density mean is tent-weighted in all three backends; a
+    # box mean's negative lobe pumped a resting tank exponentially.
+    tent = '(2 - abs(dx)) * (2 - abs(dy)) * (2 - abs(dz))'
+    assert tent in read('shaders/sim_fluid_density_relaxation.glsl')
+    assert tent in read('src/Device/SimulationComputeCuda.cu')
+    assert '(2 - std::abs(dx)) * (2 - std::abs(dy)) * (2 - std::abs(dz))' in read(
+        'src/Physics/Fluid/APICFluidSolver.cpp')
     coupling = read('src/Physics/Fluid/MatterGrainCoupling.cpp')
     assert 'f.volume[c[n]] / (.5 * pores)' in coupling, 'submersion must be occupancy, not volume'
-    assert 'has_granular ? static_cast<double>(elastic.required_substeps)' in mixed
+    assert 'const double request = std::max({has_granular' in mixed
+    assert 'static_cast<double>(elastic.required_substeps) : 1.0' in mixed
     assert coordinator.index('prepareMatterGrainCoupling(') < coordinator.index('applyMatterGrainLiquidAccelerationForce(')
     assert '~RestorePorosity()' in coordinator and 'restoreMatterGrainPorosity(grid, backup);' in coordinator
     assert '"volume_exclusion"' in params_src and 'p.volume_exclusion' in ui

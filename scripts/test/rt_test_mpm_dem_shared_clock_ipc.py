@@ -48,7 +48,8 @@ def main():
             digest = call('fluid.state_digest', domain=DOMAIN)
             models = call('fluid.matter_models', domain=DOMAIN)
             status = models['mixed_execution']['status']
-            runtime = (models.get('grain_diagnostics') or {}).get('runtime') or {}
+            diagnostics = models.get('grain_diagnostics') or {}
+            runtime = diagnostics.get('runtime') or {}
             clock = runtime.get('common_clock') or {}
             control_after = call('sim.control_state')
             print('probe', sorted(enabled), 'run_particles', expected,
@@ -59,7 +60,8 @@ def main():
                 raise AssertionError('state_digest changed after fluid.run: '
                                      f'{expected} -> {digest["particles"]}')
             return (digest['particles'], digest['centroid'][1], status, clock,
-                    runtime.get('substep_limit'))
+                    # substep_limit names the limiting term; the authored cap is in cfl_terms.
+                    (diagnostics.get('cfl_terms') or {}).get('max_substeps'))
 
         snow = probe({'T_MpmDem_snow'})
         sand = probe({'T_MpmDem_sand'})

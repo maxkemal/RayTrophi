@@ -19,7 +19,8 @@ Granular::LoadMeasurement measureMatterGranularLoad(const FluidParticles& partic
             model = legacy_granular ? MatterConstitutiveModel::Granular
                 : MatterConstitutiveModel::Fluid;
         }
-        if (model != MatterConstitutiveModel::Granular) {
+        if (model != MatterConstitutiveModel::Granular &&
+            model != MatterConstitutiveModel::Elastic) {
             continue;
         }
         const float y = particles.position[i].y;

@@ -1,0 +1,91 @@
+#version 450
+// sim_matter_mpm_particle_contact.comp - the MPM lane's parcel SAFETY push
+// against colliders (docs/dev/COLLIDER_TEMAS_YUZEYI.md, S3). Runs after the
+// lane advects, every substep.
+//
+// The contact itself (support, Coulomb, adhesion) is the grid's: in MPM only
+// the grid spreads stress (sim_matter_mpm_boundary.comp). A parcel that still
+// ends inside a collider (phi < 0: a fast hit, a voxel-step of a moving plate)
+// is put back onto the surface along grad phi and loses the velocity part that
+// carries it further in, relative to the solid. Nothing else: when this did
+// friction and adhesion too, with the lane's grid blind to the collider, a
+// jelly piled into the h/2 band (8 cm -> 1.15 cm, 2026-11-02 live).
+// The lane's grid mask holds only DEEP collider cells (phi < -h/2), so parcels
+// may fill a partly covered cell up to the true surface.
+// CPU twin: APICFluidSolver.cpp applyMpmParticleContact.
+layout(local_size_x = 256) in;
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz; uint lane;
+    float origin_x; float origin_y; float origin_z; float h;
+    float dt; float density; int particle_count; float _pad;
+} pc;
+layout(set = 0, binding = 0) buffer Positions { float positions[]; };
+layout(set = 0, binding = 1) buffer Velocities { float velocities[]; };
+layout(set = 0, binding = 2) readonly buffer Phi { float phi[]; };
+layout(set = 0, binding = 3) readonly buffer SolidVX { float svx[]; };
+layout(set = 0, binding = 4) readonly buffer SolidVY { float svy[]; };
+layout(set = 0, binding = 5) readonly buffer SolidVZ { float svz[]; };
+// 6, 7: contact surface. The grid applies it; bound for the shared table.
+layout(set = 0, binding = 6) readonly buffer ContactMu { float contact_mu[]; };
+layout(set = 0, binding = 7) readonly buffer ContactGlue { float contact_glue[]; };
+layout(set = 0, binding = 8) readonly buffer MatterIndices { uint matter_index[]; };
+layout(set = 0, binding = 9) readonly buffer MatterCounts { uint matter_count[]; };
+
+const float kFar = 1.0e29;
+
+int cellIndex(ivec3 c) {
+    return (c.z * pc.ny + c.y) * pc.nx + c.x;
+}
+float phiAt(ivec3 c) {
+    c = clamp(c, ivec3(0), ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1));
+    float v = phi[cellIndex(c)];
+    // No collider nearby: read as clear of contact, not as a huge number the
+    // trilinear blend would smear across the band.
+    return v >= kFar ? 2.0 * pc.h : v;
+}
+
+void main() {
+    uint slot = gl_GlobalInvocationID.x;
+    if (slot >= matter_count[pc.lane]) return;
+    int id = int(matter_index[slot]);
+    if (id >= pc.particle_count || pc.h <= 0.0 || pc.dt <= 0.0) return;
+    vec3 p = vec3(positions[3 * id], positions[3 * id + 1], positions[3 * id + 2]);
+    vec3 v = vec3(velocities[3 * id], velocities[3 * id + 1], velocities[3 * id + 2]);
+    if (any(isnan(p)) || any(isnan(v))) return;
+
+    vec3 origin = vec3(pc.origin_x, pc.origin_y, pc.origin_z);
+    vec3 g = (p - origin) / pc.h - 0.5;
+    ivec3 b = ivec3(floor(g));
+    vec3 f = g - vec3(b);
+    float c[2][2][2];
+    for (int z = 0; z < 2; ++z)
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 2; ++x)
+                c[z][y][x] = phiAt(b + ivec3(x, y, z));
+    float c00 = mix(c[0][0][0], c[0][0][1], f.x), c01 = mix(c[0][1][0], c[0][1][1], f.x);
+    float c10 = mix(c[1][0][0], c[1][0][1], f.x), c11 = mix(c[1][1][0], c[1][1][1], f.x);
+    float c0 = mix(c00, c01, f.y), c1 = mix(c10, c11, f.y);
+    float d = mix(c0, c1, f.z);
+    if (d >= 0.0) return;
+    vec3 grad = vec3(
+        mix(mix(c[0][0][1] - c[0][0][0], c[0][1][1] - c[0][1][0], f.y),
+            mix(c[1][0][1] - c[1][0][0], c[1][1][1] - c[1][1][0], f.y), f.z),
+        mix(mix(c[0][1][0] - c[0][0][0], c[0][1][1] - c[0][0][1], f.x),
+            mix(c[1][1][0] - c[1][0][0], c[1][1][1] - c[1][0][1], f.x), f.z),
+        c1 - c0);
+    float gl = length(grad);
+    if (gl < 1e-6) return;
+    vec3 n = grad / gl;
+    // The solid it is inside: the cell half a voxel past the surface.
+    ivec3 sc = ivec3(floor((p - n * (d + 0.5 * pc.h) - origin) / pc.h));
+    sc = clamp(sc, ivec3(0), ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1));
+    int q = cellIndex(sc);
+    vec3 vs = vec3(svx[q], svy[q], svz[q]);
+    p -= n * d;
+    float vn = dot(v - vs, n);
+    if (vn < 0.0) {
+        v -= vn * n;
+    }
+    positions[3 * id] = p.x; positions[3 * id + 1] = p.y; positions[3 * id + 2] = p.z;
+    velocities[3 * id] = v.x; velocities[3 * id + 1] = v.y; velocities[3 * id + 2] = v.z;
+}

@@ -30,6 +30,7 @@
 #include "VolumeShader.h"
 #include "SimulationWorld.h"
 #include "SimulationCompute.h"
+#include "Fluid/ColliderGpuQuery.h"
 #include "MatterExchangeLedger.h"
 
 #include <memory>
@@ -1500,6 +1501,12 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle scratch_vel_x;
     ComputeBufferHandle scratch_vel_y;
     ComputeBufferHandle scratch_vel_z;
+    // MPM grid contact reads the face velocities from this snapshot while it
+    // rewrites them (sim_matter_mpm_boundary). Not scratch_vel_*: that is the
+    // MPM lane's FLIP baseline.
+    ComputeBufferHandle mpm_contact_snapshot_x;
+    ComputeBufferHandle mpm_contact_snapshot_y;
+    ComputeBufferHandle mpm_contact_snapshot_z;
     ComputeBufferHandle scratch_scalar;
     // MacCormack second-pass targets. The correction kernels read the original
     // field AND the forward-advected field while writing a third, so the result
@@ -1634,6 +1641,10 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle var_svx;        // float[nx*ny*nz]
     ComputeBufferHandle var_svy;        // float[nx*ny*nz]
     ComputeBufferHandle var_svz;        // float[nx*ny*nz]
+    // Per-cell collider contact surface (grid.solid_contact_*), MPM walls only.
+    ComputeBufferHandle var_contact_friction;  // float[nx*ny*nz], Coulomb mu
+    ComputeBufferHandle var_contact_adhesion;  // float[nx*ny*nz], Pa
+    ComputeBufferHandle var_solid_phi;         // float[nx*ny*nz], grid.solid_phi (m)
     ComputeBufferHandle var_fluid_phi;  // float[nx*ny*nz] (GFM level-set narrow-band)
     // MGPCG Layer B: geometric multigrid V-cycle coarse levels used as the
     // pressure preconditioner on CUDA. Empty or partially invalid => Layer A
@@ -1983,8 +1994,12 @@ struct ParticleColliderDesc {
     Vec3 bounds_min = Vec3(-1.0f, -1.0f, -1.0f);
     Vec3 bounds_max = Vec3(1.0f, 1.0f, 1.0f);
     float restitution = 0.35f;
-    float friction = 0.0f;
+    float friction = 0.0f;   // particle systems: tangential speed lost per hit, 0..1
     float thickness = 0.0f;
+    // Contact surface stamped per cell for the MPM lane (sim_matter_mpm_boundary):
+    // Coulomb mu, and the tensile stress in Pa a body needs to leave the surface.
+    float contact_friction = 0.5f;
+    float contact_adhesion_pa = 0.0f;
     // Optional gas-surface source. Disabled by default so ordinary particle /
     // fluid colliders remain pure boundaries with zero scalar injection.
     bool gas_interaction_enabled = false;
@@ -2050,6 +2065,9 @@ struct ParticleColliderDesc {
     int sdf_nx = 0;
     int sdf_ny = 0;
     int sdf_nz = 0;
+    // Where the last cook ran and how long it took (collider.get readout).
+    bool sdf_cooked_on_gpu = false;
+    float sdf_cook_ms = 0.0f;
     // Runtime-only bake guards. Copies of a collider intentionally share these
     // tokens: an older detached cook may finish, but can never publish over a
     // newer request. The busy flag coalesces automatic melt refreshes.
@@ -2826,6 +2844,12 @@ private:
     bool kinematic_collider_discontinuity_ = true;
     std::vector<KinematicStampRecord> kinematic_stamp_log_;
     std::vector<uint32_t> kinematic_stamp_counts_;
+    // GPU distance queries for mesh_bvh shells (P3) and SDF cooks (P2); one
+    // BVH per collider mesh revision stays resident.
+    Fluid::ColliderGpuQuery collider_gpu_query_;
+    double last_collider_query_ms_ = 0.0;
+    bool last_collider_query_gpu_ = false;
+    std::string last_collider_query_error_;
     uint64_t kinematic_stamp_steps_ = 0;
     // Couplings that RAN during the last stepGridDomains, in execution order.
     // Cleared at the top of every step; see couplingTrace().

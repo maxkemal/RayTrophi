@@ -38,6 +38,7 @@
 #include "Fluid/FluidLevelSet.h"   // buildSubstanceViscosityField
 #include "Fluid/MatterSubstanceState.h"
 #include "Fluid/MatterGrain.h"
+#include "Fluid/ColliderGpuQuery.h"
 #include "MaterialStateField.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/GranularGpuDispatch.h"
@@ -284,6 +285,49 @@ Vec3 closestPointOnTriangle(const Vec3& p, const Vec3& a, const Vec3& b, const V
     return a + ab * v + ac * w;
 }
 
+// A cooked mesh SDF sampled trilinearly at normalized box coordinates t in
+// [0, 1]^3. The cook writes cell CENTRES ((i + 0.5) * step), so the continuous
+// index is t * n - 0.5. `gradient` is d(dist)/d(local position), the outward
+// normal direction (its length only roughly 1).
+inline float sampleCookedSdf(const ParticleColliderDesc& c, float tx, float ty, float tz,
+                             Vec3& gradient) {
+    const int n[3] = {std::max(c.sdf_nx, 1), std::max(c.sdf_ny, 1), std::max(c.sdf_nz, 1)};
+    const float t[3] = {tx, ty, tz};
+    int i0[3];
+    float f[3];
+    for (int a = 0; a < 3; ++a) {
+        const float u = std::clamp(t[a] * n[a] - 0.5f, 0.0f, static_cast<float>(n[a] - 1));
+        i0[a] = std::min(static_cast<int>(u), std::max(n[a] - 2, 0));
+        f[a] = std::clamp(u - static_cast<float>(i0[a]), 0.0f, 1.0f);
+    }
+    const auto& g = *c.sdf_grid_data;
+    auto at = [&](int x, int y, int z) {
+        x = std::min(x, n[0] - 1); y = std::min(y, n[1] - 1); z = std::min(z, n[2] - 1);
+        const std::size_t idx = static_cast<std::size_t>(z) * n[0] * n[1] +
+            static_cast<std::size_t>(y) * n[0] + static_cast<std::size_t>(x);
+        return idx < g.size() ? g[idx] : 0.0f;
+    };
+    float v[2][2][2];
+    for (int z = 0; z < 2; ++z)
+        for (int y = 0; y < 2; ++y)
+            for (int x = 0; x < 2; ++x)
+                v[z][y][x] = at(i0[0] + x, i0[1] + y, i0[2] + z);
+    auto lerp = [](float a, float b, float w) { return a + (b - a) * w; };
+    const float c00 = lerp(v[0][0][0], v[0][0][1], f[0]), c01 = lerp(v[0][1][0], v[0][1][1], f[0]);
+    const float c10 = lerp(v[1][0][0], v[1][0][1], f[0]), c11 = lerp(v[1][1][0], v[1][1][1], f[0]);
+    const float c0 = lerp(c00, c01, f[1]), c1 = lerp(c10, c11, f[1]);
+    // Per-axis derivatives of the trilinear cell, divided by the cook step.
+    const Vec3 step(c.sdf_extents.x / n[0], c.sdf_extents.y / n[1], c.sdf_extents.z / n[2]);
+    const float dx = lerp(lerp(v[0][0][1] - v[0][0][0], v[0][1][1] - v[0][1][0], f[1]),
+                          lerp(v[1][0][1] - v[1][0][0], v[1][1][1] - v[1][1][0], f[1]), f[2]);
+    const float dy = lerp(lerp(v[0][1][0] - v[0][0][0], v[0][1][1] - v[0][0][1], f[0]),
+                          lerp(v[1][1][0] - v[1][0][0], v[1][1][1] - v[1][0][1], f[0]), f[2]);
+    const float dz = c1 - c0;
+    gradient = Vec3(dx / std::max(step.x, 1e-9f), dy / std::max(step.y, 1e-9f),
+                    dz / std::max(step.z, 1e-9f));
+    return lerp(c0, c1, f[2]);
+}
+
 inline void voxelizeCollidersIntoGrid(
     FluidSim::FluidGrid& grid,
     const std::vector<ParticleColliderDesc>& colliders,
@@ -292,7 +336,9 @@ inline void voxelizeCollidersIntoGrid(
     const std::vector<Vec3>* collider_velocities = nullptr,
     const std::vector<Vec3>* collider_angular_velocities = nullptr,
     const std::vector<Vec3>* collider_centers = nullptr,
-    bool fluid_collision_only = false) {
+    bool fluid_collision_only = false,
+    const std::function<bool(const ParticleColliderDesc&, const Fluid::ColliderQueryLattice&,
+                             std::vector<float>&)>* gpu_mesh_query = nullptr) {
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return;
     const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
 
@@ -324,6 +370,16 @@ inline void voxelizeCollidersIntoGrid(
     ensureGasSource(grid.solid_gas_fuel);
     ensureGasSource(grid.solid_gas_flame);
     ensureGasSource(grid.solid_gas_band);
+    // Contact surface: every stamped collider writes its own (contact_friction,
+    // contact_adhesion_pa) into its cells; the MPM wall contact reads them.
+    const bool track_contact = !colliders.empty();
+    if (track_contact && (grid.solid_contact_friction.size() != grid.solid.size() ||
+                          grid.solid_phi.size() != grid.solid.size())) {
+        grid.solid_contact_friction.assign(grid.solid.size(), 0.0f);
+        grid.solid_contact_adhesion.assign(grid.solid.size(), 0.0f);
+        grid.solid_phi.assign(grid.solid.size(), FluidSim::FluidGrid::kSolidPhiFar);
+        grid.collider_voxel_valid = false;
+    }
     if (!track_gas_source && !grid.solid_gas_band.empty()) {
         std::vector<float>().swap(grid.solid_gas_density);
         std::vector<float>().swap(grid.solid_gas_temperature);
@@ -368,6 +424,8 @@ inline void voxelizeCollidersIntoGrid(
         sig = hashF(sig, c.gas_flame_rate);
         sig = hashF(sig, c.gas_surface_band_voxels);
         sig = hashU(sig, c.gas_ignite_on_contact ? 1ull : 0ull);
+        sig = hashF(sig, c.contact_friction);
+        sig = hashF(sig, c.contact_adhesion_pa);
         for (char ch : c.msf_substance) sig = hashU(sig, static_cast<uint64_t>(static_cast<unsigned char>(ch)));
         sig = hashU(sig, c.msf_override.override_ignition ? 1ull : 0ull);
         sig = hashF(sig, c.msf_override.ignition_kelvin);
@@ -442,6 +500,10 @@ inline void voxelizeCollidersIntoGrid(
     if (dim_changed) {
         std::fill(grid.solid.begin(), grid.solid.end(), static_cast<uint8_t>(0));
         if (track_vel) std::fill(grid.solid_vel.begin(), grid.solid_vel.end(), Vec3(0.0f, 0.0f, 0.0f));
+        if (track_contact) {
+            std::fill(grid.solid_contact_friction.begin(), grid.solid_contact_friction.end(), 0.0f);
+            std::fill(grid.solid_contact_adhesion.begin(), grid.solid_contact_adhesion.end(), 0.0f);
+        }
         if (track_gas_source) {
             std::fill(grid.solid_gas_density.begin(), grid.solid_gas_density.end(), 0.0f);
             std::fill(grid.solid_gas_temperature.begin(), grid.solid_gas_temperature.end(), 0.0f);
@@ -462,6 +524,10 @@ inline void voxelizeCollidersIntoGrid(
             const std::size_t ci = grid.cellIndex(i, j, k);
             grid.solid[ci] = 0u;
             if (track_vel) grid.solid_vel[ci] = Vec3(0.0f, 0.0f, 0.0f);
+            if (track_contact) {
+                grid.solid_contact_friction[ci] = 0.0f;
+                grid.solid_contact_adhesion[ci] = 0.0f;
+            }
             if (track_gas_source) {
                 grid.solid_gas_density[ci] = 0.0f;
                 grid.solid_gas_temperature[ci] = 0.0f;
@@ -475,6 +541,40 @@ inline void voxelizeCollidersIntoGrid(
         grid.collider_prev_lo[0] = grid.collider_cur_lo[0]; grid.collider_prev_lo[1] = grid.collider_cur_lo[1]; grid.collider_prev_lo[2] = grid.collider_cur_lo[2];
         grid.collider_prev_hi[0] = grid.collider_cur_hi[0]; grid.collider_prev_hi[1] = grid.collider_cur_hi[1]; grid.collider_prev_hi[2] = grid.collider_cur_hi[2];
     }
+
+    // Signed distance to the nearest stamped collider (sub-voxel contact,
+    // docs/dev/COLLIDER_TEMAS_YUZEYI.md). Rewritten whole on every restamp:
+    // one memset, and no footprint bookkeeping can leave a stale distance.
+    if (track_contact) {
+        std::fill(grid.solid_phi.begin(), grid.solid_phi.end(),
+                  FluidSim::FluidGrid::kSolidPhiFar);
+    }
+    auto writePhi = [&](int i, int j, int k, float d) {
+        if (!track_contact) return;
+        float& slot = grid.solid_phi[grid.cellIndex(i, j, k)];
+        slot = std::min(slot, d);
+    };
+    // Distance from a point to an OBB in WORLD units under any (orthogonal,
+    // possibly non-uniform) scale: outside through the world-space closest
+    // point, inside as the nearest face times its axis scale. An average scale
+    // reads a 0.3 x 0.05 plate's thickness 4x wrong.
+    auto obbDistance = [](const Matrix4x4& local_to_world, const Vec3& lc, const Vec3& world_p,
+                          const Vec3& mn, const Vec3& mx, const Vec3& axis_scale) {
+        const Vec3 clamped(std::clamp(lc.x, mn.x, mx.x), std::clamp(lc.y, mn.y, mx.y),
+                           std::clamp(lc.z, mn.z, mx.z));
+        if (clamped.x != lc.x || clamped.y != lc.y || clamped.z != lc.z) {
+            return (world_p - local_to_world * clamped).length();
+        }
+        const float inside = std::min({(lc.x - mn.x) * axis_scale.x, (mx.x - lc.x) * axis_scale.x,
+                                       (lc.y - mn.y) * axis_scale.y, (mx.y - lc.y) * axis_scale.y,
+                                       (lc.z - mn.z) * axis_scale.z, (mx.z - lc.z) * axis_scale.z});
+        return -inside;
+    };
+    auto axisScale = [](const Matrix4x4& m) {
+        return Vec3(Vec3(m.m[0][0], m.m[1][0], m.m[2][0]).length(),
+                    Vec3(m.m[0][1], m.m[1][1], m.m[2][1]).length(),
+                    Vec3(m.m[0][2], m.m[1][2], m.m[2][2]).length());
+    };
 
     // This frame's footprint, accumulated by markCell during stamping.
     int cur_lo[3] = { nx, ny, nz };
@@ -511,6 +611,7 @@ inline void voxelizeCollidersIntoGrid(
     Vec3 active_collider_center(0.0f, 0.0f, 0.0f);
     float active_gas_density = 0.0f, active_gas_temperature = 0.0f;
     float active_gas_fuel = 0.0f, active_gas_flame = 0.0f, active_gas_band = 0.0f;
+    float active_contact_friction = 0.0f, active_contact_adhesion = 0.0f;
 
     auto cellCenter = [&](int i, int j, int k) {
         return grid.origin + Vec3((i + 0.5f) * h, (j + 0.5f) * h, (k + 0.5f) * h);
@@ -525,6 +626,10 @@ inline void voxelizeCollidersIntoGrid(
         if (i < 0 || i >= grid.nx || j < 0 || j >= grid.ny || k < 0 || k >= grid.nz) return;
         const std::size_t ci = grid.cellIndex(i, j, k);
         grid.solid[ci] = 1u;
+        if (track_contact) {
+            grid.solid_contact_friction[ci] = active_contact_friction;
+            grid.solid_contact_adhesion[ci] = active_contact_adhesion;
+        }
         if (track_gas_source && active_gas_band > 0.0f) {
             grid.solid_gas_density[ci] = std::max(grid.solid_gas_density[ci], active_gas_density);
             grid.solid_gas_temperature[ci] = std::max(grid.solid_gas_temperature[ci], active_gas_temperature);
@@ -567,6 +672,8 @@ inline void voxelizeCollidersIntoGrid(
         active_gas_flame = c.gas_interaction_enabled ? std::max(0.0f, c.gas_flame_rate) : 0.0f;
         active_gas_band = c.gas_interaction_enabled
             ? std::clamp(c.gas_surface_band_voxels, 0.25f, 8.0f) : 0.0f;
+        active_contact_friction = std::max(0.0f, c.contact_friction);
+        active_contact_adhesion = std::max(0.0f, c.contact_adhesion_pa);
         active_collider_vel = (track_vel && collider_velocities && c_idx < collider_velocities->size())
                                   ? (*collider_velocities)[c_idx]
                                   : Vec3(0.0f, 0.0f, 0.0f);
@@ -592,13 +699,16 @@ inline void voxelizeCollidersIntoGrid(
                 const int j1 = std::clamp(j_max_raw, 0, grid.ny - 1);
                 (void)grid_top;
                 expandFootprint(0, 0, k0, grid.nx - 1, j1, k1);
+                const int jphi = std::min(j1 + 2, grid.ny - 1);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
                 for (int k = k0; k <= k1; ++k)
-                for (int j = 0;  j <= j1; ++j)
+                for (int j = 0;  j <= jphi; ++j)
                 for (int i = 0;  i <  grid.nx; ++i) {
-                    if (cellCenter(i, j, k).y < top) markCell(i, j, k);
+                    const float y = cellCenter(i, j, k).y;
+                    writePhi(i, j, k, y - top);
+                    if (j <= j1 && y < top) markCell(i, j, k);
                 }
                 break;
             }
@@ -616,6 +726,7 @@ inline void voxelizeCollidersIntoGrid(
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
                     const Vec3 d = cellCenter(i, j, k) - sc;
+                    writePhi(i, j, k, d.length() - r);
                     if (d.x*d.x + d.y*d.y + d.z*d.z < r2) markCell(i, j, k);
                 }
                 break;
@@ -646,6 +757,7 @@ inline void voxelizeCollidersIntoGrid(
                     }
                     const Vec3 closest = a + ab * t;
                     const Vec3 d = cc - closest;
+                    writePhi(i, j, k, d.length() - r);
                     if (d.x*d.x + d.y*d.y + d.z*d.z < r2) markCell(i, j, k);
                 }
                 break;
@@ -672,6 +784,8 @@ inline void voxelizeCollidersIntoGrid(
                 for (int j = j0; j <= j1; ++j)
                 for (int i = i0; i <= i1; ++i) {
                     const Vec3 cc = cellCenter(i, j, k);
+                    writePhi(i, j, k, obbDistance(Matrix4x4::identity(), cc, cc, lo, hi,
+                                                  Vec3(1.0f, 1.0f, 1.0f)));
                     if (cc.x >= lo.x && cc.x <= hi.x &&
                         cc.y >= lo.y && cc.y <= hi.y &&
                         cc.z >= lo.z && cc.z <= hi.z) markCell(i, j, k);
@@ -698,6 +812,7 @@ inline void voxelizeCollidersIntoGrid(
                 cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
                 expandFootprint(i0, j0, k0, i1, j1, k1);
                 const Matrix4x4 inv_xform = obb.local_to_world.inverse();
+                const Vec3 obb_scale = axisScale(obb.local_to_world);
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
 #endif
@@ -706,6 +821,8 @@ inline void voxelizeCollidersIntoGrid(
                 for (int i = i0; i <= i1; ++i) {
                     const Vec3 cc = cellCenter(i, j, k);
                     const Vec3 lc = inv_xform * cc;
+                    writePhi(i, j, k, obbDistance(obb.local_to_world, lc, cc, local_mn, local_mx,
+                                                  obb_scale));
                     if (lc.x >= local_mn.x && lc.x <= local_mx.x &&
                         lc.y >= local_mn.y && lc.y <= local_mx.y &&
                         lc.z >= local_mn.z && lc.z <= local_mx.z) markCell(i, j, k);
@@ -758,6 +875,7 @@ inline void voxelizeCollidersIntoGrid(
 
                 const Vec3 sdf_origin_scaled = c.sdf_origin * scale;
                 const Vec3 sdf_extents_scaled = c.sdf_extents * scale;
+                const Vec3 sdf_axis_scale = axisScale(obb.local_to_world);
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static)
@@ -777,17 +895,28 @@ inline void voxelizeCollidersIntoGrid(
                         ty >= -local_thick / std::max(1e-6f, sdf_extents_scaled.y) && ty <= 1.0f + local_thick / std::max(1e-6f, sdf_extents_scaled.y) &&
                         tz >= -local_thick / std::max(1e-6f, sdf_extents_scaled.z) && tz <= 1.0f + local_thick / std::max(1e-6f, sdf_extents_scaled.z)) {
 
-                        int idx_x = std::clamp(static_cast<int>(tx * (c.sdf_nx - 1)), 0, c.sdf_nx - 1);
-                        int idx_y = std::clamp(static_cast<int>(ty * (c.sdf_ny - 1)), 0, c.sdf_ny - 1);
-                        int idx_z = std::clamp(static_cast<int>(tz * (c.sdf_nz - 1)), 0, c.sdf_nz - 1);
-                        std::size_t sdf_idx = static_cast<std::size_t>(idx_z * (c.sdf_nx * c.sdf_ny) + idx_y * c.sdf_nx + idx_x);
-                        if (sdf_idx < c.sdf_grid_data->size()) {
-                            float dist_cooked = (*c.sdf_grid_data)[sdf_idx];
-                            float dist_local = dist_cooked * ((scale.x + scale.y + scale.z) / 3.0f);
-                            if (dist_local <= local_thick) {
-                                markCell(i, j, k);
-                            }
+                        // Trilinear, at the cook's own sample points (cell
+                        // centres). The old nearest sample at t * (n - 1) sat
+                        // half a cook cell off and stepped a whole one: at 64^3
+                        // on a 2.7 m rock that is 5.5 cm.
+                        Vec3 gradient;
+                        const float dist_cooked = sampleCookedSdf(c, tx, ty, tz, gradient);
+                        const float dist_local = dist_cooked * ((scale.x + scale.y + scale.z) / 3.0f);
+                        if (dist_local <= local_thick) {
+                            markCell(i, j, k);
                         }
+                        // World distance: a local distance along normal n scales
+                        // by 1 / |S^-1 n| under the object's axis scale S.
+                        const float gl = gradient.length();
+                        float to_world = avg_scale;
+                        if (gl > 1e-8f) {
+                            const Vec3 n = gradient * (1.0f / gl);
+                            const Vec3 sinv(n.x / std::max(sdf_axis_scale.x, 1e-6f),
+                                            n.y / std::max(sdf_axis_scale.y, 1e-6f),
+                                            n.z / std::max(sdf_axis_scale.z, 1e-6f));
+                            to_world = 1.0f / std::max(sinv.length(), 1e-6f);
+                        }
+                        writePhi(i, j, k, (dist_local - local_thick) * to_world);
                     }
                 }
                 break;
@@ -920,6 +1049,45 @@ inline void voxelizeCollidersIntoGrid(
                 cellRange(world_mn, world_mx, i0, j0, k0, i1, j1, k1);
                 expandFootprint(i0, j0, k0, i1, j1, k1);
 
+                // Query-space distance -> world, for the shell's signed
+                // distance (distance minus thickness).
+                const float to_world = avg_scale * mean_scale;
+                // GPU: one dispatch over the cell box (P3). The CPU loop below
+                // cost 1.2 s a frame for 352k triangles over 885k cells.
+                bool gpu_done = false;
+                if (gpu_mesh_query && *gpu_mesh_query && c.local_triangles_cache &&
+                    !c.local_triangles_cache->empty() && i1 >= i0 && j1 >= j0 && k1 >= k0) {
+                    // q = diag(1/scale) * inv_xform * (origin + h * (idx + 0.5)).
+                    Fluid::ColliderQueryLattice lattice;
+                    const float inv_scale[3] = {1.0f / scale.x, 1.0f / scale.y, 1.0f / scale.z};
+                    const Vec3 origin_q = inv_xform * grid.origin;
+                    const float origin_c[3] = {origin_q.x, origin_q.y, origin_q.z};
+                    for (int r = 0; r < 3; ++r) {
+                        for (int col = 0; col < 3; ++col) {
+                            lattice.m[r][col] = inv_xform.m[r][col] * h * inv_scale[r];
+                        }
+                        lattice.m[r][3] = origin_c[r] * inv_scale[r];
+                    }
+                    lattice.dims[0] = i1 - i0 + 1;
+                    lattice.dims[1] = j1 - j0 + 1;
+                    lattice.dims[2] = k1 - k0 + 1;
+                    lattice.base[0] = i0; lattice.base[1] = j0; lattice.base[2] = k0;
+                    lattice.signed_distance = false;
+                    std::vector<float> distance;
+                    if ((*gpu_mesh_query)(c, lattice, distance)) {
+                        const int dx = lattice.dims[0], dy = lattice.dims[1];
+                        for (int k = k0; k <= k1; ++k)
+                        for (int j = j0; j <= j1; ++j)
+                        for (int i = i0; i <= i1; ++i) {
+                            const float d = distance[static_cast<std::size_t>(k - k0) * dx * dy +
+                                static_cast<std::size_t>(j - j0) * dx + (i - i0)];
+                            writePhi(i, j, k, (d - thr) * to_world);
+                            if (d <= thr) markCell(i, j, k);
+                        }
+                        gpu_done = true;
+                    }
+                }
+                if (!gpu_done) {
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic)
 #endif
@@ -930,15 +1098,28 @@ inline void voxelizeCollidersIntoGrid(
                     const Vec3 lc = inv_xform * cc;
                     const Vec3 q(lc.x / scale.x, lc.y / scale.y, lc.z / scale.z);
                     Vec3 closest;
-                    if (bvh->closestDistanceSquared(q, closest) <= thr2) {
+                    const float d2 = bvh->closestDistanceSquared(q, closest);
+                    writePhi(i, j, k, (std::sqrt(d2) - thr) * to_world);
+                    if (d2 <= thr2) {
                         markCell(i, j, k);
                     }
+                }
                 }
                 break;
             }
         }
     }
 
+    // Solid cells no mode gave a distance (convex decomposition) read as half
+    // a cell inside: the mask's own resolution, never "far away".
+    if (track_contact) {
+        const float inside = -0.5f * h;
+        for (std::size_t cell = 0; cell < grid.solid.size(); ++cell) {
+            if (grid.solid[cell] && grid.solid_phi[cell] >= FluidSim::FluidGrid::kSolidPhiFar) {
+                grid.solid_phi[cell] = inside;
+            }
+        }
+    }
     storeCurFootprint();
 }
 
@@ -2328,6 +2509,98 @@ bool runGpuFluidZeroSolidFaces(const FluidSim::FluidGrid& grid,
         cmd.groups = FluidGpuDispatch::groups256(mac.face_lanes);
     }
     return Fluid::dispatchMatterGpuModel(*compute, cmd, gpu_buffers.matter_model);
+}
+
+// The MPM lane's grid contact (sim_matter_mpm_boundary.comp): grid-SDF
+// collision for colliders with a distance, the old moving/separating rule for
+// walls without one. Needs this frame's mask, solid velocity, contact surface
+// and phi on the device; dense storage only.
+bool runGpuMpmSolidFaces(const FluidSim::FluidGrid& grid,
+                         SimulationComputeContext* compute,
+                         SimulationGridDomainComputeBuffers& gpu_buffers,
+                         bool closed_boundary, float dt, float density) {
+    const auto mac = Fluid::macVelocityBinding(gpu_buffers);
+    if (!compute || compute->backendType() != ComputeBackendType::VulkanCompute ||
+        !compute->supportsDispatch() || mac.compact ||
+        grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
+        !gpu_buffers.vel_x.valid() || !gpu_buffers.vel_y.valid() ||
+        !gpu_buffers.vel_z.valid() || !gpu_buffers.fluid_mask.valid() ||
+        !gpu_buffers.var_svx.valid() || !gpu_buffers.var_svy.valid() ||
+        !gpu_buffers.var_svz.valid() || !gpu_buffers.var_contact_friction.valid() ||
+        !gpu_buffers.var_contact_adhesion.valid() || !gpu_buffers.var_solid_phi.valid() ||
+        !gpu_buffers.mpm_contact_snapshot_x.valid() ||
+        !gpu_buffers.mpm_contact_snapshot_y.valid() ||
+        !gpu_buffers.mpm_contact_snapshot_z.valid()) {
+        return false;
+    }
+    const ComputeBufferHandle velocity[3] = {gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z};
+    const ComputeBufferHandle snapshot[3] = {gpu_buffers.mpm_contact_snapshot_x,
+        gpu_buffers.mpm_contact_snapshot_y, gpu_buffers.mpm_contact_snapshot_z};
+    const std::size_t sizes[3] = {grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()};
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!Fluid::copyMatterGpuFloat(*compute, velocity[axis], snapshot[axis],
+                                       static_cast<uint32_t>(sizes[axis]))) {
+            return false;
+        }
+    }
+    struct MpmBoundaryConstants {
+        int nx, ny, nz; uint32_t flags; float dt, density, h, pad;
+    } constants{grid.nx, grid.ny, grid.nz, closed_boundary ? 1u : 0u,
+                std::max(dt, 1.0e-6f), std::max(density, 1.0f), grid.voxel_size, 0.0f};
+    static_assert(sizeof(MpmBoundaryConstants) == 32);
+    const std::size_t face_count = std::max({sizes[0], sizes[1], sizes[2]});
+    ComputeBufferHandle bufs[13] = {
+        gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z, gpu_buffers.fluid_mask,
+        gpu_buffers.var_svx, gpu_buffers.var_svy, gpu_buffers.var_svz,
+        gpu_buffers.var_contact_friction, gpu_buffers.var_contact_adhesion,
+        gpu_buffers.var_solid_phi, snapshot[0], snapshot[1], snapshot[2]
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_matter_mpm_boundary";
+    cmd.buffers = bufs;
+    cmd.buffer_count = 13;
+    cmd.constants = &constants;
+    cmd.constants_size = sizeof(constants);
+    cmd.groups.groups_x = static_cast<uint32_t>((face_count + 255u) / 256u);
+    return compute->dispatch(cmd);
+}
+
+// S3: every MPM parcel against the collider's signed distance, after the lane
+// advects (sim_matter_mpm_particle_contact.comp says what and why).
+bool runGpuMpmParticleContact(const FluidSim::FluidGrid& grid,
+                              SimulationComputeContext* compute,
+                              SimulationGridDomainComputeBuffers& lane,
+                              float dt, float density, uint32_t particle_count) {
+    const auto& model = lane.matter_model;
+    if (!compute || !compute->supportsDispatch() || particle_count == 0 ||
+        !model.indices.valid() || !model.counters.valid() ||
+        !lane.fluid_positions.valid() || !lane.fluid_velocities.valid() ||
+        !lane.var_solid_phi.valid() || !lane.var_svx.valid() || !lane.var_svy.valid() ||
+        !lane.var_svz.valid() || !lane.var_contact_friction.valid() ||
+        !lane.var_contact_adhesion.valid()) {
+        return false;
+    }
+    struct ContactConstants {
+        int nx, ny, nz; uint32_t lane;
+        float ox, oy, oz, h;
+        float dt, density; int particle_count; float pad;
+    } constants{grid.nx, grid.ny, grid.nz, model.lane,
+                grid.origin.x, grid.origin.y, grid.origin.z, grid.voxel_size,
+                dt, density, static_cast<int>(particle_count), 0.0f};
+    static_assert(sizeof(ContactConstants) == 48);
+    const ComputeBufferHandle buffers[] = {
+        lane.fluid_positions, lane.fluid_velocities, lane.var_solid_phi,
+        lane.var_svx, lane.var_svy, lane.var_svz,
+        lane.var_contact_friction, lane.var_contact_adhesion,
+        model.indices, model.counters};
+    ComputeDispatch cmd;
+    cmd.kernel = "sim_matter_mpm_particle_contact";
+    cmd.buffers = buffers;
+    cmd.buffer_count = 10;
+    cmd.constants = &constants;
+    cmd.constants_size = sizeof(constants);
+    cmd.groups.groups_x = (particle_count + 255u) / 256u;
+    return compute->dispatch(cmd);
 }
 
 bool runGpuFluidDensitySplat(SimulationGridDomainState& state,
@@ -5842,6 +6115,7 @@ void ParticleSimulationSystem::restoreRuntimeState(const ParticleSimulationRunti
 
 void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext& compute,
                                                        bool preserve_inventory) {
+    collider_gpu_query_.release(&compute);
     // Whatever only the device knows comes home before its buffers go.
     if (residency_ == ParticleKinematicResidency::Device && residentBuffersValidFor(compute)) {
         downloadResidentKinematics(compute, "release", /*in_step=*/false);
@@ -9875,6 +10149,9 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.scratch_vel_x);
     destroy(buffers.scratch_vel_y);
     destroy(buffers.scratch_vel_z);
+    destroy(buffers.mpm_contact_snapshot_x);
+    destroy(buffers.mpm_contact_snapshot_y);
+    destroy(buffers.mpm_contact_snapshot_z);
     destroy(buffers.scratch_scalar);
     destroy(buffers.scratch_scalar2);
     destroy(buffers.substance_viscosity);
@@ -9955,6 +10232,9 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.var_svx);
     destroy(buffers.var_svy);
     destroy(buffers.var_svz);
+    destroy(buffers.var_contact_friction);
+    destroy(buffers.var_contact_adhesion);
+    destroy(buffers.var_solid_phi);
     destroy(buffers.var_fluid_phi);
     for (auto& level : buffers.mg_levels) {
         destroy(level.mask);
@@ -10113,6 +10393,9 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         ensureComputeBuffer(compute, buffers.scratch_vel_x, "GridDomainScratchVelX", grid.vel_x.size() * sizeof(float), usage);
         ensureComputeBuffer(compute, buffers.scratch_vel_y, "GridDomainScratchVelY", grid.vel_y.size() * sizeof(float), usage);
         ensureComputeBuffer(compute, buffers.scratch_vel_z, "GridDomainScratchVelZ", grid.vel_z.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.mpm_contact_snapshot_x, "GridDomainMpmContactX", grid.vel_x.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.mpm_contact_snapshot_y, "GridDomainMpmContactY", grid.vel_y.size() * sizeof(float), usage);
+        ensureComputeBuffer(compute, buffers.mpm_contact_snapshot_z, "GridDomainMpmContactZ", grid.vel_z.size() * sizeof(float), usage);
     }
     if (dense_mac) {
         ensureComputeBuffer(compute, buffers.scratch_scalar, "GridDomainScratchScalar",
@@ -10185,6 +10468,12 @@ bool ParticleSimulationSystem::ensureGridDomainComputeBuffers(SimulationComputeC
         ensureComputeBuffer(compute, buffers.var_svx,      "GridDomainVarSvx",      cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.var_svy,      "GridDomainVarSvy",      cell_bytes, usage);
         ensureComputeBuffer(compute, buffers.var_svz,      "GridDomainVarSvz",      cell_bytes, usage);
+        ensureComputeBuffer(compute, buffers.var_contact_friction,
+                            "GridDomainContactFriction", cell_bytes, usage);
+        ensureComputeBuffer(compute, buffers.var_contact_adhesion,
+                            "GridDomainContactAdhesion", cell_bytes, usage);
+        ensureComputeBuffer(compute, buffers.var_solid_phi,
+                            "GridDomainSolidPhi", cell_bytes, usage);
         if (compute.backendType() == ComputeBackendType::CUDA) {
             ensureComputeBuffer(compute, buffers.var_fluid_phi,"GridDomainVarFluidPhi", cell_bytes, usage);
         }

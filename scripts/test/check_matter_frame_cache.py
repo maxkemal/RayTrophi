@@ -63,7 +63,7 @@ def main():
         ET.parse(path)
         for name in ('LosslessFrameArray.h', 'MatterGridFrameCache.h'):
             assert name in path.read_text(encoding='utf-8')
-    print('PASS byte-exact packing oracle and all 33 grid-vector/cache ownership contracts; no C++ execution')
+    print('PASS byte-exact packing oracle and all 36 grid-vector/cache ownership contracts; no C++ execution')
 
 
 if __name__ == '__main__':

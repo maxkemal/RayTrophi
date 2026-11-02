@@ -205,6 +205,18 @@ struct APICSolverParams {
     float granular_snow_min_hardening = 0.1f;
     float granular_snow_heterogeneity = 0.1f;
     float granular_snow_clump_size = 0.12f;
+    // Elastic solid law on the MPM lane (docs/dev/ELASTIK_MPM.md). Set when the
+    // lane's substance is default_constitutive_model = elastic; the modulus,
+    // Poisson ratio and density then arrive in granular_young_modulus,
+    // granular_poisson_ratio and granular_density, which size the substeps.
+    bool  elastic_solid = false;
+    float elastic_yield_strain = 0.0f;     // Hencky deviatoric; 0 = never yields
+    float elastic_relaxation_s = 0.0f;     // Maxwell deviatoric creep; 0 = off
+    float elastic_viscosity_pa_s = 0.0f;   // Kelvin-Voigt damping; 0 = off
+    // Tear threshold (principal Hencky stretch; 0 = no tear). The tear RATE is
+    // granular_damage_rate: the MPM lane has one damage-per-second field.
+    float elastic_fracture_strain = 0.0f;
+    float elastic_flip_blend = 0.0f;       // the elastic substance's own FLIP hint
     // The Default Substance's bulk density, kg/m^3: the rho the stress
     // divergence divides by (force per unit mass = div(tau)/rho) and the snow
     // branch's elastic-wave limit. Until 2026-10-23 the divergence used a fixed
@@ -317,6 +329,11 @@ struct APICSolverParams {
         granular_snow_min_hardening = std::clamp(granular_snow_min_hardening, 0.0f, 1.0f);
         granular_snow_heterogeneity = std::clamp(granular_snow_heterogeneity, 0.0f, 0.5f);
         granular_snow_clump_size = std::clamp(granular_snow_clump_size, 0.001f, 10.0f);
+        elastic_yield_strain = std::clamp(elastic_yield_strain, 0.0f, 2.0f);
+        elastic_relaxation_s = std::clamp(elastic_relaxation_s, 0.0f, 1000.0f);
+        elastic_viscosity_pa_s = std::clamp(elastic_viscosity_pa_s, 0.0f, 1.0e5f);
+        elastic_fracture_strain = std::clamp(elastic_fracture_strain, 0.0f, 5.0f);
+        elastic_flip_blend = std::clamp(elastic_flip_blend, 0.0f, 1.0f);
         granular_density = std::clamp(granular_density, 1.0f, 30000.0f);
         granular_max_solver_substeps = std::clamp(granular_max_solver_substeps, 1, 64);
         granular_softening_temperature = std::max(granular_softening_temperature, 0.0f);
@@ -620,6 +637,9 @@ struct APICSolverStats {
     int granular_required_substeps = 1;
     int granular_solver_substeps = 1;
     bool granular_stiffness_capped = false;
+    // Law the MPM lane ran last step: 0 Drucker-Prager, 1 snow, 2 elastic,
+    // -1 no MPM parcel. Published as fluid.list_domains mpm_law.
+    int mpm_law = -1;
     // Report both stability limits independently; the solver grants their maximum.
     int granular_wave_substeps = 1;
     int granular_strain_substeps = 1;
@@ -707,6 +727,11 @@ struct APICSolverStats {
     uint64_t viscosity_sparse_resident_bytes = 0;
     bool  viscosity_on_gpu = false;
     bool  density_on_gpu = false;
+    // mesh_bvh shell distances computed on the GPU this step (P3), the query's
+    // wall time and the last failure (docs/dev/COLLIDER_TEMAS_YUZEYI.md).
+    bool  collider_query_gpu = false;
+    float collider_query_ms = 0.0f;
+    std::string collider_query_error;
     bool  p2g_on_gpu = false;
     bool  g2p_on_gpu = false;
     bool  pressure_on_gpu = false;

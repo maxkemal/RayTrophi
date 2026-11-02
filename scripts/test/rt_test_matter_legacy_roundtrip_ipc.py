@@ -79,6 +79,9 @@ def main():
             call('flow_source.create', name=source, domain=name, phase=phase,
                  source_mode='point', position=[0, 0.2, 0], radius=0.05, enabled=False)
             created_sources.append(source)
+        # A new gas domain has no material until one is authored, so the save
+        # would carry no `shader` to migrate. Author a recognisable one.
+        call('volume.set_material', target='gas:' + GAS, settings={'density_multiplier': 7.25})
         call('project.save', path=str(fixture_path))
         payload = json.loads(fixture_path.read_text(encoding='utf-8'))
         legacy = make_legacy(payload)

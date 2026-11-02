@@ -2,6 +2,17 @@
 // Particle sidecars/identities stay canonical; model indices select disjoint
 // slots in persistent GPU mirrors. There is one host publication per frame.
 
+// Gravity and packed force fields integrated on every common substep, not
+// once per frame. A frame's whole g*dt (0.41 m/s at 24 fps) landing in one
+// kick hammers a resting MPM body into the floor every frame; the elastic
+// response rings at a constant amplitude of ~0.4 g*frame_dt (2026-11-02:
+// a static Dough read 0.168 / 0.077 / 0.044 m/s at frame dt 1/24, 1/48, 1/96
+// with the same substep dt, while its shape held within 1 mm).
+struct MatterSubstepForces {
+    const SimulationForceFieldComputeBuffer* buffer = nullptr;
+    float frame_start_seconds = 0.0f;
+};
+
 std::size_t matterGpuWorkingSetBytes(const FluidSim::FluidGrid& grid,
     const Fluid::APICSolverParams& params, std::size_t count) {
     const auto cells = grid.getCellCount();
@@ -16,7 +27,8 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     SimulationComputeContext* compute, SimulationGridDomainComputeBuffers& primary,
     const std::function<bool(SimulationGridDomainComputeBuffers&)>& ensure,
     MatterExchangeLedger& ledger,
-    std::string& error, const Fluid::MatterCommonClockHooks* clock = nullptr) {
+    std::string& error, const Fluid::MatterCommonClockHooks* clock = nullptr,
+    const MatterSubstepForces* substep_forces = nullptr) {
     error.clear();
     primary.sparse_mac_transfer.used = false;
     primary.sparse_mac_transfer.snapshot_valid = false;
@@ -85,27 +97,32 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
             error = "mixed GPU received invalid pore mass/energy ownership";
             return false;
         }
-        if (model == Fluid::MatterConstitutiveModel::Elastic ||
-            Fluid::isMatterObstacle(particles, i,
+        if (Fluid::isMatterObstacle(particles, i,
                 params.solid_substance_tags ? params.solid_substance_tags->data() : nullptr,
                 params.solid_substance_tags ? params.solid_substance_tags->size() : 0u) ||
             !std::isfinite(particles.mass_fraction[i]) || particles.mass_fraction[i] < 0.0f ||
             particles.mass_fraction[i] > 1.0f ||
             !std::isfinite(particles.rest_mass_kg[i]) || particles.rest_mass_kg[i] <= 0.0f) {
-            error = "mixed GPU requires mobile fluid/granular parcels; static blocks, "
-                "frozen or elastic carriers need an accepting transport lane";
+            error = "mixed GPU requires mobile fluid/granular/elastic parcels; static "
+                "blocks and frozen carriers need an accepting transport lane";
             return false;
         }
     }
-    const bool has_fluid = Fluid::resolveSingleMatterModel(particles, legacy_granular)
-        != Fluid::MatterConstitutiveModel::Granular;
-    // The grain domain's liquid subset carries no granular parcel; it must not
-    // pay the granular elastic wave/strain substep count, only the CFL.
+    // has_granular = an MPM continuum parcel (granular or elastic). The grain
+    // domain's liquid subset carries none; it must not pay the granular
+    // elastic wave/strain substep count, only the CFL.
+    const auto mpm_parcel = [&](Fluid::MatterConstitutiveModel model) {
+        return model == Fluid::MatterConstitutiveModel::Granular ||
+            model == Fluid::MatterConstitutiveModel::Elastic ||
+            (model == Fluid::MatterConstitutiveModel::Auto && legacy_granular);
+    };
+    const bool has_fluid = std::any_of(particles.constitutive_model.begin(),
+        particles.constitutive_model.end(), [&](auto value) {
+            return !mpm_parcel(static_cast<Fluid::MatterConstitutiveModel>(value));
+        }) || (particles.constitutive_model.size() < particles.size() && !legacy_granular);
     const bool has_granular = std::any_of(particles.constitutive_model.begin(),
         particles.constitutive_model.end(), [&](auto value) {
-            const auto model = static_cast<Fluid::MatterConstitutiveModel>(value);
-            return model == Fluid::MatterConstitutiveModel::Granular ||
-                (model == Fluid::MatterConstitutiveModel::Auto && legacy_granular);
+            return mpm_parcel(static_cast<Fluid::MatterConstitutiveModel>(value));
         });
     // Conservative bound covers both model grids, pressure scratch, gradients,
     // GPU particle mirrors and atomic host publication. No allocation precedes it.
@@ -121,7 +138,15 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     // Snow is sized for its hardening CEILING at its own density
     // (snowSizingYoungModulus says why not for last frame's hardest parcel).
     const bool snow = has_granular && params.granular_snow_plasticity;
-    const auto elastic = snow
+    // An elastic solid is sized at its own density, like snow, with no
+    // hardening ceiling (its modulus never grows).
+    const bool elastic_solid = has_granular && params.elastic_solid;
+    const auto elastic = elastic_solid
+        ? Fluid::Granular::elasticStepInfo(
+              params.granular_young_modulus * Fluid::Granular::kElasticWaveSizingFactor,
+              grid.voxel_size, frame_dt, load.strain_rate,
+              load.overburden_pressure, load.softening_min, params.granular_density)
+        : snow
         ? Fluid::Granular::elasticStepInfo(
               Fluid::Granular::snowSizingYoungModulus(
                   params.granular_young_modulus, params.granular_snow_max_hardening),
@@ -134,9 +159,16 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     for (const auto& velocity : particles.velocity) {
         speed = std::max(speed, velocity.length());
     }
-    const double request = std::max(has_granular ? static_cast<double>(elastic.required_substeps) : 1.0,
+    // An elastic solid's damping is explicit too: size for it, so its cap in
+    // the kernel stays a backstop rather than the normal case.
+    const int viscous_substeps = elastic_solid
+        ? Fluid::Granular::elasticViscousSubsteps(params.elastic_viscosity_pa_s,
+              grid.voxel_size, frame_dt, params.granular_density) : 1;
+    const double request = std::max({has_granular
+            ? static_cast<double>(elastic.required_substeps) : 1.0,
+        static_cast<double>(viscous_substeps),
         std::ceil(static_cast<double>(speed) * frame_dt /
-            std::max(grid.voxel_size * params.cfl, 1e-6f)));
+            std::max(grid.voxel_size * params.cfl, 1e-6f))});
     uint32_t common_substeps = 0;
     if (!Fluid::resolveMatterCommonSubsteps(request, clock, common_substeps, error)) {
         return false;
@@ -254,7 +286,10 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     // Drucker-Prager piles stay PIC/APIC (their rest state relies on it).
     // Snow takes its substance's FLIP blend; the baseline is captured inside
     // P2G before the stress impulse (granularFlipSnapshotWanted).
-    models[1].flip_blend = params.granular_snow_plasticity ? params.flip_blend : 0.0f;
+    // An elastic solid takes its OWN substance's blend (elastic_flip_blend):
+    // the domain's flip_blend belongs to its Default Substance, often water.
+    models[1].flip_blend = params.elastic_solid ? params.elastic_flip_blend
+        : params.granular_snow_plasticity ? params.flip_blend : 0.0f;
     models[1].substance_viscosity = nullptr;
     models[1].kinematic_viscosity = 0.0f;
     Fluid::MatterGpuParticleLease shared_particles;
@@ -312,8 +347,37 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
             }
         }
     }
+    // The MPM lane's wall contact reads each solid cell's collider surface.
+    if (!uploadGpuSolidContact(grid, *compute, *lanes[1])) {
+        error = "mixed GPU collider contact surface upload failed";
+        return false;
+    }
     FluidGpuOccupancy liquid_occupancy(state, compute, lanes[0]);
-    FluidGpuOccupancy granular_occupancy(state, compute, lanes[1]);
+    // S4: the MPM lane's grid sees only DEEP solid (phi < -h/2). A partly
+    // covered cell stays open; the parcel contact below holds the true surface.
+    // Cells without a distance (kinematic proxies) stay solid.
+    std::vector<uint32_t> mpm_solid_cells;
+    {
+        const bool has_phi = grid.solid_phi.size() == cells;
+        const float deep = -0.5f * grid.voxel_size;
+        auto keep = [&](std::size_t cell) {
+            if (!has_phi) return true;
+            const float phi = grid.solid_phi[cell];
+            return phi <= deep || phi >= FluidSim::FluidGrid::kSolidPhiFar;
+        };
+        if (grid.solid_cells_valid) {
+            for (const uint32_t cell : grid.solid_cells) {
+                if (keep(cell)) mpm_solid_cells.push_back(cell);
+            }
+        } else {
+            for (std::size_t cell = 0; cell < cells && cell < grid.solid.size(); ++cell) {
+                if (grid.solid[cell] && keep(cell)) {
+                    mpm_solid_cells.push_back(static_cast<uint32_t>(cell));
+                }
+            }
+        }
+    }
+    FluidGpuOccupancy granular_occupancy(state, compute, lanes[1], &mpm_solid_cells);
     Fluid::APICSolverStats stats;
     std::vector<float> unused_host_mask;
     // Dense bank only (empty for a compact owner until a fallback allocates it).
@@ -341,10 +405,30 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     if (clock && clock->begin && !clock->begin(working_set, error)) {
         return false;
     }
+    // The liquid lane's solid faces are its pressure solve's start; the MPM
+    // lane's ARE its contact: moving and separating (sim_matter_mpm_boundary).
+    const bool closed_boundary =
+        params.boundary != Fluid::APICSolverParams::BoundaryMode::Open;
+    const auto solid_faces = [&](int lane, float step_dt) {
+        return lane == 1
+            ? runGpuMpmSolidFaces(grid, compute, *lanes[1], closed_boundary, step_dt,
+                                  params.granular_density)
+            : runGpuFluidZeroSolidFaces(grid, compute, *lanes[0]);
+    };
     for (int substep = 0; substep < substeps; ++substep) {
         if (clock && clock->forces &&
             !clock->forces(substep, common_substeps, dt, error)) {
             return false;
+        }
+        if (substep_forces) {
+            auto force_params = params;
+            force_params.granular_enabled = false;
+            if (!runGpuFluidParticleIntegrateForces(state, force_params, Vec3(0.0f), dt,
+                    substep_forces->frame_start_seconds + substep * dt,
+                    substep_forces->buffer, compute, primary, false)) {
+                error = "mixed GPU substep force integration failed";
+                return false;
+            }
         }
         if (substep % grid_stride == 0) {
             const float transfer_dt = dt * std::min(grid_stride, substeps - substep);
@@ -387,8 +471,7 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
                         runGpuFluidP2G(state, compute, *lanes[lane], models[lane],
                                        transfer_dt, false, true, false);
                 }
-                if (!transferred ||
-                    !runGpuFluidZeroSolidFaces(grid, compute, *lanes[lane])) {
+                if (!transferred || !solid_faces(lane, transfer_dt)) {
                     error = "mixed GPU indexed P2G/boundary failed";
                     return false;
                 }
@@ -461,7 +544,7 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
                 if (lane == 0 && !has_fluid) {
                     continue;
                 }
-                if (!runGpuFluidZeroSolidFaces(grid, compute, *lanes[lane]) ||
+                if (!solid_faces(lane, transfer_dt) ||
                     !runGpuFluidG2P(state, models[lane], transfer_dt, compute, *lanes[lane],
                         lane == 0 || granularFlipSnapshotWanted(models[lane], *lanes[lane]),
                         false, true, true, true)) {
@@ -489,6 +572,11 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
             if (!runGpuFluidAdvectTail(state, advection, dt, compute, *lanes[lane],
                     nullptr, false, nullptr, false, nullptr, false, clock != nullptr)) {
                 error = "mixed GPU indexed advection after contact failed";
+                return false;
+            }
+            if (lane == 1 && !runGpuMpmParticleContact(grid, compute, *lanes[1], dt,
+                    params.granular_density, static_cast<uint32_t>(count))) {
+                error = "mixed GPU MPM parcel collider contact failed";
                 return false;
             }
         }
@@ -543,8 +631,10 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
         const auto model = i < particles.constitutive_model.size()
             ? static_cast<Fluid::MatterConstitutiveModel>(particles.constitutive_model[i])
             : Fluid::MatterConstitutiveModel::Auto;
-        if (model == Fluid::MatterConstitutiveModel::Granular ||
-            (model == Fluid::MatterConstitutiveModel::Auto && legacy_granular)) {
+        // ★ Every MPM parcel (granular AND elastic) takes the MPM lane's result.
+        // Granular-only here would move an elastic body each step and then
+        // silently restore it from the liquid lane's untouched copy.
+        if (mpm_parcel(model)) {
             liquid_result.copyParticleFrom(i, granular_result, i);
         }
         const auto& p = liquid_result.position[i];
@@ -598,9 +688,9 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
         const auto model = i < particles.constitutive_model.size()
             ? static_cast<Fluid::MatterConstitutiveModel>(particles.constitutive_model[i])
             : Fluid::MatterConstitutiveModel::Auto;
-        return model == Fluid::MatterConstitutiveModel::Granular ||
-               (model == Fluid::MatterConstitutiveModel::Auto && legacy_granular);
+        return mpm_parcel(model);
     });
+    stats.mpm_law = !has_granular ? -1 : elastic_solid ? 2 : snow ? 1 : 0;
     stats.grid_cell_count = cells;
     stats.granular_solver_substeps = grid_steps;
     stats.granular_required_substeps = elastic.required_substeps;

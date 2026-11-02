@@ -1,5 +1,27 @@
 # Birleşik madde — kalan yol haritası (2026-10-19)
 
+> **2026-11-02 regresyon turu (exe 11-01 14:54, 10-29 partisi içinde):**
+> 14 kolda **13/14 PASS**. Geçenler: şeritler, Play/Pause/Live,
+> eski proje kaydet/aç (T6 E2 göçü + gaz shader'ı **ilk kez canlı**), MPM+DEM
+> saati 5/5 (DEM ≤ yazılan tavan dahil). Tek FAIL: dinlenik su (p95 4.311
+> mm/kare, değişmedi). İki FAIL test hatasıydı, kod değil (NEXT_BUILD_CHECKS en üst).
+> Sıradaki kaynak işi: D2.8 su yoğunluğu, sonra Ritter.
+> **D2.8 DERLENDİ, CANLI (2026-11-02):** su p95 4.31 → 0.89 mm/kare, hız 0.165 → 0.023 m/s,
+> Ritter 0.3 %54 → %23 (gerileme kapandı), duman 10/11. Kapı hâlâ FAIL. Kalan tepe ve şişme
+> konum tabanlı yoğunluk projeksiyonundan geliyor (kapalıyken p95 0.35, kütle merkezi +0.05 mm).
+> Sıradaki iş bu projeksiyon. Ayrıntı NEXT_BUILD_CHECKS en üstte.
+> **Sonraki parti YAZILDI, derlenmedi (2026-11-02):** elastik viskoz alt adım salınımı (kök ölçüldü), Gelatin/Dough ayarı, E2 yırtılma, `state_digest` yüzdelik sınırları. FLIP rampası hâlâ açık (CPU'da da var).
+> **Aynı parti DERLENDİ, CANLI (2026-11-02):** D2.8 **liquid_at_rest PASS** (0.45 mm/kare);
+> şişme +1.4 → +0.1 mm; duman 11/12; elastik 6/8 (taban sızması + zeminde hareketsiz hız açık).
+> Önceki kayıt — **2026-11-02 büyük parti YAZILDI, derlenmedi (kullanıcı: "küçük adım yok, büyük adım"):**
+> yoğunluk şişmesinin kökü (duvar katmanı tek yönlüydü) + su kapısı + **elastik MPM E1**
+> ([ELASTIK_MPM.md](ELASTIK_MPM.md); "Bu planın dışında" listesindeki elastik madde artık
+> başladı). Tek derleme, test sırası NEXT_BUILD_CHECKS en üstte.
+> Önceki kayıt — **D2.8 kökü bulundu (2026-11-02), YAZILDI, derlenmedi:** yoğunluk değil, G2P duvarda
+> ağırlık atıyordu. FLIP, duvar yakınında yerçekimini eksik geri alıyordu ve dinlenik tank
+> kendi konveksiyonunu pompalıyordu. Düzeltme Vulkan, CPU ve CUDA'da;
+> kontrol listesi NEXT_BUILD_CHECKS en üstte. Ritter'in de bu kökten etkilendiği düşünülüyor.
+
 > **Güncel kaynak/kabul dökümü — 2026-10-29.** Kullanıcı önceliği: ana plan
 > kaynak işleri önce; hassas fizik ölçümleri ve ayarlama en son toplu turda.
 > Kapsam D2 + D3/T6; yeni yan iş eklenmez. Goal tamamlanmadı.

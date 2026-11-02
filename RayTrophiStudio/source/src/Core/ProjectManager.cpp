@@ -5772,6 +5772,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["restitution"] = collider.restitution;
         c["friction"] = collider.friction;
         c["thickness"] = collider.thickness;
+        c["contact_friction"] = collider.contact_friction;
+        c["contact_adhesion_pa"] = collider.contact_adhesion_pa;
         c["gas_interaction_enabled"] = collider.gas_interaction_enabled;
         c["gas_density_rate"] = collider.gas_density_rate;
         c["gas_temperature_rate"] = collider.gas_temperature_rate;
@@ -6316,6 +6318,9 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         collider.restitution = item.value("restitution", collider.restitution);
         collider.friction = item.value("friction", collider.friction);
         collider.thickness = item.value("thickness", collider.thickness);
+        collider.contact_friction = item.value("contact_friction", collider.contact_friction);
+        collider.contact_adhesion_pa =
+            item.value("contact_adhesion_pa", collider.contact_adhesion_pa);
         collider.gas_interaction_enabled = item.value("gas_interaction_enabled", collider.gas_interaction_enabled);
         collider.gas_density_rate = item.value("gas_density_rate", collider.gas_density_rate);
         collider.gas_temperature_rate = item.value("gas_temperature_rate", collider.gas_temperature_rate);

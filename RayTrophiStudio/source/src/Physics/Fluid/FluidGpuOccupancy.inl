@@ -5,8 +5,10 @@ class FluidGpuOccupancy {
 public:
     FluidGpuOccupancy(SimulationGridDomainState& state,
                       SimulationComputeContext* compute,
-                      SimulationGridDomainComputeBuffers* buffers)
-        : state_(state), compute_(compute), buffers_(buffers) {
+                      SimulationGridDomainComputeBuffers* buffers,
+                      const std::vector<uint32_t>* solid_override = nullptr)
+        : state_(state), compute_(compute), buffers_(buffers),
+          solid_override_(solid_override) {
     }
 
     bool build() {
@@ -74,7 +76,9 @@ private:
         const std::size_t cells = grid.getCellCount();
         const std::vector<uint32_t>* solids = &grid.solid_cells;
         std::vector<uint32_t> scanned_solids;
-        if (!grid.solid_cells_valid) {
+        if (solid_override_) {
+            solids = solid_override_;
+        } else if (!grid.solid_cells_valid) {
             for (std::size_t cell = 0; cell < cells; ++cell) {
                 if (grid.solid[cell]) {
                     scanned_solids.push_back(static_cast<uint32_t>(cell));
@@ -118,6 +122,7 @@ private:
     }
 
     SimulationGridDomainState& state_;
+    const std::vector<uint32_t>* solid_override_ = nullptr;
     SimulationComputeContext* compute_ = nullptr;
     SimulationGridDomainComputeBuffers* buffers_ = nullptr;
     uint32_t solid_count_ = 0;

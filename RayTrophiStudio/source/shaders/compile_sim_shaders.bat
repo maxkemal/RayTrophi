@@ -40,7 +40,7 @@ if errorlevel 1 exit /b 1
 for %%k in (
     sim_sparse_grid_map_clear sim_sparse_grid_map_seed sim_sparse_grid_retire sim_sparse_grid_remap
     sim_sparse_mac_clear sim_sparse_mac_mark sim_sparse_mac_reset sim_sparse_mac_normalize sim_sparse_mac_publish sim_sparse_mac_capture sim_sparse_mac_gather sim_sparse_mac_p2g sim_sparse_mac_matter_p2g sim_sparse_mac_g2p sim_sparse_mac_matter_g2p sim_sparse_mac_zero_faces sim_sparse_mac_matter_zero_faces sim_sparse_mac_divergence sim_sparse_mac_divergence_var sim_sparse_mac_divergence_porous sim_sparse_mac_subtract_gradient sim_sparse_mac_subtract_gradient_var sim_sparse_mac_capture_compact sim_sparse_mac_advect sim_sparse_mac_matter_advect sim_sparse_mac_matter_contact sim_sparse_mac_viscosity_capture sim_sparse_mac_viscosity_sweep
-    sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_contact sim_matter_copy sim_matter_clear sim_matter_zero_faces sim_matter_pores
+    sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_contact sim_matter_copy sim_matter_clear sim_matter_zero_faces sim_matter_mpm_boundary sim_collider_bvh_query sim_matter_mpm_particle_contact sim_matter_pores
 ) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1

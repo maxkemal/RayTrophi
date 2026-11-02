@@ -657,6 +657,78 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             // different materials. Substeps grow with sqrt(E / rho).
             add(p);
         }
+        // ── Elastic solids on the MPM lane (docs/dev/ELASTIK_MPM.md) ──────────
+        // Order-of-magnitude starting values, not measured fits. Substeps grow
+        // with sqrt(E / rho): Gelatin ~2 m/s wave speed is cheap, Gum ~13 m/s
+        // needs ~30 substeps at 5 cm / 24 fps.
+        {
+            SubstanceProfile p;
+            p.name = "Gelatin";
+            p.category = SubstanceCategory::Solid;
+            p.default_constitutive_model = Fluid::MatterConstitutiveModel::Elastic;
+            p.density = 1050.0f;
+            p.specific_heat = 3800.0f;
+            p.conductivity = 0.5f;
+            // Purely elastic, damped: a jelly wobbles and the wobble dies out.
+            // 2 Pa s still wobbled at 0.2 m/s after 2 s (2026-11-02 live). It
+            // tears past Hencky 0.8 (stretch e^0.8 = 2.2x; table gelatin breaks
+            // around 2-3x). 0.6 cracked ~3 % of a 20 cm drop's edge parcels.
+            p.elastic_young_modulus = 5.0e3f;
+            p.elastic_poisson_ratio = 0.45f;
+            p.elastic_viscosity_pa_s = 8.0f;
+            p.elastic_fracture_strain = 0.8f;
+            p.elastic_damage_rate = 30.0f;
+            // Gel melts near body temperature into a thin solution.
+            p.meltable = true;
+            p.melt_kelvin = 308.15f; p.boiling_kelvin = 373.15f;
+            p.latent_heat_fusion = 2.0e4f;
+            p.liquid_density = 1050.0f;
+            p.liquid_kinematic_viscosity = 1.0e-5f;
+            p.latent_heat_vaporization = 2.26e6f;
+            p.vapor_molar_mass_kg_mol = 0.018015f;
+            p.solver_flip_blend = 0.95f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Dough";
+            p.category = SubstanceCategory::Solid;
+            p.default_constitutive_model = Fluid::MatterConstitutiveModel::Elastic;
+            p.density = 1200.0f;
+            p.specific_heat = 2500.0f;
+            p.conductivity = 0.4f;
+            // Elastoplastic: springs back a little, keeps the dent. A 0.05 yield
+            // flowed a 15 cm block to 5 cm without its viscosity; 0.15 barely
+            // yielded on a 20 cm drop and sat as high as Gelatin (2026-11-02).
+            p.elastic_young_modulus = 3.0e4f;
+            p.elastic_poisson_ratio = 0.42f;
+            p.elastic_yield_strain = 0.10f;
+            p.elastic_viscosity_pa_s = 50.0f;
+            p.solver_flip_blend = 0.0f;
+            add(p);
+        }
+        {
+            SubstanceProfile p;
+            p.name = "Chewing Gum";
+            p.category = SubstanceCategory::Solid;
+            p.default_constitutive_model = Fluid::MatterConstitutiveModel::Elastic;
+            p.density = 1100.0f;
+            p.specific_heat = 1800.0f;
+            p.conductivity = 0.2f;
+            // Viscoelastic: snaps back fast, creeps slowly, yields far out.
+            p.elastic_young_modulus = 2.0e5f;
+            p.elastic_poisson_ratio = 0.45f;
+            p.elastic_yield_strain = 0.5f;
+            p.elastic_relaxation_s = 1.5f;
+            p.elastic_viscosity_pa_s = 30.0f;
+            // Softens in the mouth (body temperature), not a melt.
+            p.granular_softening_kelvin = 310.0f;
+            p.granular_softening_range = 15.0f;
+            p.granular_residual_strength = 0.2f;
+            p.solver_flip_blend = 0.5f;
+            p.solver_granular_max_substeps = 48.0f;
+            add(p);
+        }
         {
             SubstanceProfile p;
             p.name = "Gasoline";

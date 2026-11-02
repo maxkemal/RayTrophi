@@ -24,6 +24,7 @@
 #include "Fluid/GasSaturation.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 #include <exception>
 #include <string>
 
@@ -138,6 +139,20 @@ Result getFluidStateDigest(const std::string& domain_id_or_name, FluidStateDiges
     }
     if (out.particles > 0) {
         out.bounds_measured = true;
+        std::vector<float> axis_values(ps.position.size());
+        for (std::size_t axis = 0; axis < 3; ++axis) {
+            for (std::size_t i = 0; i < ps.position.size(); ++i) {
+                axis_values[i] = axis == 0 ? ps.position[i].x
+                    : axis == 1 ? ps.position[i].y : ps.position[i].z;
+            }
+            const auto at = [&](double q) {
+                const auto k = static_cast<std::size_t>(q * (axis_values.size() - 1));
+                std::nth_element(axis_values.begin(), axis_values.begin() + k, axis_values.end());
+                return static_cast<double>(axis_values[k]);
+            };
+            out.bounds_p05[axis] = at(0.05);
+            out.bounds_p95[axis] = at(0.95);
+        }
         const double n = static_cast<double>(out.particles);
         out.centroid[0] = cx / n; out.centroid[1] = cy / n; out.centroid[2] = cz / n;
         out.mean_speed = speed / n;
