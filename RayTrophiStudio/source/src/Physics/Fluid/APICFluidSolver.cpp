@@ -1996,8 +1996,11 @@ struct MpmContact {
         }
         const float phi_lo = phiAt(lo[0], lo[1], lo[2]);
         const float phi_hi = phiAt(hi[0], hi[1], hi[2]);
-        if (0.5f * (phi_lo + phi_hi) >= 0.0f) return v;
         const float h = grid.voxel_size;
+        const float phi_face = 0.5f * (phi_lo + phi_hi);
+        if (phi_face >= h) return v;
+        // 0 <= phi_face < h: the adhesion band (separating faces only).
+        const bool band = phi_face >= 0.0f;
         float g[3] = {0.0f, 0.0f, 0.0f};
         float u[3] = {0.0f, 0.0f, 0.0f};
         g[axis] = (phi_hi - phi_lo) / h;
@@ -2014,9 +2017,25 @@ struct MpmContact {
         }
         const Vec3 grad(g[0], g[1], g[2]);
         const float gl = grad.length();
-        if (gl < 1e-6f) return v;
+        if (band && gl < 1e-6f) return v;
+        // A ridge (the mid-plane of a plate thinner than ~2h): no flow across.
+        if (gl < 1e-6f) {
+            return comp(solidVelocity(std::clamp(lo[0], 0, grid.nx - 1),
+                                      std::clamp(lo[1], 0, grid.ny - 1),
+                                      std::clamp(lo[2], 0, grid.nz - 1)), axis);
+        }
         const Vec3 n = grad * (1.0f / gl);
-        const int* wall = phi_lo < phi_hi ? lo : hi;
+        int wall[3] = {phi_lo < phi_hi ? lo[0] : hi[0], phi_lo < phi_hi ? lo[1] : hi[1],
+                       phi_lo < phi_hi ? lo[2] : hi[2]};
+        if (band) {
+            // The solid cell across the surface, from the face centre.
+            float face[3] = {hi[0] + 0.5f, hi[1] + 0.5f, hi[2] + 0.5f};
+            face[axis] -= 0.5f;
+            const float back = phi_face / h + 0.5f;
+            wall[0] = static_cast<int>(std::floor(face[0] - n.x * back));
+            wall[1] = static_cast<int>(std::floor(face[1] - n.y * back));
+            wall[2] = static_cast<int>(std::floor(face[2] - n.z * back));
+        }
         const int wi = std::clamp(wall[0], 0, grid.nx - 1);
         const int wj = std::clamp(wall[1], 0, grid.ny - 1);
         const int wk = std::clamp(wall[2], 0, grid.nz - 1);
@@ -2026,7 +2045,11 @@ struct MpmContact {
         Vec3 rel = Vec3(u[0], u[1], u[2]) - vs;
         const float vn = rel.dot(n);
         Vec3 vt = rel - n * vn;
-        if (vn < 0.0f) {
+        if (band) {
+            if (glue <= 0.0f || vn <= 0.0f) return v;
+            const float hold = glue * dt / (std::max(density, 1.0f) * h);
+            rel = vt + n * std::max(vn - hold, 0.0f);
+        } else if (vn < 0.0f) {
             const float slip = vt.length();
             if (slip > 1e-9f) vt = vt * (std::max(slip - mu * (-vn), 0.0f) / slip);
             rel = vt;
@@ -2063,10 +2086,11 @@ void enforceMpmContact(FluidSim::FluidGrid& grid, float dt, float density) {
 // ends inside a collider (phi < 0) goes back onto the surface and loses the
 // velocity part carrying it further in. Support, friction and adhesion are the
 // grid's (enforceMpmContact); the kernel's header says why.
-void applyMpmParticleContact(FluidParticles& particles, const FluidSim::FluidGrid& grid,
-                             const APICSolverParams& params, float dt) {
+std::size_t applyMpmParticleContact(FluidParticles& particles, const FluidSim::FluidGrid& grid,
+                                    const APICSolverParams& params, float dt) {
     const std::size_t cells = grid.getCellCount();
-    if (grid.solid_phi.size() != cells || !(dt > 0.0f) || !(grid.voxel_size > 0.0f)) return;
+    if (grid.solid_phi.size() != cells || !(dt > 0.0f) || !(grid.voxel_size > 0.0f)) return 0u;
+    std::size_t pushed = 0u;
     const float h = grid.voxel_size;
     const float far = 2.0f * h;
     auto phiAt = [&](int i, int j, int k) {
@@ -2117,7 +2141,9 @@ void applyMpmParticleContact(FluidParticles& particles, const FluidSim::FluidGri
         x = x - n * d;
         const float vn = (v - vs).dot(n);
         if (vn < 0.0f) v = v - n * vn;
+        ++pushed;
     }
+    return pushed;
 }
 
 static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverParams& params,

@@ -1,5 +1,178 @@
 # NEXT BUILD CHECKS
 
+## Proje açılışında zaman çizelgesi yarışı — 2026-11-03 gece (CANLI: saç projesi çökmeden açıldı)
+
+- **Belirti:** saç sistemli proje açılırken read access violation. Yığın: `SDL_main` →
+  `std::map` iteratörü `++`. Yığındaki `json` / `VectorKey` adları bağlayıcının özdeş
+  fonksiyon birleştirmesi (COMDAT folding); gerçek döngü `scene.timeline.tracks`
+  (`Main.cpp`).
+- **Kök:** proje yüklemesi kapları iş parçacığında yeniden kurarken ana döngü her kare
+  zaman çizelgesi izlerini, model bağlamlarını ve gaz/VDB listelerini geziyordu. Rüzgâr,
+  materyal ve `animationDataList` döngüleri zaten `sceneLoadActive` ile korunuyordu; bu
+  dördü korumasızdı.
+- **Düzeltme:** `sceneLoadActive` yukarı taşındı. Yükleme sürerken bu dört döngüye hiç
+  girilmez ve önbelleğe alınmış bayraklar kullanılır.
+- **Kontrol:** aynı saç projesini 3–4 kez aç/kapat; çökme olmamalı. Açıldıktan sonra
+  zaman çizelgesi anahtarları çalmalı (önbellek yükleme bitince tazelenir).
+  - Yine çökerse: yükleyici `scene_loading` bayrağını kabı değiştirdikten SONRA mı
+    kaldırıyor? Ona bak.
+
+## Canlı sonuç — 2026-11-03 gece (determinant + yapışma bandı derlendi)
+
+- `collider_phi` **12/12**:
+  - SDF sıfır geçişi 0.0986 (tepe 0.100);
+  - SDF boşluğu −4.9 mm, kabuk −4.6 mm, analitik küre −4.9 mm: üç yol aynı yerde;
+  - kurtarma sayacı 0.
+- `mpm_collider` **7/8**, üç koşuda da bit düzeyinde aynı:
+  - kayma kararsızlığı KAPANMADI. Tek başına 3 koşuda 0.1000 m, ama duman paketinde
+    (`rt_matter_smoke --quick`, 13/14) 0.00005 m.
+    - Aday: önceki testlerden kalan durum (OBB memo, yüzey önbelleği, aynı ad), ya da plaka
+      SDF'si pişmeden kaymanın başlaması.
+    - Sına: duman paketini yalnız `elastic` + `mpm_collider` ile koştur;
+      `collider.get sdf_ready` kayma kolu başında yazdır.
+  - `drawn_gum_tears` ilk kez geçti (172 / 1152 koptu).
+- `elastic` 11/11.
+- **AÇIK: `gum_stretches`.**
+  - Sakız üst plakaya yapışık 7.9 → ~15.5 cm uzuyor, 32. karede ucu bırakıp eski boyuna
+    (p95 0.197) geri sıçrıyor (ortalama hız 0.49).
+  - Kırılma gerinimi 1 ve 5 iken bit düzeyinde aynı: yırtılma değil.
+  - Fizik değil: E = 2e5 Pa, Hencky ≈ 0.67, gerilme ~1e5 Pa; yapışma 1e6 Pa, tutma eşiği
+    ~95 m/s.
+  - Kopuştan önce plaka-sakız boşluğu ~1 mm, yani bant kaybolmuyor.
+  - Sonraki aday: kopuş karesinde `fluid.step_stats` (alt adım sayısı, pushed) ve
+    `fluid.sample_solid_phi` ile plaka altı. Gerilmiş ince boyunda (necking) ızgara kütlesinin
+    seyrelmesi ya da alt adım sayısının değişmesi.
+
+## ★ Matrix4x4::determinant düzeltildi + yapışma bandı — 2026-11-03 akşam (YAZILDI, derlenmedi)
+
+**Derlenecek:** C++ (`src/Math/Matrix4x4.cpp` — GENİŞ ETKİ, aşağıya bak) ve
+`sim_matter_mpm_boundary` shader'ı. Yeni `.cpp` yok. Madde denetimleri temiz.
+
+**Önceki partinin canlı sonucu (kurtarma + sırt + φ sondası):**
+- `collider_phi` 9/12:
+  - küre 1 → 8.2 cm, SDF 8.0 cm, kurtarma sayacı her karede 0;
+  - FAIL `sdf_phi_surface`, `sdf_matches_analytic`, `shell_on_surface`.
+- `mpm_collider` 4/8 → 6/8: yükseklik, sürtünmeyle taşıma 0.100 / 0.100 m, plaka üstünde;
+  FAIL `gum_stretches`, `drawn_gum_tears`.
+- `elastic` 11/11.
+
+**Kökler (`fluid.sample_solid_phi` ile ölçüldü):**
+1. **★ `Matrix4x4::determinant()` kofaktör işaretini İKİ KEZ uyguluyordu** (2025-12-10'dan
+   beri).
+   - z ekseni etrafında θ dönmede det = cos 2θ: 10°'de 0.94, 30°'de 0.5, 45°'de 0 (ters
+     birim matris dönüyor!), 90°'de −1.
+   - `inverse()` adjugate / det olduğu için eğik her çerçeve yanlış ölçekle tersleniyordu.
+   - Collider OBB'si ilk üçgenden kurulur; kürede eğik. Ölçüm: SDF ve kabuk φ'si ikisi de
+     eğim 1.03, yüzey 3 cm aşağıda; analitik küre 0.2 mm içinde.
+   - Küp plakalar neredeyse sağlamdı: eksene hizalı ya da yer değiştirmiş çerçevede hata
+     yalnız işaret, kutu da merkezine göre simetrik.
+2. **Yapışma yalnız plakanın İÇİNDEKİ yüzlerde etkiliydi.**
+   - Plaka kalkıp boşluk yarım yüzü geçince bırakıyordu: sakız ~1 cm izleyip geri düştü.
+   - Şimdi 0 ≤ φ_yüz < h bandında, yalnız AYRILAN yüzlerde aynı tutma kuralı. Yapışma ve
+     katı hızı yüzeyin öbür yanındaki hücreden okunur. Destek ve sürtünme yine yalnız
+     φ_yüz < 0'da.
+
+**Sırayla:**
+1. `python scripts/test/rt_test_collider_phi_ipc.py`: **12/12** hedef.
+   - `sdf_phi_zero_y` ≈ 0.100 ve kabukta tepede φ ≈ 0 olmalı.
+   - Hâlâ ~0.07 ise çağıran yol başka bir ters fonksiyon kullanıyor (`inverse_affine` vb. ara).
+   - `shell_on_surface` hâlâ FAIL ise (boşluk ~−2 cm): sırt yüzü orta düzlemde tutuyor, S3
+     itmesi 0.12'ye kaldırmıyor.
+2. `python scripts/test/rt_test_mpm_collider_ipc.py`: **8/8** hedef.
+   - `gum_stretches` FAIL ve `stretch_upper_gap_m` ≈ 0.10: bant yüzleri kütle taşımıyor; bant
+     h'den geniş olmalı (1.5h dene).
+   - ★ **En sinsi:** `slide` / `slip` değerleri değişirse bant yapışma dışında bir şeye
+     dokunuyor demektir. Glue 0 iken bant hiçbir şey yapmamalı.
+   - **Kararsız kol (bu exe):** `slide_gum_x_m` 3 koşuda 0.1000 / 0.00005 / 0.1000 çıktı
+     (iki uçlu, diğer kollar bit düzeyinde aynı).
+     - Aday: OBB çerçevesi ilk üçgenden kurulur. Üçgen sırası koşudan koşuya değişirse
+       çerçeve kimi zaman yer değiştirmiş olur; hatalı det −1 ise ters matrisin tamamı
+       negatifleniyordu.
+     - Determinant düzeltmesinden sonra testi **3 kez** koştur; üçünde de ≈ 0.100 olmalı.
+       Değilse kök başka: kayma kolunun SDF pişirme zamanlaması.
+3. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 11/11.
+4. `python scripts/test/rt_matter_smoke.py --quick`: 14/14 (10 dakikayı geçebilir; arka
+   planda koştur).
+5. **★ Determinant düzeltmesinin geniş etkisi — elle gözle bak.** `Matrix4x4::inverse`'ü
+   137 yer çağırıyor. Eğik her şey (45°'ye yakın olanlar en çok) değişecek:
+   - döndürülmüş objede gizmo ve seçim;
+   - saç groom'u, rig, sculpt;
+   - kinematik collider, kuvvet alanı, gaz/VDB hacmi;
+   - terrain eğrisi, scatter.
+   Beklenen: daha DOĞRU. Ama eskiyi telafi etmek için yazılmış bir kod varsa şimdi bozulur.
+   Örnek ölçüt: 45° dönmüş bir küp collider sıvıyı doğru yerde durdurmalı. Eskiden ters
+   birim matris çıkıyordu, yani collider dünya orijininde sanılıyordu.
+
+## MPM için kurtarma ışınlaması kapandı + sırt teması + φ sondası — 2026-11-03 (YAZILDI, derlenmedi)
+
+**Derlenecek:** C++ ve bir shader (`sim_matter_mpm_boundary`, sırt dalı). Yeni `.cpp` yok.
+Madde denetimleri, IPC yetki denetimi ve tarif üreticisi temiz.
+
+**Önceki partinin canlı sonucu (bu düzeltmelerden ÖNCE):**
+- `collider_phi` 6/8:
+  - düzlem tam yüzeyde (0.01 mm) ve 7.3 cm boyunda; S4'ün ezmesi kapandı;
+  - FAIL `sdf_matches_analytic` (−42.6 mm) ve `shell_on_surface` (−56.6 mm).
+- `mpm_collider` 4/8. `elastic` 11/11. Duman testi 12/14.
+
+**Bulunan kökler (sondayla ölçüldü):**
+1. **Katıdan kurtarma MPM parçacıklarını ışınlıyordu.**
+   - Maske hücreyi merkezine göre katı sayar. Eğri ya da hücre yüzüne denk gelmeyen bir
+     yüzeyde duran parçacık "katı" hücrededir.
+   - `recoverParticlesFromSolidCells` onu her kare üstteki hücre merkezine taşıyıp hızını
+     ¼'e indiriyordu.
+   - Ölçüm: R = 20 m kubbede bile μ 1 ile jöle 10 cm → 0.6 cm; düzlemde 7.3 cm.
+     "Dinlenik" hız 0.16–0.22 m/s.
+   - ★ Küre kolu boşluk kapısını GEÇİYORDU ama 1 cm'e ezilmişti: sessiz, makul görünen sonuç.
+   - Kar "collider'a yapışık" raporunun da kökü.
+   - **Düzeltme:** φ taşıyan hücredeki MPM parçacığı (Granular, Elastic, Auto + MPM) ışınlanmaz.
+     Aynı karede `applyMpmParticleContact` koşar: φ < 0 ise yüzeye konur, yalnız içe doğru hızı
+     kesilir. Bu itme eski granüler zincirde de (saf kar) koşar; orada S3 yoktu. İtilen
+     parçacık varsa GPU parçacık tamponu tazelenir.
+2. **İnce kabukta sırt.**
+   - 2 cm kalınlık, h 2.5 cm: hücre merkezinde φ satır satır +1.75 / −0.75 / −0.75 / +1.75 cm.
+   - φ_yüz < 0 olan tek yüz plakanın orta düzlemi; orada ∇φ = 0, kod teması atlıyordu.
+     Jöle kabuğun içinden düşüyordu.
+   - **Düzeltme:** φ_yüz < 0 ve eğim yok ise yüz katının hızını alır (akış kesilir).
+     CPU ikizi de aynı.
+3. **AÇIK — pişmiş SDF yüzeyi ~3 cm aşağıda gösteriyor** (jöle p05 0.07, gerçek tepe 0.10).
+   - Önbellek değil: zorla yeniden damgalama aynı sonucu verdi.
+   - Kafes kuralı değil: pişirme ve örnekleyici hücre merkezinde.
+   - Mesh tepesi 0.0999'da (1280 üçgen).
+   - İpucu: Auto boyutları 187/186/187. 1.8 m kürede ceil(2.34 / 0.0125) = 188 olmalıydı,
+     yani pişirilen üçgenlerin kutusu ~1.785–1.79 m.
+   - Ölçmek için yeni `fluid.sample_solid_phi`.
+
+**Yeni IPC:**
+- `fluid.sample_solid_phi {domain, points}`: nokta başına hücre, maske, hücre φ'si ve üç
+  doğrusal φ.
+- `fluid.step_stats` iki yeni alan taşıyor: `recovered_solid_particles`,
+  `mpm_surface_pushed_particles`.
+
+**Sırayla:**
+1. `python scripts/test/rt_test_collider_phi_ipc.py`: 12 kapı.
+   - Yeni kapılar: `sphere_keeps_height` / `sdf_keeps_height` (≥ 6 cm), `no_mpm_teleport`
+     (kurtarma sayacı her karede 0), `sdf_phi_surface` (SDF'nin sıfır geçişi tepeye h/4 içinde).
+   - `sphere_keeps_height` FAIL ve `recovered_max` > 0: atlama koşulu tutmuyor. Parçacığın
+     `constitutive_model`'i Auto ve `auto_is_mpm` yanlış olabilir.
+   - `sphere_keeps_height` FAIL ve `recovered_max` = 0: ezilme başka yerden geliyor. Kubbede
+     ızgara desteğine bak; düzlem tutuyorsa eğimli n'nin x/z yüzleri.
+   - `shell_on_surface` FAIL, boşluk ≈ −2 cm: sırt kesmesi çalışıyor ama jöle orta düzlemde
+     oturuyor. S3 onu 0.12'de tutmalıydı; `pushed_max`'a bak.
+   - `sdf_phi_surface` FAIL: `sdf_phi_zero_y` kaymanın kendisi. 0.07 civarı ise sorun
+     pişirmede ya da örneklemede, ızgarada değil. `phi_column`'u analitik
+     `|p − c| − R` ile karşılaştır.
+2. `python scripts/test/rt_test_mpm_collider_ipc.py`: önceki 4/8 (yükseklik, sürtünme, germe,
+   yırtılma).
+   - Plakalar `mesh_sdf`; 1. kök hepsini bozuyordu (¼ hız kesmesi taşımayı öldürür).
+   - 3. kök (SDF kayması) açık kaldıkça tam 8/8 beklenmez. `rise_height` > 6 mm ve
+     `slide_gum_x_m` > 6 cm olmalı.
+3. `python scripts/test/rt_test_elastic_mpm_ipc.py`: 11/11 kalmalı (collider yok).
+4. `python scripts/test/rt_matter_smoke.py --quick`: 14/14 hedef.
+   - Sıvı testleri (`seed_settle`, `fire_steam`) değişmemeli: sıvı parçacıkları hâlâ
+     ışınlanıyor, değişiklik yalnız MPM'de.
+5. Elle: snow seed + collider sahnesi. Kar tepeye yapışmadan oturmalı.
+   `fluid.step_stats` `recovered_solid_particles` 0 olmalı.
+
 ## Izgara yüzünde φ teması + GPU sorgu sağlamlığı — 2026-11-03 (YAZILDI, derlenmedi)
 
 **Derlenecek:** C++ ve iki shader: `sim_matter_mpm_boundary` (yeniden yazıldı; 13 tampon) ve

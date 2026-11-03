@@ -4279,6 +4279,35 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"hottest", rows(ex.hottest)}, {"coldest", rows(ex.coldest)}};
         });
     }
+    if (method == "fluid.sample_solid_phi") {
+        std::string domain = requireString(params, "domain");
+        if (!params.contains("points") || !params["points"].is_array()) {
+            throw std::runtime_error("points must be an array of [x, y, z]");
+        }
+        std::vector<std::array<float, 3>> points;
+        for (const auto& p : params["points"]) {
+            if (!p.is_array() || p.size() != 3) {
+                throw std::runtime_error("points must be an array of [x, y, z]");
+            }
+            points.push_back({p[0].get<float>(), p[1].get<float>(), p[2].get<float>()});
+        }
+        return enqueueQuery([domain, points](UIContext&) {
+            std::vector<rtapi::FluidSolidPhiSample> samples;
+            double voxel_m = 0.0;
+            bool has_field = false;
+            auto r = rtapi::sampleFluidSolidPhi(domain, points, samples, voxel_m, has_field);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            nlohmann::json rows = nlohmann::json::array();
+            for (const auto& s : samples) {
+                rows.push_back({
+                    {"ijk", nlohmann::json::array({s.ijk[0], s.ijk[1], s.ijk[2]})},
+                    {"solid", s.solid}, {"cell_has_phi", s.cell_has_phi},
+                    {"cell_phi", s.cell_phi}, {"phi", s.phi}});
+            }
+            return nlohmann::json{{"ok", true}, {"voxel_m", voxel_m},
+                                  {"has_phi_field", has_field}, {"samples", rows}};
+        });
+    }
     if (method == "fluid.gas_cell_extremes") {
         std::string domain = requireString(params, "domain");
         const int count = params.contains("count") ? requireInt(params, "count") : 8;
@@ -7694,6 +7723,8 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["collider_query_gpu"] = s.collider_query_gpu;
             j["collider_query_ms"] = s.collider_query_ms;
             j["collider_query_error"] = s.collider_query_error;
+            j["recovered_solid_particles"] = s.recovered_solid_particles;
+            j["mpm_surface_pushed_particles"] = s.mpm_surface_pushed_particles;
             j["total_ms"] = s.total_ms;
             j["p2g_ms"] = s.p2g_ms;
             j["pressure_ms"] = s.pressure_ms;

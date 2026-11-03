@@ -101,9 +101,12 @@ float Matrix4x4::cofactor(int row, int col) const {
 }
 
 float Matrix4x4::determinant() const {
-    // 4x4 matris için determinant hesaplama
-    // Bu basit bir implementasyondur, daha verimli metotlar kullanılabilir
-    return m[0][0] * cofactor(0, 0) - m[0][1] * cofactor(0, 1) + m[0][2] * cofactor(0, 2) - m[0][3] * cofactor(0, 3);
+    // Laplace expansion along row 0. cofactor() already carries (-1)^(i+j);
+    // this line used to apply the sign a second time, which gave a rotation
+    // about z by theta det = cos(2 theta) instead of 1 (0 at 45 deg, so
+    // inverse() returned identity there). Every tilted frame was inverted with
+    // a wrong scale: a mesh_sdf collider read 3 cm low (2026-11-03 live).
+    return m[0][0] * cofactor(0, 0) + m[0][1] * cofactor(0, 1) + m[0][2] * cofactor(0, 2) + m[0][3] * cofactor(0, 3);
 }
 float Matrix4x4::minor(int row, int col) const {
     float minor[3][3];

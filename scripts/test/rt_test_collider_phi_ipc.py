@@ -15,7 +15,13 @@ Arms:
 
 Gates:
   * plane_on_surface / sphere_on_surface: |lowest - surface| <= h/4;
-  * plane_keeps_height: the jelly stays >= 6 cm tall (not piled into a band);
+  * plane/sphere/sdf_keeps_height: the jelly stays >= 6 cm tall (not piled
+    into a band). 2026-11-03: the sphere arm passed its gap gate while solid
+    recovery teleported its resting parcels every frame and crushed it to 1 cm;
+  * no_mpm_teleport: recovered_solid_particles stays 0 on every frame of every
+    arm (MPM parcels on a collider with a distance take the surface push);
+  * sdf_phi_surface: the cooked SDF's zero crossing above the top (sampled
+    with fluid.sample_solid_phi) is within h/4 of the true surface;
   * sdf_cooked_on_gpu: collider.get sdf_cooked_on_gpu, Auto dims >= 64 on y;
   * sdf_matches_analytic: |sdf rest - sphere rest| <= h/4;
   * shell_on_gpu: collider_query_gpu on some frame and never an error (a
@@ -95,15 +101,30 @@ def main():
                                 'particles': d['particles'],
                                 'query_gpu': st.get('collider_query_gpu'),
                                 'query_ms': st.get('collider_query_ms'),
-                                'query_error': st.get('collider_query_error')})
+                                'query_error': st.get('collider_query_error'),
+                                'recovered': st.get('recovered_solid_particles'),
+                                'pushed': st.get('mpm_surface_pushed_particles')})
+            # The distance the grid contact read, on the vertical through the
+            # top (the jelly's footprint): where does phi cross zero?
+            column = [[0.0, 0.002 * k, 0.0] for k in range(101)]
+            probe = call('fluid.sample_solid_phi', domain=DOMAIN, points=column)
+            crossing = None
+            rows = probe.get('samples', [])
+            for k in range(1, len(rows)):
+                a, b = rows[k - 1]['phi'], rows[k]['phi']
+                if a < 0.0 <= b:
+                    crossing = column[k - 1][1] + 0.002 * (-a) / max(b - a, 1e-9)
+                    break
             if wait_sdf:
                 cook = call('collider.get', name=name)
-            data[label] = {'samples': samples,
+            data[label] = {'samples': samples, 'phi_zero_y': crossing,
+                           'phi_column': [round(r['phi'], 5) for r in rows[::5]],
                            'cook': {k: cook.get(k) for k in ('sdf_ready', 'sdf_dims',
                                     'sdf_cooked_on_gpu', 'sdf_cook_ms')}}
             OUT.write_text(json.dumps(data, indent=2), encoding='utf-8')
             # The last third: settled.
             tail = samples[-FRAMES // 3:]
+            cook = dict(cook, phi_zero_y=crossing)
             return sum(s['min_y'] for s in tail) / len(tail), samples, cook
         finally:
             for kind, name in reversed(made):
@@ -115,16 +136,23 @@ def main():
 
     try:
         plane, plane_samples, _ = drop('plane', {'source_mode': 'plane', 'plane_y': TOP})
-        sphere, _, _ = drop('sphere', {'source_mode': 'sphere',
+        sphere, sphere_samples, _ = drop('sphere', {'source_mode': 'sphere',
                                        'sphere_center': [0, TOP - RADIUS, 0],
                                        'sphere_radius': RADIUS})
-        sdf, _, cook = drop('sdf', {'source_mode': 'mesh_sdf', 'sdf_resolution_mode': 4},
+        sdf, sdf_samples, cook = drop('sdf', {'source_mode': 'mesh_sdf', 'sdf_resolution_mode': 4},
                             mesh=True, wait_sdf=True)
         shell, shell_samples, _ = drop('shell', {'source_mode': 'mesh_bvh', 'thickness': THICK},
                                        mesh=True)
         dims = cook.get('sdf_dims') or [0, 0, 0]
         summary = {'plane_gap_m': plane - TOP, 'sphere_gap_m': sphere - TOP,
                    'plane_height_m': plane_samples[-1]['p95_y'] - plane_samples[-1]['p05_y'],
+                   'sphere_height_m': sphere_samples[-1]['p95_y'] - sphere_samples[-1]['p05_y'],
+                   'sdf_height_m': sdf_samples[-1]['p95_y'] - sdf_samples[-1]['p05_y'],
+                   'sdf_phi_zero_y': cook.get('phi_zero_y'),
+                   'recovered_max': max((s['recovered'] or 0) for arm in (
+                       plane_samples, sphere_samples, sdf_samples, shell_samples) for s in arm),
+                   'pushed_max': max((s['pushed'] or 0) for arm in (
+                       plane_samples, sphere_samples, sdf_samples, shell_samples) for s in arm),
                    'sdf_gap_m': sdf - TOP, 'shell_gap_m': shell - (TOP + THICK),
                    'sdf_dims': dims, 'sdf_cooked_on_gpu': cook.get('sdf_cooked_on_gpu'),
                    'sdf_cook_ms': cook.get('sdf_cook_ms'),
@@ -140,6 +168,11 @@ def main():
             # band (8 cm -> 1.15 cm). A 10 cm Gelatin cube keeps >= 6 cm.
             'plane_keeps_height': summary['plane_height_m'] >= 0.06,
             'sphere_on_surface': abs(summary['sphere_gap_m']) <= q,
+            'sphere_keeps_height': summary['sphere_height_m'] >= 0.06,
+            'sdf_keeps_height': summary['sdf_height_m'] >= 0.06,
+            'no_mpm_teleport': summary['recovered_max'] == 0,
+            'sdf_phi_surface': summary['sdf_phi_zero_y'] is not None and
+                               abs(summary['sdf_phi_zero_y'] - TOP) <= q,
             'sdf_cooked_on_gpu': bool(summary['sdf_cooked_on_gpu']) and dims[1] >= 64,
             'sdf_matches_analytic': abs(sdf - sphere) <= q,
             'shell_on_gpu': any(s['query_gpu'] for s in shell_samples) and

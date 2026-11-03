@@ -12,6 +12,7 @@
 // (fluid.particle_extremes) and the hottest / most vapour-laden gas cells
 // (fluid.gas_cell_extremes). Particles are read from the host arrays; the gas
 // inventory through a host image (a device-resident one is copied out).
+// fluid.sample_solid_phi reads the collider distance the MPM contact uses.
 
 #include "RtApiInternal.h"
 #include "ParticleSimulation.h"
@@ -23,6 +24,7 @@
 #include "Fluid/GasInventoryGpu.h"
 #include "Fluid/GasSaturation.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 #include <exception>
@@ -310,6 +312,67 @@ Result getFluidGasCellExtremes(const std::string& domain_id_or_name, uint32_t co
                                                     : a.cell < b.cell;
         });
     out.most_vapour.assign(ranked.begin(), ranked.begin() + k);
+    return Result::success();
+}
+
+Result sampleFluidSolidPhi(const std::string& domain_id_or_name,
+                           const std::vector<std::array<float, 3>>& points,
+                           std::vector<FluidSolidPhiSample>& out, double& voxel_m,
+                           bool& has_phi_field) {
+    out.clear();
+    voxel_m = 0.0;
+    has_phi_field = false;
+    if (points.empty() || points.size() > 4096) return Result::fail("points must be 1..4096");
+    const RayTrophiSim::SimulationGridDomainState* state = nullptr;
+    Result found = resolveLiveLiquidState(domain_id_or_name, state);
+    if (!found.ok || !state) return found;
+    const auto& grid = state->grid;
+    const float h = grid.voxel_size;
+    if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || !(h > 0.0f)) {
+        return Result::fail("domain grid is not allocated (step once)");
+    }
+    voxel_m = h;
+    const std::size_t cells = grid.getCellCount();
+    has_phi_field = grid.solid_phi.size() == cells;
+    constexpr float kFar = FluidSim::FluidGrid::kSolidPhiFar;
+    auto clampCell = [&](int& i, int& j, int& k) {
+        i = std::clamp(i, 0, grid.nx - 1);
+        j = std::clamp(j, 0, grid.ny - 1);
+        k = std::clamp(k, 0, grid.nz - 1);
+    };
+    // Same far substitution as sim_matter_mpm_boundary / the parcel push.
+    auto phiAt = [&](int i, int j, int k) {
+        clampCell(i, j, k);
+        const float v = has_phi_field ? grid.solid_phi[grid.cellIndex(i, j, k)] : kFar;
+        return v >= kFar ? 2.0f * h : v;
+    };
+    out.reserve(points.size());
+    for (const auto& pt : points) {
+        FluidSolidPhiSample sample;
+        const Vec3 x(pt[0], pt[1], pt[2]);
+        const Vec3 gc = (x - grid.origin) * (1.0f / h);
+        int ci = static_cast<int>(std::floor(gc.x));
+        int cj = static_cast<int>(std::floor(gc.y));
+        int ck = static_cast<int>(std::floor(gc.z));
+        clampCell(ci, cj, ck);
+        const std::size_t cell = grid.cellIndex(ci, cj, ck);
+        sample.ijk[0] = ci; sample.ijk[1] = cj; sample.ijk[2] = ck;
+        sample.solid = cell < grid.solid.size() && grid.solid[cell] != 0u;
+        sample.cell_has_phi = has_phi_field && grid.solid_phi[cell] < kFar;
+        sample.cell_phi = sample.cell_has_phi ? grid.solid_phi[cell] : 0.0f;
+        const Vec3 g = gc - Vec3(0.5f);
+        const int bx = static_cast<int>(std::floor(g.x));
+        const int by = static_cast<int>(std::floor(g.y));
+        const int bz = static_cast<int>(std::floor(g.z));
+        const float fx = g.x - bx, fy = g.y - by, fz = g.z - bz;
+        auto mix = [](float a, float b, float w) { return a + (b - a) * w; };
+        const float c00 = mix(phiAt(bx, by, bz), phiAt(bx + 1, by, bz), fx);
+        const float c01 = mix(phiAt(bx, by + 1, bz), phiAt(bx + 1, by + 1, bz), fx);
+        const float c10 = mix(phiAt(bx, by, bz + 1), phiAt(bx + 1, by, bz + 1), fx);
+        const float c11 = mix(phiAt(bx, by + 1, bz + 1), phiAt(bx + 1, by + 1, bz + 1), fx);
+        sample.phi = mix(mix(c00, c01, fy), mix(c10, c11, fy), fz);
+        out.push_back(sample);
+    }
     return Result::success();
 }
 

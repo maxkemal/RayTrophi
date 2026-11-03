@@ -3986,15 +3986,24 @@ int main(int argc, char* argv[]) try {
         static bool cached_has_camera_keyframes = false;
         static bool cached_has_world_keyframes = false;
 
+        // A project load rebuilds the scene containers on its worker thread.
+        // Walking them here meanwhile is a data race: a std::map iterator
+        // stepped through scene.timeline.tracks while the loader cleared it
+        // (read access violation opening a hair project, 2026-11-03). While a
+        // load runs, keep last frame's cached flags and touch no container.
+        const bool sceneLoadActive = ui.scene_loading.load(std::memory_order_acquire) ||
+            g_scene_loading_in_progress.load(std::memory_order_acquire);
         size_t current_timeline_keyframe_count = 0;
-        for (const auto& [track_name, track] : scene.timeline.tracks) {
-            (void)track_name;
-            current_timeline_keyframe_count += track.keyframes.size();
+        if (!sceneLoadActive) {
+            for (const auto& [track_name, track] : scene.timeline.tracks) {
+                (void)track_name;
+                current_timeline_keyframe_count += track.keyframes.size();
+            }
         }
 
-        if (!timeline_playing ||
+        if (!sceneLoadActive && (!timeline_playing ||
             cached_timeline_track_count != scene.timeline.tracks.size() ||
-            cached_timeline_keyframe_count != current_timeline_keyframe_count) {
+            cached_timeline_keyframe_count != current_timeline_keyframe_count)) {
             cached_timeline_track_count = scene.timeline.tracks.size();
             cached_timeline_keyframe_count = current_timeline_keyframe_count;
             cached_has_manual_keyframes = false;
@@ -4029,15 +4038,17 @@ int main(int argc, char* argv[]) try {
         timeline_has_world_keyframes = cached_has_world_keyframes;
 
         bool autonomous_anim_graph_playing = false;
-        for (const auto& modelCtx : scene.importedModelContexts) {
-            auto activeGraph = modelCtx.runtimeGraph ? modelCtx.runtimeGraph : modelCtx.graph;
-            if (RigAuthoring::isRestPoseView(scene,modelCtx.importName) || !modelCtx.useAnimGraph || !activeGraph || modelCtx.animGraphFollowTimeline) {
-                continue;
-            }
-            const auto playback = activeGraph->getPlaybackStatus();
-            if (playback.isPlaying) {
-                autonomous_anim_graph_playing = true;
-                break;
+        if (!sceneLoadActive) {
+            for (const auto& modelCtx : scene.importedModelContexts) {
+                auto activeGraph = modelCtx.runtimeGraph ? modelCtx.runtimeGraph : modelCtx.graph;
+                if (RigAuthoring::isRestPoseView(scene,modelCtx.importName) || !modelCtx.useAnimGraph || !activeGraph || modelCtx.animGraphFollowTimeline) {
+                    continue;
+                }
+                const auto playback = activeGraph->getPlaybackStatus();
+                if (playback.isPlaying) {
+                    autonomous_anim_graph_playing = true;
+                    break;
+                }
             }
         }
         if (autonomous_anim_graph_playing) {
@@ -4050,13 +4061,15 @@ int main(int argc, char* argv[]) try {
         static int last_volume_frame = -1;
         int current_volume_frame = ui.timeline.getCurrentFrame();
         bool timeline_drives_volumes = false;
-        for (const auto& gas : scene.gas_volumes) {
-            if (gas && gas->isLinkedToTimeline()) {
-                timeline_drives_volumes = true;
-                break;
+        if (!sceneLoadActive) {
+            for (const auto& gas : scene.gas_volumes) {
+                if (gas && gas->isLinkedToTimeline()) {
+                    timeline_drives_volumes = true;
+                    break;
+                }
             }
         }
-        if (!timeline_drives_volumes) {
+        if (!timeline_drives_volumes && !sceneLoadActive) {
             for (const auto& vdb : scene.vdb_volumes) {
                 if (vdb && vdb->isAnimated() && vdb->isLinkedToTimeline()) {
                     timeline_drives_volumes = true;
@@ -4078,8 +4091,6 @@ int main(int argc, char* argv[]) try {
         }
 
         bool timeline_drives_wind = false;
-        const bool sceneLoadActive = ui.scene_loading.load(std::memory_order_acquire) ||
-            g_scene_loading_in_progress.load(std::memory_order_acquire);
         if (!sceneLoadActive) {
             for (const auto& group : InstanceManager::getInstance().getGroups()) {
                 if (group.wind_settings.enabled && !group.instances.empty()) {

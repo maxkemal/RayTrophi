@@ -1,6 +1,6 @@
 # Collider temas yüzeyi — sıvı, DEM ve MPM için tek tanım
 
-> **Durum:** AKTİF — P1–P3 CANLI (GPU mesh_bvh 352 k'da 1240 → 19 ms). Izgara yüzünde φ teması YAZILDI, derlenmedi (2026-11-03): S4'ün kırdığı ızgara desteğini geri getiriyor; S3 yalnız güvenlik itmesi. DEM ve sıvı TASLAK.
+> **Durum:** AKTİF — P1–P3 CANLI; ızgara yüzünde φ teması + MPM kurtarma atlaması CANLI (küre 8.2 cm, sürtünme 0.100/0.100 m). 2026-11-03 akşam YAZILDI derlenmedi: Matrix4x4::determinant düzeltmesi (mesh φ 3 cm kayması kökü) ve dışarıda yapışma bandı. DEM ve sıvı TASLAK.
 
 ## Neden
 
@@ -209,6 +209,21 @@ Izgara taşır, yüzey hücreden ince olur.
 
 Destek ızgarada, eşik φ'nin kendisi, yani hücreden ince. S3 yalnız güvenlik itmesi. S4
 kaldı ama zararsız, çünkü destek artık maskeden gelmiyor.
+
+## Kurtarma ışınlaması ve ince kabuk (2026-11-03, yazıldı, derlenmedi)
+
+- **Katıdan kurtarma MPM'i ezer.** Maske hücreyi merkezine göre katı sayar. Eğri ya da
+  hücre yüzüne denk gelmeyen bir yüzeyde dinlenen parçacık "katı" hücrede kalır ve her
+  kare ışınlanıp ¼ hıza iner. R = 20 m kubbede jöle 10 → 0.6 cm. Bu, düzlemde hiç görünmez:
+  yüzey hücre yüzüne denk geliyor.
+  - Kural: φ'li hücredeki MPM parçacığı ışınlanmaz; yüzey itmesi alır
+    (`applyMpmParticleContact`, kare başına da).
+- **Sırt.** Kalınlığı ~2h'den ince bir kabukta φ_yüz < 0 olan tek yüz orta düzlemdir ve
+  orada ∇φ = 0. Bu yüz artık akışı keser.
+- **Kapandı (yazıldı):** pişmiş SDF ve kabuk yüzeyi ~3 cm aşağıdaydı. Kökü
+  `Matrix4x4::determinant` (işaret iki kez): eğik OBB'nin tersi yanlış ölçekliydi.
+- **Yapışma bandı:** 0 ≤ φ_yüz < h'de yalnızca ayrılan yüz tutulur; içeride kalan
+  yapışma, plaka yarım yüz uzaklaşınca bırakıyordu.
 
 ## Ölçüm
 

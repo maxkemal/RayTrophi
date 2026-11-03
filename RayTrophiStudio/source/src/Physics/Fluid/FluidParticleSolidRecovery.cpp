@@ -1,6 +1,7 @@
 #include "Fluid/FluidParticleSolidRecovery.h"
 
 #include "Fluid/FluidParticles.h"
+#include "Fluid/MatterConstitutive.h"
 #include "FluidGrid.h"
 
 #include <algorithm>
@@ -11,7 +12,9 @@ namespace RayTrophiSim::Fluid {
 
 std::size_t recoverParticlesFromSolidCells(FluidParticles& particles,
                                            const FluidSim::FluidGrid& grid,
-                                           int maximum_search_radius) {
+                                           int maximum_search_radius,
+                                           bool keep_mpm_on_phi,
+                                           bool auto_is_mpm) {
     if (particles.empty() || grid.solid.empty() || !(grid.voxel_size > 0.0f) ||
         grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return 0u;
 
@@ -26,7 +29,17 @@ std::size_t recoverParticlesFromSolidCells(FluidParticles& particles,
         const int ck = static_cast<int>(std::floor(gp.z));
         if (ci < 0 || ci >= grid.nx || cj < 0 || cj >= grid.ny ||
             ck < 0 || ck >= grid.nz) continue;
-        if (grid.solid[grid.cellIndex(ci, cj, ck)] == 0u) continue;
+        const std::size_t cell = grid.cellIndex(ci, cj, ck);
+        if (grid.solid[cell] == 0u) continue;
+        if (keep_mpm_on_phi && cell < grid.solid_phi.size() &&
+            grid.solid_phi[cell] < FluidSim::FluidGrid::kSolidPhiFar) {
+            const auto model = pi < particles.constitutive_model.size()
+                ? static_cast<MatterConstitutiveModel>(particles.constitutive_model[pi])
+                : MatterConstitutiveModel::Auto;
+            if (model == MatterConstitutiveModel::Granular ||
+                model == MatterConstitutiveModel::Elastic ||
+                (model == MatterConstitutiveModel::Auto && auto_is_mpm)) continue;
+        }
 
         int best_i = -1, best_j = -1, best_k = -1;
         float best_distance2 = std::numeric_limits<float>::max();

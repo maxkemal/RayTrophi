@@ -120,6 +120,24 @@ def main():
     assert "vt *= max(slip - mu * (-vn), 0.0) / slip;" in mpm_wall
     assert "rel = vt + n * max(vn - hold, 0.0);" in mpm_wall
     assert "(plainWall(low) || plainWall(f))" in mpm_wall
+    # A ridge face (phi_face < 0, no slope: a shell thinner than ~2h) blocks
+    # flow across instead of being skipped (a jelly fell through, 2026-11-03).
+    assert "return solidVelocity(clamp(low, ivec3(0)," in mpm_wall
+    # Solid recovery must not teleport MPM parcels resting on a collider with a
+    # distance (crushed a jelly on a dome; the snow-sticks report); they take
+    # the true-surface push the same frame, and both counts reach step_stats.
+    domain_step = read("src/Physics/Fluid/FluidDomainStep.inl")
+    assert "recoverParticlesFromSolidCells(state.particles, state.grid, 6,\n" \
+        "                                                          true, auto_is_mpm);" in domain_step
+    assert "mpm_surface_push_count = Fluid::applyMpmParticleContact(" in domain_step
+    assert "if (keep_mpm_on_phi && cell < grid.solid_phi.size() &&" in read(
+        "src/Physics/Fluid/FluidParticleSolidRecovery.cpp")
+    assert 'j["mpm_surface_pushed_particles"]' in read("src/Api/RtIpc.cpp")
+    assert 'method == "fluid.sample_solid_phi"' in read("src/Api/RtIpc.cpp")
+    # Matrix4x4::determinant applied the cofactor sign twice (det of a z
+    # rotation = cos 2theta): every tilted collider OBB was inverted scaled.
+    assert "m[0][0] * cofactor(0, 0) + m[0][1] * cofactor(0, 1) + m[0][2] * cofactor(0, 2) + m[0][3] * cofactor(0, 3)" in read(
+        "src/Math/Matrix4x4.cpp")
     assert "Fluid::copyMatterGpuFloat(*compute, velocity[axis], snapshot[axis]," in read(
         "src/Physics/ParticleSimulation.cpp")
     particle_sim = read("src/Physics/ParticleSimulation.cpp")

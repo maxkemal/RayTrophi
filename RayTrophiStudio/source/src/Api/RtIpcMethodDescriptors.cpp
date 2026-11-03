@@ -1917,6 +1917,23 @@ static const MethodDescriptor desc_fluid_run = {
 };
 static const MethodRegistration reg_fluid_run(desc_fluid_run);
 
+static const MethodParam params_fluid_sample_solid_phi[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"points", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_sample_solid_phi = {
+    "fluid.sample_solid_phi", "fluid",
+    "Collider signed distance (grid.solid_phi, metres, < 0 inside) of a liquid/Matter domain at 1..4096 world points: cell ijk, cell mask (solid), the cell centre's distance and the trilinear value the MPM grid contact and parcel push read",
+    "points: [[x, y, z], ...]. Cells no collider wrote read as 2 h in the trilinear value (the kernels' own substitution); cell_has_phi=false marks them. has_phi_field=false means no collider is stamped. To find where a collider's surface really is for the solver, sample a vertical line and locate the zero crossing; compare with the analytic or mesh surface. Read after a fluid.step: the field is stamped in the step.",
+    "write", "SceneWrite", false, "any",
+    "fluid|sample|solid|phi|collider|sdf|distance|contact|mpm|measure|verify|debug",
+    "collider.get|fluid.step_stats|fluid.state_digest|fluid.step",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_sample_solid_phi, 2,
+    true
+};
+static const MethodRegistration reg_fluid_sample_solid_phi(desc_fluid_sample_solid_phi);
+
 static const MethodParam params_fluid_seed[] = {
     {"domain", "string", true, "", nullptr, nullptr},
     {"seed_min", "vec3", false, "World-space box minimum in metres; omit to derive from the domain", nullptr, nullptr},
@@ -2424,7 +2441,7 @@ static const MethodParam params_fluid_step_stats[] = {
 static const MethodDescriptor desc_fluid_step_stats = {
     "fluid.step_stats", "fluid",
     "Read the last fluid step's total time, requested GPU transfer bytes, call times, and actual GPU path",
-    "Read measured first. total_ms is the complete liquid-domain wall time, including APIC, labels, whitewater and the density bridge. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters. pressure_sparse_used and pressure_sparse_active_tiles/allocated_tiles/resident_bytes describe only the Vulkan pressure scratch pool, not the full fluid or gas grid. Unused sparse pressure reports zero; no runtime FPS or full sparse-storage acceptance is implied. viscosity_sparse_used and viscosity_sparse_active_tiles/allocated_tiles/resident_bytes describe only the implicit-viscosity MAC RHS tile pool; transfer_sparse_used and transfer_sparse_active_tiles/allocated_tiles/resident_bytes describe compact P2G/G2P velocity, weights and FLIP pages plus tile lookup. flip_sparse_used requires a successful compact FLIP gather; transfer_sparse_status reports dense fallback reasons. Projection/contact publication, host MAC arrays and gas storage remain dense; transfer pool bytes are additional resident storage, not net VRAM savings. collider_query_gpu / collider_query_ms / collider_query_error: mesh_bvh shell distances computed on the GPU this step (sim_collider_bvh_query); false with an error means the CPU loop ran (1.2 s/frame for 352k triangles over 885k cells, 2026-11-02).",
+    "Read measured first. total_ms is the complete liquid-domain wall time, including APIC, labels, whitewater and the density bridge. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters. pressure_sparse_used and pressure_sparse_active_tiles/allocated_tiles/resident_bytes describe only the Vulkan pressure scratch pool, not the full fluid or gas grid. Unused sparse pressure reports zero; no runtime FPS or full sparse-storage acceptance is implied. viscosity_sparse_used and viscosity_sparse_active_tiles/allocated_tiles/resident_bytes describe only the implicit-viscosity MAC RHS tile pool; transfer_sparse_used and transfer_sparse_active_tiles/allocated_tiles/resident_bytes describe compact P2G/G2P velocity, weights and FLIP pages plus tile lookup. flip_sparse_used requires a successful compact FLIP gather; transfer_sparse_status reports dense fallback reasons. Projection/contact publication, host MAC arrays and gas storage remain dense; transfer pool bytes are additional resident storage, not net VRAM savings. collider_query_gpu / collider_query_ms / collider_query_error: mesh_bvh shell distances computed on the GPU this step (sim_collider_bvh_query); false with an error means the CPU loop ran (1.2 s/frame for 352k triangles over 885k cells, 2026-11-02). recovered_solid_particles: parcels teleported out of collider cells before P2G this frame; mpm_surface_pushed_particles: MPM parcels put back onto a collider's true surface (solid_phi < 0) instead -- MPM parcels resting in a cell whose centre is solid are left alone, so a nonzero recovered count on an elastic or snow body over a mesh/analytic collider is a regression.",
     "write", "SceneWrite", false, "any",
     "fluid|step|stats|simulation|performance|transfer|measurement",
     "fluid.step|particle.stats|perf.get_gpu_memory",
