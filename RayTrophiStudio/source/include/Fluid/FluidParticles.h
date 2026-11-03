@@ -57,6 +57,8 @@ struct AffineC {
 // falls. Set and cleared only by Fluid::updateThermalFreeze; see
 // FluidThermalLiquid.h for why freezing needs a support.
 constexpr uint32_t kParticleFlagFrozen = 1u << 3;
+// granular_support_accel before a parcel's first settle: not yet measured.
+constexpr float kGranularSupportFresh = 1.0e30f;
 
 class FluidParticles {
 public:
@@ -150,6 +152,14 @@ public:
     // without falsely consuming the cohesive fracture budget. Deliberately
     // not integrated over solver substeps.
     std::vector<float> granular_fracture_history;
+    // Support (settle, GranularConstitutive.h settleParticle): the velocity
+    // along gravity the last settle left, and the running mean of the net
+    // acceleration along gravity since (m/s^2). A parcel is "supported" only
+    // when that mean is well below g. kGranularSupportFresh = not yet
+    // measured: unsupported, so a new parcel is never damped or put to sleep
+    // before it has shown it rests on something.
+    std::vector<float> granular_support_prev_vg;
+    std::vector<float> granular_support_accel;
     // ── Material coordinate (UVW) ────────────────────────────────────────────
     // Where this parcel of liquid WAS BORN, in world units. This is a texture
     // anchor, and it is Lagrangian: it rides the particle and is never
@@ -274,6 +284,7 @@ public:
         granular_stress_diag.clear(); granular_stress_shear.clear();
         granular_yield_value.clear(); granular_plastic_increment.clear();
         granular_damage.clear(); granular_fracture_history.clear();
+        granular_support_prev_vg.clear(); granular_support_accel.clear();
         uvw.clear();
         uvw_b.clear();
         uvw_step = 0;
@@ -298,6 +309,8 @@ public:
         granular_plastic_increment.resize(n, 0.0f);
         granular_damage.resize(n, 0.0f);
         granular_fracture_history.resize(n, 0.0f);
+        granular_support_prev_vg.resize(n, 0.0f);
+        granular_support_accel.resize(n, kGranularSupportFresh);
     }
 
     void reserve(size_t n) {
@@ -326,6 +339,7 @@ public:
         granular_stress_diag.reserve(n); granular_stress_shear.reserve(n);
         granular_yield_value.reserve(n); granular_plastic_increment.reserve(n);
         granular_damage.reserve(n); granular_fracture_history.reserve(n);
+        granular_support_prev_vg.reserve(n); granular_support_accel.reserve(n);
         uvw.reserve(n);
         uvw_b.reserve(n);
     }
@@ -390,6 +404,8 @@ public:
         granular_plastic_increment.push_back(0.0f);
         granular_damage.push_back(0.0f);
         granular_fracture_history.push_back(0.0f);
+        granular_support_prev_vg.push_back(0.0f);
+        granular_support_accel.push_back(kGranularSupportFresh);
         // Genuinely new material is the identity in both generations, which is
         // what the null defaults give.
         uvw.push_back(birth_uvw ? *birth_uvw : p);
@@ -438,6 +454,8 @@ public:
             granular_plastic_increment[i] = granular_plastic_increment[last];
             granular_damage[i] = granular_damage[last];
             granular_fracture_history[i] = granular_fracture_history[last];
+            granular_support_prev_vg[i] = granular_support_prev_vg[last];
+            granular_support_accel[i] = granular_support_accel[last];
             uvw[i] = uvw[last];
             if (i < uvw_b.size() && last < uvw_b.size()) uvw_b[i] = uvw_b[last];
         }
@@ -469,6 +487,8 @@ public:
         granular_yield_value.pop_back(); granular_plastic_increment.pop_back();
         granular_damage.pop_back();
         granular_fracture_history.pop_back();
+        granular_support_prev_vg.pop_back();
+        granular_support_accel.pop_back();
         uvw.pop_back();
         if (!uvw_b.empty()) uvw_b.pop_back();
     }
@@ -587,6 +607,8 @@ private:
         fn(a.granular_plastic_increment, b.granular_plastic_increment);
         fn(a.granular_damage, b.granular_damage);
         fn(a.granular_fracture_history, b.granular_fracture_history);
+        fn(a.granular_support_prev_vg, b.granular_support_prev_vg);
+        fn(a.granular_support_accel, b.granular_support_accel);
     }
 
     // Copy particle `src` onto slot `dst`. Every optional sidecar is guarded by
@@ -634,6 +656,8 @@ private:
         shrink(granular_plastic_increment);
         shrink(granular_damage);
         shrink(granular_fracture_history);
+        shrink(granular_support_prev_vg);
+        shrink(granular_support_accel);
     }
 };
 

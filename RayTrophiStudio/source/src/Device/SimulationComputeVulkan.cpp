@@ -1035,7 +1035,7 @@ private:
             { "sim_matter_g2p", "sim_matter_g2p.spv", 12, 72 },
             { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 116 },
             { "sim_matter_stress_p2g", "sim_matter_stress_p2g.spv", 9, 52 },
-            { "sim_matter_settle", "sim_matter_settle.spv", 5, 36 },
+            { "sim_matter_settle", "sim_matter_settle.spv", 7, 52 },
             { "sim_matter_advect", "sim_matter_advect.spv", 11, 84 },
             { "sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40 },
             { "sim_matter_contact", "sim_matter_contact.spv", 19, 16 },
@@ -1081,7 +1081,7 @@ private:
             { "sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128 },
             { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 112 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
-            { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        3, 32 },
+            { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        5, 48 },
             { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 80 },
             { "sim_fluid_occupancy",                "sim_fluid_occupancy.spv",             4, 36 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may

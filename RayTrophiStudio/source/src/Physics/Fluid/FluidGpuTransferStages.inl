@@ -33,6 +33,8 @@ bool downloadGpuGranularParticles(Fluid::FluidParticles& particles,
     download(buffers.granular.damage, particles.granular_damage);
     download(buffers.granular.hardening, particles.granular_hardening);
     download(buffers.granular.fracture_history, particles.granular_fracture_history);
+    download(buffers.granular.support_prev_vg, particles.granular_support_prev_vg);
+    download(buffers.granular.support_accel, particles.granular_support_accel);
     download(buffers.granular.deformation_col0, particles.granular_deformation_col0);
     download(buffers.granular.deformation_col1, particles.granular_deformation_col1);
     download(buffers.granular.deformation_col2, particles.granular_deformation_col2);
@@ -441,7 +443,7 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
             // (SettleParams::damping_max_speed says why).
             ok = Fluid::Granular::dispatchSettle(
                 *compute, gpu_buffers.granular,
-                gpu_buffers.fluid_velocities, n, dt,
+                gpu_buffers.fluid_velocities, n, dt, fluid_params.gravity,
                 fluid_params.granular_snow_plasticity
                     ? Fluid::Granular::kSnowSettleDampingMaxSpeed : 0.0f);
         }
@@ -485,6 +487,12 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
                                      particles.granular_hardening.data(), n * sizeof(float)) && ok;
         ok = compute->downloadBuffer(gpu_buffers.granular.fracture_history,
                                      particles.granular_fracture_history.data(),
+                                     n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.support_prev_vg,
+                                     particles.granular_support_prev_vg.data(),
+                                     n * sizeof(float)) && ok;
+        ok = compute->downloadBuffer(gpu_buffers.granular.support_accel,
+                                     particles.granular_support_accel.data(),
                                      n * sizeof(float)) && ok;
         ok = compute->downloadBuffer(gpu_buffers.granular.deformation_col0,
                                      particles.granular_deformation_col0.data(),

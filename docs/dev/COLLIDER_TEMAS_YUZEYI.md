@@ -1,6 +1,6 @@
 # Collider temas yüzeyi — sıvı, DEM ve MPM için tek tanım
 
-> **Durum:** AKTİF — P1–P3 CANLI; ızgara yüzünde φ teması + MPM kurtarma atlaması CANLI (küre 8.2 cm, sürtünme 0.100/0.100 m). 2026-11-03 akşam YAZILDI derlenmedi: Matrix4x4::determinant düzeltmesi (mesh φ 3 cm kayması kökü) ve dışarıda yapışma bandı. DEM ve sıvı TASLAK.
+> **Durum:** AKTİF — MPM collider teması CANLI 8/8 (yükselen/kayan/yapışık plaka, germe ve yırtılma), sub-voxel φ 12/12, duman testi 14/14 (2026-11-04). DEM ve sıvı tarafı TASLAK; kar seed + collider elle doğrulanmadı.
 
 ## Neden
 

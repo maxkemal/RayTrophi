@@ -860,6 +860,7 @@ struct SceneData {
         uint64_t request_serial = 0;
         bool gpu = false;
         float cook_ms = 0.0f;
+        Vec3 mesh_size = Vec3(0.0f);
     };
     std::mutex pending_sdf_bakes_mutex_;
     std::vector<PendingSdfBake> pending_sdf_bakes_;
@@ -872,6 +873,7 @@ struct SceneData {
         std::shared_ptr<std::vector<RayTrophiSim::SurfaceMeshTriangle>> triangles;
         Vec3 origin;
         Vec3 extents;
+        Vec3 mesh_size = Vec3(0.0f);
         int nx = 0, ny = 0, nz = 0;
         std::shared_ptr<std::atomic<uint64_t>> serial;
         std::shared_ptr<std::atomic<bool>> busy;
@@ -2531,6 +2533,9 @@ struct SceneData {
                     drop(pt.granular_plastic_volume);
                     drop(pt.granular_plastic_increment);
                     drop(pt.granular_fracture_history);
+                    // Support is re-measured from fresh after a restore.
+                    drop(pt.granular_support_prev_vg);
+                    drop(pt.granular_support_accel);
                     SFC::collapseIfUniform(pt.granular_softening, c.k_g_softening);
                     SFC::collapseIfUniform(pt.granular_bond_scale, c.k_g_bond);
                     SFC::collapseIfUniform(pt.granular_hardening, c.k_g_hardening);
@@ -9485,6 +9490,25 @@ public:
     // SDF to the wrong system — or none — and the collider would silently fail to
     // block fluid after reload. (The SDF voxel grid itself is intentionally not
     // serialized; it is deterministically rebuilt here from the source mesh.)
+    // The finest voxel of the enabled grid domains (0 = none): the Auto SDF
+    // cook sizes its cells and pad from it.
+    float finestDomainVoxel(
+        const std::shared_ptr<RayTrophiSim::ParticleSimulationSystem>& target_runtime) {
+        auto sys = target_runtime ? target_runtime : getParticleSimulationSystem();
+        float h = 0.0f;
+        if (!sys) return h;
+        for (const auto& d : sys->gridDomains()) {
+            if (!d.enabled) continue;
+            const Vec3 e = d.bounds_max - d.bounds_min;
+            const float hx = e.x / std::max(d.resolution_x, 1);
+            const float hy = e.y / std::max(d.resolution_y, 1);
+            const float hz = e.z / std::max(d.resolution_z, 1);
+            const float hd = std::min({hx, hy, hz});
+            if (hd > 0.0f && (h <= 0.0f || hd < h)) h = hd;
+        }
+        return h;
+    }
+
     bool rebuildSDFColliderAsync(RayTrophiSim::ParticleColliderDesc& desc,
                                  std::shared_ptr<RayTrophiSim::ParticleSimulationSystem> target_runtime = nullptr,
                                  bool coalesce = false) {
@@ -9555,29 +9579,24 @@ public:
         job.runtime = target_runtime;
         job.triangles = std::make_shared<std::vector<RayTrophiSim::SurfaceMeshTriangle>>(
             std::move(triangles));
-        {
-            const Vec3 size = bmax - bmin;
-            const Vec3 pad = size * 0.15f;
-            job.origin = bmin - pad;
-            job.extents = size + pad * 2.0f;
-        }
+        // The pad is the room the distance field has OUTSIDE the mesh: the
+        // grid contact needs phi out to ~2 voxels (adhesion band + gradient
+        // stencil). 15 % per axis gave a 5 cm plate 7.5 mm below it, so the
+        // field jumped to "far" inside one voxel and a glued gum let go
+        // (2026-11-03 live). Isotropic, from the longest side; Auto also
+        // keeps at least 3 domain voxels.
+        const Vec3 size = bmax - bmin;
+        float pad_len = 0.15f * std::max({size.x, size.y, size.z});
+        const float domain_h = res_mode == 4 ? finestDomainVoxel(target_runtime) : 0.0f;
+        if (domain_h > 0.0f) pad_len = std::max(pad_len, 3.0f * domain_h);
+        job.mesh_size = size;
+        job.origin = bmin - Vec3(pad_len);
+        job.extents = size + Vec3(2.0f * pad_len);
         job.nx = job.ny = job.nz = N;
         if (res_mode == 4) {
             // Auto: a cook cell no larger than half the finest domain voxel,
             // per axis, so a thin plate is not cooked at its long side's step.
-            auto sys = target_runtime ? target_runtime : getParticleSimulationSystem();
-            float h = 0.0f;
-            if (sys) {
-                for (const auto& d : sys->gridDomains()) {
-                    if (!d.enabled) continue;
-                    const Vec3 e = d.bounds_max - d.bounds_min;
-                    const float hx = e.x / std::max(d.resolution_x, 1);
-                    const float hy = e.y / std::max(d.resolution_y, 1);
-                    const float hz = e.z / std::max(d.resolution_z, 1);
-                    const float hd = std::min({hx, hy, hz});
-                    if (hd > 0.0f && (h <= 0.0f || hd < h)) h = hd;
-                }
-            }
+            const float h = domain_h;
             if (h > 0.0f) {
                 // The cook box is in the OBB's local frame, which carries the
                 // object's scale (its transform is rotation + translation): a
@@ -9671,7 +9690,8 @@ public:
                     job.node_name, job.runtime, result_vec, origin, extents,
                     nx, ny, nz, job.serial, job.busy, job.request_serial, false,
                     static_cast<float>(std::chrono::duration<double, std::milli>(
-                        std::chrono::steady_clock::now() - cook_start).count())
+                        std::chrono::steady_clock::now() - cook_start).count()),
+                    job.mesh_size
                 });
             }
             g_active_sdf_bakes.fetch_sub(1, std::memory_order_release);
@@ -9716,7 +9736,7 @@ public:
             pending_sdf_bakes_.push_back(PendingSdfBake{
                 job.node_name, job.runtime, grid, job.origin, job.extents,
                 job.nx, job.ny, job.nz, job.serial, job.busy, job.request_serial, true,
-                static_cast<float>(last_sdf_cook_ms_)});
+                static_cast<float>(last_sdf_cook_ms_), job.mesh_size});
         }
     }
 
@@ -9740,6 +9760,7 @@ public:
                         coll.sdf_grid_data = std::move(bake.grid);
                         coll.sdf_origin = bake.origin;
                         coll.sdf_extents = bake.extents;
+                        coll.sdf_mesh_size = bake.mesh_size;
                         coll.sdf_nx = bake.nx;
                         coll.sdf_ny = bake.ny;
                         coll.sdf_nz = bake.nz;

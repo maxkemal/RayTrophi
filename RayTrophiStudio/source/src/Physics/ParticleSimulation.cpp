@@ -844,7 +844,7 @@ inline void voxelizeCollidersIntoGrid(
                 if (avg_scale <= 1e-6f) avg_scale = 1.0f;
                 const float local_thick = thick / avg_scale;
 
-                Vec3 cooked_size = c.sdf_extents / 1.3f;
+                Vec3 cooked_size = c.sdf_mesh_size;
                 Vec3 current_size = obb.local_bounds_max - obb.local_bounds_min;
                 Vec3 scale(
                     cooked_size.x > 1e-6f ? current_size.x / cooked_size.x : 1.0f,
@@ -939,7 +939,7 @@ inline void voxelizeCollidersIntoGrid(
                 if (avg_scale <= 1e-6f) avg_scale = 1.0f;
                 const float local_thick = thick / avg_scale;
 
-                Vec3 cooked_size = c.sdf_extents / 1.3f;
+                Vec3 cooked_size = c.sdf_mesh_size;
                 if (cooked_size.length_squared() < 1e-6f) {
                     cooked_size = obb.local_bounds_max - obb.local_bounds_min;
                 }
@@ -1010,7 +1010,7 @@ inline void voxelizeCollidersIntoGrid(
                 // Size-ratio scale (current object size vs the size the BVH
                 // triangles were cached at). For BVH colliders sdf_extents is 0,
                 // so this is ~1 — the query then runs in raw cached-local space.
-                Vec3 cooked_size = c.sdf_extents / 1.3f;
+                Vec3 cooked_size = c.sdf_mesh_size;
                 if (cooked_size.length_squared() < 1e-6f) {
                     cooked_size = obb.local_bounds_max - obb.local_bounds_min;
                 }
@@ -1387,9 +1387,9 @@ inline void computeSolidFaceWeights(
                 const float sy = Vec3(obb.local_to_world.m[0][1], obb.local_to_world.m[1][1], obb.local_to_world.m[2][1]).length();
                 const float sz = Vec3(obb.local_to_world.m[0][2], obb.local_to_world.m[1][2], obb.local_to_world.m[2][2]).length();
                 float avg_scale = (sx + sy + sz) / 3.0f; if (avg_scale <= 1e-6f) avg_scale = 1.0f;
-                // cooked_size = sdf_extents / 1.3 (the 0.15 pad per side baked at cook
-                // time in rebuildSDFColliderAsync); keep in sync if that pad changes.
-                const Vec3 cooked_size = c.sdf_extents / 1.3f;
+                // cooked_size = sdf_mesh_size: the mesh box the cook padded
+                // (rebuildSDFColliderAsync stores it with the grid).
+                const Vec3 cooked_size = c.sdf_mesh_size;
                 const Vec3 current_size = obb.local_bounds_max - obb.local_bounds_min;
                 Vec3 scl(cooked_size.x > 1e-6f ? current_size.x / cooked_size.x : 1.0f,
                          cooked_size.y > 1e-6f ? current_size.y / cooked_size.y : 1.0f,
@@ -1432,7 +1432,7 @@ inline void computeSolidFaceWeights(
                 const float sz = Vec3(obb.local_to_world.m[0][2], obb.local_to_world.m[1][2], obb.local_to_world.m[2][2]).length();
                 float avg_scale = (sx + sy + sz) / 3.0f; if (avg_scale <= 1e-6f) avg_scale = 1.0f;
                 const float local_thick = thick / avg_scale;
-                Vec3 cooked_size = c.sdf_extents / 1.3f;
+                Vec3 cooked_size = c.sdf_mesh_size;
                 if (cooked_size.length_squared() < 1e-6f) cooked_size = obb.local_bounds_max - obb.local_bounds_min;
                 const Vec3 current_size = obb.local_bounds_max - obb.local_bounds_min;
                 Vec3 scl(cooked_size.x > 1e-6f ? current_size.x / cooked_size.x : 1.0f,
@@ -5567,7 +5567,7 @@ void resolveSDFCollision(const ParticleColliderDesc& collider,
     const Vec3 local_pos = world_to_local.transform_point(position);
     
     // Calculate scale factor relative to cooked size
-    Vec3 cooked_size = collider.sdf_extents / 1.3f;
+    Vec3 cooked_size = collider.sdf_mesh_size;
     Vec3 current_size = obb.local_bounds_max - obb.local_bounds_min;
     Vec3 scale(
         cooked_size.x > 1e-6f ? current_size.x / cooked_size.x : 1.0f,
@@ -5749,7 +5749,7 @@ void resolveMeshBVHCollision(const ParticleColliderDesc& collider,
     if (avg_scale <= 1e-6f) avg_scale = 1.0f;
 
     // Calculate scale factor relative to cooked size
-    Vec3 cooked_size = collider.sdf_extents / 1.3f;
+    Vec3 cooked_size = collider.sdf_mesh_size;
     if (cooked_size.length_squared() < 1e-6f) {
         cooked_size = obb.local_bounds_max - obb.local_bounds_min;
     }
@@ -5849,7 +5849,7 @@ void resolveConvexDecompCollision(const ParticleColliderDesc& collider,
     if (avg_scale <= 1e-6f) avg_scale = 1.0f;
 
     // Calculate scale factor relative to cooked size
-    Vec3 cooked_size = collider.sdf_extents / 1.3f;
+    Vec3 cooked_size = collider.sdf_mesh_size;
     if (cooked_size.length_squared() < 1e-6f) {
         cooked_size = obb.local_bounds_max - obb.local_bounds_min;
     }

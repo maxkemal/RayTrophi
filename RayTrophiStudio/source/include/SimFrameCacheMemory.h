@@ -64,6 +64,8 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     bytes += allocationBytes(particles.granular_plastic_increment);
     bytes += allocationBytes(particles.granular_damage);
     bytes += allocationBytes(particles.granular_fracture_history);
+    bytes += allocationBytes(particles.granular_support_prev_vg);
+    bytes += allocationBytes(particles.granular_support_accel);
     bytes += allocationBytes(particles.uvw);
     bytes += allocationBytes(particles.uvw_b);
 
