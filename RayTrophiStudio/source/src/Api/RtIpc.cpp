@@ -4274,14 +4274,20 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"fusion_solid_fraction", p.fusion_solid_fraction},
                         {"pore_water_kg", p.pore_water_kg}, {"frozen", p.frozen},
                         {"position", nlohmann::json::array({p.position[0], p.position[1], p.position[2]})},
-                        {"velocity", nlohmann::json::array({p.velocity[0], p.velocity[1], p.velocity[2]})}});
+                        {"velocity", nlohmann::json::array({p.velocity[0], p.velocity[1], p.velocity[2]})},
+                        {"speed", p.speed}, {"granular_sleeping", p.granular_sleeping},
+                        {"granular_detached", p.granular_detached},
+                        {"granular_damage", p.granular_damage},
+                        {"granular_pressure", p.granular_pressure},
+                        {"support_accel", p.support_accel}});
                 }
                 return out;
             };
             return nlohmann::json{
                 {"ok", true}, {"live", ex.live}, {"particles", ex.particles},
                 {"measured", ex.measured},
-                {"hottest", rows(ex.hottest)}, {"coldest", rows(ex.coldest)}};
+                {"hottest", rows(ex.hottest)}, {"coldest", rows(ex.coldest)},
+                {"fastest", rows(ex.fastest)}};
         });
     }
     if (method == "fluid.sample_solid_phi") {
@@ -7730,6 +7736,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["collider_query_error"] = s.collider_query_error;
             j["recovered_solid_particles"] = s.recovered_solid_particles;
             j["mpm_surface_pushed_particles"] = s.mpm_surface_pushed_particles;
+            j["mpm_resting_particles"] = s.mpm_resting_particles;
             j["total_ms"] = s.total_ms;
             j["p2g_ms"] = s.p2g_ms;
             j["pressure_ms"] = s.pressure_ms;

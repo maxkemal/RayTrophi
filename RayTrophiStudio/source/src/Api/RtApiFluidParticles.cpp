@@ -19,6 +19,7 @@
 #include "MaterialStateField.h"
 #include "Fluid/FluidParticles.h"
 #include "Fluid/MatterConstitutive.h"
+#include "Fluid/GranularConstitutive.h"
 #include "Fluid/SubstanceTag.h"
 #include "Fluid/MatterPhaseGrid.h"
 #include "Fluid/GasInventoryGpu.h"
@@ -99,6 +100,21 @@ FluidParticleProbe probeParticle(const RayTrophiSim::Fluid::FluidParticles& ps, 
         out.velocity[0] = ps.velocity[i].x;
         out.velocity[1] = ps.velocity[i].y;
         out.velocity[2] = ps.velocity[i].z;
+    }
+    if (i < ps.velocity.size()) out.speed = ps.velocity[i].length();
+    if (i < ps.granular_material_flags.size()) {
+        const uint32_t f = ps.granular_material_flags[i];
+        out.granular_sleeping = (f & RayTrophiSim::Fluid::Granular::kFlagSleeping) != 0u;
+        out.granular_detached = (f & RayTrophiSim::Fluid::Granular::kFlagDetached) != 0u;
+    }
+    if (i < ps.granular_damage.size()) out.granular_damage = ps.granular_damage[i];
+    if (i < ps.granular_stress_diag.size()) {
+        const Vec3 d = ps.granular_stress_diag[i];
+        out.granular_pressure = std::max(-(d.x + d.y + d.z) / 3.0f, 0.0f);
+    }
+    if (i < ps.granular_support_accel.size() &&
+        ps.granular_support_accel[i] < 0.5f * RayTrophiSim::Fluid::kGranularSupportFresh) {
+        out.support_accel = ps.granular_support_accel[i];
     }
     return out;
 }
@@ -202,6 +218,15 @@ Result getFluidParticleExtremes(const std::string& domain_id_or_name, uint32_t c
     ranked = written;
     std::partial_sort(ranked.begin(), ranked.begin() + k, ranked.end(), colder);
     for (std::size_t r = 0; r < k; ++r) out.coldest.push_back(probeParticle(ps, ranked[r]));
+    std::vector<std::size_t> by_speed(ps.velocity.size());
+    for (std::size_t q = 0; q < by_speed.size(); ++q) by_speed[q] = q;
+    const std::size_t ks = std::min<std::size_t>(count, by_speed.size());
+    std::partial_sort(by_speed.begin(), by_speed.begin() + ks, by_speed.end(),
+        [&](std::size_t a, std::size_t b) {
+            const float sa = ps.velocity[a].length_squared(), sb = ps.velocity[b].length_squared();
+            return sa != sb ? sa > sb : a < b;
+        });
+    for (std::size_t r = 0; r < ks; ++r) out.fastest.push_back(probeParticle(ps, by_speed[r]));
     return Result::success();
 }
 

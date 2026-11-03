@@ -204,6 +204,34 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     }
     const auto legacy = legacy_granular ? Fluid::MatterConstitutiveModel::Granular
                                        : Fluid::MatterConstitutiveModel::Fluid;
+    // Domain sleep (MatterMpmSleep.h): when every parcel rests, no substep runs.
+    Fluid::MpmSleepResult mpm_sleep;
+    Fluid::computeMpmSleep(particles, grid, params, legacy_granular,
+        runtime.mpm_sleep, mpm_sleep);
+    // Everything asleep and nothing else in the domain: no lane has work, so
+    // no substep loop runs (its ~50 substeps of grid kernels cost the frame
+    // with zero parcels in them). The parcels keep their state; gravity the
+    // canonical force stage may have added comes back off.
+    // Never under a force field (the DEM sleep rule): a skipped frame would
+    // ignore it, and nothing in the rest test sees it. Known only when the
+    // forces come per substep; preintegrated forces never sleep the domain.
+    const bool no_force_field = substep_forces && !substep_forces->buffer;
+    if (count > 0 && no_force_field && mpm_sleep.domain_asleep) {
+        for (auto& v : particles.velocity) v = Vec3(0.0f);
+        Fluid::APICSolverStats asleep_stats;
+        // The state did not change, so its counters still hold: recount them
+        // from the parcels. A blank block reported a resting pile as 0 asleep
+        // and its plastic J as 1 (2026-11-04, snow_support floor_sleeps).
+        // Timings stay 0: nothing ran.
+        Fluid::Granular::countMaterialState(particles, asleep_stats);
+        asleep_stats.particle_count = count;
+        asleep_stats.mixed_model_step = true;
+        asleep_stats.mixed_common_substeps = 0;
+        asleep_stats.mpm_resting_particles = mpm_sleep.resting_particles;
+        asleep_stats.gpu_status = "matter_asleep";
+        state.fluid_stats = asleep_stats;
+        return true;
+    }
     if (!Fluid::ensureMatterGpuPartition(*compute, runtime.partition, count,
             params.mixed_working_set_budget_bytes, error) ||
         !Fluid::dispatchMatterGpuPartition(*compute, runtime.partition, particles, legacy, error)) {
@@ -318,6 +346,7 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
         view.mass_fraction = runtime.transport_fraction;
         view.wet_response = runtime.wet_response;
         view.dry_volume = runtime.dry_volume;
+        view.mass_gradient_wanted = has_fluid;
         for (int axis = 0; axis < 3; ++axis) {
             if (!allocation(runtime.gradient[lane][axis], faces[axis] * 3 * sizeof(float),
                             "matter_face_mass_gradient")) {
@@ -442,7 +471,8 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
                 if (lane == 0 && !has_fluid) {
                     continue;
                 }
-                for (int axis = 0; axis < 3; ++axis) {
+                // Nothing reads the gradient without liquid (P2G skips it too).
+                for (int axis = 0; axis < 3 && has_fluid; ++axis) {
                     const uint32_t values = static_cast<uint32_t>(faces[axis] * 3);
                     ComputeDispatch clear;
                     clear.kernel = "sim_matter_clear";
@@ -707,6 +737,8 @@ bool runMatterGpuStep(SimulationGridDomainState& state,
     stats.granular_load_measured = true;
     stats.particle_count = particles.size();
     stats.mixed_model_step = true;
+    // Resting share this frame (the domain was not all asleep, so it ran).
+    stats.mpm_resting_particles = mpm_sleep.resting_particles;
     stats.mixed_common_substeps = substeps;
     stats.mixed_contact_pairs = pairs;
     stats.mixed_working_set_bytes = working_set;

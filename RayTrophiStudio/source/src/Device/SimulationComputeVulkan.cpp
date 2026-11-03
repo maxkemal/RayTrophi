@@ -779,6 +779,7 @@ private:
     };
     std::unordered_map<std::string, KernelTimeAccum> m_kernelTimes;
     bool     m_has_float_atomics = false;
+    bool     m_clustered_p2g = false;  // P2G kernels loaded in the clustered variant
     bool     m_has_shader_float64 = false;
 
     // Persistent staging + copy command buffer (see stagingReserve /
@@ -1368,8 +1369,33 @@ private:
             // metre-scale parameters. Gather writes need no float atomics.
             { "terrain_snow_solver",                 "terrain_snow_solver.spv",             14, 88 },
         };
-        for (const auto& d : defs)
-            createPipeline(d.name, sd + "/" + d.spv, d.bufs, d.pc);
+        // Clustered subgroup ops cut P2G same-address contention (see
+        // sim_fluid_p2g_scatter.glsl P2G_CLUSTERED). Same name, bindings and
+        // constants; a device without them keeps the per-lane kernels.
+        const bool clustered = supportsClusteredSubgroups();
+        for (const auto& d : defs) {
+            std::string spv = d.spv;
+            if (clustered && (std::string(d.name) == "sim_matter_p2g" ||
+                              std::string(d.name) == "sim_matter_stress_p2g")) {
+                spv = std::string(d.name) + "_clustered.spv";
+            }
+            createPipeline(d.name, sd + "/" + spv, d.bufs, d.pc);
+        }
+        m_clustered_p2g = clustered;
+    }
+
+    bool supportsClusteredSubgroups() const {
+        VkPhysicalDeviceSubgroupProperties subgroup{};
+        subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+        VkPhysicalDeviceProperties2 props{};
+        props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        props.pNext = &subgroup;
+        vkGetPhysicalDeviceProperties2(m_physDevice, &props);
+        return subgroup.subgroupSize >= 8 &&
+            (subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0 &&
+            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT) != 0;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

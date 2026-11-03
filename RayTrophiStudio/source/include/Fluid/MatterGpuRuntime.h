@@ -2,6 +2,7 @@
 #include "../ParticleSimulation.h"
 #include "MatterGpuPartition.h"
 #include "MatterGrainFluidGpuCoupling.h"
+#include "MatterMpmSleep.h"
 
 namespace RayTrophiSim::Fluid {
 
@@ -18,6 +19,7 @@ struct MatterGpuRuntime {
     std::array<std::array<ComputeBufferHandle, 3>, 2> gradient;
     std::array<std::size_t, 3> face_count{};
     std::size_t particle_capacity = 0;
+    MpmSleepState mpm_sleep;
 };
 
 } // namespace RayTrophiSim::Fluid

@@ -735,6 +735,10 @@ struct APICSolverStats {
     // MPM parcels the domain step's true-surface push moved this frame (they
     // are not counted in recovered_solid_particles: no teleport).
     size_t mpm_surface_pushed_particles = 0;
+    // MPM parcels that rest this frame (MatterMpmSleep.h). When all of the
+    // domain's parcels have rested for a few frames the step runs no substep
+    // (gpu_status "matter_asleep").
+    size_t mpm_resting_particles = 0;
     bool  p2g_on_gpu = false;
     bool  g2p_on_gpu = false;
     bool  pressure_on_gpu = false;

@@ -9,6 +9,19 @@
 // fixed-point variant was tried and produced no flow; don't re-attempt it
 // without also revisiting the scale factor that made it collapse.
 #extension GL_EXT_shader_atomic_float : require
+#if defined(P2G_CLUSTERED) && !defined(RT_SPARSE_MAC)
+// Contention. Seeding fills a cell's parcels consecutively, so the eight lanes
+// of a cluster usually share one base node and their 27-node stencils are the
+// same addresses: per-lane atomics serialised on them. Measured on resting
+// snow (2026-11-04): P2G time hardly fell when 65 % of the parcels left the
+// lane, the signature of same-address contention, not throughput. A cluster
+// whose lanes share the base node sums its contributions first and one lane
+// issues the atomic; any other cluster keeps the per-lane path. Loaded only
+// where the device reports clustered subgroup ops (SimulationComputeVulkan).
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#define P2G_CLUSTER_ACTIVE 1
+#endif
 #include "sim_dispatch.glsl"
 #ifdef RT_SPARSE_MAC
 #include "sim_sparse_mac_address.glsl"
@@ -79,7 +92,10 @@ void main() {
     if (lane >= uint(pc.particle_count)) return;
     int id = int(lane);
 #ifdef MATTER_INDEXED
-    if (uint(id) >= matter_count[pc.matter_lane]) return;
+    // Bit 31: no face mass gradient this dispatch (no liquid to contact).
+    const uint matter_lane = pc.matter_lane & 0x7fffffffu;
+    const bool write_gradient = (pc.matter_lane & 0x80000000u) == 0u;
+    if (uint(id) >= matter_count[matter_lane]) return;
     id = int(matter_index[id]);
 #endif
     if (id >= pc.particle_count || pc.voxel_size <= 1e-6) return;
@@ -123,6 +139,63 @@ void main() {
     else if (pc.component == 1) C_row = vec3(affine[ai+1], affine[ai+4], affine[ai+7]);
     else                        C_row = vec3(affine[ai+2], affine[ai+5], affine[ai+8]);
 
+#ifdef P2G_CLUSTER_ACTIVE
+    const bool same_base =
+        subgroupClusteredMin(bx, 8u) == subgroupClusteredMax(bx, 8u) &&
+        subgroupClusteredMin(by, 8u) == subgroupClusteredMax(by, 8u) &&
+        subgroupClusteredMin(bz, 8u) == subgroupClusteredMax(bz, 8u);
+    if (same_base) {
+        const bool leader =
+            subgroupClusteredMin(gl_SubgroupInvocationID, 8u) == gl_SubgroupInvocationID;
+#ifdef MATTER_INDEXED
+        const float cluster_mass = matter_rest[id] * matter_fraction[id];
+#endif
+        for (int dk = 0; dk < 3; ++dk)
+        for (int dj = 0; dj < 3; ++dj)
+        for (int di = 0; di < 3; ++di) {
+            int gi = bx+di, gj = by+dj, gk = bz+dk;
+            // Same base node: in or out of range for the whole cluster.
+            if (gi < 0 || gi > xmax || gj < 0 || gj > ymax || gk < 0 || gk > zmax) continue;
+            float w = wx[di] * wy[dj] * wz[dk];
+#ifdef MATTER_INDEXED
+            vec3 derivative = vec3(
+                (di == 0 ? gx - float(bx + 1) - 0.5 : di == 1 ?
+                    -2.0 * (gx - float(bx + 1)) : gx - float(bx + 1) + 0.5) * wy[dj] * wz[dk],
+                (dj == 0 ? gy - float(by + 1) - 0.5 : dj == 1 ?
+                    -2.0 * (gy - float(by + 1)) : gy - float(by + 1) + 0.5) * wx[di] * wz[dk],
+                (dk == 0 ? gz - float(bz + 1) - 0.5 : dk == 1 ?
+                    -2.0 * (gz - float(bz + 1)) : gz - float(bz + 1) + 0.5) * wx[di] * wy[dj]);
+            w *= cluster_mass;
+#endif
+            vec3 dxw = vec3(float(gi)-gx, float(gj)-gy, float(gk)-gz) * h;
+            const float momentum = subgroupClusteredAdd(w * (vp + dot(C_row, dxw)), 8u);
+            const float weight = subgroupClusteredAdd(w, 8u);
+#ifdef MATTER_INDEXED
+            vec3 gradient = vec3(0.0);
+            if (write_gradient) {
+                gradient = vec3(subgroupClusteredAdd(cluster_mass * derivative.x * invH, 8u),
+                                subgroupClusteredAdd(cluster_mass * derivative.y * invH, 8u),
+                                subgroupClusteredAdd(cluster_mass * derivative.z * invH, 8u));
+            }
+#endif
+            if (!leader) continue;
+            int fi;
+            if      (pc.component == 0) fi = gi + gj*(pc.nx+1) + gk*(pc.nx+1)*pc.ny;
+            else if (pc.component == 1) fi = gi + gj*pc.nx     + gk*pc.nx*(pc.ny+1);
+            else                        fi = gi + gj*pc.nx     + gk*pc.nx*pc.ny;
+            atomicAdd(vel_field[fi], momentum);
+            atomicAdd(wt_field[fi], weight);
+#ifdef MATTER_INDEXED
+            if (write_gradient) {
+                atomicAdd(matter_gradient[fi * 3], gradient.x);
+                atomicAdd(matter_gradient[fi * 3 + 1], gradient.y);
+                atomicAdd(matter_gradient[fi * 3 + 2], gradient.z);
+            }
+#endif
+        }
+        return;
+    }
+#endif
     for (int dk = 0; dk < 3; ++dk)
     for (int dj = 0; dj < 3; ++dj)
     for (int di = 0; di < 3; ++di) {
@@ -160,9 +233,11 @@ void main() {
         atomicAdd(vel_field[fi], w * (vp + apic));
         atomicAdd(wt_field[fi],  w);
 #ifdef MATTER_INDEXED
-        atomicAdd(matter_gradient[dense_fi * 3], parcel_mass * derivative.x * invH);
-        atomicAdd(matter_gradient[dense_fi * 3 + 1], parcel_mass * derivative.y * invH);
-        atomicAdd(matter_gradient[dense_fi * 3 + 2], parcel_mass * derivative.z * invH);
+        if (write_gradient) {
+            atomicAdd(matter_gradient[dense_fi * 3], parcel_mass * derivative.x * invH);
+            atomicAdd(matter_gradient[dense_fi * 3 + 1], parcel_mass * derivative.y * invH);
+            atomicAdd(matter_gradient[dense_fi * 3 + 2], parcel_mass * derivative.z * invH);
+        }
 #endif
     }
 }

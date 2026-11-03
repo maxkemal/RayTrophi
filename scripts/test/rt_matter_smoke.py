@@ -63,6 +63,7 @@ ARMS = [
     ('mpm_collider', 'rt_test_mpm_collider_ipc.py', []),
     ('collider_phi', 'rt_test_collider_phi_ipc.py', []),
     ('snow_support', 'rt_test_snow_support_ipc.py', []),
+    ('mpm_sleep', 'rt_test_mpm_sleep_ipc.py', []),
     ('t0', 'rt_t0_matter_vs_specialized_perf.py', ['--rounds', '1']),
 ]
 H1 = ('h1_suite', 'rt_h1_grain_suite.py', [])
@@ -71,7 +72,7 @@ LEGACY = ('legacy_project', 'rt_test_matter_legacy_roundtrip_ipc.py', [])
 # at the end of the plan.
 QUICK = ('substance', 'thermal_films', 'phase3_freeze', 'fire_steam', 'grain_readiness',
          'seed_settle', 'p9_melt', 'p9_floor', 'mpm_dem_clock', 'run_readback', 'fast_fall',
-         'elastic', 'mpm_collider', 'collider_phi', 'snow_support')
+         'elastic', 'mpm_collider', 'collider_phi', 'snow_support', 'mpm_sleep')
 GATE = re.compile(r'^(PASS|FAIL)\s+(\S+)')
 
 

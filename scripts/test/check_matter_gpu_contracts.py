@@ -51,7 +51,13 @@ def main():
         output = []
         for line in read("shaders/" + filename).splitlines():
             stripped = line.strip()
-            if stripped.startswith("#ifdef "):
+            if stripped.startswith("#if ") and "defined(" in stripped:
+                # `#if defined(A) && !defined(B)`: defined() terms joined by && / ||.
+                expr = re.sub(r"defined\((\w+)\)",
+                              lambda m: str(m.group(1) in defines), stripped[4:])
+                expr = expr.replace("&&", " and ").replace("||", " or ").replace("!", " not ")
+                active.append(active[-1] and bool(eval(expr, {"__builtins__": {}})))
+            elif stripped.startswith("#ifdef "):
                 active.append(active[-1] and stripped.split()[1] in defines)
             elif stripped.startswith("#ifndef "):
                 active.append(active[-1] and stripped.split()[1] not in defines)
@@ -134,6 +140,30 @@ def main():
         "src/Physics/Fluid/FluidParticleSolidRecovery.cpp")
     assert 'j["mpm_surface_pushed_particles"]' in read("src/Api/RtIpc.cpp")
     assert 'method == "fluid.sample_solid_phi"' in read("src/Api/RtIpc.cpp")
+    # Without liquid the P2G skips the face mass gradient (its only reader is
+    # sim_matter_contact, which needs liquid): bit 31 of the lane word.
+    p2g = read("shaders/sim_fluid_p2g_scatter.glsl")
+    assert "const bool write_gradient = (pc.matter_lane & 0x80000000u) == 0u;" in p2g
+    assert "view.mass_gradient_wanted = has_fluid;" in read("src/Physics/Fluid/MatterGpuStep.inl")
+    # Clustered P2G (same-address contention): loaded only where the device
+    # reports clustered subgroup ops; the per-lane kernels stay the fallback.
+    vk = read("src/Device/SimulationComputeVulkan.cpp")
+    assert "(subgroup.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT) != 0" in vk
+    assert 'spv = std::string(d.name) + "_clustered.spv";' in vk
+    assert "#define P2G_CLUSTERED" in read("shaders/sim_matter_p2g_clustered.comp")
+    assert "#define P2G_CLUSTERED" in read("shaders/sim_matter_stress_p2g_clustered.comp")
+    # Domain sleep: every parcel resting for kMpmSleepFrames runs no substep,
+    # never under a force field. Partial freezing was measured slower (serial
+    # substep chain) and removed; nothing leaves a lane any more.
+    sleep_src = read("src/Physics/Fluid/MatterMpmSleep.cpp")
+    assert "out.domain_asleep = state.rest_frames >= kMpmSleepFrames;" in sleep_src
+    step = read("src/Physics/Fluid/MatterGpuStep.inl")
+    assert "if (count > 0 && no_force_field && mpm_sleep.domain_asleep) {" in step
+    # An asleep frame recounts the granular counters from the parcels: a blank
+    # stats block reported a resting pile as 0 asleep (snow_support, 2026-11-04).
+    assert "Fluid::Granular::countMaterialState(particles, asleep_stats);" in step
+    assert "frozen_cells" not in step and "frozen_particle" not in step
+    assert "kMatterPartitionFrozen" not in read("include/Fluid/MatterGpuPartition.h")
     # Settle damps and sleeps only SUPPORTED parcels (mean acceleration along
     # gravity < tolerance * g, measured before damping). Pressure alone hung a
     # mid-air snow block from its top (2026-11-03 live).
