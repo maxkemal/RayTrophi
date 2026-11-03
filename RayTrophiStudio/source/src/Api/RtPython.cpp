@@ -1,3 +1,4 @@
+#include "RtUvBindings.h"
 #include "RtLensWeatherBindings.h"
 #include "RtObjectSubstanceBindings.h"
 #include "RtPostBindings.h"
@@ -5855,6 +5856,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             requireResult(rtapi::setPostStylizeStrength(py::cast<float>(kwargs["stylize_strength"])));
     });
 
+    registerUvPython(module);
     registerRigPython(module);
     py::module_ project = module.def_submodule("project", "Project file operations");
     project.def("path", &rtapi::currentProjectPath);

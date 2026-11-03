@@ -3418,4 +3418,38 @@
     <ClInclude Include="source\src\Api\RtIpcUpscale.h" />
     <ClInclude Include="source\src\Api\RtUpscaleBindings.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\UV\UvLayout.h" />
+    <ClInclude Include="source\include\UV\UvService.h" />
+    <ClInclude Include="source\include\UI\UvEditorUI.h" />
+    <ClInclude Include="source\src\Api\RtUvBindings.h" />
+    <ClCompile Include="source\src\UV\UvLayout.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvService.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvXatlasBackend.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\UvEditorUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtUvBindings.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcUv.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\UI\MaterialUvSamplingUI.h" />
+    <ClCompile Include="source\src\UI\MaterialUvSamplingUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvProjection.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
 </Project>

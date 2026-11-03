@@ -4214,4 +4214,21 @@
     <ClInclude Include="source\src\Api\RtIpcUpscale.h" />
     <ClInclude Include="source\src\Api\RtUpscaleBindings.h" />
   </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\UV\UvLayout.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
+    <ClInclude Include="source\include\UV\UvService.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\UvEditorUI.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
+    <ClInclude Include="source\src\Api\RtUvBindings.h"><Filter>Kaynak Dosyalar\Api</Filter></ClInclude>
+    <ClCompile Include="source\src\UV\UvLayout.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UV\UvService.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UV\UvXatlasBackend.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\UvEditorUI.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtUvBindings.cpp"><Filter>Kaynak Dosyalar\Api</Filter></ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcUv.cpp"><Filter>Kaynak Dosyalar\Api</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\UI\MaterialUvSamplingUI.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
+    <ClCompile Include="source\src\UI\MaterialUvSamplingUI.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UV\UvProjection.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+  </ItemGroup>
 </Project>
