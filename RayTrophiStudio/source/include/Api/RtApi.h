@@ -4120,6 +4120,8 @@ struct FluidStepStats {
     // MPM parcels the true-surface push put back onto a collider instead.
     std::size_t recovered_solid_particles = 0;
     std::size_t mpm_surface_pushed_particles = 0;
+    // MPM parcels resting this frame (gpu_status matter_asleep = the step slept).
+    std::size_t mpm_resting_particles = 0;
     float total_ms = 0.0f;
     float p2g_ms = 0.0f;
     float pressure_ms = 0.0f;
@@ -5506,6 +5508,15 @@ struct FluidParticleProbe {
     bool        frozen = false;     // kParticleFlagFrozen
     double      position[3] = { 0.0, 0.0, 0.0 };
     double      velocity[3] = { 0.0, 0.0, 0.0 };
+    float       speed = 0.0f;
+    // MPM granular state (zero / false where the parcel carries none).
+    bool        granular_sleeping = false;   // settle's sleep flag
+    bool        granular_detached = false;   // cohesion broken (snow/soil)
+    float       granular_damage = 0.0f;
+    float       granular_pressure = 0.0f;    // -trace(stress)/3, Pa per unit density
+    // Settle's support measure: mean acceleration along gravity (m/s^2);
+    // "supported" below 0.25 g. -1 = not yet measured.
+    float       support_accel = -1.0f;
 };
 struct FluidParticleExtremes {
     bool     live = false;
@@ -5513,6 +5524,8 @@ struct FluidParticleExtremes {
     uint64_t measured = 0;          // particles with a written temperature
     std::vector<FluidParticleProbe> hottest;  // descending kelvin
     std::vector<FluidParticleProbe> coldest;  // ascending kelvin
+    // Descending speed: what keeps an MPM domain from sleeping.
+    std::vector<FluidParticleProbe> fastest;
 };
 // count 1..64 per list.
 Result getFluidParticleExtremes(const std::string& domain_id_or_name, uint32_t count,

@@ -890,6 +890,9 @@
     <ClCompile Include="source\src\Physics\Fluid\MatterGpuPartition.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMpmSleep.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\MatterGpuModelView.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>

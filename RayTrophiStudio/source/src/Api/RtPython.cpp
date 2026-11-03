@@ -3047,6 +3047,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["collider_query_error"] = s.collider_query_error;
         d["recovered_solid_particles"] = s.recovered_solid_particles;
         d["mpm_surface_pushed_particles"] = s.mpm_surface_pushed_particles;
+        d["mpm_resting_particles"] = s.mpm_resting_particles;
         d["total_ms"] = s.total_ms;
         d["p2g_ms"] = s.p2g_ms;
         d["pressure_ms"] = s.pressure_ms;
@@ -3451,6 +3452,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 d["pore_water_kg"] = p.pore_water_kg; d["frozen"] = p.frozen;
                 d["position"] = py::make_tuple(p.position[0], p.position[1], p.position[2]);
                 d["velocity"] = py::make_tuple(p.velocity[0], p.velocity[1], p.velocity[2]);
+                d["speed"] = p.speed; d["granular_sleeping"] = p.granular_sleeping;
+                d["granular_detached"] = p.granular_detached;
+                d["granular_damage"] = p.granular_damage;
+                d["granular_pressure"] = p.granular_pressure;
+                d["support_accel"] = p.support_accel;
                 out.append(d);
             }
             return out;
@@ -3458,6 +3464,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         py::dict d;
         d["live"] = ex.live; d["particles"] = ex.particles; d["measured"] = ex.measured;
         d["hottest"] = rows(ex.hottest); d["coldest"] = rows(ex.coldest);
+        d["fastest"] = rows(ex.fastest);
         return d;
     }, py::arg("domain"), py::arg("count") = 8,
        "Hottest and coldest live particles (count 1..64 each) with substance, solver model, "

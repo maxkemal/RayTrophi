@@ -1,4 +1,10 @@
 #extension GL_EXT_shader_atomic_float : require
+#ifdef P2G_CLUSTERED
+// Same-address contention fix, as sim_fluid_p2g_scatter.glsl P2G_CLUSTERED:
+// a cluster of eight lanes sharing the base node sums first, one lane writes.
+#extension GL_KHR_shader_subgroup_basic : require
+#extension GL_KHR_shader_subgroup_clustered : require
+#endif
 layout(local_size_x=256) in;
 
 layout(set=0,binding=0) readonly buffer Positions { float pos[]; };
@@ -58,6 +64,34 @@ void main(){
     int xmax=pc.component==0?pc.nx:pc.nx-1;
     int ymax=pc.component==1?pc.ny:pc.ny-1;
     int zmax=pc.component==2?pc.nz:pc.nz-1;
+#ifdef P2G_CLUSTERED
+    const bool same_base =
+        subgroupClusteredMin(bx, 8u) == subgroupClusteredMax(bx, 8u) &&
+        subgroupClusteredMin(by, 8u) == subgroupClusteredMax(by, 8u) &&
+        subgroupClusteredMin(bz, 8u) == subgroupClusteredMax(bz, 8u);
+    if(same_base){
+        const bool leader =
+            subgroupClusteredMin(gl_SubgroupInvocationID, 8u) == gl_SubgroupInvocationID;
+        for(int k=0;k<3;++k)for(int j=0;j<3;++j)for(int i=0;i<3;++i){
+            int x=bx+i,y=by+j,z=bz+k;if(x<0||x>xmax||y<0||y>ymax||z<0||z>zmax)continue;
+            // The small-weight cut is per lane: a cut lane adds zero.
+            float impulse=0.0;
+            if(wx[i]*wy[j]*wz[k]>=kMinNodeWeight){
+                vec3 grad=vec3(dx[i]*wy[j]*wz[k],wx[i]*dy[j]*wz[k],wx[i]*wy[j]*dz[k])*ih;
+                impulse=-pc.dt*pc.inv_density*dot(row,grad);
+#ifdef MATTER_INDEXED
+                impulse = -pc.dt * matter_dry_volume[id] * dot(row, grad);
+#endif
+            }
+            const float sum=subgroupClusteredAdd(impulse, 8u);
+            if(!leader)continue;
+            int fi=pc.component==0?x+y*(pc.nx+1)+z*(pc.nx+1)*pc.ny:
+                   pc.component==1?x+y*pc.nx+z*pc.nx*(pc.ny+1):x+y*pc.nx+z*pc.nx*pc.ny;
+            atomicAdd(momentum[fi],sum);
+        }
+        return;
+    }
+#endif
     for(int k=0;k<3;++k)for(int j=0;j<3;++j)for(int i=0;i<3;++i){
         int x=bx+i,y=by+j,z=bz+k;if(x<0||x>xmax||y<0||y>ymax||z<0||z>zmax)continue;
         if(wx[i]*wy[j]*wz[k]<kMinNodeWeight)continue;

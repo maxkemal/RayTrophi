@@ -1,5 +1,54 @@
 # NEXT BUILD CHECKS
 
+## ★ TAM REBUILD — dinlenik kar yüzeyindeki kıpırdama teşhisi — 2026-11-04 gece (YAZILDI, derlenmedi)
+
+**Durum:** ajanın başlattığı tam Rebuild yarıda durduruldu. Rebuild önce temizlediği için
+`x64\Release` nesne dosyaları ve exe eksik ya da eski olabilir: **tam Rebuild** al.
+`RtApi.h`'de `FluidParticleProbe` büyüdü (yapı düzeni değişti).
+
+**Sorun (canlı, kullanıcının sahnesinin kopyası):**
+- Havadan düşüp kırılan kar 150 kare sonra %99.6 dinleniyor, ama ~300 parçacık hiç durmuyor.
+- Ortalama hız 0.0007 m/s, yani bu ~300 parçacık ~0.2 m/s civarında. Domain uykusu "ya
+  hep ya hiç" olduğu için kare ~130 ms'de kalıyor.
+- 11 000 parçacık (%12.6) kopmuş.
+- Hipotez (doğrulanmadı): kütlenin üstündeki tek tek tanelerin basıncı ~0. Settle yalnız
+  basınç altındakini sönümlüyor; kar FLIP karışımı kullandığı için seyrek bölgedeki tane
+  ızgara gürültüsüyle sarsılıyor.
+
+**Yazılan:** `fluid.particle_extremes` artık `fastest` listesi veriyor. Her sonda: `speed`,
+`granular_sleeping`, `granular_detached`, `granular_damage`, `granular_pressure`,
+`support_accel`.
+
+**Derledikten sonra (ajan koşturur):** teşhis sondası en hızlı 32 parçacığı basar.
+- `granular_pressure` ~0, `support_accel` < 2.45 (destekli) ve `granular_sleeping` 0 ise
+  hipotez doğru. Düzeltme: settle'ın sönümü desteğe bağlansın, basınca değil.
+- `support_accel` büyükse tane gerçekten havada (dökülme); doğal.
+
+## MPM domain uykusu + P2G gradyan atlama + kümelenmiş P2G — 2026-11-04 (AJAN DERLEDİ, CANLI)
+
+Kullanıcı onayıyla ajan derledi: tam Rebuild ×2, artımlı ×5; shader'lar glslc ile
+`source/shaders` + `x64/Release/shaders`. Ayrıntı ve ölçümler:
+[MPM_UYUYAN_KAROLAR.md](MPM_UYUYAN_KAROLAR.md).
+
+**Canlı:**
+- `rt_test_mpm_sleep_ipc.py`: dinlenik 83 k kar **123 → 16.7 ms/kare (7.4×)**, şekil farkı
+  0.06 mm; ince katman 8.4×; havadaki blok hiç uyumadı.
+- Uyku kapalıyken P2G 84 → 49 ms/kare (sıvı yokken kütle gradyanı atlanıyor).
+- Kısmi uyku (hücre bazlı) ölçüldü: %5–7 YAVAŞ, söküldü.
+- Uyuyan karede istatistik bloğu boş yayımlanıyordu (`granular_sleeping` 0, plastik J 1):
+  sayaçlar artık parçacıklardan yeniden sayılıyor (`snow_support` `floor_sleeps` bunu yakaladı).
+- `rt_matter_smoke --quick` **16/16** (`snow_support`, `mpm_sleep` dahil).
+
+**Senin kontrolün için (elle):**
+1. Kar sahnende Settle on Seed açık, kar dinlenince `fluid.step_stats` `gpu_status`
+   `matter_asleep` olmalı ve kare hızlanmalı. Bir collider'ı hareket ettirince ya da
+   kartopu atınca (parçacık sayısı değişir) hemen uyanmalı.
+2. ★ **En sinsi:** uyuyan bir yığının yanına yavaşça yaklaşan bir collider. Hareketli
+   collider bütün domain'i uyandırır, yani doğru. Ama collider'ı DURDURUP yığına yaslarsan
+   yığın 3 kare sonra yeniden uyur. Collider o anda kara itme uyguluyorsa bu yanlıştır.
+   Bağlam özeti collider setini (imzayı) görür, temas kuvvetini görmez.
+3. Kuvvet alanı (rüzgâr vb.) varken domain hiç uyumamalı.
+
 ## ★ TAM REBUILD — MPM settle desteğe bakıyor (A aşaması) — 2026-11-04 (CANLI)
 
 **Canlı sonuç (tam Rebuild sonrası):**

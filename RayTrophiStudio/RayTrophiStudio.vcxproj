@@ -577,6 +577,7 @@
     <ClCompile Include="source\src\Physics\Fluid\MatterSolverStages.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterModelBatch.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGpuPartition.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterMpmSleep.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGpuModelView.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterMixedStep.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterMacContact.cpp" />

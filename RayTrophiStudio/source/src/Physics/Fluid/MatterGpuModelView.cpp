@@ -102,9 +102,16 @@ bool dispatchMatterGpuModel(SimulationComputeContext& compute,
         }
         buffers.push_back(model.mass_gradient[component]);
     }
+    // Bit 31 of the lane word: this P2G skips the face mass gradient
+    // (MatterGpuModelView::mass_gradient_wanted). The buffer stays bound.
+    uint32_t lane_word = model.lane;
+    if ((name == "sim_fluid_p2g_scatter" || name == "sim_sparse_mac_p2g") &&
+        !model.mass_gradient_wanted) {
+        lane_word |= 0x80000000u;
+    }
     std::vector<unsigned char> constants(command.constants_size + sizeof(uint32_t));
     std::memcpy(constants.data(), command.constants, command.constants_size);
-    std::memcpy(constants.data() + command.constants_size, &model.lane, sizeof(model.lane));
+    std::memcpy(constants.data() + command.constants_size, &lane_word, sizeof(lane_word));
     auto indexed = command;
     indexed.kernel = variant;
     indexed.buffers = buffers.data();
