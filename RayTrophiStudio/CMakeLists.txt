@@ -115,6 +115,7 @@ endif()
 # Automatically collect source files from new subdirectories to avoid manual maintenance
 file(GLOB SOURCES_CPP_ROOT "source/src/*.cpp")
 file(GLOB_RECURSE SOURCES_CPP 
+    "source/src/UV/*.cpp"
     "source/src/Core/*.cpp"
     "source/src/Render/*.cpp"
     "source/src/Scene/*.cpp"

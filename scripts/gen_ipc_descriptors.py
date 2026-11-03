@@ -43,7 +43,9 @@ OUTPUT = os.path.join(API, "RtIpcMethodDescriptors.cpp")
 # Descriptors are generated from the other dispatch modules; the output file
 # itself must never be parsed as one.
 SOURCES = [p for p in IPC_FILES
-           if os.path.basename(p) != "RtIpcMethodDescriptors.cpp"]
+           if os.path.basename(p) not in {"RtIpcMethodDescriptors.cpp", "RtIpcUv.cpp"}]
+# UV's keyword-based shared service has explicit schemas registered by RtUvBindings.cpp.
+# Parsing its delegate would produce duplicate, parameterless descriptors.
 # Grain diagnostic passes the full request to its shared API service. Include
 # that reader so generated discovery follows its schema, not just the delegate.
 SOURCES.append(os.path.join(API, "RtApiGrainReference.cpp"))

@@ -58,6 +58,8 @@ def namespace_table(source):
 
 def required(method, namespaces):
     """Mirror of RtIpcSecurity.cpp::requiredCapabilities (name-level only)."""
+    if method in {"uv.capabilities", "uv.targets", "uv.info", "uv.layout"}:
+        return "Read"
     if method == "camera.sample_lens_weather":
         return "Read"
     if method.startswith("audio."):

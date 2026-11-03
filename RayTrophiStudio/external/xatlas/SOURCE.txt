@@ -1,0 +1,15 @@
+Upstream: https://github.com/jpcy/xatlas
+Commit: f700c7790aaa030e794b52ba7791a05c085faf0c
+Files: source/xatlas/xatlas.h, source/xatlas/xatlas.cpp, LICENSE
+License: MIT (Jonathan Young; embedded thekla_atlas notices retained).
+
+Original upstream SHA256:
+xatlas.h   e7675335ad8ab1c1cc9060ad153cf6b8ba2ee914282044eb5f02c49590218fbd
+xatlas.cpp 0ed0283aad005c94738cb0cc4612dba264379d29dea5b3c9b242f2d4752d5df4
+LICENSE    2c16d5b1c2808277fe975b4f70f0fd9afc9b3bcf04e6c676665a82cb2d5579e3
+
+Local changes in xatlas.cpp (marked RayTrophi):
+- Empty chart boundary: use all supplied points for the hull, or a finite empty box.
+- Planar-region growth: compare each candidate to the seed normal as well as its neighbor.
+These failure modes were identified during the SculptForge UV audit; downloaded code is
+the MIT upstream, not SculptForge's GPL AutoUv/UV solver/editor implementation.

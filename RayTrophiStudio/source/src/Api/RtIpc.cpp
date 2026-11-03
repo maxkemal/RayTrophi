@@ -1,3 +1,4 @@
+#include "RtUvBindings.h"
 #include "Fluid/SourceSplatGeometryJson.h"
 #include "RtLensWeatherBindings.h"
 #include "RtObjectSubstanceBindings.h"
@@ -1058,6 +1059,10 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    json uv_result;
+    if (dispatchUvIpc(method, params,
+            [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
+            uv_result)) return uv_result;
     json upscale_result;
     if (dispatchUpscaleIpc(method, params,
             [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },

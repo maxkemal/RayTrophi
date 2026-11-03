@@ -211,6 +211,8 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
+    if (method == "uv.capabilities" || method == "uv.targets" ||
+        method == "uv.info" || method == "uv.layout") return Read;
     if (method == "gas.get_source_materials") return Read;
     if (method == "gas.set_source_materials") return SceneWrite;
     if (method == "camera.sample_lens_weather") return Read;
@@ -556,6 +558,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // which cost 14 write methods; scripts/audit_ipc_capabilities.py now diffs
     // the two files so the pair cannot drift apart again.
     static const char* namespaces[] = {
+        "uv.",
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
         "world.", "post.", "anim.", "rig.", "nodes.", "modifiers.",
         "scatter.", "physics.", "forcefield.", "particle.", "fluid.", "gas.", "msf.", "terrain.", "water.",

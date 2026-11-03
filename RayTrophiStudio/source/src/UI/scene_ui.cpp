@@ -19,6 +19,7 @@
 #include "scene_ui.h"
 #include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
+#include "UI/UvEditorUI.h"
 #include "UI/AudioUI.h"
 #include "Audio/AcousticRenderDebug.h"
 #include "UI/AudioWorkspaceUI.h"
@@ -4276,6 +4277,7 @@ void SceneUI::draw(UIContext& ctx)
     
     
     drawAuxWindows(ctx);
+    UvEditorUI::draw(ctx, [this](const char* window) { dockToBottom(window); });
     
     // Global Sun Sync (Light -> Nishita)
     processSunSync(ctx);
@@ -4576,6 +4578,7 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_node_editor    = (keep_index == 7) ? show_node_editor : false;
         };
         
+        UvEditorUI::drawBottomTab(ctx);
         AudioUI::drawAudioBottomTabs(ctx);
         bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
         if (UIWidgets::HorizontalTab("Dope Sheet", UIWidgets::IconType::Timeline, active_dope))
