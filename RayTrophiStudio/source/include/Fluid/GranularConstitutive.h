@@ -1136,17 +1136,56 @@ struct SettleParams {
     // (measured 1.06 -> 1.17 over 60 steps at rest); damping every speed
     // instead ate the impact energy that breaks a snowball.
     float damping_max_speed = 0.0f;
+    // Support. Damping and sleep are for a parcel RESTING on something, and
+    // pressure is not that: a pre-stressed body in mid air has pressure too.
+    // (2026-11-03 live: a snow block seeded with settle-on-seed hung from its
+    // top for 24 frames while its bottom tore away; gravity adds ~0.025 m/s a
+    // substep, under sleep_speed, so every substep zeroed it again.) The test
+    // is the DEM sleep lesson: a supported parcel does not accelerate, a free
+    // one gains g * dt. The net acceleration along gravity is measured BEFORE
+    // this step's damping (a damped fall at its terminal speed still shows g)
+    // and averaged over support_tau_s, so the snow's tens-of-Hz rest jitter
+    // averages out. No gravity: every parcel counts as supported (old rule).
+    Vec3  gravity = Vec3(0.0f, -9.81f, 0.0f);
+    float support_tau_s = 0.2f;
+    float support_tolerance = 0.25f;
 };
 
 // Snow's damping ceiling: well above the measured rest jitter (0.23 m/s),
 // well below an impact (metres per second).
 constexpr float kSnowSettleDampingMaxSpeed = 0.5f;
 
+// Updates the support measurement and returns whether the parcel rests on
+// something. prev_vg / accel are FluidParticles granular_support_*.
+inline bool updateSupport(const SettleParams& sp, const Vec3& velocity,
+                          float& prev_vg, float& accel) {
+    const float g = sp.gravity.length();
+    if (!(g > 1e-6f) || !(sp.dt > 0.0f)) {
+        accel = 0.0f;
+        return true;
+    }
+    const Vec3 down = sp.gravity * (1.0f / g);
+    const float vg = velocity.dot(down);
+    if (accel >= 0.5f * kGranularSupportFresh) {
+        accel = g;
+    } else {
+        const float a = (vg - prev_vg) / sp.dt;
+        accel += (a - accel) * std::min(sp.dt / std::max(sp.support_tau_s, 1e-6f), 1.0f);
+    }
+    prev_vg = vg;
+    return accel < sp.support_tolerance * g;
+}
+
 inline void settleParticle(const Vec3& stress_diag, const SettleParams& sp,
-                           Vec3& velocity, uint32_t& flags) {
+                           Vec3& velocity, uint32_t& flags,
+                           float& support_prev_vg, float& support_accel) {
+    const bool supported = updateSupport(sp, velocity, support_prev_vg, support_accel);
     const float pressure =
         std::max(-(stress_diag.x + stress_diag.y + stress_diag.z) / 3.0f, 0.0f);
-    if (pressure <= sp.pressure_threshold) return;
+    if (pressure <= sp.pressure_threshold || !supported) {
+        flags &= ~kFlagSleeping;
+        return;
+    }
     if (!(sp.damping_max_speed > 0.0f) || velocity.length() < sp.damping_max_speed)
         velocity = velocity * std::exp(-std::max(sp.contact_damping, 0.0f) *
                                         std::max(sp.dt, 0.0f));
@@ -1156,6 +1195,9 @@ inline void settleParticle(const Vec3& stress_diag, const SettleParams& sp,
     } else {
         flags &= ~kFlagSleeping;
     }
+    // The next step measures against what this one leaves.
+    const float g = sp.gravity.length();
+    if (g > 1e-6f) support_prev_vg = velocity.dot(sp.gravity * (1.0f / g));
 }
 
 } // namespace RayTrophiSim::Fluid::Granular

@@ -2062,6 +2062,10 @@ struct ParticleColliderDesc {
     std::shared_ptr<std::vector<float>> sdf_grid_data;
     Vec3 sdf_origin = Vec3(0.0f);
     Vec3 sdf_extents = Vec3(0.0f);
+    // The cooked mesh's own box size (sdf_extents minus the cook's pad). The
+    // readers compare it with the live object's size; the pad is no longer a
+    // fixed 15 % per axis, so it is stored, never derived from sdf_extents.
+    Vec3 sdf_mesh_size = Vec3(0.0f);
     int sdf_nx = 0;
     int sdf_ny = 0;
     int sdf_nz = 0;

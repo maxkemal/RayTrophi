@@ -28,6 +28,9 @@ struct GpuBuffers {
     ComputeBufferHandle state_flags{};
     ComputeBufferHandle damage{};
     ComputeBufferHandle fracture_history{};
+    // Settle's support measurement (FluidParticles granular_support_*).
+    ComputeBufferHandle support_prev_vg{};
+    ComputeBufferHandle support_accel{};
     std::size_t capacity = 0;
     bool valid() const {
         return deformation_col0.valid() && deformation_col1.valid() &&
@@ -36,7 +39,8 @@ struct GpuBuffers {
                stress_diag.valid() && stress_shear.valid() &&
                yield_value.valid() && plastic_increment.valid() &&
                state_flags.valid() && damage.valid() && fracture_history.valid() &&
-               softening.valid() && bond_scale.valid();
+               softening.valid() && bond_scale.valid() &&
+               support_prev_vg.valid() && support_accel.valid();
     }
 };
 
@@ -63,6 +67,8 @@ inline void destroy(SimulationComputeContext* compute, GpuBuffers& b) {
     compute->destroyBuffer(b.state_flags);
     compute->destroyBuffer(b.damage);
     compute->destroyBuffer(b.fracture_history);
+    compute->destroyBuffer(b.support_prev_vg);
+    compute->destroyBuffer(b.support_accel);
     b = {};
 }
 

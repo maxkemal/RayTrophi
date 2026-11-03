@@ -312,6 +312,7 @@ void step(FluidParticles& particles,
 
         G::SettleParams settle;
         settle.dt = dt;
+        settle.gravity = params.gravity;
         if (sp.snow_plasticity) settle.damping_max_speed = G::kSnowSettleDampingMaxSpeed;
 
         const int64_t count = static_cast<int64_t>(particles.size());
@@ -347,7 +348,9 @@ void step(FluidParticles& particles,
             // body is not a pile: no settle (it would kill a jelly's wobble).
             if (!sp.elastic_solid) {
                 G::settleParticle(particles.granular_stress_diag[p], settle,
-                                  particles.velocity[p], flags);
+                                  particles.velocity[p], flags,
+                                  particles.granular_support_prev_vg[p],
+                                  particles.granular_support_accel[p]);
             }
             particles.granular_material_flags[p] = flags;
         }

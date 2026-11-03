@@ -1,5 +1,110 @@
 # NEXT BUILD CHECKS
 
+## ★ TAM REBUILD — MPM settle desteğe bakıyor (A aşaması) — 2026-11-04 (CANLI)
+
+**Canlı sonuç (tam Rebuild sonrası):**
+- `snow_support` **5/5**:
+  - havadaki blok 0.25 s'de 0.343 m düştü (serbest düşüş 0.307), hasar 0;
+  - zemindeki kar hızı 6e-5 m/s, %93'ü uyuyor;
+  - J_P büyümesi 7e-5, mandal etkisi yok.
+- `seed_settle` 6/6. `rt_matter_smoke --quick` **15/15**.
+- Kullanıcı kendi kar sahnesinde doğruladı: kar artık asılı kalmıyor.
+- Not: hava düşüşünün serbest düşüşten fazla çıkması büyük olasılıkla ölçümün tohum anındaki
+  (oturtma öncesi) üst sınırdan başlaması; doğrulanmadı, kapı alt sınır olduğu için sonucu
+  etkilemiyor.
+
+
+**★ Tam Rebuild gerekli:** `FluidParticles` iki yeni dizi aldı (`granular_support_prev_vg`,
+`granular_support_accel`), `Granular::GpuBuffers` iki tampon, `SettleConstants` 32 → 48
+bayt. Artımlı derleme eski `.obj` bırakırsa alakasız bir yerde erişim ihlali görürsün.
+**Derlenecek:** C++ ve iki shader: `sim_fluid_granular_settle` ve `sim_matter_settle`
+(ikisi de `sim_fluid_granular_settle.glsl`'yi içeriyor). Madde denetimleri temiz.
+
+**Kök (canlı ölçüm, kullanıcının sahnesi):**
+- Havada tohumlanan kar, oturtma açıkken üstten asılı kaldı: üst sınır 24 kare boyunca
+  2.18'de, alt kısım koptu, hasar > 0.5 olan 18 850 parçacık. Oturtma kapalıyken blok tek
+  parça serbest düştü.
+- Settle, basıncı olan her yavaş parçacığı sönümleyip uyutuyordu. Alt adım başına
+  yerçekimi ~0.025 m/s, uyku eşiği 0.03, yani her alt adımda sıfırlanıyordu.
+- Basınç destek değildir.
+
+**Düzeltme:**
+- Sönüm ve uyku yalnızca desteklenen parçacıkta: yerçekimi yönündeki net ivmenin 0.2 s
+  ortalaması 0.25·g altında.
+- İvme sönümden önceki hızla ölçülür; titreşim ortalamada söner.
+- Yeni parçacık desteksiz başlar.
+- Uyanma kendiliğinden (destek giderse ~0.06 s).
+- GPU (iki yol aynı fonksiyondan) ve CPU ikizi.
+- B aşaması (gerçek iş atlayan uyku) için TASLAK: [MPM_UYUYAN_KAROLAR.md](MPM_UYUYAN_KAROLAR.md).
+
+**Sırayla** (boş ve duraklatılmış sahnede):
+1. `python scripts/test/rt_test_snow_support_ipc.py`: **5/5** hedef (yeni test; eşikler
+   canlıda ayarlanmadı).
+   - `air_falls` FAIL: settle hâlâ havadaki parçacığı tutuyor. `granular_support_accel`
+     yüklenmiyor olabilir (`uploadState` boyut kontrolü) ya da yerçekimi 0 geliyor.
+   - ★ **En sinsi:** `floor_sleeps` FAIL ama `floor_rests` PASS. Kar dinleniyor ama hiç
+     uyumuyor demektir: 0.25·g toleransı titreşime göre dar. Ortalamanın değeri tolerans
+     ayarı için kritik.
+   - `floor_no_ratchet` FAIL: titreşim sönümü kayboldu ve J_P mandal gibi büyüyor
+     (eski gerileme, `SettleParams::damping_max_speed`).
+2. `python scripts/test/rt_test_seed_settle_ipc.py`: 6/6 kalmalı. Oturtma zemindeki tohumda
+   biraz daha yavaş yakınsayabilir; destek 0.2 s içinde öğreniliyor.
+3. `python scripts/test/rt_matter_smoke.py --quick` (arka planda): 15/15
+   (`snow_support` eklendi).
+4. Elle: senin kar sahnen, Settle on Seed açık. Kar tek parça düşmeli.
+
+## SDF pişirme payı + kayma kolu testi — 2026-11-04 (CANLI, tam Rebuild sonrası)
+
+**Canlı sonuç:**
+- `collider_phi` 12/12.
+- `mpm_collider` **8/8**:
+  - germe 7.5 → 16.7 cm, iki plakaya tutunuyor (üst boşluk 1.7 mm);
+  - yükseliş 9.7 cm;
+  - kayma 0.100 m.
+- `rt_matter_smoke --quick` **14/14**; kayma kolu tam pakette de 0.100 m.
+- ★ İlk derlemede `substance.remove` erişim ihlali verdi. Kod hatası DEĞİLDİ: artımlı derleme
+  `RtApiSubstance.obj` ve dört büyük `.obj`'yi `ParticleColliderDesc` düzen değişikliğinden
+  sonra yeniden derlememişti. Tam Rebuild çözdü. Yaygın bir struct'ın düzeni değişince
+  listenin başına "tam Rebuild" yazılır.
+
+
+**Derlenecek:** yalnız C++ (`scene_data.h`, `ParticleSimulation.h/.cpp`). Shader değişmedi.
+Madde denetimleri temiz.
+
+**Sondalar (canlı, önceki exe):**
+1. **Yapışık germe kopuşu = SDF kutusu plakanın dışında çok dar.**
+   - Pişirme her eksende kendi boyunun %15'i kadar pay ekliyordu. 5 cm plakada bu y'de
+     7.5 mm; h 2.5 cm.
+   - `fluid.sample_solid_phi`: plakanın altında φ 7.5 mm sonra "uzak"a (2h) atlıyor. Sıfır
+     geçişi gerçek alt yüzün 0–1 cm üstünde; plaka bir hücre (6 kare) ilerledikçe döngüsel.
+   - Yapışma bandı (φ < h) bu plakada pratikte yok. Sakız ~1.9 kat uzayıp hücre hizası
+     kötü düştüğü karede bıraktı. `step_stats` kopuşun çevresinde hiçbir sayaçta değişmedi.
+   - **Düzeltme:**
+     - pay eşyönlü ve en uzun kenardan: 0.15 · max(boyut); Auto'da en az 3 voxel;
+     - pişen mesh boyu artık collider'da `sdf_mesh_size` olarak saklanıyor;
+     - sekiz okuyucu `sdf_extents / 1.3` varsayımını bıraktı.
+2. **Kayma kolu kararsızlığı = test pişirmeyi beklemiyordu (büyük olasılık).**
+   - İkiye bölme: `elastic` + `mpm_collider` geçti; hızlı yarı + `mpm_collider` geçti;
+     yavaş yarı + `mpm_collider` geçti. Yalnız tam paket (iki kez) 0.00005 m verdi.
+   - Pişirme süresi bu oturumda 97–342 ms arası değişti. Yük altında geç pişen plakadan
+     sakız zemine düşer ve kaymaz.
+   - **Test düzeltildi:** `plate()` artık `sdf_ready`'yi bekliyor (iki kopya da güncel).
+
+**Sırayla:**
+1. `python scripts/test/rt_test_collider_phi_ipc.py`: 12/12 kalmalı. Küre payı değişmedi
+   (0.15 · 1.8 m).
+2. `python scripts/test/rt_test_mpm_collider_ipc.py`: **8/8** hedef.
+   - `gum_stretches` FAIL ise germe kolunu kur ve her karede plaka alt yüzünün 2 cm altından
+     1 cm içine kadar eksende `fluid.sample_solid_phi` oku. φ artık 2 cm boyunca doğrusal
+     (−0.0 … +0.02) olmalı.
+     - Doğrusalsa kopuşun kökü başka.
+     - Hâlâ 7.5 mm'de 0.05'e atlıyorsa pişirme eski payla kalmış (`sdf_dims` y'de büyümeli:
+       0.0575 / 0.0125 ≈ 5 → ~11).
+   - ★ **En sinsi:** `rise` ve `slide` sayıları değişirse, ölçek (`scale = current /
+     sdf_mesh_size`) yanlış okunuyor demektir. 1.0 olmalı.
+3. `python scripts/test/rt_matter_smoke.py --quick` (arka planda): **14/14**, kayma kolu
+   tam pakette de 0.100.
+
 ## Proje açılışında zaman çizelgesi yarışı — 2026-11-03 gece (CANLI: saç projesi çökmeden açıldı)
 
 - **Belirti:** saç sistemli proje açılırken read access violation. Yığın: `SDL_main` →

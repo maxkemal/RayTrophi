@@ -41,7 +41,7 @@ def main():
     assert "atomicAdd(count[3], 1u)" in shader
     specs = {
         "p2g": (10, 40), "g2p": (12, 72), "stress_update": (18, 116),
-        "stress_p2g": (9, 52), "settle": (5, 36), "advect": (11, 84),
+        "stress_p2g": (9, 52), "settle": (7, 52), "advect": (11, 84),
         "occupancy": (6, 40), "contact": (19, 16), "copy": (2, 4),
         "clear": (1, 4), "zero_faces": (4, 36), "pores": (13, 40),
     }
@@ -134,6 +134,21 @@ def main():
         "src/Physics/Fluid/FluidParticleSolidRecovery.cpp")
     assert 'j["mpm_surface_pushed_particles"]' in read("src/Api/RtIpc.cpp")
     assert 'method == "fluid.sample_solid_phi"' in read("src/Api/RtIpc.cpp")
+    # Settle damps and sleeps only SUPPORTED parcels (mean acceleration along
+    # gravity < tolerance * g, measured before damping). Pressure alone hung a
+    # mid-air snow block from its top (2026-11-03 live).
+    settle = read("shaders/sim_fluid_granular_settle.glsl")
+    assert "if(pressure<=pc.pressure_threshold || !supported)" in settle
+    assert "supported=accel<pc.support_tolerance*g;" in settle
+    assert "inline bool updateSupport(const SettleParams& sp" in read(
+        "include/Fluid/GranularConstitutive.h")
+    assert "static_assert(sizeof(SettleConstants)==48);" in read(
+        "include/Fluid/GranularGpuDispatch.h")
+    # The SDF cook pad is isotropic and >= 3 voxels (a 15 %-per-axis pad left a
+    # 5 cm plate 7.5 mm of field; a glued gum let go); readers take the stored
+    # mesh size, never sdf_extents / 1.3.
+    assert "sdf_extents / 1.3f" not in read("src/Physics/ParticleSimulation.cpp")
+    assert "pad_len = std::max(pad_len, 3.0f * domain_h);" in read("include/scene_data.h")
     # Matrix4x4::determinant applied the cofactor sign twice (det of a z
     # rotation = cos 2theta): every tilted collider OBB was inverted scaled.
     assert "m[0][0] * cofactor(0, 0) + m[0][1] * cofactor(0, 1) + m[0][2] * cofactor(0, 2) + m[0][3] * cofactor(0, 3)" in read(

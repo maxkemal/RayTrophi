@@ -115,6 +115,8 @@ std::size_t estimateMixedMatterWorkingSet(const FluidParticles& particles,
     bytes += bytesOf(particles.granular_plastic_increment);
     bytes += bytesOf(particles.granular_damage);
     bytes += bytesOf(particles.granular_fracture_history);
+    bytes += bytesOf(particles.granular_support_prev_vg);
+    bytes += bytesOf(particles.granular_support_accel);
     bytes += bytesOf(particles.uvw);
     bytes += bytesOf(particles.uvw_b);
 

@@ -33,6 +33,7 @@ import json
 import math
 from pathlib import Path
 import tempfile
+import time
 
 from rt_ipc import RtIpc
 
@@ -65,6 +66,15 @@ def main():
         call('collider.create', name=name + '_Collider', source_mode='mesh_sdf',
              source_object=obj, enabled=True, fluid_collision_enabled=True,
              contact_friction=friction, contact_adhesion_pa=glue)
+        # Wait for the cook before seeding. The slide arm measured 0.00005 m
+        # instead of 0.1 m in two full smoke runs (never alone): a cook late
+        # under load lets the gum fall through the plate onto the floor.
+        start = time.time()
+        while not call('collider.get', name=name + '_Collider').get('sdf_ready'):
+            if time.time() - start > 120:
+                raise RuntimeError(name + ': SDF cook did not finish in 120 s')
+            call('fluid.step', dt=1e-4)  # the publish tick runs GPU cooks
+            time.sleep(0.1)
         # The scene may rename the object (".001"); the collider keeps `name`.
         return obj, name + '_Collider'
 

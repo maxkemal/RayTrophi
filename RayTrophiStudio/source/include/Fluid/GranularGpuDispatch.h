@@ -45,9 +45,13 @@ static_assert(sizeof(StressP2GConstants)==48);
 
 struct alignas(16) SettleConstants {
     uint32_t count=0;float dt=0;float contact_damping=8.0f;float sleep_speed=0.03f;
-    float pressure_threshold=0.1f;float damping_max_speed=0.0f;uint32_t pad1=0,pad2=0;
+    float pressure_threshold=0.1f;float damping_max_speed=0.0f;
+    // Support (SettleParams): mean-acceleration time constant and the
+    // fraction of g below which a parcel counts as resting on something.
+    float support_tau_s=0.2f;float support_tolerance=0.25f;
+    float gx=0.0f,gy=-9.81f,gz=0.0f;uint32_t pad=0;
 };
-static_assert(sizeof(SettleConstants)==32);
+static_assert(sizeof(SettleConstants)==48);
 
 
 
@@ -255,6 +259,8 @@ inline bool ensureBuffers(SimulationComputeContext& compute, GpuBuffers& b,
     b.state_flags = make("granular_state_flags", bytes_u32, rw);
     b.damage = make("granular_damage", bytes_f32, rw);
     b.fracture_history = make("granular_fracture_history", bytes_f32, rw);
+    b.support_prev_vg = make("granular_support_prev_vg", bytes_f32, rw);
+    b.support_accel = make("granular_support_accel", bytes_f32, rw);
     if (!b.valid()) { destroy(&compute, b); return false; }
     b.capacity = count;
     return true;
@@ -270,7 +276,8 @@ inline bool uploadState(SimulationComputeContext& compute, const FluidParticles&
         p.granular_softening.size() != n || p.granular_bond_scale.size() != n ||
         p.granular_stress_diag.size() != n || p.granular_stress_shear.size() != n ||
         p.granular_material_flags.size() != n || p.granular_damage.size() != n ||
-        p.granular_fracture_history.size() != n)
+        p.granular_fracture_history.size() != n ||
+        p.granular_support_prev_vg.size() != n || p.granular_support_accel.size() != n)
         return false;
     compute.beginTransferBatch();
     bool ok = compute.uploadBuffer(b.deformation_col0, p.granular_deformation_col0.data(), n * sizeof(Vec3));
@@ -284,6 +291,8 @@ inline bool uploadState(SimulationComputeContext& compute, const FluidParticles&
     ok = ok && compute.uploadBuffer(b.stress_shear, p.granular_stress_shear.data(), n * sizeof(Vec3));
     ok = ok && compute.uploadBuffer(b.damage, p.granular_damage.data(), n * sizeof(float));
     ok = ok && compute.uploadBuffer(b.fracture_history, p.granular_fracture_history.data(), n * sizeof(float));
+    ok = ok && compute.uploadBuffer(b.support_prev_vg, p.granular_support_prev_vg.data(), n * sizeof(float));
+    ok = ok && compute.uploadBuffer(b.support_accel, p.granular_support_accel.data(), n * sizeof(float));
     return compute.endTransferBatch() && ok;
 }
 
@@ -342,13 +351,15 @@ inline bool dispatchStressP2G(SimulationComputeContext& compute,const GpuBuffers
 
 inline bool dispatchSettle(SimulationComputeContext& compute,const GpuBuffers& b,
                            ComputeBufferHandle velocities,std::size_t count,float dt,
-                           float damping_max_speed=0.0f){
+                           const Vec3& gravity,float damping_max_speed=0.0f){
     if(count==0)return true;if(!b.valid()||!velocities.valid())return false;
     SettleConstants c;c.count=static_cast<uint32_t>(std::min<std::size_t>(count,0xffffffffu));c.dt=dt;
     c.damping_max_speed=std::max(damping_max_speed,0.0f);
-    ComputeBufferHandle bufs[]={velocities,b.stress_diag,b.state_flags};
+    c.gx=gravity.x;c.gy=gravity.y;c.gz=gravity.z;
+    ComputeBufferHandle bufs[]={velocities,b.stress_diag,b.state_flags,
+                                b.support_prev_vg,b.support_accel};
     ComputeDispatch cmd;cmd.kernel="sim_fluid_granular_settle";cmd.groups={(c.count+255u)/256u,1u,1u};
-    cmd.buffers=bufs;cmd.buffer_count=3;cmd.constants=&c;cmd.constants_size=sizeof(c);
+    cmd.buffers=bufs;cmd.buffer_count=5;cmd.constants=&c;cmd.constants_size=sizeof(c);
     return dispatchMatterGpuModel(compute, cmd, b.matter_model);
 }
 
