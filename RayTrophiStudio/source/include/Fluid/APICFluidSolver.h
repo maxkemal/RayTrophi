@@ -732,6 +732,9 @@ struct APICSolverStats {
     bool  collider_query_gpu = false;
     float collider_query_ms = 0.0f;
     std::string collider_query_error;
+    // MPM parcels the domain step's true-surface push moved this frame (they
+    // are not counted in recovered_solid_particles: no teleport).
+    size_t mpm_surface_pushed_particles = 0;
     bool  p2g_on_gpu = false;
     bool  g2p_on_gpu = false;
     bool  pressure_on_gpu = false;
@@ -819,6 +822,14 @@ void seedBox(FluidParticles& particles,
 // emit. x particles_per_cell = the request.
 std::size_t countSeedBoxCells(const FluidSim::FluidGrid& grid,
                               const Vec3& min_world, const Vec3& max_world);
+
+// MPM parcels (Granular, Elastic, Auto when params.granular_enabled) inside a
+// collider (solid_phi < 0) go onto its surface and lose the velocity part
+// carrying them further in. The lane's S3 safety push, CPU side; the domain
+// step also runs it once per frame for the parcels solid recovery leaves alone.
+// Returns how many parcels it moved.
+std::size_t applyMpmParticleContact(FluidParticles& particles, const FluidSim::FluidGrid& grid,
+                                    const APICSolverParams& params, float dt);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

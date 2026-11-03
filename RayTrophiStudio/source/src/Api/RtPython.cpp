@@ -3044,6 +3044,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["collider_query_gpu"] = s.collider_query_gpu;
         d["collider_query_ms"] = s.collider_query_ms;
         d["collider_query_error"] = s.collider_query_error;
+        d["recovered_solid_particles"] = s.recovered_solid_particles;
+        d["mpm_surface_pushed_particles"] = s.mpm_surface_pushed_particles;
         d["total_ms"] = s.total_ms;
         d["p2g_ms"] = s.p2g_ms;
         d["pressure_ms"] = s.pressure_ms;
@@ -3459,6 +3461,28 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("domain"), py::arg("count") = 8,
        "Hottest and coldest live particles (count 1..64 each) with substance, solver model, "
        "granular transport, mass fraction, solid share, position and velocity.");
+
+    // Collider distance at world points (IPC fluid.sample_solid_phi).
+    fluid.def("sample_solid_phi", [](const std::string& domain,
+                                     const std::vector<std::array<float, 3>>& points) {
+        std::vector<rtapi::FluidSolidPhiSample> samples;
+        double voxel_m = 0.0;
+        bool has_field = false;
+        requireResult(rtapi::sampleFluidSolidPhi(domain, points, samples, voxel_m, has_field));
+        py::list rows;
+        for (const auto& s : samples) {
+            py::dict d;
+            d["ijk"] = py::make_tuple(s.ijk[0], s.ijk[1], s.ijk[2]);
+            d["solid"] = s.solid; d["cell_has_phi"] = s.cell_has_phi;
+            d["cell_phi"] = s.cell_phi; d["phi"] = s.phi;
+            rows.append(d);
+        }
+        py::dict d;
+        d["voxel_m"] = voxel_m; d["has_phi_field"] = has_field; d["samples"] = rows;
+        return d;
+    }, py::arg("domain"), py::arg("points"),
+       "Collider signed distance (m, < 0 inside) the MPM grid contact reads, at 1..4096 "
+       "world points: cell mask, cell-centre distance and the trilinear value.");
 
     // Hottest / most vapour-laden gas cells (IPC fluid.gas_cell_extremes).
     fluid.def("gas_cell_extremes", [](const std::string& domain, int count) {

@@ -4116,6 +4116,10 @@ struct FluidStepStats {
     bool collider_query_gpu = false;
     float collider_query_ms = 0.0f;
     std::string collider_query_error;
+    // Parcels solid recovery teleported out of collider cells this frame, and
+    // MPM parcels the true-surface push put back onto a collider instead.
+    std::size_t recovered_solid_particles = 0;
+    std::size_t mpm_surface_pushed_particles = 0;
     float total_ms = 0.0f;
     float p2g_ms = 0.0f;
     float pressure_ms = 0.0f;
@@ -5549,6 +5553,24 @@ struct FluidGasCellExtremes {
 // count 1..64 per list.
 Result getFluidGasCellExtremes(const std::string& domain_id_or_name, uint32_t count,
                                FluidGasCellExtremes& out);
+
+// The collider distance the MPM grid contact reads (grid.solid_phi, metres,
+// < 0 inside), at world points (fluid.sample_solid_phi).
+struct FluidSolidPhiSample {
+    int32_t ijk[3] = {0, 0, 0};  // cell holding the point (clamped)
+    bool  solid = false;         // the cell mask (centre inside a collider)
+    bool  cell_has_phi = false;  // a collider wrote this cell's distance
+    float cell_phi = 0.0f;       // the cell centre's distance
+    // Trilinear over the 8 surrounding cell centres, cells without a distance
+    // read as 2 h: the value the parcel safety push and phi_face see.
+    float phi = 0.0f;
+};
+// 1..4096 points. voxel_m is the grid's h; has_phi_field false = no collider
+// stamped a distance (the field is not allocated).
+Result sampleFluidSolidPhi(const std::string& domain_id_or_name,
+                           const std::vector<std::array<float, 3>>& points,
+                           std::vector<FluidSolidPhiSample>& out, double& voxel_m,
+                           bool& has_phi_field);
 
 // A liquid domain's particle budget (the panel's Max Particles). Seeding and
 // emitters stop at it. No ceiling (at least 1); the panel's 10M is a drag range.

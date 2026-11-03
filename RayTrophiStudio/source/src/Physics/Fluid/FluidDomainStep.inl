@@ -269,16 +269,32 @@
             // Cached/deforming colliders can enclose particles that were valid
             // in the previous frame. Recover before P2G so neither the pressure
             // grid nor SurfaceSDF density sees hidden liquid inside solid cells.
+            // MPM parcels on a collider with a distance stay where they are
+            // (a curved surface leaves resting parcels in a cell whose centre
+            // is solid) and take the true-surface safety push instead; the
+            // header says what the teleport did to them.
+            const bool auto_is_mpm = mixed_models ? mixed_legacy_granular
+                                                  : fluid_params.granular_enabled;
             const std::size_t solid_recovery_count =
                 fluid_params.grain.enabled ? 0 :
-                    Fluid::recoverParticlesFromSolidCells(state.particles, state.grid);
+                    Fluid::recoverParticlesFromSolidCells(state.particles, state.grid, 6,
+                                                          true, auto_is_mpm);
+            std::size_t mpm_surface_push_count = 0u;
+            if (!fluid_params.grain.enabled) {
+                // The push reads only granular_enabled (Auto ownership).
+                const bool granular_was = fluid_params.granular_enabled;
+                fluid_params.granular_enabled = auto_is_mpm;
+                mpm_surface_push_count = Fluid::applyMpmParticleContact(
+                    state.particles, state.grid, fluid_params, dt);
+                fluid_params.granular_enabled = granular_was;
+            }
             // GPU particle buffers were uploaded before collider voxelization.
             // Recovery changes positions on the host, so refresh the particle
             // buffers instead of changing physics models for one frame. The old
             // CPU fallback made granular piles alternate between MPM and liquid
             // pressure whenever a collider recovered even one parcel, observed
             // as a perpetual boiling layer at the contact surface.
-            if (solid_recovery_count > 0u && fluid_gpu_requested &&
+            if (solid_recovery_count + mpm_surface_push_count > 0u && fluid_gpu_requested &&
                 fluid_gpu_compute_available && context.compute &&
                 i < grid_domain_compute_buffers_.size()) {
                 gpu_integrated_forces = ensureGpuFluidParticleBuffers(
@@ -1436,6 +1452,7 @@
             state.fluid_stats.recovered_solid_particles = std::max(
                 state.fluid_stats.recovered_solid_particles,
                 solid_recovery_count);
+            state.fluid_stats.mpm_surface_pushed_particles = mpm_surface_push_count;
             // Patched in after the step because Fluid::step resets the stats
             // block: these two are MEASURED here, where the overlay was built,
             // and the pair is what distinguishes "no solid parcels" from

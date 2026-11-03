@@ -20,6 +20,10 @@
 //   shrinks by mu * |v_n| (Coulomb); moving out -> the surface's adhesion holds
 //   it: the stress to stop a face is rho * h * v_n / dt, up to the adhesion it
 //   stays, beyond it its separation slows by adhesion * dt / (rho * h).
+// Adhesion also acts on separating faces just OUTSIDE the surface
+// (0 <= phi_face < h), reading the glue and velocity of the solid cell across
+// it. Inside-only adhesion let go as soon as a rising plate opened half a face
+// of gap: a glued gum followed it ~1 cm and dropped back (2026-11-03 live).
 // The contact switches on with phi itself, not with whole cells, so a moving
 // plate carries a body continuously and the rest height is sub-voxel. A face
 // deep in a collider that holds no mass reads v = 0 and keeps its slip relative
@@ -114,9 +118,10 @@ float phiContact(float v, ivec3 low, ivec3 high, int component) {
     float phi_low = phiAt(low);
     float phi_high = phiAt(high);
     float phi_face = 0.5 * (phi_low + phi_high);
-    if (phi_face >= 0.0) {
+    if (phi_face >= pc.h) {
         return v;
     }
+    bool band = phi_face >= 0.0;
     vec3 grad;
     grad[component] = (phi_high - phi_low) / pc.h;
     for (int k = 1; k <= 2; ++k) {
@@ -126,8 +131,16 @@ float phiContact(float v, ivec3 low, ivec3 high, int component) {
                   (4.0 * pc.h);
     }
     float gl = length(grad);
-    if (gl < 1e-6) {
+    if (band && gl < 1e-6) {
         return v;
+    }
+    if (gl < 1e-6) {
+        // A ridge: the face sits on the mid-plane of a feature thinner than
+        // ~2h (a mesh_bvh shell), where phi has no slope. It is the only face
+        // of that plate with phi_face < 0, so skipping it let a jelly fall
+        // straight through a 2 cm shell (2026-11-03 live). No flow across it.
+        return solidVelocity(clamp(low, ivec3(0),
+                                   ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1)))[component];
     }
     vec3 n = grad / gl;
     // Full velocity at this face.
@@ -139,8 +152,15 @@ float phiContact(float v, ivec3 low, ivec3 high, int component) {
         u[a] = 0.25 * (snapFace(a, low) + snapFace(a, low + e) +
                        snapFace(a, high) + snapFace(a, high + e));
     }
-    ivec3 wall = clamp(phi_low < phi_high ? low : high, ivec3(0),
-                       ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1));
+    ivec3 wall = phi_low < phi_high ? low : high;
+    if (band) {
+        // The solid cell across the surface: half a cell past phi = 0 along
+        // -n, from the face centre (in cell units).
+        vec3 face = vec3(high) + 0.5;
+        face[component] -= 0.5;
+        wall = ivec3(floor(face - n * (phi_face / pc.h + 0.5)));
+    }
+    wall = clamp(wall, ivec3(0), ivec3(pc.nx - 1, pc.ny - 1, pc.nz - 1));
     vec3 vs = solidVelocity(wall);
     int q = cellIndex(wall);
     float mu = max(contact_mu[q], 0.0);
@@ -148,7 +168,15 @@ float phiContact(float v, ivec3 low, ivec3 high, int component) {
     vec3 rel = u - vs;
     float vn = dot(rel, n);
     vec3 vt = rel - vn * n;
-    if (vn < 0.0) {
+    if (band) {
+        // Outside: no support, no friction; only a glued surface holds a
+        // separating face.
+        if (glue <= 0.0 || vn <= 0.0) {
+            return v;
+        }
+        float hold = glue * pc.dt / (max(pc.density, 1.0) * pc.h);
+        rel = vt + n * max(vn - hold, 0.0);
+    } else if (vn < 0.0) {
         float slip = length(vt);
         if (slip > 1e-9) {
             vt *= max(slip - mu * (-vn), 0.0) / slip;
