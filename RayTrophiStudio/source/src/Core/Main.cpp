@@ -29,6 +29,7 @@
 #include "Autosave.h"
 #include "VolumetricRenderer.h"
 #include "PerfProfile.h"
+#include "UI/UvEditorUI.h"
 #include "Backend/IBackend.h"
 #include "Backend/OptixBackend.h"
 #include "Backend/VulkanBackend.h"
@@ -3485,7 +3486,8 @@ int main(int argc, char* argv[]) try {
                     // EXCEPTION: while the Geometry Graph node editor is focused, Delete is
                     // claimed by NodeEditorUIV2 for node/link deletion (see scene_ui.cpp's
                     // handleEditorShortcuts for the matching guard on the other Delete listener).
-                    if (!python_console_captures_input && !ImGui::GetIO().WantTextInput &&
+                    if (!python_console_captures_input && !UvEditorUI::capturesShortcuts() &&
+                        !ImGui::GetIO().WantTextInput &&
                         !ui.terrain_graph_focused && !ui.geometry_graph_focused && !ui.material_graph_focused &&
                         !ui.anim_graph_focused && !ui.node_editor_focused &&
                         !ui.timeline.panel_focused) {
@@ -3494,7 +3496,8 @@ int main(int argc, char* argv[]) try {
                 }
 
                 if (e.key.keysym.sym == SDLK_h) {
-                    if (!python_console_captures_input && !ImGui::GetIO().WantTextInput) {
+                    if (!python_console_captures_input && !UvEditorUI::capturesShortcuts() &&
+                        !ImGui::GetIO().WantTextInput) {
                         for (auto& obj : scene.world.objects) {
                             if (!obj) continue;
 
@@ -3530,7 +3533,8 @@ int main(int argc, char* argv[]) try {
                 // ===================================================================
                 // NUMPAD VIEW SHORTCUTS (Blender standard) - viewport nav only
                 // ===================================================================
-                if (!python_console_captures_input && !ImGui::GetIO().WantTextInput && scene.camera) {
+                if (!python_console_captures_input && !UvEditorUI::capturesShortcuts() &&
+                    !ImGui::GetIO().WantTextInput && scene.camera) {
                     const bool ctrl = (e.key.keysym.mod & KMOD_CTRL) != 0;
                     Camera& cam = *scene.camera;
 
@@ -4519,7 +4523,18 @@ int main(int argc, char* argv[]) try {
         }
         // All non-Rendered modes use the interactive raster backend and share
         // its native SurfaceSDF volume table.
-        g_solid_viewport_active = isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
+        {
+            const bool raster_now =
+                isInteractiveViewportShadingMode(ui.viewport_settings.shading_mode);
+            // ★ Rendered -> raster on a PAUSED frame: the live GPU surface route
+            // skipped the host readback, and nothing else runs the render sync
+            // while the timeline is still. Without this the raster device kept
+            // no composition (and an old proxy) until the next step
+            // (GPU_YUZEY_LEVEL_SET.md, host_stale; measured 2026-11-04).
+            if (raster_now && !g_solid_viewport_active)
+                scene.requestSimulationTimelineRenderResync();
+            g_solid_viewport_active = raster_now;
+        }
         g_material_preview_viewport_active = ui.viewport_settings.shading_mode == 1;
         // ★ A dedicated raster viewport backend is a SECOND VkDevice, and the
         // live dense-gas addresses belong to whichever device owns the sim
@@ -4830,6 +4845,7 @@ int main(int argc, char* argv[]) try {
 
         if (mouse_control_enabled && scene.camera && !keyboard_locked &&
             !rtpython::wantsInputCapture() && !rtapi::renderOutputPending() &&
+            !UvEditorUI::capturesShortcuts() &&
             !ImGui::GetIO().WantTextInput) {
 
             Vec3 forward = (scene.camera->lookat - scene.camera->lookfrom).normalize();

@@ -45,7 +45,15 @@ bool gridCells(const FogFieldGrid& grid, std::size_t& cells) {
 }
 
 bool charge(std::size_t count, std::size_t bytes, std::size_t budget, std::size_t& total) {
-    if (total > budget || count > (budget - total) / bytes) {
+    if (total > budget) {
+        return false;
+    }
+    // Hidden/absent gas has zero cells and zero bytes per cell. It consumes
+    // no budget and must not reach the overflow check's division by bytes.
+    if (count == 0 || bytes == 0) {
+        return true;
+    }
+    if (count > (budget - total) / bytes) {
         return false;
     }
     total += count * bytes;
@@ -75,7 +83,9 @@ bool prepare(const MatterFogFieldInput& input, MatterFogFields& result, std::str
         return false;
     };
     if (!input.particles || !input.plan || !std::isfinite(input.parcel_density) ||
-        input.parcel_density < 0.0f || input.max_streams == 0) {
+        input.parcel_density < 0.0f || input.max_streams == 0 ||
+        !std::isfinite(input.spread_voxels) || input.spread_voxels < 0.0f ||
+        input.spread_voxels > kFogSpreadMaxVoxels) {
         return refuse("Fog field input requires particles, plan and valid density/stream budget");
     }
     const auto& particles = *input.particles;
@@ -151,8 +161,16 @@ bool prepare(const MatterFogFieldInput& input, MatterFogFields& result, std::str
                 grid.voxel, input.parcel_density, &selection, field.density)) {
             field.density.assign(carrier_cells, 0.0f);
         }
+        if (input.spread_voxels > 0.0f) {
+            // End this temporary's lifetime before temperature gather so the
+            // existing two-field scratch allowance also bounds the blur peak.
+            std::vector<float> spread;
+            spreadFogDensity(field.density.data(), grid.nx, grid.ny, grid.nz,
+                input.spread_voxels, spread);
+            field.density.swap(spread);
+        }
         splatFogTemperatureKelvin(particles, grid.nx, grid.ny, grid.nz, grid.origin,
-            grid.voxel, 0.0f, field.temperature_kelvin, &selection);
+            grid.voxel, input.spread_voxels, field.temperature_kelvin, &selection);
         result.fields.push_back(std::move(field));
     }
     if (gas_enabled) {

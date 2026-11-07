@@ -809,6 +809,8 @@ void diffuseParticleTemperature(FluidParticles& parts,
                                 float conductivity,
                                 float dt);
 
+class MeshVolumeCellMask;  // Fluid/MeshVolumeTest.h
+
 void seedBox(FluidParticles& particles,
              const FluidSim::FluidGrid& grid,
              const Vec3& min_world,
@@ -819,13 +821,17 @@ void seedBox(FluidParticles& particles,
              // Kelvin the new parcels are born at. 293 K rather than 0: a parcel
              // at 0 K is not cold, it is unwritten, and the thermal chain would
              // freeze it on first contact. Grid domains pass their ambient.
-             float temperature_kelvin = 293.0f);
+             float temperature_kelvin = 293.0f,
+             // Mesh Volume seed: only points inside the mesh are emitted; the
+             // box is then the mesh bounds. Null = the whole box.
+             const MeshVolumeCellMask* mask = nullptr);
 
 // Non-solid cells seedBox would fill for this box (same cell range), so a
 // caller can tell the parcels a seed ASKED for from the ones the budget let it
 // emit. x particles_per_cell = the request.
 std::size_t countSeedBoxCells(const FluidSim::FluidGrid& grid,
-                              const Vec3& min_world, const Vec3& max_world);
+                              const Vec3& min_world, const Vec3& max_world,
+                              const MeshVolumeCellMask* mask = nullptr);
 
 // MPM parcels (Granular, Elastic, Auto when params.granular_enabled) inside a
 // collider (solid_phi < 0) go onto its surface and lose the velocity part

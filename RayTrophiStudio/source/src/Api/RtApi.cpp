@@ -2062,6 +2062,45 @@ InstancePreparationInfo instancePreparationStats() {
     return out;
 }
 
+std::vector<SurfaceCompositionProbeRow> probeSurfaceComposition(const float world[3]) {
+    std::vector<SurfaceCompositionProbeRow> out;
+    auto probe = [&](const char* role, Backend::IBackend* backend) {
+        auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(backend);
+        if (!vk) return;
+        const auto p = vk->probeSurfaceComposition(world);
+        SurfaceCompositionProbeRow r;
+        r.role = role;
+        r.found = p.found;
+        r.has_buffer = p.has_buffer;
+        r.slot = p.slot;
+        r.vdb_id = p.vdb_id;
+        for (int a = 0; a < 3; ++a) { r.cell[a] = p.cell[a]; r.device[a] = p.values[a]; }
+        r.address_offset = p.address_offset;
+        r.uvw_bytes = p.uvw_bytes;
+        // The host copy the producer published on the scene volume.
+        if (g_ctx && p.vdb_id >= 0) {
+            for (const auto& vol : g_ctx->scene.vdb_volumes) {
+                if (!vol || vol->getVDBVolumeID() != p.vdb_id) continue;
+                const int nx = vol->render_isosurface_uvw_dim[0];
+                const int ny = vol->render_isosurface_uvw_dim[1];
+                const std::size_t index = (static_cast<std::size_t>(p.cell[0]) +
+                    static_cast<std::size_t>(p.cell[1]) * nx +
+                    static_cast<std::size_t>(p.cell[2]) * nx * ny) * 3u;
+                if (index + 2 < vol->render_isosurface_composition.size()) {
+                    r.host_found = true;
+                    for (int a = 0; a < 3; ++a)
+                        r.host[a] = vol->render_isosurface_composition[index + a];
+                }
+                break;
+            }
+        }
+        out.push_back(r);
+    };
+    probe("render", ::g_backend.get());
+    probe("viewport", ::g_viewport_backend.get());
+    return out;
+}
+
 VolumeSlotsInfo volumeSlots() {
     VolumeSlotsInfo out;
     auto sourceName = [](int source_type) -> const char* {
@@ -2083,6 +2122,7 @@ VolumeSlotsInfo volumeSlots() {
             table.is_vulkan = true;
             out.available = true;
             table.upload_serial = vk->volumeUploadSerial();
+            table.preview_material_count = vk->previewBoundMaterialCount();
             if (auto* dev = vk->getVulkanDevice()) table.instance_count = dev->m_volumeCount;
             for (const auto& d : vk->describeVolumeSlots()) {
                 VolumeSlotRow r;
@@ -2100,6 +2140,10 @@ VolumeSlotsInfo volumeSlots() {
                 r.has_temperature = d.has_temperature;
                 r.density_device_local = d.density_device_local;
                 r.temperature_device_local = d.temperature_device_local;
+                r.iso_material_slot = d.iso_material_slot;
+                r.has_uvw = d.has_uvw;
+                r.has_composition = d.has_composition;
+                for (int k = 0; k < 3; ++k) r.uvw_dim[k] = d.uvw_dim[k];
                 r.emission_mode = d.emission_mode;
                 r.color_ramp_enabled = d.color_ramp_enabled;
                 r.blackbody_intensity = d.blackbody_intensity;
@@ -3810,6 +3854,16 @@ Result getSimControlState(SimControlStateInfo& out) {
     out.frame = ui.timeline.getCurrentFrame();
     out.playing = ui.timeline.isPlaying();
     out.dropped_seeds = g_ctx->scene.lastResetDroppedFluidSeeds();
+    const auto& rewind = g_ctx->scene.lastSimRewind();
+    out.last_rewind_valid = rewind.valid;
+    out.last_rewind_frame = rewind.frame;
+    out.last_rewind_part = rewind.first_changed_part;
+    out.last_rewind_absorbed = rewind.absorbed;
+    out.last_rewind_fluid_affected = rewind.fluid_affected;
+    out.rewind_history.clear();
+    for (const auto& r : g_ctx->scene.simRewindHistory()) {
+        out.rewind_history.push_back({r.frame, r.first_changed_part, r.absorbed, r.fluid_affected});
+    }
     return Result::success();
 }
 

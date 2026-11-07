@@ -172,14 +172,6 @@ void drawHierarchy(UIContext& ctx) {
     ImGui::TreePop();
 }
 
-void drawProperties(UIContext& ctx) {
-    if (ImGui::Button("Open Audio workspace")) {
-        if (ctx.scene_ui_ptr) {
-            ctx.scene_ui_ptr->tab_to_focus = "Audio";
-        }
-    }
-}
-
 void drawSourceInspector(UIContext& ctx) {
     const auto output = ctx.scene.audio->invoke("status", json::object());
     if (output.value("preview_muted", false)) {

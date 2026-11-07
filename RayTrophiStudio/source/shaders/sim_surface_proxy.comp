@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Final field -> the renderer's density proxy (0.5 - 0.5*phi/w, clamped 0..1),
+// plus the counters and the occupied cell range the host needs for the volume
+// box. CPU twins: the proxy loop in syncSimulationRenderVolumes, the active /
+// surface recount at the end of buildLevelSet, VDBVolume::occupiedLocalBox
+// (density > 0).
+// stats: [0] active, [1] surface, [2..4] lowest occupied cell, [5..7] highest+1
+// (cleared to 0/~0 by the host; 0 in [5] means nothing occupied).
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer Sdf { float sdf[]; };
+layout(set = 0, binding = 1) buffer Density { float density[]; };
+layout(set = 0, binding = 2) buffer Stats { uint stats[]; };
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    uint nx = uint(pc.grid.x), ny = uint(pc.grid.y), nz = uint(pc.grid.z);
+    if (c >= nx * ny * nz) return;
+    float phi = sdf[c];
+    if (phi < pc.band.x - 1e-5) {
+        atomicAdd(stats[0], 1u);
+        if (abs(phi) < pc.cell.x) atomicAdd(stats[1], 1u);
+    }
+    float d = clamp(0.5 - phi * pc.band.y, 0.0, 1.0);
+    density[c] = d;
+    if (d > 0.0) {
+        uint x = c % nx;
+        uint y = (c / nx) % ny;
+        uint z = c / (nx * ny);
+        atomicMin(stats[2], x); atomicMin(stats[3], y); atomicMin(stats[4], z);
+        atomicMax(stats[5], x + 1u); atomicMax(stats[6], y + 1u); atomicMax(stats[7], z + 1u);
+    }
+}

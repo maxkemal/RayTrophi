@@ -318,6 +318,13 @@ FluidViewPlan resolveFluidViews(const SimulationGridDomainDesc& desc,
         const bool seen = std::any_of(plan.entries.begin(), plan.entries.end(),
             [&e](const FluidViewEntry& x) { return x.tag == e.tag; });
         if (!seen) plan.entries.push_back(e);
+        // ★ Untagged liquid is the Default Substance, so its Output route is
+        // that binding's route (the material side: collectSubstanceMaterialEntries).
+        if (b.substance == desc.fluid_params.default_substance &&
+            !plan.entries.front().is_override) {
+            plan.entries.front().view = e.view;
+            plan.entries.front().is_override = e.is_override;
+        }
     }
 
     auto mark = [&plan](FluidView v) {

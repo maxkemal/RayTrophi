@@ -113,7 +113,11 @@ VulkanBackendAdapter::describeVolumeSlots() const {
             for (int k = 0; k < 3; ++k) {
                 r.aabb_min[k] = v.aabb_min[k];
                 r.aabb_max[k] = v.aabb_max[k];
+                r.uvw_dim[k] = static_cast<int>(v.uvw_dim[k] + 0.5f);
             }
+            r.iso_material_slot = v.iso_material_index;
+            r.has_uvw = v.uvw_residual_address != 0;
+            r.has_composition = v.composition_address != 0;
         }
         rows.push_back(std::move(r));
     }
@@ -142,7 +146,11 @@ VulkanBackendAdapter::describeVolumeSlots() const {
             for (int k = 0; k < 3; ++k) {
                 r.aabb_min[k] = v.aabb_min[k];
                 r.aabb_max[k] = v.aabb_max[k];
+                r.uvw_dim[k] = static_cast<int>(v.uvw_dim[k] + 0.5f);
             }
+            r.iso_material_slot = v.iso_material_index;
+            r.has_uvw = v.uvw_residual_address != 0;
+            r.has_composition = v.composition_address != 0;
             rows.push_back(std::move(r));
         }
     }
@@ -175,6 +183,48 @@ VulkanBackendAdapter::describeVolumeSlots() const {
         }
     }
     return rows;
+}
+
+VulkanBackendAdapter::SurfaceCompositionProbe
+VulkanBackendAdapter::probeSurfaceComposition(const float world[3]) const {
+    SurfaceCompositionProbe out;
+    if (!m_device) return out;
+    const auto& shadow = m_device->m_volumeShadow;
+    const auto rows = describeVolumeSlots();
+    for (std::size_t i = 0; i < shadow.size(); ++i) {
+        const auto& v = shadow[i];
+        if (v.source_type != 4 || v.composition_address == 0) continue;
+        out.found = true;
+        out.slot = static_cast<int>(i);
+        for (const auto& r : rows) {
+            if (r.slot == out.slot) { out.vdb_id = r.vdb_id; break; }
+        }
+        const int res[3] = {static_cast<int>(v.uvw_dim[0] + 0.5f),
+                            static_cast<int>(v.uvw_dim[1] + 0.5f),
+                            static_cast<int>(v.uvw_dim[2] + 0.5f)};
+        if (res[0] <= 0 || res[1] <= 0 || res[2] <= 0 || !(v.uvw_voxel > 0.0f)) return out;
+        for (int a = 0; a < 3; ++a) {
+            const int c = static_cast<int>(std::floor((world[a] - v.uvw_origin[a]) / v.uvw_voxel));
+            out.cell[a] = (std::max)(0, (std::min)(res[a] - 1, c));
+        }
+        out.uvw_bytes = static_cast<uint64_t>(res[0]) * res[1] * res[2] * 3u * sizeof(float);
+        const auto it = m_uvwBuffers.find(out.vdb_id);
+        if (it == m_uvwBuffers.end() || !it->second.buffer ||
+            v.composition_address < it->second.deviceAddress) {
+            return out;
+        }
+        out.address_offset = v.composition_address - it->second.deviceAddress;
+        const uint64_t cellIndex = static_cast<uint64_t>(out.cell[0]) +
+            static_cast<uint64_t>(out.cell[1]) * res[0] +
+            static_cast<uint64_t>(out.cell[2]) * res[0] * res[1];
+        const uint64_t offset = out.address_offset + cellIndex * 3u * sizeof(float);
+        if (offset + 3u * sizeof(float) > it->second.size) return out;
+        out.has_buffer = true;
+        const_cast<VulkanRT::VulkanDevice*>(m_device.get())->downloadBuffer(
+            it->second, out.values, 3u * sizeof(float), offset);
+        return out;
+    }
+    return out;
 }
 
 std::vector<int> VulkanBackendAdapter::computeOrderedVolumeKeys() const {
@@ -700,6 +750,12 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
             src.dense_resolution_x > 0 &&
             src.dense_resolution_y > 0 &&
             src.dense_resolution_z > 0;
+        // A live GPU SURFACE rides the same packet fields (GPU_YUZEY_LEVEL_SET.md
+        // Y2): the producer publishes its density proxy through
+        // setLiveDenseGpuFields, so the ownership rule above applies unchanged.
+        // It keeps source_type 4 and its _ext_reserved surface slots; the shader
+        // places the proxy through the uvw_* fields (surface_dense_sampling.glsl).
+        const bool liveDenseSurface = liveDenseGas && src.source_type == 4;
 
         // Copy original transforms directly (preserves rotation). Keep this
         // index distinct from the outer volume-slot index: the project uses
@@ -733,7 +789,7 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
         dst._ext_reserved[9] = src.density_noise_strength;
         dst._ext_reserved[10] = static_cast<float>(src.density_noise_detail);
         dst._ext_reserved[11] = static_cast<float>(src.density_noise_seed);
-        if (liveDenseGas) {
+        if (liveDenseGas && !liveDenseSurface) {
             // source_type 5 reuses the volume ABI's reserved slots:
             // [0..2] dense resolution, [3..5] dense world/grid origin.
             dst.source_type = 5;
@@ -1123,6 +1179,29 @@ void VulkanBackendAdapter::updateVDBVolumes(const std::vector<GpuVDBVolume>& vol
                 }
                 m_uvwUploadedVersions.erase(vdb_id);
             }
+        }
+
+        // ── Live GPU surface placement (overrides the host uvw upload above) ──
+        // The proxy and the coordinate residual share ONE grid on this route
+        // (the host refuses it for a refined multiplier), so the uvw placement
+        // IS the proxy placement. Published as a set even without a coordinate
+        // field: address 0 there still means "anchor in world space".
+        if (liveDenseSurface) {
+            const float voxel = (opticalSource && opticalSource->dense_voxel_size > 0.0f)
+                ? opticalSource->dense_voxel_size : src.voxel_size;
+            dst.uvw_dim[0] = static_cast<float>(src.dense_resolution_x);
+            dst.uvw_dim[1] = static_cast<float>(src.dense_resolution_y);
+            dst.uvw_dim[2] = static_cast<float>(src.dense_resolution_z);
+            dst.uvw_origin[0] = src.dense_origin.x;
+            dst.uvw_origin[1] = src.dense_origin.y;
+            dst.uvw_origin[2] = src.dense_origin.z;
+            dst.uvw_voxel = voxel;
+            dst.uvw_residual_address =
+                opticalSource ? opticalSource->surface_live_uvw_address : 0;
+            // The device mixture, never a host one from an older frame: that
+            // would describe a different surface.
+            dst.composition_address =
+                opticalSource ? opticalSource->surface_live_composition_address : 0;
         }
 
         // Scattering

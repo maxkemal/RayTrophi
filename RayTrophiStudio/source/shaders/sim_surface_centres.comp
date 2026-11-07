@@ -1,0 +1,54 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Temporary render-centre smoothing. CPU twin: FluidLevelSet.cpp stage 1b with
+// anisotropy OFF (the GPU route refuses anisotropic kernels). Weighted mean of
+// the neighbours inside the smoothing radius, taken relative to the parcel and
+// moved by lambda; below the neighbour minimum the raw centre stays.
+// This pass was 124 of 153 ms on the CPU for 100k snow parcels (2026-11-04).
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer Positions { float positions[]; };
+layout(set = 0, binding = 1) readonly buffer BinIndex { uint bin_index[]; };
+layout(set = 0, binding = 2) readonly buffer Offsets { uint offsets[]; };
+layout(set = 0, binding = 3) readonly buffer Items { uint items[]; };
+layout(set = 0, binding = 4) buffer Centres { float centres[]; };
+vec3 position(uint p) {
+    return vec3(positions[p * 3u], positions[p * 3u + 1u], positions[p * 3u + 2u]);
+}
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    if (p >= uint(pc.grid.w)) return;
+    vec3 xp = position(p);
+    vec3 result = xp;
+    if (bin_index[p] != kSurfaceInvalid && pc.centre.y > 0.0) {
+        ivec3 c = binCoordinate(xp);
+        ivec3 lo = max(c - ivec3(pc.reach.x), ivec3(0));
+        ivec3 hi = min(c + ivec3(pc.reach.x), pc.bins.xyz - ivec3(1));
+        float rs2 = pc.centre.x;
+        float wsum = 0.0;
+        int ncount = 0;
+        vec3 mom1 = vec3(0.0);
+        for (int k = lo.z; k <= hi.z; ++k)
+        for (int j = lo.y; j <= hi.y; ++j)
+        for (int i = lo.x; i <= hi.x; ++i) {
+            uint b = binIndex(ivec3(i, j, k));
+            uint end = offsets[b + 1u];
+            for (uint a = offsets[b]; a < end; ++a) {
+                vec3 r = position(items[a]) - xp;
+                float d2 = dot(r, r);
+                if (d2 >= rs2) continue;
+                float t = 1.0 - d2 / rs2;
+                float w = t * t * t;
+                wsum += w;
+                ++ncount;
+                mom1 += w * r;
+            }
+        }
+        if (wsum >= 1e-12 && ncount >= pc.reach.y) {
+            result = xp + (mom1 / wsum) * pc.centre.y;
+        }
+    }
+    centres[p * 3u] = result.x;
+    centres[p * 3u + 1u] = result.y;
+    centres[p * 3u + 2u] = result.z;
+}

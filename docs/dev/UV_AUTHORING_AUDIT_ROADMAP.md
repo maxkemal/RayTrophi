@@ -4,6 +4,8 @@ Tarih: 2026-11-03. Durum: kaynak incelemesi ve önerilen tasarım; uygulama tama
 İlk kaynak dilimi artık [UV_EDITOR_FIRST_SLICE.md](UV_EDITOR_FIRST_SLICE.md) içinde
 izleniyor. Aşağıdaki mevcut-durum envanteri uygulama öncesi audit snapshot'ıdır;
 tam roadmap hâlâ tamamlanmadı, ilk dilimin build/canlı kabulü bekleniyor.
+2026-11-04 devamı: [Corner remap ve üçgen UV authoring](UV_CORNER_REMAP.md) kaynakta;
+attribute koruyan split ve kabul testleri eklendi. Native/canlı doğrulama bekleniyor.
 Build çalıştırılmadı, uygulama açılmadı. Mevcut çalışma ağacındaki değişiklikler korunmuştur.
 Buradaki yeni modül ve API isimleri öneridir; mevcut özellik olarak okunmamalıdır.
 
@@ -171,6 +173,11 @@ pin'li conformal solve bağımsız çekirdek işidir. Pack-only akışı AddUvMe
 ile, ada biçimini ve seçim dışı adaları koruma testleriyle yapılır.
 
 ### Kullanıcının build sonrası çalıştıracağı kabul listesi
+
+2026-11-04 ek kaynak teslimi: [UV etkileşim ve native texture gösterimi](UV_INTERACTIVE_EDITING.md).
+Island/vertex/edge seçimi, endpoint transform API'si ve özgün çözünürlüklü texture
+arka planı eklendi; bu ekler için kullanıcı build'i ve canlı UI kabulü bekleniyor.
+Bu teslim seam/pin aşamalarının tamamlandığı anlamına gelmez.
 
 1. xatlas mevcut/yok iki yapılandırmada doğru capability ve açıklayıcı hata.
 2. Küp, açık plane, kapalı sphere, torus, disconnected ve non-manifold mesh:

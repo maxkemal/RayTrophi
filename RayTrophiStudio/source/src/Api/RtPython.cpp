@@ -1352,6 +1352,26 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         // refill (one-shot fluid.seed(), no reseed recipe) -- see
         // docs/dev/NEXT_BUILD_CHECKS.md §A1. Usually empty.
         d["dropped_seeds"] = info.dropped_seeds;
+        if (info.last_rewind_valid) {
+            py::dict r;
+            r["frame"] = info.last_rewind_frame;
+            r["first_changed_part"] = info.last_rewind_part;
+            r["absorbed"] = info.last_rewind_absorbed;
+            r["fluid_affected"] = info.last_rewind_fluid_affected;
+            d["last_rewind"] = r;
+        } else {
+            d["last_rewind"] = py::none();
+        }
+        py::list history;
+        for (const auto& r : info.rewind_history) {
+            py::dict e;
+            e["frame"] = r.frame;
+            e["first_changed_part"] = r.first_changed_part;
+            e["absorbed"] = r.absorbed;
+            e["fluid_affected"] = r.fluid_affected;
+            history.append(e);
+        }
+        d["rewind_history"] = history;
         return d;
     },
     "Who last moved the solvers, and an epoch that changes whenever anything "
@@ -1640,6 +1660,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_gather_ms"] = info.surface_gather_ms;
         d["surface_smooth_ms"] = info.surface_smooth_ms;
         d["surface_active_cells"] = info.surface_active_cells;
+        d["surface_gpu"] = info.surface_gpu;
+        d["surface_route"] = info.surface_route;
+        d["surface_gpu_status"] = info.surface_gpu_status;
+        d["surface_upload_bytes"] = info.surface_upload_bytes;
+        d["surface_download_bytes"] = info.surface_download_bytes;
         d["surface_work_cells"] = info.surface_work_cells;
         d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
@@ -1693,6 +1718,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["pressure_cg_final_relative_residual"] = info.pressure_cg_final_relative_residual;
         d["pressure_cg_multigrid"] = info.pressure_cg_multigrid;
         d["seed_mode"] = info.seed_mode;
+        d["seed_mesh_object"] = info.seed_mesh_object;
+        d["seed_error"] = info.seed_error;
         d["seed_min"] = vec3ToPython(info.seed_min);
         d["seed_max"] = vec3ToPython(info.seed_max);
         d["seed_particles_per_cell"] = info.seed_particles_per_cell;
@@ -2001,6 +2028,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_gather_ms"] = info.surface_gather_ms;
         d["surface_smooth_ms"] = info.surface_smooth_ms;
         d["surface_active_cells"] = info.surface_active_cells;
+        d["surface_gpu"] = info.surface_gpu;
+        d["surface_route"] = info.surface_route;
+        d["surface_gpu_status"] = info.surface_gpu_status;
+        d["surface_upload_bytes"] = info.surface_upload_bytes;
+        d["surface_download_bytes"] = info.surface_download_bytes;
         d["surface_work_cells"] = info.surface_work_cells;
         d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
@@ -2054,6 +2086,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["pressure_cg_final_relative_residual"] = info.pressure_cg_final_relative_residual;
         d["pressure_cg_multigrid"] = info.pressure_cg_multigrid;
         d["seed_mode"] = info.seed_mode;
+        d["seed_mesh_object"] = info.seed_mesh_object;
+        d["seed_error"] = info.seed_error;
         d["seed_min"] = vec3ToPython(info.seed_min);
         d["seed_max"] = vec3ToPython(info.seed_max);
         d["seed_particles_per_cell"] = info.seed_particles_per_cell;
@@ -2344,6 +2378,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["surface_gather_ms"] = info.surface_gather_ms;
         d["surface_smooth_ms"] = info.surface_smooth_ms;
         d["surface_active_cells"] = info.surface_active_cells;
+        d["surface_gpu"] = info.surface_gpu;
+        d["surface_route"] = info.surface_route;
+        d["surface_gpu_status"] = info.surface_gpu_status;
+        d["surface_upload_bytes"] = info.surface_upload_bytes;
+        d["surface_download_bytes"] = info.surface_download_bytes;
         d["surface_work_cells"] = info.surface_work_cells;
         d["surface_bin_cells"] = info.surface_bin_cells;
         d["thermal_liquid_enabled"] = info.thermal_liquid_enabled;
@@ -2397,6 +2436,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["pressure_cg_final_relative_residual"] = info.pressure_cg_final_relative_residual;
         d["pressure_cg_multigrid"] = info.pressure_cg_multigrid;
         d["seed_mode"] = info.seed_mode;
+        d["seed_mesh_object"] = info.seed_mesh_object;
+        d["seed_error"] = info.seed_error;
         d["seed_min"] = vec3ToPython(info.seed_min);
         d["seed_max"] = vec3ToPython(info.seed_max);
         d["seed_particles_per_cell"] = info.seed_particles_per_cell;
@@ -2615,6 +2656,18 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "refused rather than silently creating nothing. particles_per_cell applies "
        "to this initial fill. Point, object-bounds and mesh-surface flow sources "
        "use their independent fluid_particles_per_second rate.");
+
+    fluid.def("seed_mesh", [](const std::string& domain, const std::string& object,
+                               int particles_per_cell, bool replace, bool persistent,
+                               float grain_saturation) {
+        requireResult(rtapi::seedFluidParticlesFromMesh(domain, object, particles_per_cell,
+                                                        replace, persistent, grain_saturation));
+    }, py::arg("domain"), py::arg("object"), py::arg("particles_per_cell") = 8,
+       py::arg("replace") = true, py::arg("persistent") = false,
+       py::arg("grain_saturation") = -1.0f,
+       "Fill the inside of a scene object (Seed Mode 'Mesh Volume'), e.g. a hidden "
+       "castle mesh seeded with sand. Raises when the object is missing, does not "
+       "overlap the domain, or has no inside on the domain grid (open surface).");
 
     // Script twin of fluid.run: N steps in one call. In-process there is no
     // IPC round trip to save, so it only steps; read fluid.list_domains after.
@@ -2960,6 +3013,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         if(kwargs.contains("anisotropy_max_stretch")){surface_patch.anisotropy_max_stretch=py::cast<float>(kwargs["anisotropy_max_stretch"]);has_surface_patch=true;}
         if(kwargs.contains("anisotropy_neighbor_min")){surface_patch.anisotropy_neighbor_min=py::cast<int>(kwargs["anisotropy_neighbor_min"]);has_surface_patch=true;}
         if(kwargs.contains("position_smoothing")){surface_patch.position_smoothing=py::cast<float>(kwargs["position_smoothing"]);has_surface_patch=true;}
+        if(kwargs.contains("surface_gpu")){surface_patch.surface_gpu=py::cast<bool>(kwargs["surface_gpu"]);has_surface_patch=true;}
         rtapi::FluidThermalPatch thermal_patch;
         bool has_thermal_patch = false;
         if(kwargs.contains("thermal_liquid_enabled")){thermal_patch.enabled=py::cast<bool>(kwargs["thermal_liquid_enabled"]);has_thermal_patch=true;}
@@ -3433,6 +3487,28 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["whitewater_position_hash"] = hex(dg.whitewater_position_hash);
         return d;
     }, py::arg("domain"), "Bit-exact fingerprint of the live particle state (determinism probes).");
+
+    // GPU surface builder vs the CPU reference (IPC fluid.surface_parity).
+    fluid.def("surface_parity", [](const std::string& domain) {
+        rtapi::FluidSurfaceParity p;
+        requireResult(rtapi::getFluidSurfaceParity(domain, p));
+        py::dict d;
+        d["live"] = p.live; d["gpu_ok"] = p.gpu_ok; d["gpu_status"] = p.gpu_status;
+        d["particles"] = p.particles;
+        d["grid"] = py::make_tuple(p.grid[0], p.grid[1], p.grid[2]);
+        d["voxel"] = p.voxel; d["cells"] = p.cells; d["compared_cells"] = p.compared_cells;
+        d["cpu_active"] = p.cpu_active; d["gpu_active"] = p.gpu_active;
+        d["band_mismatch"] = p.band_mismatch; d["sign_mismatch"] = p.sign_mismatch;
+        d["max_abs_phi"] = p.max_abs_phi; d["mean_abs_phi"] = p.mean_abs_phi;
+        d["max_abs_phi_over_h"] = p.max_abs_phi_over_h;
+        d["uvw_compared"] = p.uvw_compared; d["uvw_max_abs"] = p.uvw_max_abs;
+        d["composition_cpu"] = p.composition_cpu; d["composition_gpu"] = p.composition_gpu;
+        d["composition_slot_mismatch"] = p.composition_slot_mismatch;
+        d["composition_weight_max_abs"] = p.composition_weight_max_abs;
+        d["cpu_ms"] = p.cpu_ms; d["gpu_ms"] = p.gpu_ms;
+        d["upload_bytes"] = p.upload_bytes; d["download_bytes"] = p.download_bytes;
+        return d;
+    }, py::arg("domain"), "GPU surface builder vs the CPU reference on the same live particles.");
 
     // Hottest / coldest particles with what they are (IPC fluid.particle_extremes).
     fluid.def("particle_extremes", [](const std::string& domain, int count) {
@@ -6369,6 +6445,23 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, "TLAS instance preparation per Vulkan backend role: instance_count, last "
        "build/update path, CPU prepare ms, and the procedural sphere cloud's "
        "record count (its primitives, which are not TLAS instances).");
+    render.def("probe_surface_composition", [](float x, float y, float z) {
+        const float point[3] = {x, y, z};
+        py::list out;
+        for (const auto& r : rtapi::probeSurfaceComposition(point)) {
+            py::dict d;
+            d["role"] = r.role; d["found"] = r.found; d["has_buffer"] = r.has_buffer;
+            d["slot"] = r.slot; d["vdb_id"] = r.vdb_id;
+            d["cell"] = py::make_tuple(r.cell[0], r.cell[1], r.cell[2]);
+            d["device"] = py::make_tuple(r.device[0], r.device[1], r.device[2]);
+            d["host_found"] = r.host_found;
+            d["host"] = py::make_tuple(r.host[0], r.host[1], r.host[2]);
+            d["address_offset"] = r.address_offset; d["uvw_bytes"] = r.uvw_bytes;
+            out.append(d);
+        }
+        return out;
+    }, py::arg("x"), py::arg("y"), py::arg("z"),
+       "Composition cell a surface shader reads at a world point, per device and on the host.");
     render.def("volume_slots", [] {
         const rtapi::VolumeSlotsInfo t = rtapi::volumeSlots();
         auto vec3 = [](const Vec3& v) { return py::make_tuple(v.x, v.y, v.z); };
@@ -6391,6 +6484,10 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
                 e["has_temperature"] = s.has_temperature;
                 e["density_device_local"] = s.density_device_local;
                 e["temperature_device_local"] = s.temperature_device_local;
+                e["iso_material_slot"] = s.iso_material_slot;
+                e["has_uvw"] = s.has_uvw;
+                e["has_composition"] = s.has_composition;
+                e["uvw_dim"] = py::make_tuple(s.uvw_dim[0], s.uvw_dim[1], s.uvw_dim[2]);
                 e["emission_mode"] = s.emission_mode;
                 e["color_ramp_enabled"] = s.color_ramp_enabled;
                 e["blackbody_intensity"] = s.blackbody_intensity;
@@ -6405,6 +6502,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             e["role"] = b.role;
             e["is_vulkan"] = b.is_vulkan;
             e["upload_serial"] = b.upload_serial;
+            e["preview_material_count"] = b.preview_material_count;
             e["instance_count"] = b.instance_count;
             e["slots"] = slots;
             backends.append(e);
@@ -6578,6 +6676,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         out["vram_budget_bytes"] = r.vram_budget_bytes;
         out["tracked_device_local_bytes"] = r.tracked_device_local_bytes;
         out["untracked_bytes"] = r.untracked_bytes;
+        out["simulation"] = py::module_::import("json").attr("loads")(r.simulation_memory_json);
         out["blas_compaction_enabled"] = r.blas_compaction_enabled;
         out["devices"] = devices;
         return out;

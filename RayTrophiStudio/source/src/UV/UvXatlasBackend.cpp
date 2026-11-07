@@ -21,7 +21,10 @@ bool xatlasAvailable() {
 }
 
 bool atlas(Layout& layout, bool unwrap, uint32_t resolution, uint32_t padding,
-           std::string& error) {
+           std::string& error, uint32_t* preserved_faces) {
+    if (preserved_faces) {
+        *preserved_faces = 0;
+    }
     if (!validate(layout, error)) {
         return false;
     }
@@ -83,13 +86,46 @@ bool atlas(Layout& layout, bool unwrap, uint32_t resolution, uint32_t padding,
         error = "uv_atlas_topology_changed";
         return false;
     }
-    std::vector<Vec2> result = layout.coordinates;
-    std::vector<uint8_t> seen(result.size(), 0);
+    std::vector<Vec2> corners(mesh.indexCount);
+    std::vector<uint8_t> degenerate(layout.indices.size() / 3, 0);
+    uint32_t preserved = 0;
+    for (size_t face = 0; face < degenerate.size(); ++face) {
+        const uint32_t a = layout.indices[face * 3];
+        const uint32_t b = layout.indices[face * 3 + 1];
+        const uint32_t c = layout.indices[face * 3 + 2];
+        float area;
+        if (unwrap) {
+            area = 0.5f * Vec3::cross(layout.positions[b] - layout.positions[a],
+                                     layout.positions[c] - layout.positions[a]).length();
+        } else {
+            const Vec2 x = layout.coordinates[b] - layout.coordinates[a];
+            const Vec2 y = layout.coordinates[c] - layout.coordinates[a];
+            area = 0.5f * std::abs(x.u * y.v - y.u * x.v);
+        }
+        // This pinned xatlas version ignores faces at or below FLT_EPSILON area.
+        // Keep their previous UVs rather than dropping them or inventing chart UVs.
+        if (std::isfinite(area) && area <= (std::numeric_limits<float>::epsilon)()) {
+            degenerate[face] = 1;
+            ++preserved;
+        }
+    }
     for (uint32_t corner = 0; corner < mesh.indexCount; ++corner) {
+        if (mesh.indexArray[corner] >= mesh.vertexCount) {
+            error = "uv_atlas_invalid_output_index";
+            return false;
+        }
         const auto& vertex = mesh.vertexArray[mesh.indexArray[corner]];
         const uint32_t source = layout.indices[corner];
-        if (vertex.xref != source || vertex.atlasIndex != 0) {
-            error = "uv_atlas_remap_required: output needs a corner remap";
+        if (vertex.xref != source) {
+            error = "uv_atlas_remap_required: output face/corner order differs";
+            return false;
+        }
+        if (degenerate[corner / 3]) {
+            corners[corner] = layout.coordinates[source];
+            continue;
+        }
+        if (vertex.atlasIndex != 0) {
+            error = "uv_atlas_unmapped_face: non-degenerate face has no chart";
             return false;
         }
         const Vec2 uv(vertex.uv[0] / output->width, vertex.uv[1] / output->height);
@@ -97,16 +133,14 @@ bool atlas(Layout& layout, bool unwrap, uint32_t resolution, uint32_t padding,
             error = "uv_atlas_non_finite";
             return false;
         }
-        if (seen[source] && (std::abs(result[source].u - uv.u) > 1.0e-6f ||
-                             std::abs(result[source].v - uv.v) > 1.0e-6f)) {
-            error = "uv_vertex_split_required: no changes applied; corner remap pending";
-            return false;
-        }
-        result[source] = uv;
-        seen[source] = 1;
+        corners[corner] = uv;
     }
-    layout.coordinates = std::move(result);
-    buildIslands(layout);
+    if (!applyCornerCoordinates(layout, corners, error)) {
+        return false;
+    }
+    if (preserved_faces) {
+        *preserved_faces = preserved;
+    }
     return true;
 #else
     error = "uv_backend_unavailable: install MIT xatlas under external/xatlas and rebuild";

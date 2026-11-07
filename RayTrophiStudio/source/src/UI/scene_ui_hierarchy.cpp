@@ -1965,7 +1965,6 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                 bool posKeyed = isCamKeyed(true, false, false, false, false);
                 // Note: DrawSmartFloat handles 1 float, here we have 3 (DragFloat3). 
                 // Currently DrawSmartFloat does not support Float3. We will keep DragFloat3 for vectors for now
-                // BUT we can use DrawLCDSlider logic if we wanted to overload it, or just keep DragFloat3 as it is standard for vectors.
                 // Reverting Position change plan as DrawSmartFloat is for single floats.
                 if (KeyframeButton("##CPos", posKeyed)) { insertCamKey("Position", true, false, false, false, false); }
                 if (ImGui::IsItemHovered()) ImGui::SetTooltip(posKeyed ? "REMOVE Position key" : "ADD Position key");

@@ -1,0 +1,45 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// mode 0: one outward extrapolation sweep (CPU: buildMaterialCoordinateGrid
+//         stage 3). An invalid cell takes the mean of its VALID face
+//         neighbours from the sweep's input and becomes valid in the output.
+// mode 1: one valid-only smoothing sweep (CPU: smoothSurfaceCoordinateTiles):
+//         0.5 own + 0.5 mean of the valid neighbours; validity is unchanged.
+// Ping-pong buffers: a cell filled during a sweep is never a donor in it.
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer UvwIn { float uvw_in[]; };
+layout(set = 0, binding = 1) readonly buffer ValidIn { uint valid_in[]; };
+layout(set = 0, binding = 2) buffer UvwOut { float uvw_out[]; };
+layout(set = 0, binding = 3) buffer ValidOut { uint valid_out[]; };
+vec3 value(uint o) { return vec3(uvw_in[o * 3u], uvw_in[o * 3u + 1u], uvw_in[o * 3u + 2u]); }
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    int nx = pc.grid.x, ny = pc.grid.y, nz = pc.grid.z;
+    uint plane = uint(nx) * uint(ny);
+    if (c >= plane * uint(nz)) return;
+    int x = int(c % uint(nx));
+    int y = int((c / uint(nx)) % uint(ny));
+    int z = int(c / plane);
+    vec3 own = value(c);
+    uint own_valid = valid_in[c];
+    vec3 sum = vec3(0.0);
+    int n = 0;
+    if (x > 0 && valid_in[c - 1u] != 0u) { sum += value(c - 1u); ++n; }
+    if (x + 1 < nx && valid_in[c + 1u] != 0u) { sum += value(c + 1u); ++n; }
+    if (y > 0 && valid_in[c - uint(nx)] != 0u) { sum += value(c - uint(nx)); ++n; }
+    if (y + 1 < ny && valid_in[c + uint(nx)] != 0u) { sum += value(c + uint(nx)); ++n; }
+    if (z > 0 && valid_in[c - plane] != 0u) { sum += value(c - plane); ++n; }
+    if (z + 1 < nz && valid_in[c + plane] != 0u) { sum += value(c + plane); ++n; }
+    vec3 result = own;
+    uint result_valid = own_valid;
+    if (pc.reach.w == 0) {
+        if (own_valid == 0u && n > 0) { result = sum / float(n); result_valid = 1u; }
+    } else if (own_valid != 0u && n > 0) {
+        result = 0.5 * own + (0.5 / float(n)) * sum;
+    }
+    uvw_out[c * 3u] = result.x;
+    uvw_out[c * 3u + 1u] = result.y;
+    uvw_out[c * 3u + 2u] = result.z;
+    valid_out[c] = result_valid;
+}

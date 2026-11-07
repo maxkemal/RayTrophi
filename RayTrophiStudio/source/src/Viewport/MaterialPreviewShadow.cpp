@@ -678,7 +678,7 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
         // The ray pass owns this light this frame. meta[0] stays 0, so
         // rtPreviewShadow() returns the screen visibility alone. Note the light
         // budget is NOT spent here either: another light gets the tiles.
-        if (rayOwnsLight && gpuLightIndex < kMaxLights &&
+        if (rayOwnsLight && type == LightType::Directional && gpuLightIndex < kMaxLights &&
             (rayCoverage.sceneLightMask & (1u << gpuLightIndex)) != 0u) {
             m_rtShadowCascadesReplaced += faces;
             ++gpuLightIndex;

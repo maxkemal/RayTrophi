@@ -326,6 +326,10 @@ bool SimulationComputeContext::supportsDispatch() const {
     return backend_->supportsDispatch();
 }
 
+ComputeMemoryReport SimulationComputeContext::memoryReport() const {
+    return backend_->memoryReport();
+}
+
 bool SimulationComputeContext::supportsGpuTimestamps() const {
     return backend_->supportsGpuTimestamps();
 }

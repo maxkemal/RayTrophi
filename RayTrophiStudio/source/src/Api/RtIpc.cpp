@@ -870,6 +870,11 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
                 {"surface_active_cells", info.surface_active_cells},
                 {"surface_work_cells", info.surface_work_cells},
                 {"surface_bin_cells", info.surface_bin_cells},
+                {"surface_gpu", info.surface_gpu},
+                {"surface_route", info.surface_route},
+                {"surface_gpu_status", info.surface_gpu_status},
+                {"surface_upload_bytes", info.surface_upload_bytes},
+                {"surface_download_bytes", info.surface_download_bytes},
                 {"thermal_liquid_enabled", info.thermal_liquid_enabled},
                 {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
                 {"fog_autoconversion_rate", info.fog_autoconversion_rate},
@@ -921,6 +926,8 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
                 {"pressure_cg_final_relative_residual", info.pressure_cg_final_relative_residual},
                 {"pressure_cg_multigrid", info.pressure_cg_multigrid},
                 {"seed_mode", info.seed_mode},
+                {"seed_mesh_object", info.seed_mesh_object},
+                {"seed_error", info.seed_error},
                 {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
                 {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
                 {"seed_particles_per_cell", info.seed_particles_per_cell},
@@ -3200,7 +3207,23 @@ json dispatchMethod(const std::string& method, const json& params) {
                         // ★★★★ Fluid domains the most recent auto-reset wiped
                         // and did not refill (one-shot seed, no reseed
                         // recipe) — see docs/dev/NEXT_BUILD_CHECKS.md §A1.
-                        {"dropped_seeds", info.dropped_seeds}};
+                        {"dropped_seeds", info.dropped_seeds},
+                        {"last_rewind", info.last_rewind_valid
+                            ? json{{"frame", info.last_rewind_frame},
+                                   {"first_changed_part", info.last_rewind_part},
+                                   {"absorbed", info.last_rewind_absorbed},
+                                   {"fluid_affected", info.last_rewind_fluid_affected}}
+                            : json(nullptr)},
+                        {"rewind_history", [&info] {
+                            json rows = json::array();
+                            for (const auto& r : info.rewind_history) {
+                                rows.push_back({{"frame", r.frame},
+                                                {"first_changed_part", r.first_changed_part},
+                                                {"absorbed", r.absorbed},
+                                                {"fluid_affected", r.fluid_affected}});
+                            }
+                            return rows;
+                        }()}};
         });
     }
     if (method == "physics.step") {
@@ -3381,6 +3404,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"surface_active_cells", info.surface_active_cells},
                         {"surface_work_cells", info.surface_work_cells},
                         {"surface_bin_cells", info.surface_bin_cells},
+                        {"surface_gpu", info.surface_gpu},
+                        {"surface_route", info.surface_route},
+                        {"surface_gpu_status", info.surface_gpu_status},
+                        {"surface_upload_bytes", info.surface_upload_bytes},
+                        {"surface_download_bytes", info.surface_download_bytes},
                         {"thermal_liquid_enabled", info.thermal_liquid_enabled},
                         {"fog_autoconversion_kg_m3", info.fog_autoconversion_kg_m3},
                         {"fog_autoconversion_rate", info.fog_autoconversion_rate},
@@ -3432,6 +3460,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"pressure_cg_final_relative_residual", info.pressure_cg_final_relative_residual},
                         {"pressure_cg_multigrid", info.pressure_cg_multigrid},
                         {"seed_mode", info.seed_mode},
+                {"seed_mesh_object", info.seed_mesh_object},
+                {"seed_error", info.seed_error},
                         {"seed_min", json::array({info.seed_min.x, info.seed_min.y, info.seed_min.z})},
                         {"seed_max", json::array({info.seed_max.x, info.seed_max.y, info.seed_max.z})},
                         {"seed_particles_per_cell", info.seed_particles_per_cell},
@@ -3605,6 +3635,19 @@ json dispatchMethod(const std::string& method, const json& params) {
                                              has_region ? &smax : nullptr,
                                              ppc, replace, persistent, fill_level,
                                              grain_saturation);
+        });
+    }
+    if (method == "fluid.seed_mesh") {
+        std::string domain = requireString(params, "domain");
+        std::string object = requireString(params, "object");
+        int ppc = optionalInt(params, "particles_per_cell", 8);
+        bool replace = optionalBool(params, "replace", true);
+        bool persistent = optionalBool(params, "persistent", false);
+        const float grain_saturation = optionalFloat(params, "grain_saturation", -1.0f);
+        return enqueueResult([domain, object, ppc, replace, persistent,
+                              grain_saturation](UIContext&) {
+            return rtapi::seedFluidParticlesFromMesh(domain, object, ppc, replace,
+                                                     persistent, grain_saturation);
         });
     }
     if (method == "fluid.clear" || method == "gas.clear") {
@@ -3798,6 +3841,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             if(params.contains("anisotropy_max_stretch")){surface_patch.anisotropy_max_stretch=params.at("anisotropy_max_stretch").get<float>();has_surface_patch=true;}
             if(params.contains("anisotropy_neighbor_min")){surface_patch.anisotropy_neighbor_min=params.at("anisotropy_neighbor_min").get<int>();has_surface_patch=true;}
             if(params.contains("position_smoothing")){surface_patch.position_smoothing=params.at("position_smoothing").get<float>();has_surface_patch=true;}
+            if(params.contains("surface_gpu")){surface_patch.surface_gpu=params.at("surface_gpu").get<bool>();has_surface_patch=true;}
             rtapi::FluidThermalPatch thermal_patch;
             bool has_thermal_patch = false;
             if(params.contains("thermal_liquid_enabled")){thermal_patch.enabled=params.at("thermal_liquid_enabled").get<bool>();has_thermal_patch=true;}
@@ -4252,6 +4296,30 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"bounds_p95", nlohmann::json::array({dg.bounds_p95[0], dg.bounds_p95[1], dg.bounds_p95[2]})},
                 {"whitewater_particles", dg.whitewater_particles},
                 {"whitewater_position_hash", hex(dg.whitewater_position_hash)}};
+        });
+    }
+    if (method == "fluid.surface_parity") {
+        std::string domain = requireString(params, "domain");
+        return enqueueQuery([domain](UIContext&) {
+            rtapi::FluidSurfaceParity p;
+            auto r = rtapi::getFluidSurfaceParity(domain, p);
+            if (!r.ok) return nlohmann::json{{"ok", false}, {"error", r.error}};
+            return nlohmann::json{
+                {"ok", true}, {"live", p.live}, {"gpu_ok", p.gpu_ok},
+                {"gpu_status", p.gpu_status}, {"particles", p.particles},
+                {"grid", nlohmann::json::array({p.grid[0], p.grid[1], p.grid[2]})},
+                {"voxel", p.voxel}, {"cells", p.cells},
+                {"compared_cells", p.compared_cells},
+                {"cpu_active", p.cpu_active}, {"gpu_active", p.gpu_active},
+                {"band_mismatch", p.band_mismatch}, {"sign_mismatch", p.sign_mismatch},
+                {"max_abs_phi", p.max_abs_phi}, {"mean_abs_phi", p.mean_abs_phi},
+                {"max_abs_phi_over_h", p.max_abs_phi_over_h},
+                {"uvw_compared", p.uvw_compared}, {"uvw_max_abs", p.uvw_max_abs},
+                {"composition_cpu", p.composition_cpu}, {"composition_gpu", p.composition_gpu},
+                {"composition_slot_mismatch", p.composition_slot_mismatch},
+                {"composition_weight_max_abs", p.composition_weight_max_abs},
+                {"cpu_ms", p.cpu_ms}, {"gpu_ms", p.gpu_ms},
+                {"upload_bytes", p.upload_bytes}, {"download_bytes", p.download_bytes}};
         });
     }
     if (method == "fluid.particle_extremes") {
@@ -5817,6 +5885,26 @@ json dispatchMethod(const std::string& method, const json& params) {
             return json{{"available", t.available}, {"backends", backends}};
         });
     }
+    if (method == "render.probe_surface_composition") {
+        if (!params.contains("point") || !params["point"].is_array() || params["point"].size() != 3)
+            throw std::runtime_error("point must be [x, y, z]");
+        const float point[3] = {params["point"][0].get<float>(), params["point"][1].get<float>(),
+                                params["point"][2].get<float>()};
+        return enqueueQuery([point](UIContext&) {
+            json rows = json::array();
+            for (const auto& r : rtapi::probeSurfaceComposition(point)) {
+                rows.push_back({
+                    {"role", r.role}, {"found", r.found}, {"has_buffer", r.has_buffer},
+                    {"slot", r.slot}, {"vdb_id", r.vdb_id},
+                    {"cell", json::array({r.cell[0], r.cell[1], r.cell[2]})},
+                    {"device", json::array({r.device[0], r.device[1], r.device[2]})},
+                    {"host_found", r.host_found},
+                    {"host", json::array({r.host[0], r.host[1], r.host[2]})},
+                    {"address_offset", r.address_offset}, {"uvw_bytes", r.uvw_bytes}});
+            }
+            return json{{"ok", true}, {"backends", rows}};
+        });
+    }
     if (method == "render.volume_slots") {
         return enqueueQuery([](UIContext&) {
             const rtapi::VolumeSlotsInfo t = rtapi::volumeSlots();
@@ -5835,6 +5923,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"has_temperature", s.has_temperature},
                         {"density_device_local", s.density_device_local},
                         {"temperature_device_local", s.temperature_device_local},
+                        {"iso_material_slot", s.iso_material_slot},
+                        {"has_uvw", s.has_uvw},
+                        {"has_composition", s.has_composition},
+                        {"uvw_dim", nlohmann::json::array({s.uvw_dim[0], s.uvw_dim[1], s.uvw_dim[2]})},
                         {"emission_mode", s.emission_mode},
                         {"color_ramp_enabled", s.color_ramp_enabled},
                         {"blackbody_intensity", s.blackbody_intensity},
@@ -5847,6 +5939,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                 backends.push_back(json{
                     {"role", b.role}, {"is_vulkan", b.is_vulkan},
                     {"upload_serial", b.upload_serial},
+                    {"preview_material_count", b.preview_material_count},
                     {"instance_count", b.instance_count}, {"slots", slots}});
             }
             json domains = json::array();
@@ -6249,6 +6342,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"vram_budget_bytes", r.vram_budget_bytes},
                         {"tracked_device_local_bytes", r.tracked_device_local_bytes},
                         {"untracked_bytes", r.untracked_bytes},
+                        {"simulation", json::parse(r.simulation_memory_json)},
                         {"blas_compaction_enabled", r.blas_compaction_enabled},
                         {"devices", devices}};
         });

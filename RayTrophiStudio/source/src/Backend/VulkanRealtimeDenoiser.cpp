@@ -155,7 +155,8 @@ void VulkanRealtimeDenoiser::configure(const RealtimeDenoiserSettings& settings,
         s.settings.history_max != settings.history_max ||
         s.settings.atrous_iterations != settings.atrous_iterations ||
         s.settings.firefly_clip != settings.firefly_clip ||
-        s.settings.still_noise != settings.still_noise) {
+        s.settings.still_noise != settings.still_noise ||
+        s.settings.scene_motion != settings.scene_motion) {
         invalidate();
         s.failed = false;
         s.stillComplete = false;

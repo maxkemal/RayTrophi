@@ -1,4 +1,5 @@
 #include "UI/RigViewportUI.h"
+#include "UI/UvEditorUI.h"
 #include "UI/RigIKUI.h"
 #include "Api/RtApi.h"
 #include "Animation/RigEditing.h"
@@ -79,7 +80,8 @@ void drawRigRestGizmo(UIContext& ctx,int shadingMode,bool enabled,bool& hit) {
         drag.operation!=ctx.selection.transform_mode || drag.space!=ctx.selection.transform_space ||
         (editing && (drag.pivot!=ctx.scene.rigView.selection_pivot || drag.bones!=RigAuthoring::selectedBones(ctx.scene))))){cancel();return;}
     if(drag.active && ImGui::IsKeyPressed(ImGuiKey_Escape)){cancel();hit=true;return;}
-    if(!drag.active && !io.WantCaptureKeyboard && !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt) {
+    if (!drag.active && !UvEditorUI::capturesShortcuts() && !io.WantCaptureKeyboard &&
+        !io.WantTextInput && !io.KeyCtrl && !io.KeyAlt) {
         if(ImGui::IsKeyPressed(ImGuiKey_G))ctx.selection.transform_mode=TransformMode::Translate;
         else if(ImGui::IsKeyPressed(ImGuiKey_R))ctx.selection.transform_mode=TransformMode::Rotate;
         else if(!editing && !io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_S))ctx.selection.transform_mode=TransformMode::Scale;

@@ -145,7 +145,9 @@ def main():
             runtime = inventory['grain_diagnostics']['runtime']
             # Four stages per substep (list clear, hash, list build, step);
             # report.dispatches counts real dispatches since DEM batch 9.
-            assert runtime and runtime['dispatches'] == 4 * runtime['substeps'], runtime
+            assert runtime, runtime
+            stages = 5 if runtime.get('sleep_work_mode') == 'compact' else 4
+            assert runtime['dispatches'] == stages * runtime['substeps'], runtime
             assert runtime['substeps'] % 2 == 0, runtime
             return runtime
 

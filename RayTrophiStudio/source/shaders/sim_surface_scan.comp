@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Exclusive prefix sum of bin counts -> CSR offsets (bin_count + 1 entries) and
+// the scatter cursor. ONE workgroup: each lane owns a contiguous run, so a
+// domain with millions of bins costs two linear passes and one shared scan,
+// not millions of barriers.
+layout(local_size_x = 1024) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer Counts { uint counts[]; };
+layout(set = 0, binding = 1) buffer Offsets { uint offsets[]; };
+layout(set = 0, binding = 2) buffer Cursor { uint cursor[]; };
+shared uint partial[1024];
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint n = uint(pc.bins.w);
+    uint run = (n + 1023u) / 1024u;
+    uint begin = min(lane * run, n);
+    uint end = min(begin + run, n);
+    uint sum = 0u;
+    for (uint i = begin; i < end; ++i) sum += counts[i];
+    partial[lane] = sum;
+    barrier();
+    for (uint stride = 1u; stride < 1024u; stride <<= 1u) {
+        uint add = lane >= stride ? partial[lane - stride] : 0u;
+        barrier();
+        partial[lane] += add;
+        barrier();
+    }
+    uint running = partial[lane] - sum;  // exclusive prefix of this run
+    for (uint i = begin; i < end; ++i) {
+        offsets[i] = running;
+        cursor[i] = running;
+        running += counts[i];
+    }
+    if (lane == 1023u) offsets[n] = partial[1023];
+}

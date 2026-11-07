@@ -343,6 +343,8 @@ public:
     Vec3 evaluate(const Vec3& ray_dir, const Vec3& origin = Vec3(0,0,0));
     WorldData data;
 private:
+    Vec3 solid_color = Vec3(0.13f, 0.14f, 0.16f);
+    Vec3 sky_tint = Vec3(1.0f, 1.0f, 1.0f);
  
    std::string hdri_path; // Store path for getter
    std::string env_overlay_path; // Store env overlay path

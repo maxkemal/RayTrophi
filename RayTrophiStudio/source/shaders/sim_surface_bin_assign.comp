@@ -1,0 +1,42 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Particle -> bin (CSR count pass). CPU twin: FluidLevelSet.cpp stage 1 and
+// SurfaceParticleBins::build.
+//   mode 0: eligibility from mass, finiteness and the sim grid bounds, binned by
+//           the raw position (bin width max(R, h)). Shared by the centre filter
+//           and the material-coordinate gather: both CPU bins are this grid.
+//   mode 1: eligibility = the mode 0 result, binned by the filtered centre
+//           (bin width = kernel support), for the SDF gather.
+// Parcels the view selection excludes arrive with mass 0 and fail the same
+// mass > 0.02 test the CPU applies to depleted parcels.
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer Positions { float positions[]; };
+layout(set = 0, binding = 1) readonly buffer Mass { float mass[]; };
+layout(set = 0, binding = 2) readonly buffer EligibleIn { uint eligible_in[]; };
+layout(set = 0, binding = 3) buffer BinOut { uint bin_out[]; };
+layout(set = 0, binding = 4) buffer Counts { uint counts[]; };
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    if (p >= uint(pc.grid.w)) return;
+    vec3 x = vec3(positions[p * 3u], positions[p * 3u + 1u], positions[p * 3u + 2u]);
+    if (pc.reach.w == 0) {
+        if (!(mass[p] > 0.02) || any(isnan(x)) || any(isinf(x))) {
+            bin_out[p] = kSurfaceInvalid;
+            return;
+        }
+        vec3 local = (x - pc.origin.xyz) / pc.cell.y;
+        if (any(lessThan(local, vec3(0.0))) ||
+            any(greaterThanEqual(local, vec3(pc.sim.xyz)))) {
+            bin_out[p] = kSurfaceInvalid;
+            return;
+        }
+    } else if (eligible_in[p] == kSurfaceInvalid) {
+        bin_out[p] = kSurfaceInvalid;
+        return;
+    }
+    ivec3 b = clamp(binCoordinate(x), ivec3(0), pc.bins.xyz - ivec3(1));
+    uint bi = binIndex(b);
+    bin_out[p] = bi;
+    atomicAdd(counts[bi], 1u);
+}

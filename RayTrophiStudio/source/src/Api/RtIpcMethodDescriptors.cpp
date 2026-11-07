@@ -1925,7 +1925,7 @@ static const MethodDescriptor desc_fluid_sample_solid_phi = {
     "fluid.sample_solid_phi", "fluid",
     "Collider signed distance (grid.solid_phi, metres, < 0 inside) of a liquid/Matter domain at 1..4096 world points: cell ijk, cell mask (solid), the cell centre's distance and the trilinear value the MPM grid contact and parcel push read",
     "points: [[x, y, z], ...]. Cells no collider wrote read as 2 h in the trilinear value (the kernels' own substitution); cell_has_phi=false marks them. has_phi_field=false means no collider is stamped. To find where a collider's surface really is for the solver, sample a vertical line and locate the zero crossing; compare with the analytic or mesh surface. Read after a fluid.step: the field is stamped in the step.",
-    "write", "SceneWrite", false, "any",
+    "read", "Read", false, "any",
     "fluid|sample|solid|phi|collider|sdf|distance|contact|mpm|measure|verify|debug",
     "collider.get|fluid.step_stats|fluid.state_digest|fluid.step",
     nullptr, nullptr, nullptr, nullptr,
@@ -1956,6 +1956,27 @@ static const MethodDescriptor desc_fluid_seed = {
     true
 };
 static const MethodRegistration reg_fluid_seed(desc_fluid_seed);
+
+static const MethodParam params_fluid_seed_mesh[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr},
+    {"grain_saturation", "float", false, "", "-1.0", nullptr},
+    {"particles_per_cell", "int", false, "", "8", nullptr},
+    {"persistent", "bool", false, "", "false", nullptr},
+    {"replace", "bool", false, "", "true", nullptr},
+};
+static const MethodDescriptor desc_fluid_seed_mesh = {
+    "fluid.seed_mesh", "fluid",
+    "Fill the inside of a scene object with the domain's matter (Seed Mode 'Mesh Volume'), e.g. a hidden castle mesh seeded with sand",
+    "object: scene object name; its world-space surface is tested with the collider cook's three-ray parity vote, so a seed and a collider agree on inside. Liquid/MPM parcels use particles_per_cell (default 8) on the domain grid, keeping only sub-cell slots that land inside; DEM grains use their physical FCC packing inside the mesh. Fails and seeds nothing when the object is missing, does not overlap the domain, or has no inside on the grid (open surface, thinner than a voxel); fluid.get then reports seed_error. persistent=true makes it the reset-time recipe. Hide the object yourself if it should not render.",
+    "write", "SceneWrite", false, "any",
+    "fluid|seed|mesh|volume|grain|sand|write",
+    "fluid.seed|fluid.get|fluid.clear",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_seed_mesh, 6,
+    true
+};
+static const MethodRegistration reg_fluid_seed_mesh(desc_fluid_seed_mesh);
 
 static const MethodParam params_fluid_set_combustion[] = {
     {"domain", "string", true, "", nullptr, nullptr},
@@ -2014,7 +2035,7 @@ static const MethodParam params_fluid_set_fog[] = {
 static const MethodDescriptor desc_fluid_set_fog = {
     "fluid.set_fog", "fluid",
     "Shape the Volumetric Fog of a liquid domain: Gaussian spread and world-space clump erosion of the splatted density",
-    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Takes effect only when render_mode is 'fog'. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed. erosion_strength 0..1 (default 0 = off) cuts the thin parts of the spread density into clumps (snow/cotton look) with a world-space fBm: d' = max(0, (d - e)/(1 - e)), e = strength*noise, applied only where d < 1, so cells at full rest packing are kept and the body gets no holes. erosion_size 0.001..100 is the largest clump in WORLD units (independent of voxel size and domain extent; below a voxel it cannot show); erosion_detail 1..6 octaves; erosion_seed any int. Runs on the grid before upload, so Vulkan RT, RayFusion and CPU draw the same field. World-anchored: clumps do not travel with moving material. Read back with fluid.get fog_erosion_strength/size/detail/seed. erosion_depth 0..1 world units (default 0): > 0 switches to SURFACE-BAND erosion for dense bodies (a settled snow layer is d~1 everywhere, so the remap has nothing to cut and stays a flat slab): a chamfer distance transform gives each cell its depth s (voxels) below the d=0.5 surface and the noise pushes the surface in, d*=smoothstep(-0.5,0.5,s-D*n), D=strength*depth/voxel: clumps cut at most strength*depth deep whatever the body's thickness (the earlier blur-based version erased bodies thinner than the band); deeper cells are untouched, sparse spray is mostly removed. resolution_multiplier 1..4 (default 1) splats the fog on a grid that many times finer than the solver grid (same origin/extent; density keeps 1 = a cell at rest packing; spread_voxels stays in SOLVER voxels). Sharper edges and smaller clumps, but cells, memory and upload grow with its cube, and the volume march / random walk step on the finer voxel. Read back with fluid.get fog_erosion_depth / fog_resolution_multiplier.",
+    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Applies to carriers routed to Fog, including Matter solid/liquid/mist views; does not blur authoritative gas fields. Matter Fog View exposes spread; erosion and resolution controls retain their legacy route semantics. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed. erosion_strength 0..1 (default 0 = off) cuts the thin parts of the spread density into clumps (snow/cotton look) with a world-space fBm: d' = max(0, (d - e)/(1 - e)), e = strength*noise, applied only where d < 1, so cells at full rest packing are kept and the body gets no holes. erosion_size 0.001..100 is the largest clump in WORLD units (independent of voxel size and domain extent; below a voxel it cannot show); erosion_detail 1..6 octaves; erosion_seed any int. Runs on the grid before upload, so Vulkan RT, RayFusion and CPU draw the same field. World-anchored: clumps do not travel with moving material. Read back with fluid.get fog_erosion_strength/size/detail/seed. erosion_depth 0..1 world units (default 0): > 0 switches to SURFACE-BAND erosion for dense bodies (a settled snow layer is d~1 everywhere, so the remap has nothing to cut and stays a flat slab): a chamfer distance transform gives each cell its depth s (voxels) below the d=0.5 surface and the noise pushes the surface in, d*=smoothstep(-0.5,0.5,s-D*n), D=strength*depth/voxel: clumps cut at most strength*depth deep whatever the body's thickness (the earlier blur-based version erased bodies thinner than the band); deeper cells are untouched, sparse spray is mostly removed. resolution_multiplier 1..4 (default 1) splats the fog on a grid that many times finer than the solver grid (same origin/extent; density keeps 1 = a cell at rest packing; spread_voxels stays in SOLVER voxels). Sharper edges and smaller clumps, but cells, memory and upload grow with its cube, and the volume march / random walk step on the finer voxel. Read back with fluid.get fog_erosion_depth / fog_resolution_multiplier.",
     "write", "SceneWrite", false, "any",
     "fluid|set|fog",
     nullptr,
@@ -2060,6 +2081,14 @@ static const MethodRegistration reg_fluid_set_fog_shader(desc_fluid_set_fog_shad
 
 static const MethodParam params_fluid_set_grain_settings[] = {
     {"domain", "string", true, "", nullptr, nullptr},
+    {"compact_sleep_work", "bool", false,
+        "Adaptive compact GPU contact work for settled sleeping piles. False selects "
+        "the dense reference. Does not reset particles or change sleep thresholds.",
+        "true", nullptr},
+    {"contact_probe_enabled", "bool", false,
+        "Opt-in GPU contact/overflow diagnostics; adds measurement overhead. Read "
+        "fluid.matter_models grain_diagnostics.contact_probe, including held attempts.",
+        "false", nullptr},
     {"radius_m", "float", false, "", nullptr, nullptr},
     {"sliding_damping_n_s_m", "float", false, "", nullptr, nullptr},
     {"max_substeps", "int", false, "", nullptr, nullptr},
@@ -2083,7 +2112,7 @@ static const MethodDescriptor desc_fluid_set_grain_settings = {
     "fluid|set|grain|settings|write",
     "fluid.grain_settings|fluid.reset|fluid.matter_models",
     nullptr, nullptr, nullptr, nullptr,
-    params_fluid_set_grain_settings, 15,
+    params_fluid_set_grain_settings, 17,
     true
 };
 static const MethodRegistration reg_fluid_set_grain_settings(desc_fluid_set_grain_settings);
@@ -2158,6 +2187,7 @@ static const MethodParam params_fluid_set_param[] = {
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
     {"solid_phase_fill", "any", false, "", nullptr, nullptr},
+    {"surface_gpu", "any", false, "", nullptr, nullptr},
     {"surface_material", "any", false, "", nullptr, nullptr},
     {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
     {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
@@ -2178,7 +2208,7 @@ static const MethodDescriptor desc_fluid_set_param = {
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 44,
+    params_fluid_set_param, 45,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
@@ -2296,7 +2326,7 @@ static const MethodParam params_fluid_set_substance_material[] = {
 static const MethodDescriptor desc_fluid_set_substance_material = {
     "fluid.set_substance_material", "fluid",
     "Bind a substance (its physical identity, phase and representation) to a fluid domain",
-    "Phase is the static solid block flag (liquid parcels melt and freeze by temperature, so their phase is derived). The parcel's constitutive model comes from its Substance alone. representation selects inherit|splat|sdf|fog drawing.",
+    "Phase is the static solid block flag (liquid parcels melt and freeze by temperature, so their phase is derived). The parcel's constitutive model comes from its Substance alone. representation selects inherit|splat|sdf|fog drawing. For frozen SDF carriers without an authored source/domain surface material, an Ice binding supplies the phase fallback; otherwise the editable Ice (Automatic) preset is created lazily. Authored source/domain materials retain precedence.",
     "write", "SceneWrite", false, "any",
     "fluid|set|substance|material|simulation|phase|msf",
     "substance.list|fluid.set_splat_material|fluid.set_param",
@@ -2450,6 +2480,22 @@ static const MethodDescriptor desc_fluid_step_stats = {
     true
 };
 static const MethodRegistration reg_fluid_step_stats(desc_fluid_step_stats);
+
+static const MethodParam params_fluid_surface_parity[] = {
+    {"domain", "string", true, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_fluid_surface_parity = {
+    "fluid.surface_parity", "fluid",
+    "GPU surface builder vs the CPU reference on the same live particles: cell-by-cell SDF difference (max, mean, in metres and voxels), band and sign mismatches, material-coordinate residual difference, per-substance material mixture agreement, both build times",
+    "Acceptance test of the GPU surface route (docs/dev/GPU_YUZEY_LEVEL_SET.md). Builds both from the domain's current host particles with the domain's level-set parameters and the render view selection; the GPU side uses temporary device buffers, so the live publication is untouched. compared_cells = cells inside the narrow band on either side. sign_mismatch counts cells where the surface lies on opposite sides (the visible failure); band_mismatch cells inside the band on one side only. gpu_ok=false with gpu_status names why the GPU route refused (anisotropic kernels, no Vulkan compute, a missing surface kernel). Read after a fluid.step. The live route itself is reported by fluid.get surface_route (cpu | gpu_host | gpu_live) and surface_gpu_status. composition_cpu / composition_gpu: whether each side built a per-substance material mixture (a domain whose substances all resolve to the domain material builds none on either side); composition_slot_mismatch counts cells whose material pair differs, composition_weight_max_abs the largest blend-weight difference.",
+    "read", "Read", false, "any",
+    "fluid|surface|parity|sdf|level-set|gpu|measure|verify",
+    "fluid.get|fluid.set_param|fluid.step|perf.gpu_kernel_timings",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_surface_parity, 1,
+    true
+};
+static const MethodRegistration reg_fluid_surface_parity(desc_fluid_surface_parity);
 
 static const MethodParam params_forcefield_create[] = {
     {"type", "string", true, "", nullptr, nullptr},
@@ -2838,6 +2884,7 @@ static const MethodParam params_gas_set_param[] = {
     {"smoothing_iterations", "any", false, "", nullptr, nullptr},
     {"solid_phase", "any", false, "", nullptr, nullptr},
     {"solid_phase_fill", "any", false, "", nullptr, nullptr},
+    {"surface_gpu", "any", false, "", nullptr, nullptr},
     {"surface_material", "any", false, "", nullptr, nullptr},
     {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
     {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
@@ -2858,7 +2905,7 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 44,
+    params_gas_set_param, 45,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);
@@ -3778,7 +3825,7 @@ static const MethodParam params_material_create[] = {
 static const MethodDescriptor desc_material_create = {
     "material.create", "material",
     "Create a material of the given type and return its name",
-    "Substance presets require an exact catalogue name (Water, Sand, Iron, Paper, etc.); unknown names fail before material allocation. They suggest colors/roughness/transmission only, without phase or chemistry changes. The returned unique name is the scene material handle.",
+    "Substance presets require an exact catalogue name (Water, Sand, Iron, Paper, etc.); unknown names fail before material allocation. They suggest visual properties without phase or chemistry changes. Ice includes IOR 1.31, transmission, roughness and mild interior absorption; it is also the automatic frozen-SDF fallback recipe. The returned unique name is the scene material handle.",
     "write", "SceneWrite", false, "any",
     "material|create|shading",
     nullptr,
@@ -7026,6 +7073,22 @@ static const MethodDescriptor desc_render_probe = {
 };
 static const MethodRegistration reg_render_probe(desc_render_probe);
 
+static const MethodParam params_render_probe_surface_composition[] = {
+    {"point", "any", false, "", nullptr, nullptr},
+};
+static const MethodDescriptor desc_render_probe_surface_composition = {
+    "render.probe_surface_composition", "render",
+    "Per-substance material composition cell (slot A, slot B as material id + 1, weight of B) a surface shader reads at a world point, read back from each Vulkan device's own buffer, beside the host copy the producer published",
+    "point: [x, y, z] world. One row per Vulkan backend (render = Vulkan RT, viewport = the raster device behind Solid/Material/RayFusion). found=false: no surface slot carries a composition address on that device. has_buffer=false: the address does not resolve into a buffer that device owns. address_offset should equal uvw_bytes (the composition follows the material-coordinate residual in one allocation). device != host on one backend means the upload to that device is wrong; device == host but the image wrong means the shader reads it wrong. A host value of 0 in slot A is the built-in dielectric (an unsupported cell takes the fallback).",
+    "render", "Render", false, "any",
+    "render|probe|surface|composition|volume|sdf|material|debug|verify",
+    "render.volume_slots|fluid.surface_parity|fluid.get",
+    nullptr, nullptr, nullptr, nullptr,
+    params_render_probe_surface_composition, 1,
+    true
+};
+static const MethodRegistration reg_render_probe_surface_composition(desc_render_probe_surface_composition);
+
 static const MethodParam params_render_realtime_denoiser_stats[] = {
     {"synchronize", "boolean", false, "", "True", nullptr},
 };
@@ -7167,8 +7230,8 @@ static const MethodParam params_render_set_realtime_denoiser[] = {
 };
 static const MethodDescriptor desc_render_set_realtime_denoiser = {
     "render.set_realtime_denoiser", "render",
-    "Configure session-only Vulkan SVGF during motion with atomic validation",
-    "Requires motion AOV enabled. Disabling SVGF while FSR is on is allowed: FSR then upscales the raw accumulation (upscale_stats input_provider \"none\"). Defaults: svgf (on since B3b), 4 iterations, 24 history, firefly clip 3, still_noise 0.02. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera moves, or while scene animation restarts accumulation every frame (scene_motion, default on). Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged.",
+    "Configure project-persisted Vulkan SVGF with atomic validation",
+    "Requires motion AOV enabled. Disabling SVGF while FSR is on is allowed: FSR then upscales the raw accumulation (upscale_stats input_provider \"none\"). Defaults: off, 4 iterations, 24 history, firefly clip 3, still_noise 0.02. Authored settings are saved in render_settings.realtime_denoiser; old projects without this block load disabled. debug_history and GPU history remain session-only. SDF/procedural surfaces without triangle motion correspondence and fog do not publish reusable SVGF history; disoccluded pixels reject their previous history taps. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera moves, or while scene animation restarts accumulation every frame (scene_motion, default on). Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged.",
     "render", "Render", false, "any",
     "render|set|realtime|denoiser",
     nullptr,
@@ -7365,7 +7428,7 @@ static const MethodRegistration reg_render_volume_march_lod(desc_render_volume_m
 static const MethodDescriptor desc_render_volume_slots = {
     "render.volume_slots", "render",
     "List every TLAS volume slot per Vulkan backend (identity key, name, vdb id, published, is_active, source type, density/temperature channels, AABB) and which volume each grid domain owns",
-    "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. density_device_local and temperature_device_local report the actual tracked allocation heap: 1=device-local, 0=host heap, -1=unknown or not a managed NanoVDB buffer. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id.",
+    "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. density_device_local and temperature_device_local report the actual tracked allocation heap: 1=device-local, 0=host heap, -1=unknown or not a managed NanoVDB buffer. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id. iso_material_slot is the 1-based surface material the shader reads (0 = built-in dielectric); has_uvw / has_composition say whether the material-coordinate and per-substance mixture fields have an address ON THAT DEVICE (the RT backend and the raster viewport are separate devices); uvw_dim is their grid.",
     "render", "Render", false, "VolumeSlotsInfo",
     "render|volume|slots|diagnostics|backend|verify|identity",
     "render.volume_tables|fluid.get",
@@ -9970,7 +10033,7 @@ static const MethodRegistration reg_select_object(desc_select_object);
 static const MethodDescriptor desc_sim_control_state = {
     "sim.control_state", "sim",
     "Who is currently driving the solvers, and an epoch that changes whenever anything re-poses them",
-    "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops. dropped_seeds names any fluid domain whose one-shot fluid.seed() (no persistent=true) the most recent auto-reset wiped and did NOT refill -- that auto-reset fires from a config-signature change ANYWHERE in the scene (e.g. an unrelated fluid.create_domain), so a domain's particles can go to zero with no error at all; check this field when that happens instead of assuming a reader fault.",
+    "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops. dropped_seeds names any fluid domain whose one-shot fluid.seed() (no persistent=true) the most recent auto-reset wiped and did NOT refill -- that auto-reset fires from a config-signature change ANYWHERE in the scene (e.g. an unrelated fluid.create_domain), so a domain's particles can go to zero with no error at all; check this field when that happens instead of assuming a reader fault. last_rewind: null until the setup-signature watcher first sees a change; then {frame, first_changed_part, absorbed, fluid_affected}. first_changed_part is the first signature section that differed from the last matching tick (e.g. \"domain 'X' grid/gas\", \"fluid 'X' thermal/solver/seed\", \"emitters / colliders\"). absorbed=true: the seed-start drift guard kept the bake (a write-back right after the first seeded step), no rewind ran. rewind_history: the last 8 such records, oldest first (a later edit's rewind does not overwrite an earlier drift). Fluid sections are split into \"fluid 'X' thermal\" and \"fluid 'X' solver/seed\".",
     "read", "Read", false, "any",
     "sim|control|state|simulation|epoch|driver|timeline|measure|verify|fluid|seed",
     "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform|fluid.seed|fluid.create_domain",
@@ -12149,7 +12212,7 @@ static const MethodParam params_viewport_set_rt_shadow[] = {
 static const MethodDescriptor desc_viewport_set_rt_shadow = {
     "viewport.set_rt_shadow", "viewport",
     "Turn the screen-space RT shadow mask pass on or off",
-    "OFF by default; turn it on wherever ray query is supported. The mask is consumed by the raster MESH shader (rtPreviewShadow returns the screen visibility for the covered light), and the cascade views for that light are then NOT drawn at all - read 'cascades_replaced' from viewport.rt_shadow to confirm the handoff happened. Exactly ONE light is covered: the first visible directional light, else the Nishita world sun. Point, spot and area lights keep their cascades, which is why they look identical with this on and off. WHAT IS GIVEN UP: fragments the screen mask declines - impostors, transparent replay, and any fragment whose depth does not match the prepass - lose that light's shadow instead of falling back to the atlas. WHEN NOTHING IS SAVED: with volumes in the scene the cascades stay up, because the SDF surface shader, the volume shader and the deep transmittance atlas read the atlas and have no screen mask. Motivation: the cascade shadow term measured 113 ms/frame, while a ray budget on this scene's own TLAS gave >=334 Mrays/s - about 5 ms for one ray per pixel at 1680x945. In a foliage scene the cascade cost is dominated by the alpha pipeline: one opacity texture fetch and discard per leaf fragment, per cascade. Requires a depth prepass and turns one on.",
+    "Per-light screen mask for visible directional, point, spot and area scene lights (up to 32). Reads the canonical flat TLAS hit/material tables and native SurfaceSDF fields. Point/spot rays stop before the light; area shadows use the same centre sample as RayFusion lighting. One integer bit per light preserves the existing 8-byte-per-pixel allocation. Requires ray query, scene lighting and a depth prepass. Directional cascades may be replaced when no volumes exist; other lights retain their atlas fallback for receivers absent from the mesh depth prepass. SDF receivers use a separate native surface query. Existing viewport.rt_shadow reports support/readiness and rays_per_frame is an upper bound across covered lights, not GPU elapsed time. Compile host, producer and all material-preview consumer shader variants together and restart after this ABI change.",
     "render", "Render", false, "any",
     "viewport|set|rt|shadow",
     nullptr,

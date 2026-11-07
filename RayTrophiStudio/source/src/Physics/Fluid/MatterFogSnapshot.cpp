@@ -15,7 +15,7 @@ FogFieldGrid fogGrid(const FluidSim::FluidGrid& grid) {
 }
 bool prepareMatterFogSnapshot(ParticleSimulationSystem& runtime, std::size_t index,
     const SimulationComputeContext& compute, MatterFogFields& output,
-    std::string& snapshot, std::string& error) {
+    std::string& snapshot, std::string& error, MatterFogSnapshotPurpose purpose) {
     const auto refuse = [&](const std::string& message) {
         error = message;
         return false;
@@ -36,28 +36,31 @@ bool prepareMatterFogSnapshot(ParticleSimulationSystem& runtime, std::size_t ind
         return refuse("Fog inspection requires a completed simulation step");
     }
     const auto& grid = gasGrid(state);
-    // Bound both the independent builder and this diagnostic's snapshot/reference
-    // buffers. No per-frame readback or persistent dense allocation is introduced.
-    constexpr std::size_t budget = 128u * 1024u * 1024u;
+    const auto plan = resolveFluidViews(desc,
+        cachedDistinctViewKeys(state.particles, state.version));
+    const bool gas_visible = plan.phase_output.gas != LabelRoute::Hidden;
+    // Inspection retains its small on-demand ceiling. Publication has a distinct
+    // domain-bounded policy; a diagnostic guard must not silently hide live Fog.
+    const std::size_t budget = matterFogSnapshotBudgetBytes(purpose,
+        desc.resource_budget_mb, desc.enforce_resource_budget);
     std::size_t cells = 1;
     for (const int dimension : {grid.nx, grid.ny, grid.nz}) {
         if (dimension <= 0 || cells > budget / sizeof(float) /
                 static_cast<std::size_t>(dimension)) {
-            return refuse("Fog inspection grid exceeds diagnostic memory budget");
+            return refuse("Fog snapshot grid exceeds memory budget");
         }
         cells *= static_cast<std::size_t>(dimension);
     }
     // Up to six inventory sidecars, two gas snapshot fields and one reference.
     const std::size_t snapshot_bytes_per_cell =
-        (9u + 2u * state.gas_source_images.size()) * sizeof(float);
-    if (cells > budget / snapshot_bytes_per_cell) {
-        return refuse("Fog inspection snapshot exceeds diagnostic memory budget");
+        gas_visible ? (9u + 2u * state.gas_source_images.size()) * sizeof(float) : 0u;
+    if (snapshot_bytes_per_cell != 0u && cells > budget / snapshot_bytes_per_cell) {
+        return refuse("Fog snapshot exceeds memory budget: " +
+            std::to_string(budget / (1024u * 1024u)) + " MiB");
     }
     if (state.particles.size() > budget - cells * snapshot_bytes_per_cell) {
-        return refuse("Fog inspection selection exceeds diagnostic memory budget");
+        return refuse("Fog snapshot selection exceeds memory budget");
     }
-    const auto plan = resolveFluidViews(desc,
-        cachedDistinctViewKeys(state.particles, state.version));
     std::vector<float> density;
     std::vector<float> temperature;
     SimulationGridDomainState source_snapshot;
@@ -141,11 +144,17 @@ bool prepareMatterFogSnapshot(ParticleSimulationSystem& runtime, std::size_t ind
     input.particles = &state.particles;
     input.plan = &plan;
     input.carrier_grid = fogGrid(grid);
+    input.spread_voxels = desc.fluid_fog_spread_voxels;
     input.parcel_density = 1.0f /
         static_cast<float>(std::max(1, desc.fluid_params.particles_per_cell));
     input.default_substance_tag = substanceTag(desc.fluid_params.default_substance);
     input.gas = plan.phase_output.gas == LabelRoute::Hidden ? nullptr : &gas;
-    input.max_dense_bytes = budget;
+    // Gas snapshots survive into the builder. Inventory conversion scratch
+    // above is already destroyed; account retained density/temperature/source
+    // images here so fields + gather scratch cannot each reuse the full limit.
+    const std::size_t retained_snapshot_bytes = gas_visible
+        ? cells * (2u + 2u * state.gas_source_images.size()) * sizeof(float) : 0u;
+    input.max_dense_bytes = budget - retained_snapshot_bytes;
     return buildMatterFogFields(input, output, error);
 }
 } // namespace RayTrophiSim::Fluid

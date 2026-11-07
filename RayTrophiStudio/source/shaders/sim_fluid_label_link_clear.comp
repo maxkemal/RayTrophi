@@ -1,0 +1,4 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#define LABEL_LINK_CLEAR
+#include "sim_fluid_label_linked.glsl"

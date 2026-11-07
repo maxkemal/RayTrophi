@@ -2,6 +2,7 @@
 #include "RtApiInternal.h"
 #include "Backend/VulkanBackend.h"
 #include "globals.h"
+#include "ProjectManager.h"
 
 #include <cmath>
 #include <memory>
@@ -21,7 +22,8 @@ Result setRealtimeDenoiser(const std::optional<std::string>& mode,
     if (!g_ctx) {
         return notBound();
     }
-    auto next = realtimeDenoiserSettings();
+    const auto previous = realtimeDenoiserSettings();
+    auto next = previous;
     if (mode) {
         if (*mode != "off" && *mode != "svgf") {
             return Result::fail("mode must be 'off' or 'svgf'");
@@ -63,9 +65,17 @@ Result setRealtimeDenoiser(const std::optional<std::string>& mode,
     if (next.enabled && !g_ctx->render_settings.motion_aov_enabled) {
         return Result::fail("SVGF requires render.set_motion enabled=true");
     }
-    // Commit only after every field has passed validation. Session-only, like
-    // B2 motion controls; no project serializer owns a second copy.
+    // Commit only after validation. The project persists authored settings;
+    // diagnostic views and runtime history remain session state.
     g_ctx->render_settings.realtime_denoiser = next;
+    if (next.enabled != previous.enabled ||
+        next.atrous_iterations != previous.atrous_iterations ||
+        next.history_max != previous.history_max ||
+        next.firefly_clip != previous.firefly_clip ||
+        next.still_noise != previous.still_noise ||
+        next.scene_motion != previous.scene_motion) {
+        ProjectManager::getInstance().markModified();
+    }
     if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get())) {
         vk->requestPresentRefresh();
     }

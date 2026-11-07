@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 #include "UV/UvLayout.h"
 
 #include <algorithm>
@@ -22,13 +22,13 @@ bool projectFromView(Layout& layout, const std::vector<Vec3>& world_positions,
         return std::isfinite(v.x) && std::isfinite(v.y) && std::isfinite(v.z);
     };
     if (!finite(eye) || !finite(forward) || !finite(up) ||
-        forward.lengthSquared() < 1.0e-12f) {
+        forward.length_squared() < 1.0e-12f) {
         error = "uv_projection_invalid_camera";
         return false;
     }
     forward = forward.normalize();
     Vec3 right = Vec3::cross(forward, up);
-    if (right.lengthSquared() < 1.0e-12f) {
+    if (right.length_squared() < 1.0e-12f) {
         error = "uv_projection_invalid_camera";
         return false;
     }

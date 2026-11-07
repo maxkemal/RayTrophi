@@ -1607,7 +1607,7 @@
     "summary": "List every TLAS volume slot per Vulkan backend (identity key, name, vdb id, published, is_active, source type, density/temperature channels, AABB) and which volume each grid domain owns",
     "returns": "VolumeSlotsInfo",
     "tags": "diagnostics|volume|backend|verify|identity",
-    "notes": "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. density_device_local and temperature_device_local report the actual tracked allocation heap: 1=device-local, 0=host heap, -1=unknown or not a managed NanoVDB buffer. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id.",
+    "notes": "Counts (render.volume_tables) cannot separate a retired volume that keeps its slot from one still drawn. Identity test: read before and after an operation; a stable_key change for the same name is identity churn, an unchanged upload_serial means nothing was republished. On a surface-SDF slot has_temperature means foam, not Kelvin. density_device_local and temperature_device_local report the actual tracked allocation heap: 1=device-local, 0=host heap, -1=unknown or not a managed NanoVDB buffer. A backend with no TLAS (the raster viewport) reports packet_order=true slots: no name or stable_key, match them by vdb_id. iso_material_slot is the 1-based surface material the shader reads (0 = built-in dielectric); has_uvw / has_composition say whether the material-coordinate and per-substance mixture fields have an address ON THAT DEVICE (the RT backend and the raster viewport are separate devices); uvw_dim is their grid.",
     "related": "render.volume_tables|fluid.get"
   },
   "viewport.status": {
@@ -3565,7 +3565,7 @@
   },
   "sim.control_state": {
     "summary": "Who is currently driving the solvers, and an epoch that changes whenever anything re-poses them",
-    "notes": "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops. dropped_seeds names any fluid domain whose one-shot fluid.seed() (no persistent=true) the most recent auto-reset wiped and did NOT refill -- that auto-reset fires from a config-signature change ANYWHERE in the scene (e.g. an unrelated fluid.create_domain), so a domain's particles can go to zero with no error at all; check this field when that happens instead of assuming a reader fault.",
+    "notes": "Read epoch before and after a measurement. If it changed, the solvers were re-posed under you - the user scrubbed, playback ran, or a reset fired - and the numbers you just read are not a physics result. Without this a reverted pose and a body that never moved read exactly the same. driver says which of those it was; script_driving is true while physics.step holds the timeline, which it keeps only until the user scrubs, plays or stops. dropped_seeds names any fluid domain whose one-shot fluid.seed() (no persistent=true) the most recent auto-reset wiped and did NOT refill -- that auto-reset fires from a config-signature change ANYWHERE in the scene (e.g. an unrelated fluid.create_domain), so a domain's particles can go to zero with no error at all; check this field when that happens instead of assuming a reader fault. last_rewind: null until the setup-signature watcher first sees a change; then {frame, first_changed_part, absorbed, fluid_affected}. first_changed_part is the first signature section that differed from the last matching tick (e.g. \"domain 'X' grid/gas\", \"fluid 'X' thermal/solver/seed\", \"emitters / colliders\"). absorbed=true: the seed-start drift guard kept the bake (a write-back right after the first seeded step), no rewind ran. rewind_history: the last 8 such records, oldest first (a later edit's rewind does not overwrite an earlier drift). Fluid sections are split into \"fluid 'X' thermal\" and \"fluid 'X' solver/seed\".",
     "tags": "simulation|control|epoch|driver|timeline|measure|verify|fluid|seed",
     "related": "physics.step|timeline.set_frame|timeline.get_frame|scene.get_world_transform|fluid.seed|fluid.create_domain"
   },
@@ -6745,6 +6745,12 @@
     "tags": "fluid|particle|temperature|kelvin|measure|verify|thermal|debug",
     "related": "fluid.get|fluid.list_domains|fluid.step|fluid.run|fluid.state_digest"
   },
+  "fluid.surface_parity": {
+    "summary": "GPU surface builder vs the CPU reference on the same live particles: cell-by-cell SDF difference (max, mean, in metres and voxels), band and sign mismatches, material-coordinate residual difference, per-substance material mixture agreement, both build times",
+    "notes": "Acceptance test of the GPU surface route (docs/dev/GPU_YUZEY_LEVEL_SET.md). Builds both from the domain's current host particles with the domain's level-set parameters and the render view selection; the GPU side uses temporary device buffers, so the live publication is untouched. compared_cells = cells inside the narrow band on either side. sign_mismatch counts cells where the surface lies on opposite sides (the visible failure); band_mismatch cells inside the band on one side only. gpu_ok=false with gpu_status names why the GPU route refused (anisotropic kernels, no Vulkan compute, a missing surface kernel). Read after a fluid.step. The live route itself is reported by fluid.get surface_route (cpu | gpu_host | gpu_live) and surface_gpu_status. composition_cpu / composition_gpu: whether each side built a per-substance material mixture (a domain whose substances all resolve to the domain material builds none on either side); composition_slot_mismatch counts cells whose material pair differs, composition_weight_max_abs the largest blend-weight difference.",
+    "tags": "fluid|surface|sdf|level-set|gpu|parity|measure|verify",
+    "related": "fluid.get|fluid.set_param|fluid.step|perf.gpu_kernel_timings"
+  },
   "fluid.sample_solid_phi": {
     "summary": "Collider signed distance (grid.solid_phi, metres, < 0 inside) of a liquid/Matter domain at 1..4096 world points: cell ijk, cell mask (solid), the cell centre's distance and the trilinear value the MPM grid contact and parcel push read",
     "notes": "points: [[x, y, z], ...]. Cells no collider wrote read as 2 h in the trilinear value (the kernels' own substitution); cell_has_phi=false marks them. has_phi_field=false means no collider is stamped. To find where a collider's surface really is for the solver, sample a vertical line and locate the zero crossing; compare with the analytic or mesh surface. Read after a fluid.step: the field is stamped in the step.",
@@ -7488,5 +7494,17 @@
       }
     },
     "tags": "simulation|mode|write"
+  },
+  "render.probe_surface_composition": {
+    "summary": "Per-substance material composition cell (slot A, slot B as material id + 1, weight of B) a surface shader reads at a world point, read back from each Vulkan device's own buffer, beside the host copy the producer published",
+    "notes": "point: [x, y, z] world. One row per Vulkan backend (render = Vulkan RT, viewport = the raster device behind Solid/Material/RayFusion). found=false: no surface slot carries a composition address on that device. has_buffer=false: the address does not resolve into a buffer that device owns. address_offset should equal uvw_bytes (the composition follows the material-coordinate residual in one allocation). device != host on one backend means the upload to that device is wrong; device == host but the image wrong means the shader reads it wrong. A host value of 0 in slot A is the built-in dielectric (an unsupported cell takes the fallback).",
+    "tags": "render|volume|surface|sdf|material|composition|debug|verify",
+    "related": "render.volume_slots|fluid.surface_parity|fluid.get"
+  },
+  "fluid.seed_mesh": {
+    "summary": "Fill the inside of a scene object with the domain's matter (Seed Mode 'Mesh Volume'), e.g. a hidden castle mesh seeded with sand",
+    "notes": "object: scene object name; its world-space surface is tested with the collider cook's three-ray parity vote, so a seed and a collider agree on inside. Liquid/MPM parcels use particles_per_cell (default 8) on the domain grid, keeping only sub-cell slots that land inside; DEM grains use their physical FCC packing inside the mesh. Fails and seeds nothing when the object is missing, does not overlap the domain, or has no inside on the grid (open surface, thinner than a voxel); fluid.get then reports seed_error. persistent=true makes it the reset-time recipe. Hide the object yourself if it should not render.",
+    "tags": "fluid|seed|mesh|volume|grain|sand|write",
+    "related": "fluid.seed|fluid.get|fluid.clear"
   }
 }

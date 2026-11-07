@@ -17,6 +17,8 @@
 // ═══════════════════════════════════════════════════════════════════════════════
 
 #include "scene_ui.h"
+#include "UI/ColorControls.h"
+#include "UI/PropertyLayout.h"
 #include "UI/GizmoOcclusion.h"
 #include "PerfProfile.h"
 #include "UI/UvEditorUI.h"
@@ -908,167 +910,11 @@ static std::string active_model_path = "No file selected yet.";
 // GLOBAL UI WIDGETS IMPLEMENTATION
 // ═══════════════════════════════════════════════════════════
 
-// Initialize default theme (Retro Monochrome)
-SceneUI::LCDTheme SceneUI::currentTheme = {
-    IM_COL32(200, 200, 200, 255), // Lit: White-ish
-    IM_COL32(40, 45, 50, 255),    // Off: Dark Gray
-    IM_COL32(20, 20, 20, 255),    // Bg: Almost Black
-    IM_COL32(180, 230, 255, 255), // Text: Light Cyan
-    false
-};
-
-// Initialize default style
-SceneUI::UISliderStyle SceneUI::globalSliderStyle = SceneUI::UISliderStyle::Modern;
-
-bool SceneUI::DrawSmartFloat(const char* id, const char* label, float* value, float min, float max, 
-                           const char* format, bool keyed, 
-                           std::function<void()> onKeyframeClick, int segments) 
-{
-    if (globalSliderStyle == UISliderStyle::RetroLCD) {
-        return DrawLCDSlider(id, label, value, min, max, format, keyed, onKeyframeClick, segments);
-    }
-    else {
-        // Modern / Standard Style
-        ImGui::PushID(id);
-        bool changed = false;
-        
-        // Keyframe Button (if callback provided)
-        if (onKeyframeClick) {
-            float s = ImGui::GetFrameHeight();
-            ImVec2 kf_pos = ImGui::GetCursorScreenPos();
-            bool kf_clicked = ImGui::InvisibleButton("kf", ImVec2(s, s));
-            
-            // Standard diamond drawing
-            ImU32 kf_bg = keyed ? IM_COL32(255, 200, 0, 255) : IM_COL32(40, 40, 40, 255);
-            ImU32 kf_border = IM_COL32(180, 180, 180, 255);
-            if (ImGui::IsItemHovered()) {
-                kf_border = IM_COL32(255, 255, 255, 255);
-                ImGui::SetTooltip(keyed ? "Click to REMOVE keyframe" : "Click to ADD keyframe");
-            }
-            ImDrawList* dl = ImGui::GetWindowDrawList();
-            float cx = kf_pos.x + s * 0.5f;
-            float cy = kf_pos.y + s * 0.5f;
-            float r = s * 0.22f;
-            ImVec2 p[4] = { ImVec2(cx, cy - r), ImVec2(cx + r, cy), ImVec2(cx, cy + r), ImVec2(cx - r, cy) };
-            dl->AddQuadFilled(p[0], p[1], p[2], p[3], kf_bg);
-            dl->AddQuad(p[0], p[1], p[2], p[3], kf_border, 1.0f);
-            
-            if (kf_clicked) onKeyframeClick();
-            ImGui::SameLine();
-        }
-
-        // Standard Slider
-        // Adjust width if keyframe button exists or not to align
-        if (ImGui::SliderFloat(label, value, min, max, format)) {
-            changed = true;
-        }
-        
-        ImGui::PopID();
-        return changed;
-    }
-}
-
-
-bool SceneUI::DrawLCDSlider(const char* id, const char* label, float* value, float min, float max, 
-                          const char* format, bool keyed, 
-                          std::function<void()> onKeyframeClick, int segments) 
-{
-    ImGui::PushID(id);
-    bool changed = false;
-    float t = (*value - min) / (max - min);
-    int lit = (int)(t * segments);
-    
-    // Keyframe diamond button (Only if callback provided)
-    if (onKeyframeClick) {
-        float s = ImGui::GetFrameHeight();
-        ImVec2 kf_pos = ImGui::GetCursorScreenPos();
-        bool kf_clicked = ImGui::InvisibleButton("kf", ImVec2(s, s));
-        
-        ImU32 kf_bg = keyed ? IM_COL32(100, 180, 255, 255) : IM_COL32(40, 40, 40, 255);
-        if (currentTheme.isRetroGreen) {
-            kf_bg = keyed ? IM_COL32(50, 255, 50, 255) : IM_COL32(20, 50, 20, 255);
-        }
-        
-        ImU32 kf_border = ImGui::IsItemHovered() ? IM_COL32(255, 255, 255, 255) : IM_COL32(150, 150, 150, 255);
-        if (ImGui::IsItemHovered()) {
-            if (!currentTheme.isRetroGreen)
-                kf_bg = keyed ? IM_COL32(120, 200, 255, 255) : IM_COL32(70, 70, 70, 255);
-            ImGui::SetTooltip(keyed ? "%s: Click to REMOVE keyframe" : "%s: Click to ADD keyframe", label);
-        }
-        
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        float cx = kf_pos.x + s * 0.5f;
-        float cy = kf_pos.y + s * 0.5f;
-        float r = s * 0.22f;
-        dl->AddQuadFilled(ImVec2(cx, cy-r), ImVec2(cx+r, cy), ImVec2(cx, cy+r), ImVec2(cx-r, cy), kf_bg);
-        dl->AddQuad(ImVec2(cx, cy-r), ImVec2(cx+r, cy), ImVec2(cx, cy+r), ImVec2(cx-r, cy), kf_border, 1.0f);
-        
-        if (kf_clicked) onKeyframeClick();
-        
-        ImGui::SameLine();
-    } else {
-        // Just add some spacing if no keyframe button
-        ImGui::Dummy(ImVec2(ImGui::GetFrameHeight(), ImGui::GetFrameHeight()));
-        ImGui::SameLine();
-    }
-    
-    // Label (fixed width)
-    ImGui::Text("%-6s", label);
-    ImGui::SameLine();
-    
-    // LCD Bar
-    ImVec2 bar_pos = ImGui::GetCursorScreenPos();
-    float segW = 6.0f;
-    float segH = 14.0f;
-    float gap = 2.0f;
-    float totalW = segments * (segW + gap);
-    
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    
-    for (int i = 0; i < segments; i++) {
-        float x = bar_pos.x + i * (segW + gap);
-        ImU32 color;
-        if (i < lit) {
-            color = currentTheme.litColor;
-        } else {
-            color = currentTheme.offColor;
-        }
-        dl->AddRectFilled(ImVec2(x, bar_pos.y), ImVec2(x + segW, bar_pos.y + segH), color, 1.0f);
-        dl->AddRect(ImVec2(x, bar_pos.y), ImVec2(x + segW, bar_pos.y + segH), currentTheme.bgColor, 1.0f);
-    }
-    
-    // Invisible slider over the bar
-    ImGui::SetCursorScreenPos(bar_pos);
-    ImGui::InvisibleButton("bar", ImVec2(totalW, segH));
-    if (ImGui::IsItemActive()) {
-        float mx = ImGui::GetIO().MousePos.x - bar_pos.x;
-        float newT = std::clamp(mx / totalW, 0.0f, 1.0f);
-        *value = min + newT * (max - min);
-        changed = true;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
-        ImGui::SetTooltip("Drag to adjust value");
-    }
-    
-    ImGui::SameLine();
-    
-    // Value Input
-    ImGui::PushItemWidth(60);
-    char inputId[64];
-    snprintf(inputId, sizeof(inputId), "##input_%s", id);
-    
-    // Style input specific to theme
-    ImGui::PushStyleColor(ImGuiCol_Text, currentTheme.textValColor);
-    if (ImGui::InputFloat(inputId, value, 0.0f, 0.0f, format)) {
-        *value = std::clamp(*value, min, max); // Clamp manual input
-        changed = true;
-    }
-    ImGui::PopStyleColor();
-    ImGui::PopItemWidth();
-    
-    ImGui::PopID();
-    return changed;
+bool SceneUI::DrawSmartFloat(const char* id, const char* label, float* value,
+                             float min, float max, const char* format, bool keyed,
+                             std::function<void()> onKeyframeClick, int /*segments*/) {
+    return PropertyLayout::slider(id, label, value, min, max, format,
+                                  keyed, onKeyframeClick);
 }
 
 
@@ -1219,116 +1065,8 @@ void SceneUI::drawLogPanelEmbedded()
 
 void SceneUI::drawThemeSelector() {
     UIWidgets::DrawThemeSelector(panel_alpha);
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ═══════════════════════════════════════════════════════════
-    // LCD WIDGET THEME
-    // ═══════════════════════════════════════════════════════════
-    if (ImGui::CollapsingHeader("LCD Widget Theme", 0)) {
-        ImGui::Indent();
-        
-        static bool init_theme = true;
-        
-        // ── SLIDER STYLE SELECTOR ──
-        int styleIdx = (globalSliderStyle == UISliderStyle::Modern) ? 0 : 1;
-        if (ImGui::Combo("Slider Style", &styleIdx, "Modern (Standard)\0Retro LCD\0")) {
-            globalSliderStyle = (styleIdx == 0) ? UISliderStyle::Modern : UISliderStyle::RetroLCD;
-        }
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        
-        static int theme_preset = 0;
-        
-        // Ensure initialization on first run to prevent zero-alpha bugs
-        if (init_theme) {
-             theme_preset = 0;
-             currentTheme.litColor = IM_COL32(200, 200, 200, 255);
-             currentTheme.offColor = IM_COL32(40, 45, 50, 255);
-             currentTheme.bgColor = IM_COL32(20, 20, 20, 255);
-             currentTheme.textValColor = IM_COL32(180, 230, 255, 255);
-             currentTheme.isRetroGreen = false;
-             init_theme = false;
-        }
-
-        if (ImGui::Combo("Preset", &theme_preset, "Retro Monochrome\0Classic Green\0Amber\0Cyberpunk Blue\0Custom\0")) {
-            switch (theme_preset) {
-                case 0: // Mono
-                    currentTheme.litColor = IM_COL32(200, 200, 200, 255);
-                    currentTheme.offColor = IM_COL32(40, 45, 50, 255);
-                    currentTheme.bgColor = IM_COL32(20, 20, 20, 255);
-                    currentTheme.textValColor = IM_COL32(180, 230, 255, 255);
-                    currentTheme.isRetroGreen = false;
-                    break;
-                case 1: // Green
-                    currentTheme.litColor = IM_COL32(50, 255, 50, 255);
-                    currentTheme.offColor = IM_COL32(20, 50, 20, 255);
-                    currentTheme.bgColor = IM_COL32(10, 20, 10, 255);
-                    currentTheme.textValColor = IM_COL32(100, 255, 100, 255);
-                    currentTheme.isRetroGreen = true;
-                    break;
-                case 2: // Amber
-                    currentTheme.litColor = IM_COL32(255, 180, 20, 255);
-                    currentTheme.offColor = IM_COL32(60, 40, 10, 255);
-                    currentTheme.bgColor = IM_COL32(20, 15, 5, 255);
-                    currentTheme.textValColor = IM_COL32(255, 200, 100, 255);
-                    currentTheme.isRetroGreen = false;
-                    break;
-                case 3: // Cyberpunk
-                    currentTheme.litColor = IM_COL32(0, 255, 255, 255);
-                    currentTheme.offColor = IM_COL32(0, 50, 60, 255);
-                    currentTheme.bgColor = IM_COL32(5, 10, 20, 255);
-                    currentTheme.textValColor = IM_COL32(0, 255, 255, 255);
-                    currentTheme.isRetroGreen = false;
-                    break;
-                case 4: // Custom
-                    // Ensure alpha is full if coming from an uninit state (just safety)
-                    if ((currentTheme.litColor & 0xFF000000) == 0) currentTheme.litColor |= 0xFF000000;
-                    if ((currentTheme.offColor & 0xFF000000) == 0) currentTheme.offColor |= 0xFF000000;
-                    if ((currentTheme.bgColor & 0xFF000000) == 0) currentTheme.bgColor |= 0xFF000000;
-                    if ((currentTheme.textValColor & 0xFF000000) == 0) currentTheme.textValColor |= 0xFF000000;
-                    break;
-            }
-        }
-        
-        // Manual Color Overrides
-        ImGui::Text("Custom Colors");
-        ImGui::Spacing();
-
-        bool custom_changed = false;
-        ImVec4 colLit = ImGui::ColorConvertU32ToFloat4(currentTheme.litColor);
-        if (ImGui::ColorEdit3("Lit Color", &colLit.x)) { 
-            currentTheme.litColor = ImGui::ColorConvertFloat4ToU32(colLit); 
-            theme_preset = 4; // Switch to Custom
-        }
-
-        ImVec4 colOff = ImGui::ColorConvertU32ToFloat4(currentTheme.offColor);
-        if (ImGui::ColorEdit3("Off Color", &colOff.x)) { 
-            currentTheme.offColor = ImGui::ColorConvertFloat4ToU32(colOff); 
-            theme_preset = 4;
-        }
-        
-        ImVec4 colBg = ImGui::ColorConvertU32ToFloat4(currentTheme.bgColor);
-        if (ImGui::ColorEdit3("Background", &colBg.x)) { 
-            currentTheme.bgColor = ImGui::ColorConvertFloat4ToU32(colBg); 
-            theme_preset = 4;
-        }
-
-        ImVec4 colTxt = ImGui::ColorConvertU32ToFloat4(currentTheme.textValColor);
-        if (ImGui::ColorEdit3("Text Color", &colTxt.x)) { 
-            currentTheme.textValColor = ImGui::ColorConvertFloat4ToU32(colTxt); 
-            theme_preset = 4;
-        }
-
-        ImGui::Checkbox("Retro Keyframe Style", &currentTheme.isRetroGreen);
-        
-        ImGui::Unindent();
-    }
 }
+
 void SceneUI::drawResolutionPanel(UIContext& ctx)
 {
     if (UIWidgets::BeginSection("System & Output", ImVec4(0.4f, 0.8f, 0.6f, 1.0f))) {
@@ -2267,7 +2005,7 @@ static const char* propertyTabRegionId(int tab)
 void SceneUI::drawPoppedTabContent(UIContext& ctx, int tab)
 {
     switch (tab) {
-        case 0:  drawSceneHierarchy(ctx); AudioUI::drawProperties(ctx); break;
+        case 0:  drawSceneHierarchy(ctx); break;
         case 1:  drawRenderInspectorContent(ctx); break;
         case 2:  if (show_terrain_tab) drawTerrainPanel(ctx); break;
         case 3:
@@ -3005,7 +2743,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (!tab_is_popped)
         switch (active_properties_tab) {
             case 15: AudioUI::drawWorkspace(ctx); break;
-            case 0: drawSceneHierarchy(ctx); AudioUI::drawProperties(ctx); break;
+            case 0: drawSceneHierarchy(ctx); break;
             case 1:
                 {
                     drawRenderInspectorContent(ctx);
@@ -4302,7 +4040,7 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     // EXCEPTION: while the Geometry Graph node editor is focused, Delete/Backspace is claimed
     // by NodeEditorUIV2 for node/link deletion — without this, deleting a node in the graph
     // also deleted the scene object the graph belongs to (same Delete keypress, two listeners).
-    if (!io.WantTextInput && ctx.selection.hasSelection() &&
+    if (!UvEditorUI::capturesShortcuts() && !io.WantTextInput && ctx.selection.hasSelection() &&
         !terrain_graph_focused && !geometry_graph_focused && !material_graph_focused &&
         !anim_graph_focused && !node_editor_focused && !timeline.panel_focused) {
         handleDeleteShortcut(ctx);
@@ -4318,12 +4056,16 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     // N key - Toggle Properties Panel (Blender-style sidebar toggle)
     // Use WantTextInput instead of WantCaptureKeyboard so it works even when panel has focus
     // Only block when actively typing in a text field
-    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_N) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+    if (!UvEditorUI::capturesShortcuts() && !io.WantTextInput &&
+        ImGui::IsKeyPressed(ImGuiKey_N) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
         showSidePanel = !showSidePanel;
         SCENE_LOG_INFO(showSidePanel ? "Properties panel shown (N)" : "Properties panel hidden (N)");
     }
 
-    if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Tab) && !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
+    if (!UvEditorUI::capturesShortcuts() &&
+        !(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) &&
+        !io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Tab) &&
+        !io.KeyCtrl && !io.KeyShift && !io.KeyAlt) {
         const bool hasSelectedObject =
             ctx.selection.selected.type == SelectableType::Object &&
             ctx.selection.selected.object != nullptr;
@@ -4338,7 +4080,8 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     }
 
     // Selection Shortcuts (A=All, Alt+A=None, Ctrl+I=Invert)
-    if (!(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && !io.WantTextInput) {
+    if (!UvEditorUI::capturesShortcuts() &&
+        !(ctx.scene.rigView.edit_mode || ctx.scene.rigView.pose.active) && !io.WantTextInput) {
         const bool edit_mode_active = mesh_overlay_settings.enabled &&
                                       mesh_overlay_settings.edit_mode &&
                                       ctx.selection.mesh_element_mode != MeshElementSelectMode::Object;
@@ -4375,7 +4118,8 @@ void SceneUI::handleEditorShortcuts(UIContext& ctx)
     }
 
     // Undo / Redo
-    if (AudioUI::handleAudioHistoryShortcuts(ctx, block_history_actions)) {
+    if (!UvEditorUI::capturesShortcuts() &&
+        AudioUI::handleAudioHistoryShortcuts(ctx, block_history_actions)) {
         return;
     }
     if (ImGui::IsKeyPressed(ImGuiKey_Z) && io.KeyCtrl && !io.KeyShift) {
@@ -4578,7 +4322,6 @@ void SceneUI::drawStatusAndBottom(UIContext& ctx,
             show_node_editor    = (keep_index == 7) ? show_node_editor : false;
         };
         
-        UvEditorUI::drawBottomTab(ctx);
         AudioUI::drawAudioBottomTabs(ctx);
         bool active_dope = show_animation_panel && (timeline.getEditorMode() == TimelineEditorMode::DopeSheet);
         if (UIWidgets::HorizontalTab("Dope Sheet", UIWidgets::IconType::Timeline, active_dope))
@@ -9224,17 +8967,17 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
                 if (ImGui::DragFloat("Graph Density", &program.density, 0.01f, 0.0f, 100.0f)) changed = true;
 
             if (socket("Scattering Color Socket", VolumeMaterialSlot::ScatterColor))
-                if (ImGui::ColorEdit3("Graph Scattering Color", program.scatter_color)) changed = true;
+                if (ColorControls::field3("Graph Scattering Color", program.scatter_color)) changed = true;
             if (socket("Scattering Strength Socket", VolumeMaterialSlot::ScatterStrength))
                 if (ImGui::DragFloat("Graph Scattering Strength", &program.scatter_strength, 0.01f, 0.0f, 100.0f)) changed = true;
 
             if (socket("Absorption Color Socket", VolumeMaterialSlot::AbsorptionColor))
-                if (ImGui::ColorEdit3("Graph Absorption Color", program.absorption_color)) changed = true;
+                if (ColorControls::field3("Graph Absorption Color", program.absorption_color)) changed = true;
             if (socket("Absorption Strength Socket", VolumeMaterialSlot::AbsorptionStrength))
                 if (ImGui::DragFloat("Graph Absorption Strength", &program.absorption_strength, 0.01f, 0.0f, 100.0f)) changed = true;
 
             if (socket("Emission Color Socket", VolumeMaterialSlot::EmissionColor))
-                if (ImGui::ColorEdit3("Graph Emission Color", program.emission_color)) changed = true;
+                if (ColorControls::field3("Graph Emission Color", program.emission_color)) changed = true;
             if (socket("Emission Strength Socket", VolumeMaterialSlot::EmissionStrength))
                 if (ImGui::DragFloat("Graph Emission Strength", &program.emission_strength, 0.01f, 0.0f, 1000.0f)) changed = true;
 
@@ -9301,7 +9044,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
         // The stored truth behind Color, Opacity and Depth Tint above.
         if (ImGui::TreeNode("Physical Coefficients")) {
         float col[3] = { shader->scattering.color.x, shader->scattering.color.y, shader->scattering.color.z };
-        if (ImGui::ColorEdit3("Scattering Color", col)) {
+        if (ColorControls::field3("Scattering Color", col)) {
             shader->scattering.color = Vec3(col[0], col[1], col[2]);
             changed = true;
         }
@@ -9311,7 +9054,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
 
         ImGui::Separator();
         float abs_col[3] = { shader->absorption.color.x, shader->absorption.color.y, shader->absorption.color.z };
-        if (ImGui::ColorEdit3("Absorption Color", abs_col)) {
+        if (ColorControls::field3("Absorption Color", abs_col)) {
             shader->absorption.color = Vec3(abs_col[0], abs_col[1], abs_col[2]);
             changed = true;
         }
@@ -9379,7 +9122,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
 
         if (shader->emission.mode == VolumeEmissionMode::Constant) {
             float ecol[3] = { shader->emission.color.x, shader->emission.color.y, shader->emission.color.z };
-            if (ImGui::ColorEdit3("Color", ecol)) {
+            if (ColorControls::field3("Color", ecol)) {
                 shader->emission.color = Vec3(ecol[0], ecol[1], ecol[2]);
                 changed = true;
             }
@@ -9484,7 +9227,7 @@ bool SceneUI::drawVolumeShaderUI(UIContext& ctx, std::shared_ptr<VolumeShader> s
                 if (selected_stop >= 0 && selected_stop < (int)ramp.stops.size()) {
                     if (ImGui::SliderFloat("Stop Pos", &ramp.stops[selected_stop].position, 0, 1)) changed = true;
                     float c[3] = { ramp.stops[selected_stop].color.x, ramp.stops[selected_stop].color.y, ramp.stops[selected_stop].color.z };
-                    if (ImGui::ColorEdit3("Stop Color", c)) { ramp.stops[selected_stop].color = Vec3(c[0],c[1],c[2]); changed = true; }
+                    if (ColorControls::field3("Stop Color", c)) { ramp.stops[selected_stop].color = Vec3(c[0],c[1],c[2]); changed = true; }
                     if (ramp.stops.size() > 2 && ImGui::Button("Delete Stop")) { ramp.stops.erase(ramp.stops.begin()+selected_stop); selected_stop = -1; changed = true; }
                 }
             }

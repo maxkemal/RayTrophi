@@ -14,8 +14,9 @@ void drawRealtimeDenoiserControls() {
     }
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Fast temporal denoiser for the frames shown while the camera or an "
-                          "object moves (Vulkan RT). Independent of the OIDN switch; the "
-                          "converged image is unchanged. Needs Motion Vectors.");
+                          "object moves (Vulkan RT). Off by default; saved with the project. "
+                          "Independent of OIDN; raw accumulation is unchanged. Needs Motion "
+                          "Vectors. SDF/fog without reliable motion do not reuse history.");
     }
     if (!error.empty()) {
         ImGui::TextWrapped("%s", error.c_str());

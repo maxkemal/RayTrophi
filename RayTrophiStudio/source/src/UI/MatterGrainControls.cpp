@@ -274,6 +274,11 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
                 "liquid coupling or a force field on the grain. Off = A/B reference.\n"
                 "Script: fluid.set_grain_settings(sleep=...)");
             ImGui::BeginDisabled(!p.sleep);
+            changed |= DomainUi::Bool("Compact sleeping work", &p.compact_sleep_work,
+                "Group awake and audit grains for the heavy contact kernel.\n"
+                "Automatic on settled piles (at least 25% sleeping in the previous step).\n"
+                "Periodic and neighbour wake checks stay enabled. Off = dense A/B reference.\n"
+                "Script: fluid.set_grain_settings(compact_sleep_work=...)");
             changed |= DomainUi::Float("Sleep speed (m/s)", &p.sleep_speed_m_s, .0005f,
                 0.0f, 1.0f, "%.4f",
                 "Translation speed, and spin x radius, below which a grain counts as still\n"

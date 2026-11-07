@@ -10,6 +10,7 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include "Viewport/RasterBackground.h"
 #include "Backend/VulkanVolumePipelineProbe.h"
 #include "Backend/VulkanVolumeStageSplit.h"
 #include "Backend/VulkanFailureReporting.h"
@@ -17752,13 +17753,9 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
     recordCloudRasterPass(cmd, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
 
     VkClearValue clearValues[2]{};
-    // Use World's solid background color for the raster viewport clear
-    const bool hasWorldBg = (m_cachedWorld.color.x != 0.0f || m_cachedWorld.color.y != 0.0f || m_cachedWorld.color.z != 0.0f);
-    clearValues[0].color = { {
-        hasWorldBg ? m_cachedWorld.color.x : 0.13f,
-        hasWorldBg ? m_cachedWorld.color.y : 0.14f,
-        hasWorldBg ? m_cachedWorld.color.z : 0.16f,
-        1.0f } };
+    clearValues[0].color = rasterBackgroundColor(
+        m_cachedWorld.mode == WORLD_MODE_COLOR,
+        m_cachedWorld.color.x, m_cachedWorld.color.y, m_cachedWorld.color.z);
     clearValues[1].depthStencil = { 1.0f, 0 };
 
     VkRenderPassBeginInfo renderPassInfo{};

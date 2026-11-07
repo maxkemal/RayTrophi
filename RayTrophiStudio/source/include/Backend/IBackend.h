@@ -507,6 +507,11 @@ public:
     
     virtual void updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) = 0;
     virtual bool updateFlatMeshBLAS(const std::string& /*nodeName*/, const class TriangleMesh* /*mesh*/) { return false; }
+    // Shading-only update. Must not refit/rebuild acceleration structures.
+    // False requests the existing correctness fallback for unsupported resident layouts.
+    virtual bool updateFlatMeshUVs(const class TriangleMesh* /*mesh*/) {
+        return false;
+    }
 
     /**
      * @brief Was the uploaded geometry built with the per-vertex pointiness attribute?

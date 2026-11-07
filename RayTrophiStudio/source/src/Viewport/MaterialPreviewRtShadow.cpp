@@ -1,4 +1,4 @@
-// Same-frame directional shadow service. Flat TLAS hit data, shared raster UV policy.
+// Same-frame per-light shadow service. Flat TLAS hit data, shared raster UV policy.
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "RayFusion/ProbeBounce.h"
@@ -11,6 +11,12 @@
 
 namespace Backend {
 namespace {
+struct alignas(16) RtShadowLight {
+    float positionType[4]{};
+    float toLight[4]{};
+};
+static_assert(sizeof(RtShadowLight) == 32u, "RT shadow light ABI");
+
 struct alignas(16) RtShadowPush {
     float invViewProj[16];
     float sunDirection[4];
@@ -40,7 +46,7 @@ public:
     VkPipeline pipeline=VK_NULL_HANDLE;
     VkDescriptorSet consumerSet=VK_NULL_HANDLE;
     VkBuffer consumerBuffer=VK_NULL_HANDLE;
-    VulkanRT::BufferHandle mask{}, hits{}, materials{};
+    VulkanRT::BufferHandle mask{}, hits{}, materials{}, lights{};
     uint32_t width=0, height=0, textureCount=1, instanceCount=0;
     VulkanBackendAdapter::RtShadowCoverage coverage{};
     bool prepared=false, recorded=false;
@@ -74,8 +80,8 @@ bool VulkanBackendAdapter::ensureRtShadowResources(uint32_t width, uint32_t heig
     s.textureCount=(std::min)(uint32_t(VULKAN_TEXTURE_CAPACITY),
         props.limits.maxPerStageDescriptorSampledImages>1u?
         props.limits.maxPerStageDescriptorSampledImages-1u:1u);
-    VkDescriptorSetLayoutBinding bindings[7]{};
-    for(uint32_t i=0;i<7;++i) {
+    VkDescriptorSetLayoutBinding bindings[8]{};
+    for(uint32_t i=0;i<8;++i) {
         bindings[i].binding=i; bindings[i].descriptorCount=1;
         bindings[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
         bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -85,14 +91,14 @@ bool VulkanBackendAdapter::ensureRtShadowResources(uint32_t width, uint32_t heig
     bindings[5].descriptorCount=s.textureCount;
     if (!s.setLayout) {
         VkDescriptorSetLayoutCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        ci.bindingCount=7;ci.pBindings=bindings;
+        ci.bindingCount=8;ci.pBindings=bindings;
         if(vkCreateDescriptorSetLayout(vk,&ci,nullptr,&s.setLayout)!=VK_SUCCESS) {
             s.reason="shadow descriptor layout failed";return false;
         }
     }
     if(!s.pool) {
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,4},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,5},
             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,s.textureCount+1u}};
         VkDescriptorPoolCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         ci.maxSets=1;ci.poolSizeCount=3;ci.pPoolSizes=sizes;
@@ -141,10 +147,6 @@ bool VulkanBackendAdapter::rtShadowCoveredLight(RtShadowCoverage& coverage,
     // would be a second copy of a number that already lives in globals.h.
     static constexpr uint32_t kWorldSunSlot =
         static_cast<uint32_t>(::kMaterialPreviewMaxSceneLights);
-    // ~0.8 derece. Senkron kodu yonu BIREBIR kopyaladigi icin pratikte dot=1;
-    // esik, elle bir kac ondalik oynatilmis bir isigi da ayni gunes saymak icin
-    // var, ayri bir yonu kaza ile yutacak kadar genis degil.
-    static constexpr float kAlignDot = 0.9999f;
     coverage = RtShadowCoverage{};
     coverage.primaryLight = kWorldSunSlot;
     reason.clear();
@@ -170,34 +172,34 @@ bool VulkanBackendAdapter::rtShadowCoveredLight(RtShadowCoverage& coverage,
         if(!std::isfinite(length) || length<1e-6f)return false;
         out=v*(1.0f/length);return true;
     };
-    // The scene light index the shading shader uses. Invisible lights are
-    // skipped WITHOUT advancing it, exactly as the GPU light packer and the
-    // cascade builder do -- all three walk m_cachedLights the same way, and a
-    // fourth walk that counted differently would shadow the wrong light.
-    struct Candidate { uint32_t index; Vec3 toLight; };
-    std::vector<Candidate> directionals;
-    uint32_t index=0;
-    for(const auto& light:m_cachedLights) {
-        if(!light || !light->visible)continue;
-        if(index>=kWorldSunSlot)break;
-        if(light->type()==LightType::Directional && light->intensity>0.0f) {
-            Vec3 toLight{};
-            if(normalized(light->direction*-1.0f,toLight))
-                directionals.push_back({index,toLight});
+    // Keep the visible-light index identical to the scene light packer.
+    uint32_t index = 0;
+    bool primary = false;
+    for (const auto& light : m_cachedLights) {
+        if (!light || !light->visible) {
+            continue;
+        }
+        if (index >= kWorldSunSlot) {
+            break;
+        }
+        Vec3 toLight{};
+        const bool directional = light->type() == LightType::Directional;
+        const bool finitePosition = std::isfinite(light->position.x) &&
+            std::isfinite(light->position.y) && std::isfinite(light->position.z);
+        if (light->intensity > 0.0f &&
+            (directional ? normalized(light->direction * -1.0f, toLight) : finitePosition)) {
+            coverage.sceneLightMask |= (1u << index);
+            if (!primary || directional) {
+                coverage.primaryLight = index;
+                coverage.toLight = toLight;
+                primary = true;
+            }
         }
         ++index;
     }
-    // Primary direction: the first usable directional. The Physical Sky sun is
-    // not a light of its own any more (it reaches surfaces only through a
-    // directional, see rtapi::ensureWorldSunLight), so it is never a fallback.
-    if(directionals.empty()) {
-        reason="no valid directional light";return false;
-    }
-    coverage.primaryLight=directionals.front().index;
-    coverage.toLight=directionals.front().toLight;
-    for(const auto& candidate:directionals) {
-        if(Vec3::dot(candidate.toLight,coverage.toLight)>=kAlignDot)
-            coverage.sceneLightMask|=(1u<<candidate.index);
+    if (coverage.sceneLightMask == 0u) {
+        reason = "no valid scene light";
+        return false;
     }
     return true;
 }
@@ -292,6 +294,28 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
         if(!buffer.buffer)return false;
         m_device->uploadBuffer(buffer,data,size);return true;
     };
+    RtShadowLight shadowLights[32]{};
+    uint32_t lightIndex = 0;
+    for (const auto& light : m_cachedLights) {
+        if (!light || !light->visible) {
+            continue;
+        }
+        if (lightIndex >= 32u) {
+            break;
+        }
+        auto& record = shadowLights[lightIndex++];
+        record.positionType[0] = light->position.x;
+        record.positionType[1] = light->position.y;
+        record.positionType[2] = light->position.z;
+        record.positionType[3] = light->type() == LightType::Directional ? 1.0f : 0.0f;
+        record.toLight[0] = -light->direction.x;
+        record.toLight[1] = -light->direction.y;
+        record.toLight[2] = -light->direction.z;
+    }
+    if (!upload(s.lights, shadowLights, sizeof(shadowLights))) {
+        s.reason = "shadow light upload allocation failed";
+        return false;
+    }
     if(!upload(s.hits,hits.data(),hits.size()*sizeof(hits[0])) ||
        !upload(s.materials,materials.data(),materials.size()*sizeof(materials[0]))) {
         s.reason="shadow hit/material upload allocation failed";return false;
@@ -315,8 +339,8 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     VkWriteDescriptorSetAccelerationStructureKHR acceleration{};
     acceleration.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
     acceleration.accelerationStructureCount=1;acceleration.pAccelerationStructures=&tlas;
-    VkWriteDescriptorSet writes[7]{};
-    for(uint32_t i=0;i<7;++i) {
+    VkWriteDescriptorSet writes[8]{};
+    for(uint32_t i=0;i<8;++i) {
         writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i].dstSet=s.set;
         writes[i].dstBinding=i;writes[i].descriptorCount=1;
         writes[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -328,7 +352,9 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     writes[5].descriptorCount=s.textureCount;writes[5].pImageInfo=textures.data();
     writes[6].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[6].pBufferInfo=&volumeInfo;
-    vkUpdateDescriptorSets(m_device->getDevice(),7,writes,0,nullptr);
+    VkDescriptorBufferInfo lightInfo{s.lights.buffer, 0, VK_WHOLE_SIZE};
+    writes[7].pBufferInfo = &lightInfo;
+    vkUpdateDescriptorSets(m_device->getDevice(),8,writes,0,nullptr);
     s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
     prepareScreenGiFrame();
     return true;
@@ -347,7 +373,7 @@ void VulkanBackendAdapter::recordRtShadowPass(VkCommandBuffer cmd,const Matrix4x
     bufferBarrier(cmd,s.mask.buffer,VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_TRANSFER_WRITE_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT,VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT|VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_TRANSFER_BIT);
-    const uint32_t header[]={0x52545348u,width,height,s.coverage.primaryLight,
+    const uint32_t header[]={0u,width,height,s.coverage.primaryLight,
                             s.coverage.sceneLightMask,0u,0u,0u};
     vkCmdUpdateBuffer(cmd,s.mask.buffer,0,sizeof(header),header);
     bufferBarrier(cmd,s.mask.buffer,VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -363,6 +389,7 @@ void VulkanBackendAdapter::recordRtShadowPass(VkCommandBuffer cmd,const Matrix4x
     push.volumeMeta[0] = m_device->m_volumeBuffer.buffer
         ? m_device->m_volumeCount
         : 0u;
+    push.volumeMeta[1] = 0x52545349u;
     vkCmdBindPipeline(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,s.pipeline);
     vkCmdBindDescriptorSets(cmd,VK_PIPELINE_BIND_POINT_COMPUTE,s.layout,0,1,&s.set,0,nullptr);
     vkCmdPushConstants(cmd,s.layout,VK_SHADER_STAGE_COMPUTE_BIT,0,sizeof(push),&push);
@@ -417,7 +444,12 @@ bool VulkanBackendAdapter::getRtShadowStatus(bool& supported,bool& ready,uint32_
     if(!m_rtShadow){reason="not prepared";return supported;}
     const auto& s=*m_rtShadow;
     ready=supported && s.recorded && s.prepared && m_device->getTLASHandle()!=VK_NULL_HANDLE;
-    rays=ready?s.width*s.height:0u;reason=s.reason;
+    uint32_t lightCount = 0;
+    for (uint32_t mask = s.coverage.sceneLightMask; mask != 0u; mask &= mask - 1u) {
+        ++lightCount;
+    }
+    rays = ready ? s.width * s.height * lightCount : 0u;
+    reason = s.reason;
     if(!ready && reason.empty())reason="shadow dispatch has not been recorded";
     return supported;
 }
@@ -439,7 +471,7 @@ void VulkanBackendAdapter::destroyRtShadowResources() {
     if(s.layout)vkDestroyPipelineLayout(vk,s.layout,nullptr);
     if(s.pool)vkDestroyDescriptorPool(vk,s.pool,nullptr);
     if(s.setLayout)vkDestroyDescriptorSetLayout(vk,s.setLayout,nullptr);
-    for(auto* buffer:{&s.mask,&s.hits,&s.materials})if(buffer->buffer)m_device->destroyBuffer(*buffer);
+    for(auto* buffer:{&s.mask,&s.hits,&s.materials,&s.lights})if(buffer->buffer)m_device->destroyBuffer(*buffer);
     m_rtShadow.reset();
 }
 } // namespace Backend

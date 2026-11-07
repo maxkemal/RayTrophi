@@ -11,17 +11,65 @@ ROOT = Path(__file__).resolve().parents[2]
 PROJECT = ROOT / "RayTrophiStudio"
 API = PROJECT / "source/src/Api"
 METHODS = {"capabilities", "targets", "info", "layout", "transform", "normalize", "pack", "unwrap", "open",
-           "flip_u", "flip_v", "swap_uv", "project_view"}
+           "flip_u", "flip_v", "swap_uv", "project_view", "set_corners"}
 
 
 class UvContracts(unittest.TestCase):
+    def test_attribute_only_update_boundary(self):
+        service = (PROJECT / "source/src/UV/UvService.cpp").read_text()
+        edit = service[service.index('class EditCommand'):service.index('json failure')]
+        self.assertIn('publishAttributeUpdate(ctx, mesh_.get())', edit)
+        self.assertNotIn('scheduleSceneMutationRebuilds', edit)
+        self.assertIn('attribute_revision.fetch_add', edit)
+        topology = (PROJECT / "source/src/UV/UvGeometryTransaction.cpp").read_text()
+        self.assertIn('scheduleSceneMutationRebuilds(ctx, true)', topology)
+        for source in ('Backend/VulkanBackend_UvUpdate.cpp', 'Render/OptixWrapper_UvUpdate.cpp'):
+            code = (PROJECT / 'source/src' / source).read_text()
+            self.assertIn('updateFlatMeshUVs', code)
+            for operation in ('updateFlatMeshBLAS(', 'updateTLAS(', 'rebuildAccelerationStructure(',
+                              'optixAccelBuild(', 'vkCmdBuildAccelerationStructuresKHR('):
+                self.assertNotIn(operation, code)
+        ast.parse((ROOT / 'scripts/test/rt_test_uv_attribute_updates_ipc.py').read_text())
+
+    def test_vertex_scope_and_native_preview(self):
+        service = (PROJECT / "source/src/UV/UvService.cpp").read_text()
+        self.assertIn('params.contains("vertices") ? &vertices : nullptr', service)
+        self.assertIn('"vertex_selection", true', service)
+        binding = (API / "RtUvBindings.cpp").read_text()
+        self.assertIn('{"vertices", "array", false', binding)
+        self.assertIn('count = 12;', binding)
+        view = (PROJECT / "source/src/UI/UvEditorUI.cpp").read_text()
+        self.assertIn('params["vertices"] = state.gesture_vertices', view)
+        self.assertIn('params["vertices"] = selectedVertices()', view)
+        self.assertNotIn('const int samples = 128', view)
+        preview = (PROJECT / "source/src/UI/UvTexturePreview.cpp").read_text()
+        self.assertIn('SDL_UpdateTexture', preview)
+        self.assertIn('->AddImage', preview)
+        self.assertNotIn('scene_ui.h', preview)
+
+    def test_uv_shortcut_ownership(self):
+        view = (PROJECT / "source/src/UI/UvEditorUI.cpp").read_text()
+        self.assertIn('bool capturesShortcuts()', view)
+        self.assertIn('return state.visible;', view)
+        for source in ("UI/scene_ui_gizmos.cpp", "UI/RigViewportUI.cpp", "Core/Main.cpp"):
+            code = (PROJECT / "source/src" / source).read_bytes().decode("utf-8", errors="replace")
+            self.assertIn('#include "UI/UvEditorUI.h"', code)
+            self.assertIn('!UvEditorUI::capturesShortcuts()', code)
+        service = (PROJECT / "source/src/UV/UvService.cpp").read_text()
+        self.assertIn('summary["textures"]', service)
+        self.assertIn('previewTextures(object, mesh_index)', service)
+
     def test_project_sources_and_headers(self):
         namespace = {"m": "http://schemas.microsoft.com/developer/msbuild/2003"}
         project = ET.parse(PROJECT / "RayTrophiStudio.vcxproj")
         filters = ET.parse(PROJECT / "RayTrophiStudio.vcxproj.filters")
         sources = list((PROJECT / "source/src/UV").glob("*.cpp"))
         sources += [PROJECT / "source/src/UI/UvEditorUI.cpp", API / "RtUvBindings.cpp", API / "RtIpcUv.cpp",
-                    PROJECT / "source/src/UI/MaterialUvSamplingUI.cpp"]
+                    PROJECT / "source/src/UI/UvTexturePreview.cpp",
+                    PROJECT / "source/src/Backend/VulkanBackend_UvUpdate.cpp",
+                    PROJECT / "source/src/Render/OptixWrapper_UvUpdate.cpp",
+                    PROJECT / "source/src/UI/MaterialUvSamplingUI.cpp",
+                    PROJECT / "source/src/MeshEdit/GeometryRemap.cpp"]
         compiled = [e.attrib["Include"] for e in project.findall(".//m:ClCompile", namespace)
                     if "Include" in e.attrib]
         visible = {e.attrib["Include"] for e in filters.findall(".//m:ClCompile", namespace)}
@@ -77,6 +125,21 @@ class UvContracts(unittest.TestCase):
         self.assertIn("f700c7790aaa030e794b52ba7791a05c085faf0c", (vendor / "SOURCE.txt").read_text())
         ast.parse((ROOT / "scripts/test/rt_test_uv_authoring_ipc.py").read_text())
         ast.parse((ROOT / "scripts/test/rt_test_uv_python.py").read_text())
+        ast.parse((ROOT / "scripts/test/rt_test_uv_corner_ipc.py").read_text())
+        ast.parse((ROOT / "scripts/test/rt_test_uv_corner_python.py").read_text())
+
+    def test_corner_remap_integration(self):
+        service = (PROJECT / "source/src/UV/UvService.cpp").read_text()
+        self.assertIn('"corner_remap", true', service)
+        self.assertIn('DNA::remapGeometry', service)
+        self.assertIn('commitGeometry', service)
+        self.assertIn('"vertex_indices"', service)
+        backend = (PROJECT / "source/src/UV/UvXatlasBackend.cpp").read_text()
+        self.assertIn('applyCornerCoordinates', backend)
+        self.assertNotIn('uv_vertex_split_required', backend)
+        cmake = (ROOT / "tests/uv/CMakeLists.txt").read_text()
+        for source in ("UvCornerRemapTests.cpp", "GeometryRemap.cpp", "UvCornerRemap.cpp"):
+            self.assertIn(source, cmake)
 
     def test_material_panel_has_only_sampling_and_editor_entry(self):
         panel = (PROJECT / "source/src/UI/scene_ui_materials.cpp").read_text()

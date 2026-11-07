@@ -147,6 +147,7 @@ void fillFluidSurfaceDetail(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.anisotropy_max_stretch = l.anisotropy_max_stretch;
     info.anisotropy_neighbor_min = l.anisotropy_neighbor_min;
     info.position_smoothing = l.position_smoothing;
+    info.surface_gpu = l.gpu_build;
     info.surface_measured = sdf != nullptr && sdf->eff_nx > 0;
     if (info.surface_measured) {
         info.surface_grid_dim[0] = sdf->eff_nx;
@@ -162,6 +163,11 @@ void fillFluidSurfaceDetail(const RayTrophiSim::SimulationGridDomainDesc& d,
         info.surface_active_cells = static_cast<uint64_t>(sdf->active_cells);
         info.surface_work_cells = static_cast<uint64_t>(sdf->work_cells);
         info.surface_bin_cells = static_cast<uint64_t>(sdf->bin_cells);
+        info.surface_route = sdf->route == 2 ? "gpu_live"
+                           : sdf->route == 1 ? "gpu_host" : "cpu";
+        info.surface_gpu_status = sdf->gpu_status;
+        info.surface_upload_bytes = static_cast<uint64_t>(sdf->upload_bytes);
+        info.surface_download_bytes = static_cast<uint64_t>(sdf->download_bytes);
     }
 }
 
@@ -189,7 +195,9 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.pressure_iterations_grid_scaled = d.fluid_params.pressure_iterations_grid_scaled;
     info.pressure_relative_residual = d.fluid_params.pressure_relative_residual;
     info.seed_mode = d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel
-        ? "fill_level" : "box";
+        ? "fill_level"
+        : (d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::MeshVolume ? "mesh_volume" : "box");
+    info.seed_mesh_object = d.fluid_seed_mesh_object;
     info.seed_min = d.fluid_seed_min;
     info.seed_max = d.fluid_seed_max;
     info.seed_particles_per_cell = d.fluid_seed_particles_per_cell;
@@ -230,6 +238,7 @@ void fillFluidSettle(const RayTrophiSim::SimulationGridDomainDesc& d,
     info.pressure_cg_multigrid = fs.pressure_cg_multigrid;
     const auto& seed = state->seed_stats;
     info.seed_ran = seed.ran;
+    info.seed_error = seed.error;
     info.seed_truncated = seed.truncated;
     info.seed_requested_particles = static_cast<uint64_t>(seed.requested);
     info.seed_emitted_particles = static_cast<uint64_t>(seed.emitted);
@@ -847,6 +856,7 @@ Result setFluidSurfaceDetail(const std::string& domain_id_or_name,
     if (patch.anisotropy_max_stretch) l.anisotropy_max_stretch = *patch.anisotropy_max_stretch;
     if (patch.anisotropy_neighbor_min) l.anisotropy_neighbor_min = *patch.anisotropy_neighbor_min;
     if (patch.position_smoothing) l.position_smoothing = *patch.position_smoothing;
+    if (patch.surface_gpu) l.gpu_build = *patch.surface_gpu;
 
     // Same commit the panel's sdf_changed does: rebuild the surface from the
     // current particles (no simulation reset) and drop the converged image, or
@@ -2282,7 +2292,67 @@ Result seedFluidParticles(const std::string& domain_id_or_name,
     // result so its next UI tick does not interpret the new PPC/recipe fields
     // as another edit and reset a one-shot seed back to zero.
     invalidateScriptSimulation();
-    g_ctx->scene.preserveScriptSimulationPreview();
+    g_ctx->scene.adoptSeedAsSimulationStart();
+    return Result::success();
+}
+
+Result seedFluidParticlesFromMesh(const std::string& domain_id_or_name,
+                                  const std::string& object_name,
+                                  int particles_per_cell, bool replace,
+                                  bool persistent, float grain_saturation) {
+    if (!g_ctx) return notBound();
+    if (grain_saturation > 1.0f) return Result::fail("grain_saturation must be 0..1");
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    if (object_name.empty()) return Result::fail("object is required");
+
+    rtapi::FluidDomainInfo info;
+    if (!getFluidDomain(domain_id_or_name, info).ok) {
+        return Result::fail("fluid domain not found: " + domain_id_or_name);
+    }
+    const auto volume = g_ctx->scene.resolveMeshVolumeForSimulation(object_name);
+    if (!volume) {
+        return Result::fail("object not found or has no triangles: " + object_name);
+    }
+    const Vec3 lo = volume->boundsMin();
+    const Vec3 hi = volume->boundsMax();
+    const bool overlaps =
+        lo.x < info.domain_max.x && hi.x > info.domain_min.x &&
+        lo.y < info.domain_max.y && hi.y > info.domain_min.y &&
+        lo.z < info.domain_max.z && hi.z > info.domain_min.z;
+    if (!overlaps) {
+        std::ostringstream msg;
+        msg.imbue(std::locale::classic());
+        msg.setf(std::ios::fixed);
+        msg.precision(3);
+        msg << "object '" << object_name << "' (" << lo.x << " " << lo.y << " " << lo.z
+            << ")-(" << hi.x << " " << hi.y << " " << hi.z << ") does not overlap domain '"
+            << info.name << "'";
+        return Result::fail(msg.str());
+    }
+
+    const auto active_runtime = g_ctx->scene.getParticleSimulationSystem();
+    bool seeded = active_runtime &&
+        active_runtime->seedFluidDomainFromMesh(info.name, object_name,
+            particles_per_cell, replace, persistent, grain_saturation);
+    for (auto& system : g_ctx->scene.particle_systems) {
+        if (!seeded && system.runtime && system.runtime != active_runtime &&
+            system.runtime->seedFluidDomainFromMesh(info.name, object_name,
+                particles_per_cell, replace, persistent, grain_saturation)) {
+            seeded = true;
+            break;
+        }
+    }
+    if (!seeded) {
+        return Result::fail("authoritative fluid grid domain not found: " + info.name);
+    }
+    invalidateScriptSimulation();
+    g_ctx->scene.adoptSeedAsSimulationStart();
+    // ★ The seed ran synchronously; an inside-less mesh emitted nothing and
+    // says why. Report it as a failure, not as a quiet success with zero.
+    rtapi::FluidDomainInfo after;
+    if (getFluidDomain(info.name, after).ok && !after.seed_error.empty()) {
+        return Result::fail(after.seed_error);
+    }
     return Result::success();
 }
 
@@ -2814,11 +2884,8 @@ Result setFluidSubstanceMaterial(const std::string& domain_id_or_name,
         table.push_back(entry);
     }
 
-    // ★ PUSH AND RESET, same rule as every other look control here: the binding
-    // only reaches the shader through a surface rebuild, and a converged image
-    // would otherwise dilute the change instead of showing it — worst exactly
-    // in an automated visual test, which converges longer than a human waits.
-    g_ctx->scene.refreshFluidSurfaceMaterial();
+    // Bindings change the composition field, not just volume shader properties.
+    g_ctx->scene.refreshFluidSurfaceMaterialBindings();
     g_ctx->renderer.resetCPUAccumulation();
     if (g_ctx->backend_ptr) g_ctx->backend_ptr->resetAccumulation();
     g_ctx->start_render = true;

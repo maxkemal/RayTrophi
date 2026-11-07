@@ -2211,6 +2211,7 @@ public:
     void showAllInstances() override;
     void updateSceneGeometry(const std::vector<std::shared_ptr<Hittable>>& objects, const std::vector<Matrix4x4>& boneMatrices) override;
     bool updateFlatMeshBLAS(const std::string& nodeName, const TriangleMesh* mesh) override;
+    bool updateFlatMeshUVs(const TriangleMesh* mesh) override;
     void updateInstanceMaterialBinding(const std::string& nodeName, int oldMatID, int newMatID) override;
     void setVisibilityByNodeName(const std::string& nodeName, bool visible) override;
     void updateGeometry(const std::vector<std::shared_ptr<Hittable>>& objects) override;
@@ -2462,6 +2463,14 @@ public:
         bool has_temperature = false;// vdb_temp_address != 0 (SDF: foam rides this)
         int density_device_local = -1; // -1 unknown, 0 host heap, 1 device-local heap
         int temperature_device_local = -1;
+        // Surface material resolution as the shader will read it: the 1-based
+        // iso material slot (0 = built-in dielectric), and whether the
+        // material-coordinate / per-substance composition fields have an
+        // address on THIS device. RT and raster are separate devices.
+        float iso_material_slot = 0.0f;
+        bool has_uvw = false;
+        bool has_composition = false;
+        int uvw_dim[3] = {0, 0, 0};
         int emission_mode = 0;
         bool color_ramp_enabled = false;
         float blackbody_intensity = 0.0f;
@@ -2472,7 +2481,27 @@ public:
         float aabb_max[3] = {0, 0, 0};
     };
     std::vector<VolumeSlotDiag> describeVolumeSlots() const;
+    // Diagnostic: the per-substance composition cell (slot A, slot B, weight B)
+    // a surface shader would read at `world`, read back from THIS device's own
+    // buffer through the published address. Tells "the data never reached this
+    // device" apart from "the shader reads it wrong" (2026-11-04, RayFusion).
+    struct SurfaceCompositionProbe {
+        bool found = false;          // a surface slot with a composition address
+        bool has_buffer = false;     // the address resolves into a buffer we own
+        int slot = -1;
+        int vdb_id = -1;
+        int cell[3] = {0, 0, 0};
+        float values[3] = {0, 0, 0};
+        uint64_t address_offset = 0; // composition address - buffer address
+        uint64_t uvw_bytes = 0;      // where the composition should start
+    };
+    SurfaceCompositionProbe probeSurfaceComposition(const float world[3]) const;
     uint64_t volumeUploadSerial() const { return m_device ? m_device->m_volumeUploadSerial : 0; }
+    // Materials the raster SDF/material-preview shaders index (pc.materialMeta.x):
+    // a surface material slot past this count shades as the built-in dielectric.
+    uint32_t previewBoundMaterialCount() const {
+        return m_interactiveViewport.materialPreviewBoundMaterialCount;
+    }
 
     /**
      * @brief Upload Atmosphere LUT host arrays into Vulkan images and bind to descriptor slot 8

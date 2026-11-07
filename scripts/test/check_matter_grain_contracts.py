@@ -16,6 +16,20 @@ def read(path):
 def main():
     gpu = read('src/Physics/Fluid/MatterGrainGpu.cpp')
     shader = read('shaders/sim_matter_grain.glsl')
+    sleep_probe_include = shader.index('#include "sim_matter_grain_sleep_probe.glsl"')
+    assert shader.index('bool contactProbeEnabled()') < sleep_probe_include
+    assert shader.index('uint sleepRestLimit()') < sleep_probe_include
+    assert shader.index('bool sleepOn()') < sleep_probe_include
+    assert sleep_probe_include < shader.index('void requestNeighbourAudit(')
+    # Audio and the opt-in contact probe share a header. A mismatch can turn
+    # an audio-disabled buffer into an out-of-bounds per-grain audio buffer.
+    audio = read('shaders/sim_matter_grain_audio.glsl')
+    header_words = int(re.search(r'kDiagnosticWords = (\d+)', gpu).group(1))
+    audio_header = int(re.search(r'AUDIO_HEADER_WORDS = (\d+)u', audio).group(1))
+    assert header_words == audio_header == 47
+    host_revision = re.search(r'kMatterGrainShaderRevision = (\d+)',
+                              read('include/Fluid/MatterGrain.h')).group(1)
+    assert re.search(r'REVISION = (\d+)u', shader).group(1) == host_revision
     header = read('include/Fluid/MatterGrain.h')
     bindings = sorted(map(int, re.findall(r'binding\s*=\s*(\d+)', shader)))
     assert bindings == list(range(17))
@@ -23,7 +37,7 @@ def main():
     assert 'static_assert(kGrainBindings == 17);' in gpu
     table = read('src/Device/SimulationComputeVulkan.cpp')
     entries = re.findall(r'\{ "sim_matter_grain_\w+", "sim_matter_grain_\w+\.spv", (\d+), 128 \}', table)
-    assert len(entries) == 4 and set(entries) == {'17'}, entries
+    assert len(entries) == 5 and set(entries) == {'17'}, entries
     push = re.search(r'uniform Constants\s*\{(.*?)\}\s*pc;', shader, re.S).group(1)
     assert len(re.findall(r'\b(?:uvec4|vec4)\s+\w+;', push)) == 8
     assert 'static_assert(sizeof(Constants) == 128)' in gpu
@@ -56,9 +70,10 @@ def main():
     group = stages[stages.index('bool dispatchMatterGrainSubstep('):stages.index('bool dispatchMatterGrainStages(')]
     assert group.index('sim_matter_grain_list_clear') < group.index('sim_matter_grain_hash') <         group.index('sim_matter_grain_list_build') < group.index('sim_matter_grain_step')
     frame = stages[stages.index('bool dispatchMatterGrainStages('):]
-    assert 'sim_matter_grain_clear' not in frame and 'dispatchMatterGrainSubstep(step, dispatch)' in frame
+    assert 'sim_matter_grain_clear' not in frame
+    assert 'dispatchMatterGrainSubstep(step, dispatch, compact_sleep)' in frame
     assert '(substeps & 1u)' in stages
-    assert 'dispatchMatterGrainSubstep(index, dispatch_stage)' in gpu, 'common clock skips the list rebuild'
+    assert 'dispatchMatterGrainSubstep(index, dispatch_stage, compact_sleep)' in gpu
     capacity = int(re.search(r'kMatterGrainBucketCapacity = (\d+);', header).group(1))
     assert f'const uint BUCKET = {capacity}u;' in shader
     list_capacity = int(re.search(r'kMatterGrainListCapacity = (\d+);', header).group(1))
@@ -76,7 +91,7 @@ def main():
     step_section = shader[shader.index('#elif defined(GRAIN_STEP)'):]
     assert 'bucket_counts' not in step_section, 'the step reads neighbours from the list only'
     assert shader.index('store(i,dst,p,v,w);') < shader.index('uint next_flag = flagWord(pc.substep.x+1u);')
-    assert 'else atomicOr(diagnostics[0],4u);' in shader and '(overflow & 4u)' in gpu
+    assert 'atomicOr(diagnostics[0],4u);' in shader and '(overflow & 4u)' in gpu
     assert 'atomicOr(diagnostics[0],8u)' in shader and '(overflow & 8u)' in gpu
     assert 'threads = kMatterGrainBucketTables * runtime.buckets;' in gpu
     assert 'heads[' not in shader and 'links[' not in shader

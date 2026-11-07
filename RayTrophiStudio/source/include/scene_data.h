@@ -48,6 +48,8 @@ inline std::atomic<int> g_active_sdf_bakes{0};
 #include "Fluid/FluidObject.h"
 #include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidViewResolver.h"
+#include "Fluid/FluidSurfaceGpu.h"
+#include "Fluid/FrozenSurfaceMaterial.h"
 #include "Fluid/FluidSimulationSystem.h"
 #include "Fluid/SubstanceTag.h"
 #include "RigidBodySystem.h"
@@ -2201,6 +2203,11 @@ struct SceneData {
         std::vector<std::vector<float>>        domain_uvw_buffers;
         // Composition staging, same swap-on-rebuild contract as above.
         std::vector<std::vector<float>>        domain_composition_buffers;
+        // GPU surface reconstruction per domain (FluidSurfaceGpu.h,
+        // docs/dev/GPU_YUZEY_LEVEL_SET.md): device storage plus the last live
+        // publication. Owns simulation-compute buffers, so it is RELEASED, not
+        // just dropped, wherever the other per-domain arrays shrink.
+        std::vector<RayTrophiSim::Fluid::FluidSurfaceGpuDomain> domain_surface_gpu;
         // SurfaceSDF rebuild gates. The first signature tracks particle +
         // surfacing params, so buildLevelSet is skipped when the generated SDF
         // would be identical. The second tracks the already-converted density
@@ -2245,6 +2252,22 @@ struct SceneData {
     // is not moving either.
     bool dense_gas_mirror_needed_latched_ = false;
     bool preserve_script_simulation_preview_ = false;
+    struct SimRewindRecord {
+        bool valid = false;
+        int frame = -1;
+        std::string first_changed_part;
+        bool absorbed = false;       // seed-start drift guard kept the bake
+        bool fluid_affected = false;
+    };
+    bool seed_defines_simulation_start_ = false;
+    // Signature parts at the last tick whose signature matched, and whether the
+    // sim stepped since. A difference found right after the first step that
+    // follows an adopted seed is a runtime write-back, not an edit.
+    std::vector<std::pair<std::string, uint64_t>> sim_sig_baseline_parts_;
+    bool sim_sig_stepped_since_baseline_ = false;
+    int seed_start_drift_guard_until_frame_ = -1;
+    SimRewindRecord last_sim_rewind_;
+    std::vector<SimRewindRecord> sim_rewind_history_;
     // Authoring gate for Flow Source keyframes. While enabled, timeline scrub
     // moves the playhead without restoring/resimulating expensive gas state;
     // the UI keeps staged slider values until the user commits a diamond key.
@@ -2787,6 +2810,10 @@ struct SceneData {
             system.domain_fog_volumes.resize(live_domain_count);
             system.matter_fog_streams.resize(live_domain_count);
             system.domain_sdf_buffers.resize(live_domain_count);
+            for (std::size_t d = live_domain_count; d < system.domain_surface_gpu.size(); ++d) {
+                system.domain_surface_gpu[d].buffers.release(simulation_world.compute());
+            }
+            system.domain_surface_gpu.resize(live_domain_count);
             system.domain_uvw_buffers.resize(live_domain_count);
             system.domain_composition_buffers.resize(live_domain_count);
             system.domain_sdf_stats.resize(live_domain_count);
@@ -3109,6 +3136,10 @@ struct SceneData {
                 // own density (which the splat pass owns).
                 const float* density_ptr_override = nullptr;
                 bool surface_sdf_changed = false;
+                // GPU surface route of THIS frame's rebuild (0 CPU, 1 GPU read
+                // back, 2 GPU live) and whether the live publication stands.
+                int surface_gpu_route = 0;
+                bool surface_live = false;
                 // Set only on frames the material-coordinate field was actually
                 // regathered, so the handoff to the render volume below is a
                 // swap on rebuild frames and nothing at all on the others.
@@ -3126,6 +3157,8 @@ struct SceneData {
                     auto& sdf_stats = system.domain_sdf_stats[d];
                     const auto& lsp = domains[d].fluid_level_set_params;
                     uint64_t sdf_sig = 1469598103934665603ull;
+                    sdf_sig = hash_combine_local(sdf_sig,
+                        RayTrophiSim::Fluid::frozenSurfaceMaterialRegistrySignature());
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(state.particles.size()));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(render_grid.nx));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(render_grid.ny));
@@ -3146,6 +3179,10 @@ struct SceneData {
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.anisotropy_max_stretch));
                     sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(lsp.anisotropy_neighbor_min));
                     sdf_sig = hash_combine_local(sdf_sig, quantize_local(lsp.position_smoothing));
+                    // Switching builders rebuilds: the field is meant to be the
+                    // same, and a switch that kept showing the old one would
+                    // hide a parity break behind the cache.
+                    sdf_sig = hash_combine_local(sdf_sig, lsp.gpu_build ? 1ull : 0ull);
                     // ★★★ THE DOMAIN MATERIAL AND EVERY SUBSTANCE MATERIAL ID
                     // BELONG HERE, and their absence was a reported bug: the
                     // composition field carries a per-cell material INDEX, so
@@ -3198,7 +3235,8 @@ struct SceneData {
                         if (particle_index < state.particles.flags.size()) {
                             sdf_sig = hash_combine_local(sdf_sig, static_cast<uint64_t>(
                                 state.particles.flags[particle_index] &
-                                RayTrophiSim::Fluid::kParticleLabelMask));
+                                (RayTrophiSim::Fluid::kParticleLabelMask |
+                                 RayTrophiSim::Fluid::kParticleFlagFrozen)));
                         }
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.x));
                         sdf_sig = hash_combine_local(sdf_sig, quantize_local(p.y));
@@ -3212,11 +3250,29 @@ struct SceneData {
                         }
                     }
 
+                    // ── Who consumes this surface decides whether it may stay on
+                    // the device (GPU_YUZEY_LEVEL_SET.md Y2). Only the Vulkan RT
+                    // backend shares the simulation compute device; the raster
+                    // viewport (a second VkDevice), OptiX and Embree all read
+                    // the host NanoVDB grid. The live route also needs the
+                    // proxy on the sim grid (the shader places it through the
+                    // uvw fields) and an existing volume binding.
+                    const bool surface_live_possible =
+                        render_settings.use_vulkan && !render_settings.use_optix &&
+                        !g_solid_viewport_active &&
+                        lsp.surface_resolution_multiplier == 1 &&
+                        system.domain_vdb_ids[d] >= 0;
+                    auto* surface_gpu = d < system.domain_surface_gpu.size()
+                        ? &system.domain_surface_gpu[d] : nullptr;
+                    // A live frame skipped the host readback; a host consumer
+                    // arriving now (a mode switch on a paused frame) needs it.
+                    const bool host_needs_refresh =
+                        surface_gpu && surface_gpu->host_stale && !surface_live_possible;
                     const bool needs_sdf_rebuild =
                         force_sync ||
                         d >= system.domain_sdf_signatures.size() ||
                         system.domain_sdf_signatures[d] != sdf_sig ||
-                        sdf_buf.empty();
+                        sdf_buf.empty() || host_needs_refresh;
                     if (needs_sdf_rebuild) {
                         // Every live tag the resolver does NOT draw as a surface,
                         // untagged parcels included. The old per-route loops only
@@ -3227,9 +3283,104 @@ struct SceneData {
                         // is kept, its spray (label route) is not.
                         const RayTrophiSim::Fluid::FluidViewSelection surface_selection{
                             &view_plan, RayTrophiSim::Fluid::FluidView::Surface};
-                        RayTrophiSim::Fluid::buildLevelSet(
-                            state.particles, render_grid,
-                            lsp, sdf_buf, &sdf_stats, &surface_selection);
+                        // ── GPU builder first (FluidSurfaceGpu.h) ──
+                        // When it reads back it writes the PROXY (not the SDF)
+                        // and the coordinate residual beside it; the CPU path
+                        // below is the reference and the fallback.
+                        std::string surface_gpu_status;
+                        // Per-substance materials: the same entry list the CPU
+                        // composition gather receives below.
+                        RayTrophiSim::Fluid::SubstanceMaterialEntry gpu_entries[
+                            RayTrophiSim::Fluid::kSubstanceMaterialEntryCapacity];
+                        const std::size_t gpu_entry_count =
+                            RayTrophiSim::Fluid::collectPhaseSurfaceMaterialEntries(
+                                domains[d], state.particles, gpu_entries, true);
+                        if (lsp.gpu_build && surface_gpu) {
+                            if (volume_foam_active) {
+                                surface_gpu_status = "volume foam rides the host proxy";
+                            } else {
+                                RayTrophiSim::Fluid::FluidSurfaceGpuRequest request;
+                                request.particles = &state.particles;
+                                request.grid = &render_grid;
+                                request.params = lsp;
+                                request.surface_band_voxels = domains[d].fluid_surface_band_voxels;
+                                request.selection = &surface_selection;
+                                request.want_uvw = d < system.domain_uvw_buffers.size();
+                                const bool want_composition =
+                                    d < system.domain_composition_buffers.size();
+                                request.materials = want_composition ? gpu_entries : nullptr;
+                                request.material_count = want_composition ? gpu_entry_count : 0;
+                                request.fallback_material = domains[d].fluid_surface_material_id;
+                                request.download_host = !surface_live_possible;
+                                RayTrophiSim::Fluid::FluidSurfaceGpuResult result;
+                                RayTrophiSim::Fluid::LevelSetStats gpu_stats;
+                                std::vector<float> no_uvw;
+                                if (RayTrophiSim::Fluid::buildFluidSurfaceGpu(
+                                        simulation_world.compute(), surface_gpu->buffers, request,
+                                        result, &sdf_buf,
+                                        request.want_uvw ? &system.domain_uvw_buffers[d] : &no_uvw,
+                                        want_composition ? &system.domain_composition_buffers[d]
+                                                         : &no_uvw,
+                                        &gpu_stats)) {
+                                    surface_gpu_route = request.download_host ? 1 : 2;
+                                    sdf_stats = gpu_stats;
+                                    sdf_stats.upload_bytes = result.upload_bytes;
+                                    sdf_stats.download_bytes = result.download_bytes;
+                                    if (surface_gpu_route == 2) {
+                                        auto& compute = simulation_world.compute();
+                                        surface_gpu->density_address =
+                                            compute.bufferDeviceAddress(result.density);
+                                        surface_gpu->uvw_address = result.uvw_built
+                                            ? compute.bufferDeviceAddress(result.uvw) : 0;
+                                        // The mixture rides the coordinate
+                                        // field's placement; without one the
+                                        // shader cannot index it.
+                                        surface_gpu->composition_address =
+                                            (result.composition_built && result.uvw_built)
+                                            ? compute.bufferDeviceAddress(result.composition) : 0;
+                                        surface_gpu->dims[0] = result.nx;
+                                        surface_gpu->dims[1] = result.ny;
+                                        surface_gpu->dims[2] = result.nz;
+                                        surface_gpu->origin[0] = render_grid.origin.x;
+                                        surface_gpu->origin[1] = render_grid.origin.y;
+                                        surface_gpu->origin[2] = render_grid.origin.z;
+                                        surface_gpu->voxel = result.voxel;
+                                        surface_gpu->occupied = result.occupied;
+                                        for (int a = 0; a < 3; ++a) {
+                                            surface_gpu->cell_min[a] = result.occupied_cell_min[a];
+                                            surface_gpu->cell_max[a] = result.occupied_cell_max[a];
+                                        }
+                                        ++surface_gpu->version;
+                                        // No address means no live route (an
+                                        // allocation without device addresses):
+                                        // build it again on the CPU path below.
+                                        if (surface_gpu->density_address == 0) {
+                                            surface_gpu_route = 0;
+                                            surface_gpu_status = "device buffer has no address";
+                                        }
+                                    } else {
+                                        // The host consumer got the field; the
+                                        // coordinate and the mixture came back
+                                        // with it.
+                                        uvw_rebuilt = result.uvw_built;
+                                        composition_rebuilt = result.composition_built;
+                                    }
+                                } else {
+                                    surface_gpu_status = result.status;
+                                }
+                            }
+                        }
+                        if (surface_gpu) {
+                            surface_gpu->live = surface_gpu_route == 2;
+                            surface_gpu->host_stale = surface_gpu_route == 2;
+                        }
+                        if (surface_gpu_route == 0) {
+                            RayTrophiSim::Fluid::buildLevelSet(
+                                state.particles, render_grid,
+                                lsp, sdf_buf, &sdf_stats, &surface_selection);
+                        }
+                        sdf_stats.route = surface_gpu_route;
+                        sdf_stats.gpu_status = lsp.gpu_build ? surface_gpu_status : std::string();
                         if (d < system.domain_sdf_signatures.size()) {
                             system.domain_sdf_signatures[d] = sdf_sig;
                         }
@@ -3240,7 +3391,10 @@ struct SceneData {
                         // one rebuild older than the surface it anchors would
                         // slide the texture by exactly one step of motion —
                         // small, plausible-looking, and untraceable.
-                        if (d < system.domain_uvw_buffers.size()) {
+                        // The GPU route gathered it already; on the live route
+                        // the host field is dropped below and its device twin is
+                        // published with the proxy.
+                        if (surface_gpu_route == 0 && d < system.domain_uvw_buffers.size()) {
                             uvw_rebuilt =
                                 RayTrophiSim::Fluid::buildMaterialCoordinateGrid(
                                     state.particles, render_grid, lsp,
@@ -3252,20 +3406,12 @@ struct SceneData {
                         // same particles with the same kernel, and a mixture one
                         // rebuild older than the surface it describes would put
                         // yesterday's boundary on today's shape.
-                        if (d < system.domain_composition_buffers.size()) {
+                        if (surface_gpu_route == 0 && d < system.domain_composition_buffers.size()) {
                             RayTrophiSim::Fluid::SubstanceMaterialEntry entries[
-                                RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials];
-                            std::size_t entry_count = 0;
-                            for (const auto& b : domains[d].fluid_substance_materials) {
-                                if (entry_count >= RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials)
-                                    break;
-                                if (b.substance.empty()) continue;
-                                entries[entry_count].tag =
-                                    RayTrophiSim::Fluid::substanceTag(b.substance);
-                                entries[entry_count].material_id = b.material_id;
-                                entries[entry_count].miscibility = b.miscibility;
-                                ++entry_count;
-                            }
+                                RayTrophiSim::Fluid::kSubstanceMaterialEntryCapacity];
+                            const std::size_t entry_count =
+                                RayTrophiSim::Fluid::collectPhaseSurfaceMaterialEntries(
+                                    domains[d], state.particles, entries, true);
                             composition_rebuilt =
                                 RayTrophiSim::Fluid::buildCompositionGrid(
                                     state.particles, render_grid, lsp,
@@ -3299,7 +3445,9 @@ struct SceneData {
                     // multiplier), so size the proxy loop from the buffer itself,
                     // not the sim grid cell count.
                     const std::size_t cells = sdf_buf.size();
-                    if (cells > 0 && needs_sdf_rebuild) {
+                    // The GPU route already wrote the proxy (route 1) or left
+                    // the host buffer untouched (route 2): convert CPU SDFs only.
+                    if (cells > 0 && needs_sdf_rebuild && surface_gpu_route == 0) {
                         // Reuse the buffer in-place as a density proxy centred
                         // on the surface:
                         //   density = clamp(0.5 - 0.5 * phi / grad_width, 0, 1)
@@ -3328,6 +3476,7 @@ struct SceneData {
                     if (cells > 0) {
                         density_ptr_override = sdf_buf.data();
                     }
+                    surface_live = surface_gpu && surface_gpu->live;
                     // Shader tuning happens above on mode-change only — don't
                     // re-apply per frame, that would stomp UI edits.
                 } else if (d < system.domain_sdf_buffers.size() &&
@@ -3411,7 +3560,10 @@ struct SceneData {
                     (d >= system.domain_vdb_upload_signatures.size() ||
                      system.domain_vdb_upload_signatures[d] != upload_sig ||
                      surface_sdf_changed);
+                // A live GPU surface publishes device addresses below; the host
+                // NanoVDB path must not overwrite its binding with stale data.
                 const bool do_update =
+                    !surface_live &&
                     (!use_live_dense_gpu || prev_id < 0) &&
                     (force_sync || (prev_id < 0) ||
                     (density_ptr_override
@@ -3616,6 +3768,23 @@ struct SceneData {
                     }
                     simulation_render_updated = true;
                     g_gas_volumes_dirty = true;
+                } else if (surface_live) {
+                    // Live GPU surface: the proxy rides the dense publication.
+                    // VolumetricRenderer hands it ONLY to the backend owning the
+                    // sim device; VulkanBackend_Volumes keeps it a surface
+                    // because source_type stays 4. Re-published every frame:
+                    // nothing else may clear it while the route stands.
+                    const auto& sg = system.domain_surface_gpu[d];
+                    mgr.setLiveDenseGpuFields(
+                        id, sg.density_address, 0, 0, 0,
+                        sg.dims[0], sg.dims[1], sg.dims[2],
+                        sg.origin[0], sg.origin[1], sg.origin[2],
+                        sg.voxel, sg.version, sg.occupied, sg.cell_min, sg.cell_max);
+                    mgr.setLiveSurfaceUvwAddress(id, sg.uvw_address, sg.composition_address);
+                    if (surface_sdf_changed) {
+                        simulation_render_updated = true;
+                        g_gas_volumes_dirty = true;
+                    }
                 } else {
                     mgr.clearLiveDenseGpuFields(id);
                 }
@@ -3763,6 +3932,25 @@ struct SceneData {
                     vol->live_occupied_max = sdf_occupied_max;
                 }
                 if (use_live_dense_gpu) vol->live_occupied_valid = false;
+                if (surface_live && surface_sdf_changed) {
+                    // occupiedLocalBox rules (pad one cell, round to 8-cell
+                    // blocks), from the device-computed occupancy.
+                    const auto& sg = system.domain_surface_gpu[d];
+                    vol->live_occupied_valid = sg.occupied;
+                    if (sg.occupied) {
+                        const float h = sg.voxel;
+                        float mn[3], mx[3];
+                        for (int a = 0; a < 3; ++a) {
+                            const int first = (std::max)(0, ((sg.cell_min[a] - 1) / 8) * 8);
+                            const int end_cell = (std::min)(sg.dims[a],
+                                ((sg.cell_max[a] + 2 + 8 - 1) / 8) * 8);
+                            mn[a] = static_cast<float>(first) * h;
+                            mx[a] = static_cast<float>(end_cell) * h;
+                        }
+                        vol->live_occupied_min = Vec3(mn[0], mn[1], mn[2]);
+                        vol->live_occupied_max = Vec3(mx[0], mx[1], mx[2]);
+                    }
+                }
                 {
                     // Vulkan refreshes its TLAS box per publish and OptiX reads
                     // it per ray; the CPU Embree BVH bakes it at build, so a box
@@ -4250,6 +4438,11 @@ struct SceneData {
         // the cache means the tank the user just resized replays at its old
         // level -- the setting looks like it did nothing.
         h = mix(h, static_cast<uint64_t>(d.fluid_seed_mode));
+        // The OBJECT a Mesh Volume seed fills is authored. Its geometry is not
+        // hashed: a version bump is the runtime's, and hashing it would rewind
+        // on every surface-cache refresh (the derived-field trap).
+        if (d.fluid_seed_mode == RayTrophiSim::FluidSeedMode::MeshVolume)
+            h = mix(h, static_cast<uint64_t>(std::hash<std::string>{}(d.fluid_seed_mesh_object)));
         // ★★★ THE SEED AABB IS NOT HASHED, and this one was learned the
         // expensive way: fluid_seed_min/max FOLLOW THE DOMAIN. When the domain
         // is translated the sync glues the seed box to it
@@ -4298,11 +4491,24 @@ struct SceneData {
         // look: assigning a material must repaint the current frame, never
         // discard a bake. They reach the picture through the composition field
         // instead -- see the surface rebuild signature, which DOES hash them.
+        //
+        // ★★ The ROW ITSELF is not physics either when it binds the Default
+        // Substance with default physics (inherited viscosity, liquid): the
+        // solver already treats untagged liquid as that substance, and the
+        // grain-owner search skips such a row (MatterSubstanceState). Hashing
+        // its tag made the FIRST material pick from the Output list reset the
+        // simulation — the pick is what creates the row (2026-11-04).
+        // ★ Miscibility is gone from here: it shapes the composition field only
+        // (FluidLevelSet / FluidSurfaceGpu), and the surface signature has it.
         for (const auto& b : d.fluid_substance_materials) {
+            const bool look_only_default_row =
+                b.substance == fp.default_substance &&
+                b.kinematic_viscosity < 0.0f &&
+                b.phase == RayTrophiSim::Fluid::SubstancePhase::Liquid;
+            if (look_only_default_row) continue;
             h = mix(h, static_cast<uint64_t>(
                 RayTrophiSim::Fluid::substanceTag(b.substance)));
             h = mix(h, fb(b.kinematic_viscosity));
-            h = mix(h, fb(b.miscibility));
             h = mix(h, static_cast<uint64_t>(b.phase));
         }
         return h;
@@ -4584,7 +4790,11 @@ struct SceneData {
     // that mutates per step (particle counts, positions) so it stays stable while
     // the sim runs. NOTE: deep per-domain particle/gas/fluid param edits are not
     // all hashed yet — full content signature is part of the Faz 5 cache hardening.
-    uint64_t computeSimConfigSignature() const {
+    // `parts`, when given, receives the running hash at each section boundary
+    // (cumulative, so the FIRST differing label names the section that moved).
+    // Diagnostic only: the auto-rewind records it (sim.control_state.last_rewind).
+    uint64_t computeSimConfigSignature(
+        std::vector<std::pair<std::string, uint64_t>>* parts = nullptr) const {
         auto mix = [](uint64_t h, uint64_t v) {
             h ^= v + 0x9e3779b97f4a7c15ull + (h << 6) + (h >> 2);
             return h;
@@ -4603,6 +4813,9 @@ struct SceneData {
             return static_cast<uint64_t>(u);
         };
         uint64_t h = 1469598103934665603ull;
+        auto mark = [&](std::string label) {
+            if (parts) parts->emplace_back(std::move(label), h);
+        };
         h = mix(h, particle_systems.size());
         for (const auto& s : particle_systems) {
             if (!s.runtime) { h = mix(h, 0); continue; }
@@ -4690,6 +4903,7 @@ struct SceneData {
                 h = mix(h, bf(gd.structural_pressure_scale));
                 h = mix(h, bf(gd.structural_min_intensity));
                 h = mix(h, bf(gd.structural_event_interval));
+                mark("domain '" + gd.name + "' grid/gas");
             }
             h = mix(h, s.runtime->emitters().size());
             // Emitter config (rate/velocity/spread/lifetime/shape/etc.) must
@@ -4766,6 +4980,7 @@ struct SceneData {
                 h = mix(h, qf(c.msf_transfer_velocity.z));
                 h = mix(h, c.msf_generate_char_mask ? 1ull : 0ull);
             }
+            mark("emitters / colliders");
             // World thermal boundary conditions (Phase 4). Ambient, the Kelvin
             // calibration, convection and oxygen all change how much an object
             // heats and how fast it burns, so a cache baked in a cold draughty
@@ -4791,7 +5006,9 @@ struct SceneData {
                     h = mix(h, qf(d.thermal_ambient_kelvin));
                     h = mix(h, qf(d.thermal_oxygen));
                 }
+                mark("fluid '" + d.name + "' thermal");
                 h = hashFluidDomainSolverConfig(h, d);
+                mark("fluid '" + d.name + "' solver/seed");
             }
             h = mix(h, s.runtime->flowSources().size());
             // Keep the general simulation-cache signature sensitive to the
@@ -4844,6 +5061,7 @@ struct SceneData {
                 }
             }
         }
+        mark("flow sources");
         h = mix(h, gas_volumes.size());
         h = mix(h, fluid_objects.size());
         // Force fields now drive rigid + soft/cloth bodies too, so editing a field
@@ -4882,6 +5100,7 @@ struct SceneData {
             h = mix(h, ff->affects_gas ? 1ull : 0ull);
             h = mix(h, ff->affects_particles ? 1ull : 0ull);
         }
+        mark("gas volumes / fluid objects / force fields");
         h = mix(h, rigid_bodies.size());
         for (const auto& rb : rigid_bodies) {
             for (char c : rb.source_name) h = mix(h, static_cast<uint64_t>(static_cast<unsigned char>(c)));
@@ -4964,7 +5183,22 @@ struct SceneData {
                     for (int c = 0; c < 4; ++c) h = mix(h, qf(rb.initial_pivot.m[r][c]));
             }
         }
+        mark("rigid bodies");
         return h;
+    }
+
+    // ── Auto-rewind record (sim.control_state.last_rewind) ──────────────────
+    // What the timeline's signature watcher saw the last time the setup
+    // signature moved, and WHICH section moved. Without it a rewind that wipes
+    // a one-shot seed is indistinguishable from a solver that lost the liquid.
+    const SimRewindRecord& lastSimRewind() const { return last_sim_rewind_; }
+    // The last few, oldest first: a later edit's rewind must not overwrite the
+    // record of the drift that came before it.
+    const std::vector<SimRewindRecord>& simRewindHistory() const { return sim_rewind_history_; }
+    void pushSimRewindHistory() {
+        sim_rewind_history_.push_back(last_sim_rewind_);
+        if (sim_rewind_history_.size() > 8)
+            sim_rewind_history_.erase(sim_rewind_history_.begin());
     }
 
     // Apply the keyframed transform of every object bound as a simulation source
@@ -6627,6 +6861,32 @@ struct SceneData {
         preserve_script_simulation_preview_ = true;
     }
 
+    // ★★★ An EXECUTED seed is the initial state, so it becomes frame 0 of the
+    // bake. The old path (preserveScriptSimulationPreview) only rebased the
+    // signature and parked the sim on the CURRENT playhead, with the RAM cache
+    // dropped and the seeded state captured nowhere. Seeding with the playhead
+    // at the end of a previous run, then pressing Play, looped the playhead to
+    // the start: restoreSimFrame found nothing, resetSimulationToStart ran, and a
+    // one-shot seed (Recreate Seed on Reset off) was wiped — the domain emptied
+    // on the first Play and worked on the second, because by then the playhead
+    // already sat at the start (reported 2026-11-04).
+    // Capturing it here keeps the one-shot semantics intact: a config edit that
+    // drops the cache still wipes it, a playback loop-back restores it.
+    void adoptSeedAsSimulationStart() {
+        clearSimFrameCache();
+        simulation_world.resetTime(0.0f, 0);
+        sim_timeline_frame_ = 0;
+        // Rigid bodies keep their present pose until they re-bake from 0.
+        rigid_timeline_frame_ = -1;
+        captureSimFrame(0);
+        sim_rewind_request_ = true;          // the UI moves the playhead to start
+        seed_defines_simulation_start_ = true;
+        // One-shot drift guard over this seed's first frames (see the
+        // signature watcher in updateSimulationTimeline).
+        seed_start_drift_guard_until_frame_ = 8;
+        preserve_script_simulation_preview_ = true;
+    }
+
     void setSimulationKeyAuthoringMode(bool enabled) {
         if (simulation_key_authoring_mode_ == enabled) return;
         simulation_key_authoring_mode_ = enabled;
@@ -6666,6 +6926,8 @@ struct SceneData {
     // viewport updates live and cheaply. Geometry-affecting params (kernel /
     // particle / narrow / surface band) must use
     // requestSimulationTimelineRenderResync() instead — they rebuild the SDF.
+    void refreshFluidSurfaceMaterialBindings();
+
     void refreshFluidSurfaceMaterial() {
         for (auto& system : particle_systems) {
             if (!system.runtime) continue;
@@ -6878,8 +7140,13 @@ struct SceneData {
             last_fluid_coupling_sig_ = computeFluidCouplingSignature();
             force_simulation_render_sync_ = false;
             sim_cache_valid_ = false;
-            sim_timeline_frame_ = tl_frame;
-            rigid_timeline_frame_ = tl_frame;
+            if (seed_defines_simulation_start_) {
+                // adoptSeedAsSimulationStart already placed the sim on frame 0.
+                seed_defines_simulation_start_ = false;
+            } else {
+                sim_timeline_frame_ = tl_frame;
+                rigid_timeline_frame_ = tl_frame;
+            }
             syncSimulationRenderVolumes();
             simulation_render_updated = true;
             return;
@@ -6934,10 +7201,61 @@ struct SceneData {
         // Auto-invalidate the in-memory bake cache when the simulation SETUP
         // changes (add/remove of any sim element, rigid-body param edit, …) so a
         // stale cache is never replayed.
+        std::vector<std::pair<std::string, uint64_t>> cfg_parts;
         const uint64_t cfg_sig = [&] {
             RTPERF_FRAME_SCOPE("sim.timeline.config_sig");
-            return computeSimConfigSignature();
+            return computeSimConfigSignature(&cfg_parts);
         }();
+        if (cfg_sig == last_sim_config_sig_ && !fps_changed) {
+            sim_sig_baseline_parts_ = std::move(cfg_parts);
+            sim_sig_stepped_since_baseline_ = false;
+        } else if (!ui_editing) {
+            std::string moved = fps_changed ? "frame rate" : "unknown (no baseline)";
+            if (!fps_changed && !sim_sig_baseline_parts_.empty()) {
+                moved = "section count changed";
+                const std::size_t n =
+                    (std::min)(sim_sig_baseline_parts_.size(), cfg_parts.size());
+                for (std::size_t i = 0; i < n; ++i) {
+                    if (sim_sig_baseline_parts_[i] != cfg_parts[i]) {
+                        moved = cfg_parts[i].first;
+                        break;
+                    }
+                }
+            }
+            last_sim_rewind_ = SimRewindRecord{};
+            last_sim_rewind_.valid = true;
+            last_sim_rewind_.frame = sim_timeline_frame_;
+            last_sim_rewind_.first_changed_part = moved;
+            // ★★★ SEED-START DRIFT GUARD. Measured 2026-11-04 on a freshly
+            // opened project: seed -> Play, and the signature moved on the tick
+            // right after the FIRST step (10057163858437137944 ->
+            // 17420775324187008440) with no edit in between. Some field the
+            // runtime derives on its first sync is hashed, and the rewind that
+            // followed wiped the one-shot seed; on later seeds the field already
+            // held its derived value, so it never happened twice.
+            // A change seen right after a step, inside the first frames of an
+            // adopted seed, is that write-back: adopt the signature, keep the
+            // bake, record it. `first_changed_part` names the section so the
+            // hashed derived field can be found and removed — then this goes.
+            const bool seed_drift = !fps_changed && sim_sig_stepped_since_baseline_ &&
+                seed_start_drift_guard_until_frame_ >= 0 &&
+                sim_timeline_frame_ <= seed_start_drift_guard_until_frame_;
+            if (seed_drift) {
+                seed_start_drift_guard_until_frame_ = -1;
+                last_sim_rewind_.absorbed = true;
+                last_sim_config_sig_ = cfg_sig;
+                last_fluid_coupling_sig_ = computeFluidCouplingSignature();
+                sim_sig_baseline_parts_ = std::move(cfg_parts);
+                sim_sig_stepped_since_baseline_ = false;
+                SCENE_LOG_WARN("Simulation signature drifted after the first seeded step (" +
+                               moved + "); kept the bake instead of rewinding.");
+                pushSimRewindHistory();
+            }
+        }
+        if (seed_start_drift_guard_until_frame_ >= 0 &&
+            sim_timeline_frame_ > seed_start_drift_guard_until_frame_) {
+            seed_start_drift_guard_until_frame_ = -1;
+        }
         if (cfg_sig != last_sim_config_sig_ || fps_changed) {
             // Settle-gate: defer the (expensive) cache drop until the edit finishes.
             // The signature changes on EVERY drag tick, so committing immediately
@@ -6958,6 +7276,9 @@ struct SceneData {
                 // needed dropping.
                 const bool fluid_affected =
                     (fluid_sig != last_fluid_coupling_sig_) || fps_changed;
+                last_sim_rewind_.fluid_affected = fluid_affected;
+                pushSimRewindHistory();
+                seed_start_drift_guard_until_frame_ = -1;
                 last_sim_config_sig_ = computeSimConfigSignature();
                 last_fluid_coupling_sig_ = fluid_sig;
                 if (fluid_affected) {
@@ -7160,6 +7481,7 @@ struct SceneData {
                     processStructuralImpulseEvents();  // ...and by blast overpressure
                     ++sim_timeline_frame_;
                     rigid_timeline_frame_ = sim_timeline_frame_;
+                    sim_sig_stepped_since_baseline_ = true;
                     captureSimFrame(sim_timeline_frame_);
                     ++steps;
                     changed = true;
@@ -7923,6 +8245,10 @@ private:
         system.domain_foam_density.clear();
         // Surface-route render artifacts share the per-domain lifetime.
         system.domain_sdf_buffers.clear();
+        for (auto& surface_gpu : system.domain_surface_gpu) {
+            surface_gpu.buffers.release(simulation_world.compute());
+        }
+        system.domain_surface_gpu.clear();
         system.domain_uvw_buffers.clear();
         system.domain_sdf_stats.clear();
         system.domain_sdf_signatures.clear();
@@ -8711,6 +9037,58 @@ public:
         return true;
     }
 
+    // Mesh Volume seed / emitter: the inside test of a scene object, built from
+    // its world-space surface triangles and rebuilt only when that surface
+    // cache's version moves.
+    struct MeshVolumeCacheEntry {
+        uint64_t version = 0;
+        std::size_t triangles = 0;
+        Vec3 bounds_min = Vec3(0.0f);
+        Vec3 bounds_max = Vec3(0.0f);
+        bool has_matrix = false;
+        Matrix4x4 matrix;
+        std::shared_ptr<const RayTrophiSim::Fluid::MeshVolumeTest> test;
+    };
+    mutable std::unordered_map<std::string, MeshVolumeCacheEntry> mesh_volume_cache_;
+
+    std::shared_ptr<const RayTrophiSim::Fluid::MeshVolumeTest>
+    resolveMeshVolumeForSimulation(const std::string& node_name) const {
+        const auto* cache = getSurfaceMeshCacheForObject(node_name);
+        if (!cache || cache->empty()) return nullptr;
+        auto& slot = mesh_volume_cache_[node_name];
+        // ★ The surface cache's `version` is a scene-wide counter that a MOVE
+        // does not bump, so version + triangle count kept the test at the old
+        // position: an object moved before seeding was filled where it used to
+        // be (reported 2026-11-05). The pose and the bounds are the key too.
+        Matrix4x4 live_matrix;
+        const bool has_matrix =
+            resolveObjectTransformForSimulation(node_name, live_matrix, false);
+        auto sameVec = [](const Vec3& a, const Vec3& b) {
+            return a.x == b.x && a.y == b.y && a.z == b.z;
+        };
+        if (slot.test && slot.version == cache->version &&
+            slot.triangles == cache->triangles.size() &&
+            sameVec(slot.bounds_min, cache->bounds_min) &&
+            sameVec(slot.bounds_max, cache->bounds_max) &&
+            slot.has_matrix == has_matrix &&
+            (!has_matrix || simSourceMatrixEqual(slot.matrix, live_matrix))) {
+            return slot.test;
+        }
+        std::vector<ColliderMeshBVH::Triangle> tris;
+        tris.reserve(cache->triangles.size());
+        for (const auto& tri : cache->triangles) tris.push_back({tri.p0, tri.p1, tri.p2});
+        auto test = std::make_shared<RayTrophiSim::Fluid::MeshVolumeTest>();
+        if (!test->build(std::move(tris), cache->version)) return nullptr;
+        slot.version = cache->version;
+        slot.triangles = cache->triangles.size();
+        slot.bounds_min = cache->bounds_min;
+        slot.bounds_max = cache->bounds_max;
+        slot.has_matrix = has_matrix;
+        if (has_matrix) slot.matrix = live_matrix;
+        slot.test = test;
+        return test;
+    }
+
     const RayTrophiSim::SurfaceMeshCache* getSurfaceMeshCacheForObject(const std::string& node_name,
                                                                        bool refresh = true) const {
         if (node_name.empty() || !hasLiveSimulationObject(node_name)) {
@@ -9325,6 +9703,10 @@ public:
                     }
                     return resolveObjectBoundsForSimulation(source.source_name, out_min, out_max);
                 });
+            runtime.setMeshVolumeResolver(
+                [this](const std::string& node_name) {
+                    return resolveMeshVolumeForSimulation(node_name);
+                });
             runtime.setFlowSourceTransformResolver(
                 [this](const std::string& node_name, Matrix4x4& out_matrix) {
                     return resolveObjectTransformForSimulation(node_name, out_matrix);
@@ -9837,6 +10219,10 @@ public:
         erase_index(system.domain_fog_volumes);
         erase_index(system.domain_foam_density);
         erase_index(system.domain_sdf_buffers);
+        if (domain_index < system.domain_surface_gpu.size()) {
+            system.domain_surface_gpu[domain_index].buffers.release(simulation_world.compute());
+        }
+        erase_index(system.domain_surface_gpu);
         erase_index(system.domain_uvw_buffers);
         erase_index(system.domain_sdf_stats);
         erase_index(system.domain_sdf_signatures);

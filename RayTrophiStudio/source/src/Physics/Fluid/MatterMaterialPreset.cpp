@@ -48,6 +48,12 @@ std::shared_ptr<Material> createMatterMaterialPreset(const std::string& substanc
     }
     auto material = std::make_shared<PrincipledBSDF>(color, roughness, metallic);
     material->setTransmission(transmission, ior);
+    if (substance == "Ice") {
+        // Clear ice by default. Depth tint is carried by interior absorption;
+        // users can add cloudiness/SSS without needing to build a node graph.
+        material->setTransmissionDensity(0.15f);
+        material->setResinColor(Vec3(0.92f, 0.98f, 1.0f));
+    }
     error.clear();
     return material;
 }

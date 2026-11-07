@@ -70,6 +70,11 @@ namespace DNA {
         virtual size_t element_count() const = 0;
         virtual void resize(size_t count) = 0;
         virtual std::unique_ptr<AttributeBuffer> clone() const = 0;
+        // A missing implementation is an explicit unsupported remap, never dropped data.
+        virtual std::unique_ptr<AttributeBuffer> remap(
+            const std::vector<uint32_t>&) const {
+            return nullptr;
+        }
     };
 
     /**
@@ -91,6 +96,19 @@ namespace DNA {
             auto copy = std::make_unique<AlignedAttributeBuffer<T>>();
             copy->data = this->data;
             return copy;
+        }
+
+        std::unique_ptr<AttributeBuffer> remap(
+            const std::vector<uint32_t>& source_vertices) const override {
+            auto result = std::make_unique<AlignedAttributeBuffer<T>>();
+            result->data.reserve(source_vertices.size());
+            for (uint32_t vertex : source_vertices) {
+                if (vertex >= data.size()) {
+                    return nullptr;
+                }
+                result->data.push_back(data[vertex]);
+            }
+            return result;
         }
     };
 
@@ -167,6 +185,7 @@ namespace DNA {
      * - Zero-copy raw data streaming for Vulkan RT and Embree.
      */
     class GeometryDetail {
+        friend struct GeometryRemapAccess;
     private:
         static constexpr size_t kCoreCount = static_cast<size_t>(Attr::CoreCount);
         using CoreSlots = std::array<std::unique_ptr<AttributeBuffer>, kCoreCount>;

@@ -108,6 +108,12 @@ Result inspectDomain(RayTrophiSim::ParticleSimulationSystem& runtime,
     if (plan.anyLiveIn(FluidView::Fog)) {
         splatFogDensityWeighted(state.particles, grid.nx, grid.ny, grid.nz,
             grid.origin, grid.voxel_size, parcel_density, &selection, reference);
+        if (!reference.empty() && desc.fluid_fog_spread_voxels > 0.0f) {
+            std::vector<float> spread;
+            spreadFogDensity(reference.data(), grid.nx, grid.ny, grid.nz,
+                desc.fluid_fog_spread_voxels, spread);
+            reference.swap(spread);
+        }
     }
     double maximum_error = 0.0;
     double maximum_density = 0.0;

@@ -1,4 +1,5 @@
 #include "UI/GrainGeneratorUI.h"
+#include "UI/UvEditorUI.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -1182,6 +1183,10 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
         if (ImGui::BeginMenu("View"))
         {
             ImGui::MenuItem("Properties Panel", nullptr, &showSidePanel);
+            if (ImGui::MenuItem("UV Editor")) {
+                UvEditorUI::open(ctx.selection.selected.mesh_object
+                    ? ctx.selection.selected.mesh_object->nodeName : std::string());
+            }
             ImGui::MenuItem("Bottom Panel", nullptr, &show_animation_panel);
             ImGui::MenuItem("Asset Browser", nullptr, &show_asset_browser);
             // Auto open log if check (optional)

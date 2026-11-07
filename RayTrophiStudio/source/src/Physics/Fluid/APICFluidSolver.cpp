@@ -7,6 +7,7 @@
  * =========================================================================
  */
 
+#include "Fluid/MeshVolumeTest.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/FluidLiquidAdvection.h"
 #include "Fluid/FluidDensityProjection.h"
@@ -401,14 +402,17 @@ size_t estimateSeedBoxParticleCount(const FluidSim::FluidGrid& grid,
 }
 
 std::size_t countSeedBoxCells(const FluidSim::FluidGrid& grid,
-                              const Vec3& min_world, const Vec3& max_world) {
+                              const Vec3& min_world, const Vec3& max_world,
+                              const MeshVolumeCellMask* mask) {
     int i0, j0, k0, i1, j1, k1;
     if (!seedBoxCellRange(grid, min_world, max_world, i0, j0, k0, i1, j1, k1)) return 0;
     std::size_t cells = 0;
     for (int j = j0; j <= j1; ++j)
     for (int k = k0; k <= k1; ++k)
     for (int i = i0; i <= i1; ++i) {
-        if (!grid.isSolid(i, j, k)) ++cells;
+        if (grid.isSolid(i, j, k)) continue;
+        if (mask && mask->cellClass(i, j, k) == MeshVolumeCellMask::kOutside) continue;
+        ++cells;
     }
     return cells;
 }
@@ -420,7 +424,8 @@ void seedBox(FluidParticles& particles,
              int particles_per_cell,
              uint32_t seed,
              size_t max_new_particles,
-             float temperature_kelvin) {
+             float temperature_kelvin,
+             const MeshVolumeCellMask* mask) {
     if (particles_per_cell <= 0 || max_new_particles == 0) return;
 
     int i0, j0, k0, i1, j1, k1;
@@ -467,6 +472,11 @@ void seedBox(FluidParticles& particles,
     for (int k = k0; k <= k1; ++k)
     for (int i = i0; i <= i1; ++i) {
         if (grid.isSolid(i, j, k)) continue;
+        // Mesh Volume: whole cells outside are skipped, boundary cells keep
+        // only the slots that land inside (sub-voxel shape, not a staircase).
+        const uint8_t mesh_class = mask ? mask->cellClass(i, j, k)
+                                        : MeshVolumeCellMask::kInside;
+        if (mesh_class == MeshVolumeCellMask::kOutside) continue;
         Vec3 cellMin = grid.origin + Vec3(i * h, j * h, k * h);
         for (int placed = 0; placed < particles_per_cell; ++placed) {
             if (emitted >= max_new_particles) return;
@@ -482,7 +492,9 @@ void seedBox(FluidParticles& particles,
                 (static_cast<float>(slot.x) + U(rng)) * inv_sub,
                 (static_cast<float>(slot.y) + U(rng)) * inv_sub,
                 (static_cast<float>(slot.z) + U(rng)) * inv_sub);
-            particles.emit(cellMin + frac * h, Vec3(0, 0, 0), temperature_kelvin);
+            const Vec3 position = cellMin + frac * h;
+            if (mesh_class == MeshVolumeCellMask::kBoundary && !mask->contains(position)) continue;
+            particles.emit(position, Vec3(0, 0, 0), temperature_kelvin);
             ++emitted;
         }
     }

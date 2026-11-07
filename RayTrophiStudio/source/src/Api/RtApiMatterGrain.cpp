@@ -55,8 +55,17 @@ nlohmann::json matterGrainSettings(const std::string& domain, const nlohmann::js
                     " (fixed when a grain is born)");
             }
         }
+        auto before_physics = RayTrophiSim::Fluid::matterGrainParamsToJson(d.fluid_params.grain);
+        auto after_physics = RayTrophiSim::Fluid::matterGrainParamsToJson(candidate);
+        for (const char* runtime_key : {"contact_probe_enabled", "compact_sleep_work"}) {
+            before_physics.erase(runtime_key);
+            after_physics.erase(runtime_key);
+        }
         d.fluid_params.grain = candidate;
-        invalidateScriptSimulation();
+        // Diagnostic-only toggles must preserve the state being investigated.
+        if (before_physics != after_physics) {
+            invalidateScriptSimulation();
+        }
         return RayTrophiSim::Fluid::matterGrainParamsToJson(candidate);
     }
     throw std::runtime_error("grid domain not found: " + domain);

@@ -503,6 +503,9 @@
     <ClInclude Include="source\include\Fluid\FluidLevelSet.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\MeshVolumeTest.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidThermalLiquid.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -510,6 +513,9 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidParticleLabelsGpu.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\FluidSurfaceGpu.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidMistCoupling.h">
@@ -1651,6 +1657,9 @@
     <None Include="source\shaders\surface_sdf_shadow_query.glsl">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
+    <None Include="source\shaders\surface_sdf_rt_shadow.glsl">
+      <Filter>Kaynak Dosyalar\shader</Filter>
+    </None>
     <None Include="source\shaders\miss.rmiss">
       <Filter>Kaynak Dosyalar\shader</Filter>
     </None>
@@ -1990,6 +1999,9 @@
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabelsGpu.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSurfaceGpu.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidMistCoupling.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
@@ -2157,6 +2169,9 @@
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFluidSurface.cpp">
       <Filter>Kaynak Dosyalar\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiSubstance.cpp">
@@ -3981,6 +3996,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterMaterialPreset.h" />
+    <ClInclude Include="source\include\Fluid\FrozenSurfaceMaterial.h" />
+    <ClInclude Include="source\include\Fluid\FluidSurfaceSupport.h" />
+    <ClCompile Include="source\src\Physics\Fluid\FrozenSurfaceMaterial.cpp" />
+    <None Include="source\shaders\sim_surface_gather_supported.comp" />
+    <None Include="source\shaders\sim_surface_composition_phase.comp" />
+    <None Include="source\shaders\sim_surface_support.glsl" />
     <ClCompile Include="source\src\Physics\Fluid\MatterMaterialPreset.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -4030,6 +4051,12 @@
     <None Include="source\shaders\sim_matter_grain_list_build.comp" />
     <None Include="source\shaders\sim_matter_grain_hash.comp" />
     <None Include="source\shaders\sim_matter_grain_step.comp" />
+    <None Include="source\shaders\sim_fluid_label_link_clear.comp" />
+    <None Include="source\shaders\sim_fluid_label_link_scatter.comp" />
+    <None Include="source\shaders\sim_fluid_label_link_classify.comp" />
+    <None Include="source\shaders\sim_fluid_label_linked.glsl" />
+    <None Include="source\shaders\sim_matter_grain_active_classify.comp" />
+    <None Include="source\shaders\sim_matter_grain_active.glsl" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\ColliderGpuQuery.h" />
@@ -4150,6 +4177,8 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterFogFields.h" />
+    <ClInclude Include="source\include\UI\MatterFogSpreadUI.h" />
+    <ClInclude Include="source\include\UI\ColorControls.h" />
     <ClInclude Include="source\include\Fluid\MatterFogStreams.h" />
     <ClInclude Include="source\include\Fluid\FogOpticalBounds.h" />
     <ClInclude Include="source\include\VolumeTemperatureMapping.h" />
@@ -4185,6 +4214,7 @@
     <ClCompile Include="source\src\UI\RealtimeDenoiserControls.cpp" />
     <ClInclude Include="source\include\Backend\VulkanRealtimeDenoiser.h" />
     <ClInclude Include="source\include\Backend\RealtimeDenoiserTypes.h" />
+    <ClInclude Include="source\include\Backend\RealtimeDenoiserSettingsJson.h" />
     <ClInclude Include="source\include\Api\RtApiRealtimeDenoiser.h" />
     <ClInclude Include="source\src\Api\RtIpcRealtimeDenoiser.h" />
     <ClInclude Include="source\src\Api\RtRealtimeDenoiserBindings.h" />
@@ -4221,11 +4251,17 @@
     <ClInclude Include="source\include\UV\UvLayout.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
     <ClInclude Include="source\include\UV\UvService.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
     <ClInclude Include="source\include\UI\UvEditorUI.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
+    <ClInclude Include="source\include\UI\UvTexturePreview.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
     <ClInclude Include="source\src\Api\RtUvBindings.h"><Filter>Kaynak Dosyalar\Api</Filter></ClInclude>
     <ClCompile Include="source\src\UV\UvLayout.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
     <ClCompile Include="source\src\UV\UvService.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UV\UvAttributeUpdate.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_UvUpdate.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\Render\OptixWrapper_UvUpdate.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClInclude Include="source\include\UV\UvAttributeUpdate.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
     <ClCompile Include="source\src\UV\UvXatlasBackend.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
     <ClCompile Include="source\src\UI\UvEditorUI.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UI\UvTexturePreview.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtUvBindings.cpp"><Filter>Kaynak Dosyalar\Api</Filter></ClCompile>
     <ClCompile Include="source\src\Api\RtIpcUv.cpp"><Filter>Kaynak Dosyalar\Api</Filter></ClCompile>
   </ItemGroup>
@@ -4233,5 +4269,12 @@
     <ClInclude Include="source\include\UI\MaterialUvSamplingUI.h"><Filter>Kaynak Dosyalar\header_file</Filter></ClInclude>
     <ClCompile Include="source\src\UI\MaterialUvSamplingUI.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
     <ClCompile Include="source\src\UV\UvProjection.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\DNA\GeometryRemap.h" />
+    <ClInclude Include="source\include\UV\UvGeometryTransaction.h" />
+    <ClCompile Include="source\src\MeshEdit\GeometryRemap.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UV\UvCornerRemap.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+    <ClCompile Include="source\src\UV\UvGeometryTransaction.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
   </ItemGroup>
 </Project>

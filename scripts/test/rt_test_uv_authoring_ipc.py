@@ -31,7 +31,7 @@ def main():
     try:
         caps = call("uv.capabilities")
         assert caps["uv_set"] == 0 and not caps["seam_authoring"]
-        assert not caps["corner_remap"] and not caps["texture_preservation"]
+        assert caps["corner_remap"] and not caps["texture_preservation"]
         restore_target = next((t for t in call("uv.targets")
                                if not t["object"].startswith(("UV_Acceptance_", "UV_Extended_"))), None)
         call("scene.add_primitive", type="cube", name=name, size=1.0)
@@ -105,7 +105,7 @@ def main():
                 call("uv.pack", **target, revision=info["revision"],
                      resolution=512, padding=4, allow_texture_change=True)
             except RtIpcError as error:
-                assert "uv_vertex_split_required" in str(error) or "uv_atlas_remap_required" in str(error)
+                assert "uv_atlas_remap_required" in str(error)
                 assert call("uv.info", **target)["revision"] == info["revision"]
             else:
                 packed = call("uv.layout", **target, limit=100)
@@ -116,11 +116,11 @@ def main():
                 call("uv.unwrap", **target, revision=info["revision"],
                      resolution=512, padding=4, allow_texture_change=True)
             except RtIpcError as error:
-                assert "uv_vertex_split_required" in str(error) or "uv_atlas_remap_required" in str(error)
+                assert "uv_atlas_remap_required" in str(error)
                 assert call("uv.info", **target)["revision"] == info["revision"]
             else:
                 unwrapped = call("uv.layout", **target, limit=100)
-                assert unwrapped["vertices"] == before["vertices"]
+                assert unwrapped["vertices"] >= before["vertices"]
                 assert unwrapped["triangles"] == before["triangles"]
                 assert all(math.isfinite(c) for f in unwrapped["faces"] for uv in f["uv"] for c in uv)
                 print("PASS: xatlas unwrap")
@@ -134,7 +134,7 @@ def main():
             assert call("uv.info", **target)["revision"] == current["revision"]
         else:
             projected = call("uv.layout", **target, limit=100)
-            assert projected["vertices"] == before["vertices"]
+            assert projected["vertices"] == current["vertices"]
             assert all(math.isfinite(v) and -1e-6 <= v <= 1.000001
                        for f in projected["faces"] for uv in f["uv"] for v in uv)
         call("scene.delete", name=name)

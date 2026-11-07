@@ -1,0 +1,16 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// CSR fill. The order inside a bin is not deterministic; every consumer sums
+// weights, so only the float summation order (~1e-7 relative) depends on it.
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer BinIndex { uint bin_index[]; };
+layout(set = 0, binding = 1) buffer Cursor { uint cursor[]; };
+layout(set = 0, binding = 2) buffer Items { uint items[]; };
+void main() {
+    uint p = gl_GlobalInvocationID.x;
+    if (p >= uint(pc.grid.w)) return;
+    uint b = bin_index[p];
+    if (b == kSurfaceInvalid) return;
+    items[atomicAdd(cursor[b], 1u)] = p;
+}

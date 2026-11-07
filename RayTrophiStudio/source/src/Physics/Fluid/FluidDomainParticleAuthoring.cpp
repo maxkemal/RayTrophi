@@ -47,6 +47,34 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
     return false;
 }
 
+bool ParticleSimulationSystem::seedFluidDomainFromMesh(
+    const std::string& domain_name,
+    const std::string& object_name,
+    int particles_per_cell,
+    bool replace,
+    bool persistent,
+    float grain_saturation) {
+    for (auto& domain : grid_domains_) {
+        if (domain.name != domain_name ||
+            !simulationDomainHasLiquid(domain)) {
+            continue;
+        }
+        domain.fluid_seed_mode = FluidSeedMode::MeshVolume;
+        domain.fluid_seed_mesh_object = object_name;
+        domain.fluid_seed_particles_per_cell = std::clamp(particles_per_cell, 1, 64);
+        domain.fluid_replace_on_seed = replace;
+        if (grain_saturation >= 0.0f)
+            domain.fluid_seed_grain_saturation = std::clamp(grain_saturation, 0.0f, 1.0f);
+        domain.fluid_reseed_on_reset = persistent;
+        domain.fluid_pending_seed = true;
+        // Synchronous, like seedFluidDomainParticles: the caller reads the
+        // outcome (seed_stats.error) right after.
+        synchronizeGridDomainsNow();
+        return true;
+    }
+    return false;
+}
+
 bool ParticleSimulationSystem::configureFluidDomainSettle(
     const std::string& domain_name,
     const bool* on_seed,

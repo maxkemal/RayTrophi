@@ -349,6 +349,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "fluid.grain_reference") return Read;
     if (method == "fluid.grain_settings") return Read;
     if (method == "fluid.particle_extremes") return Read;
+    if (method == "fluid.surface_parity") return Read;
     if (method == "fluid.gas_cell_extremes") return Read;
     if (method == "fluid.sample_solid_phi") return Read;
     if (method == "fluid.set_pore_exchange") return SceneWrite;

@@ -1,3 +1,4 @@
+#include "Fluid/MeshVolumeTest.h"
 #include "Fluid/MatterGrainBirth.h"
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/MatterSubstanceState.h"
@@ -98,7 +99,8 @@ bool MatterGrainBirthFilter::accept(const Vec3& p, float radius) {
 
 MatterGrainSeedResult seedMatterGrainBox(FluidParticles& particles,
     const FluidSim::FluidGrid& grid, const Vec3& low, const Vec3& high,
-    const APICSolverParams& params, float kelvin, std::size_t budget) {
+    const APICSolverParams& params, float kelvin, std::size_t budget,
+    const MeshVolumeCellMask* mask) {
     MatterGrainSeedResult result;
     Vec3 grid_low, grid_high;
     grid.getWorldBounds(grid_low, grid_high);
@@ -185,6 +187,9 @@ MatterGrainSeedResult seedMatterGrainBox(FluidParticles& particles,
                 }
                 const auto cell = grid.cellIndex(cx, cy, cz);
                 if (cell < grid.solid.size() && grid.solid[cell]) {
+                    continue;
+                }
+                if (mask && !mask->contains(p)) {
                     continue;
                 }
                 auto grain = params.grain;

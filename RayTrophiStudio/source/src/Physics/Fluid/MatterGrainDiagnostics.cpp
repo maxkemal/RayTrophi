@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <iterator>
+#include <utility>
 #include <vector>
 
 namespace RayTrophiSim::Fluid {
@@ -208,6 +210,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
     nlohmann::json runtime = nullptr;
     if (report && report->substeps > 0) {
         runtime = {{"substeps", report->substeps}, {"dispatches", report->dispatches},
+            {"sleep_work_mode", report->compact_sleep_work ? "compact" : "dense"},
             {"substep_dt_s", report->substep_dt}, {"substep_limit", report->limit},
             {"max_contacts_per_grain", report->max_contacts},
             {"cfl_contacts_per_grain", report->cfl_contacts},
@@ -336,7 +339,54 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"capped", c.capped},
             {"bridge_min_volume_fraction", kMatterGrainBridgeMinVolumeFraction}};
     }
+    nlohmann::json contact_probe = {{"measured", false}};
+    if (report && report->contact_probe.measured) {
+        const auto& probe = report->contact_probe;
+        static constexpr const char* sleep_keys[] = {
+            "frame_contact_skips", "frame_contact_solves", "frame_periodic_audits",
+            "frame_neighbour_audits_consumed", "frame_new_neighbour_audit_requests",
+            "final_linear_speed_blocked", "final_spin_speed_blocked",
+            "final_force_balance_blocked", "final_torque_balance_blocked",
+            "final_coupling_blocked", "final_fresh_history", "final_context_reset",
+            "final_rest_time_pending", "final_rest_eligible", "final_sampled_grains",
+            "final_sleep_disabled"
+        };
+        static_assert(std::size(sleep_keys) == 16);
+        nlohmann::json sleep_probe = {
+            {"counts_valid", !probe.sleep_counter_overflow},
+            {"grains", probe.sleep_probe_grains},
+            {"final_snapshot_complete", !probe.sleep_counter_overflow &&
+                probe.sleep_counters[14] == probe.sleep_probe_grains}
+        };
+        for (std::size_t index = 0; index < probe.sleep_counters.size(); ++index) {
+            sleep_probe[sleep_keys[index]] = probe.sleep_counters[index];
+        }
+        nlohmann::json failure_stages = nlohmann::json::array();
+        for (const auto& stage : {std::pair<uint32_t, const char*>{32u, "collider_closest_point"},
+                {64u, "substep_input"}, {128u, "contact_force"}, {256u, "integration"},
+                {512u, "collider_normal"}}) {
+            if ((probe.overflow_bits & stage.first) != 0u) {
+                failure_stages.push_back(stage.second);
+            }
+        }
+        contact_probe = {{"measured", true}, {"overflow_bits", probe.overflow_bits},
+            {"sleep", sleep_probe},
+            {"failure_stages", failure_stages},
+            {"output_finite", probe.output_finite},
+            {"contact_metrics_measured", probe.first_bucket_overflow_substep != 0},
+            {"first_bucket_overflow_substep", probe.first_bucket_overflow_substep},
+            {"overflow_grain_index", probe.overflow_grain_index},
+            {"overflow_bucket_population", probe.overflow_bucket_population},
+            {"overflow_cell_population", probe.overflow_cell_population},
+            {"peak_bucket_population", probe.peak_bucket_population},
+            {"max_grain_overlap_fraction", probe.max_grain_overlap_fraction},
+            {"max_collider_overlap_fraction", probe.max_collider_overlap_fraction},
+            {"max_speed_m_s", probe.max_speed_m_s},
+            {"max_acceleration_m_s2", probe.max_acceleration_m_s2},
+            {"max_collider_contacts", probe.max_collider_contacts}};
+    }
     return {{"transport_owner", params.enabled ? "grain" : "mpm"},
+        {"contact_probe", contact_probe},
         {"solver", history ? "force_dem_cundall_strack_candidate"
                            : "force_dem_viscous_sliding_candidate"},
         {"collider_structure", "flat_bvh"}, {"max_support_contacts", 4},

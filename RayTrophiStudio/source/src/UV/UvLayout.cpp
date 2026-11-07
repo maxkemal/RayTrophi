@@ -127,7 +127,8 @@ std::string fingerprint(const Layout& layout) {
 
 bool transform(Layout& layout, const std::vector<uint32_t>& islands,
                Vec2 offset, Vec2 scale, Vec2 pivot, float degrees,
-               bool normalize, std::string& error, bool swap_axes) {
+               bool normalize, std::string& error, bool swap_axes,
+               const std::vector<uint32_t>* vertices) {
     if (!validate(layout, error)) {
         return false;
     }
@@ -146,7 +147,20 @@ bool transform(Layout& layout, const std::vector<uint32_t>& islands,
         }
     }
     std::vector<uint8_t> mask(layout.coordinates.size(), 0);
-    for (size_t face = 0; face < layout.islands.size(); ++face) {
+    if (vertices) {
+        if (!islands.empty() || vertices->empty()) {
+            error = "uv_invalid_selection: vertices must be nonempty and exclude islands";
+            return false;
+        }
+        for (uint32_t vertex : *vertices) {
+            if (vertex >= mask.size()) {
+                error = "uv_invalid_vertex";
+                return false;
+            }
+            mask[vertex] = 1;
+        }
+    }
+    for (size_t face = 0; !vertices && face < layout.islands.size(); ++face) {
         const bool active = selected.empty() || selected.count(layout.islands[face]) != 0;
         for (size_t k = 0; k < 3; ++k) {
             mask[layout.indices[face * 3 + k]] |= active ? 1 : 2;

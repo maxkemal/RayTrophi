@@ -20,6 +20,7 @@
 #include "Fluid/FluidRenderProxy.h"
 #include "Fluid/GranularGpuState.h"
 #include "Fluid/SubstanceTag.h"
+#include "Fluid/MeshVolumeTest.h"
 #include "Fluid/MatterConstitutive.h"
 #include "Fluid/MatterGpuModelView.h"
 #include "Fluid/MatterPhaseSettings.h"
@@ -198,7 +199,11 @@ inline uint32_t defaultGridDomainChannels() {
 //               setups ("dolu kap"); colliders then carve waves on top.
 enum class FluidSeedMode : uint32_t {
     SeedBox = 0,
-    FillLevel = 1
+    FillLevel = 1,
+    // Fill the INTERIOR of a scene mesh (fluid_seed_mesh_object): a sand castle
+    // is a hidden castle mesh seeded with sand. Same inside rule as the collider
+    // SDF cook (Fluid/MeshVolumeTest.h).
+    MeshVolume = 2
 };
 
 // Resting-tank fill region (single source of truth for the seeder, the viewport
@@ -369,6 +374,10 @@ struct SimulationGridDomainDesc {
     // sim to frame 0. Positive also turns the domain's grains wet
     // (matterGrainOwnership). DEM grains only; MPM parcels ignore it.
     float fluid_seed_grain_saturation = 0.0f;
+    // Mesh Volume seed: the scene object whose interior is filled. Authored by
+    // name, like every other object reference here; the mesh is resolved at
+    // seed time, so moving the object before seeding moves the fill.
+    std::string fluid_seed_mesh_object;
     std::size_t fluid_max_particles = 100000;
     bool fluid_replace_on_seed = true;
     bool fluid_pending_seed = false;
@@ -1116,6 +1125,9 @@ struct SimulationSeedStats {
     std::size_t emitted = 0;
     float top_y = 0.0f;
     float region_top_y = 0.0f;
+    // Why a seed emitted nothing it was asked for (Mesh Volume: object
+    // missing, or a mesh with no inside on this grid). Empty on success.
+    std::string error;
 };
 
 struct SimulationSeedSettleStats {
@@ -2574,6 +2586,18 @@ public:
                                   bool persistent,
                                   float fill_level = -1.0f,
                                   float grain_saturation = -1.0f);
+    /// Seed the interior of a scene mesh (FluidSeedMode::MeshVolume). The mesh
+    /// is resolved through the mesh-volume resolver at seed time.
+    bool seedFluidDomainFromMesh(const std::string& domain_name,
+                                 const std::string& object_name,
+                                 int particles_per_cell,
+                                 bool replace,
+                                 bool persistent,
+                                 float grain_saturation = -1.0f);
+    void setMeshVolumeResolver(
+        std::function<std::shared_ptr<const Fluid::MeshVolumeTest>(const std::string&)> resolver) {
+        mesh_volume_resolver_ = std::move(resolver);
+    }
     /// Clear the authoritative live particles. With `clear_seed_recipe`, also
     /// disarm reset-time SeedBox/FillLevel reproduction so emitter-only domains
     /// stay emitter-only after a rewind.
@@ -2901,6 +2925,7 @@ private:
     std::function<bool(const SimulationFlowSourceDesc&, Vec3&, Vec3&)> flow_source_bounds_resolver_;
     std::function<bool(const std::string&, Matrix4x4&)> flow_source_transform_resolver_;
     std::function<bool(const SimulationFlowSourceDesc&, uint32_t, ParticleSurfaceSample&)> flow_source_surface_sampler_;
+    std::function<std::shared_ptr<const Fluid::MeshVolumeTest>(const std::string&)> mesh_volume_resolver_;
     bool enabled_ = true;
     bool collision_plane_enabled_ = false;
     float collision_plane_y_ = 0.0f;

@@ -1747,6 +1747,11 @@ struct VolumeSlotRow {
     bool has_temperature = false;
     int density_device_local = -1; // -1 unknown, 0 host heap, 1 device-local heap
     int temperature_device_local = -1;
+    // Surface material resolution on this device (see the backend diag).
+    float iso_material_slot = 0.0f;
+    bool has_uvw = false;
+    bool has_composition = false;
+    int uvw_dim[3] = {0, 0, 0};
     int emission_mode = 0;
     bool color_ramp_enabled = false;
     float blackbody_intensity = 0.0f;
@@ -1760,9 +1765,30 @@ struct VolumeSlotTable {
     std::string role;            // "render" | "viewport"
     bool is_vulkan = false;
     uint64_t upload_serial = 0;
+    // Raster material table size the SDF shader indexes (0 on a backend that
+    // never drew a material-preview frame).
+    uint32_t preview_material_count = 0;
     uint32_t instance_count = 0; // uploaded count; may differ from slots.size()
     std::vector<VolumeSlotRow> slots;
 };
+// The per-substance composition cell a surface shader reads at a world point,
+// read back from each Vulkan device's own buffer, beside the host copy the
+// producer published (render.probe_surface_composition).
+struct SurfaceCompositionProbeRow {
+    std::string role;            // "render" | "viewport"
+    bool found = false;          // a surface slot with a composition address
+    bool has_buffer = false;     // the address resolves into a buffer that device owns
+    int slot = -1;
+    int vdb_id = -1;
+    int cell[3] = {0, 0, 0};
+    float device[3] = {0, 0, 0}; // slot A, slot B (material id + 1), weight of B
+    bool host_found = false;
+    float host[3] = {0, 0, 0};
+    uint64_t address_offset = 0; // composition address - buffer address
+    uint64_t uvw_bytes = 0;      // expected offset (the residual field precedes it)
+};
+std::vector<SurfaceCompositionProbeRow> probeSurfaceComposition(const float world[3]);
+
 // Scene side: which volume each grid domain currently owns.
 struct DomainVolumeRow {
     std::string system;
@@ -2626,6 +2652,7 @@ struct GpuMemoryDevice {
     uint64_t compaction_bytes_after = 0;
 };
 struct GpuMemoryReport {
+    std::string simulation_memory_json = "{}";
     bool vram_measured = false;
     uint64_t vram_usage_bytes = 0;
     uint64_t vram_budget_bytes = 0;
@@ -3625,6 +3652,22 @@ struct SimControlStateInfo {
     // of the time; check it after creating a domain if another one just went
     // quiet. See docs/dev/NEXT_BUILD_CHECKS.md §A1.
     std::vector<std::string> dropped_seeds;
+    // What the timeline's setup-signature watcher saw the last time the
+    // signature moved: the frame, the FIRST signature section that differed
+    // from the last matching tick, whether the fluid coupling moved too, and
+    // whether the seed-start drift guard kept the bake instead of rewinding.
+    bool last_rewind_valid = false;
+    int last_rewind_frame = -1;
+    std::string last_rewind_part;
+    bool last_rewind_absorbed = false;
+    bool last_rewind_fluid_affected = false;
+    struct RewindEntry {
+        int frame = -1;
+        std::string first_changed_part;
+        bool absorbed = false;
+        bool fluid_affected = false;
+    };
+    std::vector<RewindEntry> rewind_history;  // oldest first, at most 8
 };
 Result getSimControlState(SimControlStateInfo& out);
 Result setPhysicsGravity(Vec3 gravity);
@@ -4902,6 +4945,8 @@ struct FluidDomainInfo {
     float anisotropy_max_stretch = 4.0f;
     int   anisotropy_neighbor_min = 6;
     float position_smoothing = 0.9f;
+    // Build the surface on the simulation Vulkan device (GPU_YUZEY_LEVEL_SET.md).
+    bool  surface_gpu = true;
     // Measured, from the last surface build. surface_measured false = no build
     // has happened for this domain yet (not "zero cost").
     bool  surface_measured = false;
@@ -4916,6 +4961,13 @@ struct FluidDomainInfo {
     uint64_t surface_active_cells = 0;
     uint64_t surface_work_cells = 0;
     uint64_t surface_bin_cells = 0;
+    // Which builder made the last surface: "cpu", "gpu_host" (GPU, proxy read
+    // back for a host consumer), "gpu_live" (Vulkan RT reads the device buffers).
+    // surface_gpu_status names why a requested GPU build fell back to the CPU.
+    std::string surface_route;
+    std::string surface_gpu_status;
+    uint64_t surface_upload_bytes = 0;
+    uint64_t surface_download_bytes = 0;
     // ── Thermal liquid (cooling / ν(T) / freezing) ─────────────────────────
     // See APICSolverParams::thermal_* and FluidThermalLiquid.h. Written through
     // setFluidThermal.
@@ -5016,7 +5068,9 @@ struct FluidDomainInfo {
     // Seed recipe (fluid.seed) and what the last seed did. seed_truncated:
     // the particle budget cut it; the liquid then ends at seed_top_y, below
     // seed_region_top_y.
-    std::string seed_mode;            // "box" | "fill_level"
+    std::string seed_mode;            // "box" | "fill_level" | "mesh_volume"
+    std::string seed_mesh_object;     // Mesh Volume: the object whose inside is filled
+    std::string seed_error;           // why the last seed emitted nothing (empty = ok)
     Vec3     seed_min = Vec3(0.0f);
     Vec3     seed_max = Vec3(0.0f);
     int      seed_particles_per_cell = 8;
@@ -5087,6 +5141,7 @@ struct FluidSurfaceDetailPatch {
     std::optional<float> anisotropy_max_stretch;         // 1..8
     std::optional<int>   anisotropy_neighbor_min;        // 1..24
     std::optional<float> position_smoothing;             // 0..1
+    std::optional<bool>  surface_gpu;
 };
 
 struct FluidThermalPatch {
@@ -5531,6 +5586,42 @@ struct FluidParticleExtremes {
 Result getFluidParticleExtremes(const std::string& domain_id_or_name, uint32_t count,
                                 FluidParticleExtremes& out);
 
+// GPU surface builder vs the CPU reference on the same live particles
+// (docs/dev/GPU_YUZEY_LEVEL_SET.md). Metres; compared = cells where either
+// side is inside the narrow band. gpu_ok=false with gpu_status = why the GPU
+// route refused (or failed); live=false = the domain has not stepped.
+struct FluidSurfaceParity {
+    bool     live = false;
+    bool     gpu_ok = false;
+    std::string gpu_status;
+    uint64_t particles = 0;
+    int      grid[3] = {0, 0, 0};
+    float    voxel = 0.0f;
+    uint64_t cells = 0;
+    uint64_t compared_cells = 0;
+    uint64_t cpu_active = 0;
+    uint64_t gpu_active = 0;
+    uint64_t band_mismatch = 0;     // inside the band on one side only
+    uint64_t sign_mismatch = 0;     // the surface on opposite sides of a cell
+    double   max_abs_phi = 0.0;
+    double   mean_abs_phi = 0.0;
+    double   max_abs_phi_over_h = 0.0;
+    bool     uvw_compared = false;
+    double   uvw_max_abs = 0.0;     // material-coordinate residual, metres
+    // Per-substance material mixture: whether each side built one (a single-
+    // material domain builds none on either), cells whose material pair
+    // differs, largest blend-weight difference.
+    bool     composition_cpu = false;
+    bool     composition_gpu = false;
+    uint64_t composition_slot_mismatch = 0;
+    double   composition_weight_max_abs = 0.0;
+    double   cpu_ms = 0.0;
+    double   gpu_ms = 0.0;          // host wall time including the device wait
+    uint64_t upload_bytes = 0;
+    uint64_t download_bytes = 0;
+};
+Result getFluidSurfaceParity(const std::string& domain_id_or_name, FluidSurfaceParity& out);
+
 // The hottest and the most vapour-laden air cells of a Matter domain's gas
 // grid (2026-10-21). Rain parcels are born at their cell's rain temperature,
 // so a parcel past every source means an air cell past it; this says which
@@ -5787,6 +5878,16 @@ Result seedFluidParticles(const std::string& domain_id_or_name,
 // are the domain's Default Substance in either mode.
 Result clearFluidParticles(const std::string& domain_id_or_name,
                            bool clear_seed_recipe = false);
+// Fill the INSIDE of a scene object (Seed Mode "Mesh Volume"), e.g. a hidden
+// castle mesh seeded with sand. Liquid/MPM parcels use particles_per_cell like
+// a box seed; DEM grains use their physical packing. Fails (and seeds nothing)
+// when the object is missing, does not overlap the domain, or has no inside on
+// the domain grid (an open surface).
+Result seedFluidParticlesFromMesh(const std::string& domain_id_or_name,
+                                  const std::string& object_name,
+                                  int particles_per_cell = 8, bool replace = true,
+                                  bool persistent = false,
+                                  float grain_saturation = -1.0f);
 // Seed settle: a seed (and on request any current particles) is relaxed to
 // rest before t = 0 without advancing time (MatterSeedSettle). Null keeps a
 // setting; request = settle the current particles at the start of the next

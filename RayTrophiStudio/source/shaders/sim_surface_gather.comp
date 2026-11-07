@@ -1,0 +1,65 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// Per-cell SDF (Zhu-Bridson, isotropic). CPU twin: FluidLevelSet.cpp stage 2.
+// Dense over the output grid: a cell outside every support gathers no weight
+// and keeps the far value, which is what the CPU's unscheduled cells hold.
+// confidence feeds the smoothing gate (support_confidence); 0 where unsupported.
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer Centres { float centres[]; };
+layout(set = 0, binding = 1) readonly buffer Mass { float mass[]; };
+layout(set = 0, binding = 2) readonly buffer Offsets { uint offsets[]; };
+layout(set = 0, binding = 3) readonly buffer Items { uint items[]; };
+layout(set = 0, binding = 4) buffer Sdf { float sdf[]; };
+layout(set = 0, binding = 5) buffer Confidence { float confidence[]; };
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    uint cells = uint(pc.grid.x) * uint(pc.grid.y) * uint(pc.grid.z);
+    if (c >= cells) return;
+    int i = int(c % uint(pc.grid.x));
+    int j = int((c / uint(pc.grid.x)) % uint(pc.grid.y));
+    int k = int(c / (uint(pc.grid.x) * uint(pc.grid.y)));
+    vec3 pcell = pc.origin.xyz + (vec3(i, j, k) + vec3(0.5)) * pc.cell.x;
+    ivec3 b = binCoordinate(pcell);
+    ivec3 lo = max(b - ivec3(pc.reach.x), ivec3(0));
+    ivec3 hi = min(b + ivec3(pc.reach.x), pc.bins.xyz - ivec3(1));
+    float R2 = pc.cell.z;
+    float acc_w = 0.0, acc_w2 = 0.0, acc_mass = 0.0;
+    vec3 acc_p = vec3(0.0);
+    for (int kk = lo.z; kk <= hi.z; ++kk)
+    for (int jj = lo.y; jj <= hi.y; ++jj)
+    for (int ii = lo.x; ii <= hi.x; ++ii) {
+        uint bi = binIndex(ivec3(ii, jj, kk));
+        uint end = offsets[bi + 1u];
+        for (uint a = offsets[bi]; a < end; ++a) {
+            uint p = items[a];
+            vec3 x = vec3(centres[p * 3u], centres[p * 3u + 1u], centres[p * 3u + 2u]);
+            vec3 d = pcell - x;
+            float d2 = dot(d, d);
+            if (d2 >= R2) continue;
+            float t = 1.0 - d2 / R2;
+            float w = t * t * t;
+            acc_w += w;
+            acc_w2 += w * w;
+            acc_mass += w * clamp(mass[p], 0.0, 1.0);
+            acc_p += w * x;
+        }
+    }
+    float far_value = pc.band.x;
+    float conf = 0.0;
+    float phi = far_value;
+    if (acc_w > 1e-12) {
+        if (pc.reach.z > 0) {
+            float effective = acc_w * acc_w / max(acc_w2, 1.0e-12);
+            float t = clamp((effective - 4.0) / 12.0, 0.0, 1.0);
+            conf = t * t * (3.0 - 2.0 * t);
+        }
+        vec3 x_bar = acc_p / acc_w;
+        float dlen = length(pcell - x_bar);
+        float mean_mass = clamp(acc_mass / max(acc_w, 1.0e-12), 0.0, 1.0);
+        float mass_radius = pc.centre.z * pow(max(mean_mass, 0.02), 1.0 / 3.0);
+        phi = clamp(dlen - mass_radius - pc.centre.w, -far_value, far_value);
+    }
+    sdf[c] = phi;
+    confidence[c] = conf;
+}

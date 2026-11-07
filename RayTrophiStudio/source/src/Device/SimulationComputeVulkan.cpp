@@ -292,6 +292,13 @@ public:
             g_nextVulkanSimulationBufferId.fetch_add(1, std::memory_order_relaxed);
         m_buffers[id] = { buf, mem, desc.size_bytes, mapped,
                           desc.usage, desc.debug_name };
+        auto& allocation = m_buffers[id];
+        allocation.allocation_bytes = req.size;
+        VkPhysicalDeviceMemoryProperties properties{};
+        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &properties);
+        const auto flags = properties.memoryTypes[ai.memoryTypeIndex].propertyFlags;
+        allocation.device_local = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+        allocation.host_visible = (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
         ComputeBufferHandle h;
         h.id = id;
         // ComputeBufferHandle defaults to CPU. Leaving that tag unchanged made
@@ -549,6 +556,29 @@ public:
 
     // ── Dispatch ──────────────────────────────────────────────────────────────
 
+    ComputeMemoryReport memoryReport() const override {
+        ComputeMemoryReport report;
+        report.supported = true;
+        for (const auto& entry : m_buffers) {
+            const auto& buffer = entry.second;
+            report.buffers.push_back({buffer.debug_name, buffer.size,
+                buffer.allocation_bytes, buffer.device_local, buffer.host_visible});
+            report.requested_bytes += buffer.size;
+            report.allocation_bytes += buffer.allocation_bytes;
+            if (buffer.device_local) {
+                report.device_local_bytes += buffer.allocation_bytes;
+            }
+        }
+        std::sort(report.buffers.begin(), report.buffers.end(),
+            [](const ComputeMemoryAllocation& a, const ComputeMemoryAllocation& b) {
+                if (a.allocation_bytes != b.allocation_bytes) {
+                    return a.allocation_bytes > b.allocation_bytes;
+                }
+                return a.name < b.name;
+            });
+        return report;
+    }
+
     bool dispatch(const ComputeDispatch& cmd) override {
         if (!m_ready || !cmd.constants || cmd.constants_size == 0) return false;
         if (cmd.buffer_count > MAX_BINDINGS) return false;
@@ -724,6 +754,9 @@ private:
         void*          mapped = nullptr; // non-null: ReBAR (device-local host-visible) — uploads are direct memcpy
         ComputeBufferUsage usage = ComputeBufferUsage::Storage;
         std::string       debug_name;
+        uint64_t allocation_bytes = 0;
+        bool device_local = false;
+        bool host_visible = false;
     };
 
     struct PipelineEntry {
@@ -1010,6 +1043,24 @@ private:
             { "sim_fluid_label_bin_clear",          "sim_fluid_label_bin_clear.spv",       2, 80 },
             { "sim_fluid_label_bin_scatter",        "sim_fluid_label_bin_scatter.spv",     5, 80 },
             { "sim_fluid_label_classify",           "sim_fluid_label_classify.spv",        6, 80 },
+            { "sim_fluid_label_link_clear",         "sim_fluid_label_link_clear.spv",      2, 80 },
+            { "sim_fluid_label_link_scatter",       "sim_fluid_label_link_scatter.spv",    5, 80 },
+            { "sim_fluid_label_link_classify",      "sim_fluid_label_link_classify.spv",   6, 80 },
+            // GPU surface reconstruction (FluidSurfaceGpu.cpp, docs/dev/GPU_YUZEY_LEVEL_SET.md).
+            // All share SurfaceGpuConstants = 128 bytes; integer atomics only.
+            { "sim_surface_clear",                  "sim_surface_clear.spv",               1, 128 },
+            { "sim_surface_bin_assign",             "sim_surface_bin_assign.spv",          5, 128 },
+            { "sim_surface_scan",                   "sim_surface_scan.spv",                3, 128 },
+            { "sim_surface_scatter",                "sim_surface_scatter.spv",             3, 128 },
+            { "sim_surface_centres",                "sim_surface_centres.spv",             5, 128 },
+            { "sim_surface_gather",                 "sim_surface_gather.spv",              6, 128 },
+            { "sim_surface_gather_supported", "sim_surface_gather_supported.spv", 8, 128 },
+            { "sim_surface_composition_phase", "sim_surface_composition_phase.spv", 6, 128 },
+            { "sim_surface_smooth",                 "sim_surface_smooth.spv",              4, 128 },
+            { "sim_surface_proxy",                  "sim_surface_proxy.spv",               3, 128 },
+            { "sim_surface_uvw_gather",             "sim_surface_uvw_gather.spv",          6, 128 },
+            { "sim_surface_uvw_extend",             "sim_surface_uvw_extend.spv",          4, 128 },
+            { "sim_surface_composition",            "sim_surface_composition.spv",         6, 128 },
             // Whitewater spawn potentials. The bucket-grid bin replaces the serial
             // CSR bin on the host; only INTEGER atomics are used, so these do not
             // depend on the shaderAtomicFloat support the P2G/splat pair needs.
@@ -1080,6 +1131,7 @@ private:
             { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 17, 128 },
             { "sim_matter_grain_list_build", "sim_matter_grain_list_build.spv", 17, 128 },
             { "sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128 },
+            { "sim_matter_grain_active_classify", "sim_matter_grain_active_classify.spv", 17, 128 },
             { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 112 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        5, 48 },

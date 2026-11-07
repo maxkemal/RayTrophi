@@ -1,4 +1,4 @@
-"""Revision-24 DEM sleep acceptance, external named-pipe process only.
+"""Revision-38 DEM sleep/compact-work acceptance, external named-pipe only.
 
 Requires an empty paused scene, downward gravity and no active colliders/fields.
 Tests physical free fall at deliberately loose sleep settings, and settled
@@ -33,11 +33,12 @@ def main():
         inventory = call('fluid.matter_models', domain=domain)
         assert not inventory['mixed_execution']['step_held'], inventory['mixed_execution']
         diagnostic = inventory['grain_diagnostics']
-        assert diagnostic['contact_shader_revision'] >= 24, 'Rebuild revision-24 C++ and grain shaders'
+        assert diagnostic['contact_shader_revision'] >= 38, 'Rebuild revision-38 C++ and grain shaders'
         grain = inventory['acceptance_metrics']['granular']
         runtime = diagnostic['runtime']
         assert grain['particles'] == 1, grain
-        assert runtime['dispatches'] == 4 * runtime['substeps'], runtime
+        stages = 5 if runtime.get('sleep_work_mode') == 'compact' else 4
+        assert runtime['dispatches'] == stages * runtime['substeps'], runtime
         return {'shader_revision': diagnostic['contact_shader_revision'],
                 'position': grain['dry_center_of_mass'], 'mass_kg': grain['dry_mass_kg'],
                 'energy_j': grain['kinetic_energy_j'], 'runtime': runtime}
@@ -66,7 +67,7 @@ def main():
              fluid_temperature_override=True, fluid_temperature_kelvin=293.15)
         source_created = True
 
-        def run_arm(name, sleep, height, frames, speed, duration):
+        def run_arm(name, sleep, height, frames, speed, duration, compact=True):
             call('timeline.set_frame', frame=0)
             call('fluid.reset')
             call('fluid.set_grain_settings', domain=domain, radius_m=.025,
@@ -74,13 +75,13 @@ def main():
                  friction=.5, rolling_friction=.1, twisting_friction=0.,
                  tangential_stiffness_ratio=2/7, contact_resolution=24,
                  packing_fraction=.6, max_substeps=1024,
-                 sleep=sleep, sleep_speed_m_s=speed, sleep_time_s=duration)
+                 sleep=sleep, sleep_speed_m_s=speed, sleep_time_s=duration,
+                 compact_sleep_work=compact)
             call('flow_source.update', name=source, enabled=True, position=[0, height, 0])
             samples = []
-            frame_control = call('sim.control_state')
             for frame in range(frames):
                 call('fluid.step', dt=1/60)
-                assert call('sim.control_state') == frame_control
+                assert not call('sim.control_state')['playing']
                 if frame == 0 or frame == frames - 1:
                     samples.append(sample())
             results[name] = samples
@@ -113,6 +114,11 @@ def main():
             assert .025 * .7 <= last['position'][1] <= .025 * 1.1, last
             settled[sleep] = last
         assert abs(settled[True]['position'][1] - settled[False]['position'][1]) <= 2e-5
+        dense = run_arm('settle_dense_sleep', True, .025, 120, .002, .2, compact=False)[-1]
+        assert dense['runtime']['sleep_work_mode'] == 'dense'
+        assert settled[True]['runtime']['sleep_work_mode'] == 'compact'
+        assert abs(dense['position'][1] - settled[True]['position'][1]) <= 2e-5
+        assert dense['runtime']['sleeping_grains'] == 1
         print('PASS sleeping support: contact/sticking/CFL diagnostics remain physical')
         print(json.dumps(results))
         print('PASS grain sleep acceptance; wet/motion/repose/large-N gates still required')

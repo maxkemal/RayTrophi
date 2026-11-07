@@ -28,6 +28,10 @@ struct MatterGrainCommonDriver;
 
 // Opt-in dry DEM candidate. Physical radius is independent of render detail.
 struct MatterGrainParams {
+    // Opt-in GPU contact/overflow investigation; no change to the force law.
+    bool contact_probe_enabled = false;
+    // Group active/audit grains into a compact GPU work list on settled piles.
+    bool compact_sleep_work = true;
     // Transient solver gate derived from AudioService's saved opt-in policy.
     // Not a material property; never implicitly enabled by a sound binding.
     bool audio_telemetry_enabled = false;
@@ -134,7 +138,7 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 30: runtime-sized contact history with four mask words and matching CFL bounds.
 // 31: neighbour hash buckets hold 32 grains (contact-born dense seed).
 // 32: no liquid bridge below kMatterGrainBridgeMinVolumeFraction.
-inline constexpr uint32_t kMatterGrainShaderRevision = 33;
+inline constexpr uint32_t kMatterGrainShaderRevision = 38;
 // Smallest pendular bridge, as a fraction of the smaller grain's volume
 // (BRIDGE_MIN_VOLUME_FRACTION in sim_matter_grain.glsl; the host CFL uses the
 // same floor). Less water than this is an adsorbed film, not a bridge:
@@ -241,7 +245,32 @@ std::size_t ensureMatterGrainRestMasses(FluidParticles& particles,
                                         const SubstanceProfile* domain_substance,
                                         bool legacy_granular);
 
+struct MatterGrainContactProbe {
+    bool measured = false;
+    bool output_finite = false;
+    uint32_t overflow_bits = 0;
+    // Zero-based; -1 means no bucket overflow in this attempt.
+    int first_bucket_overflow_substep = -1;
+    uint32_t overflow_grain_index = 0;
+    uint32_t overflow_bucket_population = 0;
+    uint32_t overflow_cell_population = 0;
+    uint32_t peak_bucket_population = 0;
+    // Maxima over completed substeps BEFORE the first bucket overflow.
+    // Grain overlap is divided by the pair's sum of radii; collider by radius.
+    float max_grain_overlap_fraction = 0.0f;
+    float max_collider_overlap_fraction = 0.0f;
+    float max_speed_m_s = 0.0f;
+    float max_acceleration_m_s2 = 0.0f;
+    uint32_t max_collider_contacts = 0;
+    // Frame events followed by non-exclusive final-substep sleep prerequisites.
+    std::array<uint32_t, 16> sleep_counters{};
+    bool sleep_counter_overflow = false;
+    uint32_t sleep_probe_grains = 0;
+};
+
 struct MatterGrainStepReport {
+    MatterGrainContactProbe contact_probe;
+    bool compact_sleep_work = false;
     // Vulkan normal-contact dashpot work over the complete committed frame.
     bool contact_damping_measured = false;
     double contact_damping_energy_j = 0.0;
@@ -402,6 +431,8 @@ struct MatterGrainCouplingOutput {
 };
 
 struct MatterGrainGpuRuntime {
+    MatterGrainContactProbe last_contact_probe;
+    uint32_t last_sleeping_grains = 0;
     ComputeBufferHandle positions;
     ComputeBufferHandle velocities;
     ComputeBufferHandle affines;
