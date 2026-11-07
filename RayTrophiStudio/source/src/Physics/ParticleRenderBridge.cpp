@@ -1612,7 +1612,16 @@ void SceneData::syncDomainFluidParticleInstances(bool enable_rt_geometry) {
                 const bool splat = view == RayTrophiSim::Fluid::FluidView::Splat;
                 std::size_t source_index = 0;
                 for (const auto& b : dconfig.fluid_substance_materials) {
-                    if (RayTrophiSim::Fluid::substanceTag(b.substance) != tag) continue;
+                    // ★ Untagged liquid IS the Default Substance (same rule as
+                    // collectSubstanceMaterialEntries): without this a spray or
+                    // foam parcel of a seeded domain splats in the DOMAIN material
+                    // while its surface already shows the binding (2026-11-04).
+                    const bool owns =
+                        RayTrophiSim::Fluid::substanceTag(b.substance) == tag ||
+                        (tag == RayTrophiSim::Fluid::kSubstanceUntagged &&
+                         !b.substance.empty() &&
+                         b.substance == dconfig.fluid_params.default_substance);
+                    if (!owns) continue;
                     const int base_key = st.source_material_keys.empty()
                         ? 0 : st.source_material_keys.front();
                     const int requested_key =

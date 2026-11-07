@@ -5,7 +5,7 @@
 // ===============================================================================
 
 #include "scene_ui.h"
-#include "UI/MaterialUvSamplingUI.h"
+#include "UI/ColorControls.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -14,6 +14,9 @@
 #include "MaterialManager.h"
 #include "PBRMaterialSnapshot.h"
 #include "UI/MaterialCoverageUI.h"
+#include "UI/MaterialInspectorUI.h"
+#include "UI/MaterialTextureSlotUI.h"
+#include "UI/MaterialTextureGridUI.h"
 #include "PrincipledBSDF.h"
 #include "Volumetric.h"
 #include "scene_data.h"
@@ -67,6 +70,8 @@ static std::unordered_map<std::string, std::string> s_cacheTagMap;
 void invalidateTextureCacheTagCache() {
     s_cacheTagMap.clear();
 }
+
+#include "UI/MaterialUvSamplingUI.h"
 
 
 void SceneUI::resetMaterialUI() {
@@ -464,7 +469,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     };
 
     if (UIWidgets::IconActionButton("MaterialKeyAll", UIWidgets::IconType::AddKey, "",
-        false, ImVec4(1.0f, 0.72f, 0.42f, 1.0f), ImVec2(42.0f, 38.0f),
+        false, ImVec4(1.0f, 0.72f, 0.42f, 1.0f), ImVec2(PanelControls::height(), PanelControls::height()),
         "Insert a material keyframe for the active slot at the current frame.")) {
         // Insert material keyframe at current frame
         int current_frame = ctx.render_settings.animation_current_frame;
@@ -495,8 +500,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     ImGui::SameLine();
     ImGui::TextDisabled("Active Slot");
 
-    ImGui::PushItemWidth(ImGui::GetContentRegionAvail().x - 110); // Space for +New buttons (adjusted for +S and +V)
-    if (ImGui::BeginCombo("##SlotAssignment", current_mat_name.c_str())) {
+    if (PanelControls::beginCombo("##SlotAssignment", current_mat_name.c_str())) {
         auto& mgr = MaterialManager::getInstance();
         const auto& all_materials = mgr.getAllMaterials();
 
@@ -517,13 +521,14 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         }
         ImGui::EndCombo();
     }
-    ImGui::PopItemWidth();
+
 
     // �������������������������������������������������������������������������
     // SHORTCUTS (New Surface / Volume) - affecting Active Slot
     // �������������������������������������������������������������������������
     UIWidgets::Divider();
-    if (ImGui::Button("+ Surface")) {
+    const float createWidth = PanelControls::actionWidth(2);
+    if (PanelControls::button("+ Surface", ImVec2(createWidth, 0))) {
         ImGui::OpenPopup("NewSurfPopup");
     }
     if (ImGui::IsItemHovered()) {
@@ -531,7 +536,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
     }
 
     ImGui::SameLine();
-    if (ImGui::Button("+ Volume")) {
+    if (PanelControls::button("+ Volume", ImVec2(createWidth, 0))) {
         ImGui::OpenPopup("NewVolPopup");
     }
     if (ImGui::IsItemHovered()) {
@@ -720,7 +725,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
 
         // --- Reuse Volumetric UI Logic ---
         Vec3 alb = vol_mat->getAlbedo();
-        if (ImGui::ColorEdit3("Scattering Color", &alb.x)) { vol_mat->setAlbedo(alb); changed = true; }
+        if (ColorControls::field3("Scattering Color", &alb.x)) { vol_mat->setAlbedo(alb); changed = true; }
 
         // Pop styling for ColorEdit
         ImGui::PopStyleVar(3);
@@ -762,7 +767,7 @@ void SceneUI::drawMaterialPanel(UIContext& ctx) {
         bool em_changed = false;
 
         ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.12f, 0.12f, 0.15f, 1.0f));
-        if (ImGui::ColorEdit3("Emission Color", &normalized_emis.x)) em_changed = true;
+        if (ColorControls::field3("Emission Color", &normalized_emis.x)) em_changed = true;
         ImGui::PopStyleColor();
 
         // Use LCD slider for emission strength
@@ -1104,719 +1109,59 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
         changed |= MaterialUvSamplingUI::draw(ctx, *pbsdf, mat_id, obj_n);
     }
 
-    if (UIWidgets::BeginSection("Surface Core", ImVec4(1.0f, 0.72f, 0.42f, 1.0f))) {
-        Vec3 albedo = pbsdf->albedoProperty.color;
-        float albedo_arr[3] = { (float)albedo.x, (float)albedo.y, (float)albedo.z };
-        bool albKeyed = isMatKeyed(mat_id, true, false, false, false, false, false, false, false);
-        if (KeyframeButton("##MAlb", albKeyed)) { insertMatPropKey(pbsdf, mat_id, true, false, false, false, false, false, false, false); }
-        ImGui::SameLine();
-        if (ImGui::ColorEdit3("Base Color", albedo_arr)) {
-            pbsdf->albedoProperty.color = Vec3(albedo_arr[0], albedo_arr[1], albedo_arr[2]);
-            changed = true;
-        }
-
-        float metallic = pbsdf->metallicProperty.intensity;
-        bool metKeyed = isMatKeyed(mat_id, false, false, false, true, false, false, false, false);
-        if (SceneUI::DrawSmartFloat("met", "Metal", &metallic, 0.0f, 1.0f, "%.3f", metKeyed,
-            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, true, false, false, false, false); }, 16)) {
-            pbsdf->metallicProperty.intensity = metallic;
-            changed = true;
-        }
-
-        float roughness = (float)pbsdf->roughnessProperty.color.x;
-        bool rghKeyed = isMatKeyed(mat_id, false, false, true, false, false, false, false, false);
-        if (SceneUI::DrawSmartFloat("rgh", "Rough", &roughness, 0.0f, 1.0f, "%.3f", rghKeyed,
-            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, true, false, false, false, false, false); }, 16)) {
-            pbsdf->roughnessProperty.color = Vec3(roughness);
-            changed = true;
-        }
-
-        float ior = pbsdf->ior;
-        bool iorKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, true, false);
-        if (SceneUI::DrawSmartFloat("ior", "IOR", &ior, 1.0f, 3.0f, "%.3f", iorKeyed,
-            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, true, false); }, 16)) {
-            pbsdf->ior = ior;
-            changed = true;
-        }
-
-        float transmission = pbsdf->transmission;
-        bool trnKeyed = isMatKeyed(mat_id, false, false, false, false, false, true, false, false);
-        if (SceneUI::DrawSmartFloat("trans", "Trans", &transmission, 0.0f, 1.0f, "%.3f", trnKeyed,
-            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, true, false, false); }, 16)) {
-            pbsdf->setTransmission(transmission, pbsdf->ior);
-            changed = true;
-        }
-
-        // Spectral dispersion: per-path stochastic wavelength-channel refraction.
-        // Only meaningful with Transmission > 0 (prism / diamond colour fringing).
-        float dispersion = pbsdf->dispersion;
-        if (ImGui::SliderFloat("Dispersion##disp", &dispersion, 0.0f, 1.0f, "%.3f")) {
-            pbsdf->dispersion = dispersion;
-            changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Spectral dispersion (chromatic refraction): red/green/blue bend differently,\n"
-                              "producing rainbow fringing in glass (prism, diamond). Needs Transmission > 0.\n"
-                              "Adds colour noise that converges with more samples. 0 = off.");
-
-        // Thick-resin / glass-marble depth. Self-contained: when > 0 the material
-        // becomes a transmissive resin body (no need to raise Transmission too) and
-        // absorbs colour over the REAL distance light travels inside it — deep centre,
-        // clear thin edges. Albedo = the absorption tint. 0 = off (plain material).
-        // INTERIOR VOLUME — the material's embedded medium: depth absorption
-        // (resin/thick glass), nebula dust, dirt specks, bubbles and coloured
-        // glass shards. "Resin" survives as the opaque-base coat mode's name;
-        // the structure itself outgrew it.
-        float trans_density = pbsdf->getTransmissionDensity();
-        if (ImGui::SliderFloat("Interior Depth##transdens", &trans_density, 0.0f, 8.0f, "%.2f")) {
-            pbsdf->setTransmissionDensity(trans_density);
-            changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Interior Volume: depth absorption. With Transmission <= 0.5 this is a resin\n"
-                              "body over an OPAQUE base. With Transmission > 0.5 it becomes a TRANSLUCENT\n"
-                              "STONE (amber/jade): see-through, colour deepens with the real distance light\n"
-                              "travels inside (thick centre, clear edges) and the material KEEPS casting\n"
-                              "caustics. Interior Tint drives which wavelengths survive the depth.");
-        if (pbsdf->getTransmissionDensity() > 0.001f) {
-            ImGui::Indent();
-            float resinCol[3] = { (float)pbsdf->getResinColor().x, (float)pbsdf->getResinColor().y, (float)pbsdf->getResinColor().z };
-            if (ImGui::ColorEdit3("Interior Tint##resincol", resinCol)) {
-                pbsdf->setResinColor(Vec3(resinCol[0], resinCol[1], resinCol[2]));
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("The colour the interior builds with depth (separate from albedo).\n"
-                                  "White = clear (lensing only). Saturated = stronger, richer depth.");
-            float resin_roughness = pbsdf->getResinRoughness();
-            if (ImGui::SliderFloat("Coat Gloss##resinrough", &resin_roughness, 0.0f, 1.0f, "%.3f")) {
-                pbsdf->setResinRoughness(resin_roughness);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Roughness of the coat's reflection (the glossy top layer),\n"
-                                  "independent of the base material roughness underneath.\n"
-                                  "0 = mirror-sharp clear coat, 1 = matte/satin coat.");
-            ImGui::Unindent();
-        }
-
-        // Internal inclusions — a shared procedural march used by TWO modes:
-        //   - Resin (Resin Depth > 0): opaque base under the coat.
-        //   - Glass Marble (base Transmission high, no Resin Depth): real see-through
-        //     glass with volumetric dust/dirt inside (independent of the resin coat).
-        // Mode split mirrors the shader: Interior Depth + Trans > 0.5 =
-        // TRANSLUCENT STONE (amber/jade: see-through + real-distance depth
-        // absorption, stays a caustic caster); Trans <= 0.5 = resin coat over
-        // an opaque base; Trans > 0.5 without depth = clear glass marble.
-        bool stoneMode = pbsdf->getTransmissionDensity() > 0.001f && transmission > 0.5f;
-        bool resinMode = pbsdf->getTransmissionDensity() > 0.001f && transmission <= 0.5f;
-        bool glassMarbleMode = (transmission > 0.5f) && !stoneMode;
-        if (resinMode || glassMarbleMode || stoneMode) {
-            ImGui::Indent();
-            ImGui::Separator();
-            ImGui::TextDisabled(stoneMode ? "Interior Volume (Translucent Stone \xE2\x80\x94 amber/jade, casts caustics)"
-                              : glassMarbleMode ? "Interior Volume (Glass Marble \xE2\x80\x94 see-through)"
-                                                 : "Interior Volume (resin \xE2\x80\x94 opaque base)");
-            // Curated interior presets — one click sets the whole inclusion
-            // stack; every value remains hand-editable afterwards.
-            {
-                struct ResinPreset {
-                    const char* name;
-                    float dust, dirt, shard, shardHue, scale;
-                    float dirtCol[3];
-                    int   dustStyle, shardShape;
-                    float dustA[3], dustB[3];
-                };
-                static const ResinPreset kResinPresets[] = {
-                    { "Clear",           0.00f, 0.00f, 0.00f, -1.0f,  8.0f, {0.18f, 0.14f, 0.10f}, 0, 0, {1,1,1},             {1,1,1} },
-                    { "Dusty Amber",     0.45f, 0.25f, 0.00f, -1.0f,  6.0f, {0.30f, 0.20f, 0.10f}, 0, 0, {1,1,1},             {1,1,1} },
-                    { "Nebula",          0.70f, 0.10f, 0.15f,  0.65f, 3.5f, {0.10f, 0.08f, 0.14f}, 0, 0, {1,1,1},             {1,1,1} },
-                    { "Galaxy Marble",   0.35f, 0.20f, 0.55f, -1.0f,  5.0f, {0.05f, 0.05f, 0.08f}, 1, 0, {0.15f,0.10f,0.45f}, {0.95f,0.55f,0.25f} },
-                    { "Cat's Eye",       0.15f, 0.05f, 0.65f,  0.33f, 2.5f, {0.10f, 0.10f, 0.10f}, 0, 0, {1,1,1},             {1,1,1} },
-                    { "Crystal Geode",   0.20f, 0.10f, 0.80f,  0.72f, 3.0f, {0.10f, 0.08f, 0.14f}, 1, 1, {0.30f,0.20f,0.50f}, {0.85f,0.80f,0.95f} },
-                    { "Ink in Water",    0.85f, 0.00f, 0.00f, -1.0f,  2.2f, {0.10f, 0.10f, 0.10f}, 3, 0, {0.05f,0.15f,0.55f}, {0.92f,0.92f,0.98f} },
-                    { "Riverbed Epoxy",  0.30f, 0.55f, 0.10f,  0.55f, 10.0f,{0.16f, 0.12f, 0.08f}, 2, 0, {0.45f,0.38f,0.25f}, {0.20f,0.28f,0.18f} },
-                    { "Champagne",       0.10f, 0.35f, 0.00f, -1.0f, 14.0f, {0.85f, 0.80f, 0.65f}, 0, 0, {1,1,1},             {1,1,1} },
-                };
-                static int presetIdx = 0;
-                ImGui::SetNextItemWidth(180.0f);
-                if (ImGui::BeginCombo("Interior Preset##resinpreset", kResinPresets[presetIdx].name)) {
-                    for (int i = 0; i < IM_ARRAYSIZE(kResinPresets); ++i) {
-                        if (ImGui::Selectable(kResinPresets[i].name, i == presetIdx)) {
-                            presetIdx = i;
-                            const ResinPreset& p = kResinPresets[i];
-                            pbsdf->setResinInclusion(p.dust);
-                            pbsdf->setResinDirt(p.dirt);
-                            pbsdf->setResinShard(p.shard);
-                            pbsdf->setResinShardHue(p.shardHue);
-                            pbsdf->setResinInclusionScale(p.scale);
-                            pbsdf->setResinDirtColor(Vec3(p.dirtCol[0], p.dirtCol[1], p.dirtCol[2]));
-                            pbsdf->setDustStyle(p.dustStyle);
-                            pbsdf->setShardShape(p.shardShape);
-                            pbsdf->setDustColorA(Vec3(p.dustA[0], p.dustA[1], p.dustA[2]));
-                            pbsdf->setDustColorB(Vec3(p.dustB[0], p.dustB[1], p.dustB[2]));
-                            changed = true;
-                        }
-                    }
-                    ImGui::EndCombo();
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Curated interior looks (dust + specks + shards).\n"
-                                      "Applies once; all sliders stay editable.");
-            }
-            float resin_inclusion = pbsdf->getResinInclusion();
-            if (ImGui::SliderFloat("Dust##resindust", &resin_inclusion, 0.0f, 1.0f, "%.3f")) {
-                pbsdf->setResinInclusion(resin_inclusion);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Cloudy dust suspended inside — heterogeneous absorption that\n"
-                                  "thickens at depth (amorphous, varies in 3D). 0 = perfectly clear.");
-            if (pbsdf->getResinInclusion() > 0.001f) {
-                ImGui::Indent();
-                int dustStyle = pbsdf->getDustStyle();
-                const char* kDustStyles[] = { "Nebula (auto tint)", "Billow 2-Color",
-                                              "Wispy Streaks", "Paint Swirl" };
-                ImGui::SetNextItemWidth(180.0f);
-                if (ImGui::Combo("Dust Style##duststyle", &dustStyle, kDustStyles, 4)) {
-                    pbsdf->setDustStyle(dustStyle);
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Nebula: legacy auto tint derived from the interior colour.\n"
-                                      "Billow: puffy clouds mixing your two colours.\n"
-                                      "Wispy: stretched horizontal filaments.\n"
-                                      "Paint Swirl: domain-warped ink-in-water curls \xE2\x80\x94 the two\n"
-                                      "pigments fold into each other like stirred paint.");
-                if (pbsdf->getDustStyle() > 0) {
-                    float dA[3] = { (float)pbsdf->getDustColorA().x, (float)pbsdf->getDustColorA().y, (float)pbsdf->getDustColorA().z };
-                    if (ImGui::ColorEdit3("Dust Color A##dustcola", dA)) {
-                        pbsdf->setDustColorA(Vec3(dA[0], dA[1], dA[2]));
-                        changed = true;
-                    }
-                    float dB[3] = { (float)pbsdf->getDustColorB().x, (float)pbsdf->getDustColorB().y, (float)pbsdf->getDustColorB().z };
-                    if (ImGui::ColorEdit3("Dust Color B##dustcolb", dB)) {
-                        pbsdf->setDustColorB(Vec3(dB[0], dB[1], dB[2]));
-                        changed = true;
-                    }
-                }
-                ImGui::Unindent();
-            }
-            float resin_dirt = pbsdf->getResinDirt();
-            if (ImGui::SliderFloat("Dirt Specks##resindirt", &resin_dirt, 0.0f, 1.0f, "%.3f")) {
-                pbsdf->setResinDirt(resin_dirt);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Opaque specks (dirt/debris) embedded at random depths. A ray that\n"
-                                  "hits one terminates early — its colour shows through the medium crossed.");
-            if (pbsdf->getResinDirt() > 0.001f) {
-                ImGui::Indent();
-                float dirtCol[3] = { (float)pbsdf->getResinDirtColor().x, (float)pbsdf->getResinDirtColor().y, (float)pbsdf->getResinDirtColor().z };
-                if (ImGui::ColorEdit3("Dirt Color##resindirtcol", dirtCol)) {
-                    pbsdf->setResinDirtColor(Vec3(dirtCol[0], dirtCol[1], dirtCol[2]));
-                    changed = true;
-                }
-                ImGui::Unindent();
-            }
-            float resin_shard = pbsdf->getResinShard();
-            if (ImGui::SliderFloat("Glass Shards##resinshard", &resin_shard, 0.0f, 1.0f, "%.3f")) {
-                pbsdf->setResinShard(resin_shard);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Colored translucent glass chips suspended inside (faceted, gem-like).\n"
-                                  "They tint light passing through like stained glass — the classic\n"
-                                  "geometric colours of a toy marble.");
-            if (pbsdf->getResinShard() > 0.001f) {
-                ImGui::Indent();
-                int shardShape = pbsdf->getShardShape();
-                const char* kShardShapes[] = { "Round Chips", "Faceted Crystals" };
-                ImGui::SetNextItemWidth(180.0f);
-                if (ImGui::Combo("Shard Shape##shardshape", &shardShape, kShardShapes, 2)) {
-                    pbsdf->setShardShape(shardShape);
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Round Chips: soft translucent colour blobs.\n"
-                                      "Faceted Crystals: elongated shards with flat cut faces that\n"
-                                      "flash as the light or the object turns.");
-                float shardHue = pbsdf->getResinShardHue();
-                bool rainbow = shardHue < 0.0f;
-                if (ImGui::Checkbox("Rainbow##resinshardrainbow", &rainbow)) {
-                    pbsdf->setResinShardHue(rainbow ? -1.0f : 0.33f);
-                    changed = true;
-                }
-                if (!rainbow) {
-                    shardHue = pbsdf->getResinShardHue();
-                    if (ImGui::SliderFloat("Shard Hue##resinshardhue", &shardHue, 0.0f, 1.0f, "%.2f")) {
-                        pbsdf->setResinShardHue(shardHue);
-                        changed = true;
-                    }
-                    if (ImGui::IsItemHovered())
-                        ImGui::SetTooltip("Base hue of the shards (0 = red, 0.33 = green, 0.66 = blue);\n"
-                                          "each shard varies slightly around it. Rainbow = full palette.");
-                }
-                ImGui::Unindent();
-            }
-            if (pbsdf->getResinInclusion() > 0.001f || pbsdf->getResinDirt() > 0.001f ||
-                pbsdf->getResinShard() > 0.001f) {
-                float resin_inclusion_scale = pbsdf->getResinInclusionScale();
-                if (ImGui::SliderFloat("Inclusion Scale##resininclscale", &resin_inclusion_scale, 1.0f, 64.0f, "%.1f")) {
-                    pbsdf->setResinInclusionScale(resin_inclusion_scale);
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Feature size of the procedural dust/dirt field.\n"
-                                      "Low = large blobs/clouds, high = fine grain.");
-                int anchorIdx = pbsdf->getResinObjectSpace() ? 0 : 1;
-                const char* kAnchors[] = { "Object (moves with it)", "World (fixed in space)" };
-                ImGui::SetNextItemWidth(180.0f);
-                if (ImGui::Combo("Anchor##resinanchor", &anchorIdx, kAnchors, 2)) {
-                    pbsdf->setResinObjectSpace(anchorIdx == 0);
-                    changed = true;
-                }
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Object: the interior pattern travels/rotates with the mesh (usual).\n"
-                                      "World: the pattern stays fixed in space \xE2\x80\x94 a moving object appears\n"
-                                      "to pass THROUGH a frozen medium (deliberate effect).");
-            }
-            if (glassMarbleMode || stoneMode) {
-                // Full Volume (real-interior medium march) was retired — too camera-angle
-                // dependent and the interior dust/dirt never read as intended. Inclusion glass
-                // uses the front-shell approximation only. Keep the flag dormant/off.
-                pbsdf->setGlassMarbleVolume(false);
-                ImGui::TextDisabled(stoneMode
-                    ? "Translucent Stone: see-through + depth absorption; remains a caustic caster."
-                    : "Glass Marble: light passes through (see-through) + shell inclusions.");
-            }
-            ImGui::Unindent();
-        }
-
-        // Thin-shell BUBBLE (champagne / soda / soap-foam close-up). Renders the
-        // surface as a thin dielectric film (Fresnel rim + straight pass-through) —
-        // assign this material to foam BUBBLES (foam panel) for the production look.
-        bool is_bubble = pbsdf->getIsBubble();
-        if (ImGui::Checkbox("Bubble (thin shell)", &is_bubble)) {
-            pbsdf->setIsBubble(is_bubble);
-            changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Thin dielectric bubble film: bright Fresnel rim + transparent centre.\n"
-                              "For champagne/soda/soap close-ups. Assign to foam Bubbles in the foam panel.");
-        if (pbsdf->getIsBubble()) {
-            ImGui::Indent();
-            float bubble_ior = pbsdf->getBubbleIor();
-            if (ImGui::SliderFloat("Rim IOR##bubble", &bubble_ior, 1.0f, 2.0f, "%.3f")) {
-                pbsdf->setBubbleIor(bubble_ior);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Fresnel strength of the bubble rim. ~1.33 = air/water interface.");
-            float bubble_film = pbsdf->getBubbleFilm();
-            if (ImGui::SliderFloat("Thin-Film##bubble", &bubble_film, 0.0f, 30.0f, "%.1f")) {
-                pbsdf->setBubbleFilm(bubble_film);
-                changed = true;
-            }
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Soap-bubble iridescence: thin-film interference tints the rim by view angle.\n"
-                                  "0 = clean silver rim. Higher = rainbow shimmer (thicker film / more cycles).");
-            // Thin-shell is a TYPE branch, not a lobe: both shaders dispatch it
-            // and return before the resin coat and the transmission lobes are
-            // ever considered. Silently winning over settings the user can still
-            // see and drag reads as "resin does nothing" — say which one is
-            // actually driving the surface.
-            if (pbsdf->getTransmissionDensity() > 1e-4f || pbsdf->transmission > 0.01f) {
-                ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.3f, 1.0f),
-                    "Thin shell OVERRIDES resin + transmission.");
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("A bubble is shaded as a thin film and returns before the resin\n"
-                                      "coat and the glass lobe run — Interior Depth and Trans have no\n"
-                                      "effect while this is on. Uncheck it to author a resin coat.");
-            }
-            ImGui::Unindent();
-        }
-
-        float specular = pbsdf->specularProperty.intensity;
-        bool specKeyed = isMatKeyed(mat_id, false, false, false, false, false, false, false, true);
-        if (SceneUI::DrawSmartFloat("spec", "Spec", &specular, 0.0f, 1.0f, "%.3f", specKeyed,
-            [&](){ insertMatPropKey(pbsdf, mat_id, false, false, false, false, false, false, false, true); }, 16)) {
-            pbsdf->specularProperty.intensity = specular;
-            changed = true;
-        }
-
-        MaterialCoverageUI::draw(mat_id, *pbsdf);
-        float opacity = pbsdf->opacityProperty.alpha;
-        bool opKeyed = isMatKeyed(mat_id, false, true, false, false, false, false, false, false);
-        if (SceneUI::DrawSmartFloat("opac", "Alpha", &opacity, 0.0f, 1.0f, "%.3f", opKeyed,
-            [&](){ insertMatPropKey(pbsdf, mat_id, false, true, false, false, false, false, false, false); }, 16)) {
-            pbsdf->opacityProperty.alpha = opacity;
-            changed = true;
-        }
-
-        Vec3 emission = pbsdf->emissionProperty.color;
-        float emission_arr[3] = { (float)emission.x, (float)emission.y, (float)emission.z };
-        bool emsKeyed = isMatKeyed(mat_id, false, false, false, false, true, false, false, false);
-        if (KeyframeButton("##MEms", emsKeyed)) { insertMatPropKey(pbsdf, mat_id, false, false, false, false, true, false, false, false); }
-        ImGui::SameLine();
-        if (ImGui::ColorEdit3("Emission", emission_arr)) {
-            pbsdf->emissionProperty.color = Vec3(emission_arr[0], emission_arr[1], emission_arr[2]);
-            changed = true;
-        }
-
-        float emissionStr = pbsdf->emissionProperty.intensity;
-        if (SceneUI::DrawSmartFloat("mems", "EmStr", &emissionStr, 0.0f, 1000.0f, "%.1f", false, nullptr, 12)) {
-            pbsdf->emissionProperty.intensity = emissionStr;
-            changed = true;
-        }
-        UIWidgets::EndSection();
-    }
-    if (UIWidgets::BeginSection("Subsurface Scattering", ImVec4(1.0f, 0.7f, 0.4f, 1.0f))) {
-        float sss_amount = pbsdf->getSubsurface();
-        if (SceneUI::DrawSmartFloat("sss", "Subsurf", &sss_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->setSubsurface(sss_amount);
-            changed = true;
-        }
-        UIWidgets::HelpMarker("Amount of subsurface scattering (0=off, 1=full)");
-        
-        Vec3 sss_color = pbsdf->getSubsurfaceColor();
-        float sss_color_arr[3] = {(float)sss_color.x, (float)sss_color.y, (float)sss_color.z};
-        if (ImGui::ColorEdit3("SSS Color", sss_color_arr)) {
-            pbsdf->setSubsurfaceColor(Vec3(sss_color_arr[0], sss_color_arr[1], sss_color_arr[2]));
-            changed = true;
-        }
-        
-        Vec3 sss_radius = pbsdf->getSubsurfaceRadius();
-        float sss_radius_arr[3] = {(float)sss_radius.x, (float)sss_radius.y, (float)sss_radius.z};
-        if (ImGui::DragFloat3("Radius (RGB)", sss_radius_arr, 0.01f, 0.001f, 10.0f, "%.3f")) {
-            pbsdf->setSubsurfaceRadius(Vec3(sss_radius_arr[0], sss_radius_arr[1], sss_radius_arr[2]));
-            changed = true;
-        }
-        
-        float sss_scale = pbsdf->getSubsurfaceScale();
-        if (SceneUI::DrawSmartFloat("sscl", "Scale", &sss_scale, 0.001f, 2.0f, "%.4f", false, nullptr, 12)) {
-            pbsdf->setSubsurfaceScale(sss_scale);
-            changed = true;
-        }
-        
-        float sss_aniso = pbsdf->getSubsurfaceAnisotropy();
-        if (SceneUI::DrawSmartFloat("ssani", "Aniso", &sss_aniso, -0.9f, 0.9f, "%.2f", false, nullptr, 12)) {
-            pbsdf->setSubsurfaceAnisotropy(sss_aniso);
-            changed = true;
-        }
-        
-        // SSS Index of Refraction (controls internal refraction/exit behavior)
-        float sss_ior = pbsdf->getSubsurfaceIOR();
-        if (SceneUI::DrawSmartFloat("ssior", "SSS IOR", &sss_ior, 1.0f, 3.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->setSubsurfaceIOR(sss_ior);
-            changed = true;
-        }
-
-        // Method + walk cap. Both reach every backend (Vulkan RT via the
-        // material ext record, OptiX via its legacy fields).
-        int sss_method = pbsdf->getSssMethod();
-        const char* sss_methods[] = { "Random Walk", "Fast" };
-        if (ImGui::Combo("SSS Method", &sss_method, sss_methods, 2)) {
-            pbsdf->setSssMethod(sss_method);
-            changed = true;
-        }
-        UIWidgets::HelpMarker("Random Walk: geometry-aware, light bleeds through thin parts. "
-                              "Fast: same colour, no bleed, near-zero cost (use on heavy scenes / TDR).");
-        ImGui::BeginDisabled(sss_method != 0);
-        int sss_steps = pbsdf->getSssWalkMaxSteps();
-        if (ImGui::SliderInt("Walk Max Steps", &sss_steps, 8, 256)) {
-            pbsdf->setSssWalkMaxSteps(sss_steps);
-            changed = true;
-        }
-        ImGui::EndDisabled();
-        UIWidgets::HelpMarker("Hard cap on scatter events per walk. Too low DARKENS the result "
-                              "(cut walks lose their energy); 64 is enough for most materials.");
-        
-        ImGui::Separator();
-        ImGui::Text("Presets:");
-        // Calibrated for the random-walk remap (2026-09-24): SSS Color is the
-        // colour the surface SETTLES to (multi-scatter albedo), no longer a
-        // per-event albedo that compounds darker with every scatter. Radius is
-        // the per-channel mean free path in scene units, times Scale.
-        if (ImGui::SmallButton("Skin")) {
-            pbsdf->setSubsurface(1.0f);
-            pbsdf->setSubsurfaceColor(Vec3(0.80f, 0.52f, 0.42f));
-            pbsdf->setSubsurfaceRadius(Vec3(1.0f, 0.2f, 0.1f));
-            pbsdf->setSubsurfaceScale(0.05f);
-            pbsdf->setSubsurfaceAnisotropy(0.0f);
-            pbsdf->setSubsurfaceIOR(1.4f);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Wax")) {
-            pbsdf->setSubsurface(1.0f);
-            pbsdf->setSubsurfaceColor(Vec3(0.85f, 0.72f, 0.45f));
-            pbsdf->setSubsurfaceRadius(Vec3(1.0f, 0.8f, 0.5f));
-            pbsdf->setSubsurfaceScale(0.03f);
-            pbsdf->setSubsurfaceAnisotropy(0.0f);
-            pbsdf->setSubsurfaceIOR(1.45f);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Milk")) {
-            pbsdf->setSubsurface(1.0f);
-            pbsdf->setSubsurfaceColor(Vec3(0.92f, 0.90f, 0.85f));
-            pbsdf->setSubsurfaceRadius(Vec3(1.0f, 1.0f, 0.9f));
-            pbsdf->setSubsurfaceScale(0.1f);
-            pbsdf->setSubsurfaceAnisotropy(0.3f);
-            pbsdf->setSubsurfaceIOR(1.35f);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Jade")) {
-            pbsdf->setSubsurface(1.0f);
-            pbsdf->setSubsurfaceColor(Vec3(0.35f, 0.65f, 0.40f));
-            pbsdf->setSubsurfaceRadius(Vec3(0.3f, 1.0f, 0.4f));
-            pbsdf->setSubsurfaceScale(0.02f);
-            pbsdf->setSubsurfaceAnisotropy(0.3f);
-            pbsdf->setSubsurfaceIOR(1.6f);
-            changed = true;
-        }
-        
-        UIWidgets::EndSection();
-    }
-
-    if (UIWidgets::BeginSection("Clear Coat", ImVec4(0.8f, 0.2f, 0.8f, 1.0f))) {
-        float cc_amount = pbsdf->getClearcoat();
-        if (SceneUI::DrawSmartFloat("cc", "ClearCt", &cc_amount, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->setClearcoat(cc_amount, pbsdf->getClearcoatRoughness());
-            changed = true;
-        }
-        
-        float cc_roughness = pbsdf->getClearcoatRoughness();
-        if (SceneUI::DrawSmartFloat("ccr", "CCRough", &cc_roughness, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->setClearcoat(pbsdf->getClearcoat(), cc_roughness);
-            changed = true;
-        }
-
-        // Iridescent clearcoat (thin-film tint on the clearcoat lobe): oil-slick, beetle
-        // shell, candy paint. 0 = plain white clearcoat. Thickness drives the hue cycle.
-        float cc_irid = pbsdf->getClearcoatIridescence();
-        if (SceneUI::DrawSmartFloat("cci", "Irides", &cc_irid, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->setClearcoatIridescence(cc_irid);
-            changed = true;
-        }
-        if (pbsdf->getClearcoatIridescence() > 0.001f) {
-            float cc_thick = pbsdf->getClearcoatFilmThickness();
-            if (SceneUI::DrawSmartFloat("ccft", "FilmThk", &cc_thick, 0.1f, 2.0f, "%.3f", false, nullptr, 12)) {
-                pbsdf->setClearcoatFilmThickness(cc_thick);
-                changed = true;
-            }
-        }
-
-        ImGui::Separator();
-        if (ImGui::SmallButton("Car Paint")) {
-            pbsdf->setClearcoat(1.0f, 0.03f);
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Oil Slick")) {
-            pbsdf->setClearcoat(1.0f, 0.04f);
-            pbsdf->setClearcoatIridescence(0.85f);
-            pbsdf->setClearcoatFilmThickness(0.55f);
-            changed = true;
-        }
-        UIWidgets::EndSection();
-    }
-
-    if (UIWidgets::BeginSection("Translucent", ImVec4(0.5f, 0.9f, 0.9f, 1.0f))) {
-        float trans = pbsdf->translucent;
-        if (SceneUI::DrawSmartFloat("trns", "Transl", &trans, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->translucent = trans;
-            changed = true;
-        }
-        UIWidgets::EndSection();
-    }
-
-    // Procedural Detail — world-space color/dirt/roughness + optional UV tile-break
-    // Shared by all three backends (Vulkan/GLSL, OptiX/CUDA, CPU).
-    if (UIWidgets::BeginSection("Procedural Detail", ImVec4(0.65f, 0.55f, 0.40f, 1.0f))) {
-        float det_str = pbsdf->micro_detail_strength;
-        if (SceneUI::DrawSmartFloat("pd_str", "Strength", &det_str, 0.0f, 1.0f, "%.3f", false, nullptr, 12)) {
-            pbsdf->micro_detail_strength = det_str;
-            changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("World-space color variation + dirt + roughness.\nDoes NOT warp UV — texture stays intact.\n0 = off, 0.2–0.5 = subtle, 1.0 = strong");
-
-        float det_sc = pbsdf->micro_detail_scale;
-        if (SceneUI::DrawSmartFloat("pd_sc", "Scale", &det_sc, 0.1f, 10.0f, "%.2f", false, nullptr, 12)) {
-            pbsdf->micro_detail_scale = det_sc;
-            changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("World-space frequency\n1–2 = large patches\n4–8 = fine grain");
-
-        ImGui::Separator();
-
-        float tb_str = pbsdf->tile_break_strength;
-        if (SceneUI::DrawSmartFloat("pd_tb", "Tile Break", &tb_str, 0.0f, 0.35f, "%.3f", false, nullptr, 12)) {
-            pbsdf->tile_break_strength = tb_str;
-            changed = true;
-        }
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("UV warp to break repeating tiling seams.\nLeave at 0 for unique/non-tiling albedo maps.\n0.05–0.15 = subtle, 0.25–0.35 = strong");
-
-        ImGui::Separator();
-        if (ImGui::SmallButton("Worn Stone")) {
-            pbsdf->micro_detail_strength = 0.45f;
-            pbsdf->micro_detail_scale    = 3.5f;
-            pbsdf->tile_break_strength   = 0.0f;
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Dusty")) {
-            pbsdf->micro_detail_strength = 0.30f;
-            pbsdf->micro_detail_scale    = 2.0f;
-            pbsdf->tile_break_strength   = 0.0f;
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Tiled Tex")) {
-            pbsdf->micro_detail_strength = 0.20f;
-            pbsdf->micro_detail_scale    = 2.5f;
-            pbsdf->tile_break_strength   = 0.15f;
-            changed = true;
-        }
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Off")) {
-            pbsdf->micro_detail_strength = 0.0f;
-            pbsdf->tile_break_strength   = 0.0f;
-            changed = true;
-        }
-        UIWidgets::EndSection();
-    }
+    changed |= MaterialInspectorUI::draw(pbsdf, mat_id, isMatKeyed, insertMatPropKey);
 
     if (UIWidgets::BeginSection("Texture Maps", ImVec4(0.4f, 1.0f, 0.6f, 1.0f))) {
         static std::shared_ptr<Texture> texture_clipboard = nullptr;
 
-        auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref, TextureType type, Paint::PaintChannel paint_channel) {
+        auto DrawTextureSlot = [&](const char* label, std::shared_ptr<Texture>& tex_ref,
+                                   TextureType type, Paint::PaintChannel paint_channel) {
             ImGui::PushID(label);
-            
-            // 1. Label
-            ImGui::AlignTextToFramePadding();
-            ImGui::Text("%s", label);
-            
-            // 2. Setup Right Alignment for Buttons
-            float buttonsWidth = 85.0f; 
-            float availWidth = ImGui::GetContentRegionAvail().x;
-            float rightEdge = ImGui::GetWindowContentRegionMax().x;
-
-            // 3. Texture Info / Short Name
-            ImGui::SameLine();
-            
-            // Move cursor to allow space for label but don't overlap buttons
-            // Calculate max width for name
-            float cursorX = ImGui::GetCursorPosX();
-            float nameMaxWidth = rightEdge - cursorX - buttonsWidth - 10.0f; 
-            
+            bool paint = false;
+            std::string source;
+            std::string cache;
             if (tex_ref && tex_ref->is_loaded()) {
-                std::string name = tex_ref->name;
-                std::string shortName = std::filesystem::path(name).filename().string();
-                const auto [is_paint_override, source_name] = getPaintOverrideInfo(tex_ref, paint_channel);
-                
-                // Truncate if long 
-                if (shortName.length() > 20) {
-                     shortName = shortName.substr(0, 8) + "..." + shortName.substr(shortName.length()-5);
-                }
-
-                ImGui::TextColored(ImVec4(0.5f, 0.9f, 0.5f, 1.0f), "%s", shortName.c_str());
-                if (ImGui::IsItemHovered()) {
-                    if (is_paint_override && !source_name.empty()) {
-                        ImGui::SetTooltip("%s\n(%dx%d)\nPaint Override\nSeeded from: %s",
-                            name.c_str(), tex_ref->width, tex_ref->height, source_name.c_str());
-                    } else if (is_paint_override) {
-                        ImGui::SetTooltip("%s\n(%dx%d)\nPaint Override",
-                            name.c_str(), tex_ref->width, tex_ref->height);
-                    } else {
-                        ImGui::SetTooltip("%s\n(%dx%d)", name.c_str(), tex_ref->width, tex_ref->height);
-                    }
-                }
-
-                if (is_paint_override) {
-                    ImGui::SameLine(0, 6);
-                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.30f, 1.0f), "[Paint]");
-                    if (ImGui::IsItemHovered()) {
-                        if (!source_name.empty()) {
-                            ImGui::SetTooltip("Paint override active\nSeeded from: %s", source_name.c_str());
-                        } else {
-                            ImGui::SetTooltip("Paint override active");
-                        }
-                    }
-                }
-
+                const auto info = getPaintOverrideInfo(tex_ref, paint_channel);
+                paint = info.first;
+                source = info.second;
                 if (type != TextureType::Unknown && !tex_ref->name.empty()) {
-                    const std::string cacheKey = tex_ref->name + "|" + std::to_string(static_cast<int>(type));
-                    auto it = s_cacheTagMap.find(cacheKey);
+                    const std::string key = tex_ref->name + "|"
+                        + std::to_string(static_cast<int>(type));
+                    auto it = s_cacheTagMap.find(key);
                     if (it == s_cacheTagMap.end()) {
-                        it = s_cacheTagMap.emplace(cacheKey, queryManagedCacheTag(*tex_ref, type)).first;
+                        it = s_cacheTagMap.emplace(key, queryManagedCacheTag(*tex_ref, type)).first;
                     }
-                    if (!it->second.empty()) {
-                        ImGui::SameLine(0, 6);
-                        ImGui::TextColored(ImVec4(0.3f, 0.7f, 1.0f, 1.0f), "[%s]", it->second.c_str());
-                        if (ImGui::IsItemHovered())
-                            ImGui::SetTooltip("GPU cache: %s (managed)\nReload project to activate.", it->second.c_str());
-                    }
+                    cache = it->second;
                 }
-
-                // 4. Buttons (Right Aligned)
-                ImGui::SameLine();
-                if (ImGui::GetCursorPosX() < (rightEdge - buttonsWidth)) {
-                    ImGui::SetCursorPosX(rightEdge - buttonsWidth);
-                }
-                
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-                
-                // X Button
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.5f, 0.2f, 0.2f, 1.0f));
-                if (ImGui::SmallButton("X")) {
-                    if (tex_ref) texture_graveyard.push_back(tex_ref); // Safety
-                    tex_ref = nullptr;
-                    texture_changed = true;
-                }
-                ImGui::PopStyleColor();
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Remove");
-
-                ImGui::SameLine(0, 4);
-                // C Button
-                if (ImGui::SmallButton("C")) texture_clipboard = tex_ref;
-                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Copy");
-            
-                ImGui::PopStyleVar();
             }
-            else {
-                ImGui::TextDisabled("-");
-                
-                // 4. Buttons (Right Aligned even if empty)
-                ImGui::SameLine();
-                if (ImGui::GetCursorPosX() < (rightEdge - buttonsWidth)) {
-                    ImGui::SetCursorPosX(rightEdge - buttonsWidth);
-                }
-
-                ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-                
-                // P Button
-                if (texture_clipboard) {
-                    if (ImGui::SmallButton("P")) {
-                        tex_ref = texture_clipboard;
-                        texture_changed = true;
-                    }
-                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Paste");
-                    ImGui::SameLine(0, 4);
-                }
-                
-                ImGui::PopStyleVar();
+            int channel = -1;
+            if (paint_channel == Paint::PaintChannel::Roughness) {
+                const int selected = pbsdf->roughness_tex_channel;
+                channel = selected >= 1 && selected <= 3 ? selected - 1 : 1;
+            } else if (paint_channel == Paint::PaintChannel::Metallic) {
+                const int selected = pbsdf->metallic_tex_channel;
+                channel = selected >= 1 && selected <= 3 ? selected - 1 : 2;
             }
-
-            // Load Button (Always at end)
-            ImGui::SameLine(0, 4);
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-            if (ImGui::SmallButton("+")) {
+            // Single-channel source images have equal R/G/B components.
+            const auto action = MaterialTextureSlotUI::draw(
+                label, tex_ref, static_cast<bool>(texture_clipboard), paint, source, cache,
+                channel, paint_channel == Paint::PaintChannel::Opacity);
+            using Action = MaterialTextureSlotUI::Action;
+            if (action == Action::Remove) {
+                if (tex_ref) {
+                    texture_graveyard.push_back(tex_ref);
+                }
+                tex_ref.reset();
+                texture_changed = true;
+            } else if (action == Action::Copy) {
+                texture_clipboard = tex_ref;
+            } else if (action == Action::Paste && texture_clipboard) {
+                if (tex_ref) {
+                    texture_graveyard.push_back(tex_ref);
+                }
+                tex_ref = texture_clipboard;
+                texture_changed = true;
+            } else if (action == Action::Load) {
                 std::string initialDir = "";
                 std::string defaultFile = "";
 
@@ -1831,59 +1176,24 @@ void SceneUI::drawPrincipledBSDFEditor(PrincipledBSDF* pbsdf, uint16_t mat_id, U
                 else if (texture_clipboard && !texture_clipboard->name.empty()) {
                     std::string fullPath = texture_clipboard->name;
                     size_t lastSlash = fullPath.find_last_of("/\\");
-                    if (lastSlash != std::string::npos) initialDir = fullPath.substr(0, lastSlash);
+                    if (lastSlash != std::string::npos) {
+                        initialDir = fullPath.substr(0, lastSlash);
+                    }
                 }
 
                 auto new_tex = LoadTextureFromDialog(type, initialDir, defaultFile);
                 if (new_tex) {
-                    if (tex_ref) texture_graveyard.push_back(tex_ref); // Safety
+                    if (tex_ref) {
+                        texture_graveyard.push_back(tex_ref);
+                    }
                     tex_ref = new_tex;
                     texture_changed = true;
                 }
             }
-            ImGui::PopStyleVar();
-            
             ImGui::PopID();
         };
 
-        DrawTextureSlot("Albedo", pbsdf->albedoProperty.texture, TextureType::Albedo, Paint::PaintChannel::BaseColor);
-        DrawTextureSlot("Normal", pbsdf->normalProperty.texture, TextureType::Normal, Paint::PaintChannel::Normal);
-        float normal_strength = pbsdf->get_normal_strength();
-        if (SceneUI::DrawSmartFloat("nrmstr", "Normal Strength", &normal_strength, 0.0f, 8.0f, "%.2f", false, nullptr, 12)) {
-            pbsdf->set_normal_strength(normal_strength);
-            pbsdf->normalProperty.intensity = normal_strength;
-            changed = true;
-        }
-        // Channel selector for packed roughness/metallic maps. Auto = ORM
-        // convention (roughness .g / metallic .b, BC4/R8 caches .r). Non-ORM
-        // packings (RMA/MRA, metal-in-R exports) need the explicit choice —
-        // under Auto they read the wrong channel and the surface shades as
-        // full metal (killing diffuse response and caustics on it).
-        auto DrawChannelCombo = [&](const char* id, int& channel) {
-            const char* items[] = { "Auto (ORM)", "R", "G", "B" };
-            int cur = (channel >= 0 && channel <= 3) ? channel : 0;
-            // Own line under the slot — appended to the slot row it lands at the
-            // far right edge, out of comfortable reach.
-            ImGui::Indent(24.0f);
-            ImGui::SetNextItemWidth(130.0f);
-            if (ImGui::Combo(id, &cur, items, 4)) {
-                channel = cur;
-                changed = true;
-                texture_changed = true; // flags live in the GPU material — full resync
-            }
-            ImGui::SameLine();
-            ImGui::TextDisabled("Channel");
-            ImGui::Unindent(24.0f);
-        };
-        DrawTextureSlot("Roughness", pbsdf->roughnessProperty.texture, TextureType::Roughness, Paint::PaintChannel::Roughness);
-        if (pbsdf->roughnessProperty.texture) DrawChannelCombo("##roughch", pbsdf->roughness_tex_channel);
-        DrawTextureSlot("Metallic", pbsdf->metallicProperty.texture, TextureType::Metallic, Paint::PaintChannel::Metallic);
-        if (pbsdf->metallicProperty.texture) DrawChannelCombo("##metalch", pbsdf->metallic_tex_channel);
-        DrawTextureSlot("Specular", pbsdf->specularProperty.texture, TextureType::Specular, Paint::PaintChannel::Mask);
-        DrawTextureSlot("Emission", pbsdf->emissionProperty.texture, TextureType::Emission, Paint::PaintChannel::Emission);
-        DrawTextureSlot("Transmission", pbsdf->transmissionProperty.texture, TextureType::Transmission, Paint::PaintChannel::Transmission);
-        DrawTextureSlot("Height", pbsdf->heightProperty.texture, TextureType::Unknown, Paint::PaintChannel::Mask);
-        DrawTextureSlot("Opacity", pbsdf->opacityProperty.texture, TextureType::Opacity, Paint::PaintChannel::Opacity);
+        MaterialTextureGridUI::draw(*pbsdf, DrawTextureSlot, changed, texture_changed);
 
         UIWidgets::EndSection();
     }

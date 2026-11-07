@@ -2445,6 +2445,8 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
                         RT_MASK_DIRECT_SHADOW, 0, 1, 1, flashOrigin, SHADOW_TMIN, flashDir,
                         max(flashDist - 1.0, SHADOW_TMIN * 2.0), 1);
             vec3 flashVis = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+            flashVis *= computeVolumeShadowTransmittance(
+                flashOrigin, flashDir, max(flashDist - 1.0, SHADOW_TMIN * 2.0), -2);
             if (any(greaterThan(flashVis, vec3(1e-4)))) {
                 vec3 V = normalize(-rayDir);
                 // flashE already carries cos(N, wi); the BRDF here excludes it.

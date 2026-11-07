@@ -1,4 +1,5 @@
 ﻿#include "Backend/VulkanViewportBackend.h"
+#include "Viewport/RasterBackground.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "Viewport/RasterInstanceUpload.h"
 #include "Viewport/RasterViewportFrameRing.h"
@@ -3980,12 +3981,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         (!m_rasterInstances.empty() || m_device->m_volumeCount > 0u);
 
     VkClearValue clearValues[5]{};
-    const bool hasWorldBg = (m_cachedWorld.color.x != 0.0f || m_cachedWorld.color.y != 0.0f || m_cachedWorld.color.z != 0.0f);
-    clearValues[0].color = { {
-        hasWorldBg ? m_cachedWorld.color.x : 0.13f,
-        hasWorldBg ? m_cachedWorld.color.y : 0.14f,
-        hasWorldBg ? m_cachedWorld.color.z : 0.16f,
-        1.0f } };
+    clearValues[0].color = rasterBackgroundColor(
+        m_cachedWorld.mode == WORLD_MODE_COLOR,
+        m_cachedWorld.color.x, m_cachedWorld.color.y, m_cachedWorld.color.z);
     clearValues[1].depthStencil = { 1.0f, 0 };
     // ★★ G-buffer temizligi SIFIR roughness degil, SIFIR AGIRLIK demek: .w
     //   (split-sum agirligi) 0 ise o piksel yansima kapisindan gecmez. Kapiyi

@@ -7,7 +7,6 @@ void appendAsset(UIContext& ctx, const AssetRecord& asset, float x, float y, flo
 bool editSelection(UIContext& ctx, bool duplicate);
 void drawAssetActions(UIContext& ctx, const AssetRecord& asset);
 void drawHierarchy(UIContext& ctx);
-void drawProperties(UIContext& ctx);
 void drawViewport(UIContext& ctx, bool orthographic, bool showGizmos, bool& hit);
 void updateListener(UIContext& ctx);
 }

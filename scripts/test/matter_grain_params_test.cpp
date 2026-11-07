@@ -13,6 +13,8 @@ int main() {
     const auto initial = matterGrainParamsToJson(p);
     std::string error;
     for (const auto& patch : {nlohmann::json{{"enabled", 1}},
+                             nlohmann::json{{"compact_sleep_work", 1}},
+                             nlohmann::json{{"contact_probe_enabled", 1}},
                              nlohmann::json{{"radius_m", 0}},
                              nlohmann::json{{"max_substeps", 1.5}},
                              nlohmann::json{{"max_substeps", 4294967296ull}},
@@ -144,6 +146,55 @@ int main() {
     }
     assert(!matterGrainPileProfile({Vec3(0.0f)}, .02f).at("measured").get<bool>());
     const auto diagnostics = matterGrainDiagnostics(particles, p);
+    assert(!diagnostics.at("contact_probe").at("measured").get<bool>());
+    {
+        auto probe_params = p;
+        assert(probe_params.compact_sleep_work);
+        assert(patchMatterGrainParams({{"compact_sleep_work", false}}, probe_params, error));
+        assert(!probe_params.compact_sleep_work);
+        assert(probe_params.sleep == p.sleep);
+        assert(probe_params.sleep_speed_m_s == p.sleep_speed_m_s);
+        assert(patchMatterGrainParams({{"contact_probe_enabled", true}}, probe_params, error));
+        assert(probe_params.contact_probe_enabled);
+        assert(matterGrainParamsFromJson(matterGrainParamsToJson(probe_params))
+            .contact_probe_enabled);
+        MatterGrainStepReport held;
+        // A failed frame has no published runtime, but must keep its evidence.
+        held.contact_probe.measured = true;
+        held.contact_probe.overflow_bits = 4;
+        held.contact_probe.first_bucket_overflow_substep = 3;
+        held.contact_probe.overflow_bucket_population = 35;
+        held.contact_probe.overflow_cell_population = 8;
+        held.contact_probe.sleep_probe_grains = 100;
+        held.contact_probe.sleep_counters[0] = 30;
+        held.contact_probe.sleep_counters[1] = 170;
+        held.contact_probe.sleep_counters[14] = 100;
+        const auto failed = matterGrainDiagnostics(particles, probe_params, &held);
+        assert(failed.at("runtime").is_null());
+        const auto& probe = failed.at("contact_probe");
+        assert(probe.at("measured").get<bool>());
+        assert(!probe.at("output_finite").get<bool>());
+        assert(probe.at("contact_metrics_measured").get<bool>());
+        assert(probe.at("first_bucket_overflow_substep") == 3);
+        assert(probe.at("overflow_bucket_population") == 35);
+        assert(probe.at("overflow_cell_population") == 8);
+        const auto& sleep = probe.at("sleep");
+        assert(sleep.at("counts_valid").get<bool>());
+        assert(sleep.at("final_snapshot_complete").get<bool>());
+        assert(sleep.at("frame_contact_skips") == 30);
+        assert(sleep.at("frame_contact_solves") == 170);
+        held.contact_probe.sleep_counter_overflow = true;
+        assert(!matterGrainDiagnostics(particles, probe_params, &held)
+            .at("contact_probe").at("sleep").at("counts_valid").get<bool>());
+        held.contact_probe.sleep_counter_overflow = false;
+        held.contact_probe.overflow_bits = 32u | 128u;
+        const auto stages = matterGrainDiagnostics(particles, probe_params, &held)
+            .at("contact_probe").at("failure_stages");
+        assert(stages == nlohmann::json::array({"collider_closest_point", "contact_force"}));
+        held.contact_probe.first_bucket_overflow_substep = 0;
+        assert(!matterGrainDiagnostics(particles, probe_params, &held)
+            .at("contact_probe").at("contact_metrics_measured").get<bool>());
+    }
     assert(std::abs(diagnostics.at("max_spin_rad_s").get<double>() - 3.0) < 1e-9);
     assert(std::abs(diagnostics.at("spin_energy_j").get<double>() - .009) < 1e-8);
 }

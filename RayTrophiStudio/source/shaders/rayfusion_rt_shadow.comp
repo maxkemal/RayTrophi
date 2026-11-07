@@ -11,7 +11,7 @@ layout(set=0,binding=1) uniform sampler2D rfDepth;
 layout(set=0,binding=2,std430) buffer RtMask {
     uvec4 metadata;      // magic, w, h, birincil isik
     uvec4 coverage;      // kapsanan isik kumesi -- yalnizca tuketici okur
-    vec2 pixels[];       // std430: 32. bayttan baslar
+    uvec2 pixels[];       // std430: 32. bayttan baslar
 };
 // RayFusion::HitInstance ile birebir: 3 x 16 = 48 bayt.
 struct HitInstance {
@@ -26,6 +26,10 @@ layout(set=0,binding=3,std430) readonly buffer Hits { HitInstance hits[]; };
 layout(set=0,binding=4,std430) readonly buffer Materials { Material materials[]; };
 layout(set=0,binding=5) uniform sampler2D textures[];
 #include "surface_sdf_shadow_query.glsl"
+struct ShadowLight { vec4 positionType; vec4 toLight; };
+layout(set = 0, binding = 7, std430) readonly buffer ShadowLights {
+    ShadowLight shadowLights[];
+};
 layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Ids { uint ids[]; };
 layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer UVs { float uv[]; };
 layout(buffer_reference,std430,buffer_reference_align=4) readonly buffer Idx { uint idx[]; };
@@ -70,12 +74,14 @@ bool occludes(uint instance, uint triangle, vec2 bary) {
     return materialCoverageOpacity(opacity*(alpha?texel.a:texel.r),(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>=0.1;
 }
 void main(){
+    if (pc.volumeMeta.y != 0x52545349u) return;
     ivec2 pix=ivec2(gl_GlobalInvocationID.xy);
     uint width=uint(pc.params.z),height=uint(pc.params.w);
     if(pix.x>=int(width)||pix.y>=int(height))return;
     uint offset=uint(pix.y)*width+uint(pix.x);
     float depth=texelFetch(rfDepth,pix,0).r;
-    pixels[offset]=vec2(1.0,depth);
+    if (offset == 0u) metadata.x = 0x52545349u;
+    pixels[offset]=uvec2(0u,floatBitsToUint(depth));
     if(depth>=1.0)return;
     vec2 ndc=(vec2(pix)+0.5)/vec2(width,height)*2.0-1.0;
     vec4 world=pc.invViewProj*vec4(ndc,depth,1.0);
@@ -101,23 +107,39 @@ void main(){
     // Normali burada bilmiyoruz; 3x, sin>=1/3'e (~19 derece) kadar guvenli. Daha
     // buyuk bir katsayi golgeyi nesneden koparir (peter-panning).
     float tmin=max(pc.params.x,slack*3.0);
-    rayQueryEXT query;
-    // Force non-opaque even for BLAS/instances marked opaque: inspect cutouts.
-    rayQueryInitializeEXT(query,rfScene,
-        gl_RayFlagsTerminateOnFirstHitEXT|gl_RayFlagsNoOpaqueEXT,
-        0xFFu,origin,tmin,normalize(pc.sunDirection.xyz),pc.params.y);
-    while(rayQueryProceedEXT(query)){
-        if(rayQueryGetIntersectionTypeEXT(query,false)==gl_RayQueryCandidateIntersectionTriangleEXT &&
-           occludes(rayQueryGetIntersectionInstanceCustomIndexEXT(query,false),
-                    rayQueryGetIntersectionPrimitiveIndexEXT(query,false),
-                    rayQueryGetIntersectionBarycentricsEXT(query,false)))rayQueryConfirmIntersectionEXT(query);
+    uint blockedLights = 0u;
+    for (uint light = 0u; light < 32u; ++light) {
+        uint bit = 1u << light;
+        if ((coverage.x & bit) == 0u) continue;
+        ShadowLight source = shadowLights[light];
+        bool directional = source.positionType.w > 0.5;
+        vec3 delta = directional ? source.toLight.xyz : source.positionType.xyz - origin;
+        float distance = length(delta);
+        if (distance <= 1e-6) continue;
+        vec3 direction = delta / distance;
+        float rayMax = directional ? pc.params.y : distance - tmin;
+        if (rayMax <= tmin) continue;
+        rayQueryEXT query;
+        // Force non-opaque even for opaque BLAS/instances: inspect cutouts.
+        rayQueryInitializeEXT(query, rfScene,
+            gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsNoOpaqueEXT,
+            0xFFu, origin, tmin, direction, rayMax);
+        while (rayQueryProceedEXT(query)) {
+            if (rayQueryGetIntersectionTypeEXT(query, false) ==
+                    gl_RayQueryCandidateIntersectionTriangleEXT &&
+                occludes(rayQueryGetIntersectionInstanceCustomIndexEXT(query, false),
+                    rayQueryGetIntersectionPrimitiveIndexEXT(query, false),
+                    rayQueryGetIntersectionBarycentricsEXT(query, false))) {
+                rayQueryConfirmIntersectionEXT(query);
+            }
+        }
+        bool blocked = rayQueryGetIntersectionTypeEXT(query, true) !=
+            gl_RayQueryCommittedIntersectionNoneEXT;
+        if (!blocked && pc.volumeMeta.x > 0u) {
+            blocked = rfSurfaceSdfOccludes(origin, direction, tmin, rayMax,
+                pc.volumeMeta.x, pc.flags.y);
+        }
+        if (blocked) blockedLights |= bit;
     }
-    bool blocked = rayQueryGetIntersectionTypeEXT(query, true) !=
-        gl_RayQueryCommittedIntersectionNoneEXT;
-    if (!blocked && pc.volumeMeta.x > 0u) {
-        blocked = rfSurfaceSdfOccludes(
-            origin, normalize(pc.sunDirection.xyz), tmin,
-            pc.params.y, pc.volumeMeta.x, pc.flags.y);
-    }
-    pixels[offset].x = blocked ? 0.0 : 1.0;
+    pixels[offset].x = blockedLights;
 }

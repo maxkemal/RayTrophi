@@ -70,7 +70,11 @@ MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain
         }
     }
     for (const auto& binding : domain.fluid_substance_materials) {
-        if (binding.phase != SubstancePhase::Solid) {
+        // ★ The Default Substance's row is skipped: it is considered last below,
+        // and letting a material binding move it ahead of other bindings would
+        // make a look-only pick change which substance owns the grains.
+        if (binding.phase != SubstancePhase::Solid &&
+            binding.substance != domain.fluid_params.default_substance) {
             consider(binding.substance, "substance binding");
         }
     }

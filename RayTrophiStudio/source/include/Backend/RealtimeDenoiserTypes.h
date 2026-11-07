@@ -5,9 +5,8 @@
 
 namespace VulkanRT {
 struct RealtimeDenoiserSettings {
-    // On by default since B3b: display-only while the camera moves, the
-    // converged image is bit-identical with it off (B3 live test).
-    bool enabled = true;
+    // Project preference; opt in. GPU histories and debug views are runtime only.
+    bool enabled = false;
     int atrous_iterations = 4;
     int history_max = 24;
     // Firefly clamp (sigmas) for pixels starting a new history. Replaces

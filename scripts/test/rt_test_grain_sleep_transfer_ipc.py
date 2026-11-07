@@ -82,7 +82,8 @@ def main():
             diag = inv['grain_diagnostics']
             assert diag['contact_shader_revision'] >= 24, 'Build revision-24 C++ and shaders'
             g, r = inv['acceptance_metrics']['granular'], diag['runtime']
-            assert r['dispatches'] == 4*r['substeps'], r
+            stages = 5 if r.get('sleep_work_mode') == 'compact' else 4
+            assert r['dispatches'] == stages*r['substeps'], r
             assert client.call('sim.control_state') == control
             return {'particles': g['particles'], 'mass_kg': g['dry_mass_kg'],
                     'bounds_min': g.get('bounds_min'),

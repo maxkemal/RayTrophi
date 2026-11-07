@@ -74,6 +74,13 @@ struct VDBVolumeData {
     float dense_origin[3] = {0.0f, 0.0f, 0.0f};
     float dense_voxel_size = 0.0f;
     uint64_t dense_version = 0;
+    // Live GPU SURFACE only (GPU_YUZEY_LEVEL_SET.md Y2): the material-coordinate
+    // residual built beside the density proxy, same grid, same device. 0 = none
+    // (the shader then anchors in world space). Same ownership rule as the
+    // dense_* addresses: consumed only by the backend that owns the sim device.
+    uint64_t surface_live_uvw_address = 0;
+    // Its per-substance material mixture (same grid, same rule). 0 = none.
+    uint64_t surface_live_composition_address = 0;
     // ★★★ HOST MIRROR of the dense grids, for a consumer that does NOT own the
     // simulation compute device. The addresses above are raw VkDeviceAddresses
     // and are meaningless on a second VkDevice — and reading one there yields
@@ -217,6 +224,8 @@ public:
     const std::vector<float>* liveDenseTemperatureMirror(int volume_id) const;
     uint64_t liveDenseMirrorVersion(int volume_id) const;
     void clearLiveDenseGpuFields(int volume_id);
+    void setLiveSurfaceUvwAddress(int volume_id, uint64_t uvw_address,
+                                  uint64_t composition_address);
     // Toggle only the content gate while preserving persistent Vulkan buffer
     // addresses and the stable TLAS/SSBO binding.
     void setLiveDenseContentActive(int volume_id, bool active);

@@ -6,6 +6,8 @@ bu son değişikliklerin build/görsel kabulü bekleniyor.
 Bkz. [Canlı test kaydı](UV_EDITOR_LIVE_ACCEPTANCE_2026_11_03.md).
 2026-11-04: [Materyal UV Workflow taşıması](UV_MATERIAL_WORKFLOW_MIGRATION.md) uygulandı;
 materyalde sampling ayarları ve kısayol, editörde bütün mesh UV araçları bulunur.
+Devam dilimi: [UV corner remap](UV_CORNER_REMAP.md) kaynakta eklendi; xatlas vertex
+bölünmesi ve Triangle corners authoring kullanıcı build/kabulünü bekliyor.
 Tam UV editörü tamamlanmış değildir. Ana kapsam: [UV yol haritası](UV_AUTHORING_AUDIT_ROADMAP.md).
 
 ## Teslim edilen kaynak
@@ -22,7 +24,7 @@ Tam UV editörü tamamlanmış değildir. Ana kapsam: [UV yol haritası](UV_AUTH
 - UV değişimleri SceneHistory üzerinden undo/redo; seçim dışı UV'ler korunur.
 - MIT upstream xatlas sabit commit ile eklendi; auto unwrap ve pack-only backend bağlantısı.
 - Ortak flat servis üzerinden Python `rt.uv.*` ve main-thread enqueue kullanan IPC `uv.*`.
-- IPC keşfinde 13 yöntemin parametreleri, yetkileri ve sınırlamaları kayıtlıdır.
+- IPC keşfinde 14 yöntemin parametreleri, yetkileri ve sınırlamaları kayıtlıdır.
 
 Yeni çekirdek `source/include/UV` ve `source/src/UV`; arayüz `UI/UvEditorUI`;
 adaptörler `Api/RtUvBindings` / `RtIpcUv` içinde. Birleşik domain/MPM implementasyonu
@@ -39,9 +41,8 @@ diğer ajanın bu dosyalardaki değişiklikleri korunmalıdır.
 - Seam/pin, manuel conformal unwrap, cut/stitch, GPU UV renderer, box selection ve
   interaktif G/R/S sürükleme henüz yoktur. Canvas şimdilik CPU ImDrawList kullanır;
   milyon yüz için performans kabulü yapılmış değildir.
-- xatlas çıktısı aynı kaynak vertex'e farklı UV istiyorsa işlem `uv_vertex_split_required`
-  ile atomik olarak reddedilir. Face/corner remap ihtiyacı da reddedilir. Vertex ve
-  skin/custom attribute verisi kaybedilerek unwrap yapılmaz.
+- Güncel kaynakta xatlas UV vertex split ihtiyacı attribute koruyan remap ile
+  karşılanır. Face/corner sırası değişirse işlem hâlâ reddedilir. Bkz. corner remap notu.
 - Atlas işleri bu dilimde senkrondur ve 20000 üçgen ile sınırlıdır. Bu eşik bir süre
   garantisi değildir; background job/cancel sonraki aşamadır. Tek atlas desteklenir.
 - Texture rebake yoktur. Mesh UV değişimi mevcut texture görünümünü değiştirebilir.
@@ -70,7 +71,7 @@ rt.uv.transform(
 ```
 
 Diğer işlemler: `capabilities`, `normalize`, `pack`, `unwrap`, `flip_u`, `flip_v`,
-`swap_uv`, `project_view`. Transform/normalize/flip/swap
+`swap_uv`, `project_view`, `set_corners`. Transform/normalize/flip/swap
 için boş `islands` bütün adaları hedefler; atlas işlemleri bütün mesh üzerinde çalışır.
 Her yazma güncel `revision` gerektirir; bu değer opaque'tir ve oturumlar arasında
 saklanmamalıdır. Layout sayfaları 1..10000 üçgen ile sınırlıdır; `next_face` null
@@ -97,7 +98,7 @@ SculptForge'un GPL AutoUv, UV solver, komut veya panel kodu kopyalanmadı.
 python -B scripts/test/check_uv_authoring_contracts.py
 ```
 
-Bu altı kontrol proje/XML kayıtlarını, API/IPC-yetki eşleşmesini, flat modül sınırını,
+Bu yedi kontrol proje/XML kayıtlarını, API/IPC-yetki eşleşmesini, flat modül sınırını,
 UV görünümünün private host/header bağımsızlığını ve vendor kaynak kaydını doğrular.
 C++ derleme veya davranış testi yerine geçmez.
 Genel `audit_ipc_capabilities.py` ilk çalıştırmada UV okuma mirror eksiklerini yakaladı;

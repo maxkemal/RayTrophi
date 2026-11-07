@@ -2,7 +2,8 @@
 // Bank 0 is the grain runtime's own device copy of the grain-owned carriers
 // (identity order); liquid parcels of the same domain never enter it.
 //
-// One step dispatch per contact substep. State ping-pongs between bank 0 (the
+// One heavy step per contact substep, optionally preceded by a light active
+// classify/carry pass. State ping-pongs between bank 0 (the
 // canonical position/velocity/affine buffers) and bank 1 (grain scratch), so a
 // substep reads only the previous substep's complete state and writes only its
 // own grain.
@@ -72,7 +73,7 @@ const uint BUCKET = 32u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 33u;
+const uint REVISION = 38u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -85,6 +86,11 @@ uint listCapacity() { return uint(masses[2u * pc.meta.x + 2u]); }
 // 16 sleeping grains on the last substep.
 uint flagWord(uint k) { return 12u + k % 3u; }
 bool rebuildNow() { return diagnostics[flagWord(pc.substep.x)] != 0u; }
+// Any of these makes the entire attempt unpublishable. Later substeps carry
+// their input through instead of propagating an invalid contact into the pile.
+bool invalidGrainAttempt() {
+    return (diagnostics[0] & (32u | 64u | 128u | 256u | 512u)) != 0u;
+}
 
 float radius(uint i) { return masses[pc.meta.x + i]; }
 
@@ -108,6 +114,9 @@ vec3 omega(uint i, uint bank) {
     }
     uint b = 6u*pc.meta.x+3u*i;
     return vec3(scratch[b], scratch[b+1], scratch[b+2]);
+}
+bool finiteGrainVector(vec3 value) {
+    return !any(isnan(value)) && !any(isinf(value));
 }
 void store(uint i, uint bank, vec3 x, vec3 v, vec3 w) {
     if (bank == 0u) {
@@ -135,33 +144,64 @@ uint bucket(ivec3 c) {
     uvec3 u = uvec3(c);
     return ((u.x*73856093u) ^ (u.y*19349663u) ^ (u.z*83492791u)) & (pc.meta.y-1u);
 }
+bool contactProbeEnabled() {
+    return uint(diagnostics.length()) >= AUDIO_HEADER_WORDS && diagnostics[27] != 0u;
+}
 // A full bucket refuses publication: dropping a neighbour would silently
 // delete a contact.
 void insert(uint i, vec3 p, uint table) {
     uint b = table*pc.meta.y+bucket(cell(p));
     uint slot = atomicAdd(bucket_counts[b],1u);
+    if (contactProbeEnabled()) {
+        atomicMax(diagnostics[21], slot + 1u);
+    }
     if (slot < BUCKET) bucket_slots[b*BUCKET+slot] = i;
-    else atomicOr(diagnostics[0],4u);
+    else {
+        atomicOr(diagnostics[0],4u);
+        if (contactProbeEnabled() &&
+            atomicCompSwap(diagnostics[17], 0u, pc.substep.x + 1u) == 0u) {
+            diagnostics[18] = i;
+        }
+    }
+}
+
+vec3 closestGrainSegment(vec3 p, vec3 a, vec3 b) {
+    vec3 edge = b - a;
+    float squared_length = dot(edge, edge);
+    if (!(squared_length > 0.0)) return a;
+    float fraction = clamp(dot(p - a, edge) / squared_length, 0.0, 1.0);
+    return a + fraction * edge;
 }
 
 vec3 closestTriangle(vec3 p, vec3 a, vec3 b, vec3 c) {
-    vec3 ab = b-a, ac = c-a, ap = p-a;
-    float d1 = dot(ab,ap), d2 = dot(ac,ap);
-    if (d1 <= 0.0 && d2 <= 0.0) return a;
-    vec3 bp = p-b;
-    float d3 = dot(ab,bp), d4 = dot(ac,bp);
-    if (d3 >= 0.0 && d4 <= d3) return b;
-    float vc = d1*d4-d3*d2;
-    if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0) return a+ab*(d1/(d1-d3));
-    vec3 cp = p-c;
-    float d5 = dot(ab,cp), d6 = dot(ac,cp);
-    if (d6 >= 0.0 && d5 <= d6) return c;
-    float vb = d5*d2-d1*d6;
-    if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0) return a+ac*(d2/(d2-d6));
-    float va = d3*d6-d5*d4;
-    if (va <= 0.0 && d4-d3 >= 0.0 && d5-d6 >= 0.0)
-        return b+(c-b)*((d4-d3)/((d4-d3)+(d5-d6)));
-    return a+(ab*vb+ac*vc)/(va+vb+vc);
+    // Project onto the face, then test its oriented edge half-spaces. Unlike
+    // the dot-product barycentric determinants, the normal's squared length
+    // does not subtract two almost equal products on skinny pole triangles.
+    vec3 ab = b - a;
+    vec3 ac = c - a;
+    vec3 normal = cross(ab, ac);
+    float normal_squared = dot(normal, normal);
+    if (normal_squared > 0.0) {
+        vec3 unit_normal = normal / sqrt(normal_squared);
+        vec3 projected = p - dot(p - a, unit_normal) * unit_normal;
+        if (dot(cross(ab, projected - a), unit_normal) >= 0.0 &&
+            dot(cross(c - b, projected - b), unit_normal) >= 0.0 &&
+            dot(cross(a - c, projected - c), unit_normal) >= 0.0) {
+            return projected;
+        }
+    }
+    // Outside (or collapsed) faces use the nearest closed edge. No division
+    // by a barycentric determinant; a zero-length edge reduces to its vertex.
+    vec3 result = closestGrainSegment(p, a, b);
+    vec3 candidate = closestGrainSegment(p, b, c);
+    if (dot(p - candidate, p - candidate) < dot(p - result, p - result)) {
+        result = candidate;
+    }
+    candidate = closestGrainSegment(p, c, a);
+    if (dot(p - candidate, p - candidate) < dot(p - result, p - result)) {
+        result = candidate;
+    }
+    return result;
 }
 
 // Per-grain contact history: the grain's own block only, so no other
@@ -189,6 +229,7 @@ uint ownerWord() { return pc.substep.y+7u*g_block; }
 uint restWordOf(uint j) { return pc.substep.y+7u*(history_blocks[j] & ~FRESH)+5u; }
 uint sleepRestLimit() { return floatBitsToUint(max(pc.sleep.w,pc.step_contact.x)); }
 bool sleepOn() { return pc.sleep.y > 0.0; }
+#include "sim_matter_grain_sleep_probe.glsl"
 // This grain is moving; only a meaningful transferred kick requests an audit.
 bool g_fast = false;
 bool g_probe_sleep_transfer = false;
@@ -206,7 +247,8 @@ void requestNeighbourAudit(uint j) {
     // Commit never exposes a temporary zero for an already sleeping owner.
     uint word = restWordOf(j);
     if ((history_blocks[word] & ~AUDIT) >= sleepRestLimit()) {
-        atomicOr(history_blocks[word], AUDIT);
+        uint previous = atomicOr(history_blocks[word], AUDIT);
+        if ((previous & AUDIT) == 0u) grainSleepProbeCount(4u);
     }
 }
 
@@ -403,25 +445,47 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     }
 }
 
+#include "sim_matter_grain_active.glsl"
+
 void main() {
     // 2-D dispatch folded to one index: Vulkan guarantees only 65535 groups
     // per axis, the host spills the rest into y (setLinearGroups).
-    uint i = gl_GlobalInvocationID.x + gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    uint work_index = gl_GlobalInvocationID.x +
+        gl_GlobalInvocationID.y * gl_NumWorkGroups.x * 256u;
+    uint i = work_index;
 #if defined(GRAIN_LIST_CLEAR)
     // Word k+2 was last read in substep k-1 and is next written in k+1.
     if (i == 0u) diagnostics[flagWord(pc.substep.x+2u)] = 0u;
+    if (i == 0u && uint(diagnostics.length()) >= AUDIO_HEADER_WORDS) diagnostics[46] = 0u;
     if (!rebuildNow()) return;
     if (i < pc.meta.y) bucket_counts[i] = 0u;
 #elif defined(GRAIN_HASH)
-    if (i < pc.meta.x && rebuildNow()) insert(i, position(i,readBank()), 0u);
+    if (i < pc.meta.x && rebuildNow() && !invalidGrainAttempt()) {
+        insert(i, position(i,readBank()), 0u);
+    }
 #elif defined(GRAIN_LIST_BUILD)
     // Every grain within the cutoff, from its own cell's bucket only (two
     // cells sharing a bucket would otherwise list a neighbour twice).
-    if (!rebuildNow()) return;
+    if (!rebuildNow() || invalidGrainAttempt()) return;
     if (i == 0u) atomicAdd(diagnostics[15],1u);
     if (i >= pc.meta.x) return;
     uint bank = readBank();
     vec3 p = position(i,bank);
+    // Hash dispatch has completed: count the selected physical cell exactly,
+    // including grains omitted by the fixed bucket. One invocation, once per
+    // failed attempt; other cells hashing here must not be called compression.
+    if (contactProbeEnabled() && diagnostics[17] == pc.substep.x + 1u &&
+        diagnostics[18] == i) {
+        ivec3 overflow_cell = cell(p);
+        diagnostics[19] = bucket_counts[bucket(overflow_cell)];
+        uint population = 0u;
+        for (uint j = 0u; j < pc.meta.x; ++j) {
+            if (all(equal(cell(position(j, bank)), overflow_cell))) {
+                ++population;
+            }
+        }
+        diagnostics[20] = population;
+    }
     float skin = 0.5 * pc.low_radius.w;
     ivec3 own = cell(p);
     uint base = i*(listCapacity()+1u);
@@ -447,10 +511,23 @@ void main() {
     }
     neighbour_list[base] = listed;
     for (uint k=0u; k<3u; ++k) build_positions[3u*i+k] = p[k];
+#elif defined(GRAIN_ACTIVE_CLASSIFY)
+    if (i >= pc.meta.x) return;
+    if (uint(diagnostics.length()) < AUDIO_HEADER_WORDS ||
+        uint(history_blocks.length()) / 8u < pc.substep.y ||
+        uint(scratch.length()) / 10u < pc.meta.x) {
+        if (i == 0u) atomicOr(diagnostics[0], 16u);
+        return;
+    }
+    classifyGrainWork(i);
 #elif defined(GRAIN_STEP)
+    if (work_index == 0u) diagnostics[1] = REVISION;
+    if (uint(diagnostics.length()) >= AUDIO_HEADER_WORDS && diagnostics[45] != 0u) {
+        if (work_index >= diagnostics[46]) return;
+        i = floatBitsToUint(scratch[9u * pc.meta.x + work_index]);
+    }
     if (i >= pc.meta.x) return;
     // Proves the fused-step SPIR-V ran; the host refuses publication otherwise.
-    if (i == 0u) diagnostics[1] = REVISION;
     // Map + owner/four masks/rest/elapsed: eight words per allocated grain.
     // Divide the length so a malformed capacity cannot wrap the guard product.
     // The descriptor/push ABI is unchanged, so reflection alone cannot catch it.
@@ -475,6 +552,20 @@ void main() {
         valid_block = true;
     }
     vec3 p = position(i,bank), v = velocity(i,bank), w = omega(i,bank);
+    if (invalidGrainAttempt()) {
+        store(i, writeBank(), p, v, w);
+        return;
+    }
+    if (!finiteGrainVector(p) || !finiteGrainVector(v) || !finiteGrainVector(w)) {
+        atomicOr(diagnostics[0], 64u);
+        store(i, writeBank(), p, v, w);
+        return;
+    }
+    // Frozen after the first overflowing hash; later truncated lists are not
+    // evidence about the contact state which led to the overflow.
+    bool probe_contacts = contactProbeEnabled() && diagnostics[17] == 0u;
+    float probe_grain_overlap = 0.0;
+    float probe_collider_overlap = 0.0;
     float r = radius(i), im = 1.0/masses[i], ii = 2.5*im/(r*r);
     uint dst = writeBank();
     vec4 drag = coupling[3u*i];
@@ -500,15 +591,19 @@ void main() {
     if (sleepOn() && valid_block && can_sleep && input_slow) {
         uint raw = grainSleepTakeAudit(rest_word);
         bool audit_requested = (raw & AUDIT) != 0u;
+        if (audit_requested) grainSleepProbeCount(3u);
         rest = context_changed ? 0u : raw & ~AUDIT;
         sleeping = rest >= sleepRestLimit();
+        if (sleeping && grainSleepAudit()) grainSleepProbeCount(2u);
         if (sleeping && !audit_requested && !grainSleepAudit()) {
+            grainSleepProbeCount(0u);
             history_blocks[elapsed_word] = floatBitsToUint(g_history_dt);
             store(i,dst,p,vec3(0.0),vec3(0.0));
             return;
         }
     }
     g_fast = sleepOn() && (dot(v,v) >= pc.sleep.y*pc.sleep.y || length(w)*r >= pc.sleep.y);
+    grainSleepProbeCount(1u);
     vec3 f = vec3(0.0), t = vec3(0.0);
     uint list_base = i*(listCapacity()+1u);
     uint listed = neighbour_list[list_base];
@@ -536,6 +631,9 @@ void main() {
         }
         bool linked = g_bridges != bridges_before;
         if (d < sum_radius) {
+            if (probe_contacts) {
+                probe_grain_overlap = max(probe_grain_overlap, (sum_radius - d) / sum_radius);
+            }
             linked = true;
             ++g_pairs;
             vec3 n = d > 1e-9 ? separation/d : vec3(i<j ? -1.0 : 1.0,0,0);
@@ -619,8 +717,21 @@ void main() {
             }
             vec3 q = closestTriangle(p,a,bp,c);
             float d = length(p-q);
+            if (!finiteGrainVector(q) || isnan(d) || isinf(d)) {
+                atomicOr(diagnostics[0], 32u);
+                store(i, dst, p, v, w);
+                return;
+            }
             if (d >= r) continue;
-            vec3 n = d > 1e-9 ? (p-q)/d : normalize(cross(bp-a,c-a));
+            vec3 face_normal = cross(bp - a, c - a);
+            float normal_length = length(face_normal);
+            vec3 n = d > 1e-9 ? (p-q)/d :
+                (normal_length > 0.0 ? face_normal / normal_length : vec3(0.0));
+            if (!finiteGrainVector(n) || dot(n, n) < 0.5) {
+                atomicOr(diagnostics[0], 512u);
+                store(i, dst, p, v, w);
+                return;
+            }
             vec3 wall = vec3(0.0);
             if (velocity_offset != 0u) {
                 // Barycentric weights of the contact point.
@@ -696,6 +807,9 @@ void main() {
         manifold_key[manifold_count++] = PATCH_KEY|(patch_id[k] & 0x3fffffffu);
     }
     for (uint m=0u; m<manifold_count; ++m) {
+        if (probe_contacts) {
+            probe_collider_overlap = max(probe_collider_overlap, (r - manifold_d[m]) / r);
+        }
         vec3 n = manifold_n[m], arm = -n*r;
         contact(i,manifold_key[m],n,r-manifold_d[m],arm,v+cross(w,arm)-manifold_v[m],w,ii,0.0,r,
             im+r*r*ii,im,f,t);
@@ -719,10 +833,24 @@ void main() {
     // Symplectic Euler from the complete previous-substep state.
     float dt = pc.step_contact.x;
     vec3 acceleration = f*im+pc.rolling.yzw+lift.xyz;
+    if (!finiteGrainVector(acceleration) || !finiteGrainVector(t)) {
+        atomicOr(diagnostics[0], 128u);
+        store(i, dst, p, v, w);
+        return;
+    }
+    if (probe_contacts) {
+        atomicMax(diagnostics[22], floatBitsToUint(probe_grain_overlap));
+        atomicMax(diagnostics[23], floatBitsToUint(probe_collider_overlap));
+        atomicMax(diagnostics[24], floatBitsToUint(length(v)));
+        atomicMax(diagnostics[25], floatBitsToUint(length(acceleration)));
+        atomicMax(diagnostics[26], manifold_count);
+    }
     bool force_balanced = sleepOn() &&
         grainSleepBalanced(acceleration,t*ii,r,p,im,g_contacts);
     bool balanced = can_sleep && force_balanced;
     if (sleeping && balanced) {
+        grainSleepProbeFinal(valid_block, can_sleep, context_changed,
+            vec3(0.0), vec3(0.0), r, sleepRestLimit());
         history_blocks[elapsed_word] = 0u;
         store(i,dst,p,vec3(0.0),vec3(0.0));
         grainSleepCommit(rest_word, sleepRestLimit());
@@ -761,6 +889,11 @@ void main() {
     }
     p += dt*v;
     w += dt*t*ii;
+    if (!finiteGrainVector(p) || !finiteGrainVector(v) || !finiteGrainVector(w)) {
+        atomicOr(diagnostics[0], 256u);
+        store(i, dst, position(i, bank), velocity(i, bank), omega(i, bank));
+        return;
+    }
     store(i,dst,p,v,w);
     // Still this substep: accumulate physical rest time. Liquid drag and force fields
     // (lift row) keep a grain awake: they change between frames. A AUDIT set by
@@ -783,6 +916,7 @@ void main() {
     }
     history_blocks[elapsed_word] = floatBitsToUint(next_compensation);
     grainSleepCommit(rest_word, next_rest);
+    grainSleepProbeFinal(valid_block, can_sleep, context_changed, v, w, r, next_rest);
     // Rebuild the lists before substep k+1 once this grain has moved half the
     // skin since the build: two grains then closed at most the whole skin, so
     // every pair inside 2r + rupture cap was inside the cutoff at the build.

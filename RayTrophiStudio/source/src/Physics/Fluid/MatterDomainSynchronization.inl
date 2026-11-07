@@ -319,6 +319,35 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
 
             Vec3 seed_lo = domain.fluid_seed_min;
             Vec3 seed_hi = domain.fluid_seed_max;
+            // ── Mesh Volume: the box becomes the mesh bounds and a cell mask
+            // decides what is inside. A missing or inside-less mesh seeds
+            // NOTHING and says why, rather than falling back to the box.
+            std::shared_ptr<const Fluid::MeshVolumeTest> seed_volume;
+            std::unique_ptr<Fluid::MeshVolumeCellMask> seed_mask;
+            std::string seed_error;
+            const bool mesh_seed = domain.fluid_seed_mode == FluidSeedMode::MeshVolume;
+            if (mesh_seed) {
+                if (domain.fluid_seed_mesh_object.empty()) {
+                    seed_error = "Mesh Volume seed has no object";
+                } else if (mesh_volume_resolver_) {
+                    seed_volume = mesh_volume_resolver_(domain.fluid_seed_mesh_object);
+                }
+                if (seed_volume && !seed_volume->empty()) {
+                    seed_mask = std::make_unique<Fluid::MeshVolumeCellMask>(
+                        *seed_volume, Fluid::liquidGrid(state));
+                    seed_lo = seed_volume->boundsMin();
+                    seed_hi = seed_volume->boundsMax();
+                    if (seed_mask->empty()) {
+                        seed_error = "mesh '" + domain.fluid_seed_mesh_object +
+                            "' has no inside in this domain (open surface, outside the "
+                            "domain, or thinner than a voxel)";
+                    }
+                } else if (seed_error.empty()) {
+                    seed_error = "mesh '" + domain.fluid_seed_mesh_object +
+                        "' not found or has no triangles";
+                }
+            }
+            const bool mesh_seed_blocked = mesh_seed && !seed_error.empty();
             // The request is the authored region (Fill Domain: its target
             // level with no budget), counted before the budget shapes it.
             std::size_t seed_request_cells = 0;
@@ -335,9 +364,11 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 seed_request_cells = Fluid::countSeedBoxCells(
                     Fluid::liquidGrid(state), target_lo, target_hi);
                 seed_region_top = std::max(target_lo.y, target_hi.y);
+            } else if (mesh_seed_blocked) {
+                seed_request_cells = 0;
             } else {
                 seed_request_cells = Fluid::countSeedBoxCells(
-                    Fluid::liquidGrid(state), seed_lo, seed_hi);
+                    Fluid::liquidGrid(state), seed_lo, seed_hi, seed_mask.get());
             }
             if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
                 computeFluidFillSeedAABB(Fluid::liquidGrid(state).origin,
@@ -364,10 +395,12 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
             // is snow, not water (substanceAmbientBirthKelvin).
             const std::size_t seed_begin = state.particles.size();
             Fluid::MatterGrainSeedResult grain_seed;
-            if (seed_grains) {
+            if (mesh_seed_blocked) {
+                // Nothing to fill: see seed_error.
+            } else if (seed_grains) {
                 grain_seed = Fluid::seedMatterGrainBox(state.particles,
                     Fluid::liquidGrid(state), seed_lo, seed_hi, domain.fluid_params,
-                    birth_kelvin, seed_budget);
+                    birth_kelvin, seed_budget, seed_mask.get());
                 // Same birth water as a damp flow source (initMatterGrainBirthWater).
                 if (domain.fluid_seed_grain_saturation > 0.0f) {
                     for (std::size_t g = seed_begin; g < state.particles.size(); ++g) {
@@ -379,7 +412,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 Fluid::seedBox(state.particles, Fluid::liquidGrid(state),
                     seed_lo, seed_hi, ppc,
                     /*seed=*/static_cast<uint32_t>(i + 1u) * 2654435761u,
-                    seed_budget, birth_kelvin);
+                    seed_budget, birth_kelvin, seed_mask.get());
             }
             Fluid::initializeMatterBirthModels(
                 state.particles, seed_begin, domain.fluid_params);
@@ -388,6 +421,10 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                 auto& seed_stats = state.seed_stats;
                 seed_stats = SimulationSeedStats{};
                 seed_stats.ran = true;
+                seed_stats.error = seed_error;
+                if (!seed_error.empty()) {
+                    SCENE_LOG_WARN("[Fluid] " + domain.name + ": seed emitted nothing: " + seed_error);
+                }
                 seed_stats.requested = seed_grains
                     ? grain_seed.emitted + (grain_seed.truncated ? 1u : 0u)
                     : seed_request_cells * static_cast<std::size_t>(ppc);
@@ -398,8 +435,17 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                     top = std::max(top, state.particles.position[p].y);
                 }
                 seed_stats.top_y = seed_stats.emitted ? top : 0.0f;
+                // ★ A Mesh Volume request counts every boundary cell as full, but
+                // only the slots inside the mesh are born there, so emitted <
+                // requested is the SHAPE, not the budget (measured: a 0.5 m sphere
+                // emitted 33086 of a 42624 request with no budget limit). The
+                // budget cut is told by the budget itself.
                 seed_stats.truncated = seed_grains ? grain_seed.truncated
-                    : seed_stats.emitted < seed_stats.requested;
+                    : (mesh_seed ? seed_stats.emitted >= seed_budget
+                                 : seed_stats.emitted < seed_stats.requested);
+                if (mesh_seed && !seed_grains && !seed_stats.truncated) {
+                    seed_stats.requested = seed_stats.emitted;
+                }
                 if (seed_grains && seed_stats.truncated) {
                     SCENE_LOG_WARN("[DEM] " + domain.name +
                         ": seed stopped at particle capacity or authoring scan limit; " +

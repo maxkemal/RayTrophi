@@ -91,7 +91,8 @@ def required(method, namespaces):
         return "SceneWrite"
     if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings",
                   "fluid.inspect_fog_fields", "fluid.get_lanes",
-                  "fluid.particle_extremes", "fluid.gas_cell_extremes"):
+                  "fluid.particle_extremes", "fluid.gas_cell_extremes",
+                  "fluid.surface_parity", "fluid.sample_solid_phi"):
         return "Read"
     if method == "ipc.admin.audit.export":
         return "Admin|FilesWrite"

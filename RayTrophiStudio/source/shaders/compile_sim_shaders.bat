@@ -13,6 +13,16 @@ if errorlevel 1 (
 set SHADER_DIR=%~dp0
 echo Compiling simulation compute shaders...
 
+for %%k in (sim_surface_gather_supported sim_surface_composition_phase) do (
+    glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
+    if errorlevel 1 exit /b 1
+)
+
+for %%k in (sim_fluid_label_link_clear sim_fluid_label_link_scatter sim_fluid_label_link_classify) do (
+    glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
+    if errorlevel 1 exit /b 1
+)
+
 for %%k in (clear mark capture sweep) do (
     glslc "%SHADER_DIR%sim_sparse_viscosity_%%k.comp" -o "%SHADER_DIR%sim_sparse_viscosity_%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
@@ -31,7 +41,7 @@ for %%k in (sim_sparse_pressure_init_mac_weights sim_sparse_pressure_spmv_mac_we
 )
 
 glslc "%SHADER_DIR%sim_matter_partition.comp" -o "%SHADER_DIR%sim_matter_partition.spv" --target-env=vulkan1.2
-for %%k in (sim_grain_mpm_count sim_grain_fluid_clear sim_grain_fluid_hash sim_grain_fluid_solid sim_grain_fluid_cells sim_grain_fluid_refresh sim_grain_fluid_delta sim_grain_fluid_reaction sim_grain_fluid_apply sim_grain_mpm_init sim_grain_mpm_clear sim_grain_mpm_hash sim_grain_mpm_gather sim_grain_mpm_apply sim_matter_grain_list_clear sim_matter_grain_hash sim_matter_grain_list_build sim_matter_grain_step sim_fluid_divergence_porous) do (
+for %%k in (sim_grain_mpm_count sim_grain_fluid_clear sim_grain_fluid_hash sim_grain_fluid_solid sim_grain_fluid_cells sim_grain_fluid_refresh sim_grain_fluid_delta sim_grain_fluid_reaction sim_grain_fluid_apply sim_grain_mpm_init sim_grain_mpm_clear sim_grain_mpm_hash sim_grain_mpm_gather sim_grain_mpm_apply sim_matter_grain_list_clear sim_matter_grain_hash sim_matter_grain_list_build sim_matter_grain_active_classify sim_matter_grain_step sim_fluid_divergence_porous) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
 )

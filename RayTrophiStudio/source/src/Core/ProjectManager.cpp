@@ -10,6 +10,7 @@
 #include "PostProcess/PostService.h"
 #include "ProjectManager.h"
 #include "Backend/UpscaleSettingsJson.h"
+#include "Backend/RealtimeDenoiserSettingsJson.h"
 #include "ProjectTimelineReset.h"
 #include "ProjectSimulationCache.h"
 #include "globals.h"
@@ -4419,6 +4420,7 @@ void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
 json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
     json j;
     j["upscale"] = VulkanRT::serializeUpscaleSettings(settings.upscale);
+    j["realtime_denoiser"] = VulkanRT::serializeRealtimeDenoiserSettings(settings.realtime_denoiser);
     
     j["samples_per_pixel"] = settings.samples_per_pixel;
     j["samples_per_pass"] = settings.samples_per_pass;
@@ -4479,6 +4481,10 @@ json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
 
 void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& settings) {
     settings.upscale = VulkanRT::deserializeUpscaleSettings(j);
+    settings.realtime_denoiser = VulkanRT::deserializeRealtimeDenoiserSettings(j);
+    if (settings.realtime_denoiser.enabled) {
+        settings.motion_aov_enabled = true;
+    }
     settings.samples_per_pixel = j.value("samples_per_pixel", 1);
     settings.samples_per_pass = j.value("samples_per_pass", 1);
     settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
@@ -5908,6 +5914,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"max_particles", domain.fluid_max_particles},
             {"replace_on_seed", domain.fluid_replace_on_seed},
             {"seed_mode", (int)domain.fluid_seed_mode},
+            {"seed_mesh_object", domain.fluid_seed_mesh_object},
             {"fill_level", domain.fluid_fill_level},
             {"fill_wall_margin", domain.fluid_fill_wall_margin},
             {"seed_settle", domain.fluid_seed_settle},
@@ -6024,7 +6031,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"anisotropy_radius_voxels", domain.fluid_level_set_params.anisotropy_radius_voxels},
             {"anisotropy_max_stretch", domain.fluid_level_set_params.anisotropy_max_stretch},
             {"anisotropy_neighbor_min", domain.fluid_level_set_params.anisotropy_neighbor_min},
-            {"position_smoothing", domain.fluid_level_set_params.position_smoothing}
+            {"position_smoothing", domain.fluid_level_set_params.position_smoothing},
+            {"gpu_build", domain.fluid_level_set_params.gpu_build}
         };
 
         d["fluid_surface_band_voxels"] = domain.fluid_surface_band_voxels;
@@ -6509,6 +6517,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_max_particles = f.value("max_particles", domain.fluid_max_particles);
             domain.fluid_replace_on_seed = f.value("replace_on_seed", domain.fluid_replace_on_seed);
             domain.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)f.value("seed_mode", (int)domain.fluid_seed_mode);
+            domain.fluid_seed_mesh_object = f.value("seed_mesh_object", domain.fluid_seed_mesh_object);
             domain.fluid_fill_level = f.value("fill_level", domain.fluid_fill_level);
             domain.fluid_fill_wall_margin = f.value("fill_wall_margin", domain.fluid_fill_wall_margin);
             domain.fluid_seed_settle = f.value("seed_settle", domain.fluid_seed_settle);
@@ -6676,6 +6685,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_level_set_params.anisotropy_max_stretch = lsp.value("anisotropy_max_stretch", domain.fluid_level_set_params.anisotropy_max_stretch);
             domain.fluid_level_set_params.anisotropy_neighbor_min = lsp.value("anisotropy_neighbor_min", domain.fluid_level_set_params.anisotropy_neighbor_min);
             domain.fluid_level_set_params.position_smoothing = lsp.value("position_smoothing", domain.fluid_level_set_params.position_smoothing);
+            domain.fluid_level_set_params.gpu_build = lsp.value("gpu_build", domain.fluid_level_set_params.gpu_build);
         }
 
         domain.fluid_surface_band_voxels = item.value("fluid_surface_band_voxels", domain.fluid_surface_band_voxels);

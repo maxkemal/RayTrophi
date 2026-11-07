@@ -11,6 +11,9 @@ bool grainSleepAudit() {
     return pc.substep.x == pc.substep.w || (pc.substep.x + 1u) % period == 0u;
 }
 
+// Retain the two existing predicates separately for opt-in diagnostics.
+// The combined predicate remains the sole physical sleep decision.
+bvec2 grainSleepBalanceParts = bvec2(false);
 bool grainSleepBalanced(vec3 acceleration, vec3 angular_acceleration, float radius,
                        vec3 position, float inverse_mass, uint contacts) {
     // A low instantaneous velocity can be a turning point. Require the residual
@@ -37,9 +40,11 @@ bool grainSleepBalanced(vec3 acceleration, vec3 angular_acceleration, float radi
         linear_tolerance = min(linear_tolerance, 0.25 * gravity);
         angular_tolerance = min(angular_tolerance, 0.625 * gravity);
     }
-    return dot(acceleration, acceleration) < linear_tolerance * linear_tolerance &&
+    grainSleepBalanceParts = bvec2(
+        dot(acceleration, acceleration) < linear_tolerance * linear_tolerance,
         dot(angular_acceleration, angular_acceleration) * radius * radius <
-            angular_tolerance * angular_tolerance;
+            angular_tolerance * angular_tolerance);
+    return all(grainSleepBalanceParts);
 }
 
 uint grainSleepTakeAudit(uint word) {

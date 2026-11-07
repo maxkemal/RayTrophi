@@ -1,4 +1,6 @@
 #include "Api/RtApi.h"
+#include "RtApiInternal.h"
+#include <json.hpp>
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
@@ -53,6 +55,22 @@ GpuMemoryDevice describeBackend(Backend::IBackend& backend, const char* role) {
 
 GpuMemoryReport gpuMemoryReport() {
     GpuMemoryReport out;
+    nlohmann::json simulation = {{"supported", false}, {"buffers", nlohmann::json::array()}};
+    if (g_ctx) {
+        const auto memory = g_ctx->scene.simulation_world.compute().memoryReport();
+        simulation = {{"supported", memory.supported},
+            {"scope", "live_compute_buffers"}, {"requested_bytes", memory.requested_bytes},
+            {"allocation_bytes", memory.allocation_bytes},
+            {"device_local_bytes", memory.device_local_bytes},
+            {"buffers", nlohmann::json::array()}};
+        for (const auto& buffer : memory.buffers) {
+            simulation["buffers"].push_back({{"name", buffer.name},
+                {"requested_bytes", buffer.requested_bytes},
+                {"allocation_bytes", buffer.allocation_bytes},
+                {"device_local", buffer.device_local}, {"host_visible", buffer.host_visible}});
+        }
+    }
+    out.simulation_memory_json = simulation.dump();
     out.blas_compaction_enabled = VulkanRT::VulkanDevice::blasCompactionEnabled();
     Backend::IBackend* render = g_backend.get();
     Backend::IBackend* viewport = g_viewport_backend.get();

@@ -427,7 +427,8 @@ void SceneData::syncMatterFogStreams(ParticleSystemObject& system, std::size_t d
     std::string error;
     try {
         if (!prepareMatterFogSnapshot(*system.runtime, d, simulation_world.compute(),
-                fields, snapshot, error)) {
+                fields, snapshot, error,
+                RayTrophiSim::Fluid::MatterFogSnapshotPurpose::Publication)) {
             SCENE_LOG_WARN("Matter Fog publication refused: " + error);
             return;
         }

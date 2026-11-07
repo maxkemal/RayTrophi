@@ -67,6 +67,8 @@ float sampleNanoVDBFloatTrilinearAcc(
     return mix(dxy0, dxy1, frac.z);
 }
 
+#include "surface_dense_sampling.glsl"
+
 // Live gas domains expose their Vulkan compute fields directly to RT. The
 // dense grid stores cell-centred floats in x-major order.
 layout(buffer_reference, std430, buffer_reference_align = 4)
@@ -695,6 +697,8 @@ float sampleDensityAccChannels(
         }
     } else if (vol.volume_type == 4 && vol.source_type == 5) {
         density = sampleDenseGasFloat(vol.vdb_grid_address, vol, localPos);
+    } else if (isLiveDenseSurface(vol)) {
+        density = sampleDenseSurfaceProxy(vol, worldPos);
     }
 
     // SurfaceSDF consumes the producer's surface-centred 0..1 proxy directly.
@@ -936,6 +940,8 @@ float sampleDensityChannels(VkVolumeInstance vol, vec3 worldPos, out float emiss
         }
     } else if (vol.volume_type == 4 && vol.source_type == 5) {
         density = sampleDenseGasFloat(vol.vdb_grid_address, vol, localPos);
+    } else if (isLiveDenseSurface(vol)) {
+        density = sampleDenseSurfaceProxy(vol, worldPos);
     }
     
     density = applyMaterialDensityNoise(vol, localPos, density);

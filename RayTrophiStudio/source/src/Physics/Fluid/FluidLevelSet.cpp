@@ -1,3 +1,5 @@
+#include "Fluid/FrozenSurfaceMaterial.h"
+#include "Fluid/FluidSurfaceSupport.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -446,6 +448,11 @@ bool buildLevelSet(const FluidParticles& particles,
     }
     work_tiles.finish();
     const int64_t active_n = static_cast<int64_t>(work_tiles.workSize());
+    std::vector<float> carrier_radii(particle_count, particle_r);
+    for (std::size_t p = 0; p < particle_count && p < particles.mass_fraction.size(); ++p) {
+        carrier_radii[p] *= std::cbrt(std::max(
+            std::clamp(particles.mass_fraction[p], 0.0f, 1.0f), 0.02f));
+    }
     // Transient compact reconstruction evidence; never stored in simulation cache.
     std::vector<float> support_confidence(
         smoothing > 0 ? work_tiles.workSize() : 0, 0.0f);
@@ -484,6 +491,7 @@ bool buildLevelSet(const FluidParticles& particles,
         float acc_w = 0.0f;
         float acc_mass = 0.0f;
         float acc_w_squared = 0.0f;
+        float nearest_surface = far_value;
         Sym3 acc_metric;
         Vec3  acc_p(0.0f, 0.0f, 0.0f);
 
@@ -515,6 +523,9 @@ bool buildLevelSet(const FluidParticles& particles,
                             acc_metric.yz += w * s_aniso[pa].yz;
                             acc_w += w;
                             acc_w_squared += w * w;
+                            nearest_surface = std::min(nearest_surface,
+                                std::sqrt(lengthSq(p_c - particles.position[pa])) -
+                                    carrier_radii[pa]);
                             acc_mass += w * mass;
                             acc_p.x += w * xt.x;
                             acc_p.y += w * xt.y;
@@ -533,6 +544,9 @@ bool buildLevelSet(const FluidParticles& particles,
                                 : 1.0f;
                             acc_w += w;
                             acc_w_squared += w * w;
+                            nearest_surface = std::min(nearest_surface,
+                                std::sqrt(lengthSq(p_c - particles.position[pa])) -
+                                    carrier_radii[pa]);
                             acc_mass += w * mass;
                             acc_p.x += w * pp.x;
                             acc_p.y += w * pp.y;
@@ -546,12 +560,9 @@ bool buildLevelSet(const FluidParticles& particles,
         const std::size_t out_ci = cellIndex(i, j, k);
         if (acc_w > 1e-12f) {
             const float inv_w = 1.0f / acc_w;
+            const float support_blend = surfaceSupportBlend(acc_w, acc_w_squared);
             if (smoothing > 0) {
-                const float effective_neighbours = acc_w * acc_w /
-                    std::max(acc_w_squared, 1.0e-12f);
-                const float t = std::clamp((effective_neighbours - 4.0f) / 12.0f,
-                                           0.0f, 1.0f);
-                support_confidence[static_cast<std::size_t>(at)] = t * t * (3.0f - 2.0f * t);
+                support_confidence[static_cast<std::size_t>(at)] = support_blend;
             }
             const Vec3 x_bar(acc_p.x * inv_w, acc_p.y * inv_w, acc_p.z * inv_w);
             const float dlen = std::sqrt(lengthSq(p_c - x_bar));
@@ -578,6 +589,7 @@ bool buildLevelSet(const FluidParticles& particles,
                 }
                 phi = (shaped_length - mass_radius - surface_offset) / gradient_length;
             }
+            phi = constrainSparseSurface(phi, nearest_surface, support_blend);
             // Clamp to narrow band so far interior cells still report
             // a finite distance the iso-walker can step through.
             const float phi_clamped = std::min(narrow_band, std::max(-narrow_band, phi));
@@ -653,8 +665,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
     const std::size_t particle_count = particles.size();
 
     if (cell_count == 0 || particle_count == 0 || voxel <= 0.0f ||
-        substance_material_count == 0 || substance_materials == nullptr ||
-        particles.substance_tag.size() < particle_count) {
+        substance_material_count == 0 || substance_materials == nullptr) {
         composition_out.clear();
         return false;
     }
@@ -666,11 +677,11 @@ bool buildCompositionGrid(const FluidParticles& particles,
     //
     // ★ Slot 0 is always the fallback, so a cell that gathered nothing but
     // untagged liquid resolves to the domain material without a special case.
-    int slot_material[kMaxFluidSubstanceMaterials + 1];
+    int slot_material[kSubstanceMaterialEntryCapacity];
     std::size_t slot_count = 1;
     slot_material[0] = fallback_material;
     for (std::size_t i = 0; i < substance_material_count &&
-                            slot_count <= kMaxFluidSubstanceMaterials; ++i) {
+                            slot_count < kSubstanceMaterialEntryCapacity; ++i) {
         bool seen = false;
         for (std::size_t s = 0; s < slot_count; ++s)
             if (slot_material[s] == substance_materials[i].material_id) { seen = true; break; }
@@ -688,19 +699,16 @@ bool buildCompositionGrid(const FluidParticles& particles,
 
     // Tag -> slot. Linear scans over at most kMax entries; both loops are tiny
     // and a map would cost more than it saves at this size.
-    auto slotForTag = [&](uint32_t tag) -> std::size_t {
-        if (tag == kSubstanceUntagged) return 0;
-        for (std::size_t i = 0; i < substance_material_count; ++i) {
-            if (substance_materials[i].tag != tag) continue;
-            for (std::size_t s = 0; s < slot_count; ++s)
-                if (slot_material[s] == substance_materials[i].material_id) return s;
-            return 0;
+    // Untagged liquid is looked up like any tag: collectSubstanceMaterialEntries
+    // aliases the Default Substance's binding under kSubstanceUntagged.
+    auto slotForParticle = [&](std::size_t particle) -> std::size_t {
+        const int material = surfaceMaterialForParticle(particles, particle,
+            substance_materials, substance_material_count, fallback_material);
+        for (std::size_t slot = 0; slot < slot_count; ++slot) {
+            if (slot_material[slot] == material) {
+                return slot;
+            }
         }
-        // ★ A tag with no binding is NOT an error and must not be dropped: it is
-        // liquid poured by a source that has since been renamed, or handed over
-        // by a mass transfer. It takes the domain material, exactly like
-        // untagged liquid, rather than vanishing from the mixture and letting
-        // the other substances renormalise to more than they really are.
         return 0;
     };
 
@@ -776,7 +784,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
     // be reached by several tags (two substances sharing a material); the
     // STRICTEST wins, because a slot that any immiscible substance feeds must
     // not be softened by a miscible sibling that happens to shade the same.
-    float slot_miscibility[kMaxFluidSubstanceMaterials + 1];
+    float slot_miscibility[kSubstanceMaterialEntryCapacity];
     for (std::size_t s = 0; s < slot_count; ++s) slot_miscibility[s] = 1.0f;
     for (std::size_t i = 0; i < substance_material_count; ++i) {
         for (std::size_t s = 0; s < slot_count; ++s) {
@@ -794,7 +802,7 @@ bool buildCompositionGrid(const FluidParticles& particles,
     s_particle_slot.assign(particle_count, 0u);
     for (std::size_t p = 0; p < particle_count; ++p) {
         s_particle_slot[p] = static_cast<uint8_t>(
-            slotForTag(particles.substance_tag[p]));
+            slotForParticle(p));
     }
 
 #ifdef _OPENMP

@@ -138,6 +138,39 @@ bool rayVolumeInterval(uint vi, vec3 ro, vec3 rd, out float tNear, out float tFa
     return tFar > max(tNear, 0.0);
 }
 
+// Per-substance surface material (composition grid). RT resolves the material
+// per point from this field; reading only iso_material_index here left every
+// raster mode (RayFusion included) on the domain's fallback material after a
+// substance was bound to a scene material. Same placement as the RT reader
+// (sampleComposition): uvw_dim @592, uvw_origin @604, uvw_voxel @616,
+// composition_address @584, cells of (slot A, slot B, weight of B).
+// The preview shades ONE material, so it takes the dominant one instead of
+// blending parameters.
+layout(buffer_reference, std430, buffer_reference_align = 4)
+readonly buffer PreviewCompositionGrid { float values[]; };
+
+float previewSurfaceMaterialSlot(uint vi, vec3 worldPos) {
+    float fallback = volFloat(vi, 556u);
+    uint64_t address = volAddress(vi, 584u);
+    float voxel = volFloat(vi, 616u);
+    ivec3 res = ivec3(int(volFloat(vi, 592u) + 0.5),
+                      int(volFloat(vi, 596u) + 0.5),
+                      int(volFloat(vi, 600u) + 0.5));
+    if (address == uint64_t(0) || !(voxel > 0.0) ||
+        any(lessThanEqual(res, ivec3(0)))) {
+        return fallback;
+    }
+    vec3 gridPos = (worldPos - volVec3(vi, 604u)) / voxel;
+    ivec3 cell = clamp(ivec3(floor(gridPos)), ivec3(0), res - ivec3(1));
+    int index = (cell.x + cell.y * res.x + cell.z * res.x * res.y) * 3;
+    PreviewCompositionGrid g = PreviewCompositionGrid(address);
+    float slotA = g.values[index];
+    float slotB = g.values[index + 1];
+    float weightB = g.values[index + 2];
+    // Slot 0 is the built-in dielectric for that substance, a real choice.
+    return weightB > 0.5 ? slotB : slotA;
+}
+
 // NanoVDB reader: identical buffer-reference contract to volume_closesthit.
 #define PNANOVDB_GLSL
 #define PNANOVDB_BUF_CUSTOM
@@ -157,6 +190,9 @@ uvec2 pnanovdb_buf_read_uint64(pnanovdb_buf_t buf, uint byteOffset) {
 void pnanovdb_buf_write_uint32(pnanovdb_buf_t buf, uint byteOffset, uint value) {}
 void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byteOffset, uvec2 value) {}
 #include "PNanoVDB.h"
+#define RF_SDF_VOLUME_WORDS volumeWords
+#define RF_SDF_EXTERNAL_NANOVDB
+#include "surface_sdf_shadow_query.glsl"
 
 float sampleGrid(pnanovdb_buf_t buf, pnanovdb_map_handle_t mapHandle,
                  inout pnanovdb_readaccessor_t accessor, vec3 p) {
@@ -365,7 +401,20 @@ uint pointShadowFace(vec3 d) {
 
 float evaluateShadow(uint recordIndex, int lightType, vec3 lightPosition,
                      vec3 p, vec3 n, vec3 l) {
-    return rtPreviewShadow(recordIndex, p, n, l, lightPosition, pc.materialMeta.y & 0xffu);
+    float visibility = rtPreviewShadow(recordIndex, p, n, l, lightPosition,
+                                       pc.materialMeta.y & 0xffu);
+    if ((sceneFlags & 1u) != 0u && visibility > 0.0 && pc.materialMeta.w > 0u) {
+        vec3 origin = p + n * 0.02;
+        vec3 delta = lightPosition - origin;
+        float distance = length(delta);
+        vec3 direction = lightType == 1 ? l : delta / max(distance, 1e-6);
+        float rayMax = lightType == 1 ? 1e5 : distance - 0.02;
+        if (rayMax > 0.02 && rfSurfaceSdfOccludes(origin, direction, 0.02, rayMax,
+                pc.materialMeta.w, pc.materialMeta.x)) {
+            return 0.0;
+        }
+    }
+    return visibility;
 }
 
 RtPostParams sdfPostParams() {
@@ -446,7 +495,7 @@ void main() {
     uint count = min(pc.materialMeta.w, 16u);
     for (uint vi = 0u; vi < count; ++vi) {
         // is_active @172, volume_type @168, source_type @428, grid @232.
-        if (volWord(vi, 168u) == 0u || volWord(vi, 168u) != 2u ||
+        if (volWord(vi, 172u) == 0u || volWord(vi, 168u) != 2u ||
             int(volWord(vi, 428u)) != 4 || volAddress(vi, 232u) == uint64_t(0)) continue;
         float t;
         vec3 n;
@@ -478,7 +527,7 @@ void main() {
         return;
     }
 
-    float materialSlot = volFloat(nearestVolume, 556u);
+    float materialSlot = previewSurfaceMaterialSlot(nearestVolume, p);
     bool hasMaterial = materialSlot >= 1.0 && uint(materialSlot - 1.0) < pc.materialMeta.x;
     uint mi = hasMaterial ? uint(materialSlot - 1.0) : 0u;
     GpuMaterial mat;

@@ -7,6 +7,7 @@
 #include "PerfProfile.h"
 #include "scene_ui.h"
 #include "UI/RigWeightMapUI.h"
+#include "UI/UvEditorUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -3378,7 +3379,8 @@ mesh_edit_changed_confirmed:
     // �������������������������������������������������������������������������
     // Engage whenever the app is focused; only block while typing in a text field
     // (WantTextInput), not whenever any UI panel has focus (WantCaptureKeyboard).
-    if (sel.hasSelection() && !ImGui::GetIO().WantTextInput) {
+    if (sel.hasSelection() && !ImGui::GetIO().WantTextInput &&
+        !UvEditorUI::capturesShortcuts()) {
         if (ImGui::IsKeyPressed(ImGuiKey_G)) {
             sel.transform_mode = TransformMode::Translate;
         }
@@ -4992,6 +4994,7 @@ void SceneUI::drawSelectionGizmos(UIContext& ctx)
         // The point gizmo normally owns spline edit mode, so let P switch
         // ownership to the object-pivot gizmo before asking it to draw.
         if (ctx.selection.selected.spline_object && !ImGui::GetIO().WantTextInput &&
+            !UvEditorUI::capturesShortcuts() &&
             ImGui::IsKeyPressed(ImGuiKey_P)) {
             pivot_edit_mode = !pivot_edit_mode;
         }

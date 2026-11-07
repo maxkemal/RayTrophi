@@ -96,6 +96,22 @@ struct ComputeBackendCaps {
     uint32_t max_threads_per_group = 1;
 };
 
+struct ComputeMemoryAllocation {
+    std::string name;
+    uint64_t requested_bytes = 0;
+    uint64_t allocation_bytes = 0;
+    bool device_local = false;
+    bool host_visible = false;
+};
+
+struct ComputeMemoryReport {
+    bool supported = false;
+    uint64_t requested_bytes = 0;
+    uint64_t allocation_bytes = 0;
+    uint64_t device_local_bytes = 0;
+    std::vector<ComputeMemoryAllocation> buffers;
+};
+
 class ISimulationComputeBackend {
 public:
     virtual ~ISimulationComputeBackend() = default;
@@ -158,6 +174,7 @@ public:
     }
 
     virtual bool supportsDispatch() const { return false; }
+    virtual ComputeMemoryReport memoryReport() const { return {}; }
 
     // GPU timestamp timing. Off by default: a timestamp pair per dispatch costs
     // a little device time and a query-pool readback per submission, so it is a
@@ -249,6 +266,7 @@ public:
     uint64_t bufferDeviceAddress(ComputeBufferHandle handle) const;
     bool dispatch(const ComputeDispatch& cmd);
     bool supportsDispatch() const;  // true when the backend can run kernels (GPU)
+    ComputeMemoryReport memoryReport() const;
 
     bool supportsGpuTimestamps() const;
     void setGpuTimestampsEnabled(bool enabled);

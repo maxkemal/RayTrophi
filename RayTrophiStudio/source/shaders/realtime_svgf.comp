@@ -265,7 +265,8 @@ void temporal(ivec2 p) {
         vec3 color = current;
         float nh = 0.0;
         vec4 mvStill = imageLoad(motionImage, p);
-        if ((pc.historyFlags & SVGF_HISTORY) != 0u && mvStill.z < 0.9) {
+        if ((pc.historyFlags & SVGF_HISTORY) != 0u && mvStill.z < 0.9 &&
+            imageLoad(previousColor, p).a > 0.0) {
             vec4 hc = imageLoad(previousColor, p);
             vec4 hm = imageLoad(previousMoments, p);
             nh = hc.a;
@@ -308,6 +309,10 @@ void temporal(ivec2 p) {
         for (int i = 0; i < 4; ++i) {
             ivec2 q = ivec2(b) + corner[i];
             if (!onScreen(q)) continue;
+            // Reactive SDF/fog pixels did not record reusable history. A newly
+            // exposed background (notably sky with material 0xFFFF) must not
+            // borrow their colour just because the packed material IDs match.
+            if (imageLoad(previousMoments, q).z < 1.0) continue;
             bool ok = (raygenAccepted && q == raygenTap) ||
                       consistentTap(cur, curN, footprint, previousRecord(q));
             if (!ok) continue;
@@ -329,6 +334,7 @@ void temporal(ivec2 p) {
                 for (int x = -1; x <= 1; ++x) {
                     ivec2 q = raygenTap + ivec2(x, y);
                     if (!onScreen(q)) continue;
+                    if (imageLoad(previousMoments, q).z < 1.0) continue;
                     if (!(raygenAccepted && q == raygenTap) &&
                         !consistentTap(cur, curN, footprint, previousRecord(q))) continue;
                     history += imageLoad(previousColor, q).rgb;
@@ -362,6 +368,11 @@ void temporal(ivec2 p) {
         moments.z = n;
     }
     moments.w = max(moments.y - moments.x * moments.x, 0.0);
+    if (mv.z >= 0.9) {
+        // Zero is an explicit invalid-history marker, consumed by both tap
+        // searches and the camera-stop bridge. Preserve current-frame colour.
+        moments.z = 0.0;
+    }
     imageStore(nextColor, p, vec4(color, moments.z));
     imageStore(nextMoments, p, moments);
     imageStore(outputWork, p, vec4(color, moments.w));

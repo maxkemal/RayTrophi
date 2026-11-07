@@ -245,6 +245,18 @@ WorldData World::getGPUData() const {
 }
 
 void World::setMode(WorldMode mode) {
+    if (data.mode != mode) {
+        if (data.mode == WORLD_MODE_COLOR) {
+            solid_color = to_vec3(data.color);
+        } else if (data.mode == WORLD_MODE_NISHITA) {
+            sky_tint = to_vec3(data.color);
+        }
+        if (mode == WORLD_MODE_COLOR) {
+            data.color = to_float3(solid_color);
+        } else if (mode == WORLD_MODE_NISHITA) {
+            data.color = to_float3(sky_tint);
+        }
+    }
     data.mode = mode;
 
     // Lazy-load HDRI only when HDRI mode is actually activated.
@@ -669,6 +681,8 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
 
 // Reset to defaults
 void World::reset() {
+    solid_color = Vec3(0.13f, 0.14f, 0.16f);
+    sky_tint = Vec3(1.0f, 1.0f, 1.0f);
     // Selective reset - preserve LUT object but reset data
     data.mode = WORLD_MODE_NISHITA;
     data.color = make_float3(0.05f, 0.05f, 0.05f);
@@ -929,6 +943,10 @@ void World::serialize(nlohmann::json& j) const {
     // Color Mode
     j["color"] = { data.color.x, data.color.y, data.color.z };
     j["color_intensity"] = data.color_intensity;
+    const Vec3 solid = data.mode == WORLD_MODE_COLOR ? to_vec3(data.color) : solid_color;
+    const Vec3 tint = data.mode == WORLD_MODE_NISHITA ? to_vec3(data.color) : sky_tint;
+    j["solid_color"] = {solid.x, solid.y, solid.z};
+    j["sky_tint"] = {tint.x, tint.y, tint.z};
     
     // HDRI
     // Persist HDRI path only when HDRI mode is active to avoid hidden stale paths
@@ -1037,6 +1055,18 @@ void World::deserialize(const nlohmann::json& j) {
         data.color = make_float3(c[0], c[1], c[2]);
     }
     if (j.contains("color_intensity")) data.color_intensity = j["color_intensity"];
+    solid_color = data.mode == WORLD_MODE_COLOR
+        ? to_vec3(data.color) : Vec3(0.13f, 0.14f, 0.16f);
+    sky_tint = data.mode == WORLD_MODE_NISHITA
+        ? to_vec3(data.color) : Vec3(1.0f, 1.0f, 1.0f);
+    if (j.contains("solid_color")) {
+        const auto& c = j["solid_color"];
+        solid_color = Vec3(c[0], c[1], c[2]);
+    }
+    if (j.contains("sky_tint")) {
+        const auto& c = j["sky_tint"];
+        sky_tint = Vec3(c[0], c[1], c[2]);
+    }
     
     if (j.contains("hdri_path")) {
         std::string path = j["hdri_path"];

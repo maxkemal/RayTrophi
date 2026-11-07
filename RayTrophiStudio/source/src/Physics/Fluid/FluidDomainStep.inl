@@ -846,6 +846,8 @@
                             grid_domain_compute_buffers_[i].matter_runtime) {
                             state.fluid_stats.grain_report.cfl =
                                 grid_domain_compute_buffers_[i].matter_runtime->grain.last_cfl;
+                            state.fluid_stats.grain_report.contact_probe =
+                                grid_domain_compute_buffers_[i].matter_runtime->grain.last_contact_probe;
                         }
                         if (step_params.pore_exchange.enabled) {
                             state.fluid_stats.pore_exchange.held = true;

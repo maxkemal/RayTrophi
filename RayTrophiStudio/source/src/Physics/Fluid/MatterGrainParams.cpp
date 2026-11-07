@@ -46,7 +46,9 @@ void deriveStiffness(MatterGrainParams& p) {
 nlohmann::json matterGrainParamsToJson(const MatterGrainParams& p) {
     // Only what the domain authors (MADDE_UI_TEK_OTORITE U2/U3): the grain
     // material is the substance's, `enabled` and `wet_grains` are derived.
-    return {{"radius_m", p.radius_m}, {"radius_max_m", p.radius_max_m},
+    return {{"contact_probe_enabled", p.contact_probe_enabled},
+        {"compact_sleep_work", p.compact_sleep_work},
+        {"radius_m", p.radius_m}, {"radius_max_m", p.radius_max_m},
         {"size_distribution", p.size_distribution}, {"size_seed", p.size_seed},
         {"large_grain_fraction", p.large_grain_fraction},
         {"stiffness_scale", p.stiffness_scale},
@@ -94,7 +96,8 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         const bool integer = it.key() == "max_substeps" || it.key() == "contact_resolution" ||
             it.key() == "size_seed";
         const bool boolean = it.key() == "fluid_coupling" ||
-            it.key() == "volume_exclusion" || it.key() == "sleep";
+            it.key() == "volume_exclusion" || it.key() == "sleep" ||
+            it.key() == "contact_probe_enabled" || it.key() == "compact_sleep_work";
         const bool text = it.key() == "size_distribution";
         if ((text && !it.value().is_string()) || (boolean && !it.value().is_boolean()) ||
             (integer && !it.value().is_number_integer()) ||
@@ -105,6 +108,9 @@ bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& p,
         }
     }
     try {
+        candidate.contact_probe_enabled = patch.value("contact_probe_enabled",
+            p.contact_probe_enabled);
+        candidate.compact_sleep_work = patch.value("compact_sleep_work", p.compact_sleep_work);
         candidate.radius_m = patch.value("radius_m", p.radius_m);
         candidate.radius_max_m = patch.value("radius_max_m", p.radius_max_m);
         candidate.size_distribution = patch.value("size_distribution", p.size_distribution);

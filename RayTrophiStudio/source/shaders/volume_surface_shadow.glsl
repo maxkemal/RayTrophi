@@ -6,6 +6,8 @@
 // this march integrates - the cell was measured along the same line. The cache
 // is never guessed from the direction; a light it does not model, or a cell not
 // yet filled by the volume shader, takes the march below unchanged.
+#include "surface_sdf_rt_shadow.glsl"
+
 float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist,
                                        int lightIndex) {
     int volCount = int(cam.pad0);
@@ -21,7 +23,12 @@ float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float m
         // SurfaceSDF's 0..1 proxy represents a surface, not participating fog.
         // Match RayFusion's volume-shadow membership: never use its Fog knobs
         // to turn a water/solid reconstruction into an extra scattering medium.
-        if (vol.source_type == 4) continue;
+        if (vol.source_type == 4) {
+            if (rtSurfaceSdfOccludes(vol, shadowOrigin, lightDir, SHADOW_TMIN, maxDist)) {
+                return 0.0;
+            }
+            continue;
+        }
         if (vol.shadow_steps <= 0 || vol.shadow_strength <= 0.0) continue;
         float sigma_t = vol.scatter_coefficient + vol.absorption_coefficient;
         if (sigma_t < EPS || vol.density_multiplier < EPS) continue;

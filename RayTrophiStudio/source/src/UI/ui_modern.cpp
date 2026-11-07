@@ -5,6 +5,7 @@
  */
 
 #include "ui_modern.h"
+#include "UI/PanelControls.h"
 #include "UI/AudioIcon.h"
 #include "globals.h"
 #include <fstream>
@@ -524,63 +525,15 @@ bool StateButton(const char* label, bool isActive,
 }
 
 bool PrimaryButton(const char* label, const ImVec2& size, bool enabled) {
-    const auto& theme = ThemeManager::instance().current();
-    
-    if (!enabled)
-        ImGui::BeginDisabled();
-    
-    ImGui::PushStyleColor(ImGuiCol_Button, theme.colors.primary);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ScaleColor(theme.colors.primary, 1.2f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ScaleColor(theme.colors.primary, 0.8f));
-    
-    bool clicked = ImGui::Button(label, size);
-    
-    ImGui::PopStyleColor(3);
-    
-    if (!enabled)
-        ImGui::EndDisabled();
-    
-    return clicked && enabled;
+    return PanelControls::button(label, size, enabled);
 }
 
 bool SecondaryButton(const char* label, const ImVec2& size, bool enabled) {
-    const auto& theme = ThemeManager::instance().current();
-    
-    if (!enabled)
-        ImGui::BeginDisabled();
-    
-    ImGui::PushStyleColor(ImGuiCol_Button, theme.colors.secondary);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ScaleColor(theme.colors.secondary, 1.3f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ScaleColor(theme.colors.secondary, 0.7f));
-    
-    bool clicked = ImGui::Button(label, size);
-    
-    ImGui::PopStyleColor(3);
-    
-    if (!enabled)
-        ImGui::EndDisabled();
-    
-    return clicked && enabled;
+    return PanelControls::button(label, size, enabled);
 }
 
 bool DangerButton(const char* label, const ImVec2& size, bool enabled) {
-    const auto& theme = ThemeManager::instance().current();
-
-    if (!enabled)
-        ImGui::BeginDisabled();
-
-    ImGui::PushStyleColor(ImGuiCol_Button, theme.colors.error);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ScaleColor(theme.colors.error, 1.2f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ScaleColor(theme.colors.error, 0.8f));
-
-    bool clicked = ImGui::Button(label, size);
-
-    ImGui::PopStyleColor(3);
-
-    if (!enabled)
-        ImGui::EndDisabled();
-
-    return clicked && enabled;
+    return PanelControls::button(label, size, enabled);
 }
 
 bool SliderWithHelp(const char* label, float* value, float min, float max,

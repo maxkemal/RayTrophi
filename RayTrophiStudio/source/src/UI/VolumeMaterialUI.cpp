@@ -4,6 +4,7 @@
 #include "Api/RtApi.h"
 #include "scene_data.h"
 #include "scene_ui.h"
+#include "UI/ColorControls.h"
 #include "imgui.h"
 #include <algorithm>
 #include <cfloat>
@@ -272,7 +273,7 @@ bool drawSmokeAppearanceUI(VolumeShader& shader) {
     const auto look = volume_material::smokeAppearance(shader);
     nlohmann::json patch = nlohmann::json::object();
     float color[3] = {look.color.x, look.color.y, look.color.z};
-    if (ImGui::ColorEdit3("Color", color)) {
+    if (ColorControls::field3("Color", color)) {
         patch["smoke_color"] = {color[0], color[1], color[2]};
     }
     hint("Color of lit smoke. Dark gray is soot, near white is steam. Does not change "
@@ -283,7 +284,7 @@ bool drawSmokeAppearanceUI(VolumeShader& shader) {
     }
     hint("How much light the smoke stops. Does not change its color.");
     float tint[3] = {look.tint.x, look.tint.y, look.tint.z};
-    if (ImGui::ColorEdit3("Depth Tint", tint)) {
+    if (ColorControls::field3("Depth Tint", tint)) {
         patch["smoke_tint"] = {tint[0], tint[1], tint[2]};
     }
     hint("Which colors thick smoke removes. White is neutral.");

@@ -93,6 +93,9 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     const SimulationForceFieldComputeBuffer* force_buffer,
     bool domain_moving, const Fluid::MatterGrainGasAir& gas_air, std::string& error) {
     const auto step_start = std::chrono::steady_clock::now();
+    if (buffers.matter_runtime) {
+        buffers.matter_runtime->grain.last_contact_probe = {};
+    }
     if (!compute || params.boundary != Fluid::APICSolverParams::BoundaryMode::Closed ||
         params.pore_exchange.enabled || params.pore_exchange.wet_response_enabled) {
         error = "grain domain requires Closed Vulkan and MPM pore/wet physics disabled";

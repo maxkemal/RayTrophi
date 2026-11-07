@@ -142,11 +142,39 @@ MPM şeridinin katı maskesine "duran duvar" olarak eklendi. Üç ders, sırası
   Yalnız `VK_SUBGROUP_FEATURE_CLUSTERED_BIT` olan cihazda yüklenir; ölçülen kazanç küçük
   (~%5–10).
 
-### Sıradaki kaldıraç (yazılmadı)
+### Sıradaki kaldıraç — ölçüldü 2026-11-04 sabah: zincir DEĞİL
 
-Dinlenmeyen (hareketli ya da kısmen hareketli) MPM sahnesinin karesini zincir belirliyor:
-- x/y/z bileşen dispatch'lerini birleştirmek (P2G, gerilme P2G, temizleme, normalize);
-- bağımsız dispatch'ler arasındaki bariyerleri kaldırmak.
+Önceki not "hareketli MPM karesini zincir belirliyor" diyordu. Ölçülünce yanlış çıktı.
+Ölçüm koşulları:
+- Sahne: kar, kapalı 5 m domain, h 0.1, uyku kapalı, düşen blok.
+- Exe: 23:45.
+- Prob: `scripts/test/probe_mpm_substep_chain.py` ve `perf.list`.
 
-Paylaşılan sıvı koduna dokunur; önce küçük-parçacık kontrollü ölçümle zincir payını
-kesinleştir.
+| Kalem (kare başına) | 64 parçacık (kontrol) | 100 k parçacık |
+|---|---|---|
+| Dispatch / alt adım | 1859 / 50 | 1859 / 50 |
+| GPU zaman damgası toplamı | **9.0 ms** | **66 ms** |
+| — `sim_matter_p2g` + `stress_p2g` | 1.9 ms | **49 ms** |
+| Solver `total_ms` | 19.7 ms | ~128 ms |
+| CPU `sim.render.surface.level_set` | — | **184 ms** |
+| CPU `sim.render.surface.material_coordinates` | — | **51 ms** |
+| `loop.frame` (kare döngüsü) | — | ~420 ms |
+
+Okuma:
+1. **Zincirin GPU payı ~9 ms.** Kontrol sahnesinde de 1859 dispatch var ve toplam 9 ms
+   tutuyor. Bileşen birleştirme ve bariyer kaldırma en fazla bu kadar kazandırır.
+   Dinlenik karede okunan "~95 ms" farklı bir ölçümdü: o koşulda GPU kısılmış görünüyordu.
+   Hareketli karede tekrar etmedi.
+2. **Solver'ın yarısı GPU dışında.** 128 ms'lik solver süresinin 66 ms'si GPU'da.
+   Kayıt 512 dispatch'te `synchronize()` ile bekliyor, yani CPU kayıt yaparken GPU boşta
+   kalıyor ve ikisi hiç örtüşmüyor. Bunun üstüne her kare 37.7 MB yükleniyor ve 18 MB
+   indiriliyor. Ana makinede de iş var: iki tam `FluidParticles` kopyası, parçacık
+   döngüleri ve istatistik.
+3. **Asıl kalem yüzey.** Hareketli kar yüzeyi her kare CPU'da (OMP) yeniden kuruluyor:
+   Yu–Turk level set ve malzeme koordinatları birlikte **235 ms**. Bu, solver'ın neredeyse
+   iki katı ve karenin %55'i.
+   - ★ `fluid.set_param visible=false` bunu kapatmıyor. Kapı `system.visible`'a bakıyor,
+     IPC parametresi başka bir alana yazıyor olabilir; doğrulanmadı.
+
+Öncelik (ölçüye göre): yüzey (235 ms) > solver ana makine/GPU örtüşmesi (~60 ms) >
+P2G atomikleri (49 ms) > dispatch zinciri (~9 ms).

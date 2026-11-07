@@ -281,16 +281,12 @@ float rnd(inout uint seed) {
     return float(pcgNext(seed)) * (1.0 / 4294967296.0);
 }
 
-// Volume-shadow query required by the shared BSDF module. The surface shader
-// marches every other volume here; this shader is already INSIDE one, and its
-// own grids are sampled through sampleDensityAcc rather than that path. Return
-// full transmittance for now and say so: it means a liquid surface is not
-// shadowed by a SEPARATE volume (a smoke plume over a pool). It is not a
-// regression — this path had no volumetric shadowing at all before — but it is
-// the one place the two shaders do not yet agree.
+// Surface occlusion is independent of fog attenuation. Separate participating
+// media remain handled by the existing volume path.
+float rtSurfaceSdfShadowTransmittance(vec3 origin, vec3 direction, float maxDist);
 float computeVolumeShadowTransmittance(vec3 shadowOrigin, vec3 lightDir, float maxDist,
                                        int lightIndex) {
-    return 1.0;
+    return rtSurfaceSdfShadowTransmittance(shadowOrigin, lightDir, maxDist);
 }
 
 // Water lobes in the shared module need the v3 helpers.
@@ -737,6 +733,8 @@ float fbmNoise(vec3 p, int octaves) {
 // NanoVDB GLSL Setup
 // ============================================================
 #include "volume_hit_sampling.glsl"
+#define RT_SDF_SHADOW_SAMPLE sampleNanoVDBFloatTrilinearAcc
+#include "surface_sdf_rt_shadow.glsl"
 
 float volumeExitDistance(VkVolumeInstance vol, vec3 worldPos, vec3 worldDir) {
     vec3 lp;
@@ -848,21 +846,30 @@ float nearestSurfaceSDFCrossing(vec3 rayOrigin,
         // Erring the other way erases geometry that is plainly there, which is
         // the strictly worse failure — the same reasoning as the solid probe's
         // "err toward PROBING" rule.
-        if (surface.volume_type != 2 || surface.vdb_grid_address == 0) {
+        // A live GPU surface (isLiveDenseSurface) is sampleable too: its proxy is
+        // a dense device grid, read by sampleIsoField's dense branch. Only the
+        // NanoVDB header walk below must not run on it — those bytes are floats.
+        const bool surfaceDense = isLiveDenseSurface(surface);
+        if (!surfaceDense &&
+            (surface.volume_type != 2 || surface.vdb_grid_address == 0)) {
             volumeRecordArbiterReject();
             nearestHit = min(nearestHit, beginT);
             continue;
         }
 
         pnanovdb_buf_t surfaceBuf;
-        surfaceBuf.address = surface.vdb_grid_address;
-        pnanovdb_grid_handle_t gridH;
-        gridH.address.byte_offset = 0u;
-        pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(surfaceBuf, gridH);
-        pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(surfaceBuf, treeH);
-        pnanovdb_map_handle_t mapH = pnanovdb_grid_get_map(surfaceBuf, gridH);
+        surfaceBuf.address = surfaceDense ? uint64_t(0) : surface.vdb_grid_address;
+        pnanovdb_map_handle_t mapH;
+        mapH.address.byte_offset = 0u;
         pnanovdb_readaccessor_t acc;
-        pnanovdb_readaccessor_init(acc, rootH);
+        if (!surfaceDense) {
+            pnanovdb_grid_handle_t gridH;
+            gridH.address.byte_offset = 0u;
+            pnanovdb_tree_handle_t treeH = pnanovdb_grid_get_tree(surfaceBuf, gridH);
+            pnanovdb_root_handle_t rootH = pnanovdb_tree_get_root(surfaceBuf, treeH);
+            mapH = pnanovdb_grid_get_map(surfaceBuf, gridH);
+            pnanovdb_readaccessor_init(acc, rootH);
+        }
 
         const float ISO = 0.5;
         float span = endT - beginT;

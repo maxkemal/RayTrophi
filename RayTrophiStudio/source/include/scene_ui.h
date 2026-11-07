@@ -267,23 +267,8 @@ public:
     // ═══════════════════════════════════════════════════════════
     // GLOBAL UI WIDGETS (Themable)
     // ═══════════════════════════════════════════════════════════
-    struct LCDTheme {
-        ImU32 litColor = IM_COL32(200, 200, 200, 255);    // Active segment color
-        ImU32 offColor = IM_COL32(40, 45, 50, 255);       // Inactive segment color
-        ImU32 bgColor = IM_COL32(20, 20, 20, 255);        // Background/border color
-        ImU32 textValColor = IM_COL32(180, 230, 255, 255);// Value text color
-        bool isRetroGreen = false;                        // Preset flag
-    };
-    static LCDTheme currentTheme;
-    
-    enum class UISliderStyle { Modern, RetroLCD };
-    static UISliderStyle globalSliderStyle; // Definition
-
-    // Global LCD Slider Widget (Direct Call)
-    static bool DrawLCDSlider(const char* id, const char* label, float* value, float min, float max, 
-                              const char* format, bool keyed = false, 
-                              std::function<void()> onKeyframeClick = nullptr, int segments = 16);
-
+    // Shared adaptive property row. The trailing argument is retained only
+    // for source compatibility with existing callers; it no longer affects rendering.
     static bool DrawSmartFloat(const char* id, const char* label, float* value, float min, float max, 
                                const char* format = "%.2f", bool keyed = false, 
                                std::function<void()> onKeyframeClick = nullptr, int segments = 16);
@@ -1511,6 +1496,7 @@ public:
     bool show_python_console = false;
     bool show_remote_ipc_panel = false;
     float bottom_panel_height = 100.0f; // Default height
+    void dockToBottom(const char* window_name);
 private:
     // --- UI Structure ---
     void drawPanels(UIContext& ctx);
@@ -1633,7 +1619,7 @@ private:
     bool docking_layout_dirty = false;   // Rebuild the default DockBuilder layout next frame
     unsigned int dockspace_id = 0;      // Cached ID of the dockspace
     unsigned int dock_bottom_id = 0;     // Cached ID of the bottom dock node
-    void dockToBottom(const char* window_name);
+    
     void drawDockSpaceHost(UIContext& ctx); // Hosts the DockSpace + default layout, feeds viewport rect back to legacy offsets
     // --- Detachable (tear-off) Properties sub-tabs ---
     // Side-effect-free editor tabs can be popped into their own dockable window so two

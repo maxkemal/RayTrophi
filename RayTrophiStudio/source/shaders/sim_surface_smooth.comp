@@ -1,0 +1,51 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// One confidence-gated Laplacian sweep. CPU twin: smoothSurfaceTiles with
+// support_confidence (the only form buildLevelSet calls). anchor is the
+// unsmoothed gather result; a move is clamped to +-displacement limit of it.
+layout(local_size_x = 256) in;
+#include "sim_surface_common.glsl"
+layout(set = 0, binding = 0) readonly buffer Src { float src[]; };
+layout(set = 0, binding = 1) buffer Dst { float dst[]; };
+layout(set = 0, binding = 2) readonly buffer Anchor { float anchor[]; };
+layout(set = 0, binding = 3) readonly buffer Confidence { float confidence[]; };
+void main() {
+    uint c = gl_GlobalInvocationID.x;
+    int nx = pc.grid.x, ny = pc.grid.y, nz = pc.grid.z;
+    uint plane = uint(nx) * uint(ny);
+    if (c >= plane * uint(nz)) return;
+    int x = int(c % uint(nx));
+    int y = int((c / uint(nx)) % uint(ny));
+    int z = int(c / plane);
+    float far_value = pc.band.x;
+    float value = src[c];
+    bool is_active = value < far_value - 1.0e-5;
+    float conf = confidence[c];
+    bool thin = false;
+    float sum = 0.0;
+    int count = 0;
+    int s = max(1, pc.reach.z);
+    // Pairs in the CPU's order: x, then y, then z.
+    if (x >= s && x + s < nx) {
+        float a = src[c - uint(s)], b = src[c + uint(s)];
+        if (a >= far_value - 1.0e-5 || b >= far_value - 1.0e-5) conf = 0.0;
+        else { thin = thin || (a > 0.0 && b > 0.0); sum += a + b; count += 2; }
+    }
+    if (y >= s && y + s < ny) {
+        float a = src[c - uint(nx * s)], b = src[c + uint(nx * s)];
+        if (a >= far_value - 1.0e-5 || b >= far_value - 1.0e-5) conf = 0.0;
+        else { thin = thin || (a > 0.0 && b > 0.0); sum += a + b; count += 2; }
+    }
+    if (z >= s && z + s < nz) {
+        float a = src[c - plane * uint(s)], b = src[c + plane * uint(s)];
+        if (a >= far_value - 1.0e-5 || b >= far_value - 1.0e-5) conf = 0.0;
+        else { thin = thin || (a > 0.0 && b > 0.0); sum += a + b; count += 2; }
+    }
+    float next = value;
+    if (is_active && count == 6 && !thin && conf > 0.0) {
+        next += 0.65 * conf * (sum / float(count) - value);
+        float a0 = anchor[c];
+        next = clamp(next, a0 - pc.band.z, a0 + pc.band.z);
+    }
+    dst[c] = next;
+}

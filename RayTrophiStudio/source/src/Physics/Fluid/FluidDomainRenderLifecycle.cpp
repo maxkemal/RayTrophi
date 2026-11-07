@@ -4,6 +4,17 @@
 
 #include <type_traits>
 
+void SceneData::refreshFluidSurfaceMaterialBindings() {
+    // Material IDs are embedded in the composition field. Accumulation reset
+    // and a volume-property refresh alone cannot replace that field. Publish
+    // from the current live state, without restoring a timeline cache frame or
+    // waiting for another simulation step. Both UI and API use this commit.
+    refreshFluidSurfaceMaterial();
+    g_materials_dirty = true;
+    requestSimulationTimelineRenderResync();
+    syncSimulationRenderVolumes();
+}
+
 bool SceneData::hasAuthoritativeGridFluidDomain(const std::string& name) const {
     for (const auto& system : particle_systems) {
         if (!system.runtime) continue;

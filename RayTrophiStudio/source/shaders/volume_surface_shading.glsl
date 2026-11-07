@@ -338,6 +338,20 @@
         float isoMixB = 0.0;
         sampleComposition(vol, hitPos, isoMatSlot, isoMatSlotB, isoMixB);
 
+        // Publish a real primary-surface record. Without DONE, raygen treated
+        // this visible SDF as sky for motion/history even though its AOV colour
+        // and normal were written below. The surface has no triangle motion ID.
+        if ((payload.primaryMeta & PL_PRIMARY_DONE) == 0u) {
+            float primarySlot = isoMixB >= 0.5 ? isoMatSlotB : isoMatSlot;
+            uint primaryMaterial = primarySlot > 0.5
+                ? uint(max(primarySlot, 1.0) - 1.0) : PL_MATID_MASK;
+            payload.primaryMeta = (payload.primaryMeta & PL_DISP_MASK) |
+                PL_PRIMARY_DONE | (primaryMaterial & PL_MATID_MASK);
+            payload.primaryARG = packHalf2x16(vol.scatter_color.rg);
+            payload.primaryABT = packHalf2x16(vec2(vol.scatter_color.b, 1.0));
+            payload.primaryNrm = plPackNormal(N);
+        }
+
         if (isoMatSlot > 0.5 || isoMatSlotB > 0.5) {
             // ★ A slot of 0 means "the built-in dielectric" for THAT substance,
             // which is a real authoring choice — one substance a full Principled

@@ -55,6 +55,8 @@ struct MatterFogFieldInput {
     const FluidViewPlan* plan = nullptr;
     FogFieldGrid carrier_grid;
     float parcel_density = 1.0f;
+    // Render-only Gaussian sigma, in carrier-grid voxels. Gas fields are unchanged.
+    float spread_voxels = 0.0f;
     uint32_t default_substance_tag = 0;
     const GasFogFieldView* gas = nullptr;
     std::size_t max_streams = 32;

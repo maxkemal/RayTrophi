@@ -813,9 +813,11 @@
     <ClInclude Include="source\include\Fluid\FluidObject.h" />
     <ClInclude Include="source\include\Fluid\FluidSimulationSystem.h" />
     <ClInclude Include="source\include\Fluid\FluidLevelSet.h" />
+    <ClInclude Include="source\include\Fluid\MeshVolumeTest.h" />
     <ClInclude Include="source\include\Fluid\FluidThermalLiquid.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleLabels.h" />
     <ClInclude Include="source\include\Fluid\FluidParticleLabelsGpu.h" />
+    <ClInclude Include="source\include\Fluid\FluidSurfaceGpu.h" />
     <ClInclude Include="source\include\Fluid\FluidMistCoupling.h" />
     <ClInclude Include="source\include\Fluid\FluidMistPhaseExchange.h" />
     <ClInclude Include="source\include\Fluid\GasSurfaceGeometry.h" />
@@ -1857,6 +1859,7 @@
     <ClInclude Include="source\include\RayFusion\ProbeBounce.h" />
     <None Include="source\shaders\rayfusion_probe_bounce.glsl" />
     <None Include="source\shaders\surface_sdf_shadow_query.glsl" />
+    <None Include="source\shaders\surface_sdf_rt_shadow.glsl" />
     <None Include="source\shaders\rayfusion_probe_trace_beta.comp" />
     <ClCompile Include="source\src\Viewport\SelectionOutlineUpload.cpp" />
     <ClCompile Include="source\src\RayFusion\ProbeField.cpp">
@@ -1939,6 +1942,7 @@
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
     <ClCompile Include="source\src\Api\RtApiGasFieldStats.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp" />
+    <ClCompile Include="source\src\Api\RtApiFluidSurface.cpp" />
     <ClCompile Include="source\src\Api\RtApiSubstance.cpp" />
     <ClCompile Include="source\src\Api\RtApiMatterExchange.cpp" />
     <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp" />
@@ -2052,6 +2056,8 @@
     <ClInclude Include="source\include\Api\MatterPhaseOutputApi.h" />
     <ClInclude Include="source\include\Fluid\MatterPhaseOutputJson.h" />
     <ClInclude Include="source\include\Fluid\MatterFogFields.h" />
+    <ClInclude Include="source\include\UI\MatterFogSpreadUI.h" />
+    <ClInclude Include="source\include\UI\ColorControls.h" />
     <ClInclude Include="source\include\Fluid\MatterFogStreams.h" />
     <ClInclude Include="source\include\Fluid\FogOpticalBounds.h" />
     <ClInclude Include="source\include\Fluid\FogFieldDigest.h" />
@@ -2397,6 +2403,7 @@
     <ClCompile Include="source\src\Physics\Fluid\FluidViewResolver.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabels.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabelsGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\FluidSurfaceGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidMistCoupling.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidMistPhaseExchange.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\GasSurfaceGeometry.cpp" />
@@ -2803,6 +2810,12 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\MatterMaterialPreset.h" />
+    <ClInclude Include="source\include\Fluid\FrozenSurfaceMaterial.h" />
+    <ClInclude Include="source\include\Fluid\FluidSurfaceSupport.h" />
+    <ClCompile Include="source\src\Physics\Fluid\FrozenSurfaceMaterial.cpp" />
+    <None Include="source\shaders\sim_surface_gather_supported.comp" />
+    <None Include="source\shaders\sim_surface_composition_phase.comp" />
+    <None Include="source\shaders\sim_surface_support.glsl" />
     <ClCompile Include="source\src\Physics\Fluid\MatterMaterialPreset.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -2856,6 +2869,12 @@
     <None Include="source\shaders\sim_matter_grain_list_build.comp" />
     <None Include="source\shaders\sim_matter_grain_hash.comp" />
     <None Include="source\shaders\sim_matter_grain_step.comp" />
+    <None Include="source\shaders\sim_fluid_label_link_clear.comp" />
+    <None Include="source\shaders\sim_fluid_label_link_scatter.comp" />
+    <None Include="source\shaders\sim_fluid_label_link_classify.comp" />
+    <None Include="source\shaders\sim_fluid_label_linked.glsl" />
+    <None Include="source\shaders\sim_matter_grain_active_classify.comp" />
+    <None Include="source\shaders\sim_matter_grain_active.glsl" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="source\include\Fluid\ColliderGpuQuery.h" />
@@ -3386,6 +3405,7 @@
     <ClCompile Include="source\src\UI\RealtimeDenoiserControls.cpp" />
     <ClInclude Include="source\include\Backend\VulkanRealtimeDenoiser.h" />
     <ClInclude Include="source\include\Backend\RealtimeDenoiserTypes.h" />
+    <ClInclude Include="source\include\Backend\RealtimeDenoiserSettingsJson.h" />
     <ClInclude Include="source\include\Api\RtApiRealtimeDenoiser.h" />
     <ClInclude Include="source\src\Api\RtIpcRealtimeDenoiser.h" />
     <ClInclude Include="source\src\Api\RtRealtimeDenoiserBindings.h" />
@@ -3423,6 +3443,7 @@
     <ClInclude Include="source\include\UV\UvLayout.h" />
     <ClInclude Include="source\include\UV\UvService.h" />
     <ClInclude Include="source\include\UI\UvEditorUI.h" />
+    <ClInclude Include="source\include\UI\UvTexturePreview.h" />
     <ClInclude Include="source\src\Api\RtUvBindings.h" />
     <ClCompile Include="source\src\UV\UvLayout.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -3430,10 +3451,23 @@
     <ClCompile Include="source\src\UV\UvService.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="source\src\UV\UvAttributeUpdate.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_UvUpdate.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OptixWrapper_UvUpdate.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClInclude Include="source\include\UV\UvAttributeUpdate.h" />
     <ClCompile Include="source\src\UV\UvXatlasBackend.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="source\src\UI\UvEditorUI.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\UvTexturePreview.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtUvBindings.cpp">
@@ -3451,6 +3485,22 @@
     </ClCompile>
     <ClCompile Include="source\src\UV\UvProjection.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\DNA\GeometryRemap.h" />
+    <ClInclude Include="source\include\UV\UvGeometryTransaction.h" />
+    <ClCompile Include="source\src\MeshEdit\GeometryRemap.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvCornerRemap.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvGeometryTransaction.cpp">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
   </ItemGroup>
 </Project>

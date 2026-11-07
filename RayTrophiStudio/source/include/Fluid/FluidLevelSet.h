@@ -34,8 +34,10 @@
 #include "../FluidGrid.h"
 #include "FluidParticles.h"
 #include "FluidViewResolver.h"
+#include "SubstanceTag.h"
 #include <vector>
 #include <cstddef>
+#include <string>
 
 namespace RayTrophiSim {
 namespace Fluid {
@@ -55,7 +57,8 @@ struct LevelSetParams {
     // liquid silhouette; it neither raises the SDF resolution nor widens the
     // particle kernel, so its build cost is effectively constant. A modest
     // positive default restores the full water body formerly (and incorrectly)
-    // obtained by driving the shader's optical density.
+    // obtained by driving the shader's optical density. Sparse support now
+    // limits this dilation so isolated drops do not inflate into empty gaps.
     float surface_offset_voxels = 0.65f;
 
     // Distance assigned to cells with no in-range particles. Must be > 0 and
@@ -104,6 +107,12 @@ struct LevelSetParams {
     // are not modified. Below anisotropy_neighbor_min, keep the original centre.
     // 0 restores the raw-centre producer; 1 fully follows the local mean.
     float position_smoothing = 0.9f;
+    // WHERE the surface is built, never what: true = the simulation Vulkan
+    // compute device (FluidSurfaceGpu.h, the device twin of this builder),
+    // falling back to the CPU builder for what it refuses (no Vulkan compute,
+    // anisotropic kernels, volume foam). false = CPU
+    // always. Kept as a switch because the CPU builder is the parity reference.
+    bool gpu_build = true;
 };
 
 struct LevelSetStats {
@@ -129,6 +138,16 @@ struct LevelSetStats {
     int   eff_ny = 0;
     int   eff_nz = 0;
     float eff_voxel = 0.0f;
+
+    // Which builder produced this field (GPU_YUZEY_LEVEL_SET.md):
+    // 0 = CPU, 1 = GPU with the proxy read back to the host (raster viewport,
+    // OptiX, Embree consume host data), 2 = GPU live: the Vulkan RT backend
+    // reads the device buffers by address, nothing crosses back.
+    int route = 0;
+    // Why the GPU route was not taken (empty when it was, or was not asked).
+    std::string gpu_status;
+    std::size_t upload_bytes = 0;
+    std::size_t download_bytes = 0;
 };
 
 // Build an SDF grid aligned with `grid` from the current particle positions.
@@ -228,7 +247,46 @@ struct SubstanceMaterialEntry {
     // whole reason the retired `fluid_blend_substance_materials` flag looked
     // wrong: its "dominant material" mode was really "voxelised material".
     float    miscibility = 1.0f;
+    // Automatic phase fallback, considered only without an authored source material.
+    bool frozen_only = false;
 };
+
+// Entry list capacity: bindings, an untagged alias and the frozen-phase fallback.
+constexpr std::size_t kSubstanceMaterialEntryCapacity = kMaxFluidSubstanceMaterials + 2;
+
+// ★★★ THE ONE PLACE a domain's binding table becomes composition entries, for
+// the CPU gather, the GPU gather and the parity probe alike.
+//
+// Untagged liquid IS the domain's Default Substance (seeded and untagged-source
+// parcels carry tag 0; see GasSaturation / SourceSplatRenderPlan, which already
+// treat it so). The Output list offers that substance by name, so binding a
+// material to it must reach those parcels: the binding gets a second entry under
+// kSubstanceUntagged. Without it a seeded domain kept the domain material while
+// the panel showed the binding, and a replayed cache (whose parcels carry the
+// real tag) looked right — the two disagreed only on first play (2026-11-04).
+template <class Bindings>
+std::size_t collectSubstanceMaterialEntries(const Bindings& bindings,
+                                            const std::string& default_substance,
+                                            SubstanceMaterialEntry* out) {
+    std::size_t n = 0;
+    bool aliased = false;
+    for (const auto& b : bindings) {
+        if (b.substance.empty()) continue;
+        if (n >= kMaxFluidSubstanceMaterials) break;
+        out[n].tag = substanceTag(b.substance);
+        out[n].material_id = b.material_id;
+        out[n].miscibility = b.miscibility;
+        ++n;
+        if (!aliased && !default_substance.empty() && b.substance == default_substance) {
+            aliased = true;
+            out[kMaxFluidSubstanceMaterials].tag = kSubstanceUntagged;
+            out[kMaxFluidSubstanceMaterials].material_id = b.material_id;
+            out[kMaxFluidSubstanceMaterials].miscibility = b.miscibility;
+        }
+    }
+    if (aliased) out[n++] = out[kMaxFluidSubstanceMaterials];
+    return n;
+}
 
 bool buildCompositionGrid(const FluidParticles& particles,
                           const FluidSim::FluidGrid& grid,

@@ -7,7 +7,7 @@ bool dispatchUvIpc(const std::string& method, const nlohmann::json& params,
         method == "uv.info" || method == "uv.layout" || method == "uv.transform" ||
         method == "uv.normalize" || method == "uv.pack" || method == "uv.unwrap" ||
         method == "uv.open" || method == "uv.flip_u" || method == "uv.flip_v" ||
-        method == "uv.swap_uv" || method == "uv.project_view") {
+        method == "uv.swap_uv" || method == "uv.project_view" || method == "uv.set_corners") {
         result = enqueue([operation = method.substr(3), params](UIContext&) {
             return invokeUv(operation, params);
         });

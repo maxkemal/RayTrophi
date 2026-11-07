@@ -4,14 +4,17 @@
 
 // Native SurfaceSDF occlusion for RayFusion shadow rays. This reads the same
 // 688-byte VkVolumeInstance table and NanoVDB addresses as the surface pass.
+#ifndef RF_SDF_VOLUME_WORDS
 layout(set = 0, binding = 6, std430) readonly buffer RfVolumeRawBuffer {
     uint rfVolumeWords[];
 };
+#define RF_SDF_VOLUME_WORDS rfVolumeWords
+#endif
 
 const uint RF_VOLUME_STRIDE_WORDS = 172u;
 
 uint rfVolWord(uint volumeIndex, uint byteOffset) {
-    return rfVolumeWords[volumeIndex * RF_VOLUME_STRIDE_WORDS +
+    return RF_SDF_VOLUME_WORDS[volumeIndex * RF_VOLUME_STRIDE_WORDS +
                          (byteOffset >> 2u)];
 }
 
@@ -71,6 +74,7 @@ bool rfVolInterval(uint vi, vec3 origin, vec3 direction,
     return farT > max(nearT, 0.0);
 }
 
+#ifndef RF_SDF_EXTERNAL_NANOVDB
 #define PNANOVDB_GLSL
 #define PNANOVDB_BUF_CUSTOM
 struct pnanovdb_buf_t { uint64_t address; };
@@ -89,6 +93,7 @@ uvec2 pnanovdb_buf_read_uint64(pnanovdb_buf_t buf, uint byteOffset) {
 void pnanovdb_buf_write_uint32(pnanovdb_buf_t buf, uint byteOffset, uint value) {}
 void pnanovdb_buf_write_uint64(pnanovdb_buf_t buf, uint byteOffset, uvec2 value) {}
 #include "PNanoVDB.h"
+#endif
 
 float rfSampleGrid(pnanovdb_buf_t buf, pnanovdb_map_handle_t mapHandle,
                    inout pnanovdb_readaccessor_t accessor, vec3 position) {
@@ -137,7 +142,7 @@ bool rfSurfaceSdfOccludes(vec3 origin, vec3 direction, float rayMin,
                           uint materialCount) {
     uint count = min(volumeCount, 16u);
     for (uint vi = 0u; vi < count; ++vi) {
-        if (rfVolWord(vi, 168u) == 0u || rfVolWord(vi, 168u) != 2u ||
+        if (rfVolWord(vi, 172u) == 0u || rfVolWord(vi, 168u) != 2u ||
             int(rfVolWord(vi, 428u)) != 4 ||
             rfVolAddress(vi, 232u) == uint64_t(0)) {
             continue;

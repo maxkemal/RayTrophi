@@ -414,6 +414,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_replace_on_seed"] = d.fluid_replace_on_seed;
     j["fluid_pending_seed"] = d.fluid_pending_seed;
     j["fluid_seed_mode"] = (int)d.fluid_seed_mode;
+    j["fluid_seed_mesh_object"] = d.fluid_seed_mesh_object;
     j["fluid_fill_level"] = d.fluid_fill_level;
     j["fluid_flammable"] = d.fluid_flammable;
     j["fluid_auto_ignite"] = d.fluid_auto_ignite;
@@ -484,6 +485,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_level_set_params"]["anisotropy_max_stretch"] = d.fluid_level_set_params.anisotropy_max_stretch;
     j["fluid_level_set_params"]["anisotropy_neighbor_min"] = d.fluid_level_set_params.anisotropy_neighbor_min;
     j["fluid_level_set_params"]["position_smoothing"] = d.fluid_level_set_params.position_smoothing;
+    j["fluid_level_set_params"]["gpu_build"] = d.fluid_level_set_params.gpu_build;
 
     j["fluid_surface_band_voxels"] = d.fluid_surface_band_voxels;
     j["fluid_surface_ior"] = d.fluid_surface_ior;
@@ -649,6 +651,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_replace_on_seed")) d.fluid_replace_on_seed = j["fluid_replace_on_seed"];
     if (j.contains("fluid_pending_seed")) d.fluid_pending_seed = j["fluid_pending_seed"];
     if (j.contains("fluid_seed_mode")) d.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)(int)j["fluid_seed_mode"];
+    if (j.contains("fluid_seed_mesh_object")) d.fluid_seed_mesh_object = j["fluid_seed_mesh_object"].get<std::string>();
     if (j.contains("fluid_fill_level")) d.fluid_fill_level = j["fluid_fill_level"];
     if (j.contains("fluid_flammable")) d.fluid_flammable = j["fluid_flammable"];
     if (j.contains("fluid_auto_ignite")) d.fluid_auto_ignite = j["fluid_auto_ignite"];
@@ -746,6 +749,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         if (lsp.contains("anisotropy_max_stretch")) d.fluid_level_set_params.anisotropy_max_stretch = lsp["anisotropy_max_stretch"];
         if (lsp.contains("anisotropy_neighbor_min")) d.fluid_level_set_params.anisotropy_neighbor_min = lsp["anisotropy_neighbor_min"];
         if (lsp.contains("position_smoothing")) d.fluid_level_set_params.position_smoothing = lsp["position_smoothing"];
+        if (lsp.contains("gpu_build")) d.fluid_level_set_params.gpu_build = lsp["gpu_build"];
     }
 
     if (j.contains("fluid_surface_band_voxels")) d.fluid_surface_band_voxels = j["fluid_surface_band_voxels"];

@@ -1,7 +1,9 @@
-#include "UI/VolumeMaterialUI.h"
+﻿#include "UI/VolumeMaterialUI.h"
+#include "UI/ColorControls.h"
 #include "UI/MatterLaneControls.h"
 #include "UI/GrainMeshLibraryUI.h"
 #include "UI/SourceSplatGeometryUI.h"
+#include "UI/MatterFogSpreadUI.h"
 #include "Fluid/SourceSplatRenderPlan.h"
 #include "DomainPanelWidgets.h"
 #include "Fluid/MatterPoreAuthoring.h"
@@ -15,6 +17,7 @@
 #include "ui_modern.h"
 
 #include "Api/RtApi.h"
+#include <map>
 #include "Fluid/FluidSplatMaterialAuthoring.h"
 #include "Fluid/FluidFogDensity.h"
 #include "Fluid/FluidGridResourceBudget.h"
@@ -828,7 +831,8 @@ void drawSimulationDomainControls(
                     }
 
                     using RayTrophiSim::FluidSeedMode;
-                    const char* seed_mode_labels[] = { "Seed Box", "Fill Domain (resting tank)" };
+                    const char* seed_mode_labels[] = { "Seed Box", "Fill Domain (resting tank)",
+                                                       "Mesh Volume (fill an object)" };
                     int seed_mode_idx = static_cast<int>(domain.fluid_seed_mode);
                     ImGui::SetNextItemWidth(DomainUi::itemWidth());
                     if (ImGui::Combo("Seed Mode", &seed_mode_idx, seed_mode_labels, IM_ARRAYSIZE(seed_mode_labels))) {
@@ -840,6 +844,29 @@ void drawSimulationDomainControls(
                                           "Fill Domain: pre-fill the whole domain footprint from the floor up to the fill level "
                                           "as a resting tank \xE2\x80\x94 skips the long settling transient for standing water; "
                                           "colliders then carve waves on top.");
+                    }
+
+                    if (domain.fluid_seed_mode == FluidSeedMode::MeshVolume) {
+                        // The object whose INSIDE is filled (a hidden castle
+                        // mesh seeded with sand). Binding only: hiding the
+                        // object is the user's, in the outliner.
+                        const std::string current = domain.fluid_seed_mesh_object.empty()
+                            ? std::string("(choose an object)") : domain.fluid_seed_mesh_object;
+                        ImGui::SetNextItemWidth(DomainUi::itemWidth());
+                        if (ImGui::BeginCombo("Seed Object", current.c_str())) {
+                            for (const auto& name : rtapi::listObjects()) {
+                                if (ImGui::Selectable(name.c_str(),
+                                                      name == domain.fluid_seed_mesh_object)) {
+                                    domain.fluid_seed_mesh_object = name;
+                                }
+                            }
+                            ImGui::EndCombo();
+                        }
+                        DomainUi::tooltip("Seed Fluid Now fills the inside of this object with the\n"
+                            "domain's Default Substance. Liquid/MPM use Seed Particles Per Voxel;\n"
+                            "DEM grains use their physical packing. The mesh should be closed;\n"
+                            "an open surface has no inside and seeds nothing.\n"
+                            "Script: fluid.seed_mesh(domain, object, ...)");
                     }
 
                     if (domain.fluid_seed_mode == FluidSeedMode::FillLevel) {
@@ -1040,7 +1067,20 @@ void drawSimulationDomainControls(
                         }
                     }
 
-                    if (ImGui::Button("Seed Fluid Now##SeedButton", ImVec2(-1, 30))) {
+                    static std::map<std::string, std::string> s_seed_errors;
+                    const bool seed_clicked =
+                        ImGui::Button("Seed Fluid Now##SeedButton", ImVec2(-1, 30));
+                    const bool seed_hovered = ImGui::IsItemHovered();
+                    if (seed_clicked &&
+                        domain.fluid_seed_mode == RayTrophiSim::FluidSeedMode::MeshVolume) {
+                        const auto result = rtapi::seedFluidParticlesFromMesh(
+                            domain.name, domain.fluid_seed_mesh_object,
+                            domain.fluid_seed_particles_per_cell,
+                            domain.fluid_replace_on_seed, domain.fluid_reseed_on_reset);
+                        s_seed_errors[domain.name] = result.ok ? std::string() : result.error;
+                        if (result.ok) ui_ctx.start_render = true;
+                    } else if (seed_clicked) {
+                        s_seed_errors[domain.name].clear();
                         if (rtapi::seedFluidParticles(
                                 domain.name,
                                 &domain.fluid_seed_min,
@@ -1053,9 +1093,13 @@ void drawSimulationDomainControls(
                             ui_ctx.start_render = true;
                         }
                     }
-                    if (ImGui::IsItemHovered()) {
+                    if (seed_hovered) {
                         ImGui::SetTooltip("Places particles once in the authoritative grid-domain state.\n"
                                           "Reset replay is controlled separately above.");
+                    }
+                    if (const auto it = s_seed_errors.find(domain.name);
+                        it != s_seed_errors.end() && !it->second.empty()) {
+                        ImGui::TextWrapped("Seed failed: %s", it->second.c_str());
                     }
 
                     const float clear_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
@@ -3251,8 +3295,11 @@ void drawSimulationDomainControls(
                                     // it happen NOW, on the frame being viewed.
                                     if (ImGui::Selectable(unset_label, binding.material_id < 0)) {
                                         binding.material_id = -1;
-                                        scene.refreshFluidSurfaceMaterial();
-                                        scene.requestSimulationTimelineRenderResync();
+                                        scene.refreshFluidSurfaceMaterialBindings();
+                                        ui_ctx.renderer.resetCPUAccumulation();
+                                        if (ui_ctx.backend_ptr) {
+                                            ui_ctx.backend_ptr->resetAccumulation();
+                                        }
                                         ui_ctx.start_render = true;
                                     }
                                     for (std::size_t mi = 0; mi < mats.size(); ++mi) {
@@ -3260,8 +3307,11 @@ void drawSimulationDomainControls(
                                         if (ImGui::Selectable(mats[mi]->materialName.c_str(),
                                                               binding.material_id == static_cast<int>(mi))) {
                                             binding.material_id = static_cast<int>(mi);
-                                            scene.refreshFluidSurfaceMaterial();
-                                            scene.requestSimulationTimelineRenderResync();
+                                            scene.refreshFluidSurfaceMaterialBindings();
+                                            ui_ctx.renderer.resetCPUAccumulation();
+                                            if (ui_ctx.backend_ptr) {
+                                                ui_ctx.backend_ptr->resetAccumulation();
+                                            }
                                             ui_ctx.start_render = true;
                                         }
                                     }
@@ -3272,8 +3322,11 @@ void drawSimulationDomainControls(
                                     const uint16_t id = smgr.addUniqueMaterial(binding.substance + " Material", fresh);
                                     if (id != MaterialManager::INVALID_MATERIAL_ID) {
                                         binding.material_id = static_cast<int>(id);
-                                        scene.refreshFluidSurfaceMaterial();
-                                        scene.requestSimulationTimelineRenderResync();
+                                        scene.refreshFluidSurfaceMaterialBindings();
+                                        ui_ctx.renderer.resetCPUAccumulation();
+                                        if (ui_ctx.backend_ptr) {
+                                            ui_ctx.backend_ptr->resetAccumulation();
+                                        }
                                         ui_ctx.start_render = true;
                                     }
                                 }
@@ -3720,6 +3773,13 @@ void drawSimulationDomainControls(
                         if (ImGui::IsItemHovered()) ImGui::SetTooltip("Below this neighbour count render centres remain unchanged and spherical.");
                         ImGui::Unindent();
 
+                        sdf_changed |= ImGui::Checkbox("Build Surface on GPU", &domain.fluid_level_set_params.gpu_build);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Reconstruct the surface on the simulation Vulkan device instead of the CPU.\n"
+                                              "Same result (the CPU builder is the reference). Falls back to the CPU for\n"
+                                              "anisotropic kernels and volume foam.");
+                        }
+
                         if (sdf_changed) {
                             scene.requestSimulationTimelineRenderResync();
                             ui_ctx.renderer.resetCPUAccumulation();
@@ -3743,6 +3803,7 @@ void drawSimulationDomainControls(
                                 const bool none_sel = (domain.fluid_surface_material_id < 0);
                                 if (ImGui::Selectable("Built-in Dielectric (IOR below)", none_sel)) {
                                     domain.fluid_surface_material_id = -1;
+                                    scene.refreshFluidSurfaceMaterialBindings();
                                     mat_changed = true;
                                 }
                                 for (std::size_t mi = 0; mi < surf_mats.size(); ++mi) {
@@ -3751,6 +3812,7 @@ void drawSimulationDomainControls(
                                     ImGui::PushID(static_cast<int>(mi) + 40000);
                                     if (ImGui::Selectable(surf_mats[mi]->materialName.c_str(), sel)) {
                                         domain.fluid_surface_material_id = static_cast<int>(mi);
+                                        scene.refreshFluidSurfaceMaterialBindings();
                                         mat_changed = true;
                                     }
                                     ImGui::PopID();
@@ -3822,6 +3884,12 @@ void drawSimulationDomainControls(
                                 const auto& st = sys->domain_sdf_stats[d];
                                 ImGui::TextDisabled("Level-Set SDF Stats:\n  %zu active / %zu surface cells (SDF Build: %.2f ms)",
                                                      st.active_cells, st.surface_cells, st.build_ms);
+                                const char* route = st.route == 2 ? "GPU (RT reads device buffers)"
+                                                  : st.route == 1 ? "GPU (read back for viewport)" : "CPU";
+                                ImGui::TextDisabled("  Built on: %s", route);
+                                if (!st.gpu_status.empty()) {
+                                    ImGui::TextDisabled("  GPU fallback: %s", st.gpu_status.c_str());
+                                }
                             }
                         }
                     }
@@ -3900,7 +3968,7 @@ void drawSimulationDomainControls(
                                 bool foam_look_changed  = false;
                                 bool foam_resplat_changed = false;
                                 ImGui::BeginDisabled(!anyOf(ww_in_surface));
-                                foam_look_changed |= ImGui::ColorEdit3("Foam Color", &fo.volume_color.x);
+                                foam_look_changed |= ColorControls::field3("Foam Color", &fo.volume_color.x);
                                 if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Scattering tint of the isosurface medium (cool white = sea foam).\nA type routed to fog takes the fog material instead.");
                                 ImGui::EndDisabled();
                                 // Density drives the re-splat (SDF/temp re-upload) — gate
@@ -4099,7 +4167,11 @@ void drawSimulationDomainControls(
                     // NanoVDB shader UI
                     // Fog view: its medium lives on the fog volume and is edited
                     // there; this panel keeps only the domain-level spread.
-                    if (!RayTrophiSim::simulationDomainHasBothPhases(domain) && view_plan.fog &&
+                    if (domain.type == RayTrophiSim::SimulationDomainType::Matter && view_plan.fog) {
+                        RayTrophiSim::Fluid::drawMatterFogSpread(domain.name, domain.fluid_fog_spread_voxels);
+                    }
+                    if (domain.type != RayTrophiSim::SimulationDomainType::Matter &&
+                        !RayTrophiSim::simulationDomainHasBothPhases(domain) && view_plan.fog &&
                         UIWidgets::CollapsingHeader("Fog View##LiquidFogView",
                                                     ImGuiTreeNodeFlags_DefaultOpen)) {
                         // Same field and range as fluid.set_fog spread_voxels.
@@ -4231,7 +4303,7 @@ void drawSimulationDomainControls(
                         } else {
                             auto& body = *domain.shader;
                             bool body_changed = false;
-                            body_changed |= ImGui::ColorEdit3("Absorption Color##LiquidBody",
+                            body_changed |= ColorControls::field3("Absorption Color##LiquidBody",
                                                               &body.absorption.color.x);
                             if (ImGui::IsItemHovered())
                                 ImGui::SetTooltip(
@@ -4248,7 +4320,7 @@ void drawSimulationDomainControls(
                                 ImGui::SetTooltip("Absorption strength per world unit of depth. 0 = clear.");
                             const bool tint_active = domain.fluid_surface_material_id < 0;
                             ImGui::BeginDisabled(!tint_active);
-                            body_changed |= ImGui::ColorEdit3("Refraction Tint##LiquidBody",
+                            body_changed |= ColorControls::field3("Refraction Tint##LiquidBody",
                                                               &body.scattering.color.x);
                             ImGui::EndDisabled();
                             if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))

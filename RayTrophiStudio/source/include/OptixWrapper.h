@@ -232,6 +232,7 @@ public:
     bool updateMeshBLASFromTriangles(const std::string& node_name, const std::vector<std::shared_ptr<Triangle>>& triangles);
     bool updateTerrainBLASPartial(const std::string& node_name, class TerrainObject* terrain);
     bool updateFlatMeshBLAS(const std::string& node_name, const class TriangleMesh* mesh);
+    bool updateFlatMeshUVs(const class TriangleMesh* mesh);
 
     // ═══════════════════════════════════════════════════════════════════════
     // INCREMENTAL UPDATES (Fast delete/duplicate without BLAS rebuild)

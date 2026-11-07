@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: MIT
 #include "UV/UvService.h"
+#include "UV/UvGeometryTransaction.h"
+#include "UV/UvAttributeUpdate.h"
+#include "DNA/GeometryRemap.h"
 
 #include "Api/RtApiInternal.h"
 #include "ProjectManager.h"
 #include "SceneHistory.h"
 #include "TriangleMesh.h"
+#include "MaterialManager.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <unordered_set>
 #include <utility>
@@ -18,6 +24,7 @@ namespace UV {
 namespace {
 
 using nlohmann::json;
+std::atomic<uint64_t> attribute_revision{0};
 
 std::vector<std::shared_ptr<TriangleMesh>> meshes(const std::string& object) {
     std::vector<std::shared_ptr<TriangleMesh>> result;
@@ -120,8 +127,10 @@ private:
             return;
         }
         std::copy(values.begin(), values.end(), destination);
+        ctx.scene.invalidateSurfaceMeshCache(mesh_->nodeName);
         ctx.scene.requestUiMeshCacheRebuild();
-        scheduleSceneMutationRebuilds(ctx, false);
+        publishAttributeUpdate(ctx, mesh_.get());
+        attribute_revision.fetch_add(1, std::memory_order_release);
         ProjectManager::getInstance().markModified();
     }
 };
@@ -145,7 +154,52 @@ Vec2 pair(const json& params, const char* key, Vec2 fallback) {
 } // namespace
 
 uint64_t sceneRevision() {
-    return g_scene_geometry_generation.load(std::memory_order_relaxed);
+    return g_scene_geometry_generation.load(std::memory_order_acquire) +
+        attribute_revision.load(std::memory_order_acquire);
+}
+
+std::vector<PreviewTexture> previewTextures(const std::string& object, int mesh_index) {
+    std::vector<PreviewTexture> result;
+    const auto mesh = resolve(object, mesh_index);
+    if (!mesh || !mesh->geometry) {
+        return result;
+    }
+    const auto& geometry = *mesh->geometry;
+    const auto* ids = geometry.get_material_ids();
+    if (!ids || geometry.get_core_attribute_count(DNA::Attr::MaterialID) !=
+                    geometry.get_vertex_count()) {
+        return result;
+    }
+    std::set<uint16_t> materials;
+    for (uint32_t vertex : geometry.indices) {
+        if (vertex < geometry.get_vertex_count()) {
+            materials.insert(ids[vertex]);
+        }
+    }
+    for (uint16_t id : materials) {
+        const auto* material = MaterialManager::getInstance().getMaterial(id);
+        if (!material) {
+            continue;
+        }
+        const std::pair<const char*, const MaterialProperty*> channels[] = {
+            {"Albedo", &material->albedoProperty},
+            {"Roughness", &material->roughnessProperty},
+            {"Metallic", &material->metallicProperty},
+            {"Specular", &material->specularProperty},
+            {"Normal", &material->normalProperty},
+            {"Opacity", &material->opacityProperty},
+            {"Transmission", &material->transmissionProperty},
+            {"Emission", &material->emissionProperty},
+            {"Height", &material->heightProperty}
+        };
+        for (const auto& channel : channels) {
+            if (channel.second->texture) {
+                result.push_back({std::to_string(id) + " / " + material->materialName +
+                    " / " + channel.first, id, channel.second->texture});
+            }
+        }
+    }
+    return result;
 }
 
 bool inspect(const std::string& object, int mesh, Layout& layout, std::string& error) {
@@ -163,7 +217,9 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
         }
         if (operation == "capabilities") {
             return json{{"xatlas", xatlasAvailable()}, {"uv_set", 0},
-                {"island_selection", true}, {"corner_remap", false},
+                {"island_selection", true}, {"vertex_selection", true},
+                {"edge_endpoint_transform", true}, {"corner_remap", true}, {"set_corners", true},
+                {"attribute_updates", true},
                 {"seam_authoring", false}, {"texture_preservation", false},
                 {"async_atlas", false}, {"atlas_triangle_limit", 20000}};
         }
@@ -200,6 +256,12 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
             {"revision", layout.revision}, {"vertices", layout.coordinates.size()},
             {"triangles", layout.indices.size() / 3}, {"islands", layout.island_count}};
         if (operation == "info") {
+            summary["textures"] = json::array();
+            for (const auto& item : previewTextures(object, mesh_index)) {
+                summary["textures"].push_back({{"label", item.label},
+                    {"material", item.material}, {"width", item.texture->width},
+                    {"height", item.texture->height}, {"name", item.texture->name}});
+            }
             return summary;
         }
         if (operation == "layout") {
@@ -213,12 +275,16 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
             const size_t end = (std::min)(layout.islands.size(), size_t(first) + limit);
             for (size_t face = size_t(first); face < end; ++face) {
                 json corners = json::array();
+                json vertices = json::array();
                 for (size_t k = 0; k < 3; ++k) {
-                    const Vec2& uv = layout.coordinates[layout.indices[face * 3 + k]];
+                    const uint32_t vertex = layout.indices[face * 3 + k];
+                    const Vec2& uv = layout.coordinates[vertex];
                     corners.push_back({uv.u, uv.v});
+                    vertices.push_back(vertex);
                 }
                 faces.push_back({{"face", face}, {"island", layout.islands[face]},
-                                  {"uv", std::move(corners)}});
+                                  {"uv", std::move(corners)},
+                                  {"vertex_indices", std::move(vertices)}});
             }
             summary["faces"] = std::move(faces);
             summary["next_face"] = end < layout.islands.size() ? json(end) : json(nullptr);
@@ -226,7 +292,8 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
         }
         const bool repair = operation == "flip_u" || operation == "flip_v" || operation == "swap_uv";
         if (operation != "transform" && operation != "normalize" && !repair &&
-            operation != "unwrap" && operation != "pack" && operation != "project_view") {
+            operation != "unwrap" && operation != "pack" && operation != "project_view" &&
+            operation != "set_corners") {
             return failure("uv_unknown_operation");
         }
         if (rtapi::renderJobActive()) {
@@ -234,6 +301,9 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
         }
         if (!rtapi::g_history) {
             return failure("uv_history_unavailable");
+        }
+        if (mesh->transient) {
+            return failure("uv_generated_geometry: edit its authoring source instead");
         }
         for (const auto& entry : rtapi::g_ctx->scene.world.objects) {
             const auto other = std::dynamic_pointer_cast<TriangleMesh>(entry);
@@ -250,8 +320,44 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
             return failure("uv_texture_change_ack_required: texture rebake is not available yet");
         }
         std::vector<Vec2> before = layout.coordinates;
-        if (operation == "transform" || operation == "normalize" || repair) {
+        const auto before_indices = layout.indices;
+        if (operation == "set_corners") {
+            const auto& values = params.at("corners");
+            if (!values.is_array() || values.size() != layout.indices.size()) {
+                return failure("uv_corner_count_mismatch");
+            }
+            if (values.size() > 60000) {
+                return failure("uv_async_required: corner edits limited to 60000 corners");
+            }
+            std::vector<Vec2> corners;
+            corners.reserve(values.size());
+            for (const auto& uv : values) {
+                if (!uv.is_array() || uv.size() != 2 ||
+                    !uv[0].is_number() || !uv[1].is_number()) {
+                    return failure("uv_invalid_corner: expected a numeric [u,v] pair");
+                }
+                corners.emplace_back(uv[0].get<float>(), uv[1].get<float>());
+            }
+            if (!applyCornerCoordinates(layout, corners, error)) {
+                return failure(error);
+            }
+        } else if (operation == "transform" || operation == "normalize" || repair) {
             const auto selected = params.value("islands", std::vector<uint32_t>{});
+            std::vector<uint32_t> vertices;
+            if (params.contains("vertices")) {
+                const auto& values = params.at("vertices");
+                if (!values.is_array() || values.empty() ||
+                    values.size() > layout.coordinates.size()) {
+                    return failure("uv_invalid_selection: vertices must be a nonempty bounded array");
+                }
+                for (const auto& value : values) {
+                    if (!value.is_number_integer() || value.get<int64_t>() < 0 ||
+                        value.get<uint64_t>() >= layout.coordinates.size()) {
+                        return failure("uv_invalid_vertex");
+                    }
+                    vertices.push_back(value.get<uint32_t>());
+                }
+            }
             const Vec2 scale = repair ? Vec2(operation == "flip_u" ? -1.0f : 1.0f,
                                              operation == "flip_v" ? -1.0f : 1.0f)
                                       : pair(params, "scale", Vec2(1, 1));
@@ -259,7 +365,8 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
                 (repair ? Vec2(0.5f, 0.5f) : pair(params, "pivot", Vec2(0.5f, 0.5f)));
             if (!transform(layout, selected, repair ? Vec2() : pair(params, "offset", Vec2()),
                     scale, pivot, repair ? 0.0f : params.value("degrees", 0.0f),
-                    operation == "normalize", error, operation == "swap_uv")) {
+                    operation == "normalize", error, operation == "swap_uv",
+                    params.contains("vertices") ? &vertices : nullptr)) {
                 return failure(error);
             }
         } else if (operation == "project_view") {
@@ -289,13 +396,30 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
             if (resolution < 64 || resolution > 8192 || padding < 0 || padding > resolution / 8) {
                 return failure("uv_invalid_atlas_options");
             }
+            uint32_t preserved_faces = 0;
             if (!atlas(layout, operation == "unwrap", uint32_t(resolution),
-                       uint32_t(padding), error)) {
+                       uint32_t(padding), error, &preserved_faces)) {
                 return failure(error);
             }
+            summary["atlas_preserved_faces"] = preserved_faces;
         }
-        const bool changed = before != layout.coordinates;
-        if (changed) {
+        const bool topology_changed = before_indices != layout.indices;
+        const bool changed = topology_changed || before != layout.coordinates;
+        summary["topology_changed"] = topology_changed;
+        summary["vertex_splits"] = layout.coordinates.size() - before.size();
+        if (topology_changed) {
+            auto candidate = DNA::remapGeometry(*mesh->geometry,
+                layout.source_vertices, layout.indices, error);
+            if (!candidate) {
+                return failure(error);
+            }
+            Vec2* uv = candidate->get_uvs_mut();
+            if (!uv) {
+                return failure("uv_remap_missing_uv_buffer");
+            }
+            std::copy(layout.coordinates.begin(), layout.coordinates.end(), uv);
+            commitGeometry(*rtapi::g_ctx, *rtapi::g_history, mesh, std::move(candidate), operation);
+        } else if (changed) {
             auto command = std::make_unique<EditCommand>(mesh, std::move(before),
                 std::move(layout.coordinates), operation);
             command->execute(*rtapi::g_ctx);
@@ -306,6 +430,8 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
             return failure(error);
         }
         summary["revision"] = layout.revision;
+        summary["vertices"] = layout.coordinates.size();
+        summary["islands"] = layout.island_count;
         return summary;
     } catch (const std::exception& exception) {
         return failure(std::string("uv_invalid_request: ") + exception.what());

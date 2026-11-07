@@ -1134,6 +1134,14 @@ void VDBVolumeManager::setLiveDenseMajorant(int volume_id,
     volume->dense_emissive_capacity = emissiveUsable ? emissive_capacity : 0;
 }
 
+void VDBVolumeManager::setLiveSurfaceUvwAddress(int volume_id, uint64_t uvw_address,
+                                                uint64_t composition_address) {
+    VDBVolumeData* volume = getVolume(volume_id);
+    if (!volume) return;
+    volume->surface_live_uvw_address = uvw_address;
+    volume->surface_live_composition_address = composition_address;
+}
+
 void VDBVolumeManager::clearLiveDenseGpuFields(int volume_id) {
     VDBVolumeData* volume = getVolume(volume_id);
     if (!volume) return;
@@ -1141,6 +1149,8 @@ void VDBVolumeManager::clearLiveDenseGpuFields(int volume_id) {
     volume->dense_temperature_address = 0;
     volume->dense_fuel_address = 0;
     volume->dense_flame_address = 0;
+    volume->surface_live_uvw_address = 0;
+    volume->surface_live_composition_address = 0;
     // The host mirror describes the same grid these addresses did. Leaving it
     // behind would let a mirroring backend keep rendering a domain the producer
     // has already withdrawn — the "'yok' != 'silinmiş'" failure, from the other

@@ -1369,7 +1369,11 @@ void main() {
                 }
             }
         }
-        float reactive = primaryVolumeHit ? 1.0 : (hit && firstHitTransmission > 0.5 ? 0.5 : 0.0);
+        // A reconstructed/procedural surface has no stable triangle-instance
+        // correspondence. Camera-only reprojection cannot track its deformation.
+        bool missingSurfaceMotion = hit && primaryInst == 0xFFFFFFFFu;
+        float reactive = primaryVolumeHit || missingSurfaceMotion ? 1.0 :
+            (hit && firstHitTransmission > 0.5 ? 0.5 : 0.0);
         imageStore(motionImage, ivec2(pixel), vec4(motion, reactive, rejected ? 1.0 : 0.0));
 
         uvec4 rec = uvec4(floatBitsToUint(P),

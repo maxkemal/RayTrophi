@@ -15,9 +15,13 @@ struct MatterGrainSeedResult {
     std::size_t emitted = 0;
     bool truncated = false;
 };
+class MeshVolumeCellMask;
+// `mask` (Mesh Volume seed): births outside the mesh are skipped; low/high are
+// then the mesh bounds.
 MatterGrainSeedResult seedMatterGrainBox(FluidParticles& particles,
     const FluidSim::FluidGrid& grid, const Vec3& low, const Vec3& high,
-    const APICSolverParams& params, float kelvin, std::size_t budget);
+    const APICSolverParams& params, float kelvin, std::size_t budget,
+    const MeshVolumeCellMask* mask = nullptr);
 
 // Host authoring/birth boundary only. Existing simulation state stays unchanged;
 // accepted new centers occupy the hash immediately, before subsequent births.
