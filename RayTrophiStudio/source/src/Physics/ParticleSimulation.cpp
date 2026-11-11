@@ -1507,7 +1507,14 @@ inline void computeSolidFaceWeights(
     };
     const Vec3 ex(h, 0.0f, 0.0f), ey(0.0f, h, 0.0f), ez(0.0f, 0.0f, h);
 
+    // ★ Parallel over k (2026-11-11): a moving 2.5 m mesh-SDF sphere in a 5 m
+    // domain re-sampled ~3M SDF points per frame on ONE thread, 205 ms a frame
+    // whether or not it touched any matter. Every face is written by exactly
+    // one iteration and the solids are read-only, so the result is identical.
     // X-faces (y-z spanning plane at x = origin + i*h).
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
     for (int k = ck0; k < ck1; ++k)
     for (int j = cj0; j < cj1; ++j)
     for (int i = ci0; i <= ci1; ++i) {
@@ -1518,6 +1525,9 @@ inline void computeSolidFaceWeights(
         cur = std::min(cur, wgt);
     }
     // Y-faces.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
     for (int k = ck0; k < ck1; ++k)
     for (int j = cj0; j <= cj1; ++j)
     for (int i = ci0; i < ci1; ++i) {
@@ -1528,6 +1538,9 @@ inline void computeSolidFaceWeights(
         cur = std::min(cur, wgt);
     }
     // Z-faces.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1)
+#endif
     for (int k = ck0; k <= ck1; ++k)
     for (int j = cj0; j < cj1; ++j)
     for (int i = ci0; i < ci1; ++i) {
