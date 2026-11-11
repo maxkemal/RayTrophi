@@ -1,10 +1,10 @@
-"""State labels route parcels to views (Faz 2): a surface liquid's spray is splat.
+"""State labels route parcels to views (Faz 2): spray follows its substance by default.
 
 Builds a temporary surface-mode liquid with a dense block (body) and a few
 isolated parcels (spray), steps it, and checks through fluid.get:
 
-  - default table: body parcels are in the sdf view, spray parcels in the
-    splat view (views[].particles / views[].labels);
+  - default table: spray follows the surface substance;
+  - an explicit spray=splat override splits spray into the splat view;
   - routing spray to hidden removes it from every view (hidden_particles);
   - reset restores the default table;
   - unknown may only follow, and a bad name fails without changing anything.
@@ -71,6 +71,11 @@ def main():
         client.call("fluid.step", dt=1.0 / 60.0)
 
         info = snapshot("default_routes")
+        assert info["label_routes"]["spray"] == "follow", info["label_routes"]
+        default_views = views_by_name(info)
+        assert "spray" in default_views["sdf"]["labels"]
+        client.call("fluid.set_label_views", domain=name, routes={"spray": "splat"})
+        info = snapshot("explicit_splat_override")
         labels = info["particle_labels"]["primary"]
         assert info["label_routes"]["spray"] == "splat", info["label_routes"]
         assert info["label_routes"]["unknown"] == "follow"
@@ -93,7 +98,7 @@ def main():
 
         client.call("fluid.set_label_views", domain=name, reset=True)
         info = snapshot("reset")
-        assert info["label_routes"]["spray"] == "splat" and info["hidden_particles"] == 0
+        assert info["label_routes"]["spray"] == "follow" and info["hidden_particles"] == 0
 
         for bad in ({"unknown": "splat"}, {"spray": "sideways"}, {"splash": "splat"}):
             try:
@@ -103,7 +108,7 @@ def main():
                 continue
             raise AssertionError("accepted an invalid route: %s" % bad)
         info = snapshot("after_rejections")
-        assert info["label_routes"]["spray"] == "splat", "a rejected call changed the table"
+        assert info["label_routes"]["spray"] == "follow", "a rejected call changed the table"
         results["passed"] = True
         print("PASS", flush=True)
     except Exception as error:

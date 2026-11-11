@@ -275,8 +275,10 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
                     ? "device_rebin_each_tick" : "frame_sparse_cfd_dem"}}},
             {"collider_faces", report->collider_faces},
             {"ice_faces", report->ice_faces},
+            {"closed_collider_faces", report->closed_collider_faces},
             {"pore_heat_mixed_j", report->pore_heat_mixed_j},
             {"collider_speed_max_m_s", report->collider_speed_max},
+            {"separation_speed_cap_m_s", report->separation_speed_cap_m_s},
             {"field_acceleration_max_m_s2", report->field_acceleration_max},
             {"collider_manifold_truncated", report->collider_manifold_truncated}};
     }

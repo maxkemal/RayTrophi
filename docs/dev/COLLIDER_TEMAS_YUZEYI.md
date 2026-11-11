@@ -224,6 +224,15 @@ kaldı ama zararsız, çünkü destek artık maskeden gelmiyor.
   `Matrix4x4::determinant` (işaret iki kez): eğik OBB'nin tersi yanlış ölçekliydi.
 - **Yapışma bandı:** 0 ≤ φ_yüz < h'de yalnızca ayrılan yüz tutulur; içeride kalan
   yapışma, plaka yarım yüz uzaklaşınca bırakıyordu.
+- **Yapışma = kohezyon (2026-11-08, CANLI — kullanıcı sahnesinde düzeldi):** yapışma yalnız normali
+  tutuyordu, sürtünme yalnız yaklaşan yüze uygulanıyordu. Kürenin altında her yüz
+  ayrılır → yapışkan yüzey **sürtünmesiz bir ray** oldu: yan taraftaki kar yüzey boyunca
+  serbest kaydı, yapışma onu alt yüzde bükerek teğet doğrultuda ~√(2gR) hızla yana
+  fırlattı (kullanıcı sahnesi: μ 20, yapışma 1 MPa, h 0.1 m, kare ~110). Yeni yasa
+  τ ≤ yapışma + μ·basınç: yapışma bütçesi gerilme ve kayma arasında paylaşılır
+  (hız biriminde hold = yapışma·dt/(ρ·h); çekmede kayma bütçesi hold − min(v_n, hold),
+  baskıda μ·|v_n| + hold); bantta (dışarıda) yaklaşan yüz normalini korur, yalnız
+  kayması tutulur. Yapışmasız collider'da davranış değişmedi.
 
 ## Ölçüm
 
@@ -235,3 +244,128 @@ Yeni exe (16:51): 5/5; sakız 0.102 m yükseldi, yükseklik 0.090 → 0.072 m, k
 Adım 3 kolları: `slide` (plaka +x 0.1 m/s, μ 0.8 → sakız ≥ %60 izler), `slip` (μ 0 →
 ≤ %25), `stretch` (iki plaka, yapışma 1e6 Pa, üst plaka kalkar → yükseklik ≥ %30 artar ve
 iki yüze de değer).
+
+## Sıvı şeridi: yükselen collider sıvıyı taşımıyor (2026-11-08, ÖLÇÜLDÜ; ayrılan duvar YAZILDI, derlenmedi)
+
+Kullanıcı sahnesi (dem1.rtp, h 0.1 m, küre R 1 m, μ 20, yapışma 1 MPa), çikolata
+(ν 0.004 m²/s, duvar kayması 0): küre 84→108. karelerde −1.29'dan 1.13 m'ye ~1.25 m/s ile
+çıkarken sıvının en üst noktası hep kürenin ALTINDA (ör. 96. kare küre altı −1.00, sıvı
+max_y −0.90; 108. kare küre altı 0.13, max_y −1.14). Kaldırılan kütle ≈ 0.
+
+Kod sırası (`MatterGpuStep.inl`, sıvı şeridi): P2G → `sim_fluid_zero_solid_faces` (katı
+yüzü = **0**) → FLIP tabanı → viskozite → basınç (kapalı yüz = katı hızı) → temas →
+yine **sıfırlama** → G2P. Yani G2P hareketli kürenin yüzünü durağan duvar olarak okur;
+küre ancak alttaki açık yüzün emmesiyle yarım hızda çeker, bir kare sonra arada boş hücre
+açılır ve bağ kopar. Ayrıca `contact_adhesion_pa`/`contact_friction` sıvı şeridinde HİÇ
+okunmuyor (adım 4 açıktı). Basınç çözümü ise ayrılmaya izin vermiyor (sınırsız çekme):
+yalnız sıfırlamayı kaldırmak her sıvıyı (su dahil) kürelere yapıştırır.
+
+Plan: katı yüzü öngörülen (P2G) hıza göre karar verir — yaklaşan/tutulan yüz = katı hızı,
+ayrılan yüz yapışma bütçesini aşarsa (ρ·h·v_n/dt > yapışma) kendi hızını korur; basınç
+çekirdekleri kapalı yüzde sv yerine bu öngörülen yüz değerini okur; G2P öncesi sıfırlama
+kalkar. Basınç çekirdekleri tüm sıvı domain'leriyle ortak → bağımsız sıvı yolu da aynı
+duvar çekirdeğine geçmeli.
+
+Yan bulgu: küre tabana inerken (alt boşluk 9 cm < h) çikolata 7 m/s ile tavana (2.76 m)
+sıçradı; ν 0.004 bu çözünürlükte etkisiz (ν·dt/h² ≈ 0.017/kare, viskoz uzunluk ölçeği
+alt-voksel).
+
+### Bal/çikolata MPM mi sıvı mı? — ölçüm ve fizik (2026-11-08)
+
+Aynı sahne, aynı tohum (4×1.2×4 m, 4 ppc, 87k parsel). Kaldırma ölçüsü = parsellerin y p95'i
+(tohum ≈ −1.5 m), küre 1.16 m'de durduktan sonra (112–128. kare):
+
+| Koşu | p95_y | Not |
+|---|---|---|
+| Sıvı şeridi, Chocolate, yapışma 1 MPa | −1.62 | yapışma okunmuyor, G2P küreyi durağan görüyor |
+| MPM (elastik yasa), bal: η 10 Pa·s KV, E 77 kPa, ν 0.49, τ 1e-4 s; yapışma 1 MPa | **+0.31** | kütlenin >%5'i kürede asılı, akmıyor |
+| Aynı MPM bal, yapışma 0 | −1.55 | yalnız viskozite: kaldırma görünmüyor |
+
+Fizik: yükselen gövdenin viskoz sıvıdan çektiği film Landau–Levich (viskoz–yerçekimi)
+rejiminde h ≈ √(μU/ρg) = √(10·1.25/(1420·9.81)) ≈ 3 cm → kütlenin ~%2'si, sonra süzülür.
+h = 10 cm'de bu film alt-voksel; hiçbir çözücü göstermez. 1 MPa yapışma sıvı için fiziksel
+değil (ıslatma yapışması ~0.1 J/m² iş, gerilme değil); MPM'deki büyük kaldırma bu sayıdan.
+Çikolata: Casson akma ~10 Pa → ρgH < τ0 ancak H < 1 mm'de tutar; bu ölçekte ~3 Pa·s Newton
+sıvısı gibi davranır. Endüstri: Newton viskoz sıvılar (su, yağ, bal, erimiş çikolata) FLIP +
+örtük viskozite (Batty–Bridson; bal kıvrılması FLIP gösterisidir); akma gerilmeli/viskoelastik
+olanlar (diş macunu, hamur, sakız, çamur) MPM. **Karar önerisi:** bal ve çikolata SIVI
+şeridinde kalır; eksik olan sıvı duvar teması (yukarıdaki plan). Yapışma sıvıda gerilme
+sınırı olarak değil, ayrılmayı geciktiren bir ıslatma terimi olarak modellenmeli.
+
+Yan bulgu (MPM bal koşuları): dinlenik karede bile live_max_speed 15–45 m/s (ortalama
+0.2–0.7 m/s) — birkaç kaçak parsel; küre tabana inerken (boşluk 9 cm < h) tavana sıçrama
+iki şeritte de var. Ayrı iş.
+
+### Ayrılan sıvı duvarı — yazıldı (2026-11-08)
+
+`sim_matter_liquid_wall.glsl` (yoğun + seyrek). Bridson'un eşitsizlik sınırının
+ön-karar hali: collider yüzünde r = s·(u − v_s) (s = katı alt hücreyse +1), hold =
+yapışma·dt/(ρ·h). r ≤ hold → kapalı (weight 0, v_s); r > hold → AÇIK (weight 1,
+u = v_s + s·(r − hold)): varyasyonel matris açık yüzü sıvı-olmayan hücreye karşı p = 0
+hayalet sayar, yani katının bıraktığı boşluk havadır. Collider yüzleri host'un ikili
+geçişinden hep 0 ağırlıkla gelir, her alt adım 0/1 yazmak kesin ve geri yükleme istemez.
+mod 0 (P2G sonrası, G2P öncesi): alan duvarları 0, iki tarafı katı yüz katı hızı, collider
+yüzü dokunulmaz (FLIP tabanı sıvının kendi hızını tutar, duvar itkisi post − pre ile gelir).
+mod 1 basınç içinde, ağırlık yüklemesinden sonra (seyrek sayfalar her çağrıda yükleniyor).
+Host: `enforceSolidBoundaries` (liquid_collider_wall) ve `enforceGridSolidFaceBoundaries(…,
+keep_collider_faces)` yalnız iç yüzleri katı hızına çeker. Yoğunluk projeksiyonu duvarı
+kapatır (konum düzeltmesi, momentum değil). Açık: CPU-yalnız basınç ikizi; Coulomb
+sürtünmesi sıvıda yok (teğet tutunma viskozitenin kaymazlık koşulundan).
+
+### Canlı (exe 14:00, 2026-11-08): duvar ÇALIŞIYOR ama ikili vokselde bağ kopuyor
+
+Kullanıcı sahnesi, eşdeğer tohum (85k), yapışma 0 ve 1 MPa: durum hash'leri FARKLI (duvar
+devrede), ama 1 MPa'da da kaldırılan kütle ≈ 0 (p95 farkı < 2 cm). Kök MPM'de 2026-11-02'de
+görülenle aynı: collider ikili voksel (h 0.1 m), küre 5 cm/kare yükseliyor. Tutulan yüz
+sıvıyı bir alt adım çeker, ama boşalan hücre kare boyunca hâlâ katı (advect çözümü
+parçacığı geri iter); hücre boşalınca araya bir HAVA hücresi girer ve yüz artık katıya
+değil havaya bakar → yapışma tutamaz. Ayrıca kürenin yan yüzlerinde (x/z) dikey hareket
+yüz normaline dik: yalnız viskozitenin kaymazlık koşulu taşır, o da h 0.1'de zayıf
+(ν·dt/h² ≈ 0.017/kare). Çözüm MPM'deki gibi: φ tabanlı alt-voksel temas + 0 ≤ φ < h
+yapışma bandı (sıvı şeridi için). Yeni not açılmadı; bu bölüm plan.
+
+Viskozite ölçek notu: çikolata ν 0.004, bal 0.007 m²/s fiziksel. 1 m / 1 m/s'de Re ≈ 250 /
+140 → bu ölçekte "koyu" görünüm cm-altı özelliklerden (ince perde, iplik, kaplama) gelir;
+h 0.1'de çözülmez. Viskozite uygulanıyor (viscosity_sparse_used true).
+
+### Sıvı yapışma bandı — CANLI (2026-11-08; test 7/7, smoke quick 13/13; > 1 voksel/kare collider bandı geçer)
+
+`sim_matter_liquid_wall.glsl` mod 3/2. Basınç içinde, mod 1'den önce: hava hücresi (maske
+0), solid_phi < h, sıvıya komşu; ∇φ'nin tersinde yarım hücre ötedeki hücre gerçek collider
+(maske −1) ve yapışması > 0 ise hücre −2 işaretlenir, svx/svy/svz ve yapışma o hücreden
+kopyalanır. Mod 1 bant hücresini katı sayar; yalnız ayrılan yüzü tutar (r ≤ 0 → açık).
+Her çıkışta (RAII) mod 2 geri alır ve karma şeritte `pressure_statics_uploaded = false`
+(bandın yazdığı ağırlıklar ve svx yeniden yüklenir). `gridHasGluedCollider` yapışkan
+collider yoksa bandı hiç çalıştırmaz. Gerçek alt-voksel φ yüz teması (MPM'deki gibi
+φ_yüz ile karar) hâlâ yok: bant kaba ama ikili voksel boşluğunu kapatıyor.
+
+## Yapışma bir ÇİFT özelliğidir: yüzey tavanı × malzeme kapasitesi (2026-11-11, TASARIM — yazılmadı)
+
+**Gözlem (kullanıcı):** su gibi maddelerde yapışma fazla baskın. **Kök:** yapışma yalnız yüzeyin değeri —
+collider `contact_adhesion_pa`, domain duvarı `wall_adhesion_pa`. Tüketiciler aynı sayıyı her malzemeye
+uyguluyor: sıvı duvarı (`sim_matter_liquid_wall`: tut ⇔ r ≤ yapışma·dt/(ρh)), domain duvar ızgarası
+(`sim_domain_wall_grid`), akıtma kuyruğu (`wall_adhesion_acceleration`), MPM sınırı (`sim_matter_mpm_boundary`),
+DEM duvarı (`sim_matter_grain.glsl` adhesion_limit) ve CPU ikizleri (`APICFluidSolver.cpp` glue). Su, bal,
+çikolata aynı Pa ile aynı tutuluyor; tek fark ρ.
+
+**Fizik:** sıvının duvara tutunması iki kaynaktan gelir, ikisi de MALZEMENİN:
+1. **Islatma (kılcal):** ~γ(1+cosθ)/h. Su γ 0.072 N/m, h 2.78 cm → **~5 Pa** (θ = 0 en kötü durum). Yani 1 kPa
+   collider değeriyle su tutkal gibi; fiziksel olarak su bırakır.
+2. **Viskoz film (Stefan yapışması):** ayrılmaya karşı gerilme ~ μ·r/h, hıza bağlı. Bal (μ ~10) su (1e-3)'nun
+   10⁴ katı; çikolata/bal "yapışkanlığı" budur ve voksel altı film çözülmediği için model gerekir.
+
+**Kural (tek fonksiyon, bütün tüketiciler):**
+  A_eff = min(A_yüzey, A_malzeme(r))
+  sıvı:  A_malzeme = 2γ/h + μ·|r|/h       (γ: `liquid_surface_tension_n_m`, μ = ρ·ν, maddeden)
+  tut ⇔ ρ·h·r/dt ≤ A_eff;  bırakınca fazla hız r − A_eff·dt/(ρh)
+Yüzey değeri ANLAMINI korur ("bu yüzey en fazla bu kadar tutar"), malzeme kapasiteyi verir → alan adı
+değişmez, eski projeler aynı okunur. Sonuç: su kendiliğinden bırakır, bal/çikolata viskozitesiyle tutar.
+Domain duvarı aynı fonksiyonu çağırır; ayrı iş değil.
+
+**Kapsam (ilk parti yalnız SIVI):** MPM (kar/hamur) ve DEM şimdilik aynı kalır — elastik sakız testi 1e6 Pa
+yapışmayla geçiyor ve malzeme kapasitesi (çekme dayanımı/kohezyon) her madde için tanımlı değil; ayrı karar.
+
+**Dokunulacaklar:** `sim_matter_liquid_wall.glsl` (push +γ, +μ; kendi kernelim), `sim_domain_wall_grid.glsl` +
+`DomainWallGpuConstants.h` (header → geniş derleme), `FluidGpuTransferStages.inl` (kuyruk ivmesi), CPU
+`APICFluidSolver.cpp`. Kabul: `rt_test_liquid_wall_ipc.py` — su yapışık yüzeyden bırakmalı (yeni kol), bal
+`glued_follows` geçmeye devam etmeli; `rt_matter_smoke.py --quick`.

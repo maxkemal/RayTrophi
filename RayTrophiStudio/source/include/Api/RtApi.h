@@ -22,6 +22,7 @@
 */
 #pragma once
 #include "Fluid/SourceSplatGeometry.h"
+#include "Fluid/MixedGpuStageStats.h"
 #include "Api/RtApiRayFusion.h"
 #include "Api/RtApiRasterDiagnostics.h"
 #include "Api/RtApiScreenGi.h"
@@ -4123,6 +4124,7 @@ struct ParticleStateSample {
 };
 
 struct FluidStepStats {
+    RayTrophiSim::Fluid::MixedGpuStageStats mixed_stages;
     bool measured = false;
     uint64_t normalize_window_cells = 0;
     uint64_t full_grid_cells = 0;
@@ -4148,6 +4150,9 @@ struct FluidStepStats {
     uint64_t viscosity_sparse_active_tiles = 0;
     uint64_t viscosity_sparse_allocated_tiles = 0;
     uint64_t viscosity_sparse_resident_bytes = 0;
+    int viscosity_pcg_iterations = 0;
+    float viscosity_pcg_relative_residual = 0.0f;
+    int viscosity_pcg_unconverged = 0;
     bool occupancy_on_gpu = false;
     int resolution[3] = {0, 0, 0};
     std::size_t particle_count = 0;
@@ -4618,6 +4623,9 @@ struct FluidDomainInfo {
     float kinematic_viscosity = 0.0f;
     int   viscosity_sweeps = 8;
     float viscosity_wall_slip = 1.0f;  // 0 = no-slip, 1 = free-slip
+    // Whose liquid physics run: default_substance, or the dominant parcel
+    // liquid when the domain holds none of its default (adoptParcelLiquidSubstance).
+    std::string liquid_physics_substance;
     bool  granular_enabled = false;
     float granular_friction_angle_degrees = 35.0f;
     float granular_cohesion = 0.0f;
@@ -5155,7 +5163,7 @@ struct FluidThermalPatch {
 
 struct GasDomainSettings {
     std::string quality_profile = "preview"; // interactive, preview, final, cinema, custom
-    uint32_t resource_budget_mb = 1024;
+    uint32_t resource_budget_mb = 4096;
     bool enforce_resource_budget = true;
     bool use_sparse_tiles = true;
     bool render_to_nanovdb = true;
@@ -5281,6 +5289,14 @@ struct SimulationFlowSourceInfo {
     float temperature = 0.0f;
     float fuel = 0.0f;
     float falloff = 1.0f;
+    // Liquid source mode; runtime diagnostics below are read-only.
+    std::string liquid_emission = "rate"; // rate|inflow|outflow
+    double fluid_flux_m3_s = 0;
+    double fluid_flux_target_m3_s = 0;
+    int fluid_overpack_dropped_total = 0;
+    double drained_mass_kg_step = 0;
+    double drained_mass_kg_total = 0;
+    std::string liquid_emission_status;
     float fluid_particles_per_second = 1000.0f;
     float particle_pool_weight = 1.0f;
     int pool_requested_particles = 0;

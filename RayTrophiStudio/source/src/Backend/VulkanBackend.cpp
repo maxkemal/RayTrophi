@@ -1461,8 +1461,8 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     const bool canUseRayQuery = hasRayQuery &&
         supportedRayQueryFeatures.rayQuery == VK_TRUE;
     const bool canUseSamplerAnisotropy = supportedFeatures.features.samplerAnisotropy == VK_TRUE;
-    // Only the buffer (SSBO) float-atomic-add variant is needed by the fluid
-    // kernels — they do not use shared-memory float atomics.
+    // The fluid kernels need the buffer (SSBO) float-atomic-add variant; the
+    // MPM block P2G also uses the shared-memory one when supported (below).
     const bool canUseAtomicFloat = hasAtomicFloat &&
         supportedAtomicFloatFeatures.shaderBufferFloat32AtomicAdd == VK_TRUE;
     // Core FP64 feature — needed by the sim compute MGPCG dot kernel
@@ -1583,6 +1583,12 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomicFloatFeatures{};
     atomicFloatFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
     atomicFloatFeatures.shaderBufferFloat32AtomicAdd = canUseAtomicFloat ? VK_TRUE : VK_FALSE;
+    // The MPM block P2G (sim_matter_p2g_block) accumulates in shared memory.
+    // The sim compute backend reads physical support and assumes this enable:
+    // keep the two in step (SimulationComputeVulkan supportsSharedFloatAtomicAdd).
+    atomicFloatFeatures.shaderSharedFloat32AtomicAdd =
+        canUseAtomicFloat && supportedAtomicFloatFeatures.shaderSharedFloat32AtomicAdd == VK_TRUE
+        ? VK_TRUE : VK_FALSE;
 
     // The RT/preview shaders are compiled with GL_EXT_scalar_block_layout
     // (raygen.rgen, closesthit.rchit, ...): vec3 members straddle 16-byte

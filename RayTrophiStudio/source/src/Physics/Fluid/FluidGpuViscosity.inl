@@ -15,6 +15,7 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
         sparse_stats->viscosity_sparse_allocated_tiles = 0;
         sparse_stats->viscosity_sparse_resident_bytes = 0;
     }
+    Fluid::ViscosityPcgResult pcg_result;
     if (!compute ||
         compute->backendType() != ComputeBackendType::VulkanCompute ||
         !compute->supportsDispatch() || dt <= 0.0f ||
@@ -177,19 +178,14 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
 
     const uint32_t max_faces = static_cast<uint32_t>(
         std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}));
-    const int sweeps = std::clamp(params.viscosity_sweeps, 1, 64);
-
-    ComputeDispatch cmd;
-    cmd.kernel = "sim_fluid_viscosity_rbgs";
-    cmd.buffers = bufs;
-    cmd.buffer_count = 11;
-    cmd.constants_size = sizeof(c);
-    cmd.groups = FluidGpuDispatch::groups256(max_faces);
-    cmd.groups.groups_z = 1;
-
+    // Solved to a tolerance (Jacobi PCG, sim_fluid_viscosity_pcg.glsl), not a
+    // fixed sweep count: 16 red-black GS sweeps applied 1/9..1/25 of honey's
+    // viscosity at h 2 mm (2026-11-09, Huppert test). viscosity_sweeps now
+    // drives only the host oracle (APICFluidSolver.cpp:applyViscosity).
     if (sparse) {
         std::string error;
-        ok = Fluid::runSparseViscosity(*compute, gpu_buffers, params, c, sweeps, error);
+        ok = Fluid::runSparseViscosity(*compute, gpu_buffers, params, c,
+                                       gpu_buffers.viscosity_pcg, pcg_result, error);
         if (!ok) {
             SCENE_LOG_WARN("[SimCompute] sparse viscosity failed: " + error);
         } else if (sparse_stats) {
@@ -200,15 +196,25 @@ bool runGpuFluidViscosity(SimulationGridDomainState& state,
             sparse_stats->viscosity_sparse_resident_bytes = storage.resident_bytes;
         }
     } else {
-        for (int s = 0; s < sweeps && ok; ++s) {
-            for (int parity = 0; parity < 2 && ok; ++parity) {
-                c.parity = parity;
-                cmd.constants = &c;
-                ok = compute->dispatch(cmd);
-            }
+        std::string error;
+        static const std::array<uint32_t, 3> no_tiles = {0u, 0u, 0u};
+        ok = Fluid::solveViscosityPcg(*compute, gpu_buffers.viscosity_pcg,
+            "sim_fluid_viscosity_pcg", bufs, nullptr, nullptr, c, no_tiles, 0u,
+            max_faces, static_cast<float>(params.particles_per_cell), pcg_result, error);
+        if (!ok) {
+            SCENE_LOG_WARN("[SimCompute] viscosity PCG failed: " + error);
         }
     }
     if (!ok) return false;
+    if (sparse_stats) {
+        sparse_stats->viscosity_pcg_iterations =
+            std::max(sparse_stats->viscosity_pcg_iterations, pcg_result.iterations);
+        sparse_stats->viscosity_pcg_relative_residual = std::max(
+            sparse_stats->viscosity_pcg_relative_residual, pcg_result.relative_residual);
+        sparse_stats->viscosity_pcg_unconverged += pcg_result.converged ? 0 : 1;
+    }
+    // "Ran" = at least one iteration; a domain with nothing to diffuse reports 0.
+    const int sweeps = std::max(pcg_result.iterations, 1);
 
     if (gpu_buffers.matter_model.enabled) {
         if (out_sweeps_run) {

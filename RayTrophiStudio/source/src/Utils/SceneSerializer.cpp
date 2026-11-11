@@ -1,4 +1,6 @@
+#include "Fluid/LiquidEmissionAuthoring.h"
 #include "Fluid/MatterFogStreams.h"
+#include "Fluid/MatterSeedSources.h"
 #include "Fluid/SourceSplatGeometryJson.h"
 #include "Fluid/MatterPhaseOutputJson.h"
 #include "Atmosphere/LensWeatherState.h"
@@ -382,12 +384,15 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_params"]["fog_ceiling_kg_m3"] = d.fluid_params.fog_ceiling_kg_m3;
     j["fluid_params"]["granular_max_solver_substeps"] = d.fluid_params.granular_max_solver_substeps;
     j["fluid_params"]["air_drag"] = d.fluid_params.air_drag;
+    j["fluid_params"]["liquid_physics_substance"] = d.fluid_params.liquid_physics_substance;
     j["fluid_params"]["inherit_atmosphere"] = d.fluid_params.inherit_atmosphere;
     j["fluid_params"]["reseed_enabled"] = d.fluid_params.reseed_enabled;
     // Numerical settings (solver hints written when the substance was chosen,
     // then editable on the domain).
     j["fluid_params"]["velocity_damping"] = d.fluid_params.velocity_damping;
     j["fluid_params"]["wall_damping"] = d.fluid_params.wall_damping;
+    j["fluid_params"]["wall_friction"] = d.fluid_params.wall_friction;
+    j["fluid_params"]["wall_adhesion_pa"] = d.fluid_params.wall_adhesion_pa;
     j["fluid_params"]["density_relaxation_s"] = d.fluid_params.density_relaxation_s;
     j["fluid_params"]["affine_damping"] = d.fluid_params.affine_damping;
     j["fluid_params"]["max_velocity"] = d.fluid_params.max_velocity;
@@ -544,6 +549,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["turbulence_lacunarity"] = d.turbulence_lacunarity;
     j["turbulence_persistence"] = d.turbulence_persistence;
     j["turbulence_speed"] = d.turbulence_speed;
+    RayTrophiSim::Fluid::writeMatterSeedSources(j, d);
     return j;
 }
 
@@ -601,10 +607,15 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
         d.fluid_params.sanitizeThermalLiquid();
         if (fp.contains("granular_max_solver_substeps")) d.fluid_params.granular_max_solver_substeps = fp["granular_max_solver_substeps"];
         if (fp.contains("air_drag")) d.fluid_params.air_drag = fp["air_drag"];
+        if (fp.contains("liquid_physics_substance") && fp["liquid_physics_substance"].is_string()) {
+            d.fluid_params.liquid_physics_substance = fp["liquid_physics_substance"].get<std::string>();
+        }
         d.fluid_params.inherit_atmosphere = fp.value("inherit_atmosphere", true);
         if (fp.contains("reseed_enabled")) d.fluid_params.reseed_enabled = fp["reseed_enabled"];
         if (fp.contains("velocity_damping")) d.fluid_params.velocity_damping = fp["velocity_damping"];
         if (fp.contains("wall_damping")) d.fluid_params.wall_damping = fp["wall_damping"];
+        if (fp.contains("wall_friction")) d.fluid_params.wall_friction = fp["wall_friction"];
+        d.fluid_params.wall_adhesion_pa = fp.value("wall_adhesion_pa", 0.0f);
         if (fp.contains("density_relaxation_s")) d.fluid_params.density_relaxation_s = fp["density_relaxation_s"];
         if (fp.contains("affine_damping")) d.fluid_params.affine_damping = fp["affine_damping"];
         if (fp.contains("max_velocity")) d.fluid_params.max_velocity = fp["max_velocity"];
@@ -644,6 +655,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
 
     if (j.contains("fluid_seed_min")) d.fluid_seed_min = jsonToVec3(j["fluid_seed_min"]);
     if (j.contains("fluid_seed_max")) d.fluid_seed_max = jsonToVec3(j["fluid_seed_max"]);
+    d.fluid_seed_box_initialized = j.contains("fluid_seed_min") && j.contains("fluid_seed_max");
     if (j.contains("fluid_seed_particles_per_cell")) d.fluid_seed_particles_per_cell = j["fluid_seed_particles_per_cell"];
     if (j.contains("fluid_seed_grain_saturation")) d.fluid_seed_grain_saturation = j["fluid_seed_grain_saturation"];
     if (j.contains("fluid_reseed_on_reset")) d.fluid_reseed_on_reset = j["fluid_reseed_on_reset"];
@@ -818,6 +830,7 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (!RayTrophiSim::Fluid::validateMatterGrainDomain(d, d.fluid_params.grain, grain_error)) {
         throw std::runtime_error(grain_error);
     }
+    RayTrophiSim::Fluid::readMatterSeedSources(j, d);
     return d;
 }
 
@@ -839,6 +852,7 @@ json flowSourceToJson(const RayTrophiSim::SimulationFlowSourceDesc& fs) {
     j["temperature"] = fs.temperature;
     j["fuel"] = fs.fuel;
     j["falloff"] = fs.falloff;
+    RayTrophiSim::Fluid::writeLiquidEmission(j, fs);
     j["fluid_particles_per_second"] = fs.fluid_particles_per_second;
     j["fluid_velocity_spread"] = fs.fluid_velocity_spread;
     j["fluid_emit_along_normal"] = fs.fluid_emit_along_normal;
@@ -875,6 +889,7 @@ RayTrophiSim::SimulationFlowSourceDesc jsonToFlowSource(const json& j) {
     if (j.contains("temperature")) fs.temperature = j["temperature"];
     if (j.contains("fuel")) fs.fuel = j["fuel"];
     if (j.contains("falloff")) fs.falloff = j["falloff"];
+    RayTrophiSim::Fluid::readLiquidEmission(j, fs);
     if (j.contains("fluid_particles_per_second")) fs.fluid_particles_per_second = j["fluid_particles_per_second"];
     if (j.contains("fluid_velocity_spread")) fs.fluid_velocity_spread = j["fluid_velocity_spread"];
     if (j.contains("fluid_emit_along_normal")) fs.fluid_emit_along_normal = j["fluid_emit_along_normal"];

@@ -1,3 +1,7 @@
+#include "Fluid/MixedGpuStageDiagnostics.h"
+#include "RtIpcLiquidEmission.h"
+#include "RtIpcDomainWalls.h"
+#include "RtIpcMatterSeedSources.h"
 #include "RtUvBindings.h"
 #include "Fluid/SourceSplatGeometryJson.h"
 #include "RtLensWeatherBindings.h"
@@ -59,6 +63,7 @@
 #include "RtIpcAgentDiscovery.h"
 #include "RtIpcMeshTools.h"
 #include "RtIpcMeshEdit.h"
+#include "RtIpcParamValidation.h"
 #include "scene_ui.h"
 
 #include <cstdio>
@@ -241,18 +246,29 @@ bool optionalBool(const json& params, const char* key, bool default_val = false)
     return params[key].get<bool>();
 }
 
+// ★ Every element is type-checked BEFORE get<float>. Most translation units
+// build with ExceptionHandling=false, where nlohmann's JSON_THROW is
+// std::abort(); the linker may pick that copy of from_json<float>, so a
+// string inside a vec3 used to kill the app instead of returning an error
+// (2026-11-07: "-1.25" passed as a string by a PowerShell caller).
+float numberElement(const json& value, const char* key) {
+    if (!value.is_number()) throw std::runtime_error(std::string("non-numeric element in param: ") + key);
+    return value.get<float>();
+}
+
 Vec3 requireVec3(const json& params, const char* key) {
     if (!params.contains(key) || !params[key].is_array() || params[key].size() != 3)
         throw std::runtime_error(std::string("missing or invalid Vec3 param: ") + key);
     auto& a = params[key];
-    return Vec3(a[0].get<float>(), a[1].get<float>(), a[2].get<float>());
+    return Vec3(numberElement(a[0], key), numberElement(a[1], key), numberElement(a[2], key));
 }
 
 Vec3 optionalVec3(const json& params, const char* key, const Vec3& default_val = Vec3(0.0f, 0.0f, 0.0f)) {
     if (!params.contains(key)) return default_val;
     if (!params[key].is_array() || params[key].size() != 3)
         throw std::runtime_error(std::string("invalid Vec3 param: ") + key);
-    return Vec3(params[key][0].get<float>(), params[key][1].get<float>(), params[key][2].get<float>());
+    auto& a = params[key];
+    return Vec3(numberElement(a[0], key), numberElement(a[1], key), numberElement(a[2], key));
 }
 
 Matrix4x4 requireMatrix(const json& params, const char* key) {
@@ -264,7 +280,7 @@ Matrix4x4 requireMatrix(const json& params, const char* key) {
         if (!row.is_array() || row.size() != 4)
             throw std::runtime_error("each matrix row must have 4 elements");
         for (int c = 0; c < 4; ++c)
-            m.m[r][c] = row[c].get<float>();
+            m.m[r][c] = numberElement(row[c], key);
     }
     return m;
 }
@@ -362,7 +378,7 @@ Vec3 vec3FromJson(const json& j, const Vec3& fallback) {
 // Flow source <-> JSON. Key names match the Python dict exactly, so a script
 // ported from rt.flow_source to remote IPC keeps working verbatim.
 json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
-    return json{
+    json out{
         {"producer_uid", s.producer_uid},
         {"name", s.name}, {"domain", s.domain}, {"phase", s.phase},
         {"source_mode", s.source_mode}, {"source_object", s.source_object},
@@ -400,6 +416,8 @@ json flowSourceToJson(const rtapi::SimulationFlowSourceInfo& s) {
         {"parcel_mass_kg", s.parcel_mass_kg},
         {"withheld_mass_kg_step", s.withheld_mass_kg_step},
         {"withheld_mass_kg_total", s.withheld_mass_kg_total}};
+    writeLiquidEmissionInfo(out, s);
+    return out;
 }
 
 // Overlay whichever fields the request mentions onto an existing info struct.
@@ -423,6 +441,7 @@ void applyFlowSourceJson(rtapi::SimulationFlowSourceInfo& s, const json& p) {
     RT_FS_FIELD("temperature", temperature);
     RT_FS_FIELD("fuel", fuel);
     RT_FS_FIELD("falloff", falloff);
+    if (p.contains("liquid_emission")) s.liquid_emission = p.at("liquid_emission").get<std::string>();
     RT_FS_FIELD("fluid_particles_per_second", fluid_particles_per_second);
     RT_FS_FIELD("particle_pool_weight", particle_pool_weight);
     RT_FS_FIELD("fluid_velocity_spread", fluid_velocity_spread);
@@ -815,6 +834,7 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
             {"kinematic_viscosity", info.kinematic_viscosity},
             {"viscosity_sweeps", info.viscosity_sweeps},
             {"viscosity_wall_slip", info.viscosity_wall_slip},
+            {"liquid_physics_substance", info.liquid_physics_substance},
             {"granular_enabled", info.granular_enabled},
             {"granular_friction_angle", info.granular_friction_angle_degrees},
             {"granular_cohesion", info.granular_cohesion},
@@ -1066,6 +1086,15 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    // ★ Before ANY handler: a null, wrong-typed or missing parameter reaching a
+    // get<T>()/at() aborts the process in this build (JSON_NOEXCEPTION). The
+    // check kinds come from the generated descriptor table; batch children
+    // re-enter here, so they are checked too.
+    {
+        std::string param_error;
+        if (!rtipc_validation::checkParams(method, params, param_error))
+            return json{{"__error", param_error}};
+    }
     json uv_result;
     if (dispatchUvIpc(method, params,
             [](RtIpcTemplateQuery query) { return enqueueQuery(std::move(query)); },
@@ -2041,6 +2070,12 @@ json dispatchMethod(const std::string& method, const json& params) {
         });
     }
     json grain_generator_result;
+    if (dispatchMatterSeedSourcesIpc(method, params,
+            [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
+            grain_generator_result)) return grain_generator_result;
+    if (dispatchDomainWallsIpc(method, params,
+            [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
+            grain_generator_result)) return grain_generator_result;
     if (dispatchRayGpuTimingIpc(method, params,
             [](RtIpcParticleQuery query) { return enqueueQuery(std::move(query)); },
             grain_generator_result)) return grain_generator_result;
@@ -2087,7 +2122,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             return enqueueResult([obj, param, value](UIContext&) {
                 return rtapi::setMaterialParam(obj, param, value);
             });
-        } else if (params["value"].is_array() && params["value"].size() == 3) {
+        } else if (params["value"].is_array() && params["value"].size() == 3 &&
+                   params["value"][0].is_number() && params["value"][1].is_number() &&
+                   params["value"][2].is_number()) {
             Vec3 color(params["value"][0].get<float>(),
                        params["value"][1].get<float>(),
                        params["value"][2].get<float>());
@@ -2192,7 +2229,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             return enqueueResult([mat, param, value](UIContext&) {
                 return rtapi::setMaterialParamByName(mat, param, value);
             });
-        } else if (params["value"].is_array() && params["value"].size() == 3) {
+        } else if (params["value"].is_array() && params["value"].size() == 3 &&
+                   params["value"][0].is_number() && params["value"][1].is_number() &&
+                   params["value"][2].is_number()) {
             Vec3 color(params["value"][0].get<float>(),
                        params["value"][1].get<float>(),
                        params["value"][2].get<float>());
@@ -3349,6 +3388,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"kinematic_viscosity", info.kinematic_viscosity},
                         {"viscosity_sweeps", info.viscosity_sweeps},
                         {"viscosity_wall_slip", info.viscosity_wall_slip},
+                        {"liquid_physics_substance", info.liquid_physics_substance},
                         {"granular_enabled", info.granular_enabled},
                         {"granular_friction_angle", info.granular_friction_angle_degrees},
                         {"granular_cohesion", info.granular_cohesion},
@@ -3680,6 +3720,14 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "fluid.set_param" || method == "gas.set_param") {
         std::string domain = requireString(params, "domain");
         return enqueueResult([domain, params](UIContext&) {
+            if (params.contains("matter_liquid_multirate")) {
+                // Retired 2026-11-11: a liquid + MPM domain always runs the
+                // liquid on its own clock. Refused before anything is applied
+                // (unknown keys are otherwise ignored), so an old script does
+                // not believe it still selects a path.
+                return rtapi::Result::fail("matter_liquid_multirate was removed: liquid + MPM "
+                    "domains always run the liquid on its own clock");
+            }
             Vec3 dmin, dmax;
             float voxel_size = 0.0f, wall_slip = 0.0f;
             int   sweeps = 0;
@@ -4177,11 +4225,11 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "gas.fit_temperature_range") {
         std::string domain = requireString(params, "domain");
         rtapi::GasTemperatureFitRequest request;
-        request.low_percentile = params.value("low_percentile", request.low_percentile);
-        request.high_percentile = params.value("high_percentile", request.high_percentile);
-        request.floor_kelvin = params.value("floor_kelvin", request.floor_kelvin);
-        request.median_target = params.value("median_target", request.median_target);
-        request.fit_gamma = params.value("fit_gamma", request.fit_gamma);
+        request.low_percentile = optionalFloat(params, "low_percentile", request.low_percentile);
+        request.high_percentile = optionalFloat(params, "high_percentile", request.high_percentile);
+        request.floor_kelvin = optionalFloat(params, "floor_kelvin", request.floor_kelvin);
+        request.median_target = optionalFloat(params, "median_target", request.median_target);
+        request.fit_gamma = optionalBool(params, "fit_gamma", request.fit_gamma);
         return enqueueQuery([domain, request](UIContext&) {
             rtapi::GasTemperatureFit f;
             rtapi::Result r = rtapi::fitGasTemperatureRange(domain, request, f);
@@ -5106,14 +5154,20 @@ json dispatchMethod(const std::string& method, const json& params) {
         // Absent means "leave alone"; an explicit empty material clears the
         // slot. Collapsing those two would make clearing impossible.
         const bool hasMaterial = params.contains("material") && !params["material"].is_null();
-        std::string material = hasMaterial ? params["material"].get<std::string>() : std::string();
         const bool hasUvScale = params.contains("uv_scale") && !params["uv_scale"].is_null();
-        float uvScale = hasUvScale ? params["uv_scale"].get<float>() : 1.0f;
         const bool hasStrength = params.contains("overlay_strength") &&
             !params["overlay_strength"].is_null();
-        float strength = hasStrength ? params["overlay_strength"].get<float>() : 1.0f;
         const bool hasIgnoreCover = params.contains("overlay_ignore_cover") &&
             !params["overlay_ignore_cover"].is_null();
+        if ((hasMaterial && !params["material"].is_string()) ||
+            (hasUvScale && !params["uv_scale"].is_number()) ||
+            (hasStrength && !params["overlay_strength"].is_number()) ||
+            (hasIgnoreCover && !params["overlay_ignore_cover"].is_boolean()))
+            throw std::runtime_error("terrain.set_layer: material must be a string, uv_scale and "
+                                     "overlay_strength numbers, overlay_ignore_cover a boolean (or null)");
+        std::string material = hasMaterial ? params["material"].get<std::string>() : std::string();
+        float uvScale = hasUvScale ? params["uv_scale"].get<float>() : 1.0f;
+        float strength = hasStrength ? params["overlay_strength"].get<float>() : 1.0f;
         bool ignoreCover = hasIgnoreCover ? params["overlay_ignore_cover"].get<bool>() : false;
         return enqueueResult([name, slot, hasMaterial, material, hasUvScale, uvScale,
                               hasStrength, strength, hasIgnoreCover, ignoreCover](UIContext&) {
@@ -5381,7 +5435,7 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "hair.list") return enqueueQuery([hairInfoJson](UIContext&) { std::vector<rtapi::HairGroomInfo> v; auto r=rtapi::listHairGrooms(v); if(!r.ok)return json{{"__error",r.error}}; json out=json::array(); for(const auto& i:v)out.push_back(hairInfoJson(i)); return out; });
     if (method == "hair.get") { auto name=requireString(params,"name"); return enqueueQuery([name,hairInfoJson](UIContext&){rtapi::HairGroomInfo i; auto r=rtapi::getHairGroom(name,i); return r.ok?hairInfoJson(i):json{{"__error",r.error}};}); }
     if (method == "hair.create") { auto mesh=requireString(params,"mesh"); auto name=optionalString(params,"name","HairGroom"); auto s=readHairSettings(params,{}); return enqueueQuery([mesh,name,s,hairInfoJson](UIContext&){rtapi::HairGroomInfo i; auto r=rtapi::createHairGroom(mesh,name,s,i); return r.ok?hairInfoJson(i):json{{"__error",r.error}};}); }
-    if (method == "hair.update") { auto name=requireString(params,"name"); return enqueueResult([name,params,readHairSettings](UIContext&){rtapi::HairGroomInfo i; auto r=rtapi::getHairGroom(name,i); if(!r.ok)return r; i.settings=readHairSettings(params,i.settings); bool visible=params.value("visible",i.visible); return rtapi::updateHairGroom(name,i.settings,params.contains("visible")?&visible:nullptr);}); }
+    if (method == "hair.update") { auto name=requireString(params,"name"); if(params.contains("visible")) (void)requireBool(params,"visible"); return enqueueResult([name,params,readHairSettings](UIContext&){rtapi::HairGroomInfo i; auto r=rtapi::getHairGroom(name,i); if(!r.ok)return r; i.settings=readHairSettings(params,i.settings); bool visible=params.value("visible",i.visible); return rtapi::updateHairGroom(name,i.settings,params.contains("visible")?&visible:nullptr);}); }
     if (method == "hair.rename") { auto name=requireString(params,"name"); auto next=requireString(params,"new_name"); return enqueueQuery([name,next,hairInfoJson](UIContext&){rtapi::HairGroomInfo i; auto r=rtapi::renameHairGroom(name,next,i); return r.ok?hairInfoJson(i):json{{"__error",r.error}};}); }
     if (method == "hair.remove") { auto name=requireString(params,"name"); return enqueueResult([name](UIContext&){return rtapi::removeHairGroom(name);}); }
     if (method == "hair.restyle") { auto name=requireString(params,"name"); return enqueueResult([name](UIContext&){return rtapi::restyleHairGroom(name);}); }
@@ -7191,6 +7245,8 @@ json dispatchMethod(const std::string& method, const json& params) {
                 return rtapi::setAnimGraphBool(character, name, value);
             });
         }
+        if (!params["value"].is_number())
+            throw std::runtime_error("value must be a boolean or a number");
         float value = params["value"].get<float>();
         return enqueueResult([character, name, value](UIContext&) {
             return rtapi::setAnimGraphFloat(character, name, value);
@@ -7818,6 +7874,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["viscosity_sparse_active_tiles"] = s.viscosity_sparse_active_tiles;
             j["viscosity_sparse_allocated_tiles"] = s.viscosity_sparse_allocated_tiles;
             j["viscosity_sparse_resident_bytes"] = s.viscosity_sparse_resident_bytes;
+            j["viscosity_pcg_iterations"] = s.viscosity_pcg_iterations;
+            j["viscosity_pcg_relative_residual"] = s.viscosity_pcg_relative_residual;
+            j["viscosity_pcg_unconverged"] = s.viscosity_pcg_unconverged;
             j["occupancy_on_gpu"] = s.occupancy_on_gpu;
             j["particle_count"] = s.particle_count;
             j["gpu_status"] = s.gpu_status;
@@ -7847,6 +7906,7 @@ json dispatchMethod(const std::string& method, const json& params) {
             j["upload_call_ms"] = s.upload_call_ms;
             j["download_call_ms"] = s.download_call_ms;
             j["dispatch_call_ms"] = s.dispatch_call_ms;
+            j["mixed_stages"] = RayTrophiSim::Fluid::mixedGpuStagesJson(s.mixed_stages);
             j["batch_end_ms"] = s.batch_end_ms;
             j["synchronize_ms"] = s.synchronize_ms;
             return j;

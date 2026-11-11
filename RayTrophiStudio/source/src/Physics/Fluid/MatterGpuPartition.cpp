@@ -66,7 +66,8 @@ bool ensureMatterGpuPartition(SimulationComputeContext& compute, MatterGpuPartit
 
 bool dispatchMatterGpuPartition(SimulationComputeContext& compute,
     MatterGpuPartition& buffers, const FluidParticles& particles,
-    MatterConstitutiveModel legacy_model, std::string& error) {
+    MatterConstitutiveModel legacy_model, std::string& error,
+    const std::vector<uint8_t>* held) {
     error.clear();
     if (!buffers.valid() || buffers.capacity < particles.size() || particles.empty() ||
         compute.backendType() != ComputeBackendType::VulkanCompute ||
@@ -83,6 +84,12 @@ bool dispatchMatterGpuPartition(SimulationComputeContext& compute,
     for (std::size_t i = 0; i < particles.size(); ++i) {
         models[i] = i < particles.constitutive_model.size()
             ? particles.constitutive_model[i] : 0;
+        // A held parcel gets a model id no lane accepts (sim_matter_partition
+        // counts it in counters[3] and indexes it nowhere).
+        if (held && i < held->size() && (*held)[i]) {
+            models[i] = kMatterGpuHeldModel;
+            continue;
+        }
         if (models[i] > static_cast<uint32_t>(MatterConstitutiveModel::Elastic)) {
             error = "Matter GPU partition received unknown constitutive model";
             return false;

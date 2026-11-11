@@ -35,15 +35,31 @@ def main():
     transfer = read("src/Physics/Fluid/SparseMacTransferGpu.cpp")
     assert "storage.solid_weights_ready = false;" in transfer
     assert "canonical && params.variational_solids ? 14u : 11u" in transfer
-    assert "lookup_bytes + page_fields * bytes > budget" in transfer
+    assert "lookup_bytes + source_bytes + page_fields * bytes > budget" in transfer
     assert "binding.solid_weight = {pool[11], pool[12], pool[13]}" in transfer
     upload = read("src/Physics/Fluid/SparseMacSolidWeightsGpu.cpp")
-    assert "list[0] != active" in upload and "storage.nx != grid.nx" in upload
+    assert "storage.nx != grid.nx" in upload
     assert "storage.solid_weights_ready = false;" in upload
-    assert upload.index("compute.endTransferBatch() && ok;", upload.index("uploadBuffer(")) < \
-        upload.index("storage.solid_weights_ready = true;")
-    assert "createBuffer(" not in upload  # P2G owns budget and page allocation.
+    assert "downloadBuffer(" not in upload
+    assert "packSparseMacSolidWeightSource(" in upload and "source_limit" in upload
+    assert "!buffers.matter_model.enabled || !storage.solid_weight_source_valid" in upload
+    assert upload.index("compute.endTransferBatch() && uploaded") < \
+        upload.index("storage.solid_weight_source_valid = true;")
     assert "storage.owned[11u + axis]" in upload
+    assert "sim_sparse_mac_solid_weights" in upload
+    assert "compute.destroyBuffer(storage.solid_weight_source)" in transfer
+    assert "primary.sparse_mac_transfer.solid_weight_source_valid = false" in read(
+        "src/Physics/Fluid/MatterGpuStep.inl")
+    remap = entry("sim_sparse_mac_solid_weights")
+    assert bindings(remap) == 5 and push_bytes(remap) == 16
+    assert "tiles[slot + 1u]" in remap and "source[key]" in remap
+    assert "axis * 144u + local / 4u" in remap
+    codec = read("src/Physics/Fluid/SparseMacSolidWeightSource.cpp")
+    assert "owner_key != key" in codec and "page.fill(UINT32_MAX)" in codec
+    assert "output = std::move(candidate)" in codec and "max_bytes" in codec
+    backend = read("src/Device/SimulationComputeVulkan.cpp")
+    # The two-slot ring (2026-11-11): a submission in flight blocks direct writes too.
+    assert "if (it->second.mapped && !m_recording && !m_inFlight)" in backend
     pack = read("src/Physics/Fluid/SparseMacSolidWeights.cpp")
     assert "FluidSim::FluidGrid::weightToFloat" in pack
     assert "owner_key != key" in pack and "page.assign(values, 1.0f)" in pack

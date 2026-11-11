@@ -122,7 +122,9 @@ def main():
     assert 'tangential = kt > 0.0 && coulomb > 0.0 ? -(ft-damping)/kt : vec3(0.0);' in shader
     assert 'rolling = limit > 0.0 ? -(rt-roll_damping)/kr : vec3(0.0);' in shader
     assert 'maximum_radius > params.radius_m ? 5.625 : 2.8125' in gpu
-    assert 'rolling_factor * mu_r * mu_r * k' in gpu
+    time_bounds = read('include/Fluid/DemContactTimeBounds.h')
+    assert 'demExplicitContactTimeBounds(contact_time, scale)' in gpu
+    assert 'input.rolling_factor * input.rolling_friction * input.rolling_friction * k' in time_bounds
     assert 'nodes[stack[--size]]' in shader and 'patch_count == 8u' in shader
     assert 'manifold_count == 4u' in shader
     assert 'runtime.collider_fingerprint != fingerprint' in gpu
@@ -237,7 +239,8 @@ def main():
     assert 'v+cross(w,arm)-manifold_v[m]' in motion_shader and 'a -= va*time_left' in motion_shader
     assert 'triangles * 6 * sizeof(Vec3)' in gpu
     shader_src = read('shaders/sim_matter_grain.glsl')
-    assert 'float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);' in shader_src
+    assert 'float cn = 2.0 * damping_ratio * sqrt(k / inverse_normal_mass);' in shader_src
+    assert 'domain_wall ? masses[2u * pc.meta.x + 5u] : pc.step_contact.y' in shader_src
     assert 'im+jm,f,t);' in shader_src and shader_src.count('im,f,t);') == 2
     ui = read('src/UI/MatterGrainControls.cpp')
     # Matter tab shows the substance's material read-only; the domain edits none of it.
@@ -267,7 +270,7 @@ def main():
     assert '2.25f * params.rolling_friction * params.rolling_friction' in contact
     assert 'stop_torque' not in contact, 'CPU reference still has the kinetic-only rolling torque'
     # B5: porous projection + pressure force.
-    assert '"sim_fluid_divergence_porous.spv",    11, 52' in registry
+    assert '"sim_fluid_divergence_porous.spv",    12, 52' in registry
     porous = read('shaders/sim_fluid_divergence_porous.glsl')
     assert 'return porous(' in porous
     pressure_src = read('src/Physics/Fluid/FluidGpuPressure.inl')

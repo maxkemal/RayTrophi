@@ -47,6 +47,139 @@ bool allocate(SimulationComputeContext& compute, ComputeBufferHandle& handle,
 }
 } // namespace
 
+struct PcgConstants {
+    int nx, ny, nz, boundary;
+    float voxel, dt, alpha, solid_weight;
+    int mode, has_nu, stage;
+    uint32_t partial_count, lanes_per_component;
+    uint32_t tiles_x, tiles_y, tiles_z, compact_faces;
+    float particles_per_cell;  // liquid volume fraction = parcel count / this
+};
+static_assert(sizeof(PcgConstants) == 72, "Viscosity PCG push ABI");
+
+void releaseViscosityPcg(SimulationComputeContext& compute, ViscosityPcgStorage& storage) {
+    for (const auto handle : storage.owned) {
+        if (handle.valid()) {
+            compute.destroyBuffer(handle);
+        }
+    }
+    storage = {};
+}
+
+bool solveViscosityPcg(SimulationComputeContext& compute, ViscosityPcgStorage& storage,
+                       const char* kernel, const ComputeBufferHandle* base,
+                       const ComputeBufferHandle* tiles, const ComputeBufferHandle* mac,
+                       const ViscosityGpuConstants& viscosity,
+                       const std::array<uint32_t, 3>& tile_dims, uint32_t compact_faces,
+                       uint32_t lanes_per_component, float particles_per_cell,
+                       ViscosityPcgResult& result, std::string& error) {
+    result = {};
+    if (lanes_per_component == 0) {
+        result.converged = true;
+        return true;
+    }
+    const uint64_t lanes = uint64_t(lanes_per_component) * 3u;
+    if (lanes > (uint64_t(std::numeric_limits<uint32_t>::max()) & ~255ull)) {
+        error = "viscosity PCG lanes exceed 32-bit dispatch width";
+        return false;
+    }
+    const auto groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(lanes));
+    const uint32_t partial_count = groups.groups_x * groups.groups_y;
+    const std::size_t vector_bytes = static_cast<std::size_t>(lanes) * sizeof(float);
+    for (std::size_t index = 0; index < 4; ++index) {
+        if (!allocate(compute, storage.owned[index], vector_bytes, false, "ViscosityPcgVector")) {
+            error = "viscosity PCG vector allocation failed";
+            return false;
+        }
+    }
+    if (!allocate(compute, storage.owned[4], 8 * sizeof(double), false, "ViscosityPcgScalars") ||
+        !allocate(compute, storage.owned[5], std::size_t(partial_count) * sizeof(double), false,
+                  "ViscosityPcgPartials")) {
+        error = "viscosity PCG scalar allocation failed";
+        return false;
+    }
+    std::array<ComputeBufferHandle, 21> bindings{};
+    for (int i = 0; i < 11; ++i) bindings[i] = base[i];
+    for (int i = 0; i < 6; ++i) bindings[11 + i] = storage.owned[i];
+    uint32_t count = 17;
+    if (tiles) {
+        bindings[17] = tiles[0];
+        bindings[18] = tiles[1];
+        count = 19;
+    }
+    if (mac) {
+        bindings[19] = mac[0];
+        bindings[20] = mac[1];
+        count = 21;
+    }
+    PcgConstants c{};
+    c.nx = viscosity.nx; c.ny = viscosity.ny; c.nz = viscosity.nz;
+    c.boundary = viscosity.boundary;
+    c.voxel = viscosity.voxel_size; c.dt = viscosity.dt; c.alpha = viscosity.alpha;
+    c.solid_weight = viscosity.solid_weight; c.has_nu = viscosity.has_nu;
+    c.partial_count = partial_count;
+    c.lanes_per_component = lanes_per_component;
+    c.tiles_x = tile_dims[0]; c.tiles_y = tile_dims[1]; c.tiles_z = tile_dims[2];
+    c.compact_faces = compact_faces;
+    c.particles_per_cell = std::max(particles_per_cell, 1.0f);
+    const auto run = [&](int mode, int stage) {
+        c.mode = mode;
+        c.stage = stage;
+        ComputeDispatch command;
+        command.kernel = kernel;
+        command.buffers = bindings.data();
+        command.buffer_count = count;
+        command.constants = &c;
+        command.constants_size = sizeof(c);
+        if (mode == 4) {
+            command.groups.groups_x = 1;
+            command.groups.groups_y = 1;
+            command.groups.groups_z = 1;
+        } else {
+            command.groups = groups;
+        }
+        return compute.dispatch(command);
+    };
+    double scalars[8] = {};
+    const auto read = [&]() {
+        compute.beginTransferBatch();
+        bool ok = compute.downloadBuffer(storage.owned[4], scalars, sizeof(scalars));
+        return compute.endTransferBatch() && ok;
+    };
+    if (!run(0, 0) || !run(4, 0)) {
+        error = "viscosity PCG init dispatch failed";
+        return false;
+    }
+    // Check every few iterations: each readback is a GPU round trip.
+    constexpr int kCheckEvery = 8;
+    for (int iteration = 1; iteration <= kViscosityPcgMaxIterations; ++iteration) {
+        if (!run(1, 0) || !run(4, 1) || !run(2, 0) || !run(4, 2)) {
+            error = "viscosity PCG iteration dispatch failed";
+            return false;
+        }
+        if (iteration == 1 || iteration % kCheckEvery == 0 ||
+            iteration == kViscosityPcgMaxIterations) {
+            if (!read()) {
+                error = "viscosity PCG scalar readback failed";
+                return false;
+            }
+            const double rz0 = scalars[4];
+            const double rel = rz0 > 0.0 ? std::sqrt(std::max(scalars[0], 0.0) / rz0) : 0.0;
+            result.iterations = static_cast<int>(scalars[6]);
+            result.relative_residual = static_cast<float>(rel);
+            if (scalars[5] != 0.0 || rel < kViscosityPcgTolerance) {
+                result.converged = true;
+                return true;
+            }
+        }
+        if (!run(3, 0)) {
+            error = "viscosity PCG search update failed";
+            return false;
+        }
+    }
+    return true;  // ran out of iterations: result.converged stays false
+}
+
 void releaseSparseViscosity(SimulationComputeContext& compute,
                             SparseViscosityGpuStorage& storage) {
     for (const auto handle : storage.owned) {
@@ -86,7 +219,8 @@ bool ensureMacRhsScratch(SimulationComputeContext& compute,
 bool runSparseViscosity(SimulationComputeContext& compute,
                         SimulationGridDomainComputeBuffers& buffers,
                         const APICSolverParams& params,
-                        const ViscosityGpuConstants& viscosity_constants, int sweeps,
+                        const ViscosityGpuConstants& viscosity_constants,
+                        ViscosityPcgStorage& pcg, ViscosityPcgResult& result,
                         std::string& error) {
     auto& storage = buffers.sparse_viscosity;
     storage.used = false;
@@ -96,7 +230,7 @@ bool runSparseViscosity(SimulationComputeContext& compute,
         error = reason;
         return false;
     };
-    if (sweeps <= 0 || constants.nx <= 0 || constants.ny <= 0 || constants.nz <= 0 ||
+    if (constants.nx <= 0 || constants.ny <= 0 || constants.nz <= 0 ||
         !std::isfinite(constants.dt) || constants.dt <= 0.0f ||
         !std::isfinite(constants.voxel) || constants.voxel <= 0.0f ||
         !std::isfinite(constants.alpha) || constants.alpha < 0.0f ||
@@ -194,14 +328,21 @@ bool runSparseViscosity(SimulationComputeContext& compute,
         if (!dispatch("sim_sparse_viscosity_capture", compact_faces)) {
             return fail("MAC RHS capture failed");
         }
-        for (int sweep = 0; sweep < sweeps; ++sweep) {
-            for (int parity = 0; parity < 2; ++parity) {
-                constants.parity = parity;
-                if (!dispatch("sim_sparse_viscosity_sweep", compact_faces)) {
-                    return fail("sparse viscosity sweep failed");
-                }
-            }
+        // The RHS pages hold u_old; the solve runs to a tolerance on them.
+        const ComputeBufferHandle tile_pair[] = {storage.owned[0], storage.owned[1]};
+        const ComputeBufferHandle mac_pair[] = {mac.map, mac.list};
+        std::string pcg_error;
+        if (!solveViscosityPcg(compute, pcg,
+                mac.compact ? "sim_sparse_mac_viscosity_pcg" : "sim_sparse_viscosity_pcg",
+                bindings.data(), tile_pair, mac.compact ? mac_pair : nullptr,
+                viscosity_constants, {constants.tiles_x, constants.tiles_y, constants.tiles_z},
+                constants.compact_faces, constants.compact_faces,
+                static_cast<float>(params.particles_per_cell), result, pcg_error)) {
+            return fail(pcg_error.empty() ? "sparse viscosity PCG failed" : pcg_error.c_str());
         }
+    } else {
+        result = {};
+        result.converged = true;
     }
     storage.used = true;
     storage.active_tiles = active;

@@ -3,6 +3,7 @@
 #include "Fluid/APICFluidSolver.h"
 #include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"
+#include "MaterialStateField.h"
 
 #include <algorithm>
 #include <cmath>
@@ -42,6 +43,17 @@ MatterGrainBirthFilter::MatterGrainBirthFilter(const FluidParticles& particles,
         }
         if (i < particles.mass_fraction.size() && !(particles.mass_fraction[i] > 0.02f)) {
             continue;
+        }
+        if (params) {
+            const uint32_t tag = i < particles.substance_tag.size()
+                ? particles.substance_tag[i] : kSubstanceUntagged;
+            const auto* profile = particleSubstance(tag, *params);
+            if (profile && (profile->default_constitutive_model == MatterConstitutiveModel::Elastic ||
+                (profile->default_constitutive_model == MatterConstitutiveModel::Granular &&
+                 profile->granular_transport == MatterGranularTransport::Mpm))) {
+                // MPM snow/soil share the Granular model tag, not DEM ownership.
+                continue;
+            }
         }
         const uint32_t tag = i < particles.substance_tag.size()
             ? particles.substance_tag[i] : kSubstanceUntagged;

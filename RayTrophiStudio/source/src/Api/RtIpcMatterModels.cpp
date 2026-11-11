@@ -1,9 +1,25 @@
 #include "RtMatterModels.h"
+#include "Api/DemBondApi.h"
 
 #include <exception>
 
 bool dispatchMatterModelIpc(const std::string& method, const nlohmann::json& params,
                            const RtIpcTemplateEnqueue& enqueue, nlohmann::json& out) {
+    if (method == "fluid.dem_bodies") {
+        const auto domain = params.at("domain").get<std::string>();
+        const auto request = params.value("request", nlohmann::json::object());
+        if (params.size() > (params.contains("request") ? 2u : 1u)) {
+            throw std::runtime_error("dem_bodies accepts domain and request only");
+        }
+        out = enqueue([domain, request](UIContext&) {
+            try {
+                return rtapi::demBodies(domain, request);
+            } catch (const std::exception& error) {
+                return nlohmann::json{{"__error", error.what()}};
+            }
+        });
+        return true;
+    }
     if (method == "fluid.grain_settings") {
         const std::string domain = params.at("domain").get<std::string>();
         const bool valid = params.size() == 1;

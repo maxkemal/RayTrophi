@@ -56,6 +56,21 @@ layout(set = 0, binding = 10) readonly buffer SVZ { float svz[]; };
 layout(set = 0, binding = 11) readonly buffer MacTileMap { uint mac_tile_map[]; };
 layout(set = 0, binding = 12) readonly buffer MacTileList { uint mac_tile_list[]; };
 #endif
+// MPM mode (2026-11-10, MATTER_SIVI_MPM_BASINC_BAGLASIMI.md section 9): the
+// per-cell solid fraction phi of the MPM lane, and pc.sor_omega carries the
+// mobility ratio r = rho_liquid / rho_constituent (> 0 selects the mode; the
+// DEM grain path leaves it 0 and keeps the original formula below exactly).
+// The face weight then holds the PRESSURE MOBILITY
+//   beta = w_collider * min(1, eps + (1 - eps) r)
+// -- the solid fraction answers the pressure too (Xie et al. 2026, Eq. 21:
+// Dt((1-n)/rho_s + n/rho_w) lap dp) instead of being a wall of prescribed
+// velocity -- and this kernel recovers w_collider and eps for the mixture flux
+//   w_collider (eps u_liquid + (1 - eps) u_solid) + (1 - w_collider) u_wall.
+#ifdef RT_SPARSE_MAC
+layout(set = 0, binding = 13) readonly buffer SolidFraction { float solid_fraction[]; };
+#else
+layout(set = 0, binding = 11) readonly buffer SolidFraction { float solid_fraction[]; };
+#endif
 #include "sim_mac_lane.glsl"
 #include "sim_mac_solid_weight.glsl"
 // Velocity face read through the shared dense/compact storage contract.
@@ -124,6 +139,26 @@ float sv_z(int i, int j, int k) {
                   k < pc.nz ? svz[cell_id(i, j, k)] : 0.0, k < pc.nz);
 }
 
+// MPM solid fraction of a face: mean of its in-grid cells (MatterMpmPorosity.cpp
+// writes the face weights from the same rule, so w / beta is exact).
+float cellFraction(ivec3 c, out bool inside) {
+    inside = all(greaterThanEqual(c, ivec3(0))) && c.x < pc.nx && c.y < pc.ny && c.z < pc.nz;
+    return inside ? clamp(solid_fraction[cell_id(c.x, c.y, c.z)], 0.0, 1.0) : 0.0;
+}
+float faceFraction(ivec3 lo, ivec3 hi) {
+    bool il, ih;
+    float a = cellFraction(lo, il), b = cellFraction(hi, ih);
+    return il && ih ? 0.5 * (a + b) : (il ? a : b);
+}
+// Mixture flux through a face whose weight w is the pressure mobility.
+float mpmFlux(float w, float phi, float r, float u_liquid, float u_solid) {
+    if (!(phi > 1e-4)) return w * u_liquid + (1.0 - w) * u_solid;
+    float eps = 1.0 - phi;
+    float beta = min(1.0, eps + phi * r);
+    float w_collider = beta > 1e-6 ? clamp(w / beta, 0.0, 1.0) : 0.0;
+    return w_collider * (eps * u_liquid + phi * u_solid) + (1.0 - w_collider) * u_solid;
+}
+
 void main() {
     int id = fluidPressureCellIndex();
     if (id >= pc.nx * pc.ny * pc.nz) return;
@@ -146,12 +181,22 @@ void main() {
     float wyl = fw_y(i, j,     k), wyh = fw_y(i, j + 1, k);
     float wzl = fw_z(i, j, k    ), wzh = fw_z(i, j, k + 1);
 
-    vx_lo = wxl * vx_lo + (1.0 - wxl) * sv_x(i,     j, k);
-    vx_hi = wxh * vx_hi + (1.0 - wxh) * sv_x(i + 1, j, k);
-    vy_lo = wyl * vy_lo + (1.0 - wyl) * sv_y(i, j,     k);
-    vy_hi = wyh * vy_hi + (1.0 - wyh) * sv_y(i, j + 1, k);
-    vz_lo = wzl * vz_lo + (1.0 - wzl) * sv_z(i, j, k    );
-    vz_hi = wzh * vz_hi + (1.0 - wzh) * sv_z(i, j, k + 1);
+    if (pc.sor_omega > 0.0) {
+        float r = pc.sor_omega;
+        vx_lo = mpmFlux(wxl, faceFraction(ivec3(i - 1, j, k), ivec3(i, j, k)), r, vx_lo, sv_x(i, j, k));
+        vx_hi = mpmFlux(wxh, faceFraction(ivec3(i, j, k), ivec3(i + 1, j, k)), r, vx_hi, sv_x(i + 1, j, k));
+        vy_lo = mpmFlux(wyl, faceFraction(ivec3(i, j - 1, k), ivec3(i, j, k)), r, vy_lo, sv_y(i, j, k));
+        vy_hi = mpmFlux(wyh, faceFraction(ivec3(i, j, k), ivec3(i, j + 1, k)), r, vy_hi, sv_y(i, j + 1, k));
+        vz_lo = mpmFlux(wzl, faceFraction(ivec3(i, j, k - 1), ivec3(i, j, k)), r, vz_lo, sv_z(i, j, k));
+        vz_hi = mpmFlux(wzh, faceFraction(ivec3(i, j, k), ivec3(i, j, k + 1)), r, vz_hi, sv_z(i, j, k + 1));
+    } else {
+        vx_lo = wxl * vx_lo + (1.0 - wxl) * sv_x(i,     j, k);
+        vx_hi = wxh * vx_hi + (1.0 - wxh) * sv_x(i + 1, j, k);
+        vy_lo = wyl * vy_lo + (1.0 - wyl) * sv_y(i, j,     k);
+        vy_hi = wyh * vy_hi + (1.0 - wyh) * sv_y(i, j + 1, k);
+        vz_lo = wzl * vz_lo + (1.0 - wzl) * sv_z(i, j, k    );
+        vz_hi = wzh * vz_hi + (1.0 - wzh) * sv_z(i, j, k + 1);
+    }
 
     float div = ((vx_hi - vx_lo) + (vy_hi - vy_lo) + (vz_hi - vz_lo)) * inv_h;
 
@@ -174,6 +219,9 @@ void main() {
         if (k > 0 && !is_solid(i, j, k - 1))          { open += wzl; faces += 1.0; }
         if (k + 1 < pc.nz && !is_solid(i, j, k + 1))  { open += wzh; faces += 1.0; }
         float eps = faces > 0.0 ? clamp(open / faces, 0.0, 1.0) : 1.0;
+        // MPM mode: the face weights are pressure mobilities (~1 for snow),
+        // the pore volume is the cell's own solid fraction.
+        if (pc.sor_omega > 0.0) eps = 1.0 - clamp(solid_fraction[id], 0.0, 1.0);
         if (eps < 0.999) {
             float ppc = float(pc.particles_per_cell);
             RtDensitySample sample_here = rtDensitySample(ivec3(i, j, k));

@@ -1382,6 +1382,7 @@ void SceneUI::drawMainMenuBar(UIContext& ctx)
             s_show_save_user_template_modal = false;
         }
     }
+    raytrophi::templates::TemplateHubUI::instance().dispatchPendingProjectOpen(ctx, *this);
 }
 
 // ============================================================================

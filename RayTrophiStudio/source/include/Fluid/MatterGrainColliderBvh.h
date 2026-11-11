@@ -26,7 +26,10 @@ struct MatterGrainColliderBvh {
     std::vector<MatterGrainBvhNode> nodes;
     std::vector<Vec3> vertices;
     std::vector<uint32_t> source_faces;
+    // Patch id (bits 0-29) | kMatterGrainPatchClosed | kMatterGrainPatchInward.
     std::vector<uint32_t> surface_patches;
+    // Faces on a closed shell (one-sided contact); reported by grain diagnostics.
+    std::size_t closed_faces = 0;
     // Vertex velocities in the reordered triangle order (empty = static).
     std::vector<Vec3> velocities;
 };

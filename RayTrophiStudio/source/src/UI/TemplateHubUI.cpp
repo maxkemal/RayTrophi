@@ -17,6 +17,7 @@
 #include <fstream>
 #include <iostream>
 #include <cctype>
+#include <utility>
 
 namespace raytrophi::templates {
 using pathutils::pathFromUtf8;
@@ -154,12 +155,33 @@ void TemplateHubUI::removeRecentProject(const std::filesystem::path& project_pat
     saveRecentProjects();
 }
 
+void TemplateHubUI::queueProjectOpen(const std::filesystem::path& path) {
+    // Own the path before the loader's addRecentProject can reorder the list.
+    pending_project_path_ = path.string();
+    project_open_pending_ = true;
+    hide();
+}
+
+void TemplateHubUI::dispatchPendingProjectOpen(UIContext& context, SceneUI& ui) {
+    if (!project_open_pending_) {
+        return;
+    }
+    const std::string path = std::move(pending_project_path_);
+    project_open_pending_ = false;
+    pending_project_path_.clear();
+    // The normal open flow clears selections, waits for rendering and raises
+    // the scene-loading guards before its worker can replace scene runtimes.
+    if (!path.empty()) {
+        enterSolidViewportForSceneLoad(ui, "hub:project_open");
+    }
+    ui.performOpenProject(context, path);
+}
+
 void TemplateHubUI::performAutosaveRecovery(UIContext& context, SceneUI& ui, SceneHistory* history) {
     auto auto_path = StartupPreferencesManager::instance().getAutosavePath();
     if (std::filesystem::exists(auto_path)) {
         hide();
-        enterSolidViewportForSceneLoad(ui, "hub:autosave_recovery");
-        g_ProjectManager.openProject(auto_path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
+        queueProjectOpen(auto_path);
     }
 }
 
@@ -175,8 +197,7 @@ void TemplateHubUI::render(UIContext& context, SceneUI& ui, SceneHistory* histor
 
         if (mode == StartupMode::OpenLastProject && !recent_projects_.empty() && recent_projects_[0].exists && !recent_projects_[0].path.empty()) {
             visible_ = false;
-            enterSolidViewportForSceneLoad(ui, "hub:startup_open_last");
-            g_ProjectManager.openProject(recent_projects_[0].path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
+            queueProjectOpen(recent_projects_[0].path);
             return;
         } else if (mode == StartupMode::StartEmpty) {
             visible_ = false;
@@ -401,7 +422,7 @@ void TemplateHubUI::renderSidebar(UIContext& context, SceneUI& ui, SceneHistory*
                                                 std::min(1.0f, theme_accent.z * 1.1f), 1.0f), ImVec2(30, 30),
                                          "Open Project...")) {
             hide();
-            ui.performOpenProject(context);
+            queueProjectOpen({});
         }
         return;
     }
@@ -431,7 +452,7 @@ void TemplateHubUI::renderSidebar(UIContext& context, SceneUI& ui, SceneHistory*
                                             std::min(1.0f, theme_accent.z * 1.1f), 1.0f), ImVec2(-1, 34),
                                      "Open an existing RayTrophi project file (.rtp / .rts)")) {
         hide();
-        ui.performOpenProject(context);
+        queueProjectOpen({});
     }
     ImGui::Spacing();
 
@@ -479,8 +500,7 @@ void TemplateHubUI::renderSidebar(UIContext& context, SceneUI& ui, SceneHistory*
                     if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
                         hide();
                         if (!recent.path.empty() && std::filesystem::exists(recent.path)) {
-                            enterSolidViewportForSceneLoad(ui, "hub:recent_double_click");
-                            g_ProjectManager.openProject(recent.path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
+                            queueProjectOpen(recent.path);
                         } else {
                             launchTemplate("raytrophi.start.general_scene", "discard", context, ui, history);
                         }
@@ -499,8 +519,7 @@ void TemplateHubUI::renderSidebar(UIContext& context, SceneUI& ui, SceneHistory*
                 if (recent.exists && !recent.path.empty()) {
                     if (ImGui::MenuItem("Open Project")) {
                         hide();
-                        enterSolidViewportForSceneLoad(ui, "hub:recent_context_menu");
-                        g_ProjectManager.openProject(recent.path.string(), context.scene, context.render_settings, context.renderer, context.backend_ptr);
+                        queueProjectOpen(recent.path);
                     }
                     if (ImGui::MenuItem("Show in Explorer")) {
                         std::string cmd = "explorer.exe /select,\"" + recent.path.string() + "\"";

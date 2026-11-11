@@ -5,6 +5,9 @@
 //   op (pc.parity) = 0: sigma = sum; sigma0 = sigma; degenerate = 0
 //   op             = 1: sAs = sum; alpha = sigma/sAs (degenerate=1 if |sAs|<1e-30)
 //   op             = 2: sigma_new = sum; beta = sigma_new/sigma; sigma = sigma_new
+//   op             = 3: sigma = sigma_new = sum, sigma0 KEPT (warm start: op 0
+//                       ran on b = the cold residual, so convergence is still
+//                       judged against the cold right-hand side)
 // pc.iterations carries the partials count. Scalars layout: [0]=sigma
 // [1]=sigma0 [2]=sAs [3]=alpha [4]=beta [5]=sigma_new [6]=degenerate.
 // NOTE: the first version summed sequentially on ONE thread — at default grid
@@ -54,6 +57,10 @@ void main() {
         scalars[0] = sum;    // sigma
         scalars[1] = sum;    // sigma0
         scalars[6] = 0.0LF;  // degenerate flag
+    } else if (pc.parity == 3) {
+        scalars[0] = sum;    // sigma (warm residual)
+        scalars[5] = sum;    // sigma_new
+        scalars[6] = 0.0LF;
     } else if (pc.parity == 1) {
         scalars[2] = sum;    // sAs
         if (abs(sum) < 1e-30LF) {

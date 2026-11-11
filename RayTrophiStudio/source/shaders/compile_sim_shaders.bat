@@ -13,7 +13,12 @@ if errorlevel 1 (
 set SHADER_DIR=%~dp0
 echo Compiling simulation compute shaders...
 
-for %%k in (sim_surface_gather_supported sim_surface_composition_phase) do (
+for %%k in (sim_dem_bond_evaluate sim_dem_bond_kick sim_dem_bond_orient) do (
+    glslc "%SHADER_DIR%%%k.comp" -O -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
+    if errorlevel 1 exit /b 1
+)
+
+for %%k in (sim_surface_gather_supported sim_surface_composition_phase sim_fluid_advect_tail sim_surface_bin_assign sim_surface_centres sim_surface_clear sim_surface_composition sim_surface_gather sim_surface_proxy sim_surface_scan sim_surface_scatter sim_surface_smooth sim_surface_uvw_extend sim_surface_uvw_gather) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
 )
@@ -23,11 +28,13 @@ for %%k in (sim_fluid_label_link_clear sim_fluid_label_link_scatter sim_fluid_la
     if errorlevel 1 exit /b 1
 )
 
-for %%k in (clear mark capture sweep) do (
+for %%k in (clear mark capture sweep pcg) do (
     glslc "%SHADER_DIR%sim_sparse_viscosity_%%k.comp" -o "%SHADER_DIR%sim_sparse_viscosity_%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
 )
 glslc "%SHADER_DIR%sim_fluid_viscosity_rbgs.comp" -o "%SHADER_DIR%sim_fluid_viscosity_rbgs.spv" --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_viscosity_pcg.comp" -o "%SHADER_DIR%sim_fluid_viscosity_pcg.spv" --target-env=vulkan1.2
+if errorlevel 1 exit /b 1
 if errorlevel 1 exit /b 1
 
 for %%k in (clear mark init jacobi copy spmv axpy zpby scatter dense_clear) do (
@@ -49,8 +56,8 @@ if errorlevel 1 exit /b 1
 
 for %%k in (
     sim_sparse_grid_map_clear sim_sparse_grid_map_seed sim_sparse_grid_retire sim_sparse_grid_remap
-    sim_sparse_mac_clear sim_sparse_mac_mark sim_sparse_mac_reset sim_sparse_mac_normalize sim_sparse_mac_publish sim_sparse_mac_capture sim_sparse_mac_gather sim_sparse_mac_p2g sim_sparse_mac_matter_p2g sim_sparse_mac_g2p sim_sparse_mac_matter_g2p sim_sparse_mac_zero_faces sim_sparse_mac_matter_zero_faces sim_sparse_mac_divergence sim_sparse_mac_divergence_var sim_sparse_mac_divergence_porous sim_sparse_mac_subtract_gradient sim_sparse_mac_subtract_gradient_var sim_sparse_mac_capture_compact sim_sparse_mac_advect sim_sparse_mac_matter_advect sim_sparse_mac_matter_contact sim_sparse_mac_viscosity_capture sim_sparse_mac_viscosity_sweep
-    sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_contact sim_matter_copy sim_matter_clear sim_matter_zero_faces sim_matter_mpm_boundary sim_collider_bvh_query sim_matter_mpm_particle_contact sim_matter_pores
+    sim_sparse_mac_clear sim_sparse_mac_mark sim_sparse_mac_reset sim_sparse_mac_normalize sim_sparse_mac_publish sim_sparse_mac_capture sim_sparse_mac_gather sim_sparse_mac_p2g sim_sparse_mac_matter_p2g sim_sparse_mac_g2p sim_sparse_mac_matter_g2p sim_sparse_mac_zero_faces sim_sparse_mac_matter_zero_faces sim_sparse_mac_matter_liquid_wall sim_sparse_mac_divergence sim_sparse_mac_divergence_var sim_sparse_mac_divergence_porous sim_sparse_mac_subtract_gradient sim_sparse_mac_subtract_gradient_var sim_sparse_mac_capture_compact sim_sparse_mac_solid_weights sim_sparse_mac_advect sim_sparse_mac_matter_advect sim_sparse_mac_viscosity_capture sim_sparse_mac_viscosity_sweep sim_sparse_mac_viscosity_pcg
+    sim_matter_p2g sim_matter_g2p sim_matter_stress_update sim_matter_stress_p2g sim_matter_settle sim_matter_advect sim_matter_occupancy sim_matter_liquid_drag sim_sparse_mac_matter_liquid_drag sim_matter_copy sim_matter_clear sim_matter_mpm_pressure_reaction sim_matter_mpm_porosity sim_matter_p2g_fused sim_matter_p2g_fused_clustered sim_matter_p2g_block sim_matter_p2g_block_sort sim_matter_p2g_clustered sim_matter_stress_p2g_clustered sim_sparse_mac_matter_mpm_porosity sim_matter_zero_faces sim_matter_liquid_wall sim_matter_mpm_boundary sim_collider_bvh_query sim_matter_mpm_particle_contact sim_matter_pores
 ) do (
     glslc "%SHADER_DIR%%%k.comp" -o "%SHADER_DIR%%%k.spv" --target-env=vulkan1.2
     if errorlevel 1 exit /b 1
@@ -70,6 +77,7 @@ glslc "%SHADER_DIR%sim_fluid_divergence.comp"         -o "%SHADER_DIR%sim_fluid_
 glslc "%SHADER_DIR%sim_fluid_subtract_gradient.comp"  -o "%SHADER_DIR%sim_fluid_subtract_gradient.spv"  --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_cg_build_diag.comp"      -o "%SHADER_DIR%sim_fluid_cg_build_diag.spv"      --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_cg_residual_init.comp"   -o "%SHADER_DIR%sim_fluid_cg_residual_init.spv"   --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_fluid_cg_scalar_step.comp"     -o "%SHADER_DIR%sim_fluid_cg_scalar_step.spv"     --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_cg_spmv.comp"            -o "%SHADER_DIR%sim_fluid_cg_spmv.spv"            --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_cg_jacobi.comp"          -o "%SHADER_DIR%sim_fluid_cg_jacobi.spv"          --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_fluid_cg_copy.comp"            -o "%SHADER_DIR%sim_fluid_cg_copy.spv"            --target-env=vulkan1.2

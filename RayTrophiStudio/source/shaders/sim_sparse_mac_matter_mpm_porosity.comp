@@ -1,3 +1,4 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
-#include "sim_matter_contact.glsl"
+#define RT_SPARSE_MAC
+#include "sim_matter_mpm_porosity.glsl"

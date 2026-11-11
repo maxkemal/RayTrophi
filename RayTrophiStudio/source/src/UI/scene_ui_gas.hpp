@@ -27,6 +27,7 @@
 #pragma once
 
 #include "scene_ui.h"
+#include "UI/TemperatureLabel.h"
 #include "GasVolume.h"
 #include "VolumeShader.h"
 #include <memory>
@@ -342,7 +343,9 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         if (ImGui::TreeNode("Stability Limits")) {
             ImGui::DragFloat("Max Velocity", &settings.max_velocity, 10.0f, 50.0f, 2000.0f, "%.0f");
             UIWidgets::HelpMarker("Maximum velocity clamp in grid units/s. Prevents numerical explosions.");
-            ImGui::DragFloat("Max Temperature", &settings.max_temperature, 100.0f, 500.0f, 10000.0f, "%.0f K");
+            char max_t_fmt[48];
+            ImGui::DragFloat("Max Temperature", &settings.max_temperature, 100.0f, 500.0f, 10000.0f,
+                UiTemperature::kelvinFormat(settings.max_temperature, max_t_fmt, sizeof(max_t_fmt), "%.0f"));
             UIWidgets::HelpMarker("Maximum temperature in Kelvin. Fire is typically 1000-2000K.");
             ImGui::DragFloat("Max Density", &settings.max_density, 1.0f, 5.0f, 200.0f, "%.0f");
             UIWidgets::HelpMarker("Maximum smoke density. Prevents infinite accumulation.");
@@ -391,7 +394,9 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
     // COMBUSTION (Fire, Flame)
     // ─────────────────────────────────────────────────────────────────────────
     if (UIWidgets::BeginSection("Combustion (Fire)", ImVec4(1.0f, 0.5f, 0.0f, 1.0f))) {
-        ImGui::DragFloat("Ignition Temperature", &settings.ignition_temperature, 10.0f, 200.0f, 1000.0f, "%.0f K");
+        char ignition_t_fmt[48];
+        ImGui::DragFloat("Ignition Temperature", &settings.ignition_temperature, 10.0f, 200.0f, 1000.0f,
+            UiTemperature::kelvinFormat(settings.ignition_temperature, ignition_t_fmt, sizeof(ignition_t_fmt), "%.0f"));
         UIWidgets::HelpMarker("Fuel will start burning when temperature exceeds this value.");
         
         ImGui::DragFloat("Burn Rate", &settings.burn_rate, 0.5f, 0.0f, 20.0f);
@@ -449,7 +454,9 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
         UIWidgets::HelpMarker("Negative = dense smoke sinks. Positive = smoke rises regardless of temperature.");
         ImGui::DragFloat("Heat Rise (Buoyancy)", &settings.buoyancy_temperature, 0.1f, 0.0f, 10.0f);
         UIWidgets::HelpMarker("How strongly hot gas rises. Higher = faster rising flames/smoke. Try 2-4 for fire.");
-        ImGui::DragFloat("Ambient Temp (K)", &settings.ambient_temperature, 1.0f, 200.0f, 400.0f);
+        char ambient_t_fmt[48];
+        ImGui::DragFloat("Ambient Temp", &settings.ambient_temperature, 1.0f, 200.0f, 400.0f,
+            UiTemperature::kelvinFormat(settings.ambient_temperature, ambient_t_fmt, sizeof(ambient_t_fmt)));
         
         ImGui::Spacing();
         ImGui::DragFloat("Vorticity Confinement", &settings.vorticity_strength, 0.1f, 0.0f, 5.0f);
@@ -728,7 +735,9 @@ inline void drawGasSimulationProperties(UIContext& ui_ctx, std::shared_ptr<GasVo
                 bool tmpKeyed = isEmitterPropertyKeyed(track_name, false, false, true, false, false, false, false, false);
                 if (KeyframeButton("##KTmp", tmpKeyed)) { insertEmitterKey(track_name, e, false, false, true, false, false, false, false, false); }
                 ImGui::SameLine();
-                ImGui::DragFloat("Temperature (K)", &e.temperature, 10.0f, 300.0f, 5000.0f);
+                char emitter_t_fmt[48];
+                ImGui::DragFloat("Temperature", &e.temperature, 10.0f, 300.0f, 5000.0f,
+                    UiTemperature::kelvinFormat(e.temperature, emitter_t_fmt, sizeof(emitter_t_fmt), "%.0f"));
                 
                 // Initial velocity with Key
                 bool velKeyed = isEmitterPropertyKeyed(track_name, false, false, false, false, true, false, false, false);

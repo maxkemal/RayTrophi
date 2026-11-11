@@ -1,4 +1,6 @@
 #include "Fluid/MatterGrain.h"
+#include "Fluid/DemContactTimeBounds.h"
+#include "Fluid/DemBondGpu.h"
 #include "Fluid/MatterGrainAudioTelemetry.h"
 #include "Fluid/MatterGrainMpmContact.h"
 #include "Fluid/MatterCommonClock.h"
@@ -86,7 +88,7 @@ std::size_t bucketBytes(uint32_t buckets) {
 std::size_t particleBytes(std::size_t capacity, bool audio_enabled,
     uint32_t list_capacity, uint32_t contact_capacity) {
     return bucketBytes(bucketsFor(capacity)) +
-        (3 * capacity + 4) * sizeof(float) +       // mass, radius, real radius, ids
+        (3 * capacity + 8) * sizeof(float) +       // mass, radius, real radius, ids
         18 * capacity * sizeof(float) +            // bank 0 (pos/vel/affine)
         10 * capacity * sizeof(float) +            // scratch bank + active indices
         12 * capacity * sizeof(float) +            // liquid coupling
@@ -158,7 +160,7 @@ bool ensureParticles(SimulationComputeContext& compute, MatterGrainGpuRuntime& r
     candidate.bucket_slots = makeBuffer(compute, "grain_bucket_slots",
         std::size_t{kMatterGrainBucketTables} * candidate.buckets * kMatterGrainBucketCapacity *
         sizeof(uint32_t));
-    candidate.mass = makeBuffer(compute, "grain_mass_radius", (2 * capacity + 4) * sizeof(float));
+    candidate.mass = makeBuffer(compute, "grain_mass_radius", (2 * capacity + 8) * sizeof(float));
     candidate.ids = makeBuffer(compute, "grain_ids", capacity * sizeof(uint32_t));
     candidate.scratch = makeBuffer(compute, "grain_scratch_state", 10 * capacity * sizeof(float));
     candidate.history = makeBuffer(compute, "grain_contact_history",
@@ -252,6 +254,11 @@ void invalidateMatterGrainAfterReset(MatterGrainGpuRuntime& runtime) {
 }
 
 void releaseMatterGrainGpu(SimulationComputeContext& compute, MatterGrainGpuRuntime& r) {
+    for (auto handle : r.bond_buffers) {
+        if (handle.valid()) {
+            compute.destroyBuffer(handle);
+        }
+    }
     destroy(compute, {&r.positions, &r.velocities, &r.affines, &r.coupling,
         &r.bucket_counts, &r.bucket_slots, &r.mass, &r.ids, &r.scratch, &r.history,
         &r.history_blocks, &r.diagnostics, &r.triangles, &r.collider_nodes,
@@ -314,7 +321,15 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             "or the physical size ratio";
         return false;
     }
-    std::vector<float> masses(2 * count + 4);
+    std::vector<float> masses(2 * count + 8);
+    const auto wall = motion ? motion->domain_wall : DomainWallContact{};
+    if (!validateDomainWallContact(wall, error)) {
+        return false;
+    }
+    masses[2 * count + 4] = wall.friction;
+    masses[2 * count + 5] = matterGrainDampingRatio(wall.restitution);
+    masses[2 * count + 6] = wall.closed ? 1.0f : 0.0f;
+    masses[2 * count + 7] = wall.adhesion_pa;
     masses[2 * count + 3] = static_cast<float>(contact_capacity);
     masses[2 * count + 2] = static_cast<float>(list_capacity);
     masses[2 * count] = params.represented_grain_radius_m;
@@ -364,6 +379,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         minimum_bridge_volume = std::max(minimum_bridge_volume,
             double(kMatterGrainBridgeMinVolumeFraction) * 4.18879020478639 *
                 minimum_radius * minimum_radius * minimum_radius);
+    }
+    DemBondGpuFrame bonds(compute, runtime);
+    if (!bonds.prepare(p, params, error)) {
+        return false;
     }
     // Liquid coupling rows: {lump velocity, beta}, {buoyancy accel, lump mass},
     // {drag impulse accumulator}. Zero rows are an exact no-op in the shader,
@@ -421,9 +440,11 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // keeps it under 10% of a radius per substep relative to the grains too.
     const std::vector<Vec3>* triangle_velocity =
         motion && !motion->triangle_velocity.empty() ? &motion->triangle_velocity : nullptr;
+    float collider_speed_max = 0.0f;
     if (triangle_velocity) {
         for (const auto& v : *triangle_velocity) {
             maximum_speed = std::max(maximum_speed, v.length());
+            collider_speed_max = std::max(collider_speed_max, v.length());
         }
     }
     // Substep size. Every grain owns at most kMatterGrainContactBudget contact
@@ -495,48 +516,13 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         std::max(double(maximum_speed) + double(gravity.length()) * dt, 1e-8);
     // The three bounds for contact springs scaled by `scale` (the bridge is
     // a capillary force law, not a spring the step can soften).
-    struct Bounds {
-        double accuracy = 0.0, stability = 0.0, k_effective = 0.0, aggregate_zeta = 0.0;
-        const char* source = "contact";
-        const char* stability_name = "stability";
+    using Bounds = DemContactTimeBounds;
+    const DemContactTimeInput contact_time{
+        m, contact_k, params.tangential_stiffness_ratio, mu_r, rolling_factor,
+        bridge_stiffness, zeta, budget, double(params.contact_resolution)
     };
     const auto bounds_at = [&](double scale) {
-        Bounds b;
-        const double k = contact_k * scale;
-        const double kt = params.tangential_stiffness_ratio * k;
-        const std::array<std::pair<double, const char*>, 4> springs{{
-            {k, "contact"}, {3.5 * kt, "tangential"},
-            {rolling_factor * mu_r * mu_r * k, "rolling"}, {bridge_stiffness, "bridge"}}};
-        for (const auto& spring : springs) {
-            if (spring.first > b.k_effective) {
-                b.k_effective = spring.first;
-                b.source = spring.second;
-            }
-        }
-        b.accuracy = 3.14159265358979 * std::sqrt(.5 * m / k) / params.contact_resolution;
-        const double normal_damping = 2.0 * zeta * std::sqrt(k * m);
-        // Only the NORMAL dashpot is explicit. The sliding dashpot is capped in
-        // the shader so the whole contact budget cannot reverse a slip within
-        // one substep (sim_matter_grain.glsl contact(): min(c v, v / (BUDGET dt
-        // 1/m_t))) - unconditionally stable, so it sets no bound. Counting it
-        // here (7 c_t per contact) was the "damping" limit: an absolute 4 N s/m
-        // on an 8 mm grain read as zeta ~4.5 and cost 2622 substeps per frame
-        // where the normal dashpot alone needs ~710 (measured 2026-10-08, 1.3M
-        // grains). With fewer substeps the cap may engage: slip then decays in
-        // ~BUDGET substeps instead of one, still far below a frame.
-        const double damping_rate = budget * 2.0 * normal_damping / m;
-        // Spring and dashpot together: symplectic Euler on x'' = -w^2 x - 2 z w x'
-        // is stable for w^2 h^2 + 4 z w h < 4, i.e. h < (2/w)(sqrt(1+z^2) - z).
-        // Half of that, as the undamped bound always had (z = 0 gives the old
-        // 1/w). The two bounds used to be applied separately, the dashpot one at
-        // .5 / rate = 1/(4 z w), which is half the combined limit at large z and
-        // set the substep of every damped scene (234 substeps per frame at 16k).
-        const double omega = std::sqrt(2.0 * budget * b.k_effective / m);
-        b.aggregate_zeta = damping_rate / (2.0 * omega);
-        b.stability = (std::sqrt(1.0 + b.aggregate_zeta * b.aggregate_zeta) -
-                       b.aggregate_zeta) / omega;
-        b.stability_name = b.aggregate_zeta > .1 ? "damping" : "stability";
-        return b;
+        return demExplicitContactTimeBounds(contact_time, scale);
     };
     const auto substeps_for = [&](double step) { return std::ceil(dt / step - 1e-9); };
     // The ping-pong must end in the bank 0 buffers: an even count, at most
@@ -610,15 +596,35 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     needed = std::min(needed, max_steps);
     auto substeps = static_cast<uint32_t>(std::max(2.0, needed));
     substeps += substeps & 1u;
+    bool bond_limited = false;
+    double bond_stability_dt = bounds.stability;
+    if (bonds.constrains_motion) {
+        const double coupled_dt = 1.0 / std::hypot(1.0 / bonds.maximum_dt,
+                                                   1.0 / bounds.stability);
+        const double required = std::ceil(double(dt) / coupled_dt);
+        bond_stability_dt = coupled_dt;
+        cfl.requested_substeps = std::max(cfl.requested_substeps, required);
+        if (!std::isfinite(required) || required > max_steps) {
+            error = "DEM bonds: raise max_substeps; fracture stiffness is never softened";
+            return false;
+        }
+        auto bond_steps = static_cast<uint32_t>(std::max(2.0, required));
+        bond_steps += bond_steps & 1u;
+        bond_limited = bond_steps > substeps;
+        substeps = std::max(substeps, bond_steps);
+    }
     std::string limiting_name = limiting.second;
     if (scale < 1.0) limiting_name += " (stiffness adapted)";
     if (cfl.capped) limiting_name += " (capped)";
+    if (bond_limited) {
+        limiting_name = "bond stability";
+    }
     const double kt = params.tangential_stiffness_ratio * contact_k * scale;
     cfl.effective_stiffness_n_m = bounds.k_effective;
-    cfl.effective_source = bounds.source;
+    cfl.effective_source = bond_limited ? "bonds + contact" : bounds.source;
     cfl.aggregate_damping_ratio = bounds.aggregate_zeta;
     cfl.accuracy_dt_s = bounds.accuracy;
-    cfl.stability_dt_s = bounds.stability;
+    cfl.stability_dt_s = bond_stability_dt;
     cfl.stiffness_scale = static_cast<float>(scale);
     cfl.substeps = substeps;
 
@@ -648,7 +654,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         ? std::max(triangles.size(), std::size_t{1}) : runtime.triangle_capacity;
     std::size_t working = particleBytes(capacity, params.audio_telemetry_enabled,
         list_capacity, contact_capacity) +
-        colliderBytes(triangle_capacity);
+        colliderBytes(triangle_capacity) + bonds.working_bytes;
     if (grow_particles || grow_collider) {
         // Existing scratch remains allocated during transactional replacement.
         working += (grow_particles && runtime.capacity
@@ -742,6 +748,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             return false;
         }
         runtime.collider_node_count = static_cast<uint32_t>(collider.nodes.size());
+        runtime.collider_closed_faces = collider.closed_faces;
         runtime.collider_fingerprint = fingerprint;
         runtime.collider_uploaded = true;
     }
@@ -753,7 +760,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         float rolling[4];
         uint32_t substep, history_blocks, tangential_stiffness_bits, last_substep;
         float wet[4];  // hash cell size, capillary prefactor, rupture cap, velocity offset bits
-        float sleep[4];  // still substeps bits, speed (0 = off), wake-all bits, time s
+        float sleep[4];  // recovery speed cap, sleep speed, wake-all bits, sleep time
     } constants{};
     // 128 B: the push-constant size every Vulkan device guarantees.
     static_assert(sizeof(Constants) == 128);
@@ -885,16 +892,32 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     // can push a still grain that the step would not see: a moving collider
     // face, MPM contact impulses written between steps, the shared clock. A
     // removed grain may have been something's support: everyone wakes.
-    const bool sleep_on = params.sleep && params.sleep_speed_m_s > 0.0f &&
+    // Adhesive tensile contacts need live force evaluation; compressive-only
+    // sleeping support forecasts must not freeze a grain glued to a ceiling.
+    const bool sleep_on = !bonds.constrains_motion && wall.adhesion_pa == 0.0f &&
+        params.sleep && params.sleep_speed_m_s > 0.0f &&
         runtime.collider_velocity_offset == 0 && !common_driver &&
         !(mpm_contact && mpm_contact->active());
-    constants.sleep[0] = 0.0f;  // Reserved; rest now accumulates physical seconds.
+    // Numerical recovery budget for overconstrained contacts, scaled to the
+    // scene's fall/rebound speeds. This is a stabilization policy, not a
+    // physical upper bound on particle speed. The shader limits the complete
+    // normal reaction; friction uses that limited normal load as well.
+    {
+        const double height = std::max(0.0, double(high.y) - double(low.y));
+        const double fall = std::sqrt(2.0 * double(gravity.length()) * height);
+        const double rebound = (1.0 + std::clamp(double(std::max(params.restitution, wall.restitution)), 0.0, 1.0)) *
+            double(collider_speed_max);
+        // Keep overlap recovery active in static, zero-gravity scenes too.
+        const double recovery = double(maximum_radius) / double(dt);
+        constants.sleep[0] = static_cast<float>(std::max({fall, rebound, recovery}));
+        report.separation_speed_cap_m_s = constants.sleep[0];
+    }
     constants.sleep[1] = sleep_on ? params.sleep_speed_m_s : 0.0f;
     constants.sleep[3] = params.sleep_time_s;
     // O(1) per domain: exactly compare the force law, domain
     // and sleep settings. Changing any of these invalidates a frozen balance.
     // low/high/contact/rolling are four contiguous vec4 in the push ABI.
-    std::array<uint32_t, 24> sleep_context{};
+    std::array<uint32_t, 28> sleep_context{};
     std::memcpy(sleep_context.data(), constants.low, 16u * sizeof(uint32_t));
     // An adaptive CFL step changes neither the support nor the force law.
     // Rest and skipped-history clocks both integrate the actual dt in seconds.
@@ -904,6 +927,8 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     sleep_context[20] = constants.tangential_stiffness_bits;
     std::memcpy(sleep_context.data() + 21, constants.sleep, 2u * sizeof(uint32_t));
     std::memcpy(sleep_context.data() + 23, &constants.sleep[3], sizeof(uint32_t));
+    std::memcpy(sleep_context.data() + 24, masses.data() + 2 * count + 4,
+        4u * sizeof(uint32_t));
     const bool context_changed = !runtime.sleep_context_valid ||
         runtime.sleep_context != sleep_context ||
         runtime.sleep_collider_fingerprint != runtime.collider_fingerprint;
@@ -971,6 +996,10 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     const auto gpu_start = Clock::now();
     int dispatched = 0;
     const auto dispatch_stage = [&](const char* kernel, uint32_t substep) {
+        const bool integration = std::strcmp(kernel, "sim_matter_grain_step") == 0;
+        if (integration && !bonds.before(runtime, substep, constants.contact[0], error)) {
+            return false;
+        }
         if (mpm_contact && std::strcmp(kernel, "sim_matter_grain_step") == 0 &&
             !mpm_contact->step(runtime, substep, error)) {
             return false;
@@ -994,6 +1023,12 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
             return false;
         }
         ++dispatched;
+        if (integration && !bonds.after(runtime, substep, constants.contact[0], error)) {
+            return false;
+        }
+        if (integration) {
+            dispatched += bonds.extraDispatchesPerStep();
+        }
         return true;
     };
     const uint32_t planned_grain_substeps = substeps;
@@ -1172,6 +1207,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         report.friction_energy_j = 0;
         report.rolling_energy_j = 0;
     }
+    if (!bonds.readback(error) || !bonds.publish(p, error)) {
+        return false;
+    }
     p.position = std::move(new_position);
     p.velocity = std::move(new_velocity);
     p.affine = std::move(new_affine);
@@ -1192,6 +1230,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     runtime.sleep_collider_fingerprint = runtime.collider_fingerprint;
     runtime.sleep_context_valid = true;
     report.substeps = static_cast<int>(substeps);
+    report.closed_collider_faces = runtime.collider_closed_faces;
     report.dispatches = dispatched;
     report.substep_dt = dt / substeps;
     // Shared clock: the DEM substeps are a multiple of the continuum ones.
@@ -1225,13 +1264,14 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.history_reset_reason = reset_reason;
     report.history_remapped = remap;  // grain -> block map re-uploaded, no history copy
     report.state_resident = resident;
-    report.upload_bytes = upload_bytes +
+    report.upload_bytes = upload_bytes + bonds.upload_bytes +
         (refresh_collider ? collider.vertices.size() * sizeof(Vec3) +
             collider.nodes.size() * sizeof(MatterGrainBvhNode) +
             collider.surface_patches.size() * sizeof(uint32_t) : 0);
-    report.download_bytes = count * (2 * sizeof(Vec3) + sizeof(AffineC)) + diagnostic_bytes +
+    report.download_bytes = bonds.download_bytes +
+        count * (2 * sizeof(Vec3) + sizeof(AffineC)) + diagnostic_bytes +
         (coupling && drag_out ? coupling_rows.size() * sizeof(float) : 0);
-    report.transfer_batches = 2 + (refresh_collider ? 1 : 0);
+    report.transfer_batches = 2 + (refresh_collider ? 1 : 0) + (bonds.active ? 2 : 0);
     report.grains = count;
     report.working_set_bytes = working;
     report.host_publish_ms = ms_since(publish_start);

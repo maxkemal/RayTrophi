@@ -16,6 +16,149 @@ bool granularFlipSnapshotWanted(const Fluid::APICSolverParams& params,
         buffers.scratch_vel_z.valid();
 }
 
+// The MPM lane's whole P2G in three dispatches (sim_matter_p2g_fused.comp):
+// clear, scatter (momentum + weight + stress impulse of all three components),
+// normalize (velocity and, with FLIP, the stress-free baseline). Replaces the
+// per-component clear/clear/scatter/copy/stress/normalize/normalize chain.
+static bool runGpuMatterFusedP2G(SimulationComputeContext& compute,
+                                 SimulationGridDomainComputeBuffers& buffers,
+                                 const FluidSim::FluidGrid& grid,
+                                 std::size_t particle_count, float dt, bool flip_snapshot) {
+    const auto& model = buffers.matter_model;
+    const auto& g = buffers.granular;
+    if (!model.indices.valid() || !model.counters.valid() || !model.rest_mass.valid() ||
+        !model.mass_fraction.valid() || !model.dry_volume.valid() ||
+        !g.stress_diag.valid() || !g.stress_shear.valid() ||
+        !buffers.vel_x.valid() || !buffers.vel_y.valid() || !buffers.vel_z.valid() ||
+        !buffers.temperature.valid() || !buffers.fuel.valid() || !buffers.scratch_scalar.valid()) {
+        return false;
+    }
+    // Without FLIP the stress goes straight into the momentum and the baseline
+    // slots are never touched (flag bit 0): the velocity fields stand in.
+    const std::array<ComputeBufferHandle, 3> stress_slots = flip_snapshot
+        ? std::array<ComputeBufferHandle, 3>{buffers.scratch_vel_x, buffers.scratch_vel_y,
+                                             buffers.scratch_vel_z}
+        : std::array<ComputeBufferHandle, 3>{buffers.vel_x, buffers.vel_y, buffers.vel_z};
+    struct Constants {
+        int nx, ny, nz, particle_count, pass;
+        uint32_t flags;
+        float origin_x, origin_y, origin_z, voxel_size, dt;
+        uint32_t matter_lane;
+    } constants{grid.nx, grid.ny, grid.nz, static_cast<int>(particle_count), 0,
+                flip_snapshot ? 1u : 0u, grid.origin.x, grid.origin.y, grid.origin.z,
+                grid.voxel_size, dt, model.lane};
+    static_assert(sizeof(Constants) == 48);
+    const ComputeBufferHandle bindings[] = {
+        buffers.fluid_positions, buffers.fluid_velocities, buffers.fluid_affine,
+        buffers.vel_x, buffers.vel_y, buffers.vel_z,
+        buffers.temperature, buffers.fuel, buffers.scratch_scalar,
+        stress_slots[0], stress_slots[1], stress_slots[2],
+        g.stress_diag, g.stress_shear,
+        model.indices, model.counters, model.rest_mass, model.mass_fraction, model.dry_volume};
+    const uint32_t faces = static_cast<uint32_t>(
+        std::max({grid.vel_x.size(), grid.vel_y.size(), grid.vel_z.size()}));
+    ComputeDispatch command;
+    command.kernel = "sim_matter_p2g_fused";
+    command.buffers = bindings;
+    command.buffer_count = 19;
+    command.constants = &constants;
+    command.constants_size = sizeof(constants);
+    // Shared-memory block scatter (S5, docs/dev/OLCEK_MILYON_PARCACIK.md): a
+    // per-substep counting sort by 4^3-cell block (a permutation; the parcel
+    // order is untouched), then one workgroup per block. A device without
+    // shared float atomics refuses the block kernel at its first dispatch; the
+    // plain fused scatter (pass 1) then stays for the session.
+    // RT_P2G_BLOCK_OFF in the environment forces the plain scatter: the A arm
+    // of a parity run on the same device (the fallback must stay correct anyway).
+    static bool s_block_refused = std::getenv("RT_P2G_BLOCK_OFF") != nullptr;
+    const auto block_scatter = [&]() -> int {  // 1 done, 0 refused, -1 failed
+        if (s_block_refused) return 0;
+        constexpr int kBlock = 4;
+        const int bx = (grid.nx + kBlock - 1) / kBlock;
+        const int by = (grid.ny + kBlock - 1) / kBlock;
+        const int bz = (grid.nz + kBlock - 1) / kBlock;
+        const uint64_t blocks = uint64_t(bx) * by * bz;
+        if (blocks == 0 || blocks > uint64_t(std::numeric_limits<int32_t>::max() / 4)) return 0;
+        static ComputeBufferHandle s_meta{}, s_items{};
+        const auto ensure = [&](ComputeBufferHandle& h, std::size_t bytes, const char* name) {
+            if (h.valid() && compute.getBufferSize(h) >= bytes) return true;
+            if (h.valid()) compute.destroyBuffer(h);
+            ComputeBufferDesc desc;
+            desc.debug_name = name;
+            desc.size_bytes = bytes;
+            desc.usage = ComputeBufferUsage::Storage | ComputeBufferUsage::ReadWrite;
+            h = compute.createBuffer(desc);
+            return h.valid();
+        };
+        if (!ensure(s_meta, (3 * blocks + 1) * sizeof(uint32_t), "matter_p2g_block_meta") ||
+            !ensure(s_items, std::max<std::size_t>(particle_count, 1) * sizeof(uint32_t),
+                    "matter_p2g_block_items")) {
+            return -1;
+        }
+        struct SortConstants {
+            int nx, ny, nz, particle_count, pass;
+            uint32_t matter_lane;
+            float origin_x, origin_y, origin_z, voxel_size;
+            int bx, by, bz, pad0, pad1, pad2;
+        } sort{grid.nx, grid.ny, grid.nz, static_cast<int>(particle_count), 0, model.lane,
+               grid.origin.x, grid.origin.y, grid.origin.z, grid.voxel_size, bx, by, bz, 0, 0, 0};
+        static_assert(sizeof(SortConstants) == 64);
+        const ComputeBufferHandle sort_bindings[] = {
+            buffers.fluid_positions, model.indices, model.counters, s_meta, s_items};
+        ComputeDispatch sort_command;
+        sort_command.kernel = "sim_matter_p2g_block_sort";
+        sort_command.buffers = sort_bindings;
+        sort_command.buffer_count = 5;
+        sort_command.constants = &sort;
+        sort_command.constants_size = sizeof(sort);
+        for (int pass = 0; pass < 4; ++pass) {
+            sort.pass = pass;
+            sort_command.groups = pass == 2 ? ComputeDispatchSize{}
+                : FluidGpuDispatch::groups256(pass == 0 ? static_cast<uint32_t>(blocks)
+                                                        : static_cast<uint32_t>(particle_count));
+            if (!compute.dispatch(sort_command)) return -1;
+        }
+        struct BlockConstants {
+            Constants base;
+            int bx, by, bz, pad;
+        } block{constants, bx, by, bz, 0};
+        static_assert(sizeof(BlockConstants) == 64);
+        block.base.pass = 1;
+        ComputeBufferHandle block_bindings[21];
+        std::copy(std::begin(bindings), std::end(bindings), block_bindings);
+        block_bindings[19] = s_meta;
+        block_bindings[20] = s_items;
+        ComputeDispatch block_command;
+        block_command.kernel = "sim_matter_p2g_block";
+        block_command.buffers = block_bindings;
+        block_command.buffer_count = 21;
+        block_command.constants = &block;
+        block_command.constants_size = sizeof(block);
+        constexpr uint32_t kMaxGroups = 65535;
+        block_command.groups.groups_x = static_cast<uint32_t>(std::min<uint64_t>(blocks, kMaxGroups));
+        block_command.groups.groups_y = static_cast<uint32_t>((blocks + kMaxGroups - 1) / kMaxGroups);
+        if (!compute.dispatch(block_command)) {
+            // The kernel refuses before recording anything when the device
+            // lacks shared float atomics: the sort's output is just unused.
+            s_block_refused = true;
+            return 0;
+        }
+        return 1;
+    };
+    for (int pass = 0; pass < 3; ++pass) {
+        constants.pass = pass;
+        if (pass == 1) {
+            const int block = block_scatter();
+            if (block < 0) return false;
+            if (block > 0) continue;
+        }
+        command.groups = FluidGpuDispatch::groups256(
+            pass == 1 ? static_cast<uint32_t>(particle_count) : faces);
+        if (!compute.dispatch(command)) return false;
+    }
+    return true;
+}
+
 bool runGpuFluidP2G(SimulationGridDomainState& state,
                     SimulationComputeContext* compute,
                     SimulationGridDomainComputeBuffers& gpu_buffers,
@@ -104,9 +247,17 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
         sparse_transfer = Fluid::runSparseMacP2G(
             *compute, gpu_buffers, fluid_params, sparse_constants, canonical, sparse_error);
     }
+    // The MPM lane (matter, Vulkan, dense): one fused P2G.
+    bool fused_transfer = false;
+    if (!sparse_transfer && granular && gpu_buffers.matter_model.enabled &&
+        !window_normalize && compute->backendType() == ComputeBackendType::VulkanCompute) {
+        fused_transfer = runGpuMatterFusedP2G(*compute, gpu_buffers, grid, particle_count, dt,
+            granularFlipSnapshotWanted(fluid_params, gpu_buffers));
+        if (!fused_transfer) return false;
+    }
     // The dense path (or a failed compact one) needs the dense bank. A compact
     // owner whose P2G failed has had its pages released and must reallocate it.
-    for (int comp = 0; comp < 3 && !sparse_transfer; ++comp) {
+    for (int comp = 0; comp < 3 && !sparse_transfer && !fused_transfer; ++comp) {
         if (!velocity_fields[comp].valid() || !weight_fields[comp].valid()) {
             return false;
         }
@@ -115,7 +266,7 @@ bool runGpuFluidP2G(SimulationGridDomainState& state,
     const bool flip_snapshot = granularFlipSnapshotWanted(fluid_params, gpu_buffers);
     const ComputeBufferHandle flip_fields[3] = {
         gpu_buffers.scratch_vel_x, gpu_buffers.scratch_vel_y, gpu_buffers.scratch_vel_z};
-    for (int comp = 0; comp < 3 && ok && !sparse_transfer; ++comp) {
+    for (int comp = 0; comp < 3 && ok && !sparse_transfer && !fused_transfer; ++comp) {
         constants.component = comp;
         const uint32_t field_count = static_cast<uint32_t>(
             comp == 0 ? grid.vel_x.size() : (comp == 1 ? grid.vel_y.size() : grid.vel_z.size()));

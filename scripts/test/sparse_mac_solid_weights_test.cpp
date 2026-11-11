@@ -1,4 +1,5 @@
 #include "Fluid/SparseMacSolidWeightsGpu.h"
+#include "Fluid/SparseMacSolidWeightSource.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -37,6 +38,13 @@ void checkLayout(const std::array<int, 3>& cells, std::mt19937& random) {
     };
     std::array<std::vector<float>, 3> pages;
     std::string error;
+    std::vector<uint32_t> source;
+    require(RayTrophiSim::Fluid::packSparseMacSolidWeightSource(cells, input, source, error),
+        "packed source rejected valid weights");
+    const auto saved_source = source;
+    require(!RayTrophiSim::Fluid::packSparseMacSolidWeightSource(cells, input, source, error, 1),
+        "packed source exceeded byte budget");
+    require(source == saved_source, "source budget rejection changed output");
     // Full, reordered, retired/disconnected and empty topologies.
     for (int pass = 0; pass < 4; ++pass) {
         if (pass == 1) {
@@ -51,6 +59,18 @@ void checkLayout(const std::array<int, 3>& cells, std::mt19937& random) {
         require(packSparseMacSolidWeights(cells, keys, input, pages, error),
                 "Valid MAC topology rejected");
         require(error.empty(), "Successful packing retained an old error");
+        for (std::size_t slot = 0; slot < keys.size(); ++slot) {
+            const uint32_t base = source[keys[slot]];
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                for (uint32_t local = 0; local < 576u; ++local) {
+                    const uint32_t byte = base == 0u ? 255u :
+                        (source[base + axis * 144u + local / 4u] >> ((local % 4u) * 8u)) & 255u;
+                    const float decoded = float(byte) * (1.0f / 255.0f);
+                    require(decoded == pages[axis][slot * 576u + local],
+                        "GPU source decode differs from independent dense-face oracle");
+                }
+            }
+        }
         for (int axis = 0; axis < 3; ++axis) {
             require(pages[axis].size() == keys.size() * 576u, "Noncompact page allocation");
             auto dims = cells;

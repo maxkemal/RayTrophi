@@ -1,7 +1,10 @@
 // Domain <- substance. See FluidDomainSubstance.h.
 #include "Fluid/FluidDomainSubstance.h"
+#include <unordered_map>
 #include "Fluid/MatterSubstanceState.h"
+#include "Fluid/MatterMaterialResolution.h"
 #include "Fluid/FluidParticles.h"
+#include "Fluid/FluidLevelSet.h"
 
 #include "MaterialStateField.h"
 #include "SubstanceLibrary.h"
@@ -64,6 +67,9 @@ void applyElasticSubstancePhysics(APICSolverParams& params, const SubstanceProfi
     params.elastic_solid = true;
     params.elastic_yield_strain = substance.elastic_yield_strain;
     params.elastic_relaxation_s = substance.elastic_relaxation_s;
+    params.elastic_thermal_viscosity_power = substance.elastic_thermal_viscosity_power;
+    params.elastic_thermal_yield_power = substance.elastic_thermal_yield_power;
+    params.elastic_thermal_relaxation_power = substance.elastic_thermal_relaxation_power;
     params.elastic_viscosity_pa_s = substance.elastic_viscosity_pa_s;
     params.elastic_fracture_strain = substance.elastic_fracture_strain;
     params.granular_damage_rate = substance.elastic_damage_rate;
@@ -95,6 +101,116 @@ void resolveParticleGranularPhysics(APICSolverParams& params, const FluidParticl
     }
 }
 
+namespace {
+// The solver hints (wall slip, FLIP/APIC, air drag, wall damping...) of the
+// liquid now running. The thermal chain stays the domain's: it is a scene
+// switch, and the viscosity just resolved already read it.
+void applyLiquidSolverHints(APICSolverParams& params, const SubstanceProfile& liquid) {
+    const bool thermal = params.thermal_liquid_enabled;
+    applySubstanceSolverHints(params, liquid);
+    params.thermal_liquid_enabled = thermal;
+    params.sanitizeThermalLiquid();
+}
+} // namespace
+
+bool adoptParcelLiquidSubstance(APICSolverParams& params, const FluidParticles& particles,
+                                float voxel_size, const MaterialTemperatureScale& scale) {
+    // Which liquid ran last step. The hints are copied only when it CHANGES,
+    // as picking a Default Substance copies them once: they stay editable on
+    // the domain instead of snapping back every step.
+    const std::string previous = params.liquid_physics_substance;
+    params.liquid_physics_substance = params.default_substance;
+    const SubstanceProfile* domain = domainSubstance(params);
+    if (!domain || domain->default_constitutive_model != MatterConstitutiveModel::Fluid ||
+        params.granular_enabled) {
+        return false;
+    }
+    const uint32_t default_tag = substanceTag(params.default_substance);
+    std::unordered_map<uint32_t, std::size_t> counts;
+    bool default_present = false;
+    const auto n = particles.size();
+    for (std::size_t i = 0; i < n && !default_present; ++i) {
+        const auto model = i < particles.constitutive_model.size()
+            ? static_cast<MatterConstitutiveModel>(particles.constitutive_model[i])
+            : MatterConstitutiveModel::Auto;
+        if (model != MatterConstitutiveModel::Fluid && model != MatterConstitutiveModel::Auto) {
+            continue;
+        }
+        const uint32_t tag = i < particles.substance_tag.size()
+            ? particles.substance_tag[i] : kSubstanceUntagged;
+        if (tag == kSubstanceUntagged || tag == default_tag) {
+            default_present = true;  // the default substance's own liquid is present
+            break;
+        }
+        ++counts[tag];
+    }
+    const SubstanceProfile* liquid = nullptr;
+    if (!default_present) {
+        uint32_t dominant = kSubstanceUntagged;
+        std::size_t best = 0;
+        for (const auto& [tag, count] : counts) {
+            if (count > best) {
+                best = count;
+                dominant = tag;
+            }
+        }
+        if (best > 0) {
+            liquid = particleSubstance(dominant, params);
+        } else if (!previous.empty() && previous != params.default_substance) {
+            // No liquid parcels (frame 0 before an emitter pours, a rewind):
+            // no evidence either way, keep the liquid that ran. Falling back
+            // to the default here re-copied its hints on every rewind.
+            liquid = tryFindSubstance(previous);
+        }
+    }
+    if (liquid && liquid->default_constitutive_model != MatterConstitutiveModel::Fluid) {
+        liquid = nullptr;
+    }
+    if (!liquid) {
+        if (!previous.empty() && previous != params.default_substance) {
+            applyLiquidSolverHints(params, *domain);  // back to the default's liquid
+        }
+        return false;
+    }
+    APICSolverParams adopted = params;
+    adopted.default_substance = liquid->name;
+    std::string error;
+    if (!resolveDomainSubstancePhysics(adopted, voxel_size, scale, error)) {
+        return false;
+    }
+    adopted.default_substance = params.default_substance;
+    adopted.liquid_physics_substance = liquid->name;
+    // Honey on a Water-default domain kept Water's free-slip walls (slip 1,
+    // Honey 0), FLIP 0.97 and air drag: it slid over the floor (2026-11-09).
+    if (previous != liquid->name) {
+        applyLiquidSolverHints(adopted, *liquid);
+    }
+    params = adopted;
+    return true;
+}
+
+std::size_t appendParcelSubstanceViscosities(const FluidParticles& particles,
+    const APICSolverParams& params, float voxel_size, SubstanceViscosityEntry* entries,
+    std::size_t count, std::size_t capacity) {
+    const auto n = std::min(particles.size(), particles.substance_tag.size());
+    for (std::size_t i = 0; i < n && count < capacity; ++i) {
+        const uint32_t tag = particles.substance_tag[i];
+        if (tag == kSubstanceUntagged) continue;
+        bool known = false;
+        for (std::size_t e = 0; e < count && !known; ++e) known = entries[e].tag == tag;
+        if (known) continue;
+        const SubstanceProfile* profile = particleSubstance(tag, params);
+        if (!profile || profile->default_constitutive_model != MatterConstitutiveModel::Fluid) {
+            continue;
+        }
+        entries[count].tag = tag;
+        entries[count].kinematic_viscosity = resolveSubstanceViscosity(*profile, voxel_size,
+            params.thermal_liquid_enabled, false).effective;
+        ++count;
+    }
+    return count;
+}
+
 bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
                                    const MaterialTemperatureScale& scale,
                                    std::string& error) {
@@ -113,15 +229,8 @@ bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
     // the numerical diffusion of any renderable grid, and paying for sweeps buys
     // motion nobody can see. Not with the thermal chain on: its viscosity curve
     // ramps from this value in log space.
-    float nu = std::max(s->liquid_kinematic_viscosity, 0.0f);
-    const float h = voxel_size > 0.0f ? voxel_size : 0.05f;
-    if (params.granular_enabled) {
-        nu = 0.0f;
-    } else if (!params.thermal_liquid_enabled &&
-               nu * kViscosityReferenceDt / (h * h) < kUnresolvedViscosityDiffusion) {
-        nu = 0.0f;
-    }
-    params.kinematic_viscosity = nu;
+    params.kinematic_viscosity = resolveSubstanceViscosity(*s, voxel_size,
+        params.thermal_liquid_enabled, params.granular_enabled).effective;
 
     if (s->default_constitutive_model == MatterConstitutiveModel::Elastic) {
         applyElasticSubstancePhysics(params, *s);
@@ -155,7 +264,7 @@ void applySubstanceSolverHints(APICSolverParams& params, const SubstanceProfile&
     params.velocity_damping = s.solver_velocity_damping;
     params.density_relaxation_s = s.solver_density_relaxation_s;
     params.air_drag = s.solver_air_drag;
-    params.wall_damping = s.solver_wall_damping;
+    // Domain wall contact is authored independently of substance solver hints.
     params.affine_damping = s.solver_affine_damping;
     params.max_velocity = s.solver_max_velocity;
     params.viscosity_sweeps = std::max(1, static_cast<int>(std::lround(s.solver_viscosity_sweeps)));

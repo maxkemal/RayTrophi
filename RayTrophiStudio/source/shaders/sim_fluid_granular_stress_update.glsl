@@ -43,9 +43,7 @@ layout(push_constant) uniform PC {
     float compaction_hardening;
     float compaction_limit;
     // Law: 0 Drucker-Prager, 1 Stomakhin snow, 2 elastic solid
-    // (GranularConstitutive.h). Padded to 112 bytes: the Matter dispatcher
-    // appends matter_lane at the C++ struct size, so this block and
-    // StressUpdateConstants must end together.
+    // GranularConstitutive.h: scalar layout is 124 bytes (128 indexed).
     uint mpm_law;
     float snow_critical_compression;
     float snow_critical_stretch;
@@ -58,10 +56,19 @@ layout(push_constant) uniform PC {
     float elastic_relaxation_s;
     float elastic_viscosity;
     float elastic_fracture_strain;  // tear threshold; the rate is damage_rate
+    float elastic_thermal_viscosity_power;
+    float elastic_thermal_yield_power;
+    float elastic_thermal_relaxation_power;
 #ifdef MATTER_INDEXED
     uint matter_lane;
 #endif
 } pc;
+
+float elasticThermalScale(float soft, float power) {
+    if (!(power > 0.0)) return 1.0;
+    float bounded = clamp(soft, 0.0, 1.0);
+    return power == 1.0 ? bounded : pow(bounded, power);
+}
 
 // Rankine damage is driven by the largest principal (tensile) stress, not by
 // hydrostatic mean stress and not by ordinary frictional plastic flow. Analytic
@@ -283,12 +290,19 @@ void elasticStressUpdate(uint i,mat3 C){
     float mean=(eps.x+eps.y+eps.z)/3.0;
     vec3 dev=eps-vec3(mean);
     vec3 trial_dev=dev;
-    if(pc.elastic_relaxation_s>0.0)dev*=exp(-pc.dt/pc.elastic_relaxation_s);
+    if (pc.elastic_relaxation_s > 0.0) {
+        float relaxation = max(1.0e-6, pc.elastic_relaxation_s *
+            elasticThermalScale(soft, pc.elastic_thermal_relaxation_power));
+        dev *= exp(-pc.dt / relaxation);
+    }
     float dev_norm=length(dev);
     float overshoot=0.0;
-    if(pc.elastic_yield_strain>0.0&&dev_norm>pc.elastic_yield_strain){
-        overshoot=dev_norm-pc.elastic_yield_strain;
-        dev*=pc.elastic_yield_strain/dev_norm;
+    float yield_strain = pc.elastic_yield_strain > 0.0
+        ? max(1.0e-6, pc.elastic_yield_strain *
+            elasticThermalScale(soft, pc.elastic_thermal_yield_power)) : 0.0;
+    if (yield_strain > 0.0 && dev_norm > yield_strain) {
+        overshoot = dev_norm - yield_strain;
+        dev *= yield_strain / dev_norm;
     }
     vec3 sv=exp(dev+vec3(mean));
     float je=sv.x*sv.y*sv.z;
@@ -321,7 +335,8 @@ void elasticStressUpdate(uint i,mat3 C){
     }
     if(pc.elastic_viscosity>0.0&&pc.dt>0.0){
         mat3 rate=dC*(1.0/pc.dt);
-        S+=(rate+transpose(rate))*(pc.elastic_viscosity*soft*je*(1.0-dmg));
+        S+=(rate+transpose(rate))*(pc.elastic_viscosity *
+            elasticThermalScale(soft, pc.elastic_thermal_viscosity_power) * je * (1.0-dmg));
     }
     if(!finiteMat3(S)||!finiteMat3(F_elastic)){S=mat3(0.0);F_elastic=mat3(1.0);}
     sd[i*3]=S[0][0];sd[i*3+1]=S[1][1];sd[i*3+2]=S[2][2];

@@ -47,8 +47,9 @@ def main():
     assert "fluid_params.grain.enabled || fluid_params.pore_exchange.enabled ||" in read(
         "src/Physics/Fluid/FluidDomainStep.inl")
     driver = read("src/Physics/Fluid/MatterGpuStep.inl")
-    assert driver.index("exchangeMatterPoresGpu") < driver.index("particles = std::move(liquid_result)")
-    assert driver.index("particles = std::move(liquid_result)") < driver.index("ledger.record")
+    # Publication swaps the staged columns in first; pores then act on the committed set.
+    assert driver.index("particles.position.swap(staging.position);") < driver.index("exchangeMatterPoresGpu")
+    assert driver.index("exchangeMatterPoresGpu") < driver.index("ledger.record")
     assert "view.mass_fraction = runtime.transport_fraction" in driver
     assert "matterPoreSettingsHash(fp.pore_exchange)" in read("include/scene_data.h")
     for name in ["src/UI/MatterPoreControls.cpp", "src/Api/RtIpcMatterModels.cpp",

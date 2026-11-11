@@ -1,4 +1,8 @@
+#include "Fluid/GranularFrameReadback.h"
+#include "Fluid/DomainWallGpuConstants.h"
 #include "ParticleSimulation.h"
+#include "Fluid/FluidSeedBox.h"
+#include "Fluid/MatterMpmSoftening.h"
 #include "Fluid/MatterPhaseConfig.h"
 #include "Fluid/MatterAudioTelemetry.h"
 #include "Fluid/FluidCacheRestore.h"
@@ -20,6 +24,7 @@
 #include "Fluid/MatterMixedStep.h"
 #include "Fluid/MatterEmissionBudget.h"
 #include "Fluid/MatterPhaseGrid.h"
+#include "Fluid/MatterLiquidInflow.h"
 #include "Fluid/FluidParticleSolidRecovery.h"
 #include "Fluid/FluidParticleLabelsGpu.h"
 #include "Fluid/FluidMistCoupling.h"
@@ -1867,21 +1872,6 @@ struct FluidG2PGpuConstants {
     float max_affine = 80.0f;
 };
 
-struct FluidAdvectTailGpuConstants {
-    int nx = 0, ny = 0, nz = 0, particle_count = 0;
-    int boundary = 0;
-    float origin_x = 0.0f, origin_y = 0.0f, origin_z = 0.0f;
-    float voxel_size = 1.0f, dt = 0.0f;
-    float velocity_damping = 1.0f, max_velocity = 0.0f;
-    float wall_damping = 0.0f, air_drag = 0.0f;
-    int air_threshold = 1, substeps = 1;
-    // Climate wind (Faz 2): spray drag acts relative to it. Zero when the
-    // domain does not inherit the atmosphere -- the pre-Faz-2 formula.
-    float air_wind_x = 0.0f, air_wind_y = 0.0f, air_wind_z = 0.0f, _pad0 = 0.0f;
-};
-static_assert(sizeof(FluidAdvectTailGpuConstants) == 80,
-              "sim_fluid_advect_tail push-constant ABI changed");
-
 // Free-surface SOR reuses GridProjectionGpuConstants (same layout).
 // kernel = "sim_fluid_free_surface_sor", buffers = [pressure, divergence, fluid_mask]
 
@@ -2224,11 +2214,47 @@ void buildFluidMaskFromParticles(const FluidSim::FluidGrid& grid,
     }
 }
 
-void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid) {
+void enforceGridSolidFaceBoundaries(FluidSim::FluidGrid& grid, bool keep_collider_faces = false) {
     if (grid.solid.empty() || grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) {
         return;
     }
     if (!grid.hasAnySolid()) {
+        return;
+    }
+    // Separating liquid wall (sim_matter_liquid_wall.glsl): a face between a
+    // collider cell and a non-solid cell holds what the device decided (the
+    // solid's velocity, or the liquid leaving it); only faces INSIDE a
+    // collider are clamped. Zeroing them here made G2P see a rising sphere as
+    // a still wall (2026-11-08: chocolate lifted ~0).
+    if (keep_collider_faces) {
+        const int nx = grid.nx, ny = grid.ny, nz = grid.nz;
+        const bool moving = grid.solid_vel.size() == grid.getCellCount();
+        // Inside faces take the solid's velocity (the device kernel's mode 0):
+        // G2P's quadratic stencil reaches them from the surface.
+        const auto sv = [&](int i, int j, int k, int a) {
+            if (!moving) return 0.0f;
+            const Vec3& v = grid.solid_vel[grid.cellIndex(i, j, k)];
+            return a == 0 ? v.x : (a == 1 ? v.y : v.z);
+        };
+        #pragma omp parallel for schedule(static)
+        for (int k = 0; k < nz; ++k) {
+            for (int j = 0; j < ny; ++j) {
+                for (int i = 0; i < nx; ++i) {
+                    if (!grid.isSolid(i, j, k)) continue;
+                    // Each solid cell clamps its low faces whose other side is
+                    // solid too; every inside face has exactly one such owner.
+                    if (i > 0 && grid.isSolid(i - 1, j, k))
+                        grid.vel_x[grid.velXIndex(i, j, k)] =
+                            0.5f * (sv(i - 1, j, k, 0) + sv(i, j, k, 0));
+                    if (j > 0 && grid.isSolid(i, j - 1, k))
+                        grid.vel_y[grid.velYIndex(i, j, k)] =
+                            0.5f * (sv(i, j - 1, k, 1) + sv(i, j, k, 1));
+                    if (k > 0 && grid.isSolid(i, j, k - 1))
+                        grid.vel_z[grid.velZIndex(i, j, k)] =
+                            0.5f * (sv(i, j, k - 1, 2) + sv(i, j, k, 2));
+                }
+            }
+        }
         return;
     }
 
@@ -2518,7 +2544,9 @@ bool runGpuFluidZeroSolidFaces(const FluidSim::FluidGrid& grid,
 bool runGpuMpmSolidFaces(const FluidSim::FluidGrid& grid,
                          SimulationComputeContext* compute,
                          SimulationGridDomainComputeBuffers& gpu_buffers,
-                         bool closed_boundary, float dt, float density) {
+                         bool closed_boundary, float dt, float density,
+                         const Fluid::APICSolverParams& wall_params,
+                         bool wall_contact = true) {
     const auto mac = Fluid::macVelocityBinding(gpu_buffers);
     if (!compute || compute->backendType() != ComputeBackendType::VulkanCompute ||
         !compute->supportsDispatch() || mac.compact ||
@@ -2543,11 +2571,11 @@ bool runGpuMpmSolidFaces(const FluidSim::FluidGrid& grid,
             return false;
         }
     }
-    struct MpmBoundaryConstants {
-        int nx, ny, nz; uint32_t flags; float dt, density, h, pad;
-    } constants{grid.nx, grid.ny, grid.nz, closed_boundary ? 1u : 0u,
-                std::max(dt, 1.0e-6f), std::max(density, 1.0f), grid.voxel_size, 0.0f};
-    static_assert(sizeof(MpmBoundaryConstants) == 32);
+    const MpmBoundaryConstants constants{grid.nx, grid.ny, grid.nz,
+        closed_boundary ? (wall_contact ? 3u : 1u) : 0u, std::max(dt, 1.0e-6f), std::max(density, 1.0f),
+        grid.voxel_size, wall_params.wall_friction, wall_params.wall_damping,
+        wall_params.gravity.x, wall_params.gravity.y, wall_params.gravity.z,
+        wall_params.wall_adhesion_pa};
     const std::size_t face_count = std::max({sizes[0], sizes[1], sizes[2]});
     ComputeBufferHandle bufs[13] = {
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z, gpu_buffers.fluid_mask,
@@ -2563,6 +2591,84 @@ bool runGpuMpmSolidFaces(const FluidSim::FluidGrid& grid,
     cmd.constants_size = sizeof(constants);
     cmd.groups.groups_x = static_cast<uint32_t>((face_count + 255u) / 256u);
     return compute->dispatch(cmd);
+}
+
+// The matter liquid lane's collider wall (sim_matter_liquid_wall.glsl says what
+// and why). mode 0 replaces the old zeroing after P2G and before G2P; mode 1
+// runs inside the pressure solve after the solid weights are uploaded; modes 3
+// and 2 mark and clear the adhesion band of glued colliders around it.
+struct MatterLiquidWallConstants {
+    int nx, ny, nz, mode;
+    float dt, density, h;
+    int boundary;
+};
+static_assert(sizeof(MatterLiquidWallConstants) == 32);
+
+bool runGpuMatterLiquidWall(const FluidSim::FluidGrid& grid,
+                            SimulationComputeContext* compute,
+                            SimulationGridDomainComputeBuffers& gpu_buffers,
+                            int mode, float dt) {
+    const auto mac = Fluid::macVelocityBinding(gpu_buffers);
+    const auto& wall = gpu_buffers.matter_model;
+    const bool weights_valid = mac.solid_weight[0].valid() &&
+        mac.solid_weight[1].valid() && mac.solid_weight[2].valid();
+    if (!compute || compute->backendType() != ComputeBackendType::VulkanCompute ||
+        !compute->supportsDispatch() || grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 ||
+        !mac.velocity[0].valid() || !mac.velocity[1].valid() || !mac.velocity[2].valid() ||
+        !gpu_buffers.fluid_mask.valid() || !gpu_buffers.var_svx.valid() ||
+        !gpu_buffers.var_svy.valid() || !gpu_buffers.var_svz.valid() ||
+        !gpu_buffers.var_contact_adhesion.valid() || !gpu_buffers.var_solid_phi.valid() ||
+        (mode == 1 && !weights_valid)) {
+        return false;
+    }
+    const MatterLiquidWallConstants constants{grid.nx, grid.ny, grid.nz, mode,
+        std::max(dt, 1.0e-6f), std::max(wall.liquid_wall_density, 1.0f), grid.voxel_size,
+        static_cast<int>(wall.boundary)};
+    // Mode 0 never touches a weight: bind the velocity in their slots so the
+    // first substep runs before the weights are allocated.
+    ComputeBufferHandle bufs[14] = {
+        mac.velocity[0], mac.velocity[1], mac.velocity[2], gpu_buffers.fluid_mask,
+        weights_valid ? mac.solid_weight[0] : mac.velocity[0],
+        weights_valid ? mac.solid_weight[1] : mac.velocity[1],
+        weights_valid ? mac.solid_weight[2] : mac.velocity[2],
+        gpu_buffers.var_svx, gpu_buffers.var_svy, gpu_buffers.var_svz,
+        gpu_buffers.var_contact_adhesion, gpu_buffers.var_solid_phi, mac.map, mac.list
+    };
+    ComputeDispatch cmd;
+    cmd.kernel = Fluid::macKernel(mac, "sim_matter_liquid_wall", "sim_sparse_mac_matter_liquid_wall");
+    cmd.buffers = bufs;
+    cmd.buffer_count = mac.compact ? 14 : 12;
+    cmd.constants = &constants;
+    cmd.constants_size = sizeof(constants);
+    if (mode >= 2) {
+        cmd.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(grid.getCellCount()));
+    } else if (mac.compact) {
+        cmd.groups = FluidGpuDispatch::groups256(mac.face_lanes);
+    } else {
+        const std::size_t face_count = std::max({grid.vel_x.size(), grid.vel_y.size(),
+                                                 grid.vel_z.size()});
+        cmd.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(face_count));
+    }
+    return compute->dispatch(cmd);
+}
+
+// Any stamped collider cell with adhesion > 0: only then does the liquid wall
+// mark an adhesion band (and the matter lane re-upload its pressure statics).
+bool gridHasGluedCollider(const FluidSim::FluidGrid& grid) {
+    const auto& glue = grid.solid_contact_adhesion;
+    if (glue.size() != grid.solid.size()) {
+        return false;
+    }
+    if (grid.solid_cells_valid) {
+        for (uint32_t cell : grid.solid_cells) {
+            if (cell < glue.size() && glue[cell] > 0.0f) return true;
+        }
+        return false;
+    }
+    for (std::size_t c = 0; c < glue.size(); ++c) {
+        if (grid.solid[c] && glue[c] > 0.0f) return true;
+    }
+    return false;
 }
 
 // S3: every MPM parcel against the collider's signed distance, after the lane
@@ -2869,6 +2975,8 @@ static_assert(sizeof(FluidViscosityGpuConstants) == 52,
 // position/velocity/affine snapshot.
 #include "Fluid/FluidGpuOccupancy.inl"
 #include "Fluid/FluidGpuTransferStages.inl"
+
+
 #include "Fluid/MatterGpuStep.inl"
 #include "Fluid/MatterGrainStep.inl"
 
@@ -6009,11 +6117,19 @@ void ParticleSimulationSystem::clear() {
     alive_count_ = 0;
     for (auto& source : flow_sources_) {
         source.fluid_emit_accumulator = 0.0f;
+        source.fluid_inflow_initialized = false;
+        source.fluid_inflow_fractional_parcel = 0.0;
         source.fluid_emit_sample_serial = 0;
         source.total_emitted_particles = 0;
         source.total_emitted_mass_kg = 0.0;
         source.withheld_mass_kg_step = 0.0;
         source.withheld_mass_kg_total = 0.0;
+        source.fluid_flux_m3_s = 0.0;
+        source.fluid_flux_target_m3_s = 0.0;
+        source.fluid_overpack_dropped_total = 0;
+        source.drained_mass_kg_step = 0.0;
+        source.drained_mass_kg_total = 0.0;
+        source.liquid_emission_status.clear();
         source.pool_requested_particles = 0;
         source.pool_granted_particles = 0;
         // Re-arm the parent motion sampler. Without this a rewind measures the
@@ -6068,6 +6184,8 @@ ParticleSimulationRuntimeState ParticleSimulationSystem::captureRuntimeState() c
     state.flow_total_emitted_particles.reserve(flow_sources_.size());
     for (const auto& source : flow_sources_) {
         state.flow_emit_accumulators.push_back(source.fluid_emit_accumulator);
+        state.flow_inflow_initialized.push_back(source.fluid_inflow_initialized ? 1u : 0u);
+        state.flow_inflow_fractional_parcels.push_back(source.fluid_inflow_fractional_parcel);
         state.flow_emit_sample_serials.push_back(source.fluid_emit_sample_serial);
         state.flow_total_emitted_particles.push_back(source.total_emitted_particles);
         state.flow_total_emitted_mass_kg.push_back(source.total_emitted_mass_kg);
@@ -6095,6 +6213,11 @@ void ParticleSimulationSystem::restoreRuntimeState(const ParticleSimulationRunti
         std::min(state.flow_emit_accumulators.size(), state.flow_total_emitted_particles.size()));
     for (std::size_t i = 0; i < flow_count; ++i) {
         flow_sources_[i].fluid_emit_accumulator = state.flow_emit_accumulators[i];
+        flow_sources_[i].fluid_inflow_initialized = i < state.flow_inflow_initialized.size()
+            ? state.flow_inflow_initialized[i] != 0u : state.flow_total_emitted_particles[i] > 0;
+        flow_sources_[i].fluid_inflow_fractional_parcel =
+            i < state.flow_inflow_fractional_parcels.size()
+                ? state.flow_inflow_fractional_parcels[i] : 0.0;
         flow_sources_[i].total_emitted_particles = state.flow_total_emitted_particles[i];
         // A restored frame resumes the kg budget where that frame left it.
         flow_sources_[i].total_emitted_mass_kg = i < state.flow_total_emitted_mass_kg.size()
@@ -10225,6 +10348,7 @@ void ParticleSimulationSystem::releaseGridDomainComputeBuffers(SimulationCompute
     destroy(buffers.cg_scalars);
     Fluid::releaseSparsePressure(compute, buffers.sparse_pressure);
     Fluid::releaseSparseViscosity(compute, buffers.sparse_viscosity);
+    Fluid::releaseViscosityPcg(compute, buffers.viscosity_pcg);
     Fluid::releaseSparseMacTransfer(compute, buffers.sparse_mac_transfer);
     destroy(buffers.var_u_weight);
     destroy(buffers.var_v_weight);

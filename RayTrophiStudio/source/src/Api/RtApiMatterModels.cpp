@@ -7,6 +7,7 @@
 #include "Fluid/MatterAcceptanceMetrics.h"
 #include "Fluid/MatterGrain.h"
 #include "Fluid/MatterSubstanceState.h"
+#include "Fluid/MatterMaterialResolution.h"
 
 #include <algorithm>
 #include <stdexcept>
@@ -105,7 +106,13 @@ nlohmann::json getMatterModels(const std::string& domain, bool include_transfer)
                     domains[index].fluid_params.pore_exchange.wet_appearance_full_saturation);
             }
         }
+        nlohmann::json material_resolution;
+        if (!RayTrophiSim::Fluid::inspectMatterMaterialResolution(
+                domains[index], state, material_resolution, error)) {
+            throw std::runtime_error(error);
+        }
         return {{"domain", domain}, {"measured", state && state->valid},
+            {"material_resolution", material_resolution},
             {"acceptance_metrics", acceptance_metrics},
             {"granular_mechanics", {
                 {"measured", state && state->fluid_stats.granular_load_measured},

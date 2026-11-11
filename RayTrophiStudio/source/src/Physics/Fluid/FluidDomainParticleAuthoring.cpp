@@ -19,6 +19,9 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
             continue;
         }
 
+        if (domain.matter_seed_sources_enabled) {
+            return false;
+        }
         if (fill_level >= 0.0f) {
             // Fill Domain: the panel's resting tank, reachable from IPC too.
             domain.fluid_seed_mode = FluidSeedMode::FillLevel;
@@ -27,6 +30,7 @@ bool ParticleSimulationSystem::seedFluidDomainParticles(
             domain.fluid_seed_mode = FluidSeedMode::SeedBox;
             domain.fluid_seed_min = Vec3::min(seed_min, seed_max);
             domain.fluid_seed_max = Vec3::max(seed_min, seed_max);
+            domain.fluid_seed_box_initialized = true;
         }
         domain.fluid_seed_particles_per_cell =
             std::clamp(particles_per_cell, 1, 64);
@@ -58,6 +62,9 @@ bool ParticleSimulationSystem::seedFluidDomainFromMesh(
         if (domain.name != domain_name ||
             !simulationDomainHasLiquid(domain)) {
             continue;
+        }
+        if (domain.matter_seed_sources_enabled) {
+            return false;
         }
         domain.fluid_seed_mode = FluidSeedMode::MeshVolume;
         domain.fluid_seed_mesh_object = object_name;
@@ -110,6 +117,10 @@ bool ParticleSimulationSystem::clearFluidDomainParticles(
 
         domain.fluid_pending_seed = false;
         if (clear_seed_recipe) {
+            domain.matter_seed_sources.clear();
+            domain.matter_seed_selected_source = 0;
+            domain.matter_seed_sources_enabled = false;
+            domain.matter_seed_sources_applied_hash = 0;
             domain.fluid_reseed_on_reset = false;
             // FillLevel is itself a persistent initial-state recipe. Returning
             // to SeedBox is necessary; clearing only the boolean would let the

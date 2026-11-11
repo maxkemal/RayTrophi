@@ -4333,6 +4333,8 @@ struct SceneData {
         h = mix(h, fb(fp.max_velocity));
         h = mix(h, fb(fp.velocity_damping));
         h = mix(h, fb(fp.wall_damping));
+        h = mix(h, fb(fp.wall_friction));
+        h = mix(h, fb(fp.wall_adhesion_pa));
         h = mix(h, fb(fp.density_relaxation_s));
         h = mix(h, fb(fp.internal_friction));
         h = mix(h, fb(fp.air_drag));
@@ -4461,16 +4463,9 @@ struct SceneData {
         // Editing the seed box is not lost as a result: it has its own path,
         // the panel's seed-settled auto-reseed, which reseeds and snaps the
         // playhead to start once the drag is released.
-        h = mix(h, static_cast<uint64_t>(d.fluid_seed_particles_per_cell));
-        h = mix(h, fb(d.fluid_seed_grain_saturation));
+        h = mix(h, RayTrophiSim::Fluid::matterSeedAuthoringSignature(d));
         h = mix(h, static_cast<uint64_t>(d.fluid_max_particles));
         h = mix(h, d.fluid_reseed_on_reset ? 1ull : 0ull);
-        h = mix(h, fb(d.fluid_fill_level));
-        h = mix(h, fb(d.fluid_fill_wall_margin));
-        // A settled seed is a different initial state (MatterSeedSettle).
-        h = mix(h, d.fluid_seed_settle ? 1ull : 0ull);
-        h = mix(h, static_cast<uint64_t>(d.fluid_settle_max_steps));
-        h = mix(h, fb(d.fluid_settle_displacement_m));
 
         // Liquid -> gas combustion coupling: all authored, all change the solve.
         h = mix(h, d.fluid_flammable ? 1ull : 0ull);
@@ -4646,6 +4641,7 @@ struct SceneData {
                 h = mix(h, qf(f.fuel));
                 h = mix(h, qf(f.falloff));
                 h = mix(h, qf(f.velocity_coupling));
+                h = mix(h, static_cast<uint64_t>(f.liquid_emission));
                 h = mix(h, qf(f.fluid_particles_per_second));
                 h = mix(h, qf(f.particle_pool_weight));
                 h = mix(h, qf(f.fluid_velocity_spread));
@@ -5027,6 +5023,7 @@ struct SceneData {
                 h = mix(h, qf(f.fuel));
                 h = mix(h, qf(f.falloff));
                 h = mix(h, qf(f.velocity_coupling));
+                h = mix(h, static_cast<uint64_t>(f.liquid_emission));
                 h = mix(h, qf(f.fluid_particles_per_second));
                 h = mix(h, qf(f.particle_pool_weight));
                 h = mix(h, qf(f.fluid_velocity_spread));
@@ -6461,7 +6458,7 @@ struct SceneData {
         return true;
     }
 
-    void captureSimFrame(int frame) {
+    bool captureSimFrame(int frame, bool force_velocity_keyframe = false) {
         RTPERF_FRAME_SCOPE("sim.timeline.capture_frame");
         const bool already_cached = sim_frame_cache_.find(frame) != sim_frame_cache_.end();
         if (!already_cached &&
@@ -6471,12 +6468,12 @@ struct SceneData {
             // ★ Refuse rather than evict. A scrub cache that silently drops
             // frames the user believes are baked reads as "the sim changed when
             // I scrubbed back", which is indistinguishable from a solver bug.
-            return;
+            return false;
         }
         auto captured = RayTrophiSim::Fluid::captureGasInventoryFrame(*this);
         if (!captured.ok) {
             SCENE_LOG_WARN("Simulation cache snapshot rejected: " + captured.error);
-            return;
+            return false;
         }
         if (already_cached) {
             for (const auto& per_system : sim_frame_cache_[frame])
@@ -6489,7 +6486,8 @@ struct SceneData {
         // ★ Velocity keyframe stride. A resume after a scrub rewinds to the
         // nearest keyframe at or below the target; between keyframes the cache
         // is render-only, which is what SimCache's disk format has always been.
-        const bool velocity_keyframe = (frame % kSimCacheVelocityKeyframeStride) == 0;
+        const bool velocity_keyframe = force_velocity_keyframe ||
+            (frame % kSimCacheVelocityKeyframeStride) == 0;
         for (auto& states : captured.states) {
             entry.push_back(compressGridDomainStates(std::move(states), velocity_keyframe));
         }
@@ -6535,6 +6533,7 @@ struct SceneData {
         captureRigidFrame(frame);
         // Soft/cloth deformation is mesh-resident, so record it per frame too.
         captureSoftFrame(frame);
+        return true;
     }
 
     // Snapshot the dynamic rigid bodies for `frame`, keyed alongside the fluid
@@ -8818,6 +8817,7 @@ public:
                 if (collider.source_name == node_name) return true;
             }
             for (const auto& domain : system.runtime->gridDomains()) {
+                if (RayTrophiSim::Fluid::matterSeedSourcesUseObject(domain, node_name)) return true;
                 if (domain.source_mode == RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds &&
                     domain.source_name == node_name) return true;
             }

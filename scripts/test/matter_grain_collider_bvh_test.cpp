@@ -1,4 +1,5 @@
 #include "Fluid/MatterGrainColliderBvh.h"
+#include "Fluid/MatterGrain.h"
 #include "SurfaceMeshCache.h"
 
 #include <algorithm>
@@ -73,5 +74,30 @@ int main() {
     assert(matterGrainColliderFingerprint(many, &velocity) != matterGrainColliderFingerprint(many));
     std::vector<Vec3> short_velocity(3);
     assert(!buildMatterGrainColliderBvh(many, result, error, &short_velocity, .5f));
-    std::printf("PASS grain collider BVH (patches, transactional, sweep bounds, velocities)\n");
+    // Closed shells are one-sided: an outward tetrahedron is flagged closed,
+    // its mirror (inward winding) also carries the inward bit, an open sheet
+    // carries neither; the patch id below the flags is unchanged.
+    const Vec3 o(0, 0, 0), x(1, 0, 0), y(0, 1, 0), z(0, 0, 1);
+    auto tri = [](Vec3 p0, Vec3 p1, Vec3 p2) {
+        SurfaceMeshTriangle t; t.p0 = p0; t.p1 = p1; t.p2 = p2; return t;
+    };
+    const std::vector<SurfaceMeshTriangle> outward{
+        tri(o, y, x), tri(o, x, z), tri(o, z, y), tri(x, y, z)};
+    assert(buildMatterGrainColliderBvh(outward, result, error));
+    assert(result.closed_faces == 4);
+    for (auto patch : result.surface_patches) {
+        assert((patch & kMatterGrainPatchClosed) != 0u);
+        assert((patch & kMatterGrainPatchInward) == 0u);
+    }
+    std::vector<SurfaceMeshTriangle> inward;
+    for (const auto& t : outward) inward.push_back(tri(t.p0, t.p2, t.p1));
+    assert(buildMatterGrainColliderBvh(inward, result, error));
+    for (auto patch : result.surface_patches) {
+        assert((patch & kMatterGrainPatchClosed) != 0u && (patch & kMatterGrainPatchInward) != 0u);
+    }
+    const std::vector<SurfaceMeshTriangle> open(outward.begin(), outward.begin() + 3);
+    assert(buildMatterGrainColliderBvh(open, result, error));
+    assert(result.closed_faces == 0);
+    for (auto patch : result.surface_patches) assert(patch < kMatterGrainPatchClosed);
+    std::printf("PASS grain collider BVH (patches, transactional, sweep bounds, velocities, shells)\n");
 }

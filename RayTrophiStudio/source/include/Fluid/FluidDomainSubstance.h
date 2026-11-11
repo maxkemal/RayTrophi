@@ -31,6 +31,26 @@ void resolveParticleGranularPhysics(APICSolverParams& params, const FluidParticl
 // conduction and the fuel profile. Deterministic for a given substance and
 // voxel: these values are hashed into the bake signature.
 // Fails (and leaves params untouched) when the substance is unknown.
+class FluidParticles;
+// Liquid physics follow the liquid that is actually there. A domain whose
+// default substance is a liquid but holds none of its parcels (a Honey seed
+// layer in a Water-default domain) ran Water's physics on the honey: nu 0,
+// free-slip walls -- "honey flows like water" (2026-11-09). Then the dominant
+// liquid parcel substance's physics are resolved instead; default_substance
+// itself is untouched. Returns true when it adopted.
+bool adoptParcelLiquidSubstance(APICSolverParams& params, const FluidParticles& particles,
+                                float voxel_size, const MaterialTemperatureScale& scale);
+
+struct SubstanceViscosityEntry;
+// Every liquid substance among the parcels that no entry describes yet gets
+// its own catalogue viscosity (resolveSubstanceViscosity), so a honey + water
+// mixture diffuses each at its own nu even without a material binding. Before,
+// only bindings fed the per-cell field: parcels of an unbound substance took the
+// domain value. Returns the new entry count.
+std::size_t appendParcelSubstanceViscosities(const FluidParticles& particles,
+    const APICSolverParams& params, float voxel_size, SubstanceViscosityEntry* entries,
+    std::size_t count, std::size_t capacity);
+
 bool resolveDomainSubstancePhysics(APICSolverParams& params, float voxel_size,
                                    const MaterialTemperatureScale& scale,
                                    std::string& error);

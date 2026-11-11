@@ -1,0 +1,35 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "sim_dispatch.glsl"
+layout(local_size_x = 256) in;
+layout(push_constant) uniform Params { int nx; int ny; int nz; uint active_tiles; } pc;
+layout(set = 0, binding = 0) readonly buffer Source { uint source[]; };
+layout(set = 0, binding = 1) readonly buffer Tiles { uint tiles[]; };
+layout(set = 0, binding = 2) writeonly buffer WX { float wx[]; };
+layout(set = 0, binding = 3) writeonly buffer WY { float wy[]; };
+layout(set = 0, binding = 4) writeonly buffer WZ { float wz[]; };
+
+// Physical keys remain stable while P2G slot order changes every substep.
+// Padding/nonowned faces are encoded as 255 by the CPU source packer.
+void main() {
+    uint count = max(pc.active_tiles * 576u, 1u);
+    uint id = simLane256(count);
+    if (id >= count) return;
+    if (pc.active_tiles == 0u) {
+        wx[0] = 1.0; wy[0] = 1.0; wz[0] = 1.0;
+        return;
+    }
+    uint slot = id / 576u;
+    uint local = id % 576u;
+    uint key = tiles[slot + 1u];
+    uint base = source[key];
+    uint shift = (local % 4u) * 8u;
+    vec3 value = vec3(1.0);
+    if (base != 0u) {
+        for (uint axis = 0u; axis < 3u; ++axis) {
+            uint packed = source[base + axis * 144u + local / 4u];
+            value[axis] = float((packed >> shift) & 255u) * (1.0 / 255.0);
+        }
+    }
+    wx[id] = value.x; wy[id] = value.y; wz[id] = value.z;
+}

@@ -34,6 +34,7 @@
  */
 
 #include "scene_ui_substance_editor.hpp"
+#include "UI/TemperatureLabel.h"
 #include "scene_ui.h"
 // ★ scene_ui.h only forward-declares SceneSelection; reading the active
 // selection below needs the complete type.
@@ -61,9 +62,8 @@ struct LastReport {
 };
 LastReport g_last_report;
 
-// Fixed for now, and named as a constant rather than `properties_width` so the
-// name does not promise a drag handle that is not there.
-const float kPropertiesWidth = 300.0f;
+// Session-only layout preference; graph and simulation state stay in the core.
+float g_properties_width = 300.0f;
 
 void setReport(bool ok, std::string text) {
     g_last_report.has = true;
@@ -417,15 +417,40 @@ void SceneUI::drawSimulationNodePanel(UIContext& ctx)
 
     // ── Canvas + properties split ───────────────────────────────────────────
     const float avail_w = ImGui::GetContentRegionAvail().x;
-    const float side_w = std::clamp(kPropertiesWidth, 220.0f, std::max(240.0f, avail_w - 260.0f));
-    const float canvas_w = std::max(200.0f, avail_w - side_w - 8.0f);
+    constexpr float splitter_w = 5.0f;
+    if (avail_w <= splitter_w + 2.0f) {
+        return;
+    }
+    const float layout_w = avail_w - splitter_w;
+    const float min_side_w = std::min(220.0f, layout_w * 0.5f);
+    const float min_canvas_w = std::min(260.0f, layout_w * 0.5f);
+    const float max_side_w = layout_w - min_canvas_w;
+    const float side_w = std::clamp(g_properties_width, min_side_w, max_side_w);
+    const float canvas_w = layout_w - side_w;
 
     ImGui::BeginChild("##sim_canvas", ImVec2(canvas_w, 0), false);
     simulationNodeEditorUI.config.showMinimap = true;
     simulationNodeEditorUI.draw(graph);
     ImGui::EndChild();
 
-    ImGui::SameLine();
+    ImGui::SameLine(0.0f, 0.0f);
+    ImGui::InvisibleButton("##sim_properties_splitter",
+        ImVec2(splitter_w, std::max(1.0f, ImGui::GetContentRegionAvail().y)));
+    const bool dragging = ImGui::IsItemActive();
+    const bool hovered = ImGui::IsItemHovered();
+    if (dragging || hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
+    if (dragging) {
+        g_properties_width = std::clamp(
+            side_w - ImGui::GetIO().MouseDelta.x, min_side_w, max_side_w);
+    }
+    const ImGuiCol splitter_color = dragging ? ImGuiCol_SeparatorActive :
+        (hovered ? ImGuiCol_SeparatorHovered : ImGuiCol_Separator);
+    ImGui::GetWindowDrawList()->AddRectFilled(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+        ImGui::GetColorU32(splitter_color));
+
+    ImGui::SameLine(0.0f, 0.0f);
     ImGui::BeginChild("##sim_properties", ImVec2(0, 0), true);
     drawSimulationNodeProperties(graph, domain_names, object_names, material_names);
     ImGui::EndChild();
@@ -827,8 +852,10 @@ void SceneUI::drawSimulationNodeProperties(NodeSystem::Sim::SimulationNodeGraph&
             setValue("override_ignition", override_ignition ? 1.0f : 0.0f);
         ImGui::BeginDisabled(!override_ignition);
         float kelvin = sub->ignitionKelvin;
-        ImGui::TextUnformatted("Ignition (K)");
-        if (ImGui::DragFloat("##ignition", &kelvin, 1.0f, 0.0f, 4000.0f))
+        ImGui::TextUnformatted("Ignition");
+        char ignition_fmt[48];
+        if (ImGui::DragFloat("##ignition", &kelvin, 1.0f, 0.0f, 4000.0f,
+                UiTemperature::kelvinFormat(kelvin, ignition_fmt, sizeof(ignition_fmt))))
             setValue("ignition_kelvin", kelvin);
         ImGui::EndDisabled();
         helpText("Authored in Kelvin and applied before the normalized "

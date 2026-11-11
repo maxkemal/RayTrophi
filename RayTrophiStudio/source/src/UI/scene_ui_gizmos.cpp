@@ -1,3 +1,4 @@
+#include "MatterSeedViewport.h"
 // ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
@@ -106,6 +107,9 @@ void updateGizmoObjectTransformOnActiveBackends(UIContext& ctx, const std::strin
 }
 
 void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
+    if (scene_loading.load() || g_scene_loading_in_progress.load()) {
+        return;
+    }
     auto particles = ctx.scene.getParticleSimulationSystem();
     if (!ctx.scene.camera || !viewport_settings.show_gizmos) {
         return;
@@ -541,6 +545,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
     // overlay would double-paint on top of them). The Seed AABB outline is
     // separate and always drawn for authoring feedback.
     ImDrawList* fluid_draw_list = draw_list;
+    RayTrophiSim::Fluid::drawMatterSeedAuthoring(ctx, projectScreen, drawAABB);
     for (std::size_t domain_index = 0; domain_index < grid_domain_states.size(); ++domain_index) {
         const auto& state = grid_domain_states[domain_index];
 
@@ -555,6 +560,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
             // press the button. FillLevel mirrors the resting-tank region the
             // seeder actually produces, including the budget-capped (effective)
             // fill height, so the cyan box matches the real result.
+            if (!fluid_domain.matter_seed_sources_enabled) {
             Vec3 seed_lo = fluid_domain.fluid_seed_min;
             Vec3 seed_hi = fluid_domain.fluid_seed_max;
             if (fluid_domain.fluid_seed_mode == RayTrophiSim::FluidSeedMode::FillLevel) {
@@ -569,6 +575,7 @@ void SceneUI::drawParticleDebugOverlay(UIContext& ctx) {
                      seed_hi,
                      IM_COL32(80, 235, 255, 130),
                      1.1f);
+            }
             draw_particle_dots = fluid_domain.fluid_debug_overlay;
         }
         if (!draw_particle_dots || state.particles.empty()) {
@@ -2857,6 +2864,11 @@ void SceneUI::drawTransformGizmo(UIContext& ctx) {
     // �������������������������������������������������������������������������
     // Get Object Matrix
     // �������������������������������������������������������������������������
+    if (RayTrophiSim::Fluid::manipulateSelectedMatterSeed(ctx, viewMatrix, projMatrix,
+            rtpython::wantsInputCapture() || rtapi::renderOutputPending())) {
+        is_dragging = ImGuizmo::IsUsing();
+        return;
+    }
     const bool edit_mode_active =
         mesh_overlay_settings.enabled &&
         mesh_overlay_settings.edit_mode &&

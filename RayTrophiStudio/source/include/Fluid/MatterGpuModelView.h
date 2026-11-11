@@ -23,6 +23,14 @@ struct MatterGpuModelView {
     bool mass_gradient_wanted = true;
     bool pressure_statics_uploaded = false;
     bool viscosity_statics_uploaded = false;
+    // The pressure buffer holds this frame's previous projection of the same
+    // lane: the next substep's solve starts from it (FluidGpuPressure.inl).
+    // The view is reset every frame, so a frame's first solve is cold.
+    bool pressure_warm = false;
+    // Liquid lane: the pressure solve runs the separating collider wall
+    // (sim_matter_liquid_wall, mode 1) with this density for the adhesion hold.
+    bool liquid_wall = false;
+    float liquid_wall_density = 1000.0f;
 };
 
 inline bool copyMatterGpuFloat(SimulationComputeContext& compute,

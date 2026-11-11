@@ -109,6 +109,101 @@ std::vector<uint32_t> surfacePatches(const std::vector<SurfaceMeshTriangle>& tri
     }
     return parents;
 }
+
+// ★ Which faces bound a SOLID (closed, consistently wound) shell, and which way
+// is out. The grain contact is otherwise two-sided: n = (p - q) / d flips as a
+// crushed grain's centre crosses the face, the grain is pulled into the body
+// and shot out of it (2026-11-07: keyframed sphere driven into a sand bed,
+// 12-24 m/s "jet", collider overlap 0.99999). A shell is closed when every
+// position-welded edge is used by exactly two of its faces in opposite
+// directions; its winding is outward when the signed volume is positive.
+// Open sheets (ground planes, thin walls) stay two-sided.
+std::vector<uint32_t> closedShellFlags(const std::vector<SurfaceMeshTriangle>& triangles) {
+    const std::size_t count = triangles.size();
+    std::vector<uint32_t> flags(count, 0u);
+    if (count < 4) return flags;
+    // ★ Weld with a TOLERANCE, not by float bits: a UV sphere's seam vertices
+    // come from sin/cos(0) and sin/cos(2 pi) and differ by a few ULP, so an
+    // exact weld left every seam edge single-used and the closed sphere read
+    // as open (closed_collider_faces = 0, 2026-11-07 live). Tolerance 1e-5 of
+    // the collider extent; neighbouring cells are searched so a vertex pair
+    // straddling a cell boundary still joins.
+    Vec3 low = triangles[0].p0, high = triangles[0].p0;
+    for (const auto& t : triangles) {
+        low = Vec3::min(low, Vec3::min(t.p0, Vec3::min(t.p1, t.p2)));
+        high = Vec3::max(high, Vec3::max(t.p0, Vec3::max(t.p1, t.p2)));
+    }
+    const double tolerance = std::max(1e-7, 1e-5 * double((high - low).length()));
+    std::map<std::array<int64_t, 3>, std::vector<uint32_t>> cells;
+    std::vector<Vec3> welded;
+    auto weld = [&](const Vec3& p) -> uint32_t {
+        std::array<int64_t, 3> key{};
+        for (int axis = 0; axis < 3; ++axis) {
+            key[axis] = static_cast<int64_t>(std::floor(double(component(p, axis)) / tolerance));
+        }
+        for (int dz = -1; dz <= 1; ++dz) for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+            const auto found = cells.find({key[0] + dx, key[1] + dy, key[2] + dz});
+            if (found == cells.end()) continue;
+            for (const uint32_t id : found->second) {
+                if (double((welded[id] - p).length()) <= tolerance) return id;
+            }
+        }
+        const auto id = static_cast<uint32_t>(welded.size());
+        welded.push_back(p);
+        cells[key].push_back(id);
+        return id;
+    };
+    std::vector<std::array<uint32_t, 3>> ids(count);
+    for (std::size_t face = 0; face < count; ++face) {
+        const auto& t = triangles[face];
+        ids[face] = {weld(t.p0), weld(t.p1), weld(t.p2)};
+    }
+    // Directed edge uses: +1 for a->b with a < b, -1 for the reverse.
+    struct EdgeUse { uint32_t face; int direction; };
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<EdgeUse>> edges;
+    for (uint32_t face = 0; face < count; ++face) {
+        // A face the weld collapsed (two corners joined) has no area: its two
+        // remaining edges would count the same edge twice and break the shell.
+        if (ids[face][0] == ids[face][1] || ids[face][1] == ids[face][2] ||
+            ids[face][2] == ids[face][0]) continue;
+        for (int edge = 0; edge < 3; ++edge) {
+            const uint32_t a = ids[face][edge], b = ids[face][(edge + 1) % 3];
+            edges[{std::min(a, b), std::max(a, b)}].push_back({face, a < b ? 1 : -1});
+        }
+    }
+    std::vector<uint32_t> parent(count);
+    std::iota(parent.begin(), parent.end(), 0u);
+    const std::function<uint32_t(uint32_t)> root = [&](uint32_t i) {
+        while (parent[i] != i) { parent[i] = parent[parent[i]]; i = parent[i]; }
+        return i;
+    };
+    for (const auto& [key, uses] : edges) {
+        for (std::size_t u = 1; u < uses.size(); ++u) {
+            const uint32_t ra = root(uses[0].face), rb = root(uses[u].face);
+            if (ra != rb) parent[rb] = ra;
+        }
+    }
+    std::vector<uint8_t> broken(count, 0u);
+    for (const auto& [key, uses] : edges) {
+        const bool manifold = uses.size() == 2 && uses[0].direction != uses[1].direction;
+        if (!manifold) {
+            for (const auto& use : uses) broken[root(use.face)] = 1u;
+        }
+    }
+    std::vector<double> volume(count, 0.0);
+    for (uint32_t face = 0; face < count; ++face) {
+        const auto& t = triangles[face];
+        volume[root(face)] += double(t.p0.x) * (double(t.p1.y) * t.p2.z - double(t.p1.z) * t.p2.y) -
+            double(t.p0.y) * (double(t.p1.x) * t.p2.z - double(t.p1.z) * t.p2.x) +
+            double(t.p0.z) * (double(t.p1.x) * t.p2.y - double(t.p1.y) * t.p2.x);
+    }
+    for (uint32_t face = 0; face < count; ++face) {
+        const uint32_t r = root(face);
+        if (broken[r] || volume[r] == 0.0 || !std::isfinite(volume[r])) continue;
+        flags[face] = kMatterGrainPatchClosed | (volume[r] < 0.0 ? kMatterGrainPatchInward : 0u);
+    }
+    return flags;
+}
 } // namespace
 
 uint64_t matterGrainColliderFingerprint(const std::vector<SurfaceMeshTriangle>& triangles,
@@ -222,11 +317,14 @@ bool buildMatterGrainColliderBvh(const std::vector<SurfaceMeshTriangle>& triangl
     };
     build(0, triangles.size());
     const auto patches = surfacePatches(triangles);
+    const auto shells = closedShellFlags(triangles);
     for (const auto face : order) {
         const auto& t = triangles[face];
         candidate.vertices.insert(candidate.vertices.end(), {t.p0, t.p1, t.p2});
         candidate.source_faces.push_back(face);
-        candidate.surface_patches.push_back(patches[face]);
+        // Patch id in bits 0-29 (kMatterGrainMaxColliderFaces), shell flags above.
+        candidate.surface_patches.push_back(patches[face] | shells[face]);
+        if (shells[face] & kMatterGrainPatchClosed) ++candidate.closed_faces;
         if (velocities) {
             candidate.velocities.insert(candidate.velocities.end(), {(*velocities)[3 * face],
                 (*velocities)[3 * face + 1], (*velocities)[3 * face + 2]});

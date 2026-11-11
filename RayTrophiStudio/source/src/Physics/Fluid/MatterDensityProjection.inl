@@ -16,27 +16,34 @@ bool projectMatterLiquidDensity(SimulationGridDomainState& state,
     const bool compact = buffers && buffers->sparse_mac_transfer.compact_owner;
     const bool porous = buffers && buffers->porous_solid_velocity;
     const bool model_enabled = buffers && buffers->matter_model.enabled;
+    const bool liquid_wall = buffers && buffers->matter_model.liquid_wall;
     struct RestorePolicy {
         SimulationGridDomainComputeBuffers* buffers;
         bool compact;
         bool porous;
         bool model_enabled;
+        bool liquid_wall;
         ~RestorePolicy() {
             if (buffers) {
                 buffers->sparse_mac_transfer.compact_owner = compact;
                 buffers->porous_solid_velocity = porous;
                 buffers->matter_model.enabled = model_enabled;
+                buffers->matter_model.liquid_wall = liquid_wall;
                 // The scratch solve uploads zero solid velocity. A subsequent
                 // physical solve must publish its own moving-solid data again.
                 buffers->matter_model.pressure_statics_uploaded = false;
+                // Its pressure is a position correction, not the momentum one.
+                buffers->matter_model.pressure_warm = false;
                 buffers->fluid_mask_device_valid = false;
                 FluidGpuParticleUpload::invalidate(*buffers);
             }
         }
-    } restore_policy{gpu ? buffers : nullptr, compact, porous, model_enabled};
+    } restore_policy{gpu ? buffers : nullptr, compact, porous, model_enabled, liquid_wall};
     if (gpu) {
         buffers->sparse_mac_transfer.compact_owner = false;
         buffers->porous_solid_velocity = false;
+        // A position-correction solve, not momentum: no collider wall.
+        buffers->matter_model.liquid_wall = false;
         buffers->fluid_mask_device_valid = false;
     }
     bool gpu_pressure_attempted = false;

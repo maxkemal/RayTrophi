@@ -69,18 +69,26 @@ float optionalFloat(const json& params, const char* key, float default_val = 0.0
     return params[key].get<float>();
 }
 
+// Element type-checked before get<float>: see numberElement in RtIpc.cpp
+// (ExceptionHandling=false turns a nlohmann type error into abort()).
+float numberElement(const json& value, const char* key) {
+    if (!value.is_number()) throw std::runtime_error(std::string("non-numeric element in param: ") + key);
+    return value.get<float>();
+}
+
 Vec3 requireVec3(const json& params, const char* key) {
     if (!params.contains(key) || !params[key].is_array() || params[key].size() != 3)
         throw std::runtime_error(std::string("missing or invalid Vec3 param: ") + key);
     const auto& a = params[key];
-    return Vec3(a[0].get<float>(), a[1].get<float>(), a[2].get<float>());
+    return Vec3(numberElement(a[0], key), numberElement(a[1], key), numberElement(a[2], key));
 }
 
 Vec3 optionalVec3(const json& params, const char* key, const Vec3& default_val = Vec3(0.0f, 0.0f, 0.0f)) {
     if (!params.contains(key)) return default_val;
     if (!params[key].is_array() || params[key].size() != 3)
         throw std::runtime_error(std::string("invalid Vec3 param: ") + key);
-    return Vec3(params[key][0].get<float>(), params[key][1].get<float>(), params[key][2].get<float>());
+    const auto& a = params[key];
+    return Vec3(numberElement(a[0], key), numberElement(a[1], key), numberElement(a[2], key));
 }
 
 json vec3ToJson(const Vec3& v) {

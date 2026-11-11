@@ -39,13 +39,28 @@ void main() {
         ivec3 base = ivec3(floor(face_g - vec3(0.5)));
         ivec3 maximum = cells - ivec3(1);
         maximum[component] += 1;
-        for (int z = 0; z < 3; ++z)
-        for (int y = 0; y < 3; ++y)
-        for (int x = 0; x < 3; ++x) {
-            ivec3 face = base + ivec3(x, y, z);
-            if (any(lessThan(face, ivec3(0))) ||
-                any(greaterThan(face, maximum))) continue;
-            uint key = sparseMacTileKey(face, component, cells);
+        // The 3x3x3 face stencil, clipped to the grid. The tile key is
+        // monotone in each face coordinate (owner clamp, then /8), so the
+        // tiles it touches are exactly the box between the tiles of its two
+        // corners: usually one tile, at most 8. It used to CAS all 27 faces
+        // per component (81 contended atomics per particle on a handful of
+        // keys; 19 ms per call at 1M parcels, 2026-11-11).
+        ivec3 lo = max(base, ivec3(0));
+        ivec3 hi = min(base + ivec3(2), maximum);
+        if (any(greaterThan(lo, hi))) continue;
+        ivec3 tile_lo = lo, tile_hi = hi;
+        tile_lo[component] = min(tile_lo[component], cells[component] - 1);
+        tile_hi[component] = min(tile_hi[component], cells[component] - 1);
+        tile_lo /= 8;
+        tile_hi /= 8;
+        uvec3 dims = sparseMacTileDims(cells);
+        for (int tz = tile_lo.z; tz <= tile_hi.z; ++tz)
+        for (int ty = tile_lo.y; ty <= tile_hi.y; ++ty)
+        for (int tx = tile_lo.x; tx <= tile_hi.x; ++tx) {
+            uint key = uint(tx) + dims.x * (uint(ty) + dims.y * uint(tz));
+            // Plain read first: a tile only goes 0 -> marked within a pass,
+            // so a stale 0 merely falls through to the CAS.
+            if (tile_map[key] != 0u) continue;
             if (atomicCompSwap(tile_map[key], 0u, 0xffffffffu) == 0u) {
                 uint slot = atomicAdd(tile_list[0], 1u);
                 tile_list[slot + 1u] = key;

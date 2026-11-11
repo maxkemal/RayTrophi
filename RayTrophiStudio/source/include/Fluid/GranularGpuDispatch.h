@@ -6,11 +6,12 @@
 #include "../SimulationCompute.h"
 #include <algorithm>
 #include <cstdint>
+#include <cstddef>
 
 namespace RayTrophiSim::Fluid::Granular {
 
 
-struct alignas(16) StressUpdateConstants {
+struct StressUpdateConstants {
     uint32_t count=0; float dt=0; float young_modulus=2e5f; float poisson_ratio=0.25f;
     float friction_tangent=0.7002075f; float cohesion=0; float dilatancy_tangent=0.0874887f;
     float tensile_cutoff=0;
@@ -20,21 +21,21 @@ struct alignas(16) StressUpdateConstants {
     float max_stored_strain=kGranularMaxStoredStrain;
     float compaction_hardening=0.0f,compaction_limit=0.0f;
     // Law: 0 Drucker-Prager, 1 Stomakhin snow, 2 elastic solid (ELASTIK_MPM.md).
-    // The GLSL block carries the same fields and pad: the Matter dispatcher
-    // appends matter_lane at sizeof(this), so both must end at 112 bytes or the
-    // indexed variant reads its lane from a pad. snow_max_young_modulus is the
-    // wave limit of the snow AND the elastic branch; damage_rate is the elastic
-    // tear rate too (damage per second in both laws). The tear threshold took
-    // the old pad, so the block stays 112 bytes (116 indexed), under Vulkan's
-    // guaranteed 128.
+    // Scalar-only push constants: 124 bytes, 128 with the indexed lane word.
+    // Do not add alignas(16): tail padding would move the lane beyond 128.
     uint32_t mpm_law=0;
     float snow_critical_compression=0.025f,snow_critical_stretch=0.0075f;
     float snow_hardening=10.0f,snow_max_young_modulus=0.0f;
     float snow_max_hardening=5.0f,snow_min_plastic_jacobian=0.436f,snow_min_hardening=0.1f;
     float elastic_yield_strain=0.0f,elastic_relaxation_s=0.0f,elastic_viscosity=0.0f;
     float elastic_fracture_strain=0.0f;
+    float elastic_thermal_viscosity_power = 1.0f;
+    float elastic_thermal_yield_power = 0.0f;
+    float elastic_thermal_relaxation_power = 0.0f;
 };
-static_assert(sizeof(StressUpdateConstants)==112);
+static_assert(sizeof(StressUpdateConstants) == 124);
+static_assert(offsetof(StressUpdateConstants, elastic_thermal_viscosity_power) == 112);
+static_assert(offsetof(StressUpdateConstants, elastic_thermal_relaxation_power) == 120);
 
 struct alignas(16) StressP2GConstants {
     int nx=0,ny=0,nz=0,count=0,component=0;
@@ -320,6 +321,9 @@ inline bool dispatchStressUpdate(SimulationComputeContext& compute,
     c.elastic_relaxation_s=std::max(params.elastic_relaxation_s,0.0f);
     c.elastic_viscosity=std::max(params.elastic_viscosity,0.0f);
     c.elastic_fracture_strain=std::max(params.elastic_fracture_strain,0.0f);
+    c.elastic_thermal_viscosity_power = params.elastic_thermal_viscosity_power;
+    c.elastic_thermal_yield_power = params.elastic_thermal_yield_power;
+    c.elastic_thermal_relaxation_power = params.elastic_thermal_relaxation_power;
     c.snow_critical_compression=std::clamp(params.snow_critical_compression,0.0f,0.9f);
     c.snow_critical_stretch=std::max(params.snow_critical_stretch,0.0f);
     c.snow_hardening=std::max(params.snow_hardening,0.0f);

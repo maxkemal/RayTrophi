@@ -5,9 +5,65 @@
     "control": {
       "driver": "user",
       "dropped_seeds": [],
-      "epoch": 706,
+      "epoch": 1853,
       "frame": 0,
+      "last_rewind": {
+        "absorbed": false,
+        "first_changed_part": "emitters / colliders",
+        "fluid_affected": true,
+        "frame": 0
+      },
       "playing": false,
+      "rewind_history": [
+        {
+          "absorbed": false,
+          "first_changed_part": "emitters / colliders",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "domain 'T_FireSteam' grid/gas",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "domain 'T_FireSteam' grid/gas",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "domain 'T_FireSteam' grid/gas",
+          "fluid_affected": false,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "domain 'T_FireSteam' grid/gas",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "domain 'T_FireSteam' grid/gas",
+          "fluid_affected": false,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "flow sources",
+          "fluid_affected": true,
+          "frame": 60
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "emitters / colliders",
+          "fluid_affected": true,
+          "frame": 0
+        }
+      ],
       "script_driving": false,
       "script_sim_seconds": 0.0
     },
@@ -70,9 +126,65 @@
   "final_control": {
     "driver": "user",
     "dropped_seeds": [],
-    "epoch": 706,
+    "epoch": 1853,
     "frame": 0,
+    "last_rewind": {
+      "absorbed": false,
+      "first_changed_part": "domain 'H1_Grain_Runtime' grid/gas",
+      "fluid_affected": true,
+      "frame": 0
+    },
     "playing": false,
+    "rewind_history": [
+      {
+        "absorbed": false,
+        "first_changed_part": "flow sources",
+        "fluid_affected": true,
+        "frame": 60
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "emitters / colliders",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'H1_Grain_Runtime' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'H1_Grain_Runtime' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "flow sources",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "flow sources",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "flow sources",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'H1_Grain_Runtime' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      }
+    ],
     "script_driving": false,
     "script_sim_seconds": 0.0
   },

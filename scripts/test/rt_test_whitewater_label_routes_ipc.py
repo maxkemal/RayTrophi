@@ -6,7 +6,7 @@ parcels: two authorities for the same names, and the panel showed the table.
 Now the label routes decide where each whitewater type is drawn too.
 
 Checks, on a temporary dam break with whitewater on:
-  1. defaults (spray/foam/bubble -> splat): every live whitewater particle is
+  1. explicit splat configuration (spray/foam/bubble -> splat): every live whitewater particle is
      in splat, and fluid.get views[splat].whitewater agrees.
   2. all three -> hidden: every whitewater particle is hidden, no view reports
      whitewater. (Nothing is resimulated: routes are render-only, so the same
@@ -79,7 +79,7 @@ def main():
                     replace=True, persistent=True)
         client.call("fluid.set_whitewater", domain=name, enabled=True,
                     trapped_air_rate=200.0, wave_crest_rate=200.0)
-        client.call("fluid.set_label_views", domain=name, routes={}, reset=True)
+        client.call("fluid.set_label_views", domain=name, routes={"spray": "splat"}, reset=True)
 
         client.call("sim_cache.clear", ram_only=True)
         client.call("timeline.set_frame", frame=0)
@@ -88,16 +88,16 @@ def main():
             client.call("timeline.set_frame", frame=f)
         settle()
 
-        # 1. defaults
-        ww, views = snapshot("defaults")
+        # 1. Explicit all-splat configuration; spray defaults to follow.
+        ww, views = snapshot("explicit_splat")
         st = ww["stats"]
         alive = st["alive"]
         if not check("whitewater_ran", alive > 0, "alive=%d" % alive):
             raise RuntimeError("whitewater produced no particles: the routing checks prove nothing")
-        check("defaults_all_splat",
+        check("configured_all_splat",
               ww["views"] == {"spray": "splat", "foam": "splat", "bubble": "splat"}
               and st["in_splat"] == alive, json.dumps(ww["views"]))
-        check("defaults_fluid_get_agrees",
+        check("configured_fluid_get_agrees",
               views.get("splat", {}).get("whitewater") == alive,
               "views[splat].whitewater=%s alive=%d" % (views.get("splat", {}).get("whitewater"), alive))
 

@@ -1,4 +1,6 @@
-﻿/*
+#include "Fluid/MudMaterial.h"
+#include "Fluid/BuiltinPresetPhysics.h"
+/*
 * ─────────────────────────────────────────────────────────────────────────────
 * File:          MaterialStateField.cpp
 * Project:       RayTrophi Studio
@@ -15,7 +17,6 @@
 * ─────────────────────────────────────────────────────────────────────────────
 */
 #include "MaterialStateField.h"
-#include "SubstanceCatalogue.h"
 #include "Fluid/MatterSubstanceState.h"
 #include "MaterialDamagePattern.h"
 #include "Fluid/SubstanceTag.h"
@@ -493,26 +494,8 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             p.solver_affine_damping = 0.95f;
             add(p);
         }
-        {
-            SubstanceProfile p;
-            p.name = "Mud";
-            p.vapor_molar_mass_kg_mol = 0.018015f;
-            p.thermal_expansion_per_k = 0.0002f;
-            p.boiling_kelvin = 373.15f; p.latent_heat_vaporization = 2.26e6f;
-            p.category = SubstanceCategory::Liquid;
-            // A heavy slurry. Really a yield-stress (Bingham) material; until the
-            // solver has a plastic return mapping, solver_internal_friction stands
-            // in for the yield surface. Marked so it is not mistaken for physics.
-            p.density = 1700.0f; p.liquid_density = 1700.0f;
-            p.specific_heat = 1500.0f; p.conductivity = 1.0f;
-            p.liquid_kinematic_viscosity = 2.0e-3f;
-            p.solver_viscosity_sweeps = 12.0f; p.solver_viscosity_wall_slip = 0.2f;
-            p.solver_internal_friction = 0.35f;
-            p.solver_flip_blend = 0.90f; p.solver_apic_blend = 0.90f;
-            p.solver_air_drag = 0.8f; p.solver_wall_damping = 0.30f;
-            p.solver_affine_damping = 0.95f;
-            add(p);
-        }
+        add(Fluid::makeMudSlurry());
+        add(Fluid::makeDenseMud());
         {
             SubstanceProfile p;
             p.name = "Sand";
@@ -854,7 +837,7 @@ const std::vector<SubstanceProfile>& builtinSubstanceProfiles() {
             add(p);
         }
         Fluid::configureBuiltinMatterTransport(out);
-        appendFoundationSubstances(out);
+        Fluid::configureBuiltinPresetPhysics(out);
         return out;
     }();
     return library;

@@ -70,6 +70,9 @@ void releaseSparseMacTransfer(SimulationComputeContext& compute,
             compute.destroyBuffer(handle);
         }
     }
+    if (storage.solid_weight_source.valid()) {
+        compute.destroyBuffer(storage.solid_weight_source);
+    }
     const bool blocked = storage.compact_blocked;
     const auto status = storage.status;
     storage = {};
@@ -121,6 +124,7 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
     }
     const uint64_t tiles = ((nx + 7u) / 8u) * ((ny + 7u) / 8u) * ((nz + 7u) / 8u);
     const uint64_t lookup_bytes = (tiles * 2u + 1u) * sizeof(uint32_t);
+    const uint64_t source_bytes = compute.getBufferSize(storage.solid_weight_source);
     const uint64_t budget = params.mixed_working_set_budget_bytes;
     const uint64_t particles = static_cast<uint64_t>(constants.particle_count);
     const std::size_t pool_end = canonical && params.variational_solids ? 14u : 11u;
@@ -150,7 +154,7 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
             return fail("sparse MAC publication buffer capacity mismatch");
         }
     }
-    if (budget != 0 && lookup_bytes + page_fields * sizeof(float) > budget) {
+    if (budget != 0 && lookup_bytes + source_bytes + page_fields * sizeof(float) > budget) {
         return fail("sparse MAC lookup exceeds authored working budget");
     }
     if (!allocate(compute, storage.owned[0], tiles * sizeof(uint32_t), budget != 0) ||
@@ -179,10 +183,10 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
     }
     const auto lanes = static_cast<uint32_t>(uint64_t(active) * 576u);
     const uint64_t bytes = std::max<uint64_t>(lanes, 1u) * sizeof(float);
-    if (budget != 0 && lookup_bytes + page_fields * bytes > budget) {
+    if (budget != 0 && lookup_bytes + source_bytes + page_fields * bytes > budget) {
         return fail("sparse MAC pages exceed authored working budget");
     }
-    uint64_t retained = lookup_bytes;
+    uint64_t retained = lookup_bytes + source_bytes;
     for (std::size_t index = 2; index < pool_end; ++index) {
         retained += std::max<uint64_t>(bytes, compute.getBufferSize(storage.owned[index]));
     }
@@ -220,7 +224,7 @@ bool runSparseMacP2G(SimulationComputeContext& compute,
     storage.nz = constants.nz;
     storage.active_tiles = active;
     storage.allocated_tiles = compute.getBufferSize(storage.owned[2]) / (576u * sizeof(float));
-    storage.resident_bytes = 0;
+    storage.resident_bytes = compute.getBufferSize(storage.solid_weight_source);
     for (const auto handle : storage.owned) {
         storage.resident_bytes += compute.getBufferSize(handle);
     }
@@ -254,8 +258,12 @@ bool captureSparseMacFlip(SimulationComputeContext& compute,
             return false;
         }
     }
-    // A CPU boundary upload may directly overwrite host-visible source memory.
-    compute.synchronize();
+    // Dense CPU boundary uploads can overwrite host-visible source memory.
+    // A canonical compact owner never host-writes its velocity pages: the
+    // snapshot copy and its consumers stay ordered in the same GPU stream.
+    if (!storage.canonical) {
+        compute.synchronize();
+    }
     storage.snapshot_valid = true;
     return true;
 }

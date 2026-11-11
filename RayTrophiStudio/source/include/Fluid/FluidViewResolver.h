@@ -76,8 +76,8 @@ uint64_t phaseOutputSignature(const MatterPhaseOutput& output);
 const char* labelRouteName(LabelRoute route);
 // false when `name` is not one of the names above.
 bool parseLabelRoute(const std::string& name, LabelRoute& out);
-// The design table (§4.2): spray / foam / bubble -> splat, mist -> fog;
-// body, frozen and unknown follow their substance. Unknown MUST follow: an
+// Defaults: foam / bubble -> splat, mist -> fog;
+// spray, body, frozen and unknown follow their substance. Unknown MUST follow: an
 // unclassified parcel may not be presented as anything it was not measured to be.
 LabelRoutes defaultLabelRoutes();
 // Parse a particleLabelName() back ("body", "spray", ...).

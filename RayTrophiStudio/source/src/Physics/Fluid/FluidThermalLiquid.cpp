@@ -475,10 +475,36 @@ void conductThermalLiquid(FluidParticles& particles,
                     s_t[b] += (eq - s_t[b]) * decay;
                 }
             }
+    // ★ Bounded distribution (2026-11-11). The cell's energy change used to be
+    // added to EVERY parcel as one uniform dT, so a mixed cell (353 K water
+    // and 263 K snow) that cooled by 20 K pushed its snow parcel to 243 K,
+    // below anything around it: the honey/snow scene reached ~200 K and froze
+    // water. Now a cooling cell takes the energy only from parcels ABOVE its
+    // new temperature, in proportion to cp (T - T_new); a warming cell gives
+    // it only to parcels below. Those parcels together always hold at least
+    // the change (sum cp (T - T_new) over all = cap (T_old - T_new)), so no
+    // parcel crosses T_new and the cell's energy is exact.
+    static std::vector<double> s_excess;
+    s_excess.assign(cells, 0.0);
     for (std::size_t p = 0; p < n; ++p) {
         const int c = s_cell_of[p];
         if (c < 0) continue;
-        particles.temperature[p] += static_cast<float>(s_t[c] - s_t0[c]);
+        const double d = s_t[c] - s_t0[c];
+        if (d == 0.0) continue;
+        const double gap = static_cast<double>(particles.temperature[p]) - s_t[c];
+        if ((d < 0.0 && gap > 0.0) || (d > 0.0 && gap < 0.0)) {
+            s_excess[c] += s_parcel_cap[p] * std::abs(gap);
+        }
+    }
+    for (std::size_t p = 0; p < n; ++p) {
+        const int c = s_cell_of[p];
+        if (c < 0) continue;
+        const double d = s_t[c] - s_t0[c];
+        if (d == 0.0) continue;
+        const double gap = static_cast<double>(particles.temperature[p]) - s_t[c];
+        if (!((d < 0.0 && gap > 0.0) || (d > 0.0 && gap < 0.0)) || !(s_excess[c] > 0.0)) continue;
+        const double f = std::min(1.0, s_cap[c] * std::abs(d) / s_excess[c]);
+        particles.temperature[p] = static_cast<float>(particles.temperature[p] - f * gap);
     }
     stats.conducting_cells = live_cells;
 
@@ -516,10 +542,29 @@ void conductThermalLiquid(FluidParticles& particles,
         s_mix_q[c] += cp * dtp;
         moved += std::abs(cp * dtp);
     }
+    // Restore each cell's energy without a uniform shift (see above): the
+    // relaxation left q extra joules; take them from parcels on the far side
+    // of the cell mean, in proportion to cp |T - mean|, which always covers q.
+    static std::vector<double> s_mix_side;
+    s_mix_side.assign(cells, 0.0);
     for (std::size_t p = 0; p < n; ++p) {
         const int c = s_cell_of[p];
         if (c < 0 || !(s_parcel_g[p] > 0.0) || s_mix_count[c] < 2 || s_mix_q[c] == 0.0) continue;
-        particles.temperature[p] -= static_cast<float>(s_mix_q[c] / s_mix_cap[c]);
+        const double mean = s_mix_energy[c] / s_mix_cap[c];
+        const double gap = static_cast<double>(particles.temperature[p]) - mean;
+        if ((s_mix_q[c] > 0.0 && gap > 0.0) || (s_mix_q[c] < 0.0 && gap < 0.0)) {
+            s_mix_side[c] += s_parcel_cap[p] * std::abs(gap);
+        }
+    }
+    for (std::size_t p = 0; p < n; ++p) {
+        const int c = s_cell_of[p];
+        if (c < 0 || !(s_parcel_g[p] > 0.0) || s_mix_count[c] < 2 || s_mix_q[c] == 0.0) continue;
+        const double mean = s_mix_energy[c] / s_mix_cap[c];
+        const double gap = static_cast<double>(particles.temperature[p]) - mean;
+        if (!((s_mix_q[c] > 0.0 && gap > 0.0) || (s_mix_q[c] < 0.0 && gap < 0.0))) continue;
+        if (!(s_mix_side[c] > 0.0)) continue;
+        const double f = std::min(1.0, std::abs(s_mix_q[c]) / s_mix_side[c]);
+        particles.temperature[p] = static_cast<float>(particles.temperature[p] - f * gap);
     }
     for (std::size_t c = 0; c < cells; ++c) {
         if (s_mix_count[c] >= 2 && s_mix_cap[c] > 0.0) ++mixed_cells;

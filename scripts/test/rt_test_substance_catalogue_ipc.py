@@ -9,12 +9,18 @@ from rt_ipc import RtIpc, RtIpcError
 
 
 FOUNDATIONS = {
-    "Generic metal": ("Steel", "metals"),
-    "Generic mineral": ("Stone", "minerals"),
-    "Generic polymer": ("Plastic (PE)", "polymers"),
-    "Generic fibrous solid": ("Wood (Oak)", "fibrous"),
-    "Generic liquid": ("Water", "liquids"),
-    "Generic mineral grains": ("Sand", "minerals"),
+    "Steel": "metals",
+    "Stone": "minerals",
+    "Plastic (PE)": "polymers",
+    "Wood (Oak)": "fibrous",
+    "Water": "liquids",
+    "Oil": "liquids",
+    "Honey": "liquids",
+    "Sand": "minerals",
+    "Soil": "minerals",
+    "Snow": "liquids",
+    "Mud": "soft_materials",
+    "Gelatin": "soft_materials",
 }
 
 
@@ -31,24 +37,24 @@ def main():
         foundations = {row["name"] for row in listing
                        if row["catalogue"]["tier"] == "foundation"}
         assert foundations == set(FOUNDATIONS), foundations
-        for name, (representative, family) in FOUNDATIONS.items():
+        for name, family in FOUNDATIONS.items():
             value = client.call("substance.get", name=name)
-            example = client.call("substance.get", name=representative)
-            assert value["fields"] == example["fields"], name
             assert value["catalogue"] == rows[name]["catalogue"], name
             assert value["catalogue"]["family"] == family
-            assert value["catalogue"]["representative"] == representative
+            assert value["catalogue"]["representative"] == name
             assert value["edit_scope"] == "read_only_builtin"
-            assert rows[representative]["catalogue"]["tier"] == "example"
+        assert not any(name.startswith("Generic ") and row["builtin"]
+                       for name, row in rows.items())
         assert rows["Flesh"]["catalogue"]["tier"] == "test"
-        client.call("substance.derive", name=parent, based_on="Generic metal")
+        assert "yield stress" in rows["Chocolate"]["catalogue"]["model_notes"]
+        client.call("substance.derive", name=parent, based_on="Steel")
         created.append(parent)
         client.call("substance.derive", name=child, based_on=parent)
         created.append(child)
         derived = client.call("substance.get", name=child)
         assert derived["catalogue"]["tier"] == "project"
         assert derived["catalogue"]["family"] == "metals"
-        assert derived["catalogue"]["root_profile"] == "Generic metal"
+        assert derived["catalogue"]["root_profile"] == "Steel"
         assert derived["edit_scope"] == "shared_project_profile"
         affected = client.call("substance.get", name=parent)["affected_references"]
         assert f"derived profile '{child}'" in affected

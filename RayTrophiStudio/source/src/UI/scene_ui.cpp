@@ -8652,13 +8652,15 @@ void SceneUI::performNewProject(UIContext& ctx) {
      g_animGraphUI = AnimGraphUIState();
 }
 
-void SceneUI::performOpenProject(UIContext& ctx) {
+void SceneUI::performOpenProject(UIContext& ctx, const std::string& requested_path) {
     if (g_scene_loading_in_progress.load()) {
         SCENE_LOG_WARN("Already loading a project. Please wait...");
         return;
     }
     
-    std::string filepath = openFileDialogW(L"RayTrophi Project (.rtp;.rts)\0*.rtp;*.rts\0All Files\0*.*\0");
+    const std::string filepath = requested_path.empty()
+        ? openFileDialogW(L"RayTrophi Project (.rtp;.rts)\0*.rtp;*.rts\0All Files\0*.*\0")
+        : requested_path;
     if (!filepath.empty()) {
         // Clear selection to remove references to old objects (Fixes ghost camera issue)
         ctx.selection.clearSelection();

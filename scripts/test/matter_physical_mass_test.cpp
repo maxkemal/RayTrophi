@@ -40,4 +40,22 @@ int main() {
     assert(particles.mass_fraction[1] == 0.25f);
     stats = ensureFluidParticleRestMasses(particles, preset, 0.1f, 8, true);
     assert(stats.initialized_particles == 0);
+    // Outflow can run before the first solver step. Initialize lazy seed mass
+    // through the same canonical routine, preserving supplied exact masses and
+    // pore water, then verify partial drainage against an independent inventory.
+    FluidParticles seed;
+    seed.emit(Vec3(0.0f), Vec3(0.0f), 293.15f, 0.0f, water,
+        nullptr, nullptr, 0.0f, fluid);
+    seed.emit(Vec3(0.0f), Vec3(0.0f), 293.15f, 0.0f, water,
+        nullptr, nullptr, 0.004f, fluid);
+    seed.mass_fraction[0] = 0.5f;
+    seed.pore_water_mass_kg[0] = 0.002f;
+    const double expected_drain = 0.5 * mass(water, fluid) + 0.002;
+    ensureFluidParticleRestMasses(seed, preset, 0.1f, 8);
+    const double drained = double(seed.rest_mass_kg[0]) * seed.mass_fraction[0] +
+                           seed.pore_water_mass_kg[0];
+    assert(std::abs(drained - expected_drain) < 1e-7);
+    seed.compact(std::vector<uint8_t>{1, 0});
+    assert(seed.size() == 1 && seed.rest_mass_kg[0] == 0.004f);
+
 }

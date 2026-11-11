@@ -2,6 +2,7 @@
 #include "Api/MatterPhaseOutputApi.h"
 #include "Fluid/MatterModelService.h"
 #include "Fluid/MatterSubstanceState.h"
+#include "MatterMaterialResolutionUI.h"
 #include "Api/RtApi.h"
 #include "Fluid/FluidViewResolver.h"
 #include "ParticleSimulation.h"
@@ -315,6 +316,7 @@ void drawMatterModelSummary(const SimulationGridDomainDesc& domain,
         !ImGui::CollapsingHeader("Active Matter")) {
         return;
     }
+    drawMatterMaterialResolution(domain, state);
     MatterTransferFrame frame;
     std::string error;
     if (!inspectMatterModels(domain, state, false, frame, error)) {

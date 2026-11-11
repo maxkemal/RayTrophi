@@ -529,7 +529,7 @@ public:
     void tryNew(UIContext& ctx);
     void tryOpen(UIContext& ctx);
     void performNewProject(UIContext& ctx);
-    void performOpenProject(UIContext& ctx);
+    void performOpenProject(UIContext& ctx, const std::string& requested_path = {});
     void resetMaterialUI(); // Reset material editor state
     void addProceduralPlane(UIContext& ctx);      // Add a procedural plane mesh
     void addProceduralCube(UIContext& ctx);       // Add a procedural cube mesh

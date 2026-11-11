@@ -1,3 +1,63 @@
+// Mobility ratio rho_liquid / rho_constituent of the MPM lane while it is a porous
+// solid in this projection (MatterGpuStep.inl sets and clears it around the solve;
+// 0 = the DEM grain formula). Same translation unit, no header state.
+static float s_matter_porous_mobility_ratio = 0.0f;
+// The MPM cell solid fraction for the same solve. It lives on the MPM lane
+// (MatterGpuStep allocates it), not on the liquid's var_fluid_phi: that buffer
+// exists only on CUDA, and making it valid on Vulkan would switch every
+// default liquid domain (ghost_fluid_surface = true) to the CPU PCG.
+static ComputeBufferHandle s_matter_porous_fraction{};
+// The MPM lane's face masses (kg) and velocities for the device porosity pass
+// (sim_matter_mpm_porosity.glsl). Set by MatterGpuStep around the solve.
+struct MatterMpmPorosityGpu {
+    bool active = false;
+    std::array<ComputeBufferHandle, 3> mass{};
+    std::array<ComputeBufferHandle, 3> velocity{};
+    float inv_full_mass = 0.0f;
+    float cap = 0.0f;
+};
+static MatterMpmPorosityGpu s_matter_porosity_gpu{};
+
+// Pass 0: cell solid fraction + porous cells' solid velocity (var_sv*);
+// pass 1: the solid weights this solve just uploaded/packed, times beta.
+// restore_only: pass 2 alone, after the solve (var_sv* of porous cells to 0).
+static bool runMatterMpmPorosityGpu(const FluidSim::FluidGrid& grid,
+                                    SimulationComputeContext* compute,
+                                    SimulationGridDomainComputeBuffers& buffers,
+                                    const Fluid::MacVelocityBinding& mac,
+                                    bool restore_only = false) {
+    const auto& p = s_matter_porosity_gpu;
+    if (!s_matter_porous_fraction.valid() || !buffers.fluid_mask.valid() ||
+        !buffers.var_svx.valid() || !buffers.var_svy.valid() || !buffers.var_svz.valid()) {
+        return false;
+    }
+    struct Constants {
+        int nx, ny, nz, pass;
+        float inv_full_mass, cap, mobility, pad;
+    } constants{grid.nx, grid.ny, grid.nz, restore_only ? 2 : 0, p.inv_full_mass, p.cap,
+                s_matter_porous_mobility_ratio, 0.0f};
+    static_assert(sizeof(Constants) == 32);
+    const ComputeBufferHandle bindings[16] = {
+        p.mass[0], p.mass[1], p.mass[2], p.velocity[0], p.velocity[1], p.velocity[2],
+        buffers.fluid_mask, s_matter_porous_fraction,
+        buffers.var_svx, buffers.var_svy, buffers.var_svz,
+        mac.solid_weight[0], mac.solid_weight[1], mac.solid_weight[2], mac.map, mac.list};
+    ComputeDispatch command;
+    command.kernel = Fluid::macKernel(mac, "sim_matter_mpm_porosity",
+                                      "sim_sparse_mac_matter_mpm_porosity");
+    command.buffers = bindings;
+    command.buffer_count = mac.compact ? 16 : 14;
+    command.constants = &constants;
+    command.constants_size = sizeof(constants);
+    command.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(grid.getCellCount()));
+    if (!compute->dispatch(command)) return false;
+    if (restore_only) return true;
+    constants.pass = 1;
+    command.groups = FluidGpuDispatch::groups256(static_cast<uint32_t>(
+        std::size_t(grid.nx + 1) * std::size_t(grid.ny + 1) * std::size_t(grid.nz + 1)));
+    return compute->dispatch(command);
+}
+
 // Included in the simulation driver private namespace.
 bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                               const Fluid::APICSolverParams& fluid_params,
@@ -144,7 +204,8 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         std::string weight_error;
         // P2G may reorder its tile slots every substep. Static collider data
         // does not imply static page addresses; upload against the current list.
-        if (!Fluid::uploadSparseMacSolidWeights(*compute, gpu_buffers, grid, weight_error)) {
+        if (!Fluid::uploadSparseMacSolidWeights(*compute, gpu_buffers, grid, weight_error,
+                fluid_params.mixed_working_set_budget_bytes)) {
             return bail(weight_error.c_str());
         }
     }
@@ -186,6 +247,44 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     if (!ok) return bail("variational weight / solid-velocity upload");
     if (gpu_buffers.matter_model.enabled) {
         gpu_buffers.matter_model.pressure_statics_uploaded = true;
+    }
+    // Liquid (matter lane or standalone liquid step): open the collider faces
+    // the liquid leaves (the gap is air, p = 0), hold the rest at the solid's
+    // velocity. After the weight upload (the compact one runs every call and
+    // would overwrite it) and before the divergence reads them
+    // (sim_matter_liquid_wall.glsl).
+    // A glued collider first marks its adhesion band (air cells within h of
+    // its surface that touch liquid become solid for this solve); every exit
+    // below clears it again and, on the matter lane, forces the next solve to
+    // re-upload the weights the band's faces were given.
+    const bool liquid_wall = is_variational && gpu_buffers.matter_model.liquid_wall &&
+        compute->backendType() == ComputeBackendType::VulkanCompute;
+    struct LiquidBandRestore {
+        const FluidSim::FluidGrid& grid;
+        SimulationComputeContext* compute;
+        SimulationGridDomainComputeBuffers& buffers;
+        float dt;
+        bool armed = false;
+        ~LiquidBandRestore() {
+            if (!armed) return;
+            runGpuMatterLiquidWall(grid, compute, buffers, 2, dt);
+            buffers.matter_model.pressure_statics_uploaded = false;
+        }
+    } band_restore{grid, compute, gpu_buffers, dt};
+    if (liquid_wall && gridHasGluedCollider(grid)) {
+        band_restore.armed = true;
+        if (!runGpuMatterLiquidWall(grid, compute, gpu_buffers, 3, dt)) {
+            return bail("matter liquid adhesion band");
+        }
+    }
+    if (liquid_wall && !runGpuMatterLiquidWall(grid, compute, gpu_buffers, 1, dt)) {
+        return bail("matter liquid collider wall");
+    }
+    // The MPM lane as a porous moving solid, on the device: after the weights
+    // are uploaded/packed and the collider wall opened, before the divergence.
+    if (is_variational && s_matter_porosity_gpu.active && gpu_buffers.porous_solid_velocity &&
+        !runMatterMpmPorosityGpu(grid, compute, gpu_buffers, mac)) {
+        return bail("matter MPM porosity");
     }
 
     GridProjectionGpuConstants c;
@@ -306,7 +405,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         gpu_buffers.vel_x, gpu_buffers.vel_y, gpu_buffers.vel_z,
         gpu_buffers.pressure, gpu_buffers.divergence
     };
-    ComputeBufferHandle fluid_divergence_bufs[13];
+    ComputeBufferHandle fluid_divergence_bufs[14];
     fluid_divergence_bufs[0] = mac.velocity[0];
     fluid_divergence_bufs[1] = mac.velocity[1];
     fluid_divergence_bufs[2] = mac.velocity[2];
@@ -329,6 +428,17 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     }
 
     const bool porous = vulkan_variational && gpu_buffers.porous_solid_velocity;
+    // The porous kernels take the MPM solid fraction last and the mobility
+    // ratio in sor_omega; DEM grains bind no fraction, pass 0 and keep their
+    // formula.
+    const bool porous_fraction = porous && s_matter_porous_fraction.valid();
+    const float porous_mobility = porous_fraction ? s_matter_porous_mobility_ratio : 0.0f;
+    if (porous) {
+        fluid_divergence_bufs[div_buf_count] = porous_fraction
+            ? s_matter_porous_fraction : gpu_buffers.fluid_mask;
+        ++div_buf_count;
+        c.sor_omega = porous_mobility;
+    }
     const char* divergence_kernel = porous
         ? Fluid::macKernel(mac, "sim_fluid_divergence_porous", "sim_sparse_mac_divergence_porous")
         : (vulkan_variational
@@ -344,6 +454,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                    use_cuda_fluid_projection ? fluid_divergence_bufs : proj_bufs,
                    use_cuda_fluid_projection ? div_buf_count : 5,
                    cell_groups);
+    c.sor_omega = 0.0f;  // back to the CG scalar carrier
 
     if (sparse_pressure) {
         std::string sparse_error;
@@ -419,10 +530,23 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
                                        "sim_fluid_cg_build_diag_var"),
                              b, diag_buf_count, cell_groups);
     }
-    // r = -div*h*h/dt at fluid cells; pressure reset to 0.
+    // Warm start (2026-11-09): a matter lane re-solves an almost identical
+    // system every substep (180 a frame for snow + water: 1.37 s of 2.1 s, ~64
+    // cold iterations each). Start from the previous solve's pressure; only on
+    // the device-scalar Vulkan loop, which forms r = b - A p below, and only
+    // within a frame (the view resets, so the first solve is cold). The
+    // stopping test stays relative to the cold b: same accuracy.
+    const bool warm_start = gpu_buffers.matter_model.enabled &&
+        gpu_buffers.matter_model.pressure_warm &&
+        compute->backendType() == ComputeBackendType::VulkanCompute &&
+        gpu_buffers.cg_scalars.valid() && !is_gfm && !pressure_window.bounded;
+    gpu_buffers.matter_model.pressure_warm = false;  // set again on success
+    // r = -div*h*h/dt at fluid cells; pressure reset to 0 (kept when warm).
+    c.iterations = warm_start ? 1 : 0;
     { ComputeBufferHandle b[4] = { gpu_buffers.divergence, gpu_buffers.fluid_mask,
                                    gpu_buffers.cg_residual, gpu_buffers.pressure };
       ok = ok && dispatch1("sim_fluid_cg_residual_init", b, 4, cell_groups); }
+    c.iterations = 0;
     if (!ok) return bail("divergence / build_diag / residual_init dispatch");
 
     const bool use_cuda_fused_reductions = compute->backendType() == ComputeBackendType::CUDA;
@@ -437,10 +561,20 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
     int dot_count = 0;
     bool used_multigrid = false;
     auto finishReduction = [&](const auto& dot_begin, double& out) -> bool {
-        compute->synchronize();
-        if (!compute->downloadBuffer(gpu_buffers.cg_partials, cg_partials_host.data(),
-                                     dot_blocks * sizeof(double)))
+        const bool batched = compute->backendType() == ComputeBackendType::VulkanCompute;
+        if (batched) {
+            compute->beginTransferBatch();
+        } else {
+            compute->synchronize();
+        }
+        bool downloaded = compute->downloadBuffer(gpu_buffers.cg_partials,
+            cg_partials_host.data(), dot_blocks * sizeof(double));
+        if (batched) {
+            downloaded = compute->endTransferBatch() && downloaded;
+        }
+        if (!downloaded) {
             return bail("cg_partials download");
+        }
         double sum = 0.0;
         for (uint32_t bi = 0; bi < dot_blocks; ++bi) sum += cg_partials_host[bi];
         out = sum;
@@ -699,14 +833,44 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
         c.parity = 0; // op: sigma = sum; sigma0 = sigma
         { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
           ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
+        if (warm_start) {
+            // sigma0 above is b.M^-1 b (the cold reference). Now r = b - A p:
+            // As = A p, r += -1 * As, z = M^-1 r, sigma = r.z (op 3 keeps sigma0).
+            { ComputeBufferHandle b[8] = { gpu_buffers.pressure, gpu_buffers.fluid_mask,
+                                           gpu_buffers.cg_diag, gpu_buffers.cg_As,
+                                           gpu_buffers.cg_partials };
+              int n = 5;
+              if (vulkan_variational) {
+                  b[5] = gpu_buffers.var_u_weight;
+                  b[6] = gpu_buffers.var_v_weight;
+                  b[7] = gpu_buffers.var_w_weight;
+                  n = 8;
+              }
+              ok = ok && dispatch1(varKernel("sim_fluid_cg_spmv_dot",
+                                             "sim_fluid_cg_spmv_dot_var"), b, n, dot_blocks); }
+            c.sor_omega = -1.0f;
+            { ComputeBufferHandle b[2] = { gpu_buffers.cg_residual, gpu_buffers.cg_As };
+              ok = ok && dispatch1("sim_fluid_cg_axpy", b, 2, cell_groups); }
+            c.sor_omega = 0.0f;
+            { ComputeBufferHandle b[4] = { gpu_buffers.cg_residual, gpu_buffers.cg_diag,
+                                           gpu_buffers.cg_z, gpu_buffers.cg_partials };
+              ok = ok && dispatch1("sim_fluid_cg_jacobi_dot", b, 4, dot_blocks); }
+            c.parity = 3;
+            { ComputeBufferHandle b[2] = { gpu_buffers.cg_partials, gpu_buffers.cg_scalars };
+              ok = ok && dispatch1("sim_fluid_cg_scalar_step", b, 2, 1); }
+        }
         { ComputeBufferHandle b[2] = { gpu_buffers.cg_search, gpu_buffers.cg_z };
           ok = ok && dispatch1("sim_fluid_cg_copy", b, 2, cell_groups); }
 
         constexpr int kCheckEvery = 8;
+        // A warm start is often converged already: look after 2 iterations.
+        constexpr int kWarmFirstCheck = 2;
         double host_scalars[7] = {};
         int done_iters = 0;
         while (ok && done_iters < max_iter_pre) {
-            const int batch = std::min(kCheckEvery, max_iter_pre - done_iters);
+            const int batch = std::min(warm_start && done_iters == 0 ? kWarmFirstCheck
+                                                                       : kCheckEvery,
+                                       max_iter_pre - done_iters);
             for (int k = 0; k < batch && ok; ++k) {
                 // As = A s + partials(s.As) fused ; alpha = sigma/sAs
                 { ComputeBufferHandle b[8] = { gpu_buffers.cg_search, gpu_buffers.fluid_mask,
@@ -766,6 +930,7 @@ bool runGpuFluidMGPCGPressure(SimulationGridDomainState& state,
             if (sigma_new_dev <= tol_pre * sigma0_dev) break; // converged
         }
         if (!ok) return bail("device-scalar CG loop");
+        gpu_buffers.matter_model.pressure_warm = gpu_buffers.matter_model.enabled;
 
         if (mgpcg_stats) {
             mgpcg_stats->pressure_cg_iterations = done_iters;

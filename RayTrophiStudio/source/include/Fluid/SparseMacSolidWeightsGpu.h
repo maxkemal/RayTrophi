@@ -26,11 +26,12 @@ bool packSparseMacSolidWeights(
     std::string& error);
 
 // Called after canonical P2G rebuilt its topology and before variational
-// divergence. Uses pages allocated/budgeted by P2G; no dense GPU weight bank.
+// divergence. Uses pages allocated/budgeted by P2G and immutable sparse byte metadata.
+// Remaps the current device tile list entirely on GPU; no list readback.
 bool uploadSparseMacSolidWeights(SimulationComputeContext& compute,
                                  SimulationGridDomainComputeBuffers& buffers,
                                  const FluidSim::FluidGrid& grid,
-                                 std::string& error);
+                                 std::string& error, uint64_t budget_bytes = 0);
 
 } // namespace Fluid
 } // namespace RayTrophiSim

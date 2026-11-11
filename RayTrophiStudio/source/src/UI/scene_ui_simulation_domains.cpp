@@ -1,4 +1,9 @@
-﻿#include "UI/VolumeMaterialUI.h"
+#include "MixedGpuStageUI.h"
+#include "LiquidEmissionControls.h"
+#include "MatterSeedSourcesUI.h"
+#include "DomainCreationUI.h"
+#include "DomainWallControls.h"
+#include "UI/VolumeMaterialUI.h"
 #include "UI/ColorControls.h"
 #include "UI/MatterLaneControls.h"
 #include "UI/GrainMeshLibraryUI.h"
@@ -68,82 +73,9 @@ void drawSimulationDomainControls(
             }
             ui_ctx.start_render = true;
         };
-        Vec3 center(0.0f, 1.0f, 0.0f);
-        const bool has_object_selection =
-            ui_ctx.selection.selected.type == SelectableType::Object &&
-            ui_ctx.selection.selected.object != nullptr &&
-            !ui_ctx.selection.selected.object->getNodeName().empty();
-        if (has_object_selection) {
-            Vec3 selected_min;
-            Vec3 selected_max;
-            if (scene.resolveObjectBoundsForSimulation(ui_ctx.selection.selected.object->getNodeName(), selected_min, selected_max)) {
-                center = (Vec3::min(selected_min, selected_max) + Vec3::max(selected_min, selected_max)) * 0.5f;
-            }
-        }
-
+        drawDomainCreationActions(resetSimulationNow, selected_domain_index);
+        particles = scene.getParticleSimulationSystem();
         const float avail_w = ImGui::GetContentRegionAvail().x;
-        const float btn3_w = std::max(60.0f, (avail_w - 10.0f) / 3.0f);
-
-        // --- Row 1: Primary Simulation & Creation Actions ---
-        // General theme only: no state-coloured buttons in this panel.
-        if (ImGui::Button("Reset Sim##SimResetTop", ImVec2(btn3_w, 24))) {
-            resetSimulationNow();
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Clear the bake cache and return to live free-run preview.");
-        }
-        ImGui::SameLine();
-
-        if (ImGui::Button("+ Add Domain##SimulationPanel", ImVec2(btn3_w, 24))) {
-            RayTrophiSim::SimulationGridDomainDesc desc;
-            const std::size_t domain_count = particles ? particles->gridDomains().size() : 0;
-            desc.name = "Physics Domain " + std::to_string(domain_count + 1);
-            desc.source_mode = RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
-            desc.bounds_min = center + Vec3(-2.5f, -2.5f, -2.5f);
-            desc.bounds_max = center + Vec3(2.5f, 2.5f, 2.5f);
-            desc.backend = RayTrophiSim::defaultSimulationDomainBackend();
-            scene.addSimulationGridDomain(desc);
-            particles = scene.getParticleSimulationSystem();
-            selected_domain_index = particles ? static_cast<int>(particles->gridDomains().size()) - 1 : -1;
-            if (selected_domain_index >= 0) {
-                ui_ctx.selection.selectSimulationDomain(scene.active_particle_system_index, selected_domain_index,
-                    particles->gridDomains()[static_cast<std::size_t>(selected_domain_index)].name);
-                const auto& selected_domain = particles->gridDomains()[static_cast<std::size_t>(selected_domain_index)];
-                const Vec3 mn = Vec3::min(selected_domain.bounds_min, selected_domain.bounds_max);
-                const Vec3 mx = Vec3::max(selected_domain.bounds_min, selected_domain.bounds_max);
-                ui_ctx.selection.selected.position = (mn + mx) * 0.5f;
-                ui_ctx.selection.selected.scale = mx - mn;
-            }
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Add a new empty physics domain.");
-        }
-        ImGui::SameLine();
-
-        if (!has_object_selection) {
-            ImGui::BeginDisabled();
-        }
-        if (ImGui::Button("+ From Select##SimulationPanel", ImVec2(btn3_w, 24))) {
-            const std::string source_name = ui_ctx.selection.selected.object->getNodeName();
-            scene.addSimulationGridDomainFromObject(source_name);
-            particles = scene.getParticleSimulationSystem();
-            selected_domain_index = particles ? static_cast<int>(particles->gridDomains().size()) - 1 : -1;
-            if (selected_domain_index >= 0) {
-                ui_ctx.selection.selectSimulationDomain(scene.active_particle_system_index, selected_domain_index,
-                    particles->gridDomains()[static_cast<std::size_t>(selected_domain_index)].name);
-                const auto& selected_domain = particles->gridDomains()[static_cast<std::size_t>(selected_domain_index)];
-                const Vec3 mn = Vec3::min(selected_domain.bounds_min, selected_domain.bounds_max);
-                const Vec3 mx = Vec3::max(selected_domain.bounds_min, selected_domain.bounds_max);
-                ui_ctx.selection.selected.position = (mn + mx) * 0.5f;
-                ui_ctx.selection.selected.scale = mx - mn;
-            }
-        }
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Create a domain fitted around selected object bounds.");
-        }
-        if (!has_object_selection) {
-            ImGui::EndDisabled();
-        }
 
         // --- Row 2: Cleanup Actions Toolbar ---
         auto p_sim_check = scene.getParticleSimulationSystem();
@@ -424,12 +356,12 @@ void drawSimulationDomainControls(
                     switch (domain.quality_profile) {
                         case RayTrophiSim::SimulationDomainQualityProfile::Interactive:
                             domain.max_auto_resolution = 96;
-                            domain.resource_budget_mb = 512;
+                            domain.resource_budget_mb = 2048;
                             domain.turbulence_octaves = std::min(domain.turbulence_octaves, 2);
                             break;
                         case RayTrophiSim::SimulationDomainQualityProfile::Preview:
                             domain.max_auto_resolution = 192;
-                            domain.resource_budget_mb = 1024;
+                            domain.resource_budget_mb = 4096;
                             domain.turbulence_octaves = std::clamp(domain.turbulence_octaves, 2, 4);
                             break;
                         case RayTrophiSim::SimulationDomainQualityProfile::Final: {
@@ -810,8 +742,10 @@ void drawSimulationDomainControls(
 
                 if (is_fluid_domain) {
                     auto& fp = domain.fluid_params;
-                    // Fluid Seeding & Limits
-                    if (UIWidgets::CollapsingHeader("Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
+                    RayTrophiSim::Fluid::drawMatterSeedSourcesControls(domain);
+                    // Legacy single-region recipe remains available until layered sources are enabled.
+                    if (!domain.matter_seed_sources_enabled && UIWidgets::CollapsingHeader(
+                            "Fluid Seeding & Capacity", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
                         if (RayTrophiSim::Fluid::drawMatterSeedSubstanceControls(domain)) {
                             scene.requestSimulationTimelineRenderResync();
@@ -1454,6 +1388,12 @@ void drawSimulationDomainControls(
                     source.radius = std::max(0.001f, source.radius);
 
                     if (source_is_fluid) {
+                        if (RayTrophiSim::Fluid::drawLiquidEmissionControls(source)) {
+                            scene.clearSimFrameCache();
+                            scene.requestSimulationTimelineRenderResync();
+                        }
+                        ImGui::BeginDisabled(source.liquid_emission !=
+                            RayTrophiSim::SimulationFlowSourceDesc::LiquidEmission::Rate);
                         const bool rate_keyed = keyedFlowProperty([](const auto& k){ return k.has_flow_rate; });
                         if (flowKeyButton("flow_rate", rate_keyed)) {
                             if (rate_keyed) removeFlowPropertyKey([](auto& k){ k.has_flow_rate = false; });
@@ -1474,6 +1414,7 @@ void drawSimulationDomainControls(
                                               "density is authored by this rate and the source's volume or surface.");
                         }
                         source.fluid_particles_per_second = std::max(0.0f, source.fluid_particles_per_second);
+                        ImGui::EndDisabled();
                     } else {
                         const bool density_keyed = keyedFlowProperty([](const auto& k){ return k.has_density; });
                         if (flowKeyButton("density", density_keyed)) {
@@ -2821,6 +2762,8 @@ void drawSimulationDomainControls(
                 }
                 if (is_fluid_domain) {
                     auto& fp = domain.fluid_params;
+                    RayTrophiSim::Fluid::drawDomainWallControls(fp,
+                        domain.boundary_mode == RayTrophiSim::SimulationGridDomainBoundaryMode::Closed);
                     if (UIWidgets::CollapsingHeader("APIC / FLIP Liquid Solver", ImGuiTreeNodeFlags_DefaultOpen)) {
                         ImGui::Spacing();
                         // Solver edits also demote the material preset to Custom: the
@@ -2869,11 +2812,6 @@ void drawSimulationDomainControls(
                                           "  ~0.15 for 3 mm drops | ~0.5 for sub-mm mist\n\n"
                                           "Raising it is the fastest way to kill a splash - the spray is\n"
                                           "exactly what it acts on.");
-                    }
-                    fp_edited |= ImGui::DragFloat("Wall Friction Damping", &fp.wall_damping, 0.01f,  0.0f, 1.0f, "%.2f");
-                    if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("Friction factor applied when liquid rubs boundaries or solid colliders.\n"
-                                          "0 = Slippery walls (sliding), 1 = Sticky walls (no-slip).");
                     }
 
                     ImGui::SeparatorText("Coupling");
@@ -3165,9 +3103,9 @@ void drawSimulationDomainControls(
                     if (ImGui::IsItemHovered())
                         ImGui::SetTooltip(
                             "Labels are written by the simulation: body = inside the liquid,\n"
-                            "spray = detached droplets, frozen = solidified. By default spray,\n"
-                            "foam and bubbles are drawn as splats and mist as fog; the rest\n"
-                            "follow their substance.\n\n"
+                            "spray = detached droplets, frozen = solidified. By default foam\n"
+                            "and bubbles are drawn as splats and mist as fog; spray and the\n"
+                            "remaining labels follow their substance.\n\n"
                             "The same rows route whitewater spray / foam / bubble. For\n"
                             "whitewater, Isosurface means a white medium inside the liquid's\n"
                             "surface volume.");
@@ -4734,6 +4672,7 @@ void drawSimulationDomainControls(
                         blk.Value("  blocking cells", "%zu", fs.solid_phase_cells);
                     }
                     blk.Total("Step total", step_total);
+                    RayTrophiSim::Fluid::drawMixedGpuStages(fs.mixed_stages);
                     blk.Time("P2G", fs.p2g_ms, fs.p2g_on_gpu ? "GPU" : "CPU", 1);
                     RayTrophiSim::Fluid::ActiveWindow::drawDiagnostics(blk, fs);
                     blk.Time("Pressure", fs.pressure_ms,

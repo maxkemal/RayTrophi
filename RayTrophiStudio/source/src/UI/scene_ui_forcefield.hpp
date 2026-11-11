@@ -1,4 +1,7 @@
-﻿/*
+#include "DomainWallControls.h"
+#include "UI/TemperatureLabel.h"
+#include "ContactAdhesionControl.h"
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -1503,7 +1506,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
         solver_edited |= ImGui::DragFloat("Velocity Damping", &fluid->params.velocity_damping, 0.001f, 0.0f, 1.0f, "%.3f");
         solver_edited |= ImGui::DragFloat("Internal Friction", &fluid->params.internal_friction, 0.01f, 0.0f, 10.0f, "%.2f");
         solver_edited |= ImGui::DragFloat("Air Drag", &fluid->params.air_drag, 0.01f, 0.0f, 10.0f, "%.2f");
-        solver_edited |= ImGui::DragFloat("Wall Damping", &fluid->params.wall_damping, 0.01f, 0.0f, 1.0f, "%.2f");
+        solver_edited |= RayTrophiSim::Fluid::drawDomainWallControls(fluid->params);
         solver_edited |= ImGui::DragFloat("Affine Damping", &fluid->params.affine_damping, 0.001f, 0.0f, 1.0f, "%.3f");
         ImGui::DragFloat("Max Affine", &fluid->params.max_affine, 1.0f, 0.0f, 1000.0f, "%.0f");
         (void)solver_edited;
@@ -3032,13 +3035,7 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                   "Not the particle friction above: that is a per-hit speed loss.\n"
                                   "Not derived from the render roughness map.");
             }
-            ImGui::DragFloat("Contact Adhesion (Pa)##CollTab", &c.contact_adhesion_pa, 10.0f, 0.0f, 1.0e6f,
-                             "%.0f", ImGuiSliderFlags_Logarithmic);
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("Tensile stress an MPM body must exceed to leave this surface.\n"
-                                  "0 = never sticks. Chewing gum's tack is of the order of 1e6 Pa;\n"
-                                  "the body still has to carry that stress itself. Ctrl+click for more.");
-            }
+            RayTrophiSim::Fluid::drawContactAdhesionControl(c.contact_adhesion_pa);
             ImGui::DragFloat("Voxel Inflation Thickness##CollTab",   &c.thickness,   0.005f, 0.0f, 5.0f, "%.3f");
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Inflates the collision bounds during fluid grid voxelization.\n"
@@ -3156,8 +3153,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                         if (ov.override_ignition) ov.ignition_kelvin = profile_ref.ignition_kelvin;
                     }
                     ImGui::BeginDisabled(!ov.override_ignition);
-                    if (ImGui::DragFloat("Ignition (K)##CollTabMsfOv", &ov.ignition_kelvin,
-                                         1.0f, 273.0f, 4000.0f, "%.0f")) {
+                    char ignition_fmt[48];
+                    if (ImGui::DragFloat("Ignition##CollTabMsfOv", &ov.ignition_kelvin,
+                                         1.0f, 273.0f, 4000.0f,
+                                         UiTemperature::kelvinFormat(ov.ignition_kelvin, ignition_fmt,
+                                                                     sizeof(ignition_fmt), "%.0f"))) {
                     }
                     ImGui::SameLine();
                     ImGui::TextDisabled("= %.2f norm", scale.toNormalized(ov.ignition_kelvin));
@@ -3268,8 +3268,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                             effective, effective - 273.15f,
                                             world_thermal.dryingScale());
                     } else {
-                        ImGui::DragFloat("Ambient (K)##CollTabMsf", &world_thermal.ambient_kelvin,
-                                         1.0f, 1.0f, 2000.0f, "%.0f");
+                        char world_ambient_fmt[48];
+                        ImGui::DragFloat("Ambient##CollTabMsf", &world_thermal.ambient_kelvin,
+                                         1.0f, 1.0f, 2000.0f,
+                                         UiTemperature::kelvinFormat(world_thermal.ambient_kelvin,
+                                             world_ambient_fmt, sizeof(world_ambient_fmt), "%.0f"));
                         if (ImGui::IsItemHovered()) {
                             ImGui::SetTooltip(
                                 "What the room is at. Defined EVERYWHERE, including\n"
@@ -3280,8 +3283,11 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
                                 "(Domain panel -> Thermal Override).");
                         }
                     }
-                    ImGui::DragFloat("Reference (K)##CollTabMsf", &world_thermal.reference_kelvin,
-                                     1.0f, 1.0f, 2000.0f, "%.0f");
+                    char reference_fmt[48];
+                    ImGui::DragFloat("Reference##CollTabMsf", &world_thermal.reference_kelvin,
+                                     1.0f, 1.0f, 2000.0f,
+                                     UiTemperature::kelvinFormat(world_thermal.reference_kelvin,
+                                         reference_fmt, sizeof(reference_fmt), "%.0f"));
                     if (ImGui::IsItemHovered()) {
                         ImGui::SetTooltip(
                             "Calibration: normalized temperature 0 == this many Kelvin.\n"

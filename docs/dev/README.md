@@ -1,4 +1,9 @@
+| [AJAN_KOORDINASYON.md](AJAN_KOORDINASYON.md) | **CANLI 2026-11-10:** aynı ağaçta çalışan Claude ve Codex'in ortak panosu — çalışılan dosyalar, derlemeyi bozabilecek arayüz değişiklikleri, derleme bekleyen partiler, fikir/iş bölümü. Ortak dosyaya dokunmadan önce okunur. |
 # RayTrophi — engineering notes index
+
+- [General DEM integration and time-cost roadmap](DEM_CORE_INTEGRATION_ROADMAP.md)
+
+- [DEM breakable bodies — source integration, persistent seed authoring and pending acceptance](DEM_BONDED_SOLIDS.md)
 
 - [Audio background jobs — kaynak teslimi ve yeni build kabulü](AUDIO_BACKGROUND_JOBS.md)
 - [Shared object physical materials](OBJECT_SUBSTANCE_BINDINGS.md)
@@ -62,6 +67,8 @@ checkpoints, not proof that a later build/listening/physics gate passed.
 
 | Document | Area |
 |---|---|
+| [OLCEK_MILYON_PARCACIK.md](OLCEK_MILYON_PARCACIK.md) | **AKTİF 2026-11-11: ölçek hedefi 1M ≤ 1.5 s/kare, 10M ≤ 20 s/kare, kare başına parçacık indirme 0 B.** Maliyet modeli (MPM ∝ N^(4/3)), bellek/trafik tablosu, ölçülen karışım cezası (kum+kar: tane↔MPM teması kare GPU'sunun %70'i), DEM alt adım nedenleri (24 temas × aşırı sönüm ζ=1.49 → 0.13 ms), GPU yüzey hâlâ host parçacıklarından besleniyor; sıra S0 rig → S1 cihazda kalıcı durum → S2 tane–MPM teması → S3 örtük DEM (Codex) → S4 seyrek MPM → S5 P2G. |
+| [VISKOZ_SIVI_URETIM_KALITESI.md](VISKOZ_SIVI_URETIM_KALITESI.md) | **AKTIF 2026-11-09:** gerçek boyutlu bal Huppert testinde etkin viskozite gerçeğin 1/9–1/25'i (GS 16 adım, yakınsamıyor); üretim eksikleri: yakınsayan viskozite, tam gerilme formu, alt-kare collider, yüzey gerilimi. |
 | [HANDOFF_MESH_VOLUME_SEED_DEM.md](HANDOFF_MESH_VOLUME_SEED_DEM.md) | **AKTIF 2026-11-05 devir:** Mesh Volume seed (kum kale) CANLI; açık: DEM kum adımı "grain neighbour bucket overflow" ile her karede bekletiliyor (kök bulunmadı), ıslak kum dağılıyor (wetness yalnız DEM, cohesion 0), imza kayması korumasını sökme, emitter MeshVolume inflow/outflow. |
 | [GPU_YUZEY_LEVEL_SET.md](GPU_YUZEY_LEVEL_SET.md) | **AKTIF 2026-11-04: Y1+Y2 written, not built (GPU builder + Vulkan RT live route; raster/OptiX read the GPU result back).** Build the liquid/snow surface (level set, uvw, composition) on the simulation Vulkan device. Measured: CPU surface rebuild costs 235 ms/frame on moving 100k snow (centre smoothing alone 124 ms) vs solver 128 ms. Y1 GPU producer from the step's resident positions, Y2 Vulkan RT reads device addresses (gas precedent), Y3 raster viewport (second VkDevice) via a version-gated host mirror. |
 | [RIG_AUTHORING_ROADMAP.md](RIG_AUTHORING_ROADMAP.md) | **AKTİF 2026-10-28.** Rig ve hareket yazarlığı ana planı. §11: Human Walk teşhisi (kök: bacak IK erişimi taşıyor, pelvis hiç alçalmıyor → ayak ~5 cm havada, diz kilitli; foot roll yok), humanoid şablon v4 (yönelim çerçevesi, topuk/top pivotu, bend_hint, twist), Walk v2 W1–W5 ve hızlı rig yolu R1–R8 (otomatik işaret, ROM test klibi, geodezik voksel ağırlık, `rig.auto_rig`). Ayrı Rig Studio paneli kaldırıldı; kalıntı temizliği açık. |
@@ -227,6 +234,8 @@ Volume shadow implementation: [REALTIME_VOLUME_SHADOWS.md](REALTIME_VOLUME_SHADO
 
 | Document | Area |
 |---|---|
+| [MATTER_SIVI_MPM_BASINC_BAGLASIMI.md](MATTER_SIVI_MPM_BASINC_BAGLASIMI.md) | **TASLAK 2026-11-09:** sıvı–MPM bağı tek temas itmesi (tam esnek olmayan + Coulomb, her alt adımda) suyu kara değince durduruyor ve sıvının kendi saatini yakınsatmıyor; DEM'in gözenekli projeksiyon + örtük sürükleme + basınç kuvveti yolunu MPM ızgarasına taşıma tasarımı, fizik referanslı kabul (Arşimet, Darcy). |
+| [MATTER_COKLU_ZAMAN_ADIMI.md](MATTER_COKLU_ZAMAN_ADIMI.md) | **CANLI 2026-11-11** (sıvının kendi saati kalıcı, A/B anahtarı ve senkron temas yolu söküldü; kare 2.1 s → ~0.7 s, test 788 → ~140 ms): karma sahnede (100k, kar+su) karenin ~%95'i sıvı basıncının 180 MPM alt adımında tekrar çözülmesi (2.1 s/kare); öneri sıvının kendi dış saati + karışık hücrede ortak projeksiyon (kar sudan hafif: eklenmiş kütle), kabul tablosu. |
 | [MPM_UYUYAN_KAROLAR.md](MPM_UYUYAN_KAROLAR.md) | **CANLI 2026-11-04 (domain sleep: resting 83k snow 123 -> 16.7 ms/frame; partial tile/cell sleep built, measured 5-7 % slower, removed; the resting MPM frame is bound by its serial substep dispatch chain, not parcel work).** Originally drafted as: MPM sleep that actually skips work: whole grid tiles sleep (frozen parcels, cells act as a still solid for awake neighbours), wake only on real relative motion at the tile face or loss of support, with the DEM sleep lessons as rules. Stage A (settle damps/sleeps only SUPPORTED parcels; mean acceleration along gravity < 0.25 g) is LIVE (snow_support 5/5, smoke 15/15); B needs A live and a rest-cost measurement first. |
 | [RT_REALTIME_DENOISE_UPSCALE_PLAN.md](RT_REALTIME_DENOISE_UPSCALE_PLAN.md) | **AKTİF 2026-10-27 (B1-B4 live; B4b source batch awaiting build: still-frame SVGF fades by measured noise, FSR decoupled from SVGF via an input-provider contract).** Vulkan RT + RayFusion in motion: measured baseline (interior 96 ms/sample, OIDN fast 43 ms), then four single-build batches - OIDN schedule + motion bounce profile, motion vectors + history (shared RT/raster contract), SVGF realtime denoiser, FSR or in-house TAAU upscale. Why FSR is not first: an upscaler needs motion vectors and clean input. |
 | [ATMOSPHERE_PRECIP_TYPES.md](ATMOSPHERE_PRECIP_TYPES.md) | **ACTIVE 2026-10-12 (batch 14 written, not built: far-curtain forms).** Phase 8: precipitation type from the column temperature profile and terrain height (drizzle, rain, sleet, snow by temperature, freezing rain, graupel, hail in strong cores), snow line, per-type visual table (size, fall speed, far curtain, near particles, bright band). |
@@ -264,4 +273,4 @@ Audio next-stage plan: [Çok katmanlı ses kurgu](AUDIO_MULTITRACK_AUTHORING_PLA
 — planned M0–M4; existing clip foundation, real track model, selection/automation,
 project migration and acceptance. Implementation starts with the shared clip canvas.
 
-- [Scene acoustics listening checkpoint](SCENE_ACOUSTICS_PREVIEW.md) � session preview and user build/scene acceptance.
+- [Scene acoustics listening checkpoint](SCENE_ACOUSTICS_PREVIEW.md) � session preview and user build/scene acceptance.

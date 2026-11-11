@@ -58,7 +58,7 @@ layout(push_constant) uniform Constants {
     // offset of the collider vertex velocities in `triangles` (uint bits;
     // 0 = static colliders).
     vec4 wet;
-    // Sleeping grains: still substeps before sleep (uint bits), sleep speed
+    // Normal-contact separation speed budget (m/s), sleep speed
     // m/s (0 = off for this frame), wake all this frame (uint bits), sleep time s.
     vec4 sleep;
 } pc;
@@ -73,7 +73,10 @@ const uint BUCKET = 32u;
 const uint EMPTY = 0xffffffffu;
 const uint WALL_KEY = 0x80000000u;
 const uint PATCH_KEY = 0xc0000000u;
-const uint REVISION = 38u;
+// Shell flags above the 30-bit patch id (kMatterGrainPatchClosed/Inward).
+const uint PATCH_CLOSED = 0x40000000u;
+const uint PATCH_INWARD = 0x80000000u;
+const uint REVISION = 42u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -336,7 +339,20 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
              vec3 spin, float inv_inertia, float other_inv_inertia,
              float effective_radius, float inverse_tangent_mass,
              float inverse_normal_mass, inout vec3 force, inout vec3 torque) {
-    if (overlap <= 0.0) return;
+    bool domain_wall = (key & PATCH_KEY) == WALL_KEY;
+    float adhesion_limit = domain_wall
+        ? masses[2u * pc.meta.x + 7u] * 3.14159265359 * effective_radius * effective_radius
+        : 0.0;
+    if (overlap <= 0.0) {
+        vec3 old_tangent, old_roll;
+        // Only an established wall contact may bridge a small separation.
+        // No attraction to remote walls or uncontacted nearby grains.
+        if (adhesion_limit <= 0.0 || overlap < -0.05 * effective_radius ||
+            previousSprings(key, old_tangent, old_roll) == EMPTY) {
+            return;
+        }
+    }
+    overlap = max(overlap, 0.0);
     ++g_contacts;
     float dt = pc.step_contact.x;
     float radius_scale = (key & WALL_KEY) != 0u ? effective_radius : 2.0 * effective_radius;
@@ -344,8 +360,17 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float normal_speed = dot(relative,n);
     // step_contact.y is the damping ratio of the material's restitution;
     // c = 2 zeta sqrt(k m_eff) gives every contact the same rebound.
-    float cn = 2.0*pc.step_contact.y*sqrt(k/inverse_normal_mass);
+    float damping_ratio = domain_wall ? masses[2u * pc.meta.x + 5u] : pc.step_contact.y;
+    float friction = domain_wall ? masses[2u * pc.meta.x + 4u] : pc.step_contact.w;
+    float cn = 2.0 * damping_ratio * sqrt(k / inverse_normal_mass);
     float fn = max(0.0, k*overlap-cn*normal_speed);
+    // Budget all contacts against the input velocity. Dividing by BUDGET
+    // prevents simultaneous wall, mesh and grain contacts from each spending
+    // the full recovery impulse. Apply after damping so deep, closing
+    // contacts cannot bypass the limit through their dashpot reaction.
+    float recovery_speed = max(0.0, pc.sleep.x - normal_speed);
+    float normal_limit = recovery_speed / (BUDGET * dt * inverse_normal_mass);
+    fn = min(fn, normal_limit);
     recordContactDamping(i, position(i, readBank()) + arm, normal_speed,
         fn, k * overlap, dt, (key & WALL_KEY) == 0u);
     vec3 tangential, rolling;
@@ -368,7 +393,9 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     tangential = kt > 0.0 ? previous_tangent+slip*history_dt : vec3(0.0);
     vec3 tangent_trial = tangential;
     vec3 ft = damping-kt*tangential;
-    float coulomb = pc.step_contact.w*fn;
+    float tension = min(adhesion_limit,
+        max(normal_speed, 0.0) / max(dt * inverse_normal_mass, 1e-12));
+    float coulomb = friction * fn + max(adhesion_limit - tension, 0.0);
     float magnitude = length(ft);
     if (magnitude > coulomb) {
         ft = magnitude > 1e-12 ? ft*(coulomb/magnitude) : vec3(0.0);
@@ -382,7 +409,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     // mu_r Fn R. A kinetic-only torque vanishes at zero spin, so a grain on a
     // slope crept by rolling; the spring holds it below tan(theta) = mu_r.
     vec3 roll = spin-dot(spin,n)*n;
-    float mu_r = pc.rolling.x;
+    float mu_r = domain_wall ? min(pc.rolling.x, friction) : pc.rolling.x;
     float inverse_pair_inertia = inv_inertia+other_inv_inertia;
     vec3 rt = vec3(0.0);
     float rolling_work = 0.0;
@@ -411,7 +438,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
         rolling = vec3(0.0);
     }
     keepSprings(slot, key, tangential, rolling);
-    force += n*fn+ft;
+    force += n * (fn - tension) + ft;
     // Finite contact-patch twist resistance. Equal/opposite pair torque;
     // no uniform angular damping, and aggregate impulses cannot reverse spin.
     float twist_speed = dot(spin,n);
@@ -435,7 +462,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
         float previous_normal = slot == EMPTY ? 0.0 :
             max(0.0, k*(overlap+normal_speed*history_dt));
         vec3 changed_tangent = ft+kt*previous_tangent;
-        g_pair_dynamic_impulse = -(n*(fn-previous_normal)+changed_tangent)*dt;
+        g_pair_dynamic_impulse = -(n * (fn - tension - previous_normal) + changed_tangent) * dt;
         g_pair_dynamic_angular_impulse =
             (cross(arm,changed_tangent)-(rt-previous_rolling_torque)+
              sign(twist_speed)*twist_torque*n)*dt;
@@ -659,7 +686,10 @@ void main() {
     }
     g_probe_sleep_transfer = false;
     // Closed domain walls. Static collider reaction belongs to the support.
-    for (int axis=0; axis<3; ++axis) for (int side=0; side<2; ++side) {
+    for (int axis = 0; axis < 3; ++axis) for (int side = 0; side < 2; ++side) {
+        if (masses[2u * pc.meta.x + 6u] == 0.0) {
+            continue;
+        }
         vec3 n = vec3(0.0); n[axis] = side == 0 ? 1.0 : -1.0;
         float distance = side == 0 ? p[axis]-pc.low_radius[axis] : pc.high_stiffness[axis]-p[axis];
         vec3 arm = -n*r;
@@ -727,6 +757,22 @@ void main() {
             float normal_length = length(face_normal);
             vec3 n = d > 1e-9 ? (p-q)/d :
                 (normal_length > 0.0 ? face_normal / normal_length : vec3(0.0));
+            // Closed shell: one-sided. A centre behind the face is inside the
+            // body; push it OUT with depth r + d (stored as d < 0, so the
+            // contact's r - d and the deepest-feature order still hold).
+            // Two-sided here pulled crushed grains into the body and shot
+            // them out (kMatterGrainPatchClosed, MatterGrainColliderBvh.cpp).
+            uint shell = patches[k];
+            if ((shell & PATCH_CLOSED) != 0u && normal_length > 0.0) {
+                vec3 outward = face_normal / normal_length *
+                    ((shell & PATCH_INWARD) != 0u ? -1.0 : 1.0);
+                if (dot(p - q, outward) < 0.0) {
+                    n = outward;
+                    d = -d;
+                } else if (d <= 1e-9) {
+                    n = outward;
+                }
+            }
             if (!finiteGrainVector(n) || dot(n, n) < 0.5) {
                 atomicOr(diagnostics[0], 512u);
                 store(i, dst, p, v, w);

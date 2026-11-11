@@ -23,6 +23,9 @@
                     }
                 }
                 s_last_substance_error = substance_error;
+                // On the descriptor too, so panel and IPC read what runs.
+                Fluid::adoptParcelLiquidSubstance(grid_domains_[i].fluid_params,
+                    state.particles, state.voxel_size, world_thermal_.scale());
             }
             auto fluid_params = (i < grid_domains_.size())
                 ? grid_domains_[i].fluid_params
@@ -537,8 +540,7 @@
             // mass and still resists shear. See buildSubstanceViscosityField.
             static std::vector<float> s_substance_viscosity;
             step_params.substance_viscosity = nullptr;
-            if (i < grid_domains_.size() &&
-                !grid_domains_[i].fluid_substance_materials.empty()) {
+            if (i < grid_domains_.size()) {
                 RayTrophiSim::Fluid::SubstanceViscosityEntry visc_entries[
                     RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials];
                 std::size_t visc_entry_count = 0;
@@ -552,6 +554,11 @@
                         b.kinematic_viscosity;
                     ++visc_entry_count;
                 }
+                // Bindings first (an authored value wins), then every liquid
+                // substance the parcels carry at its catalogue viscosity.
+                visc_entry_count = Fluid::appendParcelSubstanceViscosities(
+                    state.particles, fluid_params, state.voxel_size, visc_entries,
+                    visc_entry_count, RayTrophiSim::Fluid::kMaxFluidSubstanceMaterials);
                 if (visc_entry_count > 0 &&
                     RayTrophiSim::Fluid::buildSubstanceViscosityField(
                         state.particles, state.grid,
@@ -626,17 +633,8 @@
             Fluid::diffuseParticleTemperature(
                 state.particles, state.grid,
                 fluid_params.granular_thermal_conductivity, granular_frame_dt);
+            Fluid::updateMatterMpmSoftening(state.particles, fluid_params);
             if (fluid_params.granular_enabled) {
-                state.particles.ensureGranularStateSize();
-                Fluid::Granular::SofteningParams softening_params;
-                softening_params.softening_temperature =
-                    fluid_params.granular_softening_temperature;
-                softening_params.softening_range =
-                    fluid_params.granular_softening_range;
-                softening_params.tack_peak = fluid_params.granular_tack_peak;
-                softening_params.residual_strength =
-                    fluid_params.granular_residual_strength;
-                Fluid::Granular::updateSoftening(state.particles, softening_params);
                 // Every backend uploads host state each frame after this, so
                 // newly born snow parcels get their density draw here once.
                 if (fluid_params.granular_snow_plasticity) {
@@ -973,6 +971,25 @@
                     auto call1_params = step_params;
                     call1_params.stop_before_pressure = true;
                     call1_params.viscosity_precomputed = true;
+                    // Separating collider wall (sim_matter_liquid_wall.glsl):
+                    // the host passes keep collider faces, the GPU pressure
+                    // solve holds or releases them. Liquid on Vulkan with
+                    // variational solids only; anything else keeps zeroing.
+                    // It reads the colliders' adhesion; without that upload it
+                    // does not run at all rather than run unglued.
+                    const bool liquid_wall = !fluid_params.granular_enabled &&
+                        fluid_params.variational_solids &&
+                        context.compute->backendType() == ComputeBackendType::VulkanCompute &&
+                        state.grid.hasAnySolid() &&
+                        uploadGpuSolidContact(state.grid, *context.compute, gpu_buffers);
+                    call1_params.liquid_collider_wall = liquid_wall;
+                    gpu_buffers.matter_model.liquid_wall = liquid_wall;
+                    gpu_buffers.matter_model.liquid_wall_density = fluid_params.granular_density;
+                    if (liquid_wall) {
+                        gpu_buffers.matter_model.boundary =
+                            fluid_params.boundary == Fluid::APICSolverParams::BoundaryMode::Open
+                                ? 0u : 1u;
+                    }
                     auto run_call1 = [&]() {
                         Fluid::step(state.particles, state.grid, call1_params, dt,
                                     gpu_integrated_forces ? nullptr : context.force_snapshot,
@@ -1053,9 +1070,12 @@
                     // contact; its solid velocity was uploaded with the mask.
                     if (upload_ok && grid_velocity_device_only &&
                         !(fluid_params.granular_enabled
-                            ? runGpuMpmSolidFaces(state.grid, context.compute, gpu_buffers, true,
-                                  dt, fluid_params.granular_density)
-                            : runGpuFluidZeroSolidFaces(state.grid, context.compute, gpu_buffers))) {
+                            ? runGpuMpmSolidFaces(state.grid, context.compute, gpu_buffers,
+                                  fluid_params.boundary == Fluid::APICSolverParams::BoundaryMode::Closed,
+                                  dt, fluid_params.granular_density, fluid_params)
+                            : (liquid_wall
+                                ? runGpuMatterLiquidWall(state.grid, context.compute, gpu_buffers, 0, dt)
+                                : runGpuFluidZeroSolidFaces(state.grid, context.compute, gpu_buffers)))) {
                         static bool s_warned_zero_solid_faces = false;
                         if (!s_warned_zero_solid_faces) {
                             s_warned_zero_solid_faces = true;
@@ -1096,7 +1116,7 @@
                                                             &gpu_mgpcg_stats,
                                                             pressure_device_input);
                         if (viscosity_ok) {
-                            enforceGridSolidFaceBoundaries(state.grid);
+                            enforceGridSolidFaceBoundaries(state.grid, liquid_wall);
                             // Its downloaded output still matches the device if
                             // the host boundary pass had no solid cells to edit.
                             pressure_device_input = !fluid_params.granular_enabled &&
@@ -1126,7 +1146,7 @@
                             // projection update. The GPU gradient kernel uses
                             // the fluid mask matrix, then we mirror that final
                             // no-flow clamp here before G2P samples velocities.
-                            enforceGridSolidFaceBoundaries(state.grid);
+                            enforceGridSolidFaceBoundaries(state.grid, liquid_wall);
                             gpu_pressure_ms = elapsedMilliseconds(gpu_pressure_begin, SimulationClock::now());
                         }
                     }
@@ -1327,6 +1347,12 @@
                     gpu_mgpcg_stats.viscosity_sparse_allocated_tiles;
                 state.fluid_stats.viscosity_sparse_resident_bytes =
                     gpu_mgpcg_stats.viscosity_sparse_resident_bytes;
+                state.fluid_stats.viscosity_pcg_iterations =
+                    gpu_mgpcg_stats.viscosity_pcg_iterations;
+                state.fluid_stats.viscosity_pcg_relative_residual =
+                    gpu_mgpcg_stats.viscosity_pcg_relative_residual;
+                state.fluid_stats.viscosity_pcg_unconverged =
+                    gpu_mgpcg_stats.viscosity_pcg_unconverged;
                 state.fluid_stats.pressure_cg_iterations = gpu_mgpcg_stats.pressure_cg_iterations;
                 state.fluid_stats.pressure_cg_max_iterations = gpu_mgpcg_stats.pressure_cg_max_iterations;
                 state.fluid_stats.pressure_cg_dot_count = gpu_mgpcg_stats.pressure_cg_dot_count;
@@ -1734,6 +1760,7 @@
             // total_ms is therefore only the second, tiny tail call. Publish
             // the actual liquid-domain wall time after all GPU stages, labels,
             // whitewater and the density bridge have completed.
+            Fluid::DemBond::retireNonDem(state.particles, grid_domains_[i].fluid_params);
             state.fluid_stats.total_ms = elapsedMilliseconds(
                 fluid_step_begin, SimulationClock::now());
 

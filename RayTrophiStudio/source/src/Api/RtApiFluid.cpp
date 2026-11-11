@@ -1,3 +1,5 @@
+#include "Fluid/LiquidEmissionAuthoring.h"
+#include "Api/MatterSeedSourcesApi.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -81,6 +83,8 @@ void fillFluidRheology(const RayTrophiSim::Fluid::APICSolverParams& params,
     info.kinematic_viscosity = params.kinematic_viscosity;
     info.viscosity_sweeps    = params.viscosity_sweeps;
     info.viscosity_wall_slip = params.viscosity_wall_slip;
+    info.liquid_physics_substance = params.liquid_physics_substance.empty()
+        ? params.default_substance : params.liquid_physics_substance;
     info.granular_enabled = params.granular_enabled;
     info.granular_friction_angle_degrees = params.granular_friction_angle_degrees;
     info.granular_cohesion = params.granular_cohesion;
@@ -2185,6 +2189,10 @@ Result seedFluidParticles(const std::string& domain_id_or_name,
         return Result::fail("fluid domain not found: " + domain_id_or_name);
     }
 
+    if (const auto seed_access = validateSingleRegionSeedRequest(info.name); !seed_access.ok) {
+        return seed_access;
+    }
+
     // Null region = "fill this tank": the bottom half of the domain, inset by a
     // voxel so the seed does not start inside the boundary cells. Derived from
     // the domain that was actually resolved above, so it is right for every
@@ -2308,6 +2316,9 @@ Result seedFluidParticlesFromMesh(const std::string& domain_id_or_name,
     rtapi::FluidDomainInfo info;
     if (!getFluidDomain(domain_id_or_name, info).ok) {
         return Result::fail("fluid domain not found: " + domain_id_or_name);
+    }
+    if (const auto seed_access = validateSingleRegionSeedRequest(info.name); !seed_access.ok) {
+        return seed_access;
     }
     const auto volume = g_ctx->scene.resolveMeshVolumeForSimulation(object_name);
     if (!volume) {
@@ -2600,6 +2611,10 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
         const auto choose = [&](RayTrophiSim::Fluid::APICSolverParams& p, float voxel) {
             p.default_substance = chosen_substance->name;
             RayTrophiSim::Fluid::applySubstanceSolverHints(p, *chosen_substance);
+            // These are now the chosen substance's hints. Should the domain hold
+            // only another liquid's parcels, the next step re-copies THAT
+            // liquid's hints (adoptParcelLiquidSubstance sees a change).
+            p.liquid_physics_substance = chosen_substance->name;
             std::string error;
             RayTrophiSim::Fluid::resolveDomainSubstancePhysics(p, voxel,
                 scriptSimulationRuntime().worldThermal().scale(), error);
@@ -3330,6 +3345,7 @@ SimulationFlowSourceInfo flowInfoFromDesc(
     const std::vector<RayTrophiSim::SimulationGridDomainDesc>& domains,
     const std::vector<RayTrophiSim::SimulationGridDomainState>* states = nullptr) {
     SimulationFlowSourceInfo out;
+    RayTrophiSim::Fluid::copyLiquidEmissionInfo(source, out);
     out.producer_uid = source.timeline_uid;
     out.name = source.name;
     if (source.domain_index >= 0 &&
@@ -3494,6 +3510,10 @@ Result flowDescFromInfo(const SimulationFlowSourceInfo& info,
     }
     out.use_mass_limit = info.use_mass_limit;
     out.max_emitted_mass_kg = info.max_emitted_mass_kg;
+    std::string emission_error;
+    if (!RayTrophiSim::Fluid::configureLiquidEmission(info, out, emission_error)) {
+        return Result::fail(emission_error);
+    }
     return Result::success();
 }
 

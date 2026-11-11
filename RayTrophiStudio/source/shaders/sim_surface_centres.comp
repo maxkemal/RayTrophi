@@ -16,11 +16,26 @@ vec3 position(uint p) {
     return vec3(positions[p * 3u], positions[p * 3u + 1u], positions[p * 3u + 2u]);
 }
 void main() {
-    uint p = gl_GlobalInvocationID.x;
-    if (p >= uint(pc.grid.w)) return;
+    // Threads walk the parcels in BIN order (the CSR items list), not in
+    // parcel order: neighbouring lanes then read the same neighbour bins and
+    // hit cache. Parcel order is spatially random after a few frames of
+    // motion. Same output per parcel (1M water: 51 ms, 2026-11-11).
+    // A parcel without a bin is not in the list; its own lane writes its raw
+    // centre.
+    uint lane = gl_GlobalInvocationID.x;
+    if (lane >= uint(pc.grid.w)) return;
+    if (bin_index[lane] == kSurfaceInvalid) {
+        vec3 raw = position(lane);
+        centres[lane * 3u] = raw.x;
+        centres[lane * 3u + 1u] = raw.y;
+        centres[lane * 3u + 2u] = raw.z;
+    }
+    uint binned = offsets[uint(pc.bins.w)];
+    if (lane >= binned) return;
+    uint p = items[lane];
     vec3 xp = position(p);
     vec3 result = xp;
-    if (bin_index[p] != kSurfaceInvalid && pc.centre.y > 0.0) {
+    if (pc.centre.y > 0.0) {
         ivec3 c = binCoordinate(xp);
         ivec3 lo = max(c - ivec3(pc.reach.x), ivec3(0));
         ivec3 hi = min(c + ivec3(pc.reach.x), pc.bins.xyz - ivec3(1));

@@ -1,10 +1,17 @@
 #include "RtMatterModels.h"
+#include "Api/DemBondApi.h"
 
 #include <pybind11/stl.h>
 
 namespace rtpy {
 
 void registerMatterModelBindings(pybind11::module_& fluid) {
+    fluid.def("dem_bodies", [](const std::string& domain, const pybind11::kwargs& kwargs) {
+        const auto request = nlohmann::json::parse(pybind11::module_::import("json")
+            .attr("dumps")(kwargs).cast<std::string>());
+        return pybind11::module_::import("json").attr("loads")(
+            rtapi::demBodies(domain, request).dump());
+    }, pybind11::arg("domain"));
     fluid.def("grain_settings", [](const std::string& domain) {
         return pybind11::module_::import("json").attr("loads")(
             rtapi::matterGrainSettings(domain, nlohmann::json::object(), false).dump());

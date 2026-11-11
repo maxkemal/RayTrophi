@@ -10,10 +10,14 @@ layout(push_constant) uniform PC {
     int air_threshold; int substeps;
     // Climate wind (Faz 2): spray drag is relative to the air. Zero = old formula.
     float air_wind_x; float air_wind_y; float air_wind_z; float _pad0;
+    float wall_friction; float gravity_x; float gravity_y; float gravity_z;
+    float wall_adhesion_acceleration;
 #ifdef MATTER_INDEXED
     uint matter_lane;
 #endif
 } pc;
+
+#include "sim_domain_wall_contact.glsl"
 
 layout(set=0,binding=0) buffer Positions { float positions[]; };
 layout(set=0,binding=1) buffer Velocities { float velocities[]; };
@@ -72,7 +76,7 @@ float sampleComp(int comp, vec3 p) {
 vec3 sampleVelocity(vec3 p) {
     return vec3(sampleComp(0,p),sampleComp(1,p),sampleComp(2,p));
 }
-// ★ 2026-10-20: the grid's velocity exists only around the cells that held
+// â˜… 2026-10-20: the grid's velocity exists only around the cells that held
 // liquid at this frame's transfer (sparse: resident pages; dense: the
 // extrapolation band), and reads 0 past them. A slab falling 4 cells per
 // frame (24 fps, 5.9 m/s, 5.7 cm voxels) carried its leading parcels out of
@@ -111,8 +115,8 @@ void main() {
     if(any(isnan(p)) || any(isnan(v))) return;
 
     ivec3 cc=ivec3(floor((p-vec3(pc.origin_x,pc.origin_y,pc.origin_z))/pc.voxel_size));
-    // ★★ Spray is ISOLATION, not local thinness. Must match the CPU reference in
-    // APICFluidSolver.cpp (air-drag stage) — a sheet of liquid one cell deep is
+    // â˜…â˜… Spray is ISOLATION, not local thinness. Must match the CPU reference in
+    // APICFluidSolver.cpp (air-drag stage) â€” a sheet of liquid one cell deep is
     // sparse per cell but is NOT airborne, and dragging it made a spill stop
     // following a moving container and scatter. Only a droplet whose whole 3x3x3
     // neighbourhood is nearly empty gets drag. The cheap per-cell test stays as
@@ -173,12 +177,9 @@ void main() {
         } else if(boundaryMode==2) {
             p=omin+mod(mod(pn-omin,span)+span,span);
         } else {
-            if(pn.x<lo.x){pn.x=lo.x;v.x=abs(v.x)*pc.wall_damping;}
-            if(pn.x>hi.x){pn.x=hi.x;v.x=-abs(v.x)*pc.wall_damping;}
-            if(pn.y<lo.y){pn.y=lo.y;v.y=abs(v.y)*pc.wall_damping;}
-            if(pn.y>hi.y){pn.y=hi.y;v.y=-abs(v.y)*pc.wall_damping;}
-            if(pn.z<lo.z){pn.z=lo.z;v.z=abs(v.z)*pc.wall_damping;}
-            if(pn.z>hi.z){pn.z=hi.z;v.z=-abs(v.z)*pc.wall_damping;}
+            domainWallParticle(pn, v, lo, hi, pc.wall_friction, pc.wall_damping,
+                vec3(pc.gravity_x, pc.gravity_y, pc.gravity_z), sdt,
+                pc.wall_adhesion_acceleration * sdt, pc.voxel_size);
             p=pn;
         }
     }

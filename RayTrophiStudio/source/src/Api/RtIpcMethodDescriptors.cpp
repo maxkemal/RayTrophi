@@ -26,7 +26,7 @@
 namespace {
 
 static const MethodParam params_addons_disable[] = {
-    {"module_name", "string", true, "", nullptr, nullptr},
+    {"module_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_addons_disable = {
     "addons.disable", "addons",
@@ -42,7 +42,7 @@ static const MethodDescriptor desc_addons_disable = {
 static const MethodRegistration reg_addons_disable(desc_addons_disable);
 
 static const MethodParam params_addons_enable[] = {
-    {"module_name", "string", true, "", nullptr, nullptr},
+    {"module_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_addons_enable = {
     "addons.enable", "addons",
@@ -71,7 +71,7 @@ static const MethodDescriptor desc_addons_list = {
 static const MethodRegistration reg_addons_list(desc_addons_list);
 
 static const MethodParam params_addons_reload[] = {
-    {"module_name", "string", true, "", nullptr, nullptr},
+    {"module_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_addons_reload = {
     "addons.reload", "addons",
@@ -87,7 +87,7 @@ static const MethodDescriptor desc_addons_reload = {
 static const MethodRegistration reg_addons_reload(desc_addons_reload);
 
 static const MethodParam params_agent_chat_poll[] = {
-    {"agent_id", "string", false, "", "", nullptr},
+    {"agent_id", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_agent_chat_poll = {
     "agent.chat_poll", "agent",
@@ -103,11 +103,11 @@ static const MethodDescriptor desc_agent_chat_poll = {
 static const MethodRegistration reg_agent_chat_poll(desc_agent_chat_poll);
 
 static const MethodParam params_agent_chat_send[] = {
-    {"sender", "string", true, "Display name shown in the panel, e.g. 'RayTrophi Agent'", nullptr, nullptr},
-    {"content", "string", true, "Message text", nullptr, nullptr},
-    {"type", "string", false, "Message kind", "reply", "reply|activity|thought|error"},
-    {"payload", "any", false, "Optional structured data appended to the message", nullptr, nullptr},
-    {"image_base64", "any", false, "Optional base64 image; the panel notes the attachment", nullptr, nullptr},
+    {"sender", "string", true, "Display name shown in the panel, e.g. 'RayTrophi Agent'", nullptr, nullptr, "string", false},
+    {"content", "string", true, "Message text", nullptr, nullptr, "string", false},
+    {"type", "string", false, "Message kind", "reply", "reply|activity|thought|error", "string", false},
+    {"payload", "any", false, "Optional structured data appended to the message", nullptr, nullptr, nullptr, false},
+    {"image_base64", "any", false, "Optional base64 image; the panel notes the attachment", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_agent_chat_send = {
     "agent.chat_send", "agent",
@@ -123,7 +123,7 @@ static const MethodDescriptor desc_agent_chat_send = {
 static const MethodRegistration reg_agent_chat_send(desc_agent_chat_send);
 
 static const MethodParam params_agent_describe[] = {
-    {"method", "string", true, "Exact method name, e.g. 'fluid.create_domain'", nullptr, nullptr},
+    {"method", "string", true, "Exact method name, e.g. 'fluid.create_domain'", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_agent_describe = {
     "agent.describe", "agent",
@@ -152,8 +152,8 @@ static const MethodDescriptor desc_agent_discover = {
 static const MethodRegistration reg_agent_discover(desc_agent_discover);
 
 static const MethodParam params_agent_get_examples[] = {
-    {"method", "string", false, "Method to show examples for, e.g. 'fluid.create_domain'", "", nullptr},
-    {"workflow", "string", false, "Recipe id from agent.search_capabilities, e.g. 'combustion_setup'", "", nullptr},
+    {"method", "string", false, "Method to show examples for, e.g. 'fluid.create_domain'", "", nullptr, "string", false},
+    {"workflow", "string", false, "Recipe id from agent.search_capabilities, e.g. 'combustion_setup'", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_agent_get_examples = {
     "agent.get_examples", "agent",
@@ -169,7 +169,7 @@ static const MethodDescriptor desc_agent_get_examples = {
 static const MethodRegistration reg_agent_get_examples(desc_agent_get_examples);
 
 static const MethodParam params_agent_get_state_summary[] = {
-    {"include_probe", "bool", false, "Sample the last viewport frame for luminance and black/NaN fractions. Costs a full-frame scan.", "true", nullptr},
+    {"include_probe", "bool", false, "Sample the last viewport frame for luminance and black/NaN fractions. Costs a full-frame scan.", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_agent_get_state_summary = {
     "agent.get_state_summary", "agent",
@@ -185,7 +185,7 @@ static const MethodDescriptor desc_agent_get_state_summary = {
 static const MethodRegistration reg_agent_get_state_summary(desc_agent_get_state_summary);
 
 static const MethodParam params_agent_list_methods[] = {
-    {"domain", "string", false, "Domain to restrict the listing to, e.g. 'fluid'. Omit for every method.", "", nullptr},
+    {"domain", "string", false, "Domain to restrict the listing to, e.g. 'fluid'. Omit for every method.", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_agent_list_methods = {
     "agent.list_methods", "agent",
@@ -214,8 +214,8 @@ static const MethodDescriptor desc_agent_roles = {
 static const MethodRegistration reg_agent_roles(desc_agent_roles);
 
 static const MethodParam params_agent_search_capabilities[] = {
-    {"query", "string", true, "Plain language goal, e.g. 'make a wooden object burn'", nullptr, nullptr},
-    {"limit", "int", false, "", "10", nullptr},
+    {"query", "string", true, "Plain language goal, e.g. 'make a wooden object burn'", nullptr, nullptr, "string", false},
+    {"limit", "int", false, "", "10", nullptr, "number", false},
 };
 static const MethodDescriptor desc_agent_search_capabilities = {
     "agent.search_capabilities", "agent",
@@ -231,9 +231,9 @@ static const MethodDescriptor desc_agent_search_capabilities = {
 static const MethodRegistration reg_agent_search_capabilities(desc_agent_search_capabilities);
 
 static const MethodParam params_agent_send_prompt[] = {
-    {"content", "string", true, "", nullptr, nullptr},
-    {"target", "string", true, "", nullptr, nullptr},
-    {"sender", "string", false, "", "Agent", nullptr},
+    {"content", "string", true, "", nullptr, nullptr, "string", false},
+    {"target", "string", true, "", nullptr, nullptr, "string", false},
+    {"sender", "string", false, "", "Agent", nullptr, "string", false},
 };
 static const MethodDescriptor desc_agent_send_prompt = {
     "agent.send_prompt", "agent",
@@ -249,13 +249,13 @@ static const MethodDescriptor desc_agent_send_prompt = {
 static const MethodRegistration reg_agent_send_prompt(desc_agent_send_prompt);
 
 static const MethodParam params_anim_bind_clip[] = {
-    {"source_character", "any", true, "Imported source rig name", nullptr, nullptr},
-    {"source_clip", "any", true, "Canonical clip name owned by source_character", nullptr, nullptr},
-    {"target_character", "any", true, "Imported destination rig name", nullptr, nullptr},
-    {"output_name", "string", false, "Optional new unique canonical clip name", "", nullptr},
-    {"node_map", "any", false, "Optional source unique node name -> target unique node name overrides. Full parent/helper chains must map consistently; unknown nodes and duplicate targets are rejected.", nullptr, nullptr},
-    {"mode", "string", false, "same_rig copies absolute local TRS. rest_basis transfers rest-frame motion deltas for matching parent chains; positive uniform rest/animated scale required.", "same_rig", "[\"['same_rig', 'rest_basis']\"]"},
-    {"translation_scale", "float", false, "Positive world-space translation delta multiplier, at most 10000, only in rest_basis mode. Includes source/target parent rest unit conversion. Does not estimate limb proportions or solve contact.", "1.", nullptr},
+    {"source_character", "string", true, "Imported source rig name", nullptr, nullptr, "string", true},
+    {"source_clip", "string", true, "Canonical clip name owned by source_character", nullptr, nullptr, "string", true},
+    {"target_character", "string", true, "Imported destination rig name", nullptr, nullptr, "string", true},
+    {"output_name", "string", false, "Optional new unique canonical clip name", "", nullptr, "string", false},
+    {"node_map", "any", false, "Optional source unique node name -> target unique node name overrides. Full parent/helper chains must map consistently; unknown nodes and duplicate targets are rejected.", nullptr, nullptr, nullptr, false},
+    {"mode", "string", false, "same_rig copies absolute local TRS. rest_basis transfers rest-frame motion deltas for matching parent chains; positive uniform rest/animated scale required.", "same_rig", "[\"['same_rig', 'rest_basis']\"]", "string", false},
+    {"translation_scale", "float", false, "Positive world-space translation delta multiplier, at most 10000, only in rest_basis mode. Includes source/target parent rest unit conversion. Does not estimate limb proportions or solve contact.", "1.", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_bind_clip = {
     "anim.bind_clip", "anim",
@@ -271,7 +271,7 @@ static const MethodDescriptor desc_anim_bind_clip = {
 static const MethodRegistration reg_anim_bind_clip(desc_anim_bind_clip);
 
 static const MethodParam params_anim_character[] = {
-    {"character", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_character = {
     "anim.character", "anim",
@@ -300,7 +300,7 @@ static const MethodDescriptor desc_anim_characters = {
 static const MethodRegistration reg_anim_characters(desc_anim_characters);
 
 static const MethodParam params_anim_clips[] = {
-    {"character", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_clips = {
     "anim.clips", "anim",
@@ -316,9 +316,9 @@ static const MethodDescriptor desc_anim_clips = {
 static const MethodRegistration reg_anim_clips(desc_anim_clips);
 
 static const MethodParam params_anim_force_state[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"state", "string", true, "", nullptr, nullptr},
-    {"node_id", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"state", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_force_state = {
     "anim.force_state", "anim",
@@ -334,7 +334,7 @@ static const MethodDescriptor desc_anim_force_state = {
 static const MethodRegistration reg_anim_force_state(desc_anim_force_state);
 
 static const MethodParam params_anim_graph_status[] = {
-    {"character", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_graph_status = {
     "anim.graph_status", "anim",
@@ -350,10 +350,10 @@ static const MethodDescriptor desc_anim_graph_status = {
 static const MethodRegistration reg_anim_graph_status(desc_anim_graph_status);
 
 static const MethodParam params_anim_insert_key[] = {
-    {"channel", "string", true, "Animated channel", nullptr, "location|rotation|scale"},
-    {"frame", "int", true, "", nullptr, nullptr},
-    {"object_name", "string", true, "", nullptr, nullptr},
-    {"value", "vec3", true, "", nullptr, nullptr},
+    {"channel", "string", true, "Animated channel", nullptr, "location|rotation|scale", "string", false},
+    {"frame", "int", true, "", nullptr, nullptr, "number", false},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"value", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_anim_insert_key = {
     "anim.insert_key", "anim",
@@ -369,7 +369,7 @@ static const MethodDescriptor desc_anim_insert_key = {
 static const MethodRegistration reg_anim_insert_key(desc_anim_insert_key);
 
 static const MethodParam params_anim_list_keys[] = {
-    {"object_name", "string", true, "", nullptr, nullptr},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_list_keys = {
     "anim.list_keys", "anim",
@@ -385,10 +385,10 @@ static const MethodDescriptor desc_anim_list_keys = {
 static const MethodRegistration reg_anim_list_keys(desc_anim_list_keys);
 
 static const MethodParam params_anim_play[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"clip", "string", true, "", nullptr, nullptr},
-    {"blend", "float", false, "", "0.3", nullptr},
-    {"layer", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"clip", "string", true, "", nullptr, nullptr, "string", false},
+    {"blend", "float", false, "", "0.3", nullptr, "number", false},
+    {"layer", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_play = {
     "anim.play", "anim",
@@ -404,12 +404,12 @@ static const MethodDescriptor desc_anim_play = {
 static const MethodRegistration reg_anim_play(desc_anim_play);
 
 static const MethodParam params_anim_preview_clip_binding[] = {
-    {"source_character", "any", true, "Imported source rig name", nullptr, nullptr},
-    {"source_clip", "any", true, "Canonical clip name owned by source_character", nullptr, nullptr},
-    {"target_character", "any", true, "Imported destination rig name", nullptr, nullptr},
-    {"node_map", "any", false, "Optional source unique node name -> target unique node name overrides. Full parent/helper chains must map consistently; unknown nodes and duplicate targets are rejected.", nullptr, nullptr},
-    {"mode", "string", false, "same_rig copies absolute local TRS. rest_basis transfers rest-frame motion deltas for matching parent chains; positive uniform rest/animated scale required.", "same_rig", "[\"['same_rig', 'rest_basis']\"]"},
-    {"translation_scale", "float", false, "Positive world-space translation delta multiplier, at most 10000, only in rest_basis mode. Includes source/target parent rest unit conversion. Does not estimate limb proportions or solve contact.", "1.", nullptr},
+    {"source_character", "string", true, "Imported source rig name", nullptr, nullptr, "string", true},
+    {"source_clip", "string", true, "Canonical clip name owned by source_character", nullptr, nullptr, "string", true},
+    {"target_character", "string", true, "Imported destination rig name", nullptr, nullptr, "string", true},
+    {"node_map", "any", false, "Optional source unique node name -> target unique node name overrides. Full parent/helper chains must map consistently; unknown nodes and duplicate targets are rejected.", nullptr, nullptr, nullptr, false},
+    {"mode", "string", false, "same_rig copies absolute local TRS. rest_basis transfers rest-frame motion deltas for matching parent chains; positive uniform rest/animated scale required.", "same_rig", "[\"['same_rig', 'rest_basis']\"]", "string", false},
+    {"translation_scale", "float", false, "Positive world-space translation delta multiplier, at most 10000, only in rest_basis mode. Includes source/target parent rest unit conversion. Does not estimate limb proportions or solve contact.", "1.", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_preview_clip_binding = {
     "anim.preview_clip_binding", "anim",
@@ -425,8 +425,8 @@ static const MethodDescriptor desc_anim_preview_clip_binding = {
 static const MethodRegistration reg_anim_preview_clip_binding(desc_anim_preview_clip_binding);
 
 static const MethodParam params_anim_remove_key[] = {
-    {"frame", "int", true, "", nullptr, nullptr},
-    {"object_name", "string", true, "", nullptr, nullptr},
+    {"frame", "int", true, "", nullptr, nullptr, "number", false},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_remove_key = {
     "anim.remove_key", "anim",
@@ -442,15 +442,15 @@ static const MethodDescriptor desc_anim_remove_key = {
 static const MethodRegistration reg_anim_remove_key(desc_anim_remove_key);
 
 static const MethodParam params_anim_sample_clip_binding[] = {
-    {"source_character", "any", true, "Imported source rig name", nullptr, nullptr},
-    {"source_clip", "any", true, "Canonical clip name owned by source_character", nullptr, nullptr},
-    {"target_character", "any", true, "Imported destination rig name", nullptr, nullptr},
-    {"node_map", "any", false, "Optional source unique node name -> target unique node name overrides. Full parent/helper chains must map consistently; unknown nodes and duplicate targets are rejected.", nullptr, nullptr},
-    {"mode", "string", false, "same_rig copies absolute local TRS. rest_basis transfers rest-frame motion deltas for matching parent chains; positive uniform rest/animated scale required.", "same_rig", "[\"['same_rig', 'rest_basis']\"]"},
-    {"translation_scale", "float", false, "Positive world-space translation delta multiplier, at most 10000, only in rest_basis mode. Includes source/target parent rest unit conversion. Does not estimate limb proportions or solve contact.", "1.", nullptr},
-    {"time_seconds", "float", false, "Finite nonnegative time in seconds, looped by clip duration. Both skeletons sample the same time.", "0.", nullptr},
-    {"source_pose_view", "string", false, "", "animated", "['rest', 'animated']"},
-    {"target_pose_view", "string", false, "", "animated", "['rest', 'animated']"},
+    {"source_character", "string", true, "Imported source rig name", nullptr, nullptr, "string", true},
+    {"source_clip", "string", true, "Canonical clip name owned by source_character", nullptr, nullptr, "string", true},
+    {"target_character", "string", true, "Imported destination rig name", nullptr, nullptr, "string", true},
+    {"node_map", "any", false, "Optional source unique node name -> target unique node name overrides. Full parent/helper chains must map consistently; unknown nodes and duplicate targets are rejected.", nullptr, nullptr, nullptr, false},
+    {"mode", "string", false, "same_rig copies absolute local TRS. rest_basis transfers rest-frame motion deltas for matching parent chains; positive uniform rest/animated scale required.", "same_rig", "[\"['same_rig', 'rest_basis']\"]", "string", false},
+    {"translation_scale", "float", false, "Positive world-space translation delta multiplier, at most 10000, only in rest_basis mode. Includes source/target parent rest unit conversion. Does not estimate limb proportions or solve contact.", "1.", nullptr, "number", false},
+    {"time_seconds", "float", false, "Finite nonnegative time in seconds, looped by clip duration. Both skeletons sample the same time.", "0.", nullptr, "number", false},
+    {"source_pose_view", "string", false, "", "animated", "['rest', 'animated']", "string", false},
+    {"target_pose_view", "string", false, "", "animated", "['rest', 'animated']", "string", false},
 };
 static const MethodDescriptor desc_anim_sample_clip_binding = {
     "anim.sample_clip_binding", "anim",
@@ -466,9 +466,9 @@ static const MethodDescriptor desc_anim_sample_clip_binding = {
 static const MethodRegistration reg_anim_sample_clip_binding(desc_anim_sample_clip_binding);
 
 static const MethodParam params_anim_set_graph_param[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
-    {"value", "any", false, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"value", "bool", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_anim_set_graph_param = {
     "anim.set_graph_param", "anim",
@@ -484,9 +484,9 @@ static const MethodDescriptor desc_anim_set_graph_param = {
 static const MethodRegistration reg_anim_set_graph_param(desc_anim_set_graph_param);
 
 static const MethodParam params_anim_set_loop[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"loop", "bool", true, "", nullptr, nullptr},
-    {"layer", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"loop", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"layer", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_set_loop = {
     "anim.set_loop", "anim",
@@ -502,8 +502,8 @@ static const MethodDescriptor desc_anim_set_loop = {
 static const MethodRegistration reg_anim_set_loop(desc_anim_set_loop);
 
 static const MethodParam params_anim_set_paused[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"paused", "bool", false, "", "true", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"paused", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_anim_set_paused = {
     "anim.set_paused", "anim",
@@ -519,9 +519,9 @@ static const MethodDescriptor desc_anim_set_paused = {
 static const MethodRegistration reg_anim_set_paused(desc_anim_set_paused);
 
 static const MethodParam params_anim_set_root_motion[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"enabled", "bool", true, "", nullptr, nullptr},
-    {"bone", "string", false, "", "", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"bone", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_set_root_motion = {
     "anim.set_root_motion", "anim",
@@ -537,9 +537,9 @@ static const MethodDescriptor desc_anim_set_root_motion = {
 static const MethodRegistration reg_anim_set_root_motion(desc_anim_set_root_motion);
 
 static const MethodParam params_anim_set_speed[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"speed", "float", true, "", nullptr, nullptr},
-    {"layer", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"speed", "float", true, "", nullptr, nullptr, "number", false},
+    {"layer", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_set_speed = {
     "anim.set_speed", "anim",
@@ -555,9 +555,9 @@ static const MethodDescriptor desc_anim_set_speed = {
 static const MethodRegistration reg_anim_set_speed(desc_anim_set_speed);
 
 static const MethodParam params_anim_set_time[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"seconds", "float", true, "", nullptr, nullptr},
-    {"layer", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"seconds", "float", true, "", nullptr, nullptr, "number", false},
+    {"layer", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_set_time = {
     "anim.set_time", "anim",
@@ -573,7 +573,7 @@ static const MethodDescriptor desc_anim_set_time = {
 static const MethodRegistration reg_anim_set_time(desc_anim_set_time);
 
 static const MethodParam params_anim_source_channels[] = {
-    {"clip", "string", false, "Clip name; empty or omitted uses the first imported clip", "", nullptr},
+    {"clip", "string", false, "Clip name; empty or omitted uses the first imported clip", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_source_channels = {
     "anim.source_channels", "anim",
@@ -602,7 +602,7 @@ static const MethodDescriptor desc_anim_source_clips = {
 static const MethodRegistration reg_anim_source_clips(desc_anim_source_clips);
 
 static const MethodParam params_anim_state_machines[] = {
-    {"character", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_state_machines = {
     "anim.state_machines", "anim",
@@ -618,8 +618,8 @@ static const MethodDescriptor desc_anim_state_machines = {
 static const MethodRegistration reg_anim_state_machines(desc_anim_state_machines);
 
 static const MethodParam params_anim_status[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"layer", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"layer", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_status = {
     "anim.status", "anim",
@@ -635,9 +635,9 @@ static const MethodDescriptor desc_anim_status = {
 static const MethodRegistration reg_anim_status(desc_anim_status);
 
 static const MethodParam params_anim_stop[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"blend_out", "float", false, "", "0.3", nullptr},
-    {"layer", "int", false, "", "0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"blend_out", "float", false, "", "0.3", nullptr, "number", false},
+    {"layer", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_anim_stop = {
     "anim.stop", "anim",
@@ -653,8 +653,8 @@ static const MethodDescriptor desc_anim_stop = {
 static const MethodRegistration reg_anim_stop(desc_anim_stop);
 
 static const MethodParam params_anim_trigger_graph_param[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_anim_trigger_graph_param = {
     "anim.trigger_graph_param", "anim",
@@ -670,8 +670,8 @@ static const MethodDescriptor desc_anim_trigger_graph_param = {
 static const MethodRegistration reg_anim_trigger_graph_param(desc_anim_trigger_graph_param);
 
 static const MethodParam params_attr_list[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"id", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"id", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_attr_list = {
     "attr.list", "attr",
@@ -687,9 +687,9 @@ static const MethodDescriptor desc_attr_list = {
 static const MethodRegistration reg_attr_list(desc_attr_list);
 
 static const MethodParam params_attr_stats[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"id", "string", false, "", "", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"id", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_attr_stats = {
     "attr.stats", "attr",
@@ -705,7 +705,7 @@ static const MethodDescriptor desc_attr_stats = {
 static const MethodRegistration reg_attr_stats(desc_attr_stats);
 
 static const MethodParam params_batch[] = {
-    {"calls", "array", true, "Array of {method, params} objects", nullptr, nullptr},
+    {"calls", "array", true, "Array of {method, params} objects", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_batch = {
     "batch", "batch",
@@ -721,7 +721,7 @@ static const MethodDescriptor desc_batch = {
 static const MethodRegistration reg_batch(desc_batch);
 
 static const MethodParam params_camera_dolly[] = {
-    {"factor", "float", true, "", nullptr, nullptr},
+    {"factor", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_dolly = {
     "camera.dolly", "camera",
@@ -737,7 +737,7 @@ static const MethodDescriptor desc_camera_dolly = {
 static const MethodRegistration reg_camera_dolly(desc_camera_dolly);
 
 static const MethodParam params_camera_frame_selected[] = {
-    {"lock_pivot", "bool", false, "", "true", nullptr},
+    {"lock_pivot", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_camera_frame_selected = {
     "camera.frame_selected", "camera",
@@ -805,8 +805,8 @@ static const MethodDescriptor desc_camera_list = {
 static const MethodRegistration reg_camera_list(desc_camera_list);
 
 static const MethodParam params_camera_orbit[] = {
-    {"pitch", "float", true, "", nullptr, nullptr},
-    {"yaw", "float", true, "", nullptr, nullptr},
+    {"pitch", "float", true, "", nullptr, nullptr, "number", false},
+    {"yaw", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_orbit = {
     "camera.orbit", "camera",
@@ -822,8 +822,8 @@ static const MethodDescriptor desc_camera_orbit = {
 static const MethodRegistration reg_camera_orbit(desc_camera_orbit);
 
 static const MethodParam params_camera_pan[] = {
-    {"right", "float", true, "", nullptr, nullptr},
-    {"up", "float", true, "", nullptr, nullptr},
+    {"right", "float", true, "", nullptr, nullptr, "number", false},
+    {"up", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_pan = {
     "camera.pan", "camera",
@@ -852,7 +852,7 @@ static const MethodDescriptor desc_camera_reset_lens_weather = {
 static const MethodRegistration reg_camera_reset_lens_weather(desc_camera_reset_lens_weather);
 
 static const MethodParam params_camera_sample_lens_weather[] = {
-    {"backend", "string", false, "viewport|render; explicit synchronous GPU readback", "viewport", nullptr},
+    {"backend", "string", false, "viewport|render; explicit synchronous GPU readback", "viewport", nullptr, "string", false},
 };
 static const MethodDescriptor desc_camera_sample_lens_weather = {
     "camera.sample_lens_weather", "camera",
@@ -868,7 +868,7 @@ static const MethodDescriptor desc_camera_sample_lens_weather = {
 static const MethodRegistration reg_camera_sample_lens_weather(desc_camera_sample_lens_weather);
 
 static const MethodParam params_camera_set_aperture[] = {
-    {"aperture", "float", true, "", nullptr, nullptr},
+    {"aperture", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_aperture = {
     "camera.set_aperture", "camera",
@@ -884,7 +884,7 @@ static const MethodDescriptor desc_camera_set_aperture = {
 static const MethodRegistration reg_camera_set_aperture(desc_camera_set_aperture);
 
 static const MethodParam params_camera_set_auto_exposure[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_camera_set_auto_exposure = {
     "camera.set_auto_exposure", "camera",
@@ -900,7 +900,7 @@ static const MethodDescriptor desc_camera_set_auto_exposure = {
 static const MethodRegistration reg_camera_set_auto_exposure(desc_camera_set_auto_exposure);
 
 static const MethodParam params_camera_set_depth_of_field[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_camera_set_depth_of_field = {
     "camera.set_depth_of_field", "camera",
@@ -916,7 +916,7 @@ static const MethodDescriptor desc_camera_set_depth_of_field = {
 static const MethodRegistration reg_camera_set_depth_of_field(desc_camera_set_depth_of_field);
 
 static const MethodParam params_camera_set_ev_compensation[] = {
-    {"ev", "float", true, "", nullptr, nullptr},
+    {"ev", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_ev_compensation = {
     "camera.set_ev_compensation", "camera",
@@ -932,7 +932,7 @@ static const MethodDescriptor desc_camera_set_ev_compensation = {
 static const MethodRegistration reg_camera_set_ev_compensation(desc_camera_set_ev_compensation);
 
 static const MethodParam params_camera_set_focus_distance[] = {
-    {"focus_distance", "float", true, "", nullptr, nullptr},
+    {"focus_distance", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_focus_distance = {
     "camera.set_focus_distance", "camera",
@@ -948,7 +948,7 @@ static const MethodDescriptor desc_camera_set_focus_distance = {
 static const MethodRegistration reg_camera_set_focus_distance(desc_camera_set_focus_distance);
 
 static const MethodParam params_camera_set_fov[] = {
-    {"fov", "float", true, "", nullptr, nullptr},
+    {"fov", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_fov = {
     "camera.set_fov", "camera",
@@ -964,7 +964,7 @@ static const MethodDescriptor desc_camera_set_fov = {
 static const MethodRegistration reg_camera_set_fov(desc_camera_set_fov);
 
 static const MethodParam params_camera_set_fstop_preset[] = {
-    {"index", "int", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_fstop_preset = {
     "camera.set_fstop_preset", "camera",
@@ -980,7 +980,7 @@ static const MethodDescriptor desc_camera_set_fstop_preset = {
 static const MethodRegistration reg_camera_set_fstop_preset(desc_camera_set_fstop_preset);
 
 static const MethodParam params_camera_set_iso_preset[] = {
-    {"index", "int", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_iso_preset = {
     "camera.set_iso_preset", "camera",
@@ -996,7 +996,7 @@ static const MethodDescriptor desc_camera_set_iso_preset = {
 static const MethodRegistration reg_camera_set_iso_preset(desc_camera_set_iso_preset);
 
 static const MethodParam params_camera_set_lens_distortion[] = {
-    {"lens_distortion", "number", true, "Finite, inclusive range -0.5..0.5; rejected (not clamped) outside it. |k| <= 0.001 is not applied.", nullptr, nullptr},
+    {"lens_distortion", "number", true, "Finite, inclusive range -0.5..0.5; rejected (not clamped) outside it. |k| <= 0.001 is not applied.", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_lens_distortion = {
     "camera.set_lens_distortion", "camera",
@@ -1012,7 +1012,7 @@ static const MethodDescriptor desc_camera_set_lens_distortion = {
 static const MethodRegistration reg_camera_set_lens_distortion(desc_camera_set_lens_distortion);
 
 static const MethodParam params_camera_set_lens_weather[] = {
-    {"patch", "object", true, "enabled bool; coating bare|hydrophobic; hood_deg 0..89; diameter_mm 10..200; seed uint32. Temperature is inherited from world climate.", nullptr, nullptr},
+    {"patch", "object", true, "enabled bool; coating bare|hydrophobic; hood_deg 0..89; diameter_mm 10..200; seed uint32. Temperature is inherited from world climate.", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_camera_set_lens_weather = {
     "camera.set_lens_weather", "camera",
@@ -1028,7 +1028,7 @@ static const MethodDescriptor desc_camera_set_lens_weather = {
 static const MethodRegistration reg_camera_set_lens_weather(desc_camera_set_lens_weather);
 
 static const MethodParam params_camera_set_pivot_mode[] = {
-    {"mode", "string", true, "", nullptr, nullptr},
+    {"mode", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_camera_set_pivot_mode = {
     "camera.set_pivot_mode", "camera",
@@ -1044,7 +1044,7 @@ static const MethodDescriptor desc_camera_set_pivot_mode = {
 static const MethodRegistration reg_camera_set_pivot_mode(desc_camera_set_pivot_mode);
 
 static const MethodParam params_camera_set_position[] = {
-    {"position", "vec3", true, "", nullptr, nullptr},
+    {"position", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_camera_set_position = {
     "camera.set_position", "camera",
@@ -1060,7 +1060,7 @@ static const MethodDescriptor desc_camera_set_position = {
 static const MethodRegistration reg_camera_set_position(desc_camera_set_position);
 
 static const MethodParam params_camera_set_shutter_preset[] = {
-    {"index", "int", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_camera_set_shutter_preset = {
     "camera.set_shutter_preset", "camera",
@@ -1076,7 +1076,7 @@ static const MethodDescriptor desc_camera_set_shutter_preset = {
 static const MethodRegistration reg_camera_set_shutter_preset(desc_camera_set_shutter_preset);
 
 static const MethodParam params_camera_set_target[] = {
-    {"target", "vec3", true, "", nullptr, nullptr},
+    {"target", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_camera_set_target = {
     "camera.set_target", "camera",
@@ -1092,7 +1092,7 @@ static const MethodDescriptor desc_camera_set_target = {
 static const MethodRegistration reg_camera_set_target(desc_camera_set_target);
 
 static const MethodParam params_camera_set_use_physical_exposure[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_camera_set_use_physical_exposure = {
     "camera.set_use_physical_exposure", "camera",
@@ -1108,56 +1108,56 @@ static const MethodDescriptor desc_camera_set_use_physical_exposure = {
 static const MethodRegistration reg_camera_set_use_physical_exposure(desc_camera_set_use_physical_exposure);
 
 static const MethodParam params_collider_create[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"bounds_max", "vec3", false, "", nullptr, nullptr},
-    {"bounds_min", "vec3", false, "", nullptr, nullptr},
-    {"capsule_end", "vec3", false, "", nullptr, nullptr},
-    {"capsule_radius", "float", false, "", nullptr, nullptr},
-    {"capsule_start", "vec3", false, "", nullptr, nullptr},
-    {"contact_adhesion_pa", "float", false, "", nullptr, nullptr},
-    {"contact_friction", "float", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"fluid_collision_enabled", "bool", false, "", nullptr, nullptr},
-    {"friction", "float", false, "", nullptr, nullptr},
-    {"gas_density_rate", "float", false, "", nullptr, nullptr},
-    {"gas_flame_rate", "float", false, "", nullptr, nullptr},
-    {"gas_fuel_rate", "float", false, "", nullptr, nullptr},
-    {"gas_ignite_on_contact", "bool", false, "", nullptr, nullptr},
-    {"gas_interaction_enabled", "bool", false, "", nullptr, nullptr},
-    {"gas_temperature_rate", "float", false, "", nullptr, nullptr},
-    {"msf_auto_transfer", "bool", false, "", nullptr, nullptr},
-    {"msf_burn_rate_scale", "float", false, "", nullptr, nullptr},
-    {"msf_fuel_capacity_scale", "float", false, "", nullptr, nullptr},
-    {"msf_generate_char_mask", "bool", false, "", nullptr, nullptr},
-    {"msf_ignition_kelvin", "float", false, "", nullptr, nullptr},
-    {"msf_mask_resolution", "int", false, "", nullptr, nullptr},
-    {"msf_melt_flow_enabled", "bool", false, "", nullptr, nullptr},
-    {"msf_melt_height_loss", "float", false, "", nullptr, nullptr},
-    {"msf_melt_sdf_change_threshold", "float", false, "", nullptr, nullptr},
-    {"msf_melt_sdf_refresh", "bool", false, "", nullptr, nullptr},
-    {"msf_melt_sdf_revision_interval", "int", false, "", nullptr, nullptr},
-    {"msf_melt_spread", "float", false, "", nullptr, nullptr},
-    {"msf_override_ignition", "bool", false, "", nullptr, nullptr},
-    {"msf_substance", "string", false, "", nullptr, nullptr},
-    {"msf_transfer_domain", "string", false, "", nullptr, nullptr},
-    {"msf_transfer_max_batch_particles", "int", false, "", nullptr, nullptr},
-    {"msf_transfer_min_mass_kg", "float", false, "", nullptr, nullptr},
-    {"msf_transfer_particles_per_kg", "float", false, "", nullptr, nullptr},
-    {"msf_transfer_rate_kg_s", "float", false, "", nullptr, nullptr},
-    {"msf_transfer_velocity", "vec3", false, "", nullptr, nullptr},
-    {"plane_y", "float", false, "", nullptr, nullptr},
-    {"restitution", "float", false, "", nullptr, nullptr},
-    {"sdf_resolution_mode", "int", false, "", nullptr, nullptr},
-    {"source_mode", "string", false, "", nullptr, nullptr},
-    {"source_object", "string", false, "", nullptr, nullptr},
-    {"sphere_center", "vec3", false, "", nullptr, nullptr},
-    {"sphere_radius", "float", false, "", nullptr, nullptr},
-    {"thickness", "float", false, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"bounds_max", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"bounds_min", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"capsule_end", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"capsule_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"capsule_start", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"contact_adhesion_pa", "float", false, "", nullptr, nullptr, "number", false},
+    {"contact_friction", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"fluid_collision_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"friction", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_density_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_flame_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_fuel_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_ignite_on_contact", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"gas_interaction_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"gas_temperature_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_auto_transfer", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_burn_rate_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_fuel_capacity_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_generate_char_mask", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_ignition_kelvin", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_mask_resolution", "int", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_flow_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_melt_height_loss", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_sdf_change_threshold", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_sdf_refresh", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_melt_sdf_revision_interval", "int", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_spread", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_override_ignition", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_substance", "string", false, "", nullptr, nullptr, "string", false},
+    {"msf_transfer_domain", "string", false, "", nullptr, nullptr, "string", false},
+    {"msf_transfer_max_batch_particles", "int", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_min_mass_kg", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_particles_per_kg", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_rate_kg_s", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_velocity", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"plane_y", "float", false, "", nullptr, nullptr, "number", false},
+    {"restitution", "float", false, "", nullptr, nullptr, "number", false},
+    {"sdf_resolution_mode", "int", false, "", nullptr, nullptr, "number", false},
+    {"source_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"source_object", "string", false, "", nullptr, nullptr, "string", false},
+    {"sphere_center", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"sphere_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"thickness", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_collider_create = {
     "collider.create", "collider",
     "Create a shared simulation collider (plane, sphere, capsule, box, SDF, convex or mesh BVH) for particles, fluid and gas",
-    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Object-bound modes need source_object; mesh_sdf cooks asynchronously, poll collider.get sdf_ready before relying on it. Contact surface for MPM bodies (sand, snow, jelly, dough, gum; docs/dev/COLLIDER_TEMAS_YUZEYI.md): contact_friction is Coulomb mu (default 0.5), contact_adhesion_pa the tensile stress a body must exceed to leave the surface (0 = never sticks). Not `friction`: that is particle systems' per-hit tangential speed loss 0..1. Never derived from the render roughness. sdf_resolution_mode: 0/1/2 = 32/64/128 cubic, 3 = 256 cubic, 4 = Auto (cook cell <= half the finest domain voxel, per axis). Cooks run on the GPU when Vulkan compute is available (collider.get sdf_cooked_on_gpu, sdf_cook_ms, sdf_dims), else on the CPU worker.",
+    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Object-bound modes need source_object; mesh_sdf cooks asynchronously, poll collider.get sdf_ready before relying on it. Contact surface for MPM bodies (sand, snow, jelly, dough, gum; docs/dev/COLLIDER_TEMAS_YUZEYI.md): contact_friction is Coulomb mu (default 0.5), contact_adhesion_pa the tensile stress a body must exceed to leave the surface (0 = never sticks); matter-domain liquid (water, honey, chocolate) reads it too: a liquid leaves a collider face once rho*h*v/dt exceeds it, so 0 lets it fall off freely and only viscosity drags it (contact_friction is MPM-only). Not `friction`: that is particle systems' per-hit tangential speed loss 0..1. Never derived from the render roughness. sdf_resolution_mode: 0/1/2 = 32/64/128 cubic, 3 = 256 cubic, 4 = Auto (cook cell <= half the finest domain voxel, per axis). Cooks run on the GPU when Vulkan compute is available (collider.get sdf_cooked_on_gpu, sdf_cook_ms, sdf_dims), else on the CPU worker.",
     "write", "SceneWrite", false, "any",
     "collider|create|simulation|particles|fluid|gas|collision",
     "collider.update|collider.remove|collider.rebuild_sdf|particle.step",
@@ -1168,7 +1168,7 @@ static const MethodDescriptor desc_collider_create = {
 static const MethodRegistration reg_collider_create(desc_collider_create);
 
 static const MethodParam params_collider_get[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_collider_get = {
     "collider.get", "collider",
@@ -1197,7 +1197,7 @@ static const MethodDescriptor desc_collider_list = {
 static const MethodRegistration reg_collider_list(desc_collider_list);
 
 static const MethodParam params_collider_rebuild_sdf[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_collider_rebuild_sdf = {
     "collider.rebuild_sdf", "collider",
@@ -1213,7 +1213,7 @@ static const MethodDescriptor desc_collider_rebuild_sdf = {
 static const MethodRegistration reg_collider_rebuild_sdf(desc_collider_rebuild_sdf);
 
 static const MethodParam params_collider_remove[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_collider_remove = {
     "collider.remove", "collider",
@@ -1229,56 +1229,56 @@ static const MethodDescriptor desc_collider_remove = {
 static const MethodRegistration reg_collider_remove(desc_collider_remove);
 
 static const MethodParam params_collider_update[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"bounds_max", "vec3", false, "", nullptr, nullptr},
-    {"bounds_min", "vec3", false, "", nullptr, nullptr},
-    {"capsule_end", "vec3", false, "", nullptr, nullptr},
-    {"capsule_radius", "float", false, "", nullptr, nullptr},
-    {"capsule_start", "vec3", false, "", nullptr, nullptr},
-    {"contact_adhesion_pa", "float", false, "", nullptr, nullptr},
-    {"contact_friction", "float", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"fluid_collision_enabled", "bool", false, "", nullptr, nullptr},
-    {"friction", "float", false, "", nullptr, nullptr},
-    {"gas_density_rate", "float", false, "", nullptr, nullptr},
-    {"gas_flame_rate", "float", false, "", nullptr, nullptr},
-    {"gas_fuel_rate", "float", false, "", nullptr, nullptr},
-    {"gas_ignite_on_contact", "bool", false, "", nullptr, nullptr},
-    {"gas_interaction_enabled", "bool", false, "", nullptr, nullptr},
-    {"gas_temperature_rate", "float", false, "", nullptr, nullptr},
-    {"msf_auto_transfer", "bool", false, "", nullptr, nullptr},
-    {"msf_burn_rate_scale", "float", false, "", nullptr, nullptr},
-    {"msf_fuel_capacity_scale", "float", false, "", nullptr, nullptr},
-    {"msf_generate_char_mask", "bool", false, "", nullptr, nullptr},
-    {"msf_ignition_kelvin", "float", false, "", nullptr, nullptr},
-    {"msf_mask_resolution", "int", false, "", nullptr, nullptr},
-    {"msf_melt_flow_enabled", "bool", false, "", nullptr, nullptr},
-    {"msf_melt_height_loss", "float", false, "", nullptr, nullptr},
-    {"msf_melt_sdf_change_threshold", "float", false, "", nullptr, nullptr},
-    {"msf_melt_sdf_refresh", "bool", false, "", nullptr, nullptr},
-    {"msf_melt_sdf_revision_interval", "int", false, "", nullptr, nullptr},
-    {"msf_melt_spread", "float", false, "", nullptr, nullptr},
-    {"msf_override_ignition", "bool", false, "", nullptr, nullptr},
-    {"msf_substance", "string", false, "", nullptr, nullptr},
-    {"msf_transfer_domain", "string", false, "", nullptr, nullptr},
-    {"msf_transfer_max_batch_particles", "int", false, "", nullptr, nullptr},
-    {"msf_transfer_min_mass_kg", "float", false, "", nullptr, nullptr},
-    {"msf_transfer_particles_per_kg", "float", false, "", nullptr, nullptr},
-    {"msf_transfer_rate_kg_s", "float", false, "", nullptr, nullptr},
-    {"msf_transfer_velocity", "vec3", false, "", nullptr, nullptr},
-    {"plane_y", "float", false, "", nullptr, nullptr},
-    {"restitution", "float", false, "", nullptr, nullptr},
-    {"sdf_resolution_mode", "int", false, "", nullptr, nullptr},
-    {"source_mode", "string", false, "", nullptr, nullptr},
-    {"source_object", "string", false, "", nullptr, nullptr},
-    {"sphere_center", "vec3", false, "", nullptr, nullptr},
-    {"sphere_radius", "float", false, "", nullptr, nullptr},
-    {"thickness", "float", false, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"bounds_max", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"bounds_min", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"capsule_end", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"capsule_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"capsule_start", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"contact_adhesion_pa", "float", false, "", nullptr, nullptr, "number", false},
+    {"contact_friction", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"fluid_collision_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"friction", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_density_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_flame_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_fuel_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"gas_ignite_on_contact", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"gas_interaction_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"gas_temperature_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_auto_transfer", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_burn_rate_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_fuel_capacity_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_generate_char_mask", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_ignition_kelvin", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_mask_resolution", "int", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_flow_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_melt_height_loss", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_sdf_change_threshold", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_sdf_refresh", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_melt_sdf_revision_interval", "int", false, "", nullptr, nullptr, "number", false},
+    {"msf_melt_spread", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_override_ignition", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"msf_substance", "string", false, "", nullptr, nullptr, "string", false},
+    {"msf_transfer_domain", "string", false, "", nullptr, nullptr, "string", false},
+    {"msf_transfer_max_batch_particles", "int", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_min_mass_kg", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_particles_per_kg", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_rate_kg_s", "float", false, "", nullptr, nullptr, "number", false},
+    {"msf_transfer_velocity", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"plane_y", "float", false, "", nullptr, nullptr, "number", false},
+    {"restitution", "float", false, "", nullptr, nullptr, "number", false},
+    {"sdf_resolution_mode", "int", false, "", nullptr, nullptr, "number", false},
+    {"source_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"source_object", "string", false, "", nullptr, nullptr, "string", false},
+    {"sphere_center", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"sphere_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"thickness", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_collider_update = {
     "collider.update", "collider",
     "Patch fields of an existing shared simulation collider",
-    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Only keys present in the request change; name selects the collider and is not renamed. Contact surface for MPM bodies (sand, snow, jelly, dough, gum; docs/dev/COLLIDER_TEMAS_YUZEYI.md): contact_friction is Coulomb mu (default 0.5), contact_adhesion_pa the tensile stress a body must exceed to leave the surface (0 = never sticks). Not `friction`: that is particle systems' per-hit tangential speed loss 0..1. Never derived from the render roughness. sdf_resolution_mode 3 = 256^3, 4 = Auto (cell <= h/2 per axis); GPU cook when available (collider.get sdf_cooked_on_gpu / sdf_cook_ms / sdf_dims).",
+    "Keys match rt.collider in Python one-to-one. source_mode: plane|sphere|capsule|aabb|obb|mesh_sdf|convex|mesh_bvh. One collider is shared by particles, APIC fluid (fluid_collision_enabled) and gas (gas_*). Only keys present in the request change; name selects the collider and is not renamed. Contact surface for MPM bodies (sand, snow, jelly, dough, gum; docs/dev/COLLIDER_TEMAS_YUZEYI.md): contact_friction is Coulomb mu (default 0.5), contact_adhesion_pa the tensile stress a body must exceed to leave the surface (0 = never sticks); matter-domain liquid (water, honey, chocolate) reads it too: a liquid leaves a collider face once rho*h*v/dt exceeds it, so 0 lets it fall off freely and only viscosity drags it (contact_friction is MPM-only). Not `friction`: that is particle systems' per-hit tangential speed loss 0..1. Never derived from the render roughness. sdf_resolution_mode 3 = 256^3, 4 = Auto (cell <= h/2 per axis); GPU cook when available (collider.get sdf_cooked_on_gpu / sdf_cook_ms / sdf_dims).",
     "write", "SceneWrite", false, "any",
     "collider|update|simulation|configure",
     "collider.get|collider.create",
@@ -1289,7 +1289,7 @@ static const MethodDescriptor desc_collider_update = {
 static const MethodRegistration reg_collider_update(desc_collider_update);
 
 static const MethodParam params_debris_configure[] = {
-    {"enabled", "bool", false, "", "true", nullptr},
+    {"enabled", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_debris_configure = {
     "debris.configure", "debris",
@@ -1305,9 +1305,9 @@ static const MethodDescriptor desc_debris_configure = {
 static const MethodRegistration reg_debris_configure(desc_debris_configure);
 
 static const MethodParam params_debris_emit_ash[] = {
-    {"center", "any", false, "", nullptr, nullptr},
-    {"mass_kg", "float", false, "", "0.0", nullptr},
-    {"velocity", "any", false, "", nullptr, nullptr},
+    {"center", "any", false, "", nullptr, nullptr, "number[]", false},
+    {"mass_kg", "float", false, "", "0.0", nullptr, "number", false},
+    {"velocity", "any", false, "", nullptr, nullptr, "number[]", false},
 };
 static const MethodDescriptor desc_debris_emit_ash = {
     "debris.emit_ash", "debris",
@@ -1349,7 +1349,7 @@ static const MethodDescriptor desc_editor_get_state = {
 static const MethodRegistration reg_editor_get_state(desc_editor_get_state);
 
 static const MethodParam params_editor_set_bottom_editor[] = {
-    {"name", "string", true, "", nullptr, "none|dope_sheet|graph_editor|audio|audio_mixer|console|assets|simulation|geometry|material|terrain|anim_graph"},
+    {"name", "string", true, "", nullptr, "none|dope_sheet|graph_editor|audio|audio_mixer|console|assets|simulation|geometry|material|terrain|anim_graph", "string", false},
 };
 static const MethodDescriptor desc_editor_set_bottom_editor = {
     "editor.set_bottom_editor", "editor",
@@ -1365,7 +1365,7 @@ static const MethodDescriptor desc_editor_set_bottom_editor = {
 static const MethodRegistration reg_editor_set_bottom_editor(desc_editor_set_bottom_editor);
 
 static const MethodParam params_editor_set_node_domain[] = {
-    {"name", "string", true, "Node editor domain", nullptr, "material|geometry|terrain"},
+    {"name", "string", true, "Node editor domain", nullptr, "material|geometry|terrain", "string", false},
 };
 static const MethodDescriptor desc_editor_set_node_domain = {
     "editor.set_node_domain", "editor",
@@ -1381,8 +1381,8 @@ static const MethodDescriptor desc_editor_set_node_domain = {
 static const MethodRegistration reg_editor_set_node_domain(desc_editor_set_node_domain);
 
 static const MethodParam params_editor_set_sim_graph_scope[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_editor_set_sim_graph_scope = {
     "editor.set_sim_graph_scope", "editor",
@@ -1398,53 +1398,54 @@ static const MethodDescriptor desc_editor_set_sim_graph_scope = {
 static const MethodRegistration reg_editor_set_sim_graph_scope(desc_editor_set_sim_graph_scope);
 
 static const MethodParam params_flow_source_create[] = {
-    {"name", "string", false, "Emitter name", nullptr, nullptr},
-    {"domain", "string", false, "Target fluid or gas domain name", nullptr, nullptr},
-    {"phase", "string", false, "Target phase inside a matter domain", nullptr, "gas|liquid"},
-    {"source_mode", "string", false, "Emission shape/source kind", nullptr, nullptr},
-    {"source_object", "string", false, "Object whose surface or volume emits", nullptr, nullptr},
-    {"parent_object", "string", false, "Object the emitter follows", nullptr, nullptr},
-    {"position", "vec3", false, "Emitter position; parent-local when parented", nullptr, nullptr},
-    {"velocity", "vec3", false, "Emitted velocity in metres per second", nullptr, nullptr},
-    {"velocity_space", "string", false, "Frame the velocity is expressed in", nullptr, nullptr},
-    {"radius", "float", false, "Emission radius in metres", nullptr, nullptr},
-    {"temperature", "float", false, "Injected temperature in Kelvin", nullptr, nullptr},
-    {"fuel", "float", false, "Injected fuel density", nullptr, nullptr},
-    {"density", "float", false, "Injected smoke or liquid density", nullptr, nullptr},
-    {"fluid_substance", "string", false, "Substance id emitted into a liquid domain", nullptr, nullptr},
-    {"fluid_particles_per_second", "float", false, "Liquid particle emission rate", nullptr, nullptr},
-    {"enabled", "bool", false, "Emitter active", nullptr, nullptr},
-    {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr},
-    {"splat_geometry", "object", false, "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry.", nullptr, nullptr},
-    {"end_time", "any", false, "", nullptr, nullptr},
-    {"falloff", "any", false, "", nullptr, nullptr},
-    {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr},
-    {"fluid_temperature_kelvin", "any", false, "", nullptr, nullptr},
-    {"fluid_temperature_override", "any", false, "", nullptr, nullptr},
-    {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
-    {"grain_birth_saturation", "any", false, "", nullptr, nullptr},
-    {"inherit_velocity", "any", false, "", nullptr, nullptr},
-    {"max_emitted_mass_kg", "any", false, "", nullptr, nullptr},
-    {"start_time", "any", false, "", nullptr, nullptr},
-    {"use_mass_limit", "any", false, "", nullptr, nullptr},
-    {"use_time_limit", "any", false, "", nullptr, nullptr},
-    {"velocity_coupling", "any", false, "", nullptr, nullptr},
+    {"name", "string", false, "Emitter name", nullptr, nullptr, nullptr, false},
+    {"domain", "string", false, "Target fluid or gas domain name", nullptr, nullptr, nullptr, false},
+    {"phase", "string", false, "Target phase inside a matter domain", nullptr, "gas|liquid", nullptr, false},
+    {"source_mode", "string", false, "Emission shape/source kind", nullptr, nullptr, nullptr, false},
+    {"source_object", "string", false, "Object whose surface or volume emits", nullptr, nullptr, nullptr, false},
+    {"parent_object", "string", false, "Object the emitter follows", nullptr, nullptr, nullptr, false},
+    {"position", "vec3", false, "Emitter position; parent-local when parented", nullptr, nullptr, nullptr, false},
+    {"velocity", "vec3", false, "Emitted velocity in metres per second", nullptr, nullptr, nullptr, false},
+    {"velocity_space", "string", false, "Frame the velocity is expressed in", nullptr, nullptr, nullptr, false},
+    {"radius", "float", false, "Emission radius in metres", nullptr, nullptr, nullptr, false},
+    {"temperature", "float", false, "Injected temperature in Kelvin", nullptr, nullptr, nullptr, false},
+    {"fuel", "float", false, "Injected fuel density", nullptr, nullptr, nullptr, false},
+    {"density", "float", false, "Injected smoke or liquid density", nullptr, nullptr, nullptr, false},
+    {"fluid_substance", "string", false, "Substance id emitted into a liquid domain", nullptr, nullptr, nullptr, false},
+    {"fluid_particles_per_second", "float", false, "Liquid particle emission rate", nullptr, nullptr, nullptr, false},
+    {"enabled", "bool", false, "Emitter active", nullptr, nullptr, nullptr, false},
+    {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr, nullptr, false},
+    {"splat_geometry", "object", false, "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry.", nullptr, nullptr, nullptr, false},
+    {"liquid_emission", "string", false, "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid only; mesh_surface refused.", nullptr, nullptr, "string", false},
+    {"end_time", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"falloff", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_temperature_kelvin", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_temperature_override", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_velocity_spread", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"grain_birth_saturation", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"inherit_velocity", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"max_emitted_mass_kg", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"start_time", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"use_mass_limit", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"use_time_limit", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"velocity_coupling", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_flow_source_create = {
     "flow_source.create", "flow_source",
     "Create an emitter that feeds a fluid or gas domain with mass, heat, fuel or particles",
-    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. Matter lanes: phase=auto (creation default) chooses gas when enabled, otherwise liquid. Explicit gas/liquid targeting a disabled lane is rejected unchanged. Legacy project sources migrate from the old domain type.",
+    "An emitter belongs to a domain by name. phase selects gas or liquid emission inside a unified matter domain; legacy single-phase domains ignore it. With a parent_object it follows that object, and velocity_space decides whether its velocity is read in world or parent-local space. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. Matter lanes: phase=auto (creation default) chooses gas when enabled, otherwise liquid. Explicit gas/liquid targeting a disabled lane is rejected unchanged. Legacy project sources migrate from the old domain type. liquid_emission defaults to rate. Inflow ignores particle-rate keys; its target is area times resolved speed. fluid_flux_m3_s is added parcel volume/dt, not a face-flux sensor; exclude startup reservoir filling when comparing steady Q. Outflow reports drained_mass_kg_step/total and records Drainage. Runtime diagnostics are read-only.",
     "write", "SceneWrite", false, "FlowSourceInfo",
     "flow_source|flow|source|create|simulation|emitter|inject|pour|jet|flame|inflow",
     "flow_source.update|flow_source.list|fluid.create_domain|gas.set_settings",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_create, 31,
+    params_flow_source_create, 32,
     true
 };
 static const MethodRegistration reg_flow_source_create(desc_flow_source_create);
 
 static const MethodParam params_flow_source_get[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_flow_source_get = {
     "flow_source.get", "flow_source",
@@ -1473,7 +1474,7 @@ static const MethodDescriptor desc_flow_source_list = {
 static const MethodRegistration reg_flow_source_list(desc_flow_source_list);
 
 static const MethodParam params_flow_source_remove[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_flow_source_remove = {
     "flow_source.remove", "flow_source",
@@ -1489,7 +1490,7 @@ static const MethodDescriptor desc_flow_source_remove = {
 static const MethodRegistration reg_flow_source_remove(desc_flow_source_remove);
 
 static const MethodParam params_flow_source_set_splat_geometry[] = {
-    {"name", "string", true, "Existing flow-source name", nullptr, nullptr},
+    {"name", "string", true, "Existing flow-source name", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_flow_source_set_splat_geometry = {
     "flow_source.set_splat_geometry", "flow_source",
@@ -1505,54 +1506,84 @@ static const MethodDescriptor desc_flow_source_set_splat_geometry = {
 static const MethodRegistration reg_flow_source_set_splat_geometry(desc_flow_source_set_splat_geometry);
 
 static const MethodParam params_flow_source_update[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr},
-    {"splat_geometry", "object", false, "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry.", nullptr, nullptr},
-    {"density", "any", false, "", nullptr, nullptr},
-    {"domain", "any", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"end_time", "any", false, "", nullptr, nullptr},
-    {"falloff", "any", false, "", nullptr, nullptr},
-    {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr},
-    {"fluid_particles_per_second", "any", false, "", nullptr, nullptr},
-    {"fluid_substance", "any", false, "", nullptr, nullptr},
-    {"fluid_temperature_kelvin", "any", false, "", nullptr, nullptr},
-    {"fluid_temperature_override", "any", false, "", nullptr, nullptr},
-    {"fluid_velocity_spread", "any", false, "", nullptr, nullptr},
-    {"fuel", "any", false, "", nullptr, nullptr},
-    {"grain_birth_saturation", "any", false, "", nullptr, nullptr},
-    {"inherit_velocity", "any", false, "", nullptr, nullptr},
-    {"max_emitted_mass_kg", "any", false, "", nullptr, nullptr},
-    {"parent_object", "any", false, "", nullptr, nullptr},
-    {"phase", "any", false, "", nullptr, nullptr},
-    {"position", "any", false, "", nullptr, nullptr},
-    {"radius", "any", false, "", nullptr, nullptr},
-    {"source_mode", "any", false, "", nullptr, nullptr},
-    {"source_object", "any", false, "", nullptr, nullptr},
-    {"start_time", "any", false, "", nullptr, nullptr},
-    {"temperature", "any", false, "", nullptr, nullptr},
-    {"use_mass_limit", "any", false, "", nullptr, nullptr},
-    {"use_time_limit", "any", false, "", nullptr, nullptr},
-    {"velocity", "any", false, "", nullptr, nullptr},
-    {"velocity_coupling", "any", false, "", nullptr, nullptr},
-    {"velocity_space", "any", false, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr, nullptr, false},
+    {"splat_geometry", "object", false, "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry.", nullptr, nullptr, nullptr, false},
+    {"liquid_emission", "string", false, "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid only; mesh_surface refused.", nullptr, nullptr, "string", false},
+    {"density", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"domain", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"enabled", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"end_time", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"falloff", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_particles_per_second", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_substance", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_temperature_kelvin", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_temperature_override", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fluid_velocity_spread", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"fuel", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"grain_birth_saturation", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"inherit_velocity", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"max_emitted_mass_kg", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"parent_object", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"phase", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"position", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"radius", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"source_mode", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"source_object", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"start_time", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"temperature", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"use_mass_limit", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"use_time_limit", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"velocity", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"velocity_coupling", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"velocity_space", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_flow_source_update = {
     "flow_source.update", "flow_source",
     "Update fields of an existing emitter, keeping everything you do not send",
-    "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. Matter lanes: phase=auto (creation default) chooses gas when enabled, otherwise liquid. Explicit gas/liquid targeting a disabled lane is rejected unchanged. Legacy project sources migrate from the old domain type.",
+    "Read-modify-write on purpose: sending only one field must not reset the rest. particle_pool_weight shares remaining live capacity between simultaneously emitting liquid sources. pool_requested_particles and pool_granted_particles are read-only last-injection diagnostics returned by get/list; denied slots are not accumulated as an emission backlog. Equal fractional ties rotate with frame. grain_birth_saturation 0..1: water each poured grain already holds, as a fraction of its substance's grain_water_capacity_fraction (an emitter of damp sand); it makes the domain's grains wet. splat_geometry reports/authors source-specific geometry. New sources default to sphere; old sources retain domain inheritance. Use flow_source.set_splat_geometry for an undoable appearance-only change that preserves live emission state. Source budget is MASS (2026-10-27): use_mass_limit + max_emitted_mass_kg (kg, rest mass plus birth pore water; evaporation/burning/draining never return it). The retired use_particle_limit/max_emitted_particles are refused with this hint. Matter lanes: phase=auto (creation default) chooses gas when enabled, otherwise liquid. Explicit gas/liquid targeting a disabled lane is rejected unchanged. Legacy project sources migrate from the old domain type. liquid_emission defaults to rate. Inflow ignores particle-rate keys; its target is area times resolved speed. fluid_flux_m3_s is added parcel volume/dt, not a face-flux sensor; exclude startup reservoir filling when comparing steady Q. Outflow reports drained_mass_kg_step/total and records Drainage. Runtime diagnostics are read-only.",
     "write", "SceneWrite", false, "any",
     "flow_source|flow|source|update|simulation|emitter|configure",
     "flow_source.create|flow_source.get",
     nullptr, nullptr, nullptr, nullptr,
-    params_flow_source_update, 31,
+    params_flow_source_update, 32,
     true
 };
 static const MethodRegistration reg_flow_source_update(desc_flow_source_update);
 
+static const MethodParam params_fluid_add_seed_source[] = {
+    {"settings", "object", true, "Mutable source fields, or particles_per_cell/settle/settle_max_steps/settle_tolerance for shared settings", nullptr, nullptr, nullptr, true},
+};
+static const MethodDescriptor desc_fluid_add_seed_source = {
+    "fluid.add_seed_source", "fluid",
+    "Add a one-shot Matter layer recipe without replacing live particles",
+    "Box bounds are world coordinates; nonempty mesh_object uses the existing flat mesh-volume resolver. Sources are produced once on Apply/reset, never per frame. Material/domain/custom temperature policies are separate from ambient Heat Exchange. Editing recipes does not reseed live particles; Apply replaces all layers transactionally, returns the timeline to frame zero and arms shared settling. Overlapping layer AABBs, missing meshes, insufficient particle capacity and incompatible DEM/MPM materials reject generation with live particles preserved. Continuum PPC is shared; DEM uses physical radius. One DEM material and one MPM material per domain, including potential emitter materials. Full schema and limits: docs/dev/MATTER_SEED_SOURCES.md. auto_capacity defaults true and computes a conservative recipe capacity plus 15 percent and 64 slots on successful Apply/reset. Manual max_particles remains available with auto_capacity=false. memory_guard defaults true; planning allowances use 4096 host bytes and 2048 GPU bytes per planned particle plus 1024/512 bytes per grid cell. These are heuristic allowances, not measured peak allocations. A guard rejects above 70 percent of measured available RAM or Vulkan compute GPU budget; unmeasured devices are not treated as zero. memory_guard=false makes the warning advisory. Neither setting changes grid resolution or material physics. Memory measurements are cached for up to one second. Viewport box edits use update_seed_source bounds; mesh transforms use existing object authoring.",
+    "write", "SceneWrite", false, "Domain, enabled recipe mode, sources, resolved_birth_kelvin, environment_kelvin, density/capacity and pending_recipe_changes; plan with per-layer particle_upper_bound, suggested_capacity, heuristic host/GPU planning bytes and measured memory availability",
+    "fluid|add|seed|source|matter|layers|initial|temperature",
+    "fluid.get_seed_sources|fluid.apply_seed_sources|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_add_seed_source, 1,
+    true
+};
+static const MethodRegistration reg_fluid_add_seed_source(desc_fluid_add_seed_source);
+
+static const MethodDescriptor desc_fluid_apply_seed_sources = {
+    "fluid.apply_seed_sources", "fluid",
+    "Replace initial particles from all layers and arm one shared settle",
+    "Box bounds are world coordinates; nonempty mesh_object uses the existing flat mesh-volume resolver. Sources are produced once on Apply/reset, never per frame. Material/domain/custom temperature policies are separate from ambient Heat Exchange. Editing recipes does not reseed live particles; Apply replaces all layers transactionally, returns the timeline to frame zero and arms shared settling. Overlapping layer AABBs, missing meshes, insufficient particle capacity and incompatible DEM/MPM materials reject generation with live particles preserved. Continuum PPC is shared; DEM uses physical radius. One DEM material and one MPM material per domain, including potential emitter materials. Full schema and limits: docs/dev/MATTER_SEED_SOURCES.md. auto_capacity defaults true and computes a conservative recipe capacity plus 15 percent and 64 slots on successful Apply/reset. Manual max_particles remains available with auto_capacity=false. memory_guard defaults true; planning allowances use 4096 host bytes and 2048 GPU bytes per planned particle plus 1024/512 bytes per grid cell. These are heuristic allowances, not measured peak allocations. A guard rejects above 70 percent of measured available RAM or Vulkan compute GPU budget; unmeasured devices are not treated as zero. memory_guard=false makes the warning advisory. Neither setting changes grid resolution or material physics. Memory measurements are cached for up to one second. Viewport box edits use update_seed_source bounds; mesh transforms use existing object authoring.",
+    "write", "SceneWrite", false, "Domain, enabled recipe mode, sources, resolved_birth_kelvin, environment_kelvin, density/capacity and pending_recipe_changes; plan with per-layer particle_upper_bound, suggested_capacity, heuristic host/GPU planning bytes and measured memory availability",
+    "fluid|apply|seed|sources|matter|layers|initial|temperature",
+    "fluid.get_seed_sources|fluid.apply_seed_sources|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_fluid_apply_seed_sources(desc_fluid_apply_seed_sources);
+
 static const MethodParam params_fluid_clear[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"clear_seed", "bool", false, "", "false", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"clear_seed", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_fluid_clear = {
     "fluid.clear", "fluid",
@@ -1568,11 +1599,11 @@ static const MethodDescriptor desc_fluid_clear = {
 static const MethodRegistration reg_fluid_clear(desc_fluid_clear);
 
 static const MethodParam params_fluid_create_domain[] = {
-    {"name", "string", false, "Domain name; also the object name in the scene", nullptr, nullptr},
-    {"type", "string", false, "Solver family", nullptr, "fluid|gas|matter"},
-    {"domain_min", "vec3", false, "World-space AABB minimum in metres", nullptr, nullptr},
-    {"domain_max", "vec3", false, "World-space AABB maximum in metres", nullptr, nullptr},
-    {"voxel_size", "float", false, "Grid cell size in metres. Drives resolution, cost and the smallest feature the solver can resolve.", "0.05", nullptr},
+    {"name", "string", false, "Domain name; also the object name in the scene", nullptr, nullptr, "string", false},
+    {"type", "string", false, "Solver family", nullptr, "fluid|gas|matter", "string", false},
+    {"domain_min", "vec3", false, "World-space AABB minimum in metres", nullptr, nullptr, "vec3", false},
+    {"domain_max", "vec3", false, "World-space AABB maximum in metres", nullptr, nullptr, "vec3", false},
+    {"voxel_size", "float", false, "Grid cell size in metres. Drives resolution, cost and the smallest feature the solver can resolve.", "0.05", nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_create_domain = {
     "fluid.create_domain", "fluid",
@@ -1587,9 +1618,43 @@ static const MethodDescriptor desc_fluid_create_domain = {
 };
 static const MethodRegistration reg_fluid_create_domain(desc_fluid_create_domain);
 
+static const MethodParam params_fluid_create_placed_domain[] = {
+    {"name", "string", false, "Explicit unique domain name; omitted/empty generates Physics Domain N", "", nullptr, "string", false},
+    {"source_object", "string", false, "Empty: canonical default ground box. Otherwise fit the named flat mesh in current world space.", "", nullptr, "string", false},
+};
+static const MethodDescriptor desc_fluid_create_placed_domain = {
+    "fluid.create_placed_domain", "fluid",
+    "Create a Matter domain at the ground default or fitted to a named flat mesh",
+    "Same creation service as panel Add Domain and From Select. Empty source ignores current selection and creates the canonical 5m box with bounds [-2.5,0,-2.5] to [2.5,5,2.5]. Named source aggregates TriangleMesh/DNA SoA vertex positions across all flat parts; uses P_orig transformed by getFinal(), or P when no local transform is available. No per-face Triangle facade reads. Missing/deleted/empty/nonfinite/zero-volume source and explicit duplicate domain name reject before adding a domain. Result is ManualBox, not bound to subsequent source movement. Selects the created domain and invalidates simulation cache. Final render locks reject writes. Existing fluid.create_domain keeps explicit-coordinate semantics.",
+    "write", "SceneWrite", false, "domain, domain_index, placement, source_object, bounds_min, bounds_max",
+    "fluid|create|placed|domain|matter|placement|flat",
+    "fluid.create_domain|fluid.list_domains|scene.set_transform",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_create_placed_domain, 2,
+    true
+};
+static const MethodRegistration reg_fluid_create_placed_domain(desc_fluid_create_placed_domain);
+
+static const MethodParam params_fluid_dem_bodies[] = {
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"request", "object", false, "action=inspect|snapshot|bind|remove and action-specific fields; see notes", nullptr, nullptr, nullptr, false},
+};
+static const MethodDescriptor desc_fluid_dem_bodies = {
+    "fluid.dem_bodies", "fluid",
+    "Inspect or explicitly bind/release breakable bodies in a paused DEM population",
+    "IPC accepts domain and request object; Python fluid.dem_bodies(domain, **request). action=inspect|snapshot|bind|remove. bind selects particle_ids (positive uint64 JSON integers) or all_current_grains=true; future births stay loose. material requires young_pa, poisson, tensile_strength_pa, shear_strength_pa. reach_ratio [1,2] default 1.25; section_ratio (0,1] default .5. No automatic fracture stiffness softening. remove requires body uint64. Mutations require pause and invalidate future cache frames. Runtime graph persists in simulation caches; project configuration alone does not replay a body edit. Wet capillary bridges remain separate. Material calibration and user build/live acceptance are required. Persistent initial bodies use seed source settings.bond_body instead of runtime bind; that recipe is saved with the project and included in its simulation hash.",
+    "write", "SceneWrite", false, "Body/bond counts, fracture and energy summary; snapshot returns canonical graph",
+    "fluid|dem|bodies|bonds|fracture|body",
+    "fluid.grain_settings|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_dem_bodies, 2,
+    true
+};
+static const MethodRegistration reg_fluid_dem_bodies(desc_fluid_dem_bodies);
+
 static const MethodParam params_fluid_gas_cell_extremes[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"count", "int", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"count", "int", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_gas_cell_extremes = {
     "fluid.gas_cell_extremes", "fluid",
@@ -1605,12 +1670,12 @@ static const MethodDescriptor desc_fluid_gas_cell_extremes = {
 static const MethodRegistration reg_fluid_gas_cell_extremes(desc_fluid_gas_cell_extremes);
 
 static const MethodParam params_fluid_get[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_get = {
     "fluid.get", "fluid",
     "Return one fluid or gas domain's complete settings and live counters",
-    "views[] is the view resolver's decision (sdf | splat | fog): which substances each view draws, whether any live parcel resolves there, and the vdb_id it is published on. One domain can hold an sdf AND a fog volume at once; match vdb_id against render.volume_slots domains[].vdb_id / fog_vdb_id. substance_materials[].effective_representation comes from the same resolver. particle_labels reports simulation-owned primary labels and separate spray/foam/bubble secondary counts. Sum(primary) equals primary_particles; sum(secondary) equals secondary_particles. Secondary whitewater carries no liquid mass. unknown includes new particles, old disk cache and unsupported granular/solid states. The neighborhood_v1 classifier runs after simulation, with 1.5-voxel radius and 2/6-neighbor hysteresis; last_step reports its timing and changed count. Mist is routed to fog, entrained by overlapping gas and then transferred into gas-phase physical inventory. gas_phase_mass_kg/energy_j report totals; gas_phase_active_cells and gas_phase_mass_centroid expose spatial transport. Missing domains retain the existing API error; gas or missing live state reports available=false. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour. Rain and non-condensable gas (2026-10-11 part 4): gas_rain_kg/gas_rain_cells is rain water in the air (gas_rain_centroid its mass-weighted centre, world space); it rides the gas velocity (wind drift, updrafts) and falls through it at its terminal speed. gas_foreign_kg/gas_foreign_cells is non-condensable gas (fuel vapour, combustion products, any boiled substance other than condensable_substance): never part of gas_phase_mass_kg, never condenses. Surface evaporation/condensation runs only for condensable_substance parcels. The gas temperature field holds the virtual temperature (steam reads ~600 K); saturation and surface exchange convert it to air temperature with the cell's vapour mass.",
+    "views[] is the view resolver's decision (sdf | splat | fog): which substances each view draws, whether any live parcel resolves there, and the vdb_id it is published on. One domain can hold an sdf AND a fog volume at once; match vdb_id against render.volume_slots domains[].vdb_id / fog_vdb_id. substance_materials[].effective_representation comes from the same resolver. particle_labels reports simulation-owned primary labels and separate spray/foam/bubble secondary counts. Sum(primary) equals primary_particles; sum(secondary) equals secondary_particles. Secondary whitewater carries no liquid mass. unknown includes new particles, old disk cache and unsupported granular/solid states. The neighborhood_v1 classifier runs after simulation, with 1.5-voxel radius and 2/6-neighbor hysteresis; last_step reports its timing and changed count. Mist is routed to fog, entrained by overlapping gas and then transferred into gas-phase physical inventory. gas_phase_mass_kg/energy_j report totals; gas_phase_active_cells and gas_phase_mass_centroid expose spatial transport. Missing domains retain the existing API error; gas or missing live state reports available=false. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour. Rain and non-condensable gas (2026-10-11 part 4): gas_rain_kg/gas_rain_cells is rain water in the air (gas_rain_centroid its mass-weighted centre, world space); it rides the gas velocity (wind drift, updrafts) and falls through it at its terminal speed. gas_foreign_kg/gas_foreign_cells is non-condensable gas (fuel vapour, combustion products, any boiled substance other than condensable_substance): never part of gas_phase_mass_kg, never condenses. Surface evaporation/condensation runs only for condensable_substance parcels. The gas temperature field holds the virtual temperature (steam reads ~600 K); saturation and surface exchange convert it to air temperature with the cell's vapour mass. liquid_physics_substance: whose liquid physics the solver runs (viscosity, wall slip, FLIP/APIC, density relaxation): default_substance, or the dominant liquid parcel substance when the domain holds none of its default (e.g. a Honey seed layer in a Water-default domain ran Water's nu 0 until 2026-11-09). kinematic_viscosity and viscosity_wall_slip report that substance. Mixtures diffuse each liquid parcel substance at its own catalogue viscosity even without a material binding.",
     "read", "Read", false, "FluidDomainInfo",
     "fluid|get|simulation",
     nullptr,
@@ -1621,7 +1686,7 @@ static const MethodDescriptor desc_fluid_get = {
 static const MethodRegistration reg_fluid_get(desc_fluid_get);
 
 static const MethodParam params_fluid_get_combustion[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_get_combustion = {
     "fluid.get_combustion", "fluid",
@@ -1637,7 +1702,7 @@ static const MethodDescriptor desc_fluid_get_combustion = {
 static const MethodRegistration reg_fluid_get_combustion(desc_fluid_get_combustion);
 
 static const MethodParam params_fluid_get_environment[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_get_environment = {
     "fluid.get_environment", "fluid",
@@ -1653,7 +1718,7 @@ static const MethodDescriptor desc_fluid_get_environment = {
 static const MethodRegistration reg_fluid_get_environment(desc_fluid_get_environment);
 
 static const MethodParam params_fluid_get_fog_shader[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_get_fog_shader = {
     "fluid.get_fog_shader", "fluid",
@@ -1669,7 +1734,7 @@ static const MethodDescriptor desc_fluid_get_fog_shader = {
 static const MethodRegistration reg_fluid_get_fog_shader(desc_fluid_get_fog_shader);
 
 static const MethodParam params_fluid_get_lanes[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_get_lanes = {
     "fluid.get_lanes", "fluid",
@@ -1685,7 +1750,7 @@ static const MethodDescriptor desc_fluid_get_lanes = {
 static const MethodRegistration reg_fluid_get_lanes(desc_fluid_get_lanes);
 
 static const MethodParam params_fluid_get_phase_grids[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_get_phase_grids = {
     "fluid.get_phase_grids", "fluid",
@@ -1701,7 +1766,7 @@ static const MethodDescriptor desc_fluid_get_phase_grids = {
 static const MethodRegistration reg_fluid_get_phase_grids(desc_fluid_get_phase_grids);
 
 static const MethodParam params_fluid_get_phase_output[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_get_phase_output = {
     "fluid.get_phase_output", "fluid",
@@ -1716,9 +1781,22 @@ static const MethodDescriptor desc_fluid_get_phase_output = {
 };
 static const MethodRegistration reg_fluid_get_phase_output(desc_fluid_get_phase_output);
 
+static const MethodDescriptor desc_fluid_get_seed_sources = {
+    "fluid.get_seed_sources", "fluid",
+    "Inspect initial Matter layers and resolved birth temperatures",
+    "Box bounds are world coordinates; nonempty mesh_object uses the existing flat mesh-volume resolver. Sources are produced once on Apply/reset, never per frame. Material/domain/custom temperature policies are separate from ambient Heat Exchange. Editing recipes does not reseed live particles; Apply replaces all layers transactionally, returns the timeline to frame zero and arms shared settling. Overlapping layer AABBs, missing meshes, insufficient particle capacity and incompatible DEM/MPM materials reject generation with live particles preserved. Continuum PPC is shared; DEM uses physical radius. One DEM material and one MPM material per domain, including potential emitter materials. Full schema and limits: docs/dev/MATTER_SEED_SOURCES.md. auto_capacity defaults true and computes a conservative recipe capacity plus 15 percent and 64 slots on successful Apply/reset. Manual max_particles remains available with auto_capacity=false. memory_guard defaults true; planning allowances use 4096 host bytes and 2048 GPU bytes per planned particle plus 1024/512 bytes per grid cell. These are heuristic allowances, not measured peak allocations. A guard rejects above 70 percent of measured available RAM or Vulkan compute GPU budget; unmeasured devices are not treated as zero. memory_guard=false makes the warning advisory. Neither setting changes grid resolution or material physics. Memory measurements are cached for up to one second. Viewport box edits use update_seed_source bounds; mesh transforms use existing object authoring.",
+    "read", "Read", false, "Domain, enabled recipe mode, sources, resolved_birth_kelvin, environment_kelvin, density/capacity and pending_recipe_changes; plan with per-layer particle_upper_bound, suggested_capacity, heuristic host/GPU planning bytes and measured memory availability",
+    "fluid|get|seed|sources|matter|layers|initial|temperature",
+    "fluid.get_seed_sources|fluid.apply_seed_sources|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_fluid_get_seed_sources(desc_fluid_get_seed_sources);
+
 static const MethodParam params_fluid_get_substance_splat_geometry[] = {
-    {"domain", "string", true, "Existing domain name", nullptr, nullptr},
-    {"substance", "string", true, "Substance output binding name", nullptr, nullptr},
+    {"domain", "string", true, "Existing domain name", nullptr, nullptr, "string", true},
+    {"substance", "string", true, "Substance output binding name", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_get_substance_splat_geometry = {
     "fluid.get_substance_splat_geometry", "fluid",
@@ -1734,7 +1812,7 @@ static const MethodDescriptor desc_fluid_get_substance_splat_geometry = {
 static const MethodRegistration reg_fluid_get_substance_splat_geometry(desc_fluid_get_substance_splat_geometry);
 
 static const MethodParam params_fluid_get_surface_interior[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_get_surface_interior = {
     "fluid.get_surface_interior", "fluid",
@@ -1749,8 +1827,24 @@ static const MethodDescriptor desc_fluid_get_surface_interior = {
 };
 static const MethodRegistration reg_fluid_get_surface_interior(desc_fluid_get_surface_interior);
 
+static const MethodParam params_fluid_get_wall_contact[] = {
+    {"domain", "string", true, "Particle matter domain name or id", nullptr, nullptr, "string", false},
+};
+static const MethodDescriptor desc_fluid_get_wall_contact = {
+    "fluid.get_wall_contact", "fluid",
+    "Read shared domain-wall friction, restitution and adhesion for liquid, MPM and DEM.",
+    "Returns friction, restitution and active (Closed boundaries only). Gas uses its own fluid boundary model. Restitution controls liquid/DEM impacts. MPM grid and particle escape contact are non-rebounding; MPM elasticity is determined by its material stress. adhesion_pa is tensile/cohesive wall traction in Pa, finite in [0,1e9], default 0. It is separate from viscous no-slip and wetting angle. Continuum uses adhesion*dt/(rho*h); DEM uses projected grain area and an established contact. Open/Periodic boundaries keep settings but disable wall contact. Adhesive DEM runs without sleeping optimization.",
+    "read", "Read", false, "object",
+    "fluid|get|wall|contact|simulation|friction|mpm|dem",
+    nullptr,
+    nullptr, nullptr, "fluid.get_wall_contact", nullptr,
+    params_fluid_get_wall_contact, 1,
+    true
+};
+static const MethodRegistration reg_fluid_get_wall_contact(desc_fluid_get_wall_contact);
+
 static const MethodParam params_fluid_get_whitewater[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_get_whitewater = {
     "fluid.get_whitewater", "fluid",
@@ -1766,13 +1860,13 @@ static const MethodDescriptor desc_fluid_get_whitewater = {
 static const MethodRegistration reg_fluid_get_whitewater(desc_fluid_get_whitewater);
 
 static const MethodParam params_fluid_grain_reference[] = {
-    {"bodies", "array", true, "Explicit id/position/radius_m/mass_kg; optional velocity/angular_velocity/saturation", nullptr, nullptr},
-    {"gravity", "vec3", false, "", "[0,-9.81,0]", nullptr},
-    {"plane", "object", false, "Unit normal and offset_m, or null for free flight", "{normal:[0,1,0],offset_m:0}", nullptr},
-    {"duration_s", "float", false, "", "1", nullptr},
-    {"maximum_dt_s", "float", false, "", ".001", nullptr},
-    {"sample_interval_s", "float", false, "", ".02", nullptr},
-    {"contact", "object", false, "", "{}", nullptr},
+    {"bodies", "array", true, "Explicit id/position/radius_m/mass_kg; optional velocity/angular_velocity/saturation", nullptr, nullptr, nullptr, false},
+    {"gravity", "vec3", false, "", "[0,-9.81,0]", nullptr, nullptr, false},
+    {"plane", "object", false, "Unit normal and offset_m, or null for free flight", "{normal:[0,1,0],offset_m:0}", nullptr, nullptr, false},
+    {"duration_s", "float", false, "", "1", nullptr, nullptr, false},
+    {"maximum_dt_s", "float", false, "", ".001", nullptr, nullptr, false},
+    {"sample_interval_s", "float", false, "", ".02", nullptr, nullptr, false},
+    {"contact", "object", false, "", "{}", nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_fluid_grain_reference = {
     "fluid.grain_reference", "fluid",
@@ -1788,7 +1882,7 @@ static const MethodDescriptor desc_fluid_grain_reference = {
 static const MethodRegistration reg_fluid_grain_reference(desc_fluid_grain_reference);
 
 static const MethodParam params_fluid_grain_settings[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_grain_settings = {
     "fluid.grain_settings", "fluid",
@@ -1804,7 +1898,7 @@ static const MethodDescriptor desc_fluid_grain_settings = {
 static const MethodRegistration reg_fluid_grain_settings(desc_fluid_grain_settings);
 
 static const MethodParam params_fluid_inspect_fog_fields[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_inspect_fog_fields = {
     "fluid.inspect_fog_fields", "fluid",
@@ -1822,7 +1916,7 @@ static const MethodRegistration reg_fluid_inspect_fog_fields(desc_fluid_inspect_
 static const MethodDescriptor desc_fluid_list_domains = {
     "fluid.list_domains", "fluid",
     "List every fluid and gas domain with its full settings",
-    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour. Rain and non-condensable gas (2026-10-11 part 4): gas_rain_kg/gas_rain_cells is rain water in the air (gas_rain_centroid its mass-weighted centre, world space); it rides the gas velocity (wind drift, updrafts) and falls through it at its terminal speed. gas_foreign_kg/gas_foreign_cells is non-condensable gas (fuel vapour, combustion products, any boiled substance other than condensable_substance): never part of gas_phase_mass_kg, never condenses. Surface evaporation/condensation runs only for condensable_substance parcels. The gas temperature field holds the virtual temperature (steam reads ~600 K); saturation and surface exchange convert it to air temperature with the cell's vapour mass. emission_withheld_kg_step/_total: liquid-source mass the Max Particles ceiling withheld (summed over the domain's sources); > 0 = the ceiling, not the sources, sets emission. mpm_law reports the law the MPM lane ran last step: drucker_prager, snow, elastic, or none (no MPM parcel / not measured).",
+    "particle_labels has the same schema and semantics as fluid.get; primary and secondary populations are counted separately. Surface telemetry includes surface_work_cells (padded scheduled tile lanes), surface_bin_cells (physical bins independent of refinement), and surface_bin_ms/surface_anisotropy_ms/surface_schedule_ms/surface_gather_ms/surface_smooth_ms CPU wall times. surface_build_ms includes dense output initialization and all producer work; these do not include downstream NanoVDB upload/render time. surface_anisotropy_ms is the legacy name for particle preparation time: temporary centre smoothing plus covariance/eigensolve when anisotropy is enabled. Position smoothing applies to spherical and anisotropic kernels; zero restores raw centres. Sparse UVW extension covers filtered surface support and preserves advected residual coordinates. Fusion latent heat: thermal_mushy_particles are parcels part solid/part liquid held at their substance's melt point; thermal_fusion_released_j / thermal_fusion_absorbed_j are the latent heat freezing gave back and melting consumed this step (state switches at half solid, so a parcel at 0 C stays ice/water until that heat crosses). The melt point is per parcel substance: the domain no longer reports a thermal_freeze_kelvin copy (read substance.get melt_kelvin). thermal_condensed_kg is vapour condensed onto surface parcels this step (reverse Hertz-Knudsen against the gas inventory); thermal_condensation_splits counts parcels grown past twice their canonical mass and split in two. Fog water (2026-10-11): gas_phase_mass_kg is VAPOUR only; gas_condensate_kg / gas_condensate_cells / gas_condensate_mean_kg_m3 are the condensed water the air carries (kg/m^3 like the atmosphere layer). Each gas step a saturation adjustment (Clausius-Clapeyron of condensable_substance, latent heat to/from the air, world humidity as background vapour) moves vapour<->fog water: fog_condensed_kg, fog_evaporated_kg, fog_latent_to_air_j (+ warms the air); rained_kg / rain_parcels count fog water that reached one liquid parcel inside the matter domain's liquid grid. saturation_measured false = it did not run (no thermal chain and no fog water, or no vapour data). Mist parcels now enter the fog-water pool, not vapour. Rain and non-condensable gas (2026-10-11 part 4): gas_rain_kg/gas_rain_cells is rain water in the air (gas_rain_centroid its mass-weighted centre, world space); it rides the gas velocity (wind drift, updrafts) and falls through it at its terminal speed. gas_foreign_kg/gas_foreign_cells is non-condensable gas (fuel vapour, combustion products, any boiled substance other than condensable_substance): never part of gas_phase_mass_kg, never condenses. Surface evaporation/condensation runs only for condensable_substance parcels. The gas temperature field holds the virtual temperature (steam reads ~600 K); saturation and surface exchange convert it to air temperature with the cell's vapour mass. emission_withheld_kg_step/_total: liquid-source mass the Max Particles ceiling withheld (summed over the domain's sources); > 0 = the ceiling, not the sources, sets emission. mpm_law reports the law the MPM lane ran last step: drucker_prager, snow, elastic, or none (no MPM parcel / not measured). liquid_physics_substance: whose liquid physics the solver runs (viscosity, wall slip, FLIP/APIC, density relaxation): default_substance, or the dominant liquid parcel substance when the domain holds none of its default (e.g. a Honey seed layer in a Water-default domain ran Water's nu 0 until 2026-11-09). kinematic_viscosity and viscosity_wall_slip report that substance. Mixtures diffuse each liquid parcel substance at its own catalogue viscosity even without a material binding.",
     "read", "Read", false, "FluidDomainInfo[]",
     "fluid|list|domains|simulation|inventory",
     "fluid.get",
@@ -1833,13 +1927,13 @@ static const MethodDescriptor desc_fluid_list_domains = {
 static const MethodRegistration reg_fluid_list_domains(desc_fluid_list_domains);
 
 static const MethodParam params_fluid_matter_models[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"include_transfer", "bool", false, "", "False", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"include_transfer", "bool", false, "", "False", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_fluid_matter_models = {
     "fluid.matter_models", "fluid",
     "Inspect domain particle identities, constitutive model mass and momentum",
-    "Read-only; does not run the mixed solver or apply contact. include_transfer=true builds sparse separate physical-mass fields, shared quadratic support, overlap and out-of-grid totals; limited to 250000 particles. Elastic parcels ride the MPM lane with the elastic law (docs/dev/ELASTIK_MPM.md); unknown lanes never scatter into fluid or granular fields. IDs are domain-local and exact in cache v11; mixed_transport_available reports the CPU-reference/Vulkan mixed route; mixed_transport_ready and mixed_execution report the last measured step, common substeps, contact pairs and GPU stages. GPU errors hold the step instead of silently selecting a single-model CPU solve. Periodic and frozen mixed parcels are rejected; elastic and granular MPM parcels in one domain hold the step (one MPM material per domain). Momentum uses kg*m/s. Invalid finite state, duplicate IDs or negative masses reject the query. pore_exchange reports settings, live stored mass/capacity/maximum saturation, last absorption/drainage, budget-blocked drainage carriers and conservation residuals. Model mass/momentum includes carrier pore water. granular_mechanics publishes the last measured granular-only wave/strain CFL and extent-based rho*g*h load estimate; measured=false means no publication, including cached/default counters. This estimate uses the legacy 1600 kg/m3 and 9.81 m/s2 reference, includes unsupported/in-flight granular extent, and is not measured contact/support pressure or repose proof. Fluid affine, height and thermal softening do not enter the mixed granular estimate. acceptance_metrics reports canonical granular dry mass, pore mass/capacity, capacity-weighted saturation, dry center of mass, material-point bounds, horizontal RMS radius and transport kinetic energy, plus eight saturation bands with the same spatial metrics. Band selection uses A=clamp(S/wet_appearance_full_saturation,0,1), then ceil(7*A): zero stays dry and positive saturation selects at least wet band 1. Default full wet look occurs at 5 percent pore filling; physical saturation and strength still use S. appearance_quantization and appearance_full_saturation identify this policy for snapshot comparison. Empty bounds/centers are null; legacy missing or unwritten canonical mass/model/pore sidecars report measured=false with a reason without replacing the existing legacy totals. Shape statistics are not an angle-of-repose or renderer proof. Invalid cardinality/nonfinite granular state rejects the read. grain_readiness: enabled, ready, blockers [{code, message}] (codes not_matter, backend, boundary, pore_exchange, wet_response, solid_phase), step_held and status; the same rule the domain panel locks and set_grain_settings use. With grains enabled, fluid.update backend/boundary/solid_phase and pore exchange edits that would add a blocker are rejected unchanged. Thermal liquid runs with grains (2026-10-19): grains keep their temperature and trade heat with the liquid, the domain's air and each other; fluid.list_domains reports thermal_grain_*; frozen liquid there is pinned ice held outside both lanes (grains do not collide with it yet). transport_owners reports measured, fluid/grain/mpm/obstacle carrier counts, ready and reason from the same core resolver as Active Matter. grain_ownership: wanted (a granular substance with granular_transport=dem is in reach: Default Substance, bound substances or a flow source aimed at the domain), enabled (what the step runs), reset_pending (live particles keep their solver until reset), substance and blockers (why a wanted DEM runs as MPM); the Solvers panel draws the same struct. Sand/Gravel/Ice default to DEM; Soil defaults to MPM. MPM/grain geometry and contact share a resident micro clock. Continuum P2G/pressure/G2P refresh at their CFL/elastic rate; advection follows contact-corrected canonical velocities each tick. grain_diagnostics.runtime.mpm_contact reports parcels, contact events, max neighbours, momentum residual in N*s and the staggered schedule. Contact relaxation uses measured graph degrees without a neighbour ceiling; contact events use a 64-bit accumulated counter. runtime.common_clock reports transport_steps, continuum_grid_steps and liquid_reaction_on_gpu. Fluid drag/buoyancy reactions are applied on device each tick using current-geometry device hash/rebin, the original trilinear mass-lump partition, per-substance density/viscosity and Di Felice drag. runtime.common_clock.liquid_support=device_rebin_each_tick identifies this path. Reaction uses the exact pre-contact support of that tick, then support is rebuilt next tick. CPU-only external forces remain frame sampled. Cached coupling buffers are charged by actual allocated bytes and released with the domain; sparse touched-bucket clearing changes no physics. Only shader index width, device storage capacity and authored domain budget/step ceiling bound this coordinator. MPM is never converted to DEM. With MPM present, liquid uses drag/buoyancy; porous projection awaits separate owner weights.",
+    "elastic_thermal_response reports shared MPM coefficient ranges at synchronized softening extrema before stability caps and damage. Elastic material fields elastic_thermal_viscosity_power, elastic_thermal_yield_power and elastic_thermal_relaxation_power are authored via the common substance schema. phase_mechanics distinguishes deformable solid laws from supported pinned fluid freezing; phase_counts, phase_basis_counts and selection_basis_counts expose phase observations versus temperature inference and model selection. model_mismatch_particles compares the synchronized model with the common birth/fusion resolver without changing particles. material_resolution reports requested model/transport, domain viscosity policy versus configured value, synchronized carrier groups and shared MPM parameter scope. It is read-only configuration/carrier inspection, not backend execution measurement; backend_executed is null. See docs/dev/MATTER_MATERIAL_RESOLUTION.md. Read-only; does not run the mixed solver or apply contact. include_transfer=true builds sparse separate physical-mass fields, shared quadratic support, overlap and out-of-grid totals; limited to 250000 particles. Elastic parcels ride the MPM lane with the elastic law (docs/dev/ELASTIK_MPM.md); unknown lanes never scatter into fluid or granular fields. IDs are domain-local and exact in cache v11; mixed_transport_available reports the CPU-reference/Vulkan mixed route; mixed_transport_ready and mixed_execution report the last measured step, common substeps, contact pairs and GPU stages. GPU errors hold the step instead of silently selecting a single-model CPU solve. Periodic and frozen mixed parcels are rejected; elastic and granular MPM parcels in one domain hold the step (one MPM material per domain). Momentum uses kg*m/s. Invalid finite state, duplicate IDs or negative masses reject the query. pore_exchange reports settings, live stored mass/capacity/maximum saturation, last absorption/drainage, budget-blocked drainage carriers and conservation residuals. Model mass/momentum includes carrier pore water. granular_mechanics publishes the last measured granular-only wave/strain CFL and extent-based rho*g*h load estimate; measured=false means no publication, including cached/default counters. This estimate uses the legacy 1600 kg/m3 and 9.81 m/s2 reference, includes unsupported/in-flight granular extent, and is not measured contact/support pressure or repose proof. Fluid affine, height and thermal softening do not enter the mixed granular estimate. acceptance_metrics reports canonical granular dry mass, pore mass/capacity, capacity-weighted saturation, dry center of mass, material-point bounds, horizontal RMS radius and transport kinetic energy, plus eight saturation bands with the same spatial metrics. Band selection uses A=clamp(S/wet_appearance_full_saturation,0,1), then ceil(7*A): zero stays dry and positive saturation selects at least wet band 1. Default full wet look occurs at 5 percent pore filling; physical saturation and strength still use S. appearance_quantization and appearance_full_saturation identify this policy for snapshot comparison. Empty bounds/centers are null; legacy missing or unwritten canonical mass/model/pore sidecars report measured=false with a reason without replacing the existing legacy totals. Shape statistics are not an angle-of-repose or renderer proof. Invalid cardinality/nonfinite granular state rejects the read. grain_readiness: enabled, ready, blockers [{code, message}] (codes not_matter, backend, boundary, pore_exchange, wet_response, solid_phase), step_held and status; the same rule the domain panel locks and set_grain_settings use. With grains enabled, fluid.update backend/boundary/solid_phase and pore exchange edits that would add a blocker are rejected unchanged. Thermal liquid runs with grains (2026-10-19): grains keep their temperature and trade heat with the liquid, the domain's air and each other; fluid.list_domains reports thermal_grain_*; frozen liquid there is pinned ice held outside both lanes (grains do not collide with it yet). transport_owners reports measured, fluid/grain/mpm/obstacle carrier counts, ready and reason from the same core resolver as Active Matter. grain_ownership: wanted (a granular substance with granular_transport=dem is in reach: Default Substance, bound substances or a flow source aimed at the domain), enabled (what the step runs), reset_pending (live particles keep their solver until reset), substance and blockers (why a wanted DEM runs as MPM); the Solvers panel draws the same struct. Sand/Gravel/Ice default to DEM; Soil defaults to MPM. MPM/grain geometry and contact share a resident micro clock. Continuum P2G/pressure/G2P refresh at their CFL/elastic rate; advection follows contact-corrected canonical velocities each tick. grain_diagnostics.runtime.mpm_contact reports parcels, contact events, max neighbours, momentum residual in N*s and the staggered schedule. Contact relaxation uses measured graph degrees without a neighbour ceiling; contact events use a 64-bit accumulated counter. runtime.common_clock reports transport_steps, continuum_grid_steps and liquid_reaction_on_gpu. Fluid drag/buoyancy reactions are applied on device each tick using current-geometry device hash/rebin, the original trilinear mass-lump partition, per-substance density/viscosity and Di Felice drag. runtime.common_clock.liquid_support=device_rebin_each_tick identifies this path. Reaction uses the exact pre-contact support of that tick, then support is rebuilt next tick. CPU-only external forces remain frame sampled. Cached coupling buffers are charged by actual allocated bytes and released with the domain; sparse touched-bucket clearing changes no physics. Only shader index width, device storage capacity and authored domain budget/step ceiling bound this coordinator. MPM is never converted to DEM. With MPM present, liquid uses drag/buoyancy; porous projection awaits separate owner weights.",
     "read", "Read", false, "Measured status, model totals, identity storage and optional CPU transfer reference",
     "fluid|matter|models|read",
     "fluid.get_phase_grids|fluid.step_stats",
@@ -1850,8 +1944,8 @@ static const MethodDescriptor desc_fluid_matter_models = {
 static const MethodRegistration reg_fluid_matter_models(desc_fluid_matter_models);
 
 static const MethodParam params_fluid_particle_extremes[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"count", "int", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"count", "int", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_particle_extremes = {
     "fluid.particle_extremes", "fluid",
@@ -1867,7 +1961,7 @@ static const MethodDescriptor desc_fluid_particle_extremes = {
 static const MethodRegistration reg_fluid_particle_extremes(desc_fluid_particle_extremes);
 
 static const MethodParam params_fluid_remove_domain[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_remove_domain = {
     "fluid.remove_domain", "fluid",
@@ -1881,6 +1975,22 @@ static const MethodDescriptor desc_fluid_remove_domain = {
     true
 };
 static const MethodRegistration reg_fluid_remove_domain(desc_fluid_remove_domain);
+
+static const MethodParam params_fluid_remove_seed_source[] = {
+    {"id", "int", true, "Positive stable seed source ID returned by get_seed_sources", nullptr, nullptr, nullptr, true},
+};
+static const MethodDescriptor desc_fluid_remove_seed_source = {
+    "fluid.remove_seed_source", "fluid",
+    "Remove a layer recipe by stable ID",
+    "Box bounds are world coordinates; nonempty mesh_object uses the existing flat mesh-volume resolver. Sources are produced once on Apply/reset, never per frame. Material/domain/custom temperature policies are separate from ambient Heat Exchange. Editing recipes does not reseed live particles; Apply replaces all layers transactionally, returns the timeline to frame zero and arms shared settling. Overlapping layer AABBs, missing meshes, insufficient particle capacity and incompatible DEM/MPM materials reject generation with live particles preserved. Continuum PPC is shared; DEM uses physical radius. One DEM material and one MPM material per domain, including potential emitter materials. Full schema and limits: docs/dev/MATTER_SEED_SOURCES.md. auto_capacity defaults true and computes a conservative recipe capacity plus 15 percent and 64 slots on successful Apply/reset. Manual max_particles remains available with auto_capacity=false. memory_guard defaults true; planning allowances use 4096 host bytes and 2048 GPU bytes per planned particle plus 1024/512 bytes per grid cell. These are heuristic allowances, not measured peak allocations. A guard rejects above 70 percent of measured available RAM or Vulkan compute GPU budget; unmeasured devices are not treated as zero. memory_guard=false makes the warning advisory. Neither setting changes grid resolution or material physics. Memory measurements are cached for up to one second. Viewport box edits use update_seed_source bounds; mesh transforms use existing object authoring.",
+    "write", "SceneWrite", false, "Domain, enabled recipe mode, sources, resolved_birth_kelvin, environment_kelvin, density/capacity and pending_recipe_changes; plan with per-layer particle_upper_bound, suggested_capacity, heuristic host/GPU planning bytes and measured memory availability",
+    "fluid|remove|seed|source|matter|layers|initial|temperature",
+    "fluid.get_seed_sources|fluid.apply_seed_sources|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_remove_seed_source, 1,
+    true
+};
+static const MethodRegistration reg_fluid_remove_seed_source(desc_fluid_remove_seed_source);
 
 static const MethodDescriptor desc_fluid_reset = {
     "fluid.reset", "fluid",
@@ -1896,13 +2006,13 @@ static const MethodDescriptor desc_fluid_reset = {
 static const MethodRegistration reg_fluid_reset(desc_fluid_reset);
 
 static const MethodParam params_fluid_run[] = {
-    {"domains", "any", false, "", nullptr, nullptr},
-    {"dt", "float", false, "", "0.0166667", nullptr},
-    {"fields", "any", false, "", nullptr, nullptr},
-    {"max_fields", "any", false, "", nullptr, nullptr},
-    {"sample_every", "int", false, "", "0", nullptr},
-    {"steps", "int", false, "", "1", nullptr},
-    {"sum_fields", "any", false, "", nullptr, nullptr},
+    {"domains", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"dt", "float", false, "", "0.0166667", nullptr, "number", false},
+    {"fields", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"max_fields", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"sample_every", "int", false, "", "0", nullptr, "number", false},
+    {"steps", "int", false, "", "1", nullptr, "number", false},
+    {"sum_fields", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_fluid_run = {
     "fluid.run", "fluid",
@@ -1918,8 +2028,8 @@ static const MethodDescriptor desc_fluid_run = {
 static const MethodRegistration reg_fluid_run(desc_fluid_run);
 
 static const MethodParam params_fluid_sample_solid_phi[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"points", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"points", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_fluid_sample_solid_phi = {
     "fluid.sample_solid_phi", "fluid",
@@ -1935,14 +2045,14 @@ static const MethodDescriptor desc_fluid_sample_solid_phi = {
 static const MethodRegistration reg_fluid_sample_solid_phi(desc_fluid_sample_solid_phi);
 
 static const MethodParam params_fluid_seed[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"seed_min", "vec3", false, "World-space box minimum in metres; omit to derive from the domain", nullptr, nullptr},
-    {"seed_max", "vec3", false, "World-space box maximum in metres; omit to derive from the domain", nullptr, nullptr},
-    {"particles_per_cell", "int", false, "Particle density per grid cell; 4 is standard", "4", nullptr},
-    {"replace", "bool", false, "Clear existing particles first", "true", nullptr},
-    {"persistent", "bool", false, "Re-apply this seed after every reset", "false", nullptr},
-    {"grain_saturation", "float", false, "Seeded DEM grain wetness 0..1 of capacity; -1 keeps the authored value", "-1.0", nullptr},
-    {"fill_level", "float", false, "", "-1.0", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"seed_min", "vec3", false, "World-space box minimum in metres; omit to derive from the domain", nullptr, nullptr, "vec3", false},
+    {"seed_max", "vec3", false, "World-space box maximum in metres; omit to derive from the domain", nullptr, nullptr, "vec3", false},
+    {"particles_per_cell", "int", false, "Particle density per grid cell; 4 is standard", "4", nullptr, "number", false},
+    {"replace", "bool", false, "Clear existing particles first", "true", nullptr, "bool", false},
+    {"persistent", "bool", false, "Re-apply this seed after every reset", "false", nullptr, "bool", false},
+    {"grain_saturation", "float", false, "Seeded DEM grain wetness 0..1 of capacity; -1 keeps the authored value", "-1.0", nullptr, "number", false},
+    {"fill_level", "float", false, "", "-1.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_seed = {
     "fluid.seed", "fluid",
@@ -1958,12 +2068,12 @@ static const MethodDescriptor desc_fluid_seed = {
 static const MethodRegistration reg_fluid_seed(desc_fluid_seed);
 
 static const MethodParam params_fluid_seed_mesh[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"grain_saturation", "float", false, "", "-1.0", nullptr},
-    {"particles_per_cell", "int", false, "", "8", nullptr},
-    {"persistent", "bool", false, "", "false", nullptr},
-    {"replace", "bool", false, "", "true", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"grain_saturation", "float", false, "", "-1.0", nullptr, "number", false},
+    {"particles_per_cell", "int", false, "", "8", nullptr, "number", false},
+    {"persistent", "bool", false, "", "false", nullptr, "bool", false},
+    {"replace", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_fluid_seed_mesh = {
     "fluid.seed_mesh", "fluid",
@@ -1978,17 +2088,33 @@ static const MethodDescriptor desc_fluid_seed_mesh = {
 };
 static const MethodRegistration reg_fluid_seed_mesh(desc_fluid_seed_mesh);
 
+static const MethodParam params_fluid_select_seed_source[] = {
+    {"id", "integer", false, "Existing positive layer ID; zero/default selects the domain gizmo", nullptr, nullptr, nullptr, false},
+};
+static const MethodDescriptor desc_fluid_select_seed_source = {
+    "fluid.select_seed_source", "fluid",
+    "Select a Matter seed layer for viewport box editing, or select its domain with id zero",
+    "Shared UI/script/IPC operation. Selection is transient and is not serialized. Unknown IDs and fractional or negative IDs reject without changing selection. Box transforms use fluid.update_seed_source bounds; G moves and S scales in the viewport. Box sources are axis aligned. Mesh-volume geometry uses the existing source object transform; use normal object editing. Selection never regenerates particles.",
+    "write", "SceneWrite", false, "Seed recipe listing with transient selected_source_id and conservative plan",
+    "fluid|select|seed|source|matter|selection|viewport",
+    "fluid.get_seed_sources|fluid.update_seed_source|fluid.apply_seed_sources",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_select_seed_source, 1,
+    true
+};
+static const MethodRegistration reg_fluid_select_seed_source(desc_fluid_select_seed_source);
+
 static const MethodParam params_fluid_set_combustion[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"auto_ignite", "bool", false, "", nullptr, nullptr},
-    {"chemistry_preset", "any", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"evaporation_rate", "float", false, "", nullptr, nullptr},
-    {"heat_release", "float", false, "", nullptr, nullptr},
-    {"ignition_temperature", "float", false, "", nullptr, nullptr},
-    {"smoke_yield", "float", false, "", nullptr, nullptr},
-    {"surface_cooling", "float", false, "", nullptr, nullptr},
-    {"surface_fuel_capacity", "float", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"auto_ignite", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"chemistry_preset", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"evaporation_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"heat_release", "float", false, "", nullptr, nullptr, "number", false},
+    {"ignition_temperature", "float", false, "", nullptr, nullptr, "number", false},
+    {"smoke_yield", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_cooling", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_fuel_capacity", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_combustion = {
     "fluid.set_combustion", "fluid",
@@ -2004,10 +2130,10 @@ static const MethodDescriptor desc_fluid_set_combustion = {
 static const MethodRegistration reg_fluid_set_combustion(desc_fluid_set_combustion);
 
 static const MethodParam params_fluid_set_environment[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"ambient_kelvin", "float", false, "", nullptr, nullptr},
-    {"override_enabled", "bool", false, "", nullptr, nullptr},
-    {"oxygen", "float", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"ambient_kelvin", "float", false, "", nullptr, nullptr, "number", false},
+    {"override_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"oxygen", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_environment = {
     "fluid.set_environment", "fluid",
@@ -2023,19 +2149,19 @@ static const MethodDescriptor desc_fluid_set_environment = {
 static const MethodRegistration reg_fluid_set_environment(desc_fluid_set_environment);
 
 static const MethodParam params_fluid_set_fog[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"erosion_depth", "any", false, "", nullptr, nullptr},
-    {"erosion_detail", "any", false, "", nullptr, nullptr},
-    {"erosion_seed", "any", false, "", nullptr, nullptr},
-    {"erosion_size", "any", false, "", nullptr, nullptr},
-    {"erosion_strength", "any", false, "", nullptr, nullptr},
-    {"resolution_multiplier", "any", false, "", nullptr, nullptr},
-    {"spread_voxels", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"erosion_depth", "float", false, "", nullptr, nullptr, "number", false},
+    {"erosion_detail", "float", false, "", nullptr, nullptr, "number", false},
+    {"erosion_seed", "float", false, "", nullptr, nullptr, "number", false},
+    {"erosion_size", "float", false, "", nullptr, nullptr, "number", false},
+    {"erosion_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"resolution_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"spread_voxels", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_fog = {
     "fluid.set_fog", "fluid",
     "Shape the Volumetric Fog of a liquid domain: Gaussian spread and world-space clump erosion of the splatted density",
-    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Applies to carriers routed to Fog, including Matter solid/liquid/mist views; does not blur authoritative gas fields. Matter Fog View exposes spread; erosion and resolution controls retain their legacy route semantics. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed. erosion_strength 0..1 (default 0 = off) cuts the thin parts of the spread density into clumps (snow/cotton look) with a world-space fBm: d' = max(0, (d - e)/(1 - e)), e = strength*noise, applied only where d < 1, so cells at full rest packing are kept and the body gets no holes. erosion_size 0.001..100 is the largest clump in WORLD units (independent of voxel size and domain extent; below a voxel it cannot show); erosion_detail 1..6 octaves; erosion_seed any int. Runs on the grid before upload, so Vulkan RT, RayFusion and CPU draw the same field. World-anchored: clumps do not travel with moving material. Read back with fluid.get fog_erosion_strength/size/detail/seed. erosion_depth 0..1 world units (default 0): > 0 switches to SURFACE-BAND erosion for dense bodies (a settled snow layer is d~1 everywhere, so the remap has nothing to cut and stays a flat slab): a chamfer distance transform gives each cell its depth s (voxels) below the d=0.5 surface and the noise pushes the surface in, d*=smoothstep(-0.5,0.5,s-D*n), D=strength*depth/voxel: clumps cut at most strength*depth deep whatever the body's thickness (the earlier blur-based version erased bodies thinner than the band); deeper cells are untouched, sparse spray is mostly removed. resolution_multiplier 1..4 (default 1) splats the fog on a grid that many times finer than the solver grid (same origin/extent; density keeps 1 = a cell at rest packing; spread_voxels stays in SOLVER voxels). Sharper edges and smaller clumps, but cells, memory and upload grow with its cube, and the volume march / random walk step on the finer voxel. Read back with fluid.get fog_erosion_depth / fog_resolution_multiplier.",
+    "Overlay semantics - keys you do not send keep their value. spread_voxels 0..6 is the Gaussian sigma in simulation voxels (default 1.5); 0 draws the raw trilinear splat, where spray shows as isolated dots. Render-side only: the solver density and fluid.get active_density_cells are unchanged. Takes effect only when render_mode is 'fog'. Out-of-range values are rejected. Read back with fluid.get fog_spread_voxels. Blackbody/ChannelDriven emission of a fog domain reads the PARTICLE temperature in Kelvin (mass-weighted, same spread), not the gas heat channel: ambient liquid barely glows (radiance ~ T^4); a Flow Source temperature override makes hot liquid, the thermal chain cools it. fluid.get particle_min_kelvin / particle_max_kelvin (particle_kelvin_measured) report what the emission is fed. erosion_strength 0..1 (default 0 = off) cuts the thin parts of the spread density into clumps (snow/cotton look) with a world-space fBm: d' = max(0, (d - e)/(1 - e)), e = strength*noise, applied only where d < 1, so cells at full rest packing are kept and the body gets no holes. erosion_size 0.001..100 is the largest clump in WORLD units (independent of voxel size and domain extent; below a voxel it cannot show); erosion_detail 1..6 octaves; erosion_seed any int. Runs on the grid before upload, so Vulkan RT, RayFusion and CPU draw the same field. World-anchored: clumps do not travel with moving material. Read back with fluid.get fog_erosion_strength/size/detail/seed. erosion_depth 0..1 world units (default 0): > 0 switches to SURFACE-BAND erosion for dense bodies (a settled snow layer is d~1 everywhere, so the remap has nothing to cut and stays a flat slab): a chamfer distance transform gives each cell its depth s (voxels) below the d=0.5 surface and the noise pushes the surface in, d*=smoothstep(-0.5,0.5,s-D*n), D=strength*depth/voxel: clumps cut at most strength*depth deep whatever the body's thickness (the earlier blur-based version erased bodies thinner than the band); deeper cells are untouched, sparse spray is mostly removed. resolution_multiplier 1..4 (default 1) splats the fog on a grid that many times finer than the solver grid (same origin/extent; density keeps 1 = a cell at rest packing; spread_voxels stays in SOLVER voxels). Sharper edges and smaller clumps, but cells, memory and upload grow with its cube, and the volume march / random walk step on the finer voxel. Read back with fluid.get fog_erosion_depth / fog_resolution_multiplier.",
     "write", "SceneWrite", false, "any",
     "fluid|set|fog",
     nullptr,
@@ -2046,25 +2172,25 @@ static const MethodDescriptor desc_fluid_set_fog = {
 static const MethodRegistration reg_fluid_set_fog(desc_fluid_set_fog);
 
 static const MethodParam params_fluid_set_fog_shader[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"absorption_coefficient", "float", false, "", nullptr, nullptr},
-    {"absorption_color", "vec3", false, "", nullptr, nullptr},
-    {"anisotropy", "float", false, "", nullptr, nullptr},
-    {"anisotropy_back", "float", false, "", nullptr, nullptr},
-    {"density_cutoff", "float", false, "", nullptr, nullptr},
-    {"density_multiplier", "float", false, "", nullptr, nullptr},
-    {"lobe_mix", "float", false, "", nullptr, nullptr},
-    {"max_steps", "int", false, "", nullptr, nullptr},
-    {"multi_scatter", "float", false, "", nullptr, nullptr},
-    {"random_walk", "any", false, "", nullptr, nullptr},
-    {"random_walk_exact_events", "int", false, "", nullptr, nullptr},
-    {"random_walk_max_events", "int", false, "", nullptr, nullptr},
-    {"scattering_coefficient", "float", false, "", nullptr, nullptr},
-    {"scattering_color", "vec3", false, "", nullptr, nullptr},
-    {"shadow_steps", "int", false, "", nullptr, nullptr},
-    {"shadow_strength", "float", false, "", nullptr, nullptr},
-    {"shadow_stride", "int", false, "", nullptr, nullptr},
-    {"voxel_step_multiplier", "float", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"absorption_coefficient", "float", false, "", nullptr, nullptr, "number", false},
+    {"absorption_color", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"anisotropy", "float", false, "", nullptr, nullptr, "number", false},
+    {"anisotropy_back", "float", false, "", nullptr, nullptr, "number", false},
+    {"density_cutoff", "float", false, "", nullptr, nullptr, "number", false},
+    {"density_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"lobe_mix", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_steps", "int", false, "", nullptr, nullptr, "number", false},
+    {"multi_scatter", "float", false, "", nullptr, nullptr, "number", false},
+    {"random_walk", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"random_walk_exact_events", "int", false, "", nullptr, nullptr, "number", false},
+    {"random_walk_max_events", "int", false, "", nullptr, nullptr, "number", false},
+    {"scattering_coefficient", "float", false, "", nullptr, nullptr, "number", false},
+    {"scattering_color", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"shadow_steps", "int", false, "", nullptr, nullptr, "number", false},
+    {"shadow_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"shadow_stride", "int", false, "", nullptr, nullptr, "number", false},
+    {"voxel_step_multiplier", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_fog_shader = {
     "fluid.set_fog_shader", "fluid",
@@ -2080,29 +2206,23 @@ static const MethodDescriptor desc_fluid_set_fog_shader = {
 static const MethodRegistration reg_fluid_set_fog_shader(desc_fluid_set_fog_shader);
 
 static const MethodParam params_fluid_set_grain_settings[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"compact_sleep_work", "bool", false,
-        "Adaptive compact GPU contact work for settled sleeping piles. False selects "
-        "the dense reference. Does not reset particles or change sleep thresholds.",
-        "true", nullptr},
-    {"contact_probe_enabled", "bool", false,
-        "Opt-in GPU contact/overflow diagnostics; adds measurement overhead. Read "
-        "fluid.matter_models grain_diagnostics.contact_probe, including held attempts.",
-        "false", nullptr},
-    {"radius_m", "float", false, "", nullptr, nullptr},
-    {"sliding_damping_n_s_m", "float", false, "", nullptr, nullptr},
-    {"max_substeps", "int", false, "", nullptr, nullptr},
-    {"sleep", "bool", false, "The domain's sleep switch, for DEM and MPM alike. DEM: a grain slower than sleep_speed_m_s for sleep_time_s stops computing contacts until a faster grain touches it. MPM (snow/granular): when every parcel of the domain has rested for 3 frames (step_stats mpm_resting_particles) the frame runs no substep. Default true; false is the A/B reference.", nullptr, nullptr},
-    {"sleep_speed_m_s", "float", false, "0..1 m/s, absolute; translation speed and spin x radius below which a grain counts as still. Default 0.002.", nullptr, nullptr},
-    {"sleep_time_s", "float", false, "0.01..10 s a grain must stay still before it sleeps. Default 0.2.", nullptr, nullptr},
-    {"contact_resolution", "int", false, "", nullptr, nullptr},
-    {"fluid_coupling", "bool", false, "", nullptr, nullptr},
-    {"volume_exclusion", "bool", false, "", nullptr, nullptr},
-    {"stiffness_scale", "float", false, ".01..1000. Contact stiffness k = scale x 8e5 N/m per m x radius_m (1 = 2e4 N/m at 25 mm).", nullptr, nullptr},
-    {"radius_max_m", "float", false, "0=fixed; otherwise radius_m..min(4*radius_m,1 m). Birth locked.", nullptr, nullptr},
-    {"size_distribution", "string", false, "uniform, log_uniform or bimodal; number distribution.", nullptr, nullptr},
-    {"size_seed", "int", false, "0..2147483647; stable identity size seed. Birth locked.", nullptr, nullptr},
-    {"large_grain_fraction", "float", false, "0..1; bimodal number fraction at radius_max_m.", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"radius_m", "float", false, "", nullptr, nullptr, nullptr, false},
+    {"sliding_damping_n_s_m", "float", false, "", nullptr, nullptr, nullptr, false},
+    {"max_substeps", "int", false, "", nullptr, nullptr, "number", false},
+    {"sleep", "bool", false, "The domain's sleep switch, for DEM and MPM alike. DEM: a grain slower than sleep_speed_m_s for sleep_time_s stops computing contacts until a faster grain touches it. MPM (snow/granular): when every parcel of the domain has rested for 3 frames (step_stats mpm_resting_particles) the frame runs no substep. Default true; false is the A/B reference.", nullptr, nullptr, nullptr, false},
+    {"sleep_speed_m_s", "float", false, "0..1 m/s, absolute; translation speed and spin x radius below which a grain counts as still. Default 0.002.", nullptr, nullptr, nullptr, false},
+    {"sleep_time_s", "float", false, "0.01..10 s a grain must stay still before it sleeps. Default 0.2.", nullptr, nullptr, nullptr, false},
+    {"contact_resolution", "int", false, "", nullptr, nullptr, "number", false},
+    {"fluid_coupling", "bool", false, "", nullptr, nullptr, nullptr, false},
+    {"volume_exclusion", "bool", false, "", nullptr, nullptr, nullptr, false},
+    {"stiffness_scale", "float", false, ".01..1000. Contact stiffness k = scale x 8e5 N/m per m x radius_m (1 = 2e4 N/m at 25 mm).", nullptr, nullptr, nullptr, false},
+    {"radius_max_m", "float", false, "0=fixed; otherwise radius_m..min(4*radius_m,1 m). Birth locked.", nullptr, nullptr, nullptr, false},
+    {"size_distribution", "string", false, "uniform, log_uniform or bimodal; number distribution.", nullptr, nullptr, nullptr, false},
+    {"size_seed", "int", false, "0..2147483647; stable identity size seed. Birth locked.", nullptr, nullptr, "number", false},
+    {"large_grain_fraction", "float", false, "0..1; bimodal number fraction at radius_max_m.", nullptr, nullptr, nullptr, false},
+    {"compact_sleep_work", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"contact_probe_enabled", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_fluid_set_grain_settings = {
     "fluid.set_grain_settings", "fluid",
@@ -2118,14 +2238,14 @@ static const MethodDescriptor desc_fluid_set_grain_settings = {
 static const MethodRegistration reg_fluid_set_grain_settings(desc_fluid_set_grain_settings);
 
 static const MethodParam params_fluid_set_label_views[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"reset", "bool", false, "", nullptr, nullptr},
-    {"routes", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"reset", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"routes", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_fluid_set_label_views = {
     "fluid.set_label_views", "fluid",
     "Route a liquid's particle STATE labels to views: routes {label: follow|sdf|splat|fog|hidden}; reset restores the design table",
-    "Labels: unknown body spray foam bubble mist frozen. Defaults: spray/foam/bubble -> splat, mist -> fog, the rest follow their substance. The substance (binding representation or domain default) still decides where 'follow' parcels go. The spray/foam/bubble rows ALSO route the domain's whitewater (massless secondary particles): for whitewater, sdf = a white medium in the surface volume, fog = deposited into the fog volume. Read back with fluid.get: label_routes, views[].labels, views[].particles, views[].whitewater, hidden_particles; fluid.get_whitewater views. Render only; unknown names fail the whole call.",
+    "Labels: unknown body spray foam bubble mist frozen. Defaults: spray follows its substance; foam/bubble -> splat, mist -> fog, the rest follow their substance. Explicitly saved or user-selected spray routes are retained. The substance (binding representation or domain default) still decides where 'follow' parcels go. The spray/foam/bubble rows ALSO route the domain's whitewater (massless secondary particles): for whitewater, sdf = a white medium in the surface volume, fog = deposited into the fog volume. Read back with fluid.get: label_routes, views[].labels, views[].particles, views[].whitewater, hidden_particles; fluid.get_whitewater views. Render only; unknown names fail the whole call.",
     "write", "SceneWrite", false, "any",
     "fluid|set|label|views|view|spray|splat|render|appearance",
     "fluid.get|fluid.set_substance_material",
@@ -2136,9 +2256,9 @@ static const MethodDescriptor desc_fluid_set_label_views = {
 static const MethodRegistration reg_fluid_set_label_views(desc_fluid_set_label_views);
 
 static const MethodParam params_fluid_set_lanes[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"gas_lane_enabled", "boolean", true, "", nullptr, nullptr},
-    {"liquid_lane_enabled", "boolean", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"gas_lane_enabled", "boolean", true, "", nullptr, nullptr, "bool", true},
+    {"liquid_lane_enabled", "boolean", true, "", nullptr, nullptr, "bool", true},
 };
 static const MethodDescriptor desc_fluid_set_lanes = {
     "fluid.set_lanes", "fluid",
@@ -2154,72 +2274,73 @@ static const MethodDescriptor desc_fluid_set_lanes = {
 static const MethodRegistration reg_fluid_set_lanes(desc_fluid_set_lanes);
 
 static const MethodParam params_fluid_set_param[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"anisotropy_enabled", "any", false, "", nullptr, nullptr},
-    {"anisotropy_max_stretch", "any", false, "", nullptr, nullptr},
-    {"anisotropy_neighbor_min", "any", false, "", nullptr, nullptr},
-    {"anisotropy_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"backend", "any", false, "", nullptr, nullptr},
-    {"boundary", "any", false, "", nullptr, nullptr},
-    {"coord_space", "any", false, "", nullptr, nullptr},
-    {"default_substance", "any", false, "", nullptr, nullptr},
-    {"device", "any", false, "", nullptr, nullptr},
-    {"domain_max", "vec3", false, "", nullptr, nullptr},
-    {"domain_min", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"fog_autoconversion_kg_m3", "any", false, "", nullptr, nullptr},
-    {"fog_autoconversion_rate", "any", false, "", nullptr, nullptr},
-    {"fog_ceiling_kg_m3", "any", false, "", nullptr, nullptr},
-    {"granular_max_solver_substeps", "any", false, "", nullptr, nullptr},
-    {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"max_auto_resolution", "any", false, "", nullptr, nullptr},
-    {"max_particles", "any", false, "", nullptr, nullptr},
-    {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
-    {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"pore_amount", "any", false, "", nullptr, nullptr},
-    {"pore_detail", "any", false, "", nullptr, nullptr},
-    {"pore_scale", "any", false, "", nullptr, nullptr},
-    {"position_smoothing", "any", false, "", nullptr, nullptr},
-    {"pressure_iterations", "int", false, "", "24", nullptr},
-    {"pressure_iterations_grid_scaled", "bool", false, "", "true", nullptr},
-    {"pressure_relative_residual", "float", false, "", nullptr, nullptr},
-    {"render_mode", "any", false, "", nullptr, nullptr},
-    {"smoothing_iterations", "any", false, "", nullptr, nullptr},
-    {"solid_phase", "any", false, "", nullptr, nullptr},
-    {"solid_phase_fill", "any", false, "", nullptr, nullptr},
-    {"surface_gpu", "any", false, "", nullptr, nullptr},
-    {"surface_material", "any", false, "", nullptr, nullptr},
-    {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
-    {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
-    {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_liquid_enabled", "any", false, "", nullptr, nullptr},
-    {"uvw_refresh_period", "any", false, "", nullptr, nullptr},
-    {"viscosity_sweeps", "any", false, "", nullptr, nullptr},
-    {"viscosity_wall_slip", "any", false, "", nullptr, nullptr},
-    {"visible", "any", false, "", nullptr, nullptr},
-    {"voxel_size", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"anisotropy_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"anisotropy_max_stretch", "float", false, "", nullptr, nullptr, "number", false},
+    {"anisotropy_neighbor_min", "float", false, "", nullptr, nullptr, "number", false},
+    {"anisotropy_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"backend", "string", false, "", nullptr, nullptr, "string", false},
+    {"boundary", "string", false, "", nullptr, nullptr, "string", false},
+    {"coord_space", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"default_substance", "string", false, "", nullptr, nullptr, "string", false},
+    {"device", "string", false, "", nullptr, nullptr, "string", false},
+    {"domain_max", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"domain_min", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"fog_autoconversion_kg_m3", "float", false, "", nullptr, nullptr, "number", false},
+    {"fog_autoconversion_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"fog_ceiling_kg_m3", "float", false, "", nullptr, nullptr, "number", false},
+    {"granular_max_solver_substeps", "float", false, "", nullptr, nullptr, "number", false},
+    {"kernel_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"matter_liquid_multirate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"max_auto_resolution", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_particles", "float", false, "", nullptr, nullptr, "number", false},
+    {"narrow_band_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"particle_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"pore_amount", "float", false, "", nullptr, nullptr, "number", false},
+    {"pore_detail", "float", false, "", nullptr, nullptr, "number", false},
+    {"pore_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"position_smoothing", "float", false, "", nullptr, nullptr, "number", false},
+    {"pressure_iterations", "int", false, "", "24", nullptr, "number", false},
+    {"pressure_iterations_grid_scaled", "bool", false, "", "true", nullptr, "bool", false},
+    {"pressure_relative_residual", "float", false, "", nullptr, nullptr, "number", false},
+    {"render_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"smoothing_iterations", "float", false, "", nullptr, nullptr, "number", false},
+    {"solid_phase", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"solid_phase_fill", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_gpu", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"surface_material", "string", false, "", nullptr, nullptr, "string", false},
+    {"surface_offset_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_resolution_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"thermal_liquid_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"uvw_refresh_period", "float", false, "", nullptr, nullptr, "number", false},
+    {"viscosity_sweeps", "float", false, "", nullptr, nullptr, "number", false},
+    {"viscosity_wall_slip", "float", false, "", nullptr, nullptr, "number", false},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"voxel_size", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_param = {
     "fluid.set_param", "fluid",
     "Update domain numerical, rendering and thermal settings; select its default substance",
-    "pressure_iterations (cap, >= 1) and pressure_relative_residual set the liquid pressure solve; fluid.list_domains reports pressure_cg_iterations / max_iterations / final_relative_residual (iterations at the cap with a residual above target = unconverged, the liquid compresses) and seed_* (recipe, requested vs emitted particles, seed_truncated when Max Particles cut the seed). default_substance names a library substance and applies its solver hints once. Physics is resolved from that substance each step. Derive a project substance and use substance.set to edit viscosity, granular material, freezing and fuel properties. Legacy preset, chemistry_preset and material physics setters are rejected. Other fields retain overlay semantics. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. Numerical thermal_* keys control cooling; selecting Wax applies its thermal hints; read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Explicit numerical and surface settings are applied after substance solver hints. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms. max_auto_resolution (>= 32, no ceiling) is the per-axis grid density knob for gas or liquid; raising it keeps the voxel and adds cells, lowering re-derives a coarser voxel (same rule as the panel). An enforced resource budget may still coarsen the grid and a GPU grid stops at ~1080^3 cells (32-bit face indices): read fluid.get resolution / voxel_size, not the knob. max_particles has no ceiling (>= 1).",
+    "pressure_iterations (cap, >= 1) and pressure_relative_residual set the liquid pressure solve; fluid.list_domains reports pressure_cg_iterations / max_iterations / final_relative_residual (iterations at the cap with a residual above target = unconverged, the liquid compresses) and seed_* (recipe, requested vs emitted particles, seed_truncated when Max Particles cut the seed). default_substance names a library substance and applies its solver hints once. Physics is resolved from that substance each step. Derive a project substance and use substance.set to edit viscosity, granular material, freezing and fuel properties. Legacy preset, chemistry_preset and material physics setters are rejected. Other fields retain overlay semantics. render_mode accepts particles/splat, surface/sdf and fog (aliases volume_fog, volume); on a liquid 'fog' raymarches the splatted density with the domain VolumeShader, on a gas domain 'volume' is the plain gas route. Reads return the canonical name ('fog' for a liquid). A SurfaceSDF substance override claims the single domain volume, so a fog domain with one draws that surface, not fog (substance_materials effective_representation says which). fluid.get reports active_density_cells / max_density, the fog mode's input. The retired virtual_particles/virtual/adaptive names are refused with an error. Changing voxel_size or the bounds invalidates the bake for that domain. Surface keys (surface_resolution_multiplier 1..4, kernel/particle radius, smoothing, anisotropy_*) refine the RENDERED surface without touching the simulation and are rejected out of range, not clamped. Numerical thermal_* keys control cooling; selecting Wax applies its thermal hints; read the result back as fluid.get thermal_frozen_particles / thermal_min_kelvin, and thermal_cold_unsupported > 0 with nothing frozen means the liquid is cold but touches no collider or closed wall. Explicit numerical and surface settings are applied after substance solver hints. Granular substeps are adaptive: wave/strain CFL requests are fully granted on CPU and GPU, preserving the authored Young modulus. granular_max_solver_substeps is a legacy compatibility field (stored/clamped to 1..64); it no longer limits physical substeps. Closed, inviscid Vulkan granular domains without solid/frozen parcels keep particle velocity/affine on device between substeps. Positions remain available to the host for occupancy and material coordinates. Compare total_ms and upload/download_bytes; deferred GPU execution can be charged to advect_ms instead of g2p_ms. max_auto_resolution (>= 32, no ceiling) is the per-axis grid density knob for gas or liquid; raising it keeps the voxel and adds cells, lowering re-derives a coarser voxel (same rule as the panel). An enforced resource budget may still coarsen the grid and a GPU grid stops at ~1080^3 cells (32-bit face indices): read fluid.get resolution / voxel_size, not the knob. max_particles has no ceiling (>= 1). matter_liquid_multirate was removed 2026-11-11 and is refused: a liquid + MPM domain always runs the liquid's transfer and projection on its own CFL clock, the MPM lane every elastic substep, coupled by pore drag and the pressure's push on the MPM grid clock (fluid.step_stats mixed_stages.liquid_steps / liquid_multirate report it).",
     "write", "SceneWrite", false, "any",
     "fluid|set|param|simulation|configure|viscosity|granular|render-mode|backend",
     "fluid.get|fluid.set_substance_material|substance.get|substance.derive|substance.set",
     "fluid.create_domain", "timeline.set_frame", "fluid.get|render.probe", "simulation_cache",
-    params_fluid_set_param, 45,
+    params_fluid_set_param, 46,
     true
 };
 static const MethodRegistration reg_fluid_set_param(desc_fluid_set_param);
 
 static const MethodParam params_fluid_set_phase_grid[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"phase", "string", true, "", nullptr, nullptr},
-    {"inherit", "boolean", false, "", "false", nullptr},
-    {"bounds_min", "array", false, "", nullptr, nullptr},
-    {"bounds_max", "array", false, "", nullptr, nullptr},
-    {"voxel", "number", false, "", "0.1", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"phase", "string", true, "", nullptr, nullptr, "string", true},
+    {"inherit", "boolean", false, "", "false", nullptr, "bool", false},
+    {"bounds_min", "array", false, "", nullptr, nullptr, nullptr, false},
+    {"bounds_max", "array", false, "", nullptr, nullptr, nullptr, false},
+    {"voxel", "number", false, "", "0.1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_phase_grid = {
     "fluid.set_phase_grid", "fluid",
@@ -2235,7 +2356,7 @@ static const MethodDescriptor desc_fluid_set_phase_grid = {
 static const MethodRegistration reg_fluid_set_phase_grid(desc_fluid_set_phase_grid);
 
 static const MethodParam params_fluid_set_phase_output[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_set_phase_output = {
     "fluid.set_phase_output", "fluid",
@@ -2251,7 +2372,7 @@ static const MethodDescriptor desc_fluid_set_phase_output = {
 static const MethodRegistration reg_fluid_set_phase_output(desc_fluid_set_phase_output);
 
 static const MethodParam params_fluid_set_pore_exchange[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_set_pore_exchange = {
     "fluid.set_pore_exchange", "fluid",
@@ -2266,23 +2387,39 @@ static const MethodDescriptor desc_fluid_set_pore_exchange = {
 };
 static const MethodRegistration reg_fluid_set_pore_exchange(desc_fluid_set_pore_exchange);
 
+static const MethodParam params_fluid_set_seed_source_settings[] = {
+    {"settings", "object", true, "Shared auto_capacity (bool), memory_guard (bool), particles_per_cell (integer 1..64), settle (bool), settle_max_steps (integer 1..4000), settle_tolerance (number 0..1 meters)", nullptr, nullptr, nullptr, true},
+};
+static const MethodDescriptor desc_fluid_set_seed_source_settings = {
+    "fluid.set_seed_source_settings", "fluid",
+    "Set shared continuum seed density and initial settle settings",
+    "Box bounds are world coordinates; nonempty mesh_object uses the existing flat mesh-volume resolver. Sources are produced once on Apply/reset, never per frame. Material/domain/custom temperature policies are separate from ambient Heat Exchange. Editing recipes does not reseed live particles; Apply replaces all layers transactionally, returns the timeline to frame zero and arms shared settling. Overlapping layer AABBs, missing meshes, insufficient particle capacity and incompatible DEM/MPM materials reject generation with live particles preserved. Continuum PPC is shared; DEM uses physical radius. One DEM material and one MPM material per domain, including potential emitter materials. Full schema and limits: docs/dev/MATTER_SEED_SOURCES.md. auto_capacity defaults true and computes a conservative recipe capacity plus 15 percent and 64 slots on successful Apply/reset. Manual max_particles remains available with auto_capacity=false. memory_guard defaults true; planning allowances use 4096 host bytes and 2048 GPU bytes per planned particle plus 1024/512 bytes per grid cell. These are heuristic allowances, not measured peak allocations. A guard rejects above 70 percent of measured available RAM or Vulkan compute GPU budget; unmeasured devices are not treated as zero. memory_guard=false makes the warning advisory. Neither setting changes grid resolution or material physics. Memory measurements are cached for up to one second. Viewport box edits use update_seed_source bounds; mesh transforms use existing object authoring.",
+    "write", "SceneWrite", false, "Domain, enabled recipe mode, sources, resolved_birth_kelvin, environment_kelvin, density/capacity and pending_recipe_changes; plan with per-layer particle_upper_bound, suggested_capacity, heuristic host/GPU planning bytes and measured memory availability",
+    "fluid|set|seed|source|settings|matter|layers|initial|temperature",
+    "fluid.get_seed_sources|fluid.apply_seed_sources|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_seed_source_settings, 1,
+    true
+};
+static const MethodRegistration reg_fluid_set_seed_source_settings(desc_fluid_set_seed_source_settings);
+
 static const MethodParam params_fluid_set_splat_geometry[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"near_mesh_shape", "string", false, "Scene exemplars, seeded rounded rocks, or convex angular grains", nullptr, "scene|rock|voronoi"},
-    {"near_mesh_source_materials", "bool", false, "Preserve original per-face materials on near scene exemplars; overrides domain/substance/wet bands only on those meshes", nullptr, nullptr},
-    {"geometry", "string", false, "", nullptr, nullptr},
-    {"geometry_source", "any", false, "", nullptr, nullptr},
-    {"grain_size_variation", "any", false, "", nullptr, nullptr},
-    {"granular_physical_carriers", "bool", false, "", nullptr, nullptr},
-    {"near_mesh_budget", "any", false, "", nullptr, nullptr},
-    {"near_mesh_distance", "any", false, "", nullptr, nullptr},
-    {"near_mesh_enabled", "bool", false, "", nullptr, nullptr},
-    {"near_mesh_sources", "any", false, "", nullptr, nullptr},
-    {"radius_factor", "any", false, "", nullptr, nullptr},
-    {"size_multiplier", "any", false, "", nullptr, nullptr},
-    {"subdivisions", "int", false, "", nullptr, nullptr},
-    {"virtual_grain_budget", "any", false, "", nullptr, nullptr},
-    {"virtual_grains", "int", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"near_mesh_shape", "string", false, "Scene exemplars, seeded rounded rocks, or convex angular grains", nullptr, "scene|rock|voronoi", "string", false},
+    {"near_mesh_source_materials", "bool", false, "Preserve original per-face materials on near scene exemplars; overrides domain/substance/wet bands only on those meshes", nullptr, nullptr, "bool", false},
+    {"geometry", "string", false, "", nullptr, nullptr, "string", false},
+    {"geometry_source", "string", false, "", nullptr, nullptr, "string", false},
+    {"grain_size_variation", "float", false, "", nullptr, nullptr, "number", false},
+    {"granular_physical_carriers", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"near_mesh_budget", "float", false, "", nullptr, nullptr, "number", false},
+    {"near_mesh_distance", "float", false, "", nullptr, nullptr, "number", false},
+    {"near_mesh_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"near_mesh_sources", "array", false, "", nullptr, nullptr, "string[]", false},
+    {"radius_factor", "float", false, "", nullptr, nullptr, "number", false},
+    {"size_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"subdivisions", "int", false, "", nullptr, nullptr, "number", false},
+    {"virtual_grain_budget", "float", false, "", nullptr, nullptr, "number", false},
+    {"virtual_grains", "int", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_splat_geometry = {
     "fluid.set_splat_geometry", "fluid",
@@ -2298,8 +2435,8 @@ static const MethodDescriptor desc_fluid_set_splat_geometry = {
 static const MethodRegistration reg_fluid_set_splat_geometry(desc_fluid_set_splat_geometry);
 
 static const MethodParam params_fluid_set_splat_material[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"material", "string", false, "", "", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"material", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_set_splat_material = {
     "fluid.set_splat_material", "fluid",
@@ -2315,18 +2452,18 @@ static const MethodDescriptor desc_fluid_set_splat_material = {
 static const MethodRegistration reg_fluid_set_splat_material(desc_fluid_set_splat_material);
 
 static const MethodParam params_fluid_set_substance_material[] = {
-    {"domain", "string", true, "Fluid domain name", nullptr, nullptr},
-    {"substance", "string", true, "Substance id from msf.substances", nullptr, nullptr},
-    {"phase", "string", false, "Static solid block flag: solid blocks the flow as a fixed obstacle. Liquid parcels melt and freeze by temperature, so their phase is derived, not set here", nullptr, "liquid|solid"},
-    {"representation", "string", false, "How the substance is rendered", nullptr, nullptr},
-    {"kinematic_viscosity", "any", false, "", nullptr, nullptr},
-    {"material", "string", false, "", "", nullptr},
-    {"miscibility", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "Fluid domain name", nullptr, nullptr, "string", false},
+    {"substance", "string", true, "Substance id from msf.substances", nullptr, nullptr, "string", false},
+    {"phase", "string", false, "Static solid block flag: solid blocks the flow as a fixed obstacle. Liquid parcels melt and freeze by temperature, so their phase is derived, not set here", nullptr, "liquid|solid", "string", false},
+    {"representation", "string", false, "How the substance is rendered", nullptr, nullptr, "string", false},
+    {"kinematic_viscosity", "float", false, "", nullptr, nullptr, "number", false},
+    {"material", "string", false, "", "", nullptr, "string", false},
+    {"miscibility", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_substance_material = {
     "fluid.set_substance_material", "fluid",
     "Bind a substance (its physical identity, phase and representation) to a fluid domain",
-    "Phase is the static solid block flag (liquid parcels melt and freeze by temperature, so their phase is derived). The parcel's constitutive model comes from its Substance alone. representation selects inherit|splat|sdf|fog drawing. For frozen SDF carriers without an authored source/domain surface material, an Ice binding supplies the phase fallback; otherwise the editable Ice (Automatic) preset is created lazily. Authored source/domain materials retain precedence.",
+    "Phase is the static solid block flag (liquid parcels melt and freeze by temperature, so their phase is derived). The parcel's constitutive model comes from its Substance alone. representation selects inherit|splat|sdf|fog drawing.",
     "write", "SceneWrite", false, "any",
     "fluid|set|substance|material|simulation|phase|msf",
     "substance.list|fluid.set_splat_material|fluid.set_param",
@@ -2337,8 +2474,8 @@ static const MethodDescriptor desc_fluid_set_substance_material = {
 static const MethodRegistration reg_fluid_set_substance_material(desc_fluid_set_substance_material);
 
 static const MethodParam params_fluid_set_substance_splat_geometry[] = {
-    {"domain", "string", true, "Existing domain name", nullptr, nullptr},
-    {"substance", "string", true, "Substance output binding name", nullptr, nullptr},
+    {"domain", "string", true, "Existing domain name", nullptr, nullptr, "string", true},
+    {"substance", "string", true, "Substance output binding name", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_fluid_set_substance_splat_geometry = {
     "fluid.set_substance_splat_geometry", "fluid",
@@ -2354,10 +2491,10 @@ static const MethodDescriptor desc_fluid_set_substance_splat_geometry = {
 static const MethodRegistration reg_fluid_set_substance_splat_geometry(desc_fluid_set_substance_splat_geometry);
 
 static const MethodParam params_fluid_set_surface_interior[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"absorption_coefficient", "float", false, "", nullptr, nullptr},
-    {"absorption_color", "vec3", false, "", nullptr, nullptr},
-    {"refraction_tint", "vec3", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"absorption_coefficient", "float", false, "", nullptr, nullptr, "number", false},
+    {"absorption_color", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"refraction_tint", "vec3", false, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_fluid_set_surface_interior = {
     "fluid.set_surface_interior", "fluid",
@@ -2372,33 +2509,50 @@ static const MethodDescriptor desc_fluid_set_surface_interior = {
 };
 static const MethodRegistration reg_fluid_set_surface_interior(desc_fluid_set_surface_interior);
 
+static const MethodParam params_fluid_set_wall_contact[] = {
+    {"domain", "string", true, "Particle matter domain name or id", nullptr, nullptr, "string", false},
+    {"settings", "object", false, "Atomic partial object: friction [0,2], restitution [0,1], adhesion_pa [0,1e9] Pa.", "{}", nullptr, nullptr, false},
+};
+static const MethodDescriptor desc_fluid_set_wall_contact = {
+    "fluid.set_wall_contact", "fluid",
+    "Set shared domain-wall friction, restitution and adhesion for liquid, MPM and DEM.",
+    "settings is an atomic partial object: friction in [0,2], restitution in [0,1]. Unknown keys, non-numbers and non-finite/out-of-range values fail without modifying settings. Mesh collider surfaces are independent. Restitution controls liquid/DEM impacts. MPM grid and particle escape contact are non-rebounding; MPM elasticity is determined by its material stress. adhesion_pa is tensile/cohesive wall traction in Pa, finite in [0,1e9], default 0. It is separate from viscous no-slip and wetting angle. Continuum uses adhesion*dt/(rho*h); DEM uses projected grain area and an established contact. Open/Periodic boundaries keep settings but disable wall contact. Adhesive DEM runs without sleeping optimization.",
+    "write", "SceneWrite", false, "object",
+    "fluid|set|wall|contact|simulation|friction|mpm|dem",
+    nullptr,
+    nullptr, nullptr, "fluid.get_wall_contact", "simulation_cache",
+    params_fluid_set_wall_contact, 2,
+    true
+};
+static const MethodRegistration reg_fluid_set_wall_contact(desc_fluid_set_wall_contact);
+
 static const MethodParam params_fluid_set_whitewater[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"bubble_min_neighbors", "int", false, "", nullptr, nullptr},
-    {"buoyancy", "float", false, "", nullptr, nullptr},
-    {"crest_cos", "float", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"fluid_drag", "float", false, "", nullptr, nullptr},
-    {"ke_max", "float", false, "", nullptr, nullptr},
-    {"ke_min", "float", false, "", nullptr, nullptr},
-    {"lifetime", "float", false, "", nullptr, nullptr},
-    {"max_foam", "int", false, "", nullptr, nullptr},
-    {"neighbor_radius_voxels", "float", false, "", nullptr, nullptr},
-    {"render_mode", "any", false, "", nullptr, nullptr},
-    {"spawn_jitter_voxels", "float", false, "", nullptr, nullptr},
-    {"spray_drag", "float", false, "", nullptr, nullptr},
-    {"spray_max_neighbors", "int", false, "", nullptr, nullptr},
-    {"ta_max", "float", false, "", nullptr, nullptr},
-    {"ta_min", "float", false, "", nullptr, nullptr},
-    {"trapped_air_rate", "float", false, "", nullptr, nullptr},
-    {"volume_bubble_strength", "float", false, "", nullptr, nullptr},
-    {"volume_color", "vec3", false, "", nullptr, nullptr},
-    {"volume_density", "float", false, "", nullptr, nullptr},
-    {"volume_opacity", "float", false, "", nullptr, nullptr},
-    {"volume_spray_strength", "float", false, "", nullptr, nullptr},
-    {"wave_crest_rate", "float", false, "", nullptr, nullptr},
-    {"wc_max", "float", false, "", nullptr, nullptr},
-    {"wc_min", "float", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"bubble_min_neighbors", "int", false, "", nullptr, nullptr, "number", false},
+    {"buoyancy", "float", false, "", nullptr, nullptr, "number", false},
+    {"crest_cos", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"fluid_drag", "float", false, "", nullptr, nullptr, "number", false},
+    {"ke_max", "float", false, "", nullptr, nullptr, "number", false},
+    {"ke_min", "float", false, "", nullptr, nullptr, "number", false},
+    {"lifetime", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_foam", "int", false, "", nullptr, nullptr, "number", false},
+    {"neighbor_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"render_mode", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"spawn_jitter_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"spray_drag", "float", false, "", nullptr, nullptr, "number", false},
+    {"spray_max_neighbors", "int", false, "", nullptr, nullptr, "number", false},
+    {"ta_max", "float", false, "", nullptr, nullptr, "number", false},
+    {"ta_min", "float", false, "", nullptr, nullptr, "number", false},
+    {"trapped_air_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"volume_bubble_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"volume_color", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"volume_density", "float", false, "", nullptr, nullptr, "number", false},
+    {"volume_opacity", "float", false, "", nullptr, nullptr, "number", false},
+    {"volume_spray_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"wave_crest_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"wc_max", "float", false, "", nullptr, nullptr, "number", false},
+    {"wc_min", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_set_whitewater = {
     "fluid.set_whitewater", "fluid",
@@ -2414,11 +2568,11 @@ static const MethodDescriptor desc_fluid_set_whitewater = {
 static const MethodRegistration reg_fluid_set_whitewater(desc_fluid_set_whitewater);
 
 static const MethodParam params_fluid_settle[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"displacement_m", "float", false, "", "0.0002", nullptr},
-    {"max_steps", "int", false, "", "240", nullptr},
-    {"on_seed", "bool", false, "", "true", nullptr},
-    {"request", "bool", false, "", "true", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"displacement_m", "float", false, "", "0.0002", nullptr, "number", false},
+    {"max_steps", "int", false, "", "240", nullptr, "number", false},
+    {"on_seed", "bool", false, "", "true", nullptr, "bool", false},
+    {"request", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_fluid_settle = {
     "fluid.settle", "fluid",
@@ -2434,7 +2588,7 @@ static const MethodDescriptor desc_fluid_settle = {
 static const MethodRegistration reg_fluid_settle(desc_fluid_settle);
 
 static const MethodParam params_fluid_state_digest[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_state_digest = {
     "fluid.state_digest", "fluid",
@@ -2450,7 +2604,7 @@ static const MethodDescriptor desc_fluid_state_digest = {
 static const MethodRegistration reg_fluid_state_digest(desc_fluid_state_digest);
 
 static const MethodParam params_fluid_step[] = {
-    {"dt", "float", false, "", "0.0166667", nullptr},
+    {"dt", "float", false, "", "0.0166667", nullptr, "number", false},
 };
 static const MethodDescriptor desc_fluid_step = {
     "fluid.step", "fluid",
@@ -2466,12 +2620,12 @@ static const MethodDescriptor desc_fluid_step = {
 static const MethodRegistration reg_fluid_step(desc_fluid_step);
 
 static const MethodParam params_fluid_step_stats[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_step_stats = {
     "fluid.step_stats", "fluid",
     "Read the last fluid step's total time, requested GPU transfer bytes, call times, and actual GPU path",
-    "Read measured first. total_ms is the complete liquid-domain wall time, including APIC, labels, whitewater and the density bridge. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters. pressure_sparse_used and pressure_sparse_active_tiles/allocated_tiles/resident_bytes describe only the Vulkan pressure scratch pool, not the full fluid or gas grid. Unused sparse pressure reports zero; no runtime FPS or full sparse-storage acceptance is implied. viscosity_sparse_used and viscosity_sparse_active_tiles/allocated_tiles/resident_bytes describe only the implicit-viscosity MAC RHS tile pool; transfer_sparse_used and transfer_sparse_active_tiles/allocated_tiles/resident_bytes describe compact P2G/G2P velocity, weights and FLIP pages plus tile lookup. flip_sparse_used requires a successful compact FLIP gather; transfer_sparse_status reports dense fallback reasons. Projection/contact publication, host MAC arrays and gas storage remain dense; transfer pool bytes are additional resident storage, not net VRAM savings. collider_query_gpu / collider_query_ms / collider_query_error: mesh_bvh shell distances computed on the GPU this step (sim_collider_bvh_query); false with an error means the CPU loop ran (1.2 s/frame for 352k triangles over 885k cells, 2026-11-02). recovered_solid_particles: parcels teleported out of collider cells before P2G this frame; mpm_surface_pushed_particles: MPM parcels put back onto a collider's true surface (solid_phi < 0) instead -- MPM parcels resting in a cell whose centre is solid are left alone, so a nonzero recovered count on an elastic or snow body over a mesh/analytic collider is a regression. mpm_resting_particles: MPM parcels that REST this frame (docs/dev/MPM_UYUYAN_KAROLAR.md: slower than 0.1 m/s and asleep, or slower than 0.03 m/s and supported). When every parcel has rested for 3 frames the step runs no substep (gpu_status matter_asleep) and a resting MPM domain costs ~nothing; any parcel that does not rest keeps the whole domain awake and exact. Never with the domain sleep switch off (fluid.set_grain_settings sleep), a force field, liquid or elastic parcels, a moving collider, or on the frames after a context change (gravity, grid, collider set, particle count).",
+    "Read measured first. total_ms is the complete liquid-domain wall time, including APIC, labels, whitewater and the density bridge. Bytes are requested transfers in the fluid domain step, including fluid coupling. upload_call_ms, download_call_ms, batch_end_ms, synchronize_ms and dispatch_call_ms are host call times; dispatch_call_ms is not kernel time. Cached-frame reads do not run the solver or refresh these counters. pressure_sparse_used and pressure_sparse_active_tiles/allocated_tiles/resident_bytes describe only the Vulkan pressure scratch pool, not the full fluid or gas grid. Unused sparse pressure reports zero; no runtime FPS or full sparse-storage acceptance is implied. viscosity_sparse_used and viscosity_sparse_active_tiles/allocated_tiles/resident_bytes describe only the implicit-viscosity MAC RHS tile pool; transfer_sparse_used and transfer_sparse_active_tiles/allocated_tiles/resident_bytes describe compact P2G/G2P velocity, weights and FLIP pages plus tile lookup. flip_sparse_used requires a successful compact FLIP gather; transfer_sparse_status reports dense fallback reasons. Projection/contact publication, host MAC arrays and gas storage remain dense; transfer pool bytes are additional resident storage, not net VRAM savings. collider_query_gpu / collider_query_ms / collider_query_error: mesh_bvh shell distances computed on the GPU this step (sim_collider_bvh_query); false with an error means the CPU loop ran (1.2 s/frame for 352k triangles over 885k cells, 2026-11-02). recovered_solid_particles: parcels teleported out of collider cells before P2G this frame; mpm_surface_pushed_particles: MPM parcels put back onto a collider's true surface (solid_phi < 0) instead -- MPM parcels resting in a cell whose centre is solid are left alone, so a nonzero recovered count on an elastic or snow body over a mesh/analytic collider is a regression. mpm_resting_particles: MPM parcels that REST this frame (docs/dev/MPM_UYUYAN_KAROLAR.md: slower than 0.1 m/s and asleep, or slower than 0.03 m/s and supported). When every parcel has rested for 3 frames the step runs no substep (gpu_status matter_asleep) and a resting MPM domain costs ~nothing; any parcel that does not rest keeps the whole domain awake and exact. Never with the domain sleep switch off (fluid.set_grain_settings sleep), a force field, liquid or elastic parcels, a moving collider, or on the frames after a context change (gravity, grid, collider set, particle count). viscosity_pcg_iterations / viscosity_pcg_relative_residual / viscosity_pcg_unconverged: the GPU viscous solve runs Jacobi-preconditioned CG to sqrt(r.z/r0.z0) < 1e-4 (max 500 iterations) instead of fixed Gauss-Seidel sweeps (16 sweeps applied 1/9..1/25 of honey's viscosity at h 2 mm); the largest iteration count and residual over the step's solves, and how many hit the cap. viscosity_sweeps (substance solver_viscosity_sweeps) now drives only the host reference path. mixed_stages reports the last successful mixed Vulkan step: measured, timing_kind=host_wall_including_waits, common_substeps, grid_steps and named stage rows (host_wall_ms, visits, dispatch/batch/synchronize calls and transfer bytes). These are host intervals including waits, not device kernel timestamps. Stage counters are part of the outer frame totals; do not add them again or add potentially nested wait timers. Use perf.gpu_kernel_timings separately for device timings. Absent/unmeasured phases are not measured zero-cost GPU work. mixed_stages.liquid_steps counts liquid transfers + projections this frame (== grid_steps unless mixed_stages.liquid_multirate).",
     "write", "SceneWrite", false, "any",
     "fluid|step|stats|simulation|performance|transfer|measurement",
     "fluid.step|particle.stats|perf.get_gpu_memory",
@@ -2482,7 +2636,7 @@ static const MethodDescriptor desc_fluid_step_stats = {
 static const MethodRegistration reg_fluid_step_stats(desc_fluid_step_stats);
 
 static const MethodParam params_fluid_surface_parity[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_fluid_surface_parity = {
     "fluid.surface_parity", "fluid",
@@ -2497,9 +2651,26 @@ static const MethodDescriptor desc_fluid_surface_parity = {
 };
 static const MethodRegistration reg_fluid_surface_parity(desc_fluid_surface_parity);
 
+static const MethodParam params_fluid_update_seed_source[] = {
+    {"id", "int", true, "Positive stable seed source ID returned by get_seed_sources", nullptr, nullptr, nullptr, true},
+    {"settings", "object", true, "Mutable source fields, or particles_per_cell/settle/settle_max_steps/settle_tolerance for shared settings", nullptr, nullptr, nullptr, true},
+};
+static const MethodDescriptor desc_fluid_update_seed_source = {
+    "fluid.update_seed_source", "fluid",
+    "Edit one Matter layer recipe atomically",
+    "Box bounds are world coordinates; nonempty mesh_object uses the existing flat mesh-volume resolver. Sources are produced once on Apply/reset, never per frame. Material/domain/custom temperature policies are separate from ambient Heat Exchange. Editing recipes does not reseed live particles; Apply replaces all layers transactionally, returns the timeline to frame zero and arms shared settling. Overlapping layer AABBs, missing meshes, insufficient particle capacity and incompatible DEM/MPM materials reject generation with live particles preserved. Continuum PPC is shared; DEM uses physical radius. One DEM material and one MPM material per domain, including potential emitter materials. Full schema and limits: docs/dev/MATTER_SEED_SOURCES.md. auto_capacity defaults true and computes a conservative recipe capacity plus 15 percent and 64 slots on successful Apply/reset. Manual max_particles remains available with auto_capacity=false. memory_guard defaults true; planning allowances use 4096 host bytes and 2048 GPU bytes per planned particle plus 1024/512 bytes per grid cell. These are heuristic allowances, not measured peak allocations. A guard rejects above 70 percent of measured available RAM or Vulkan compute GPU budget; unmeasured devices are not treated as zero. memory_guard=false makes the warning advisory. Neither setting changes grid resolution or material physics. Memory measurements are cached for up to one second. Viewport box edits use update_seed_source bounds; mesh transforms use existing object authoring.",
+    "write", "SceneWrite", false, "Domain, enabled recipe mode, sources, resolved_birth_kelvin, environment_kelvin, density/capacity and pending_recipe_changes; plan with per-layer particle_upper_bound, suggested_capacity, heuristic host/GPU planning bytes and measured memory availability",
+    "fluid|update|seed|source|matter|layers|initial|temperature",
+    "fluid.get_seed_sources|fluid.apply_seed_sources|fluid.matter_models",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_update_seed_source, 2,
+    true
+};
+static const MethodRegistration reg_fluid_update_seed_source(desc_fluid_update_seed_source);
+
 static const MethodParam params_forcefield_create[] = {
-    {"type", "string", true, "", nullptr, nullptr},
-    {"name", "string", false, "", "", nullptr},
+    {"type", "string", true, "", nullptr, nullptr, "string", false},
+    {"name", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_forcefield_create = {
     "forcefield.create", "forcefield",
@@ -2515,9 +2686,9 @@ static const MethodDescriptor desc_forcefield_create = {
 static const MethodRegistration reg_forcefield_create(desc_forcefield_create);
 
 static const MethodParam params_forcefield_evaluate[] = {
-    {"position", "vec3", true, "", nullptr, nullptr},
-    {"time", "float", false, "", "0.0", nullptr},
-    {"velocity", "vec3", false, "", nullptr, nullptr},
+    {"position", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"time", "float", false, "", "0.0", nullptr, "number", false},
+    {"velocity", "vec3", false, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_forcefield_evaluate = {
     "forcefield.evaluate", "forcefield",
@@ -2533,7 +2704,7 @@ static const MethodDescriptor desc_forcefield_evaluate = {
 static const MethodRegistration reg_forcefield_evaluate(desc_forcefield_evaluate);
 
 static const MethodParam params_forcefield_get[] = {
-    {"field", "string", true, "", nullptr, nullptr},
+    {"field", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_forcefield_get = {
     "forcefield.get", "forcefield",
@@ -2562,7 +2733,7 @@ static const MethodDescriptor desc_forcefield_list = {
 static const MethodRegistration reg_forcefield_list(desc_forcefield_list);
 
 static const MethodParam params_forcefield_remove[] = {
-    {"field", "string", true, "", nullptr, nullptr},
+    {"field", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_forcefield_remove = {
     "forcefield.remove", "forcefield",
@@ -2578,47 +2749,47 @@ static const MethodDescriptor desc_forcefield_remove = {
 static const MethodRegistration reg_forcefield_remove(desc_forcefield_remove);
 
 static const MethodParam params_forcefield_set_param[] = {
-    {"field", "string", true, "", nullptr, nullptr},
-    {"affects_cloth", "bool", false, "", nullptr, nullptr},
-    {"affects_fluid", "bool", false, "", nullptr, nullptr},
-    {"affects_gas", "bool", false, "", nullptr, nullptr},
-    {"affects_particles", "bool", false, "", nullptr, nullptr},
-    {"affects_rigidbody", "bool", false, "", nullptr, nullptr},
-    {"axis", "vec3", false, "", nullptr, nullptr},
-    {"direction", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"end_frame", "float", false, "", nullptr, nullptr},
-    {"falloff", "string", false, "", nullptr, nullptr},
-    {"falloff_radius", "float", false, "", nullptr, nullptr},
-    {"fluid_curl_detail", "float", false, "", nullptr, nullptr},
-    {"fluid_drag_coupling", "float", false, "", nullptr, nullptr},
-    {"fluid_surface_depth", "float", false, "", nullptr, nullptr},
-    {"fluid_surface_drag", "bool", false, "", nullptr, nullptr},
-    {"inner_radius", "float", false, "", nullptr, nullptr},
-    {"inward_force", "float", false, "", nullptr, nullptr},
-    {"linear_drag", "float", false, "", nullptr, nullptr},
-    {"name", "string", false, "", nullptr, nullptr},
-    {"noise_amplitude", "float", false, "", nullptr, nullptr},
-    {"noise_frequency", "float", false, "", nullptr, nullptr},
-    {"noise_lacunarity", "float", false, "", nullptr, nullptr},
-    {"noise_octaves", "int", false, "", nullptr, nullptr},
-    {"noise_persistence", "float", false, "", nullptr, nullptr},
-    {"noise_seed", "int", false, "", nullptr, nullptr},
-    {"noise_speed", "float", false, "", nullptr, nullptr},
-    {"phase", "float", false, "", nullptr, nullptr},
-    {"position", "vec3", false, "", nullptr, nullptr},
-    {"quadratic_drag", "float", false, "", nullptr, nullptr},
-    {"rotation", "vec3", false, "", nullptr, nullptr},
-    {"scale", "vec3", false, "", nullptr, nullptr},
-    {"shape", "string", false, "", nullptr, nullptr},
-    {"start_frame", "float", false, "", nullptr, nullptr},
-    {"strength", "float", false, "", nullptr, nullptr},
-    {"thermal_delta_kelvin", "float", false, "", nullptr, nullptr},
-    {"thermal_rate_per_s", "float", false, "", nullptr, nullptr},
-    {"type", "string", false, "", nullptr, nullptr},
-    {"upward_force", "float", false, "", nullptr, nullptr},
-    {"use_noise", "bool", false, "", nullptr, nullptr},
-    {"visible", "bool", false, "", nullptr, nullptr},
+    {"field", "string", true, "", nullptr, nullptr, "string", false},
+    {"affects_cloth", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"affects_fluid", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"affects_gas", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"affects_particles", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"affects_rigidbody", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"axis", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"direction", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"end_frame", "float", false, "", nullptr, nullptr, "number", false},
+    {"falloff", "string", false, "", nullptr, nullptr, "string", false},
+    {"falloff_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"fluid_curl_detail", "float", false, "", nullptr, nullptr, "number", false},
+    {"fluid_drag_coupling", "float", false, "", nullptr, nullptr, "number", false},
+    {"fluid_surface_depth", "float", false, "", nullptr, nullptr, "number", false},
+    {"fluid_surface_drag", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"inner_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"inward_force", "float", false, "", nullptr, nullptr, "number", false},
+    {"linear_drag", "float", false, "", nullptr, nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"noise_amplitude", "float", false, "", nullptr, nullptr, "number", false},
+    {"noise_frequency", "float", false, "", nullptr, nullptr, "number", false},
+    {"noise_lacunarity", "float", false, "", nullptr, nullptr, "number", false},
+    {"noise_octaves", "int", false, "", nullptr, nullptr, "number", false},
+    {"noise_persistence", "float", false, "", nullptr, nullptr, "number", false},
+    {"noise_seed", "int", false, "", nullptr, nullptr, "number", false},
+    {"noise_speed", "float", false, "", nullptr, nullptr, "number", false},
+    {"phase", "float", false, "", nullptr, nullptr, "number", false},
+    {"position", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"quadratic_drag", "float", false, "", nullptr, nullptr, "number", false},
+    {"rotation", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"scale", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"shape", "string", false, "", nullptr, nullptr, "string", false},
+    {"start_frame", "float", false, "", nullptr, nullptr, "number", false},
+    {"strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"thermal_delta_kelvin", "float", false, "", nullptr, nullptr, "number", false},
+    {"thermal_rate_per_s", "float", false, "", nullptr, nullptr, "number", false},
+    {"type", "string", false, "", nullptr, nullptr, "string", false},
+    {"upward_force", "float", false, "", nullptr, nullptr, "number", false},
+    {"use_noise", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_forcefield_set_param = {
     "forcefield.set_param", "forcefield",
@@ -2647,8 +2818,8 @@ static const MethodDescriptor desc_forcefield_types = {
 static const MethodRegistration reg_forcefield_types(desc_forcefield_types);
 
 static const MethodParam params_gas_clear[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"clear_seed", "bool", false, "", "false", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"clear_seed", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_gas_clear = {
     "gas.clear", "gas",
@@ -2664,11 +2835,11 @@ static const MethodDescriptor desc_gas_clear = {
 static const MethodRegistration reg_gas_clear(desc_gas_clear);
 
 static const MethodParam params_gas_create_domain[] = {
-    {"domain_max", "vec3", false, "", nullptr, nullptr},
-    {"domain_min", "vec3", false, "", nullptr, nullptr},
-    {"name", "string", false, "", nullptr, nullptr},
-    {"type", "string", false, "", nullptr, nullptr},
-    {"voxel_size", "float", false, "", "0.05", nullptr},
+    {"domain_max", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"domain_min", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"type", "string", false, "", nullptr, nullptr, "string", false},
+    {"voxel_size", "float", false, "", "0.05", nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_create_domain = {
     "gas.create_domain", "gas",
@@ -2684,9 +2855,9 @@ static const MethodDescriptor desc_gas_create_domain = {
 static const MethodRegistration reg_gas_create_domain(desc_gas_create_domain);
 
 static const MethodParam params_gas_field_stats[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"bins", "int", false, "", "64", nullptr},
-    {"density_threshold", "float", false, "", "0.01", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"bins", "int", false, "", "64", nullptr, "number", false},
+    {"density_threshold", "float", false, "", "0.01", nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_field_stats = {
     "gas.field_stats", "gas",
@@ -2702,12 +2873,12 @@ static const MethodDescriptor desc_gas_field_stats = {
 static const MethodRegistration reg_gas_field_stats(desc_gas_field_stats);
 
 static const MethodParam params_gas_fit_temperature_range[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"fit_gamma", "any", false, "", nullptr, nullptr},
-    {"floor_kelvin", "any", false, "", nullptr, nullptr},
-    {"high_percentile", "any", false, "", nullptr, nullptr},
-    {"low_percentile", "any", false, "", nullptr, nullptr},
-    {"median_target", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"fit_gamma", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"floor_kelvin", "float", false, "", nullptr, nullptr, "number", false},
+    {"high_percentile", "float", false, "", nullptr, nullptr, "number", false},
+    {"low_percentile", "float", false, "", nullptr, nullptr, "number", false},
+    {"median_target", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_fit_temperature_range = {
     "gas.fit_temperature_range", "gas",
@@ -2723,7 +2894,7 @@ static const MethodDescriptor desc_gas_fit_temperature_range = {
 static const MethodRegistration reg_gas_fit_temperature_range(desc_gas_fit_temperature_range);
 
 static const MethodParam params_gas_get[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_gas_get = {
     "gas.get", "gas",
@@ -2739,7 +2910,7 @@ static const MethodDescriptor desc_gas_get = {
 static const MethodRegistration reg_gas_get(desc_gas_get);
 
 static const MethodParam params_gas_get_settings[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_gas_get_settings = {
     "gas.get_settings", "gas",
@@ -2755,7 +2926,7 @@ static const MethodDescriptor desc_gas_get_settings = {
 static const MethodRegistration reg_gas_get_settings(desc_gas_get_settings);
 
 static const MethodParam params_gas_get_shader[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_gas_get_shader = {
     "gas.get_shader", "gas",
@@ -2784,8 +2955,8 @@ static const MethodDescriptor desc_gas_list_domains = {
 static const MethodRegistration reg_gas_list_domains(desc_gas_list_domains);
 
 static const MethodParam params_gas_measure_plume[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"density_threshold", "float", false, "", "0.01", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"density_threshold", "float", false, "", "0.01", nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_measure_plume = {
     "gas.measure_plume", "gas",
@@ -2801,12 +2972,12 @@ static const MethodDescriptor desc_gas_measure_plume = {
 static const MethodRegistration reg_gas_measure_plume(desc_gas_measure_plume);
 
 static const MethodParam params_gas_pressure_pulse[] = {
-    {"domain", "any", true, "", nullptr, nullptr},
-    {"center", "any", false, "", nullptr, nullptr},
-    {"coupling", "float", false, "", "1.0", nullptr},
-    {"duration_seconds", "float", false, "", "0.02", nullptr},
-    {"peak_pressure_kpa", "float", false, "", "0.0", nullptr},
-    {"radius", "float", false, "", "1.0", nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"center", "any", false, "", nullptr, nullptr, "number[]", false},
+    {"coupling", "float", false, "", "1.0", nullptr, "number", false},
+    {"duration_seconds", "float", false, "", "0.02", nullptr, "number", false},
+    {"peak_pressure_kpa", "float", false, "", "0.0", nullptr, "number", false},
+    {"radius", "float", false, "", "1.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_pressure_pulse = {
     "gas.pressure_pulse", "gas",
@@ -2822,7 +2993,7 @@ static const MethodDescriptor desc_gas_pressure_pulse = {
 static const MethodRegistration reg_gas_pressure_pulse(desc_gas_pressure_pulse);
 
 static const MethodParam params_gas_remove_domain[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_gas_remove_domain = {
     "gas.remove_domain", "gas",
@@ -2851,51 +3022,52 @@ static const MethodDescriptor desc_gas_reset = {
 static const MethodRegistration reg_gas_reset(desc_gas_reset);
 
 static const MethodParam params_gas_set_param[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"anisotropy_enabled", "any", false, "", nullptr, nullptr},
-    {"anisotropy_max_stretch", "any", false, "", nullptr, nullptr},
-    {"anisotropy_neighbor_min", "any", false, "", nullptr, nullptr},
-    {"anisotropy_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"backend", "any", false, "", nullptr, nullptr},
-    {"boundary", "any", false, "", nullptr, nullptr},
-    {"coord_space", "any", false, "", nullptr, nullptr},
-    {"default_substance", "any", false, "", nullptr, nullptr},
-    {"device", "any", false, "", nullptr, nullptr},
-    {"domain_max", "vec3", false, "", nullptr, nullptr},
-    {"domain_min", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"fog_autoconversion_kg_m3", "any", false, "", nullptr, nullptr},
-    {"fog_autoconversion_rate", "any", false, "", nullptr, nullptr},
-    {"fog_ceiling_kg_m3", "any", false, "", nullptr, nullptr},
-    {"granular_max_solver_substeps", "any", false, "", nullptr, nullptr},
-    {"kernel_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"max_auto_resolution", "any", false, "", nullptr, nullptr},
-    {"max_particles", "any", false, "", nullptr, nullptr},
-    {"narrow_band_voxels", "any", false, "", nullptr, nullptr},
-    {"particle_radius_voxels", "any", false, "", nullptr, nullptr},
-    {"pore_amount", "any", false, "", nullptr, nullptr},
-    {"pore_detail", "any", false, "", nullptr, nullptr},
-    {"pore_scale", "any", false, "", nullptr, nullptr},
-    {"position_smoothing", "any", false, "", nullptr, nullptr},
-    {"pressure_iterations", "int", false, "", "24", nullptr},
-    {"pressure_iterations_grid_scaled", "bool", false, "", "true", nullptr},
-    {"pressure_relative_residual", "float", false, "", nullptr, nullptr},
-    {"render_mode", "any", false, "", nullptr, nullptr},
-    {"smoothing_iterations", "any", false, "", nullptr, nullptr},
-    {"solid_phase", "any", false, "", nullptr, nullptr},
-    {"solid_phase_fill", "any", false, "", nullptr, nullptr},
-    {"surface_gpu", "any", false, "", nullptr, nullptr},
-    {"surface_material", "any", false, "", nullptr, nullptr},
-    {"surface_offset_voxels", "any", false, "", nullptr, nullptr},
-    {"surface_resolution_multiplier", "any", false, "", nullptr, nullptr},
-    {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr},
-    {"thermal_liquid_enabled", "any", false, "", nullptr, nullptr},
-    {"uvw_refresh_period", "any", false, "", nullptr, nullptr},
-    {"viscosity_sweeps", "any", false, "", nullptr, nullptr},
-    {"viscosity_wall_slip", "any", false, "", nullptr, nullptr},
-    {"visible", "any", false, "", nullptr, nullptr},
-    {"voxel_size", "any", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"anisotropy_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"anisotropy_max_stretch", "float", false, "", nullptr, nullptr, "number", false},
+    {"anisotropy_neighbor_min", "float", false, "", nullptr, nullptr, "number", false},
+    {"anisotropy_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"backend", "string", false, "", nullptr, nullptr, "string", false},
+    {"boundary", "string", false, "", nullptr, nullptr, "string", false},
+    {"coord_space", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"default_substance", "string", false, "", nullptr, nullptr, "string", false},
+    {"device", "string", false, "", nullptr, nullptr, "string", false},
+    {"domain_max", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"domain_min", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"fog_autoconversion_kg_m3", "float", false, "", nullptr, nullptr, "number", false},
+    {"fog_autoconversion_rate", "float", false, "", nullptr, nullptr, "number", false},
+    {"fog_ceiling_kg_m3", "float", false, "", nullptr, nullptr, "number", false},
+    {"granular_max_solver_substeps", "float", false, "", nullptr, nullptr, "number", false},
+    {"kernel_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"matter_liquid_multirate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"max_auto_resolution", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_particles", "float", false, "", nullptr, nullptr, "number", false},
+    {"narrow_band_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"particle_radius_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"pore_amount", "float", false, "", nullptr, nullptr, "number", false},
+    {"pore_detail", "float", false, "", nullptr, nullptr, "number", false},
+    {"pore_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"position_smoothing", "float", false, "", nullptr, nullptr, "number", false},
+    {"pressure_iterations", "int", false, "", "24", nullptr, "number", false},
+    {"pressure_iterations_grid_scaled", "bool", false, "", "true", nullptr, "bool", false},
+    {"pressure_relative_residual", "float", false, "", nullptr, nullptr, "number", false},
+    {"render_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"smoothing_iterations", "float", false, "", nullptr, nullptr, "number", false},
+    {"solid_phase", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"solid_phase_fill", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_gpu", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"surface_material", "string", false, "", nullptr, nullptr, "string", false},
+    {"surface_offset_voxels", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_resolution_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"thermal_air_cooling_rate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"thermal_contact_cooling_rate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"thermal_liquid_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"uvw_refresh_period", "float", false, "", nullptr, nullptr, "number", false},
+    {"viscosity_sweeps", "float", false, "", nullptr, nullptr, "number", false},
+    {"viscosity_wall_slip", "float", false, "", nullptr, nullptr, "number", false},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"voxel_size", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_set_param = {
     "gas.set_param", "gas",
@@ -2905,52 +3077,52 @@ static const MethodDescriptor desc_gas_set_param = {
     "gas|set|param|simulation|configure",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_gas_set_param, 45,
+    params_gas_set_param, 46,
     true
 };
 static const MethodRegistration reg_gas_set_param(desc_gas_set_param);
 
 static const MethodParam params_gas_set_settings[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"fire_enabled", "bool", false, "Run combustion in this domain", nullptr, nullptr},
-    {"ignition_temperature", "float", false, "Temperature at which fuel ignites, in Kelvin", nullptr, nullptr},
-    {"burn_rate", "float", false, "How fast fuel is consumed once lit", nullptr, nullptr},
-    {"heat_release", "float", false, "Temperature added per unit of fuel burned", nullptr, nullptr},
-    {"smoke_generation", "float", false, "Smoke produced per unit of fuel burned", nullptr, nullptr},
-    {"ambient_stratification", "float", false, "", nullptr, nullptr},
-    {"buoyancy_density", "float", false, "", nullptr, nullptr},
-    {"buoyancy_heat", "float", false, "", nullptr, nullptr},
-    {"density_dissipation", "float", false, "", nullptr, nullptr},
-    {"dissipation_override", "bool", false, "", nullptr, nullptr},
-    {"enforce_resource_budget", "bool", false, "", nullptr, nullptr},
-    {"fire_expansion", "float", false, "", nullptr, nullptr},
-    {"fire_max_temperature", "float", false, "", nullptr, nullptr},
-    {"flame_dissipation", "float", false, "", nullptr, nullptr},
-    {"fuel_dissipation", "float", false, "", nullptr, nullptr},
-    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr},
-    {"pressure_iterations", "int", false, "", nullptr, nullptr},
-    {"quality_profile", "string", false, "", nullptr, nullptr},
-    {"render_to_nanovdb", "bool", false, "", nullptr, nullptr},
-    {"resource_budget_mb", "int", false, "", nullptr, nullptr},
-    {"structural_coupling_enabled", "bool", false, "", nullptr, nullptr},
-    {"structural_event_interval", "float", false, "", nullptr, nullptr},
-    {"structural_min_intensity", "float", false, "", nullptr, nullptr},
-    {"structural_pressure_scale", "float", false, "", nullptr, nullptr},
-    {"surface_dust_emission", "float", false, "", nullptr, nullptr},
-    {"surface_dust_enabled", "bool", false, "", nullptr, nullptr},
-    {"surface_dust_max_density", "float", false, "", nullptr, nullptr},
-    {"surface_dust_supply", "float", false, "", nullptr, nullptr},
-    {"surface_dust_temperature", "float", false, "", nullptr, nullptr},
-    {"surface_dust_threshold", "float", false, "", nullptr, nullptr},
-    {"temperature_dissipation", "float", false, "", nullptr, nullptr},
-    {"turbulence_lacunarity", "float", false, "", nullptr, nullptr},
-    {"turbulence_octaves", "int", false, "", nullptr, nullptr},
-    {"turbulence_persistence", "float", false, "", nullptr, nullptr},
-    {"turbulence_scale", "float", false, "", nullptr, nullptr},
-    {"turbulence_speed", "float", false, "", nullptr, nullptr},
-    {"turbulence_strength", "float", false, "", nullptr, nullptr},
-    {"use_sparse_tiles", "bool", false, "", nullptr, nullptr},
-    {"vorticity", "float", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"fire_enabled", "bool", false, "Run combustion in this domain", nullptr, nullptr, "bool", false},
+    {"ignition_temperature", "float", false, "Temperature at which fuel ignites, in Kelvin", nullptr, nullptr, "number", false},
+    {"burn_rate", "float", false, "How fast fuel is consumed once lit", nullptr, nullptr, "number", false},
+    {"heat_release", "float", false, "Temperature added per unit of fuel burned", nullptr, nullptr, "number", false},
+    {"smoke_generation", "float", false, "Smoke produced per unit of fuel burned", nullptr, nullptr, "number", false},
+    {"ambient_stratification", "float", false, "", nullptr, nullptr, "number", false},
+    {"buoyancy_density", "float", false, "", nullptr, nullptr, "number", false},
+    {"buoyancy_heat", "float", false, "", nullptr, nullptr, "number", false},
+    {"density_dissipation", "float", false, "", nullptr, nullptr, "number", false},
+    {"dissipation_override", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"enforce_resource_budget", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"fire_expansion", "float", false, "", nullptr, nullptr, "number", false},
+    {"fire_max_temperature", "float", false, "", nullptr, nullptr, "number", false},
+    {"flame_dissipation", "float", false, "", nullptr, nullptr, "number", false},
+    {"fuel_dissipation", "float", false, "", nullptr, nullptr, "number", false},
+    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"pressure_iterations", "int", false, "", nullptr, nullptr, "number", false},
+    {"quality_profile", "string", false, "", nullptr, nullptr, "string", false},
+    {"render_to_nanovdb", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"resource_budget_mb", "int", false, "", nullptr, nullptr, "number", false},
+    {"structural_coupling_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"structural_event_interval", "float", false, "", nullptr, nullptr, "number", false},
+    {"structural_min_intensity", "float", false, "", nullptr, nullptr, "number", false},
+    {"structural_pressure_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_dust_emission", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_dust_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"surface_dust_max_density", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_dust_supply", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_dust_temperature", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_dust_threshold", "float", false, "", nullptr, nullptr, "number", false},
+    {"temperature_dissipation", "float", false, "", nullptr, nullptr, "number", false},
+    {"turbulence_lacunarity", "float", false, "", nullptr, nullptr, "number", false},
+    {"turbulence_octaves", "int", false, "", nullptr, nullptr, "number", false},
+    {"turbulence_persistence", "float", false, "", nullptr, nullptr, "number", false},
+    {"turbulence_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"turbulence_speed", "float", false, "", nullptr, nullptr, "number", false},
+    {"turbulence_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"use_sparse_tiles", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"vorticity", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_set_settings = {
     "gas.set_settings", "gas",
@@ -2966,23 +3138,23 @@ static const MethodDescriptor desc_gas_set_settings = {
 static const MethodRegistration reg_gas_set_settings(desc_gas_set_settings);
 
 static const MethodParam params_gas_set_shader[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
-    {"absorption_coefficient", "float", false, "", nullptr, nullptr},
-    {"blackbody_intensity", "float", false, "", nullptr, nullptr},
-    {"density_cutoff", "float", false, "", nullptr, nullptr},
-    {"density_multiplier", "float", false, "", nullptr, nullptr},
-    {"max_steps", "int", false, "", nullptr, nullptr},
-    {"preset", "string", false, "", nullptr, nullptr},
-    {"random_walk", "bool", false, "", nullptr, nullptr},
-    {"random_walk_exact_events", "int", false, "", nullptr, nullptr},
-    {"random_walk_max_events", "int", false, "", nullptr, nullptr},
-    {"scattering_coefficient", "float", false, "", nullptr, nullptr},
-    {"shadow_steps", "int", false, "", nullptr, nullptr},
-    {"shadow_strength", "float", false, "", nullptr, nullptr},
-    {"shadow_stride", "int", false, "", nullptr, nullptr},
-    {"temperature_max", "float", false, "", nullptr, nullptr},
-    {"temperature_min", "float", false, "", nullptr, nullptr},
-    {"voxel_step_multiplier", "float", false, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
+    {"absorption_coefficient", "float", false, "", nullptr, nullptr, "number", false},
+    {"blackbody_intensity", "float", false, "", nullptr, nullptr, "number", false},
+    {"density_cutoff", "float", false, "", nullptr, nullptr, "number", false},
+    {"density_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_steps", "int", false, "", nullptr, nullptr, "number", false},
+    {"preset", "string", false, "", nullptr, nullptr, "string", false},
+    {"random_walk", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"random_walk_exact_events", "int", false, "", nullptr, nullptr, "number", false},
+    {"random_walk_max_events", "int", false, "", nullptr, nullptr, "number", false},
+    {"scattering_coefficient", "float", false, "", nullptr, nullptr, "number", false},
+    {"shadow_steps", "int", false, "", nullptr, nullptr, "number", false},
+    {"shadow_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"shadow_stride", "int", false, "", nullptr, nullptr, "number", false},
+    {"temperature_max", "float", false, "", nullptr, nullptr, "number", false},
+    {"temperature_min", "float", false, "", nullptr, nullptr, "number", false},
+    {"voxel_step_multiplier", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_set_shader = {
     "gas.set_shader", "gas",
@@ -2998,7 +3170,7 @@ static const MethodDescriptor desc_gas_set_shader = {
 static const MethodRegistration reg_gas_set_shader(desc_gas_set_shader);
 
 static const MethodParam params_gas_step[] = {
-    {"dt", "float", false, "", "0.0166667", nullptr},
+    {"dt", "float", false, "", "0.0166667", nullptr, "number", false},
 };
 static const MethodDescriptor desc_gas_step = {
     "gas.step", "gas",
@@ -3014,7 +3186,7 @@ static const MethodDescriptor desc_gas_step = {
 static const MethodRegistration reg_gas_step(desc_gas_step);
 
 static const MethodParam params_gas_step_stats[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_gas_step_stats = {
     "gas.step_stats", "gas",
@@ -3043,10 +3215,10 @@ static const MethodDescriptor desc_gas_structural_impulse_stats = {
 static const MethodRegistration reg_gas_structural_impulse_stats(desc_gas_structural_impulse_stats);
 
 static const MethodParam params_geometry_cache_bake[] = {
-    {"object_name", "string", true, "Flat mesh / Geometry Graph host object", nullptr, nullptr},
-    {"start_frame", "int", true, "First sampled timeline frame", nullptr, nullptr},
-    {"end_frame", "int", true, "Last sampled timeline frame", nullptr, nullptr},
-    {"frame_step", "int", false, "Distance between stored samples", "1", nullptr},
+    {"object_name", "string", true, "Flat mesh / Geometry Graph host object", nullptr, nullptr, "string", false},
+    {"start_frame", "int", true, "First sampled timeline frame", nullptr, nullptr, "number", false},
+    {"end_frame", "int", true, "Last sampled timeline frame", nullptr, nullptr, "number", false},
+    {"frame_step", "int", false, "Distance between stored samples", "1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_geometry_cache_bake = {
     "geometry_cache.bake", "geometry_cache",
@@ -3062,7 +3234,7 @@ static const MethodDescriptor desc_geometry_cache_bake = {
 static const MethodRegistration reg_geometry_cache_bake(desc_geometry_cache_bake);
 
 static const MethodParam params_geometry_cache_clear[] = {
-    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr},
+    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_geometry_cache_clear = {
     "geometry_cache.clear", "geometry_cache",
@@ -3091,8 +3263,8 @@ static const MethodDescriptor desc_geometry_cache_self_test = {
 static const MethodRegistration reg_geometry_cache_self_test(desc_geometry_cache_self_test);
 
 static const MethodParam params_geometry_cache_set_enabled[] = {
-    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr},
-    {"enabled", "bool", true, "Use cached positions when true", nullptr, nullptr},
+    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr, "string", false},
+    {"enabled", "bool", true, "Use cached positions when true", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_geometry_cache_set_enabled = {
     "geometry_cache.set_enabled", "geometry_cache",
@@ -3108,7 +3280,7 @@ static const MethodDescriptor desc_geometry_cache_set_enabled = {
 static const MethodRegistration reg_geometry_cache_set_enabled(desc_geometry_cache_set_enabled);
 
 static const MethodParam params_geometry_cache_status[] = {
-    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr},
+    {"object_name", "string", true, "Cached flat mesh object", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_geometry_cache_status = {
     "geometry_cache.status", "geometry_cache",
@@ -3124,8 +3296,8 @@ static const MethodDescriptor desc_geometry_cache_status = {
 static const MethodRegistration reg_geometry_cache_status(desc_geometry_cache_status);
 
 static const MethodParam params_hair_apply_preset[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"preset", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"preset", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_apply_preset = {
     "hair.apply_preset", "hair",
@@ -3141,7 +3313,7 @@ static const MethodDescriptor desc_hair_apply_preset = {
 static const MethodRegistration reg_hair_apply_preset(desc_hair_apply_preset);
 
 static const MethodParam params_hair_bake[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_bake = {
     "hair.bake", "hair",
@@ -3157,10 +3329,10 @@ static const MethodDescriptor desc_hair_bake = {
 static const MethodRegistration reg_hair_bake(desc_hair_bake);
 
 static const MethodParam params_hair_comb[] = {
-    {"direction", "vec3", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
-    {"root_stiffness", "float", false, "", "0.75", nullptr},
-    {"strength", "float", false, "", "0.5", nullptr},
+    {"direction", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"root_stiffness", "float", false, "", "0.75", nullptr, "number", false},
+    {"strength", "float", false, "", "0.5", nullptr, "number", false},
 };
 static const MethodDescriptor desc_hair_comb = {
     "hair.comb", "hair",
@@ -3176,32 +3348,32 @@ static const MethodDescriptor desc_hair_comb = {
 static const MethodRegistration reg_hair_comb(desc_hair_comb);
 
 static const MethodParam params_hair_create[] = {
-    {"mesh", "string", true, "", nullptr, nullptr},
-    {"child_radius", "float", false, "", nullptr, nullptr},
-    {"children_per_guide", "int", false, "", nullptr, nullptr},
-    {"clumpiness", "float", false, "", nullptr, nullptr},
-    {"curl_frequency", "float", false, "", nullptr, nullptr},
-    {"curl_radius", "float", false, "", nullptr, nullptr},
-    {"force_influence", "float", false, "", nullptr, nullptr},
-    {"frizz", "float", false, "", nullptr, nullptr},
-    {"gravity", "float", false, "", nullptr, nullptr},
-    {"guide_count", "int", false, "", nullptr, nullptr},
-    {"length", "float", false, "", nullptr, nullptr},
-    {"length_variation", "float", false, "", nullptr, nullptr},
-    {"name", "string", false, "", "HairGroom", nullptr},
-    {"physics_damping", "float", false, "", nullptr, nullptr},
-    {"physics_mass", "float", false, "", nullptr, nullptr},
-    {"physics_stiffness", "float", false, "", nullptr, nullptr},
-    {"points_per_strand", "int", false, "", nullptr, nullptr},
-    {"root_radius", "float", false, "", nullptr, nullptr},
-    {"roughness", "float", false, "", nullptr, nullptr},
-    {"subdivisions", "int", false, "", nullptr, nullptr},
-    {"tip_radius", "float", false, "", nullptr, nullptr},
-    {"use_bspline", "bool", false, "", nullptr, nullptr},
-    {"use_dynamics", "bool", false, "", nullptr, nullptr},
-    {"use_tangent_shading", "bool", false, "", nullptr, nullptr},
-    {"wave_amplitude", "float", false, "", nullptr, nullptr},
-    {"wave_frequency", "float", false, "", nullptr, nullptr},
+    {"mesh", "string", true, "", nullptr, nullptr, "string", false},
+    {"child_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"children_per_guide", "int", false, "", nullptr, nullptr, "number", false},
+    {"clumpiness", "float", false, "", nullptr, nullptr, "number", false},
+    {"curl_frequency", "float", false, "", nullptr, nullptr, "number", false},
+    {"curl_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"force_influence", "float", false, "", nullptr, nullptr, "number", false},
+    {"frizz", "float", false, "", nullptr, nullptr, "number", false},
+    {"gravity", "float", false, "", nullptr, nullptr, "number", false},
+    {"guide_count", "int", false, "", nullptr, nullptr, "number", false},
+    {"length", "float", false, "", nullptr, nullptr, "number", false},
+    {"length_variation", "float", false, "", nullptr, nullptr, "number", false},
+    {"name", "string", false, "", "HairGroom", nullptr, "string", false},
+    {"physics_damping", "float", false, "", nullptr, nullptr, "number", false},
+    {"physics_mass", "float", false, "", nullptr, nullptr, "number", false},
+    {"physics_stiffness", "float", false, "", nullptr, nullptr, "number", false},
+    {"points_per_strand", "int", false, "", nullptr, nullptr, "number", false},
+    {"root_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"roughness", "float", false, "", nullptr, nullptr, "number", false},
+    {"subdivisions", "int", false, "", nullptr, nullptr, "number", false},
+    {"tip_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"use_bspline", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"use_dynamics", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"use_tangent_shading", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"wave_amplitude", "float", false, "", nullptr, nullptr, "number", false},
+    {"wave_frequency", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_hair_create = {
     "hair.create", "hair",
@@ -3217,7 +3389,7 @@ static const MethodDescriptor desc_hair_create = {
 static const MethodRegistration reg_hair_create(desc_hair_create);
 
 static const MethodParam params_hair_get[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_get = {
     "hair.get", "hair",
@@ -3233,8 +3405,8 @@ static const MethodDescriptor desc_hair_get = {
 static const MethodRegistration reg_hair_get(desc_hair_get);
 
 static const MethodParam params_hair_grow[] = {
-    {"length_factor", "float", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"length_factor", "float", true, "", nullptr, nullptr, "number", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_grow = {
     "hair.grow", "hair",
@@ -3276,7 +3448,7 @@ static const MethodDescriptor desc_hair_list_presets = {
 static const MethodRegistration reg_hair_list_presets(desc_hair_list_presets);
 
 static const MethodParam params_hair_remove[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_remove = {
     "hair.remove", "hair",
@@ -3292,8 +3464,8 @@ static const MethodDescriptor desc_hair_remove = {
 static const MethodRegistration reg_hair_remove(desc_hair_remove);
 
 static const MethodParam params_hair_rename[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"new_name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"new_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_rename = {
     "hair.rename", "hair",
@@ -3309,7 +3481,7 @@ static const MethodDescriptor desc_hair_rename = {
 static const MethodRegistration reg_hair_rename(desc_hair_rename);
 
 static const MethodParam params_hair_reset_simulation[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_reset_simulation = {
     "hair.reset_simulation", "hair",
@@ -3325,7 +3497,7 @@ static const MethodDescriptor desc_hair_reset_simulation = {
 static const MethodRegistration reg_hair_reset_simulation(desc_hair_reset_simulation);
 
 static const MethodParam params_hair_restyle[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_restyle = {
     "hair.restyle", "hair",
@@ -3341,9 +3513,9 @@ static const MethodDescriptor desc_hair_restyle = {
 static const MethodRegistration reg_hair_restyle(desc_hair_restyle);
 
 static const MethodParam params_hair_smooth[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"iterations", "int", false, "", "2", nullptr},
-    {"strength", "float", false, "", "0.5", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"iterations", "int", false, "", "2", nullptr, "number", false},
+    {"strength", "float", false, "", "0.5", nullptr, "number", false},
 };
 static const MethodDescriptor desc_hair_smooth = {
     "hair.smooth", "hair",
@@ -3359,8 +3531,8 @@ static const MethodDescriptor desc_hair_smooth = {
 static const MethodRegistration reg_hair_smooth(desc_hair_smooth);
 
 static const MethodParam params_hair_trim[] = {
-    {"length_factor", "float", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"length_factor", "float", true, "", nullptr, nullptr, "number", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_hair_trim = {
     "hair.trim", "hair",
@@ -3376,32 +3548,32 @@ static const MethodDescriptor desc_hair_trim = {
 static const MethodRegistration reg_hair_trim(desc_hair_trim);
 
 static const MethodParam params_hair_update[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"child_radius", "float", false, "", nullptr, nullptr},
-    {"children_per_guide", "int", false, "", nullptr, nullptr},
-    {"clumpiness", "float", false, "", nullptr, nullptr},
-    {"curl_frequency", "float", false, "", nullptr, nullptr},
-    {"curl_radius", "float", false, "", nullptr, nullptr},
-    {"force_influence", "float", false, "", nullptr, nullptr},
-    {"frizz", "float", false, "", nullptr, nullptr},
-    {"gravity", "float", false, "", nullptr, nullptr},
-    {"guide_count", "int", false, "", nullptr, nullptr},
-    {"length", "float", false, "", nullptr, nullptr},
-    {"length_variation", "float", false, "", nullptr, nullptr},
-    {"physics_damping", "float", false, "", nullptr, nullptr},
-    {"physics_mass", "float", false, "", nullptr, nullptr},
-    {"physics_stiffness", "float", false, "", nullptr, nullptr},
-    {"points_per_strand", "int", false, "", nullptr, nullptr},
-    {"root_radius", "float", false, "", nullptr, nullptr},
-    {"roughness", "float", false, "", nullptr, nullptr},
-    {"subdivisions", "int", false, "", nullptr, nullptr},
-    {"tip_radius", "float", false, "", nullptr, nullptr},
-    {"use_bspline", "bool", false, "", nullptr, nullptr},
-    {"use_dynamics", "bool", false, "", nullptr, nullptr},
-    {"use_tangent_shading", "bool", false, "", nullptr, nullptr},
-    {"visible", "any", false, "", nullptr, nullptr},
-    {"wave_amplitude", "float", false, "", nullptr, nullptr},
-    {"wave_frequency", "float", false, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"child_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"children_per_guide", "int", false, "", nullptr, nullptr, "number", false},
+    {"clumpiness", "float", false, "", nullptr, nullptr, "number", false},
+    {"curl_frequency", "float", false, "", nullptr, nullptr, "number", false},
+    {"curl_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"force_influence", "float", false, "", nullptr, nullptr, "number", false},
+    {"frizz", "float", false, "", nullptr, nullptr, "number", false},
+    {"gravity", "float", false, "", nullptr, nullptr, "number", false},
+    {"guide_count", "int", false, "", nullptr, nullptr, "number", false},
+    {"length", "float", false, "", nullptr, nullptr, "number", false},
+    {"length_variation", "float", false, "", nullptr, nullptr, "number", false},
+    {"physics_damping", "float", false, "", nullptr, nullptr, "number", false},
+    {"physics_mass", "float", false, "", nullptr, nullptr, "number", false},
+    {"physics_stiffness", "float", false, "", nullptr, nullptr, "number", false},
+    {"points_per_strand", "int", false, "", nullptr, nullptr, "number", false},
+    {"root_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"roughness", "float", false, "", nullptr, nullptr, "number", false},
+    {"subdivisions", "int", false, "", nullptr, nullptr, "number", false},
+    {"tip_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"use_bspline", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"use_dynamics", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"use_tangent_shading", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"wave_amplitude", "float", false, "", nullptr, nullptr, "number", false},
+    {"wave_frequency", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_hair_update = {
     "hair.update", "hair",
@@ -3430,7 +3602,7 @@ static const MethodDescriptor desc_ipc_admin_audit_clear = {
 static const MethodRegistration reg_ipc_admin_audit_clear(desc_ipc_admin_audit_clear);
 
 static const MethodParam params_ipc_admin_audit_export[] = {
-    {"filepath", "string", true, "", nullptr, nullptr},
+    {"filepath", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_ipc_admin_audit_export = {
     "ipc.admin.audit.export", "ipc",
@@ -3446,7 +3618,7 @@ static const MethodDescriptor desc_ipc_admin_audit_export = {
 static const MethodRegistration reg_ipc_admin_audit_export(desc_ipc_admin_audit_export);
 
 static const MethodParam params_ipc_admin_audit_list[] = {
-    {"maximum", "int", false, "", "256", nullptr},
+    {"maximum", "int", false, "", "256", nullptr, "number", false},
 };
 static const MethodDescriptor desc_ipc_admin_audit_list = {
     "ipc.admin.audit.list", "ipc",
@@ -3488,7 +3660,7 @@ static const MethodDescriptor desc_ipc_admin_sessions_disconnect_all = {
 static const MethodRegistration reg_ipc_admin_sessions_disconnect_all(desc_ipc_admin_sessions_disconnect_all);
 
 static const MethodParam params_ipc_admin_sessions_get[] = {
-    {"connection_id", "string", true, "", nullptr, nullptr},
+    {"connection_id", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_ipc_admin_sessions_get = {
     "ipc.admin.sessions.get", "ipc",
@@ -3504,7 +3676,7 @@ static const MethodDescriptor desc_ipc_admin_sessions_get = {
 static const MethodRegistration reg_ipc_admin_sessions_get(desc_ipc_admin_sessions_get);
 
 static const MethodParam params_ipc_admin_sessions_list[] = {
-    {"include_closed", "bool", false, "", "false", nullptr},
+    {"include_closed", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_ipc_admin_sessions_list = {
     "ipc.admin.sessions.list", "ipc",
@@ -3520,10 +3692,10 @@ static const MethodDescriptor desc_ipc_admin_sessions_list = {
 static const MethodRegistration reg_ipc_admin_sessions_list(desc_ipc_admin_sessions_list);
 
 static const MethodParam params_ipc_admin_tokens_create[] = {
-    {"capabilities", "int", true, "", nullptr, nullptr},
-    {"display_name", "string", true, "", nullptr, nullptr},
-    {"allowed_cidrs", "any", false, "", nullptr, nullptr},
-    {"expires_at", "any", false, "", nullptr, nullptr},
+    {"capabilities", "int", true, "", nullptr, nullptr, "number", false},
+    {"display_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"allowed_cidrs", "any", false, "", nullptr, nullptr, "string[]", false},
+    {"expires_at", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_ipc_admin_tokens_create = {
     "ipc.admin.tokens.create", "ipc",
@@ -3552,7 +3724,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_list = {
 static const MethodRegistration reg_ipc_admin_tokens_list(desc_ipc_admin_tokens_list);
 
 static const MethodParam params_ipc_admin_tokens_revoke[] = {
-    {"token_id", "string", true, "", nullptr, nullptr},
+    {"token_id", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_ipc_admin_tokens_revoke = {
     "ipc.admin.tokens.revoke", "ipc",
@@ -3568,7 +3740,7 @@ static const MethodDescriptor desc_ipc_admin_tokens_revoke = {
 static const MethodRegistration reg_ipc_admin_tokens_revoke(desc_ipc_admin_tokens_revoke);
 
 static const MethodParam params_ipc_admin_tokens_rotate[] = {
-    {"token_id", "string", true, "", nullptr, nullptr},
+    {"token_id", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_ipc_admin_tokens_rotate = {
     "ipc.admin.tokens.rotate", "ipc",
@@ -3584,10 +3756,10 @@ static const MethodDescriptor desc_ipc_admin_tokens_rotate = {
 static const MethodRegistration reg_ipc_admin_tokens_rotate(desc_ipc_admin_tokens_rotate);
 
 static const MethodParam params_ipc_admin_tokens_update[] = {
-    {"capabilities", "int", true, "", nullptr, nullptr},
-    {"token_id", "string", true, "", nullptr, nullptr},
-    {"allowed_cidrs", "any", false, "", nullptr, nullptr},
-    {"expires_at", "any", false, "", nullptr, nullptr},
+    {"capabilities", "int", true, "", nullptr, nullptr, "number", false},
+    {"token_id", "string", true, "", nullptr, nullptr, "string", false},
+    {"allowed_cidrs", "any", false, "", nullptr, nullptr, "string[]", false},
+    {"expires_at", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_ipc_admin_tokens_update = {
     "ipc.admin.tokens.update", "ipc",
@@ -3603,8 +3775,8 @@ static const MethodDescriptor desc_ipc_admin_tokens_update = {
 static const MethodRegistration reg_ipc_admin_tokens_update(desc_ipc_admin_tokens_update);
 
 static const MethodParam params_lights_add[] = {
-    {"type", "string", true, "Light type", nullptr, "point|directional|spot|area"},
-    {"position", "vec3", true, "", nullptr, nullptr},
+    {"type", "string", true, "Light type", nullptr, "point|directional|spot|area", "string", false},
+    {"position", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_lights_add = {
     "lights.add", "lights",
@@ -3620,7 +3792,7 @@ static const MethodDescriptor desc_lights_add = {
 static const MethodRegistration reg_lights_add(desc_lights_add);
 
 static const MethodParam params_lights_delete[] = {
-    {"index", "int", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_lights_delete = {
     "lights.delete", "lights",
@@ -3636,7 +3808,7 @@ static const MethodDescriptor desc_lights_delete = {
 static const MethodRegistration reg_lights_delete(desc_lights_delete);
 
 static const MethodParam params_lights_get[] = {
-    {"index", "int", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_lights_get = {
     "lights.get", "lights",
@@ -3665,8 +3837,8 @@ static const MethodDescriptor desc_lights_list = {
 static const MethodRegistration reg_lights_list(desc_lights_list);
 
 static const MethodParam params_lights_rename[] = {
-    {"index", "int", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_lights_rename = {
     "lights.rename", "lights",
@@ -3682,8 +3854,8 @@ static const MethodDescriptor desc_lights_rename = {
 static const MethodRegistration reg_lights_rename(desc_lights_rename);
 
 static const MethodParam params_lights_set_color[] = {
-    {"color", "vec3", true, "", nullptr, nullptr},
-    {"index", "int", true, "", nullptr, nullptr},
+    {"color", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_lights_set_color = {
     "lights.set_color", "lights",
@@ -3699,8 +3871,8 @@ static const MethodDescriptor desc_lights_set_color = {
 static const MethodRegistration reg_lights_set_color(desc_lights_set_color);
 
 static const MethodParam params_lights_set_direction[] = {
-    {"direction", "vec3", true, "", nullptr, nullptr},
-    {"index", "int", true, "", nullptr, nullptr},
+    {"direction", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_lights_set_direction = {
     "lights.set_direction", "lights",
@@ -3716,8 +3888,8 @@ static const MethodDescriptor desc_lights_set_direction = {
 static const MethodRegistration reg_lights_set_direction(desc_lights_set_direction);
 
 static const MethodParam params_lights_set_intensity[] = {
-    {"index", "int", true, "", nullptr, nullptr},
-    {"intensity", "float", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"intensity", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_lights_set_intensity = {
     "lights.set_intensity", "lights",
@@ -3733,9 +3905,9 @@ static const MethodDescriptor desc_lights_set_intensity = {
 static const MethodRegistration reg_lights_set_intensity(desc_lights_set_intensity);
 
 static const MethodParam params_lights_set_param[] = {
-    {"param", "string", true, "Which light property to set. Not every key applies to every light type - a key the light does not have is refused, not ignored.", nullptr, "intensity|radius|width|height|spot_angle|spot_falloff"},
-    {"index", "int", true, "", nullptr, nullptr},
-    {"value", "float", true, "", nullptr, nullptr},
+    {"param", "string", true, "Which light property to set. Not every key applies to every light type - a key the light does not have is refused, not ignored.", nullptr, "intensity|radius|width|height|spot_angle|spot_falloff", "string", false},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"value", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_lights_set_param = {
     "lights.set_param", "lights",
@@ -3751,8 +3923,8 @@ static const MethodDescriptor desc_lights_set_param = {
 static const MethodRegistration reg_lights_set_param(desc_lights_set_param);
 
 static const MethodParam params_lights_set_position[] = {
-    {"index", "int", true, "", nullptr, nullptr},
-    {"position", "vec3", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"position", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_lights_set_position = {
     "lights.set_position", "lights",
@@ -3768,8 +3940,8 @@ static const MethodDescriptor desc_lights_set_position = {
 static const MethodRegistration reg_lights_set_position(desc_lights_set_position);
 
 static const MethodParam params_lights_set_visible[] = {
-    {"index", "int", true, "", nullptr, nullptr},
-    {"visible", "bool", true, "", nullptr, nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"visible", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_lights_set_visible = {
     "lights.set_visible", "lights",
@@ -3785,8 +3957,8 @@ static const MethodDescriptor desc_lights_set_visible = {
 static const MethodRegistration reg_lights_set_visible(desc_lights_set_visible);
 
 static const MethodParam params_material_assign[] = {
-    {"material_name", "string", true, "", nullptr, nullptr},
-    {"object_name", "string", true, "", nullptr, nullptr},
+    {"material_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_assign = {
     "material.assign", "material",
@@ -3802,8 +3974,8 @@ static const MethodDescriptor desc_material_assign = {
 static const MethodRegistration reg_material_assign(desc_material_assign);
 
 static const MethodParam params_material_clear_texture[] = {
-    {"material_name", "string", true, "", nullptr, nullptr},
-    {"slot", "string", true, "", nullptr, nullptr},
+    {"material_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"slot", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_clear_texture = {
     "material.clear_texture", "material",
@@ -3819,13 +3991,13 @@ static const MethodDescriptor desc_material_clear_texture = {
 static const MethodRegistration reg_material_clear_texture(desc_material_clear_texture);
 
 static const MethodParam params_material_create[] = {
-    {"type", "string", true, "principled, volumetric, or substance:<canonical catalogue name> (e.g. substance:Sand). Substance presets create editable visual materials and do not change physics.", nullptr, nullptr},
-    {"name", "string", false, "", "", nullptr},
+    {"type", "string", true, "principled, volumetric, or substance:<canonical catalogue name> (e.g. substance:Sand). Substance presets create editable visual materials and do not change physics.", nullptr, nullptr, "string", false},
+    {"name", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_create = {
     "material.create", "material",
     "Create a material of the given type and return its name",
-    "Substance presets require an exact catalogue name (Water, Sand, Iron, Paper, etc.); unknown names fail before material allocation. They suggest visual properties without phase or chemistry changes. Ice includes IOR 1.31, transmission, roughness and mild interior absorption; it is also the automatic frozen-SDF fallback recipe. The returned unique name is the scene material handle.",
+    "Substance presets require an exact catalogue name (Water, Sand, Iron, Paper, etc.); unknown names fail before material allocation. They suggest colors/roughness/transmission only, without phase or chemistry changes. The returned unique name is the scene material handle.",
     "write", "SceneWrite", false, "any",
     "material|create|shading",
     nullptr,
@@ -3836,8 +4008,8 @@ static const MethodDescriptor desc_material_create = {
 static const MethodRegistration reg_material_create(desc_material_create);
 
 static const MethodParam params_material_get[] = {
-    {"object_name", "string", true, "", nullptr, nullptr},
-    {"param", "string", true, "", nullptr, nullptr},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"param", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_get = {
     "material.get", "material",
@@ -3853,8 +4025,8 @@ static const MethodDescriptor desc_material_get = {
 static const MethodRegistration reg_material_get(desc_material_get);
 
 static const MethodParam params_material_get_param[] = {
-    {"material_name", "string", true, "", nullptr, nullptr},
-    {"param", "string", true, "", nullptr, nullptr},
+    {"material_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"param", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_get_param = {
     "material.get_param", "material",
@@ -3870,7 +4042,7 @@ static const MethodDescriptor desc_material_get_param = {
 static const MethodRegistration reg_material_get_param(desc_material_get_param);
 
 static const MethodParam params_material_info[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_info = {
     "material.info", "material",
@@ -3899,7 +4071,7 @@ static const MethodDescriptor desc_material_list = {
 static const MethodRegistration reg_material_list(desc_material_list);
 
 static const MethodParam params_material_of_object[] = {
-    {"object_name", "string", true, "", nullptr, nullptr},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_of_object = {
     "material.of_object", "material",
@@ -3915,9 +4087,9 @@ static const MethodDescriptor desc_material_of_object = {
 static const MethodRegistration reg_material_of_object(desc_material_of_object);
 
 static const MethodParam params_material_set[] = {
-    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens).", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
-    {"object_name", "string", true, "", nullptr, nullptr},
-    {"value", "any", false, "", nullptr, nullptr},
+    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens).", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y", "string", false},
+    {"object_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"value", "float", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_material_set = {
     "material.set", "material",
@@ -3933,9 +4105,9 @@ static const MethodDescriptor desc_material_set = {
 static const MethodRegistration reg_material_set(desc_material_set);
 
 static const MethodParam params_material_set_param[] = {
-    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens).", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y"},
-    {"material_name", "string", true, "", nullptr, nullptr},
-    {"value", "any", false, "", nullptr, nullptr},
+    {"param", "string", true, "Which Principled BSDF property to set. Colour keys (base_color, emission, resin_color, dust_color_a/b, resin_dirt_color, subsurface_color, subsurface_radius) need an RGB value; the rest need a scalar. roughness, metallic, specular, transmission, opacity and subsurface are clamped to [0,1]; ior to [1,10]; subsurface_ior to [1,3]; subsurface_anisotropy to [-0.99,0.99]; subsurface_scale must be positive; subsurface_method 0=random walk 1=fast; subsurface_max_steps integer [8,256] (too low darkens).", nullptr, "base_color|bubble_film|bubble_ior|dust_color_a|dust_color_b|dust_style|emission|emission_strength|ior|is_bubble|metallic|opacity|resin_color|resin_density|resin_dirt|resin_dirt_color|resin_inclusion|resin_inclusion_scale|resin_object_space|resin_roughness|resin_shard|resin_shard_hue|roughness|shard_shape|specular|subsurface|subsurface_anisotropy|subsurface_color|subsurface_ior|subsurface_max_steps|subsurface_method|subsurface_radius|subsurface_scale|transmission|uv_offset_x|uv_offset_y|uv_scale_x|uv_scale_y", "string", false},
+    {"material_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"value", "float", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_material_set_param = {
     "material.set_param", "material",
@@ -3951,9 +4123,9 @@ static const MethodDescriptor desc_material_set_param = {
 static const MethodRegistration reg_material_set_param(desc_material_set_param);
 
 static const MethodParam params_material_set_texture[] = {
-    {"material_name", "string", true, "", nullptr, nullptr},
-    {"path", "string", true, "", nullptr, nullptr},
-    {"slot", "string", true, "", nullptr, nullptr},
+    {"material_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"path", "string", true, "", nullptr, nullptr, "string", false},
+    {"slot", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_set_texture = {
     "material.set_texture", "material",
@@ -3969,7 +4141,7 @@ static const MethodDescriptor desc_material_set_texture = {
 static const MethodRegistration reg_material_set_texture(desc_material_set_texture);
 
 static const MethodParam params_material_textures[] = {
-    {"material_name", "string", true, "", nullptr, nullptr},
+    {"material_name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_material_textures = {
     "material.textures", "material",
@@ -3998,7 +4170,7 @@ static const MethodDescriptor desc_matter_exchanges = {
 static const MethodRegistration reg_matter_exchanges(desc_matter_exchanges);
 
 static const MethodParam params_mesh_asset_validate[] = {
-    {"object", "string", false, "", "", nullptr},
+    {"object", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_asset_validate = {
     "mesh.asset.validate", "mesh",
@@ -4014,10 +4186,10 @@ static const MethodDescriptor desc_mesh_asset_validate = {
 static const MethodRegistration reg_mesh_asset_validate(desc_mesh_asset_validate);
 
 static const MethodParam params_mesh_bevel[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"width", "float", true, "Bevel width in OBJECT-LOCAL units; must be positive", "0.0", nullptr},
-    {"segments", "int", false, "Profile segments; 1 is a flat chamfer, more rounds it", "1", nullptr},
-    {"round", "bool", false, "Use a rounded profile instead of a flat chamfer", "false", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"width", "float", true, "Bevel width in OBJECT-LOCAL units; must be positive", "0.0", nullptr, "number", false},
+    {"segments", "int", false, "Profile segments; 1 is a flat chamfer, more rounds it", "1", nullptr, "number", false},
+    {"round", "bool", false, "Use a rounded profile instead of a flat chamfer", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_mesh_bevel = {
     "mesh.bevel", "mesh",
@@ -4033,7 +4205,7 @@ static const MethodDescriptor desc_mesh_bevel = {
 static const MethodRegistration reg_mesh_bevel(desc_mesh_bevel);
 
 static const MethodParam params_mesh_dissolve_edges[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_dissolve_edges = {
     "mesh.dissolve_edges", "mesh",
@@ -4049,7 +4221,7 @@ static const MethodDescriptor desc_mesh_dissolve_edges = {
 static const MethodRegistration reg_mesh_dissolve_edges(desc_mesh_dissolve_edges);
 
 static const MethodParam params_mesh_dissolve_vertices[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_dissolve_vertices = {
     "mesh.dissolve_vertices", "mesh",
@@ -4065,7 +4237,7 @@ static const MethodDescriptor desc_mesh_dissolve_vertices = {
 static const MethodRegistration reg_mesh_dissolve_vertices(desc_mesh_dissolve_vertices);
 
 static const MethodParam params_mesh_edit_begin[] = {
-    {"object", "string", true, "Object to edit", "", nullptr},
+    {"object", "string", true, "Object to edit", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_edit_begin = {
     "mesh.edit.begin", "mesh",
@@ -4081,7 +4253,7 @@ static const MethodDescriptor desc_mesh_edit_begin = {
 static const MethodRegistration reg_mesh_edit_begin(desc_mesh_edit_begin);
 
 static const MethodParam params_mesh_edit_clear_selection[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_edit_clear_selection = {
     "mesh.edit.clear_selection", "mesh",
@@ -4097,8 +4269,8 @@ static const MethodDescriptor desc_mesh_edit_clear_selection = {
 static const MethodRegistration reg_mesh_edit_clear_selection(desc_mesh_edit_clear_selection);
 
 static const MethodParam params_mesh_edit_get_selection[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"domain", "string", true, "Element domain", "", "vertex|edge|face"},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"domain", "string", true, "Element domain", "", "vertex|edge|face", "string", false},
 };
 static const MethodDescriptor desc_mesh_edit_get_selection = {
     "mesh.edit.get_selection", "mesh",
@@ -4114,7 +4286,7 @@ static const MethodDescriptor desc_mesh_edit_get_selection = {
 static const MethodRegistration reg_mesh_edit_get_selection(desc_mesh_edit_get_selection);
 
 static const MethodParam params_mesh_edit_get_state[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_edit_get_state = {
     "mesh.edit.get_state", "mesh",
@@ -4130,11 +4302,11 @@ static const MethodDescriptor desc_mesh_edit_get_state = {
 static const MethodRegistration reg_mesh_edit_get_state(desc_mesh_edit_get_state);
 
 static const MethodParam params_mesh_edit_select[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"domain", "string", true, "Element domain", "", "vertex|edge|face"},
-    {"ids", "array", false, "Element ids; required unless 'all' is true", nullptr, nullptr},
-    {"mode", "string", false, "How the ids combine with the current selection", "set", "set|add|remove"},
-    {"all", "bool", false, "Select every element in the domain, ignoring 'ids'", "false", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"domain", "string", true, "Element domain", "", "vertex|edge|face", "string", false},
+    {"ids", "array", false, "Element ids; required unless 'all' is true", nullptr, nullptr, nullptr, false},
+    {"mode", "string", false, "How the ids combine with the current selection", "set", "set|add|remove", "string", false},
+    {"all", "bool", false, "Select every element in the domain, ignoring 'ids'", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_mesh_edit_select = {
     "mesh.edit.select", "mesh",
@@ -4150,10 +4322,10 @@ static const MethodDescriptor desc_mesh_edit_select = {
 static const MethodRegistration reg_mesh_edit_select(desc_mesh_edit_select);
 
 static const MethodParam params_mesh_edit_select_by_box[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"domain", "string", false, "Element domain", "face", "vertex|edge|face"},
-    {"mode", "string", false, "How the matches combine with the current selection", "set", "set|add|remove"},
-    {"world_space", "bool", false, "Compare in world space (default) rather than object space", "true", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"domain", "string", false, "Element domain", "face", "vertex|edge|face", "string", false},
+    {"mode", "string", false, "How the matches combine with the current selection", "set", "set|add|remove", "string", false},
+    {"world_space", "bool", false, "Compare in world space (default) rather than object space", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_mesh_edit_select_by_box = {
     "mesh.edit.select_by_box", "mesh",
@@ -4169,9 +4341,9 @@ static const MethodDescriptor desc_mesh_edit_select_by_box = {
 static const MethodRegistration reg_mesh_edit_select_by_box(desc_mesh_edit_select_by_box);
 
 static const MethodParam params_mesh_edit_select_by_normal[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"max_angle", "float", false, "Maximum angle in degrees between normal and direction", "30.0", nullptr},
-    {"mode", "string", false, "How the matches combine with the current selection", "set", "set|add|remove"},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"max_angle", "float", false, "Maximum angle in degrees between normal and direction", "30.0", nullptr, "number", false},
+    {"mode", "string", false, "How the matches combine with the current selection", "set", "set|add|remove", "string", false},
 };
 static const MethodDescriptor desc_mesh_edit_select_by_normal = {
     "mesh.edit.select_by_normal", "mesh",
@@ -4187,8 +4359,8 @@ static const MethodDescriptor desc_mesh_edit_select_by_normal = {
 static const MethodRegistration reg_mesh_edit_select_by_normal(desc_mesh_edit_select_by_normal);
 
 static const MethodParam params_mesh_extrude[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"distance", "float", true, "Extrude distance in OBJECT-LOCAL units; must be non-zero, negative pushes inward", "0.0", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"distance", "float", true, "Extrude distance in OBJECT-LOCAL units; must be non-zero, negative pushes inward", "0.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_mesh_extrude = {
     "mesh.extrude", "mesh",
@@ -4204,8 +4376,8 @@ static const MethodDescriptor desc_mesh_extrude = {
 static const MethodRegistration reg_mesh_extrude(desc_mesh_extrude);
 
 static const MethodParam params_mesh_inset[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"amount", "float", true, "Inset distance in OBJECT-LOCAL units; must be positive", "0.0", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"amount", "float", true, "Inset distance in OBJECT-LOCAL units; must be positive", "0.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_mesh_inset = {
     "mesh.inset", "mesh",
@@ -4221,8 +4393,8 @@ static const MethodDescriptor desc_mesh_inset = {
 static const MethodRegistration reg_mesh_inset(desc_mesh_inset);
 
 static const MethodParam params_mesh_loop_cut[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"t", "float", false, "Cut position along the ring, strictly between 0 and 1", "0.5", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"t", "float", false, "Cut position along the ring, strictly between 0 and 1", "0.5", nullptr, "number", false},
 };
 static const MethodDescriptor desc_mesh_loop_cut = {
     "mesh.loop_cut", "mesh",
@@ -4238,7 +4410,7 @@ static const MethodDescriptor desc_mesh_loop_cut = {
 static const MethodRegistration reg_mesh_loop_cut(desc_mesh_loop_cut);
 
 static const MethodParam params_mesh_merge_vertices[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_merge_vertices = {
     "mesh.merge_vertices", "mesh",
@@ -4254,8 +4426,8 @@ static const MethodDescriptor desc_mesh_merge_vertices = {
 static const MethodRegistration reg_mesh_merge_vertices(desc_mesh_merge_vertices);
 
 static const MethodParam params_mesh_operation_commit_positions[] = {
-    {"object", "string", false, "", "", nullptr},
-    {"positions", "any", false, "", nullptr, nullptr},
+    {"object", "string", false, "", "", nullptr, "string", false},
+    {"positions", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_mesh_operation_commit_positions = {
     "mesh.operation.commit_positions", "mesh",
@@ -4271,9 +4443,9 @@ static const MethodDescriptor desc_mesh_operation_commit_positions = {
 static const MethodRegistration reg_mesh_operation_commit_positions(desc_mesh_operation_commit_positions);
 
 static const MethodParam params_mesh_operation_plan[] = {
-    {"backend", "string", false, "", "auto", nullptr},
-    {"object", "string", false, "", "", nullptr},
-    {"tool", "string", false, "", "", nullptr},
+    {"backend", "string", false, "", "auto", nullptr, "string", false},
+    {"object", "string", false, "", "", nullptr, "string", false},
+    {"tool", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_operation_plan = {
     "mesh.operation.plan", "mesh",
@@ -4302,7 +4474,7 @@ static const MethodDescriptor desc_mesh_operation_self_test = {
 static const MethodRegistration reg_mesh_operation_self_test(desc_mesh_operation_self_test);
 
 static const MethodParam params_mesh_profile_loft_commit[] = {
-    {"object", "string", true, "Destination mesh object name", "", nullptr},
+    {"object", "string", true, "Destination mesh object name", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_profile_loft_commit = {
     "mesh.profile.loft.commit", "mesh",
@@ -4344,7 +4516,7 @@ static const MethodDescriptor desc_mesh_profile_loft_self_test = {
 static const MethodRegistration reg_mesh_profile_loft_self_test(desc_mesh_profile_loft_self_test);
 
 static const MethodParam params_mesh_profile_revolve_commit[] = {
-    {"object", "string", false, "Destination mesh object name", "", nullptr},
+    {"object", "string", false, "Destination mesh object name", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_profile_revolve_commit = {
     "mesh.profile.revolve.commit", "mesh",
@@ -4386,7 +4558,7 @@ static const MethodDescriptor desc_mesh_profile_revolve_self_test = {
 static const MethodRegistration reg_mesh_profile_revolve_self_test(desc_mesh_profile_revolve_self_test);
 
 static const MethodParam params_mesh_profile_sweep_commit[] = {
-    {"object", "string", false, "", "", nullptr},
+    {"object", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_profile_sweep_commit = {
     "mesh.profile.sweep.commit", "mesh",
@@ -4428,7 +4600,7 @@ static const MethodDescriptor desc_mesh_profile_sweep_self_test = {
 static const MethodRegistration reg_mesh_profile_sweep_self_test(desc_mesh_profile_sweep_self_test);
 
 static const MethodParam params_mesh_tools_describe[] = {
-    {"tool", "string", false, "", "", nullptr},
+    {"tool", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_tools_describe = {
     "mesh.tools.describe", "mesh",
@@ -4444,8 +4616,8 @@ static const MethodDescriptor desc_mesh_tools_describe = {
 static const MethodRegistration reg_mesh_tools_describe(desc_mesh_tools_describe);
 
 static const MethodParam params_mesh_tools_list[] = {
-    {"include_unavailable", "bool", false, "", "false", nullptr},
-    {"workspace", "string", false, "", "edit", nullptr},
+    {"include_unavailable", "bool", false, "", "false", nullptr, "bool", false},
+    {"workspace", "string", false, "", "edit", nullptr, "string", false},
 };
 static const MethodDescriptor desc_mesh_tools_list = {
     "mesh.tools.list", "mesh",
@@ -4461,8 +4633,8 @@ static const MethodDescriptor desc_mesh_tools_list = {
 static const MethodRegistration reg_mesh_tools_list(desc_mesh_tools_list);
 
 static const MethodParam params_mesh_weld_vertices[] = {
-    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr},
-    {"distance", "float", true, "Weld threshold in OBJECT-LOCAL units; must be positive", "0.0", nullptr},
+    {"object", "string", false, "Object to edit; empty uses the active mesh edit object", "", nullptr, "string", false},
+    {"distance", "float", true, "Weld threshold in OBJECT-LOCAL units; must be positive", "0.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_mesh_weld_vertices = {
     "mesh.weld_vertices", "mesh",
@@ -4478,11 +4650,11 @@ static const MethodDescriptor desc_mesh_weld_vertices = {
 static const MethodRegistration reg_mesh_weld_vertices(desc_mesh_weld_vertices);
 
 static const MethodParam params_modifiers_add[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"levels", "int", false, "", "1", nullptr},
-    {"name", "string", false, "", "", nullptr},
-    {"render_levels", "int", false, "", "2", nullptr},
-    {"type", "string", false, "", "catmull_clark", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"levels", "int", false, "", "1", nullptr, "number", false},
+    {"name", "string", false, "", "", nullptr, "string", false},
+    {"render_levels", "int", false, "", "2", nullptr, "number", false},
+    {"type", "string", false, "", "catmull_clark", nullptr, "string", false},
 };
 static const MethodDescriptor desc_modifiers_add = {
     "modifiers.add", "modifiers",
@@ -4498,8 +4670,8 @@ static const MethodDescriptor desc_modifiers_add = {
 static const MethodRegistration reg_modifiers_add(desc_modifiers_add);
 
 static const MethodParam params_modifiers_apply[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"index", "int", false, "", "0", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"index", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_modifiers_apply = {
     "modifiers.apply", "modifiers",
@@ -4515,7 +4687,7 @@ static const MethodDescriptor desc_modifiers_apply = {
 static const MethodRegistration reg_modifiers_apply(desc_modifiers_apply);
 
 static const MethodParam params_modifiers_get_stack[] = {
-    {"object", "string", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_modifiers_get_stack = {
     "modifiers.get_stack", "modifiers",
@@ -4531,8 +4703,8 @@ static const MethodDescriptor desc_modifiers_get_stack = {
 static const MethodRegistration reg_modifiers_get_stack(desc_modifiers_get_stack);
 
 static const MethodParam params_modifiers_remove[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"index", "int", false, "", "0", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"index", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_modifiers_remove = {
     "modifiers.remove", "modifiers",
@@ -4548,13 +4720,13 @@ static const MethodDescriptor desc_modifiers_remove = {
 static const MethodRegistration reg_modifiers_remove(desc_modifiers_remove);
 
 static const MethodParam params_modifiers_set_param[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"index", "int", false, "", "0", nullptr},
-    {"levels", "any", false, "", nullptr, nullptr},
-    {"name", "string", false, "", "", nullptr},
-    {"render_levels", "any", false, "", nullptr, nullptr},
-    {"smooth_angle", "any", false, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"index", "int", false, "", "0", nullptr, "number", false},
+    {"levels", "float", false, "", nullptr, nullptr, "number", false},
+    {"name", "string", false, "", "", nullptr, "string", false},
+    {"render_levels", "float", false, "", nullptr, nullptr, "number", false},
+    {"smooth_angle", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_modifiers_set_param = {
     "modifiers.set_param", "modifiers",
@@ -4596,9 +4768,9 @@ static const MethodDescriptor desc_msf_water_budget = {
 static const MethodRegistration reg_msf_water_budget(desc_msf_water_budget);
 
 static const MethodParam params_nodes_add[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"type_id", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"type_id", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_nodes_add = {
     "nodes.add", "nodes",
@@ -4614,8 +4786,8 @@ static const MethodDescriptor desc_nodes_add = {
 static const MethodRegistration reg_nodes_add(desc_nodes_add);
 
 static const MethodParam params_nodes_apply[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_nodes_apply = {
     "nodes.apply", "nodes",
@@ -4631,8 +4803,8 @@ static const MethodDescriptor desc_nodes_apply = {
 static const MethodRegistration reg_nodes_apply(desc_nodes_apply);
 
 static const MethodParam params_nodes_create_graph[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_nodes_create_graph = {
     "nodes.create_graph", "nodes",
@@ -4648,10 +4820,10 @@ static const MethodDescriptor desc_nodes_create_graph = {
 static const MethodRegistration reg_nodes_create_graph(desc_nodes_create_graph);
 
 static const MethodParam params_nodes_get_param[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"pin_index", "int", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"pin_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_get_param = {
     "nodes.get_param", "nodes",
@@ -4667,10 +4839,10 @@ static const MethodDescriptor desc_nodes_get_param = {
 static const MethodRegistration reg_nodes_get_param(desc_nodes_get_param);
 
 static const MethodParam params_nodes_get_property[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"property", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"property", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_get_property = {
     "nodes.get_property", "nodes",
@@ -4686,7 +4858,7 @@ static const MethodDescriptor desc_nodes_get_property = {
 static const MethodRegistration reg_nodes_get_property(desc_nodes_get_property);
 
 static const MethodParam params_nodes_graphs[] = {
-    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_nodes_graphs = {
     "nodes.graphs", "nodes",
@@ -4702,12 +4874,12 @@ static const MethodDescriptor desc_nodes_graphs = {
 static const MethodRegistration reg_nodes_graphs(desc_nodes_graphs);
 
 static const MethodParam params_nodes_link[] = {
-    {"from_output", "int", true, "", nullptr, nullptr},
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"to_input", "int", true, "", nullptr, nullptr},
-    {"from_node", "any", false, "", nullptr, nullptr},
-    {"to_node", "any", false, "", nullptr, nullptr},
+    {"from_output", "int", true, "", nullptr, nullptr, "number", false},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"to_input", "int", true, "", nullptr, nullptr, "number", false},
+    {"from_node", "any", false, "", nullptr, nullptr, "number", false},
+    {"to_node", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_link = {
     "nodes.link", "nodes",
@@ -4723,12 +4895,12 @@ static const MethodDescriptor desc_nodes_link = {
 static const MethodRegistration reg_nodes_link(desc_nodes_link);
 
 static const MethodParam params_nodes_link_by_key[] = {
-    {"from_output", "string", true, "", nullptr, nullptr},
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"to_input", "string", true, "", nullptr, nullptr},
-    {"from_node", "any", false, "", nullptr, nullptr},
-    {"to_node", "any", false, "", nullptr, nullptr},
+    {"from_output", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"to_input", "string", true, "", nullptr, nullptr, "string", false},
+    {"from_node", "any", false, "", nullptr, nullptr, "number", false},
+    {"to_node", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_link_by_key = {
     "nodes.link_by_key", "nodes",
@@ -4744,8 +4916,8 @@ static const MethodDescriptor desc_nodes_link_by_key = {
 static const MethodRegistration reg_nodes_link_by_key(desc_nodes_link_by_key);
 
 static const MethodParam params_nodes_list[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_nodes_list = {
     "nodes.list", "nodes",
@@ -4761,9 +4933,9 @@ static const MethodDescriptor desc_nodes_list = {
 static const MethodRegistration reg_nodes_list(desc_nodes_list);
 
 static const MethodParam params_nodes_list_params[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_list_params = {
     "nodes.list_params", "nodes",
@@ -4779,9 +4951,9 @@ static const MethodDescriptor desc_nodes_list_params = {
 static const MethodRegistration reg_nodes_list_params(desc_nodes_list_params);
 
 static const MethodParam params_nodes_list_ports[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_list_ports = {
     "nodes.list_ports", "nodes",
@@ -4797,9 +4969,9 @@ static const MethodDescriptor desc_nodes_list_ports = {
 static const MethodRegistration reg_nodes_list_ports(desc_nodes_list_ports);
 
 static const MethodParam params_nodes_list_properties[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_list_properties = {
     "nodes.list_properties", "nodes",
@@ -4815,9 +4987,9 @@ static const MethodDescriptor desc_nodes_list_properties = {
 static const MethodRegistration reg_nodes_list_properties(desc_nodes_list_properties);
 
 static const MethodParam params_nodes_remove[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_nodes_remove = {
     "nodes.remove", "nodes",
@@ -4833,8 +5005,8 @@ static const MethodDescriptor desc_nodes_remove = {
 static const MethodRegistration reg_nodes_remove(desc_nodes_remove);
 
 static const MethodParam params_nodes_remove_graph[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_nodes_remove_graph = {
     "nodes.remove_graph", "nodes",
@@ -4850,11 +5022,11 @@ static const MethodDescriptor desc_nodes_remove_graph = {
 static const MethodRegistration reg_nodes_remove_graph(desc_nodes_remove_graph);
 
 static const MethodParam params_nodes_set_param[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"pin_index", "int", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
-    {"value", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"pin_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
+    {"value", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_nodes_set_param = {
     "nodes.set_param", "nodes",
@@ -4870,12 +5042,12 @@ static const MethodDescriptor desc_nodes_set_param = {
 static const MethodRegistration reg_nodes_set_param(desc_nodes_set_param);
 
 static const MethodParam params_nodes_set_port_visible[] = {
-    {"direction", "string", true, "", nullptr, nullptr},
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"port_key", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
-    {"visible", "bool", false, "", "true", nullptr},
+    {"direction", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"port_key", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
+    {"visible", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_nodes_set_port_visible = {
     "nodes.set_port_visible", "nodes",
@@ -4891,11 +5063,11 @@ static const MethodDescriptor desc_nodes_set_port_visible = {
 static const MethodRegistration reg_nodes_set_port_visible(desc_nodes_set_port_visible);
 
 static const MethodParam params_nodes_set_property[] = {
-    {"graph_name", "string", true, "", nullptr, nullptr},
-    {"graph_type", "string", true, "", nullptr, nullptr},
-    {"property", "string", true, "", nullptr, nullptr},
-    {"node_id", "any", false, "", nullptr, nullptr},
-    {"value", "any", false, "", nullptr, nullptr},
+    {"graph_name", "string", true, "", nullptr, nullptr, "string", false},
+    {"graph_type", "string", true, "", nullptr, nullptr, "string", false},
+    {"property", "string", true, "", nullptr, nullptr, "string", false},
+    {"node_id", "any", false, "", nullptr, nullptr, "number", false},
+    {"value", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_nodes_set_property = {
     "nodes.set_property", "nodes",
@@ -4924,10 +5096,10 @@ static const MethodDescriptor desc_nodes_types = {
 static const MethodRegistration reg_nodes_types(desc_nodes_types);
 
 static const MethodParam params_paint_add_layer[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"insert_at", "int", false, "", "-1", nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
-    {"name", "string", false, "", "Paint Layer", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"insert_at", "int", false, "", "-1", nullptr, "number", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"name", "string", false, "", "Paint Layer", nullptr, "string", false},
 };
 static const MethodDescriptor desc_paint_add_layer = {
     "paint.add_layer", "paint",
@@ -4943,12 +5115,12 @@ static const MethodDescriptor desc_paint_add_layer = {
 static const MethodRegistration reg_paint_add_layer(desc_paint_add_layer);
 
 static const MethodParam params_paint_apply_mask[] = {
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"preset", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
-    {"seed", "int", false, "", "1337", nullptr},
-    {"strength", "float", false, "", "1.0", nullptr},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"preset", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"seed", "int", false, "", "1337", nullptr, "number", false},
+    {"strength", "float", false, "", "1.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_apply_mask = {
     "paint.apply_mask", "paint",
@@ -4964,10 +5136,10 @@ static const MethodDescriptor desc_paint_apply_mask = {
 static const MethodRegistration reg_paint_apply_mask(desc_paint_apply_mask);
 
 static const MethodParam params_paint_bake_height_to_normal[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"clear_height", "bool", false, "", "false", nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
-    {"strength", "float", false, "", "4.0", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"clear_height", "bool", false, "", "false", nullptr, "bool", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"strength", "float", false, "", "4.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_bake_height_to_normal = {
     "paint.bake_height_to_normal", "paint",
@@ -4983,10 +5155,10 @@ static const MethodDescriptor desc_paint_bake_height_to_normal = {
 static const MethodRegistration reg_paint_bake_height_to_normal(desc_paint_bake_height_to_normal);
 
 static const MethodParam params_paint_clear_channel[] = {
-    {"channel", "string", true, "", nullptr, nullptr},
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"channel", "string", true, "", nullptr, nullptr, "string", false},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_clear_channel = {
     "paint.clear_channel", "paint",
@@ -5002,9 +5174,9 @@ static const MethodDescriptor desc_paint_clear_channel = {
 static const MethodRegistration reg_paint_clear_channel(desc_paint_clear_channel);
 
 static const MethodParam params_paint_duplicate_layer[] = {
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_duplicate_layer = {
     "paint.duplicate_layer", "paint",
@@ -5020,9 +5192,9 @@ static const MethodDescriptor desc_paint_duplicate_layer = {
 static const MethodRegistration reg_paint_duplicate_layer(desc_paint_duplicate_layer);
 
 static const MethodParam params_paint_ensure[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
-    {"resolution", "int", false, "", "1024", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"resolution", "int", false, "", "1024", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_ensure = {
     "paint.ensure", "paint",
@@ -5038,11 +5210,11 @@ static const MethodDescriptor desc_paint_ensure = {
 static const MethodRegistration reg_paint_ensure(desc_paint_ensure);
 
 static const MethodParam params_paint_export_channel[] = {
-    {"channel", "string", true, "", nullptr, nullptr},
-    {"filepath", "string", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"layer_index", "int", false, "", "-1", nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"channel", "string", true, "", nullptr, nullptr, "string", false},
+    {"filepath", "string", true, "", nullptr, nullptr, "string", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"layer_index", "int", false, "", "-1", nullptr, "number", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_export_channel = {
     "paint.export_channel", "paint",
@@ -5058,11 +5230,11 @@ static const MethodDescriptor desc_paint_export_channel = {
 static const MethodRegistration reg_paint_export_channel(desc_paint_export_channel);
 
 static const MethodParam params_paint_fill[] = {
-    {"channel", "string", true, "", nullptr, nullptr},
-    {"color", "vec3", true, "", nullptr, nullptr},
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"channel", "string", true, "", nullptr, nullptr, "string", false},
+    {"color", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_fill = {
     "paint.fill", "paint",
@@ -5078,8 +5250,8 @@ static const MethodDescriptor desc_paint_fill = {
 static const MethodRegistration reg_paint_fill(desc_paint_fill);
 
 static const MethodParam params_paint_flatten[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_flatten = {
     "paint.flatten", "paint",
@@ -5095,8 +5267,8 @@ static const MethodDescriptor desc_paint_flatten = {
 static const MethodRegistration reg_paint_flatten(desc_paint_flatten);
 
 static const MethodParam params_paint_get[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_get = {
     "paint.get", "paint",
@@ -5112,11 +5284,11 @@ static const MethodDescriptor desc_paint_get = {
 static const MethodRegistration reg_paint_get(desc_paint_get);
 
 static const MethodParam params_paint_import_channel[] = {
-    {"channel", "string", true, "", nullptr, nullptr},
-    {"filepath", "string", true, "", nullptr, nullptr},
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"channel", "string", true, "", nullptr, nullptr, "string", false},
+    {"filepath", "string", true, "", nullptr, nullptr, "string", false},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_import_channel = {
     "paint.import_channel", "paint",
@@ -5145,9 +5317,9 @@ static const MethodDescriptor desc_paint_list_mask_presets = {
 static const MethodRegistration reg_paint_list_mask_presets(desc_paint_list_mask_presets);
 
 static const MethodParam params_paint_merge_down[] = {
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_merge_down = {
     "paint.merge_down", "paint",
@@ -5163,10 +5335,10 @@ static const MethodDescriptor desc_paint_merge_down = {
 static const MethodRegistration reg_paint_merge_down(desc_paint_merge_down);
 
 static const MethodParam params_paint_move_layer[] = {
-    {"from_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"to_index", "int", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"from_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"to_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_move_layer = {
     "paint.move_layer", "paint",
@@ -5182,9 +5354,9 @@ static const MethodDescriptor desc_paint_move_layer = {
 static const MethodRegistration reg_paint_move_layer(desc_paint_move_layer);
 
 static const MethodParam params_paint_remove_layer[] = {
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_paint_remove_layer = {
     "paint.remove_layer", "paint",
@@ -5200,14 +5372,14 @@ static const MethodDescriptor desc_paint_remove_layer = {
 static const MethodRegistration reg_paint_remove_layer(desc_paint_remove_layer);
 
 static const MethodParam params_paint_update_layer[] = {
-    {"layer_index", "int", true, "", nullptr, nullptr},
-    {"object", "string", true, "", nullptr, nullptr},
-    {"blend_mode", "any", false, "", nullptr, nullptr},
-    {"locked", "any", false, "", nullptr, nullptr},
-    {"material_id", "int", false, "", "-1", nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
-    {"opacity", "any", false, "", nullptr, nullptr},
-    {"visible", "any", false, "", nullptr, nullptr},
+    {"layer_index", "int", true, "", nullptr, nullptr, "number", false},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"blend_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"locked", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"opacity", "float", false, "", nullptr, nullptr, "number", false},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_paint_update_layer = {
     "paint.update_layer", "paint",
@@ -5223,14 +5395,14 @@ static const MethodDescriptor desc_paint_update_layer = {
 static const MethodRegistration reg_paint_update_layer(desc_paint_update_layer);
 
 static const MethodParam params_particle_add_appearance[] = {
-    {"blend", "any", false, "", nullptr, nullptr},
-    {"color_ramp", "any", false, "", nullptr, nullptr},
-    {"emission_curve", "any", false, "", nullptr, nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
-    {"opacity_curve", "any", false, "", nullptr, nullptr},
-    {"size_curve", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"blend", "string", false, "", nullptr, nullptr, "string", false},
+    {"color_ramp", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"emission_curve", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"opacity_curve", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"size_curve", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_add_appearance = {
     "particle.add_appearance", "particle",
@@ -5246,35 +5418,35 @@ static const MethodDescriptor desc_particle_add_appearance = {
 static const MethodRegistration reg_particle_add_appearance(desc_particle_add_appearance);
 
 static const MethodParam params_particle_add_emitter[] = {
-    {"angular_jitter", "float", false, "", nullptr, nullptr},
-    {"angular_velocity", "float", false, "", nullptr, nullptr},
-    {"appearance_profile_id", "any", false, "", nullptr, nullptr},
-    {"burst_count", "any", false, "", nullptr, nullptr},
-    {"direction", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"grid_density_deposit", "float", false, "", nullptr, nullptr},
-    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
-    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
-    {"inherit_velocity", "float", false, "", nullptr, nullptr},
-    {"lifetime_seconds", "float", false, "", nullptr, nullptr},
-    {"local_offset", "vec3", false, "", nullptr, nullptr},
-    {"mass", "float", false, "", nullptr, nullptr},
-    {"name", "string", false, "", nullptr, nullptr},
-    {"override_grid_deposit", "bool", false, "", nullptr, nullptr},
-    {"parent_object", "string", false, "", nullptr, nullptr},
-    {"point", "vec3", false, "", nullptr, nullptr},
-    {"rate_per_second", "float", false, "", nullptr, nullptr},
-    {"seed", "any", false, "", nullptr, nullptr},
-    {"size_jitter", "float", false, "", nullptr, nullptr},
-    {"source_mode", "string", false, "", nullptr, nullptr},
-    {"source_name", "string", false, "", nullptr, nullptr},
-    {"spawn_mode", "string", false, "", nullptr, nullptr},
-    {"speed", "float", false, "", nullptr, nullptr},
-    {"spread", "float", false, "", nullptr, nullptr},
-    {"surface_offset", "float", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
-    {"velocity_space", "string", false, "", nullptr, nullptr},
+    {"angular_jitter", "float", false, "", nullptr, nullptr, "number", false},
+    {"angular_velocity", "float", false, "", nullptr, nullptr, "number", false},
+    {"appearance_profile_id", "float", false, "", nullptr, nullptr, "number", false},
+    {"burst_count", "float", false, "", nullptr, nullptr, "number", false},
+    {"direction", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"grid_density_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"inherit_velocity", "float", false, "", nullptr, nullptr, "number", false},
+    {"lifetime_seconds", "float", false, "", nullptr, nullptr, "number", false},
+    {"local_offset", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"mass", "float", false, "", nullptr, nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"override_grid_deposit", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"parent_object", "string", false, "", nullptr, nullptr, "string", false},
+    {"point", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"rate_per_second", "float", false, "", nullptr, nullptr, "number", false},
+    {"seed", "float", false, "", nullptr, nullptr, "number", false},
+    {"size_jitter", "float", false, "", nullptr, nullptr, "number", false},
+    {"source_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"source_name", "string", false, "", nullptr, nullptr, "string", false},
+    {"spawn_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"speed", "float", false, "", nullptr, nullptr, "number", false},
+    {"spread", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_offset", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+    {"velocity_space", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_particle_add_emitter = {
     "particle.add_emitter", "particle",
@@ -5290,7 +5462,7 @@ static const MethodDescriptor desc_particle_add_emitter = {
 static const MethodRegistration reg_particle_add_emitter(desc_particle_add_emitter);
 
 static const MethodParam params_particle_add_preset[] = {
-    {"preset", "string", true, "", nullptr, nullptr},
+    {"preset", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_particle_add_preset = {
     "particle.add_preset", "particle",
@@ -5306,7 +5478,7 @@ static const MethodDescriptor desc_particle_add_preset = {
 static const MethodRegistration reg_particle_add_preset(desc_particle_add_preset);
 
 static const MethodParam params_particle_add_system[] = {
-    {"name", "string", false, "", "Particle System", nullptr},
+    {"name", "string", false, "", "Particle System", nullptr, "string", false},
 };
 static const MethodDescriptor desc_particle_add_system = {
     "particle.add_system", "particle",
@@ -5322,8 +5494,8 @@ static const MethodDescriptor desc_particle_add_system = {
 static const MethodRegistration reg_particle_add_system(desc_particle_add_system);
 
 static const MethodParam params_particle_clear[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_clear = {
     "particle.clear", "particle",
@@ -5339,11 +5511,11 @@ static const MethodDescriptor desc_particle_clear = {
 static const MethodRegistration reg_particle_clear(desc_particle_clear);
 
 static const MethodParam params_particle_clear_emitter_key[] = {
-    {"emitter", "string", true, "", nullptr, nullptr},
-    {"frame", "int", true, "", nullptr, nullptr},
-    {"emitter_uid", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"emitter", "string", true, "", nullptr, nullptr, "string", false},
+    {"frame", "int", true, "", nullptr, nullptr, "number", false},
+    {"emitter_uid", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_clear_emitter_key = {
     "particle.clear_emitter_key", "particle",
@@ -5359,8 +5531,8 @@ static const MethodDescriptor desc_particle_clear_emitter_key = {
 static const MethodRegistration reg_particle_clear_emitter_key(desc_particle_clear_emitter_key);
 
 static const MethodParam params_particle_clear_emitters[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_clear_emitters = {
     "particle.clear_emitters", "particle",
@@ -5389,8 +5561,8 @@ static const MethodDescriptor desc_particle_clear_systems = {
 static const MethodRegistration reg_particle_clear_systems(desc_particle_clear_systems);
 
 static const MethodParam params_particle_emitters[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_emitters = {
     "particle.emitters", "particle",
@@ -5406,9 +5578,9 @@ static const MethodDescriptor desc_particle_emitters = {
 static const MethodRegistration reg_particle_emitters(desc_particle_emitters);
 
 static const MethodParam params_particle_get_appearance[] = {
-    {"profile_id", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"profile_id", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_get_appearance = {
     "particle.get_appearance", "particle",
@@ -5424,10 +5596,10 @@ static const MethodDescriptor desc_particle_get_appearance = {
 static const MethodRegistration reg_particle_get_appearance(desc_particle_get_appearance);
 
 static const MethodParam params_particle_get_emitter[] = {
-    {"emitter", "string", true, "", nullptr, nullptr},
-    {"emitter_uid", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"emitter", "string", true, "", nullptr, nullptr, "string", false},
+    {"emitter_uid", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_get_emitter = {
     "particle.get_emitter", "particle",
@@ -5443,8 +5615,8 @@ static const MethodDescriptor desc_particle_get_emitter = {
 static const MethodRegistration reg_particle_get_emitter(desc_particle_get_emitter);
 
 static const MethodParam params_particle_get_physics[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_get_physics = {
     "particle.get_physics", "particle",
@@ -5460,8 +5632,8 @@ static const MethodDescriptor desc_particle_get_physics = {
 static const MethodRegistration reg_particle_get_physics(desc_particle_get_physics);
 
 static const MethodParam params_particle_get_render[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_get_render = {
     "particle.get_render", "particle",
@@ -5477,11 +5649,11 @@ static const MethodDescriptor desc_particle_get_render = {
 static const MethodRegistration reg_particle_get_render(desc_particle_get_render);
 
 static const MethodParam params_particle_get_state_sample[] = {
-    {"max_count", "int", false, "", "256", nullptr},
-    {"offset", "int", false, "", "0", nullptr},
-    {"stride", "int", false, "", "1", nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"max_count", "int", false, "", "256", nullptr, "number", false},
+    {"offset", "int", false, "", "0", nullptr, "number", false},
+    {"stride", "int", false, "", "1", nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_get_state_sample = {
     "particle.get_state_sample", "particle",
@@ -5497,8 +5669,8 @@ static const MethodDescriptor desc_particle_get_state_sample = {
 static const MethodRegistration reg_particle_get_state_sample(desc_particle_get_state_sample);
 
 static const MethodParam params_particle_get_system[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_get_system = {
     "particle.get_system", "particle",
@@ -5514,17 +5686,17 @@ static const MethodDescriptor desc_particle_get_system = {
 static const MethodRegistration reg_particle_get_system(desc_particle_get_system);
 
 static const MethodParam params_particle_key_emitter[] = {
-    {"emitter", "string", true, "", nullptr, nullptr},
-    {"frame", "int", true, "", nullptr, nullptr},
-    {"direction", "vec3", false, "", nullptr, nullptr},
-    {"emitter_uid", "any", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"point", "vec3", false, "", nullptr, nullptr},
-    {"rate_per_second", "float", false, "", "0.0", nullptr},
-    {"speed", "float", false, "", "0.0", nullptr},
-    {"spread", "float", false, "", "0.0", nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"emitter", "string", true, "", nullptr, nullptr, "string", false},
+    {"frame", "int", true, "", nullptr, nullptr, "number", false},
+    {"direction", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"emitter_uid", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"point", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"rate_per_second", "float", false, "", "0.0", nullptr, "number", false},
+    {"speed", "float", false, "", "0.0", nullptr, "number", false},
+    {"spread", "float", false, "", "0.0", nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_key_emitter = {
     "particle.key_emitter", "particle",
@@ -5540,8 +5712,8 @@ static const MethodDescriptor desc_particle_key_emitter = {
 static const MethodRegistration reg_particle_key_emitter(desc_particle_key_emitter);
 
 static const MethodParam params_particle_list_appearances[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_list_appearances = {
     "particle.list_appearances", "particle",
@@ -5570,9 +5742,9 @@ static const MethodDescriptor desc_particle_list_systems = {
 static const MethodRegistration reg_particle_list_systems(desc_particle_list_systems);
 
 static const MethodParam params_particle_remove_appearance[] = {
-    {"profile_id", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"profile_id", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_remove_appearance = {
     "particle.remove_appearance", "particle",
@@ -5588,10 +5760,10 @@ static const MethodDescriptor desc_particle_remove_appearance = {
 static const MethodRegistration reg_particle_remove_appearance(desc_particle_remove_appearance);
 
 static const MethodParam params_particle_remove_emitter[] = {
-    {"emitter", "string", true, "", nullptr, nullptr},
-    {"emitter_uid", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"emitter", "string", true, "", nullptr, nullptr, "string", false},
+    {"emitter_uid", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_remove_emitter = {
     "particle.remove_emitter", "particle",
@@ -5607,8 +5779,8 @@ static const MethodDescriptor desc_particle_remove_emitter = {
 static const MethodRegistration reg_particle_remove_emitter(desc_particle_remove_emitter);
 
 static const MethodParam params_particle_remove_system[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_remove_system = {
     "particle.remove_system", "particle",
@@ -5624,8 +5796,8 @@ static const MethodDescriptor desc_particle_remove_system = {
 static const MethodRegistration reg_particle_remove_system(desc_particle_remove_system);
 
 static const MethodParam params_particle_set_active_system[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_set_active_system = {
     "particle.set_active_system", "particle",
@@ -5641,15 +5813,15 @@ static const MethodDescriptor desc_particle_set_active_system = {
 static const MethodRegistration reg_particle_set_active_system(desc_particle_set_active_system);
 
 static const MethodParam params_particle_set_appearance[] = {
-    {"blend", "any", false, "", nullptr, nullptr},
-    {"color_ramp", "any", false, "", nullptr, nullptr},
-    {"emission_curve", "any", false, "", nullptr, nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
-    {"opacity_curve", "any", false, "", nullptr, nullptr},
-    {"profile_id", "any", false, "", nullptr, nullptr},
-    {"size_curve", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"blend", "string", false, "", nullptr, nullptr, "string", false},
+    {"color_ramp", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"emission_curve", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"opacity_curve", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"profile_id", "float", false, "", nullptr, nullptr, "number", false},
+    {"size_curve", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_set_appearance = {
     "particle.set_appearance", "particle",
@@ -5665,37 +5837,37 @@ static const MethodDescriptor desc_particle_set_appearance = {
 static const MethodRegistration reg_particle_set_appearance(desc_particle_set_appearance);
 
 static const MethodParam params_particle_set_emitter[] = {
-    {"emitter", "string", true, "", nullptr, nullptr},
-    {"angular_jitter", "float", false, "", nullptr, nullptr},
-    {"angular_velocity", "float", false, "", nullptr, nullptr},
-    {"appearance_profile_id", "any", false, "", nullptr, nullptr},
-    {"burst_count", "any", false, "", nullptr, nullptr},
-    {"direction", "vec3", false, "", nullptr, nullptr},
-    {"emitter_uid", "any", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"grid_density_deposit", "float", false, "", nullptr, nullptr},
-    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
-    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
-    {"inherit_velocity", "float", false, "", nullptr, nullptr},
-    {"lifetime_seconds", "float", false, "", nullptr, nullptr},
-    {"local_offset", "vec3", false, "", nullptr, nullptr},
-    {"mass", "float", false, "", nullptr, nullptr},
-    {"name", "string", false, "", nullptr, nullptr},
-    {"override_grid_deposit", "bool", false, "", nullptr, nullptr},
-    {"parent_object", "string", false, "", nullptr, nullptr},
-    {"point", "vec3", false, "", nullptr, nullptr},
-    {"rate_per_second", "float", false, "", nullptr, nullptr},
-    {"seed", "any", false, "", nullptr, nullptr},
-    {"size_jitter", "float", false, "", nullptr, nullptr},
-    {"source_mode", "string", false, "", nullptr, nullptr},
-    {"source_name", "string", false, "", nullptr, nullptr},
-    {"spawn_mode", "string", false, "", nullptr, nullptr},
-    {"speed", "float", false, "", nullptr, nullptr},
-    {"spread", "float", false, "", nullptr, nullptr},
-    {"surface_offset", "float", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
-    {"velocity_space", "string", false, "", nullptr, nullptr},
+    {"emitter", "string", true, "", nullptr, nullptr, "string", false},
+    {"angular_jitter", "float", false, "", nullptr, nullptr, "number", false},
+    {"angular_velocity", "float", false, "", nullptr, nullptr, "number", false},
+    {"appearance_profile_id", "float", false, "", nullptr, nullptr, "number", false},
+    {"burst_count", "float", false, "", nullptr, nullptr, "number", false},
+    {"direction", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"emitter_uid", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"grid_density_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"inherit_velocity", "float", false, "", nullptr, nullptr, "number", false},
+    {"lifetime_seconds", "float", false, "", nullptr, nullptr, "number", false},
+    {"local_offset", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"mass", "float", false, "", nullptr, nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"override_grid_deposit", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"parent_object", "string", false, "", nullptr, nullptr, "string", false},
+    {"point", "vec3", false, "", nullptr, nullptr, nullptr, false},
+    {"rate_per_second", "float", false, "", nullptr, nullptr, "number", false},
+    {"seed", "float", false, "", nullptr, nullptr, "number", false},
+    {"size_jitter", "float", false, "", nullptr, nullptr, "number", false},
+    {"source_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"source_name", "string", false, "", nullptr, nullptr, "string", false},
+    {"spawn_mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"speed", "float", false, "", nullptr, nullptr, "number", false},
+    {"spread", "float", false, "", nullptr, nullptr, "number", false},
+    {"surface_offset", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+    {"velocity_space", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_particle_set_emitter = {
     "particle.set_emitter", "particle",
@@ -5711,27 +5883,27 @@ static const MethodDescriptor desc_particle_set_emitter = {
 static const MethodRegistration reg_particle_set_emitter(desc_particle_set_emitter);
 
 static const MethodParam params_particle_set_physics[] = {
-    {"buoyancy", "float", false, "", nullptr, nullptr},
-    {"cohesion", "float", false, "", nullptr, nullptr},
-    {"execution_policy", "string", false, "", nullptr, nullptr},
-    {"gravity_scale", "float", false, "", nullptr, nullptr},
-    {"grid_density_deposit", "float", false, "", nullptr, nullptr},
-    {"grid_deposit_fade_with_age", "bool", false, "", nullptr, nullptr},
-    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr},
-    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr},
-    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr},
-    {"max_neighbors_per_particle", "int", false, "", nullptr, nullptr},
-    {"mode", "string", false, "", nullptr, nullptr},
-    {"particle_radius", "float", false, "", nullptr, nullptr},
-    {"pressure_stiffness", "float", false, "", nullptr, nullptr},
-    {"quality", "string", false, "", nullptr, nullptr},
-    {"rest_density", "float", false, "", nullptr, nullptr},
-    {"self_collision_enabled", "bool", false, "", nullptr, nullptr},
-    {"solver_iterations", "int", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
-    {"viscosity", "float", false, "", nullptr, nullptr},
-    {"vorticity", "float", false, "", nullptr, nullptr},
+    {"buoyancy", "float", false, "", nullptr, nullptr, "number", false},
+    {"cohesion", "float", false, "", nullptr, nullptr, "number", false},
+    {"execution_policy", "string", false, "", nullptr, nullptr, "string", false},
+    {"gravity_scale", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_density_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_deposit_fade_with_age", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"grid_fuel_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"grid_temperature_deposit", "float", false, "", nullptr, nullptr, "number", false},
+    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"max_neighbors_per_particle", "int", false, "", nullptr, nullptr, "number", false},
+    {"mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"particle_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"pressure_stiffness", "float", false, "", nullptr, nullptr, "number", false},
+    {"quality", "string", false, "", nullptr, nullptr, "string", false},
+    {"rest_density", "float", false, "", nullptr, nullptr, "number", false},
+    {"self_collision_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"solver_iterations", "int", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+    {"viscosity", "float", false, "", nullptr, nullptr, "number", false},
+    {"vorticity", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_set_physics = {
     "particle.set_physics", "particle",
@@ -5747,19 +5919,19 @@ static const MethodDescriptor desc_particle_set_physics = {
 static const MethodRegistration reg_particle_set_physics(desc_particle_set_physics);
 
 static const MethodParam params_particle_set_render[] = {
-    {"base_color", "vec3", false, "", nullptr, nullptr},
-    {"emission_strength", "float", false, "", nullptr, nullptr},
-    {"emissive", "bool", false, "", nullptr, nullptr},
-    {"emitter_only", "bool", false, "", nullptr, nullptr},
-    {"inherit_color_from_emitter", "bool", false, "", nullptr, nullptr},
-    {"mesh_sources", "any", false, "", nullptr, nullptr},
-    {"render_in_raytrace", "bool", false, "", nullptr, nullptr},
-    {"roughness", "float", false, "", nullptr, nullptr},
-    {"shape", "any", false, "", nullptr, nullptr},
-    {"size_multiplier", "float", false, "", nullptr, nullptr},
-    {"sphere_subdivisions", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"base_color", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"emission_strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"emissive", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"emitter_only", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"inherit_color_from_emitter", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"mesh_sources", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"render_in_raytrace", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"roughness", "float", false, "", nullptr, nullptr, "number", false},
+    {"shape", "string", false, "", nullptr, nullptr, "string", false},
+    {"size_multiplier", "float", false, "", nullptr, nullptr, "number", false},
+    {"sphere_subdivisions", "float", false, "", nullptr, nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_set_render = {
     "particle.set_render", "particle",
@@ -5775,10 +5947,10 @@ static const MethodDescriptor desc_particle_set_render = {
 static const MethodRegistration reg_particle_set_render(desc_particle_set_render);
 
 static const MethodParam params_particle_set_system[] = {
-    {"name", "any", false, "", nullptr, nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
-    {"visible", "any", false, "", nullptr, nullptr},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_particle_set_system = {
     "particle.set_system", "particle",
@@ -5794,8 +5966,8 @@ static const MethodDescriptor desc_particle_set_system = {
 static const MethodRegistration reg_particle_set_system(desc_particle_set_system);
 
 static const MethodParam params_particle_set_system_emitter_only[] = {
-    {"system", "string", true, "", nullptr, nullptr},
-    {"emitter_only", "bool", false, "", "true", nullptr},
+    {"system", "string", true, "", nullptr, nullptr, "string", false},
+    {"emitter_only", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_particle_set_system_emitter_only = {
     "particle.set_system_emitter_only", "particle",
@@ -5811,13 +5983,13 @@ static const MethodDescriptor desc_particle_set_system_emitter_only = {
 static const MethodRegistration reg_particle_set_system_emitter_only(desc_particle_set_system_emitter_only);
 
 static const MethodParam params_particle_spawn[] = {
-    {"position", "vec3", true, "", nullptr, nullptr},
-    {"lifetime_seconds", "float", false, "", "5.0", nullptr},
-    {"mass", "float", false, "", "1.0", nullptr},
-    {"size", "float", false, "", "0.05", nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
-    {"velocity", "vec3", false, "", nullptr, nullptr},
+    {"position", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"lifetime_seconds", "float", false, "", "5.0", nullptr, "number", false},
+    {"mass", "float", false, "", "1.0", nullptr, "number", false},
+    {"size", "float", false, "", "0.05", nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+    {"velocity", "vec3", false, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_particle_spawn = {
     "particle.spawn", "particle",
@@ -5833,8 +6005,8 @@ static const MethodDescriptor desc_particle_spawn = {
 static const MethodRegistration reg_particle_spawn(desc_particle_spawn);
 
 static const MethodParam params_particle_stats[] = {
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_stats = {
     "particle.stats", "particle",
@@ -5850,9 +6022,9 @@ static const MethodDescriptor desc_particle_stats = {
 static const MethodRegistration reg_particle_stats(desc_particle_stats);
 
 static const MethodParam params_particle_step[] = {
-    {"dt", "float", false, "", "0.0166667", nullptr},
-    {"system", "string", false, "", "", nullptr},
-    {"system_id", "int", false, "", "-1", nullptr},
+    {"dt", "float", false, "", "0.0166667", nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_particle_step = {
     "particle.step", "particle",
@@ -5868,7 +6040,7 @@ static const MethodDescriptor desc_particle_step = {
 static const MethodRegistration reg_particle_step(desc_particle_step);
 
 static const MethodParam params_perf_get[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_perf_get = {
     "perf.get", "perf",
@@ -5897,7 +6069,7 @@ static const MethodDescriptor desc_perf_get_gpu_memory = {
 static const MethodRegistration reg_perf_get_gpu_memory(desc_perf_get_gpu_memory);
 
 static const MethodParam params_perf_gpu_kernel_timings[] = {
-    {"reset", "bool", false, "", "false", nullptr},
+    {"reset", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_perf_gpu_kernel_timings = {
     "perf.gpu_kernel_timings", "perf",
@@ -5939,7 +6111,7 @@ static const MethodDescriptor desc_perf_reset = {
 static const MethodRegistration reg_perf_reset(desc_perf_reset);
 
 static const MethodParam params_perf_set_blas_compaction[] = {
-    {"enabled", "bool", true, "true compacts static BLAS built from now on; false keeps build-size allocations.", nullptr, nullptr},
+    {"enabled", "bool", true, "true compacts static BLAS built from now on; false keeps build-size allocations.", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_perf_set_blas_compaction = {
     "perf.set_blas_compaction", "perf",
@@ -5955,7 +6127,7 @@ static const MethodDescriptor desc_perf_set_blas_compaction = {
 static const MethodRegistration reg_perf_set_blas_compaction(desc_perf_set_blas_compaction);
 
 static const MethodParam params_perf_set_gpu_kernel_timing[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_perf_set_gpu_kernel_timing = {
     "perf.set_gpu_kernel_timing", "perf",
@@ -5971,7 +6143,7 @@ static const MethodDescriptor desc_perf_set_gpu_kernel_timing = {
 static const MethodRegistration reg_perf_set_gpu_kernel_timing(desc_perf_set_gpu_kernel_timing);
 
 static const MethodParam params_perf_set_logging[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_perf_set_logging = {
     "perf.set_logging", "perf",
@@ -5987,11 +6159,11 @@ static const MethodDescriptor desc_perf_set_logging = {
 static const MethodRegistration reg_perf_set_logging(desc_perf_set_logging);
 
 static const MethodParam params_physics_add_body[] = {
-    {"object", "string", true, "Object name", nullptr, nullptr},
-    {"kind", "string", false, "Body family, e.g. rigid", "rigid", nullptr},
-    {"motion_type", "string", false, "dynamic, kinematic or static", "dynamic", nullptr},
-    {"mass", "float", false, "Mass in kilograms", "1.0", nullptr},
-    {"shape", "string", false, "Collision shape, e.g. box, sphere, mesh", "box", nullptr},
+    {"object", "string", true, "Object name", nullptr, nullptr, "string", false},
+    {"kind", "string", false, "Body family, e.g. rigid", "rigid", nullptr, "string", false},
+    {"motion_type", "string", false, "dynamic, kinematic or static", "dynamic", nullptr, "string", false},
+    {"mass", "float", false, "Mass in kilograms", "1.0", nullptr, "number", false},
+    {"shape", "string", false, "Collision shape, e.g. box, sphere, mesh", "box", nullptr, "string", false},
 };
 static const MethodDescriptor desc_physics_add_body = {
     "physics.add_body", "physics",
@@ -6007,10 +6179,10 @@ static const MethodDescriptor desc_physics_add_body = {
 static const MethodRegistration reg_physics_add_body(desc_physics_add_body);
 
 static const MethodParam params_physics_apply_fracture_impulse[] = {
-    {"group", "any", true, "", nullptr, nullptr},
-    {"direction", "any", false, "", nullptr, nullptr},
-    {"impulse", "float", false, "", "1.0", nullptr},
-    {"point", "any", false, "", nullptr, nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", true},
+    {"direction", "any", false, "", nullptr, nullptr, "number[]", false},
+    {"impulse", "float", false, "", "1.0", nullptr, "number", false},
+    {"point", "any", false, "", nullptr, nullptr, "number[]", false},
 };
 static const MethodDescriptor desc_physics_apply_fracture_impulse = {
     "physics.apply_fracture_impulse", "physics",
@@ -6026,8 +6198,8 @@ static const MethodDescriptor desc_physics_apply_fracture_impulse = {
 static const MethodRegistration reg_physics_apply_fracture_impulse(desc_physics_apply_fracture_impulse);
 
 static const MethodParam params_physics_break_fracture_group[] = {
-    {"group", "any", true, "", nullptr, nullptr},
-    {"strength", "float", false, "", "6.0", nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", true},
+    {"strength", "float", false, "", "6.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_break_fracture_group = {
     "physics.break_fracture_group", "physics",
@@ -6043,8 +6215,8 @@ static const MethodDescriptor desc_physics_break_fracture_group = {
 static const MethodRegistration reg_physics_break_fracture_group(desc_physics_break_fracture_group);
 
 static const MethodParam params_physics_collider_proxy_delete[] = {
-    {"proxy_id", "int", true, "", nullptr, nullptr},
-    {"set_id", "int", true, "", nullptr, nullptr},
+    {"proxy_id", "int", true, "", nullptr, nullptr, "number", false},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_delete = {
     "physics.collider.proxy.delete", "physics",
@@ -6060,18 +6232,18 @@ static const MethodDescriptor desc_physics_collider_proxy_delete = {
 static const MethodRegistration reg_physics_collider_proxy_delete(desc_physics_collider_proxy_delete);
 
 static const MethodParam params_physics_collider_proxy_set[] = {
-    {"set_id", "int", true, "", nullptr, nullptr},
-    {"bone", "any", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"half_extents", "any", false, "", nullptr, nullptr},
-    {"half_length", "any", false, "", nullptr, nullptr},
-    {"local_axis", "any", false, "", nullptr, nullptr},
-    {"local_position", "any", false, "", nullptr, nullptr},
-    {"local_rotation", "any", false, "", nullptr, nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
-    {"proxy_id", "int", false, "", nullptr, nullptr},
-    {"radius", "any", false, "", nullptr, nullptr},
-    {"shape", "any", false, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
+    {"bone", "string", false, "", nullptr, nullptr, "string", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"half_extents", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"half_length", "float", false, "", nullptr, nullptr, "number", false},
+    {"local_axis", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"local_position", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"local_rotation", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"proxy_id", "int", false, "", nullptr, nullptr, "number", false},
+    {"radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"shape", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set = {
     "physics.collider.proxy.set", "physics",
@@ -6087,15 +6259,15 @@ static const MethodDescriptor desc_physics_collider_proxy_set = {
 static const MethodRegistration reg_physics_collider_proxy_set(desc_physics_collider_proxy_set);
 
 static const MethodParam params_physics_collider_proxy_set_auto_fit[] = {
-    {"set_id", "int", true, "", nullptr, nullptr},
-    {"include_detail_bones", "any", false, "", nullptr, nullptr},
-    {"maximum_proxies", "any", false, "", nullptr, nullptr},
-    {"maximum_radius", "float", false, "", nullptr, nullptr},
-    {"minimum_bone_length", "float", false, "", nullptr, nullptr},
-    {"minimum_radius", "float", false, "", nullptr, nullptr},
-    {"radius_fraction", "float", false, "", nullptr, nullptr},
-    {"replace_existing", "any", false, "", nullptr, nullptr},
-    {"weighted_bones_only", "any", false, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
+    {"include_detail_bones", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"maximum_proxies", "float", false, "", nullptr, nullptr, "number", false},
+    {"maximum_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"minimum_bone_length", "float", false, "", nullptr, nullptr, "number", false},
+    {"minimum_radius", "float", false, "", nullptr, nullptr, "number", false},
+    {"radius_fraction", "float", false, "", nullptr, nullptr, "number", false},
+    {"replace_existing", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"weighted_bones_only", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_auto_fit = {
     "physics.collider.proxy_set.auto_fit", "physics",
@@ -6111,15 +6283,15 @@ static const MethodDescriptor desc_physics_collider_proxy_set_auto_fit = {
 static const MethodRegistration reg_physics_collider_proxy_set_auto_fit(desc_physics_collider_proxy_set_auto_fit);
 
 static const MethodParam params_physics_collider_proxy_set_create[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"target_character", "string", true, "", nullptr, nullptr},
-    {"consumer_mask", "any", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"friction", "any", false, "", nullptr, nullptr},
-    {"restitution", "any", false, "", nullptr, nullptr},
-    {"target_node_id", "any", false, "", nullptr, nullptr},
-    {"thickness", "any", false, "", nullptr, nullptr},
-    {"viewport_visible", "any", false, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"target_character", "string", true, "", nullptr, nullptr, "string", false},
+    {"consumer_mask", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"friction", "float", false, "", nullptr, nullptr, "number", false},
+    {"restitution", "float", false, "", nullptr, nullptr, "number", false},
+    {"target_node_id", "string", false, "", nullptr, nullptr, "string", false},
+    {"thickness", "float", false, "", nullptr, nullptr, "number", false},
+    {"viewport_visible", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_create = {
     "physics.collider.proxy_set.create", "physics",
@@ -6135,7 +6307,7 @@ static const MethodDescriptor desc_physics_collider_proxy_set_create = {
 static const MethodRegistration reg_physics_collider_proxy_set_create(desc_physics_collider_proxy_set_create);
 
 static const MethodParam params_physics_collider_proxy_set_delete[] = {
-    {"set_id", "int", true, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_delete = {
     "physics.collider.proxy_set.delete", "physics",
@@ -6151,7 +6323,7 @@ static const MethodDescriptor desc_physics_collider_proxy_set_delete = {
 static const MethodRegistration reg_physics_collider_proxy_set_delete(desc_physics_collider_proxy_set_delete);
 
 static const MethodParam params_physics_collider_proxy_set_get[] = {
-    {"set_id", "int", true, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_get = {
     "physics.collider.proxy_set.get", "physics",
@@ -6180,8 +6352,8 @@ static const MethodDescriptor desc_physics_collider_proxy_set_list = {
 static const MethodRegistration reg_physics_collider_proxy_set_list(desc_physics_collider_proxy_set_list);
 
 static const MethodParam params_physics_collider_proxy_set_sample[] = {
-    {"set_id", "int", true, "", nullptr, nullptr},
-    {"dt", "float", false, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
+    {"dt", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_sample = {
     "physics.collider.proxy_set.sample", "physics",
@@ -6197,16 +6369,16 @@ static const MethodDescriptor desc_physics_collider_proxy_set_sample = {
 static const MethodRegistration reg_physics_collider_proxy_set_sample(desc_physics_collider_proxy_set_sample);
 
 static const MethodParam params_physics_collider_proxy_set_set[] = {
-    {"set_id", "int", true, "", nullptr, nullptr},
-    {"consumer_mask", "any", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"friction", "any", false, "", nullptr, nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
-    {"restitution", "any", false, "", nullptr, nullptr},
-    {"target_character", "any", false, "", nullptr, nullptr},
-    {"target_node_id", "any", false, "", nullptr, nullptr},
-    {"thickness", "any", false, "", nullptr, nullptr},
-    {"viewport_visible", "any", false, "", nullptr, nullptr},
+    {"set_id", "int", true, "", nullptr, nullptr, "number", false},
+    {"consumer_mask", "float", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"friction", "float", false, "", nullptr, nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
+    {"restitution", "float", false, "", nullptr, nullptr, "number", false},
+    {"target_character", "string", false, "", nullptr, nullptr, "string", false},
+    {"target_node_id", "string", false, "", nullptr, nullptr, "string", false},
+    {"thickness", "float", false, "", nullptr, nullptr, "number", false},
+    {"viewport_visible", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_physics_collider_proxy_set_set = {
     "physics.collider.proxy_set.set", "physics",
@@ -6235,7 +6407,7 @@ static const MethodDescriptor desc_physics_collider_proxy_set_solver_stamps = {
 static const MethodRegistration reg_physics_collider_proxy_set_solver_stamps(desc_physics_collider_proxy_set_solver_stamps);
 
 static const MethodParam params_physics_fracture_cluster_groups[] = {
-    {"object", "any", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_physics_fracture_cluster_groups = {
     "physics.fracture_cluster_groups", "physics",
@@ -6251,13 +6423,13 @@ static const MethodDescriptor desc_physics_fracture_cluster_groups = {
 static const MethodRegistration reg_physics_fracture_cluster_groups(desc_physics_fracture_cluster_groups);
 
 static const MethodParam params_physics_fracture_object[] = {
-    {"object", "string", true, "Object to shatter", nullptr, nullptr},
-    {"site_count", "int", false, "Number of Voronoi sites, i.e. shards", "15", nullptr},
-    {"pattern", "int", false, "Fracture site distribution pattern", "0", nullptr},
-    {"cluster_count", "int", false, "Number of shard clusters to form", "4", nullptr},
-    {"exact_surface", "bool", false, "Clip shards against the exact surface rather than an approximation", "true", nullptr},
-    {"preview_gap", "float", false, "Visual gap between shards in metres, for preview only", "0.02", nullptr},
-    {"seed", "any", false, "Random seed for reproducible shard layouts", nullptr, nullptr},
+    {"object", "string", true, "Object to shatter", nullptr, nullptr, "string", true},
+    {"site_count", "int", false, "Number of Voronoi sites, i.e. shards", "15", nullptr, "number", false},
+    {"pattern", "int", false, "Fracture site distribution pattern", "0", nullptr, "number", false},
+    {"cluster_count", "int", false, "Number of shard clusters to form", "4", nullptr, "number", false},
+    {"exact_surface", "bool", false, "Clip shards against the exact surface rather than an approximation", "true", nullptr, "bool", false},
+    {"preview_gap", "float", false, "Visual gap between shards in metres, for preview only", "0.02", nullptr, "number", false},
+    {"seed", "any", false, "Random seed for reproducible shard layouts", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_fracture_object = {
     "physics.fracture_object", "physics",
@@ -6273,7 +6445,7 @@ static const MethodDescriptor desc_physics_fracture_object = {
 static const MethodRegistration reg_physics_fracture_object(desc_physics_fracture_object);
 
 static const MethodParam params_physics_get_body[] = {
-    {"object", "string", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_physics_get_body = {
     "physics.get_body", "physics",
@@ -6289,7 +6461,7 @@ static const MethodDescriptor desc_physics_get_body = {
 static const MethodRegistration reg_physics_get_body(desc_physics_get_body);
 
 static const MethodParam params_physics_get_fracture_group[] = {
-    {"group", "any", true, "", nullptr, nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_physics_get_fracture_group = {
     "physics.get_fracture_group", "physics",
@@ -6305,13 +6477,13 @@ static const MethodDescriptor desc_physics_get_fracture_group = {
 static const MethodRegistration reg_physics_get_fracture_group(desc_physics_get_fracture_group);
 
 static const MethodParam params_physics_make_fracture_group[] = {
-    {"group", "any", true, "", nullptr, nullptr},
-    {"break_velocity", "float", false, "", "5.0", nullptr},
-    {"integrity_exponent", "float", false, "", "1.5", nullptr},
-    {"integrity_weakening", "bool", false, "", "true", nullptr},
-    {"minimum_threshold_scale", "float", false, "", "0.15", nullptr},
-    {"shard_objects", "any", false, "", nullptr, nullptr},
-    {"source_object", "string", false, "", "", nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", true},
+    {"break_velocity", "float", false, "", "5.0", nullptr, "number", false},
+    {"integrity_exponent", "float", false, "", "1.5", nullptr, "number", false},
+    {"integrity_weakening", "bool", false, "", "true", nullptr, "bool", false},
+    {"minimum_threshold_scale", "float", false, "", "0.15", nullptr, "number", false},
+    {"shard_objects", "any", false, "", nullptr, nullptr, "string[]", false},
+    {"source_object", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_physics_make_fracture_group = {
     "physics.make_fracture_group", "physics",
@@ -6327,7 +6499,7 @@ static const MethodDescriptor desc_physics_make_fracture_group = {
 static const MethodRegistration reg_physics_make_fracture_group(desc_physics_make_fracture_group);
 
 static const MethodParam params_physics_remove_body[] = {
-    {"object", "string", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_physics_remove_body = {
     "physics.remove_body", "physics",
@@ -6356,7 +6528,7 @@ static const MethodDescriptor desc_physics_reset = {
 static const MethodRegistration reg_physics_reset(desc_physics_reset);
 
 static const MethodParam params_physics_set_gravity[] = {
-    {"gravity", "vec3", true, "", nullptr, nullptr},
+    {"gravity", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_physics_set_gravity = {
     "physics.set_gravity", "physics",
@@ -6372,7 +6544,7 @@ static const MethodDescriptor desc_physics_set_gravity = {
 static const MethodRegistration reg_physics_set_gravity(desc_physics_set_gravity);
 
 static const MethodParam params_physics_step[] = {
-    {"dt", "float", false, "", "0.0166667", nullptr},
+    {"dt", "float", false, "", "0.0166667", nullptr, "number", false},
 };
 static const MethodDescriptor desc_physics_step = {
     "physics.step", "physics",
@@ -6388,7 +6560,7 @@ static const MethodDescriptor desc_physics_step = {
 static const MethodRegistration reg_physics_step(desc_physics_step);
 
 static const MethodParam params_physics_unfracture_object[] = {
-    {"object", "any", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_physics_unfracture_object = {
     "physics.unfracture_object", "physics",
@@ -6404,7 +6576,7 @@ static const MethodDescriptor desc_physics_unfracture_object = {
 static const MethodRegistration reg_physics_unfracture_object(desc_physics_unfracture_object);
 
 static const MethodParam params_post_configure_exposure[] = {
-    {"settings", "object", true, "Exposure patch: mode, ev, min_ev, max_ev, low_percent, high_percent, key, speed_up, speed_down, center_weight, locked, locked_ev", nullptr, nullptr},
+    {"settings", "object", true, "Exposure patch: mode, ev, min_ev, max_ev, low_percent, high_percent, key, speed_up, speed_down, center_weight, locked, locked_ev", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_post_configure_exposure = {
     "post.configure_exposure", "post",
@@ -6459,7 +6631,7 @@ static const MethodDescriptor desc_post_reset_exposure = {
 static const MethodRegistration reg_post_reset_exposure(desc_post_reset_exposure);
 
 static const MethodParam params_post_set_color_temperature[] = {
-    {"color_temperature", "float", true, "", nullptr, nullptr},
+    {"color_temperature", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_post_set_color_temperature = {
     "post.set_color_temperature", "post",
@@ -6475,7 +6647,7 @@ static const MethodDescriptor desc_post_set_color_temperature = {
 static const MethodRegistration reg_post_set_color_temperature(desc_post_set_color_temperature);
 
 static const MethodParam params_post_set_exposure[] = {
-    {"exposure", "float", true, "", nullptr, nullptr},
+    {"exposure", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_post_set_exposure = {
     "post.set_exposure", "post",
@@ -6491,7 +6663,7 @@ static const MethodDescriptor desc_post_set_exposure = {
 static const MethodRegistration reg_post_set_exposure(desc_post_set_exposure);
 
 static const MethodParam params_post_set_gamma[] = {
-    {"gamma", "float", true, "", nullptr, nullptr},
+    {"gamma", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_post_set_gamma = {
     "post.set_gamma", "post",
@@ -6507,7 +6679,7 @@ static const MethodDescriptor desc_post_set_gamma = {
 static const MethodRegistration reg_post_set_gamma(desc_post_set_gamma);
 
 static const MethodParam params_post_set_saturation[] = {
-    {"saturation", "float", true, "", nullptr, nullptr},
+    {"saturation", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_post_set_saturation = {
     "post.set_saturation", "post",
@@ -6523,7 +6695,7 @@ static const MethodDescriptor desc_post_set_saturation = {
 static const MethodRegistration reg_post_set_saturation(desc_post_set_saturation);
 
 static const MethodParam params_post_set_stylize_enabled[] = {
-    {"stylize_enabled", "bool", true, "", nullptr, nullptr},
+    {"stylize_enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_post_set_stylize_enabled = {
     "post.set_stylize_enabled", "post",
@@ -6539,7 +6711,7 @@ static const MethodDescriptor desc_post_set_stylize_enabled = {
 static const MethodRegistration reg_post_set_stylize_enabled(desc_post_set_stylize_enabled);
 
 static const MethodParam params_post_set_stylize_strength[] = {
-    {"stylize_strength", "float", true, "", nullptr, nullptr},
+    {"stylize_strength", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_post_set_stylize_strength = {
     "post.set_stylize_strength", "post",
@@ -6555,7 +6727,7 @@ static const MethodDescriptor desc_post_set_stylize_strength = {
 static const MethodRegistration reg_post_set_stylize_strength(desc_post_set_stylize_strength);
 
 static const MethodParam params_post_set_tone_mapping[] = {
-    {"tone_mapping", "string", true, "", nullptr, nullptr},
+    {"tone_mapping", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_post_set_tone_mapping = {
     "post.set_tone_mapping", "post",
@@ -6571,7 +6743,7 @@ static const MethodDescriptor desc_post_set_tone_mapping = {
 static const MethodRegistration reg_post_set_tone_mapping(desc_post_set_tone_mapping);
 
 static const MethodParam params_post_set_vignette_enabled[] = {
-    {"vignette_enabled", "bool", true, "", nullptr, nullptr},
+    {"vignette_enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_post_set_vignette_enabled = {
     "post.set_vignette_enabled", "post",
@@ -6587,7 +6759,7 @@ static const MethodDescriptor desc_post_set_vignette_enabled = {
 static const MethodRegistration reg_post_set_vignette_enabled(desc_post_set_vignette_enabled);
 
 static const MethodParam params_post_set_vignette_strength[] = {
-    {"vignette_strength", "float", true, "", nullptr, nullptr},
+    {"vignette_strength", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_post_set_vignette_strength = {
     "post.set_vignette_strength", "post",
@@ -6603,7 +6775,7 @@ static const MethodDescriptor desc_post_set_vignette_strength = {
 static const MethodRegistration reg_post_set_vignette_strength(desc_post_set_vignette_strength);
 
 static const MethodParam params_project_autosave_now[] = {
-    {"reason", "any", false, "Tag recorded in last_reason so a later status read says what triggered the write. Defaults to 'manual'.", nullptr, nullptr},
+    {"reason", "string", false, "Tag recorded in last_reason so a later status read says what triggered the write. Defaults to 'manual'.", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_project_autosave_now = {
     "project.autosave_now", "project",
@@ -6619,8 +6791,8 @@ static const MethodDescriptor desc_project_autosave_now = {
 static const MethodRegistration reg_project_autosave_now(desc_project_autosave_now);
 
 static const MethodParam params_project_autosave_set[] = {
-    {"enabled", "any", false, "Turn interval autosave on or off.", nullptr, nullptr},
-    {"interval_sec", "any", false, "Seconds between interval writes, 30..86400.", nullptr, nullptr},
+    {"enabled", "bool", false, "Turn interval autosave on or off.", nullptr, nullptr, "bool", false},
+    {"interval_sec", "float", false, "Seconds between interval writes, 30..86400.", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_project_autosave_set = {
     "project.autosave_set", "project",
@@ -6649,7 +6821,7 @@ static const MethodDescriptor desc_project_autosave_status = {
 static const MethodRegistration reg_project_autosave_status(desc_project_autosave_status);
 
 static const MethodParam params_project_open[] = {
-    {"path", "string", true, "", nullptr, nullptr},
+    {"path", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_project_open = {
     "project.open", "project",
@@ -6678,7 +6850,7 @@ static const MethodDescriptor desc_project_path = {
 static const MethodRegistration reg_project_path(desc_project_path);
 
 static const MethodParam params_project_save[] = {
-    {"path", "any", false, "", nullptr, nullptr},
+    {"path", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_project_save = {
     "project.save", "project",
@@ -6759,7 +6931,7 @@ static const MethodDescriptor desc_rayfusion_screen_gi = {
 static const MethodRegistration reg_rayfusion_screen_gi(desc_rayfusion_screen_gi);
 
 static const MethodParam params_rayfusion_set_probe_bounce[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rayfusion_set_probe_bounce = {
     "rayfusion.set_probe_bounce", "rayfusion",
@@ -6775,7 +6947,7 @@ static const MethodDescriptor desc_rayfusion_set_probe_bounce = {
 static const MethodRegistration reg_rayfusion_set_probe_bounce(desc_rayfusion_set_probe_bounce);
 
 static const MethodParam params_rayfusion_set_probe_follow_camera[] = {
-    {"enabled", "boolean", true, "Follow camera position with a cell dead band", nullptr, nullptr},
+    {"enabled", "boolean", true, "Follow camera position with a cell dead band", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rayfusion_set_probe_follow_camera = {
     "rayfusion.set_probe_follow_camera", "rayfusion",
@@ -6791,11 +6963,11 @@ static const MethodDescriptor desc_rayfusion_set_probe_follow_camera = {
 static const MethodRegistration reg_rayfusion_set_probe_follow_camera(desc_rayfusion_set_probe_follow_camera);
 
 static const MethodParam params_rayfusion_set_probe_grid[] = {
-    {"counts", "array", false, "Cells per axis [x,y,z], each 1..128; the product may not exceed max_slots", nullptr, nullptr},
-    {"spacing", "float", false, "World units per cell; probes sit at (cell + 0.5) * spacing", nullptr, nullptr},
-    {"minimum", "array", false, "Lowest cell index [x,y,z] in cells (integers); mutually exclusive with center", nullptr, nullptr},
-    {"center", "array", false, "World point [x,y,z] to place at the middle of the window; mutually exclusive with minimum", nullptr, nullptr},
-    {"auto_fit", "any", false, "", nullptr, nullptr},
+    {"counts", "array", false, "Cells per axis [x,y,z], each 1..128; the product may not exceed max_slots", nullptr, nullptr, nullptr, false},
+    {"spacing", "float", false, "World units per cell; probes sit at (cell + 0.5) * spacing", nullptr, nullptr, "number", false},
+    {"minimum", "array", false, "Lowest cell index [x,y,z] in cells (integers); mutually exclusive with center", nullptr, nullptr, nullptr, false},
+    {"center", "array", false, "World point [x,y,z] to place at the middle of the window; mutually exclusive with minimum", nullptr, nullptr, nullptr, false},
+    {"auto_fit", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rayfusion_set_probe_grid = {
     "rayfusion.set_probe_grid", "rayfusion",
@@ -6811,7 +6983,7 @@ static const MethodDescriptor desc_rayfusion_set_probe_grid = {
 static const MethodRegistration reg_rayfusion_set_probe_grid(desc_rayfusion_set_probe_grid);
 
 static const MethodParam params_rayfusion_set_probe_overlay[] = {
-    {"enabled", "boolean", true, "Enable depth-tested raster probe markers", nullptr, nullptr},
+    {"enabled", "boolean", true, "Enable depth-tested raster probe markers", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rayfusion_set_probe_overlay = {
     "rayfusion.set_probe_overlay", "rayfusion",
@@ -6827,7 +6999,7 @@ static const MethodDescriptor desc_rayfusion_set_probe_overlay = {
 static const MethodRegistration reg_rayfusion_set_probe_overlay(desc_rayfusion_set_probe_overlay);
 
 static const MethodParam params_rayfusion_set_probe_producer[] = {
-    {"traced", "any", false, "", nullptr, nullptr},
+    {"traced", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rayfusion_set_probe_producer = {
     "rayfusion.set_probe_producer", "rayfusion",
@@ -6843,11 +7015,11 @@ static const MethodDescriptor desc_rayfusion_set_probe_producer = {
 static const MethodRegistration reg_rayfusion_set_probe_producer(desc_rayfusion_set_probe_producer);
 
 static const MethodParam params_rayfusion_set_reflections[] = {
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"follow_quality_preset", "any", false, "", nullptr, nullptr},
-    {"roughness_gate", "any", false, "", nullptr, nullptr},
-    {"samples", "any", false, "", nullptr, nullptr},
-    {"weight_gate", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"follow_quality_preset", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"roughness_gate", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"samples", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"weight_gate", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rayfusion_set_reflections = {
     "rayfusion.set_reflections", "rayfusion",
@@ -6863,10 +7035,10 @@ static const MethodDescriptor desc_rayfusion_set_reflections = {
 static const MethodRegistration reg_rayfusion_set_reflections(desc_rayfusion_set_reflections);
 
 static const MethodParam params_rayfusion_set_screen_gi[] = {
-    {"enabled", "any", false, "Enable same-frame diffuse RTGI", nullptr, nullptr},
-    {"samples", "any", false, "", nullptr, "['1', '2', '4']"},
-    {"filter_radius", "any", false, "", nullptr, "['0', '1', '2']"},
-    {"max_distance", "any", false, "Finite ray range in world units [0.1,10000]", nullptr, nullptr},
+    {"enabled", "bool", false, "Enable same-frame diffuse RTGI", nullptr, nullptr, "bool", false},
+    {"samples", "any", false, "", nullptr, "['1', '2', '4']", nullptr, false},
+    {"filter_radius", "any", false, "", nullptr, "['0', '1', '2']", nullptr, false},
+    {"max_distance", "float", false, "Finite ray range in world units [0.1,10000]", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rayfusion_set_screen_gi = {
     "rayfusion.set_screen_gi", "rayfusion",
@@ -7025,7 +7197,7 @@ static const MethodDescriptor desc_render_instance_stats = {
 static const MethodRegistration reg_render_instance_stats(desc_render_instance_stats);
 
 static const MethodParam params_render_motion_stats[] = {
-    {"sample", "string", false, "", "", nullptr},
+    {"sample", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_render_motion_stats = {
     "render.motion_stats", "render",
@@ -7054,11 +7226,11 @@ static const MethodDescriptor desc_render_optix_accum_status = {
 static const MethodRegistration reg_render_optix_accum_status(desc_render_optix_accum_status);
 
 static const MethodParam params_render_probe[] = {
-    {"x", "int", false, "Region origin in pixels", "0", nullptr},
-    {"y", "int", false, "Region origin in pixels", "0", nullptr},
-    {"width", "int", false, "Region width in pixels; 0 means to the right edge", "0", nullptr},
-    {"height", "int", false, "Region height in pixels; 0 means to the bottom edge", "0", nullptr},
-    {"threshold", "float", false, "Luminance at or below which a pixel counts as black", "0.001", nullptr},
+    {"x", "int", false, "Region origin in pixels", "0", nullptr, "number", false},
+    {"y", "int", false, "Region origin in pixels", "0", nullptr, "number", false},
+    {"width", "int", false, "Region width in pixels; 0 means to the right edge", "0", nullptr, "number", false},
+    {"height", "int", false, "Region height in pixels; 0 means to the bottom edge", "0", nullptr, "number", false},
+    {"threshold", "float", false, "Luminance at or below which a pixel counts as black", "0.001", nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_probe = {
     "render.probe", "render",
@@ -7074,7 +7246,7 @@ static const MethodDescriptor desc_render_probe = {
 static const MethodRegistration reg_render_probe(desc_render_probe);
 
 static const MethodParam params_render_probe_surface_composition[] = {
-    {"point", "any", false, "", nullptr, nullptr},
+    {"point", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_render_probe_surface_composition = {
     "render.probe_surface_composition", "render",
@@ -7090,7 +7262,7 @@ static const MethodDescriptor desc_render_probe_surface_composition = {
 static const MethodRegistration reg_render_probe_surface_composition(desc_render_probe_surface_composition);
 
 static const MethodParam params_render_realtime_denoiser_stats[] = {
-    {"synchronize", "boolean", false, "", "True", nullptr},
+    {"synchronize", "boolean", false, "", "True", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_realtime_denoiser_stats = {
     "render.realtime_denoiser_stats", "render",
@@ -7145,13 +7317,13 @@ static const MethodDescriptor desc_render_sequence_status = {
 static const MethodRegistration reg_render_sequence_status(desc_render_sequence_status);
 
 static const MethodParam params_render_set_denoiser[] = {
-    {"blend", "float", false, "", nullptr, nullptr},
-    {"mode", "string", false, "", nullptr, nullptr},
-    {"quality", "string", false, "", nullptr, nullptr},
-    {"render_enabled", "bool", false, "", nullptr, nullptr},
-    {"schedule", "string", false, "", nullptr, nullptr},
-    {"timeline_enabled", "bool", false, "", nullptr, nullptr},
-    {"viewport_enabled", "bool", false, "", nullptr, nullptr},
+    {"blend", "float", false, "", nullptr, nullptr, "number", false},
+    {"mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"quality", "string", false, "", nullptr, nullptr, "string", false},
+    {"render_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"schedule", "string", false, "", nullptr, nullptr, "string", false},
+    {"timeline_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"viewport_enabled", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_set_denoiser = {
     "render.set_denoiser", "render",
@@ -7167,7 +7339,7 @@ static const MethodDescriptor desc_render_set_denoiser = {
 static const MethodRegistration reg_render_set_denoiser(desc_render_set_denoiser);
 
 static const MethodParam params_render_set_gpu_timing[] = {
-    {"enabled", "bool", true, "true arms a fresh capture; false stops recording and retains final results", nullptr, nullptr},
+    {"enabled", "bool", true, "true arms a fresh capture; false stops recording and retains final results", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_set_gpu_timing = {
     "render.set_gpu_timing", "render",
@@ -7183,8 +7355,8 @@ static const MethodDescriptor desc_render_set_gpu_timing = {
 static const MethodRegistration reg_render_set_gpu_timing(desc_render_set_gpu_timing);
 
 static const MethodParam params_render_set_motion[] = {
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"halton_jitter", "bool", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"halton_jitter", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_set_motion = {
     "render.set_motion", "render",
@@ -7200,11 +7372,11 @@ static const MethodDescriptor desc_render_set_motion = {
 static const MethodRegistration reg_render_set_motion(desc_render_set_motion);
 
 static const MethodParam params_render_set_motion_profile[] = {
-    {"diffuse_bounces", "int", false, "", nullptr, nullptr},
-    {"enabled", "bool", false, "", nullptr, nullptr},
-    {"max_bounces", "int", false, "", nullptr, nullptr},
-    {"settle_ms", "int", false, "", nullptr, nullptr},
-    {"transmission_bounces", "int", false, "", nullptr, nullptr},
+    {"diffuse_bounces", "int", false, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"max_bounces", "int", false, "", nullptr, nullptr, "number", false},
+    {"settle_ms", "int", false, "", nullptr, nullptr, "number", false},
+    {"transmission_bounces", "int", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_set_motion_profile = {
     "render.set_motion_profile", "render",
@@ -7220,18 +7392,18 @@ static const MethodDescriptor desc_render_set_motion_profile = {
 static const MethodRegistration reg_render_set_motion_profile(desc_render_set_motion_profile);
 
 static const MethodParam params_render_set_realtime_denoiser[] = {
-    {"mode", "string", false, "", nullptr, "['off', 'svgf']"},
-    {"atrous_iterations", "integer", false, "Inclusive range 1..5; invalid values are rejected.", nullptr, nullptr},
-    {"history_max", "integer", false, "Inclusive range 1..64; invalid values are rejected.", nullptr, nullptr},
-    {"firefly_clip", "number", false, "Firefly clamp in sigmas, applied only to pixels that start a new history (no reprojected tap passed the 2x2/3x3 consistency test). Inclusive range 0.1..10; invalid values are rejected.", nullptr, nullptr},
-    {"still_noise", "number", false, "0 = off; default 0.02. Still camera with viewport OIDN OFF: spatial-only SVGF over the accumulated image, faded out PER PIXEL by measured noise: the raw accumulation's relative standard error (raygen Welford M2, same-material 3x3 mean, trusted from 8 samples) is shown unfiltered at or below this value and fully filtered at twice it. Applies through the converged frame: pixels still above the target stay filtered on the final view (display only; the accumulator is never modified). The earlier forced raw ramp before the target was removed because it handed a clean SVGF image back to a noisy raw interior at the end. Once at most 0.1% of pixels are still filtered the accumulation is complete and still-frame SVGF stops dispatching (realtime_denoiser_stats.still_complete). Range 0..0.5. Replaces static_samples, whose fixed linear fade made shown noise GROW with the sample count on noisy interiors.", nullptr, nullptr},
-    {"debug_history", "boolean", false, "Diagnostic: SVGF frames show per-pixel temporal history length instead of the image (red = none, yellow = under 4 frames, green ramp = long). Capture with viewport.get_screenshot while moving. Session only, default false.", nullptr, nullptr},
-    {"scene_motion", "boolean", false, "Default true. Scene animation counts as motion: when at least 2 consecutive realtime traces each start a new accumulation with the camera still (skinning, timeline, simulation, rigid object edits), SVGF runs its temporal path and FSR may engage. Decided from the PREVIOUS trace, independent of where in the frame the reset happens. false = such frames run the still filter at 1 spp with history wiped every frame (measured on a skinned scene: 11.8 ms/frame at full resolution, mean history 1.0). realtime_denoiser_stats.motion_source reports camera|scene|none.", nullptr, nullptr},
+    {"mode", "string", false, "", nullptr, "['off', 'svgf']", "string", false},
+    {"atrous_iterations", "integer", false, "Inclusive range 1..5; invalid values are rejected.", nullptr, nullptr, nullptr, false},
+    {"history_max", "integer", false, "Inclusive range 1..64; invalid values are rejected.", nullptr, nullptr, nullptr, false},
+    {"firefly_clip", "number", false, "Firefly clamp in sigmas, applied only to pixels that start a new history (no reprojected tap passed the 2x2/3x3 consistency test). Inclusive range 0.1..10; invalid values are rejected.", nullptr, nullptr, "number", false},
+    {"still_noise", "number", false, "0 = off; default 0.02. Still camera with viewport OIDN OFF: spatial-only SVGF over the accumulated image, faded out PER PIXEL by measured noise: the raw accumulation's relative standard error (raygen Welford M2, same-material 3x3 mean, trusted from 8 samples) is shown unfiltered at or below this value and fully filtered at twice it. Applies through the converged frame: pixels still above the target stay filtered on the final view (display only; the accumulator is never modified). The earlier forced raw ramp before the target was removed because it handed a clean SVGF image back to a noisy raw interior at the end. Once at most 0.1% of pixels are still filtered the accumulation is complete and still-frame SVGF stops dispatching (realtime_denoiser_stats.still_complete). Range 0..0.5. Replaces static_samples, whose fixed linear fade made shown noise GROW with the sample count on noisy interiors.", nullptr, nullptr, "number", false},
+    {"debug_history", "boolean", false, "Diagnostic: SVGF frames show per-pixel temporal history length instead of the image (red = none, yellow = under 4 frames, green ramp = long). Capture with viewport.get_screenshot while moving. Session only, default false.", nullptr, nullptr, "bool", false},
+    {"scene_motion", "boolean", false, "Default true. Scene animation counts as motion: when at least 2 consecutive realtime traces each start a new accumulation with the camera still (skinning, timeline, simulation, rigid object edits), SVGF runs its temporal path and FSR may engage. Decided from the PREVIOUS trace, independent of where in the frame the reset happens. false = such frames run the still filter at 1 spp with history wiped every frame (measured on a skinned scene: 11.8 ms/frame at full resolution, mean history 1.0). realtime_denoiser_stats.motion_source reports camera|scene|none.", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_set_realtime_denoiser = {
     "render.set_realtime_denoiser", "render",
-    "Configure project-persisted Vulkan SVGF with atomic validation",
-    "Requires motion AOV enabled. Disabling SVGF while FSR is on is allowed: FSR then upscales the raw accumulation (upscale_stats input_provider \"none\"). Defaults: off, 4 iterations, 24 history, firefly clip 3, still_noise 0.02. Authored settings are saved in render_settings.realtime_denoiser; old projects without this block load disabled. debug_history and GPU history remain session-only. SDF/procedural surfaces without triangle motion correspondence and fog do not publish reusable SVGF history; disoccluded pixels reject their previous history taps. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera moves, or while scene animation restarts accumulation every frame (scene_motion, default on). Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged.",
+    "Configure session-only Vulkan SVGF during motion with atomic validation",
+    "Requires motion AOV enabled. Disabling SVGF while FSR is on is allowed: FSR then upscales the raw accumulation (upscale_stats input_provider \"none\"). Defaults: svgf (on since B3b), 4 iterations, 24 history, firefly clip 3, still_noise 0.02. Reprojected history is never clamped (B3 measured the old variance_clip darkening moving frames by 11%). Runs while the camera moves, or while scene animation restarts accumulation every frame (scene_motion, default on). Final renders bypass SVGF. Stable accumulation and scheduled OIDN remain unchanged.",
     "render", "Render", false, "any",
     "render|set|realtime|denoiser",
     nullptr,
@@ -7242,11 +7414,11 @@ static const MethodDescriptor desc_render_set_realtime_denoiser = {
 static const MethodRegistration reg_render_set_realtime_denoiser(desc_render_set_realtime_denoiser);
 
 static const MethodParam params_render_set_settings[] = {
-    {"debug_view", "int", false, "", nullptr, nullptr},
-    {"diffuse_bounces", "int", false, "", nullptr, nullptr},
-    {"max_bounces", "int", false, "", nullptr, nullptr},
-    {"rr_start_bounce", "int", false, "", nullptr, nullptr},
-    {"transmission_bounces", "int", false, "", nullptr, nullptr},
+    {"debug_view", "int", false, "", nullptr, nullptr, "number", false},
+    {"diffuse_bounces", "int", false, "", nullptr, nullptr, "number", false},
+    {"max_bounces", "int", false, "", nullptr, nullptr, "number", false},
+    {"rr_start_bounce", "int", false, "", nullptr, nullptr, "number", false},
+    {"transmission_bounces", "int", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_set_settings = {
     "render.set_settings", "render",
@@ -7262,10 +7434,10 @@ static const MethodDescriptor desc_render_set_settings = {
 static const MethodRegistration reg_render_set_settings(desc_render_set_settings);
 
 static const MethodParam params_render_set_upscale[] = {
-    {"mode", "string", false, "", nullptr, "['off', 'fsr', 'auto']"},
-    {"quality", "string", false, "", nullptr, "['quality', 'balanced', 'performance', 'ultra_performance']"},
-    {"sharpness", "number", false, "Finite inclusive range 0..1. Omitted fields retain current values.", nullptr, nullptr},
-    {"rejection_reactive", "boolean", false, "Default true. Raygen's motion-history rejections (motion AOV w) that form a 3x3 cluster (>= 4 of 9, full at 7) are written into FSR's reactive mask, so content that moved without a matching vector (sim particles, deforming surfaces) uses the new frame instead of dragging old history. Isolated rejections (jittered silhouettes) are ignored to keep anti-aliasing. false = reactive from volume/transmission only, which ghosted moving particles under FSR while SVGF alone was clean.", nullptr, nullptr},
+    {"mode", "string", false, "", nullptr, "['off', 'fsr', 'auto']", "string", false},
+    {"quality", "string", false, "", nullptr, "['quality', 'balanced', 'performance', 'ultra_performance']", "string", false},
+    {"sharpness", "number", false, "Finite inclusive range 0..1. Omitted fields retain current values.", nullptr, nullptr, "number", false},
+    {"rejection_reactive", "boolean", false, "Default true. Raygen's motion-history rejections (motion AOV w) that form a 3x3 cluster (>= 4 of 9, full at 7) are written into FSR's reactive mask, so content that moved without a matching vector (sim particles, deforming surfaces) uses the new frame instead of dragging old history. Isolated rejections (jittered silhouettes) are ignored to keep anti-aliasing. false = reactive from volume/transmission only, which ghosted moving particles under FSR while SVGF alone was clean.", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_set_upscale = {
     "render.set_upscale", "render",
@@ -7281,7 +7453,7 @@ static const MethodDescriptor desc_render_set_upscale = {
 static const MethodRegistration reg_render_set_upscale(desc_render_set_upscale);
 
 static const MethodParam params_render_set_volume_light_cache[] = {
-    {"max_cells", "int", true, "", nullptr, nullptr},
+    {"max_cells", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_set_volume_light_cache = {
     "render.set_volume_light_cache", "render",
@@ -7297,12 +7469,12 @@ static const MethodDescriptor desc_render_set_volume_light_cache = {
 static const MethodRegistration reg_render_set_volume_light_cache(desc_render_set_volume_light_cache);
 
 static const MethodParam params_render_set_volume_march_lod[] = {
-    {"camera_light_stride", "int", false, "", "0", nullptr},
-    {"camera_max_steps", "int", false, "", "0", nullptr},
-    {"secondary_light_stride", "int", false, "", "0", nullptr},
-    {"secondary_max_steps", "int", false, "", "0", nullptr},
-    {"secondary_radiance_cache", "bool", false, "", nullptr, nullptr},
-    {"secondary_step_scale", "int", false, "", "0", nullptr},
+    {"camera_light_stride", "int", false, "", "0", nullptr, "number", false},
+    {"camera_max_steps", "int", false, "", "0", nullptr, "number", false},
+    {"secondary_light_stride", "int", false, "", "0", nullptr, "number", false},
+    {"secondary_max_steps", "int", false, "", "0", nullptr, "number", false},
+    {"secondary_radiance_cache", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"secondary_step_scale", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_set_volume_march_lod = {
     "render.set_volume_march_lod", "render",
@@ -7318,8 +7490,8 @@ static const MethodDescriptor desc_render_set_volume_march_lod = {
 static const MethodRegistration reg_render_set_volume_march_lod(desc_render_set_volume_march_lod);
 
 static const MethodParam params_render_start[] = {
-    {"output_path", "string", true, "Absolute path of the image file to write", nullptr, nullptr},
-    {"spp", "int", true, "Samples per pixel", nullptr, nullptr},
+    {"output_path", "string", true, "Absolute path of the image file to write", nullptr, nullptr, "string", false},
+    {"spp", "int", true, "Samples per pixel", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_start = {
     "render.start", "render",
@@ -7335,10 +7507,10 @@ static const MethodDescriptor desc_render_start = {
 static const MethodRegistration reg_render_start(desc_render_start);
 
 static const MethodParam params_render_start_sequence[] = {
-    {"end_frame", "int", true, "", nullptr, nullptr},
-    {"output_dir", "string", true, "", nullptr, nullptr},
-    {"spp", "int", true, "", nullptr, nullptr},
-    {"start_frame", "int", true, "", nullptr, nullptr},
+    {"end_frame", "int", true, "", nullptr, nullptr, "number", false},
+    {"output_dir", "string", true, "", nullptr, nullptr, "string", false},
+    {"spp", "int", true, "", nullptr, nullptr, "number", false},
+    {"start_frame", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_render_start_sequence = {
     "render.start_sequence", "render",
@@ -7367,7 +7539,7 @@ static const MethodDescriptor desc_render_status = {
 static const MethodRegistration reg_render_status(desc_render_status);
 
 static const MethodParam params_render_upscale_stats[] = {
-    {"synchronize", "boolean", false, "", "True", nullptr},
+    {"synchronize", "boolean", false, "", "True", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_render_upscale_stats = {
     "render.upscale_stats", "render",
@@ -7383,8 +7555,8 @@ static const MethodDescriptor desc_render_upscale_stats = {
 static const MethodRegistration reg_render_upscale_stats(desc_render_upscale_stats);
 
 static const MethodParam params_render_volume_counters[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
-    {"region", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"region", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_render_volume_counters = {
     "render.volume_counters", "render",
@@ -7491,10 +7663,10 @@ static const MethodDescriptor desc_reset_accumulation = {
 static const MethodRegistration reg_reset_accumulation(desc_reset_accumulation);
 
 static const MethodParam params_rig_add_bone[] = {
-    {"character", "any", false, "Owned rig identity.", nullptr, nullptr},
-    {"name", "any", false, "New authored joint name; full key becomes character_name.", nullptr, nullptr},
-    {"parent", "any", false, "Existing full unique parent joint key.", nullptr, nullptr},
-    {"rest_transform", "any", false, "Row-major 16-number local rest transform. Translation and proper rotation only; scale/shear/reflection rejected.", nullptr, nullptr},
+    {"character", "string", false, "Owned rig identity.", nullptr, nullptr, "string", false},
+    {"name", "string", false, "New authored joint name; full key becomes character_name.", nullptr, nullptr, "string", false},
+    {"parent", "string", false, "Existing full unique parent joint key.", nullptr, nullptr, "string", false},
+    {"rest_transform", "any", false, "Row-major 16-number local rest transform. Translation and proper rotation only; scale/shear/reflection rejected.", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_add_bone = {
     "rig.add_bone", "rig",
@@ -7510,14 +7682,14 @@ static const MethodDescriptor desc_rig_add_bone = {
 static const MethodRegistration reg_rig_add_bone(desc_rig_add_bone);
 
 static const MethodParam params_rig_apply_bone_envelope[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"bone", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"start_radius", "float", true, "", nullptr, nullptr},
-    {"end_radius", "float", true, "", nullptr, nullptr},
-    {"start_extension", "float", true, "", nullptr, nullptr},
-    {"end_extension", "float", true, "", nullptr, nullptr},
-    {"falloff", "float", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"bone", "string", true, "", nullptr, nullptr, "string", false},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", false},
+    {"start_radius", "float", true, "", nullptr, nullptr, "number", false},
+    {"end_radius", "float", true, "", nullptr, nullptr, "number", false},
+    {"start_extension", "float", true, "", nullptr, nullptr, "number", false},
+    {"end_extension", "float", true, "", nullptr, nullptr, "number", false},
+    {"falloff", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_apply_bone_envelope = {
     "rig.apply_bone_envelope", "rig",
@@ -7533,12 +7705,12 @@ static const MethodDescriptor desc_rig_apply_bone_envelope = {
 static const MethodRegistration reg_rig_apply_bone_envelope(desc_rig_apply_bone_envelope);
 
 static const MethodParam params_rig_apply_envelope_weights[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"torso_radius", "float", false, "", "0.16", nullptr},
-    {"limb_radius", "float", false, "", "0.065", nullptr},
-    {"extremity_radius", "float", false, "", "0.05", nullptr},
-    {"falloff", "float", false, "", "2.0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", false},
+    {"torso_radius", "float", false, "", "0.16", nullptr, "number", false},
+    {"limb_radius", "float", false, "", "0.065", nullptr, "number", false},
+    {"extremity_radius", "float", false, "", "0.05", nullptr, "number", false},
+    {"falloff", "float", false, "", "2.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_apply_envelope_weights = {
     "rig.apply_envelope_weights", "rig",
@@ -7554,10 +7726,10 @@ static const MethodDescriptor desc_rig_apply_envelope_weights = {
 static const MethodRegistration reg_rig_apply_envelope_weights(desc_rig_apply_envelope_weights);
 
 static const MethodParam params_rig_apply_geodesic_weights[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"resolution", "integer", false, "", "96", nullptr},
-    {"falloff", "float", false, "", "2.0", nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"resolution", "integer", false, "", "96", nullptr, "number", false},
+    {"falloff", "float", false, "", "2.0", nullptr, "number", false},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_apply_geodesic_weights = {
     "rig.apply_geodesic_weights", "rig",
@@ -7573,7 +7745,7 @@ static const MethodDescriptor desc_rig_apply_geodesic_weights = {
 static const MethodRegistration reg_rig_apply_geodesic_weights(desc_rig_apply_geodesic_weights);
 
 static const MethodParam params_rig_apply_pose_preview[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_apply_pose_preview = {
     "rig.apply_pose_preview", "rig",
@@ -7589,8 +7761,8 @@ static const MethodDescriptor desc_rig_apply_pose_preview = {
 static const MethodRegistration reg_rig_apply_pose_preview(desc_rig_apply_pose_preview);
 
 static const MethodParam params_rig_auto_landmarks[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"mesh", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"mesh", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_auto_landmarks = {
     "rig.auto_landmarks", "rig",
@@ -7606,10 +7778,10 @@ static const MethodDescriptor desc_rig_auto_landmarks = {
 static const MethodRegistration reg_rig_auto_landmarks(desc_rig_auto_landmarks);
 
 static const MethodParam params_rig_bake_ik_channels[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"start_frame", "integer", true, "", nullptr, nullptr},
-    {"end_frame", "integer", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"start_frame", "integer", true, "", nullptr, nullptr, "number", true},
+    {"end_frame", "integer", true, "", nullptr, nullptr, "number", true},
 };
 static const MethodDescriptor desc_rig_bake_ik_channels = {
     "rig.bake_ik_channels", "rig",
@@ -7625,9 +7797,9 @@ static const MethodDescriptor desc_rig_bake_ik_channels = {
 static const MethodRegistration reg_rig_bake_ik_channels(desc_rig_bake_ik_channels);
 
 static const MethodParam params_rig_bind_mesh[] = {
-    {"preview", "any", false, "Unmodified preview payload; generated weights are recomputed", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
-    {"mesh", "any", false, "", nullptr, nullptr},
+    {"preview", "any", false, "Unmodified preview payload; generated weights are recomputed", nullptr, nullptr, nullptr, false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
+    {"mesh", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_bind_mesh = {
     "rig.bind_mesh", "rig",
@@ -7643,7 +7815,7 @@ static const MethodDescriptor desc_rig_bind_mesh = {
 static const MethodRegistration reg_rig_bind_mesh(desc_rig_bind_mesh);
 
 static const MethodParam params_rig_cancel_pose_preview[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_cancel_pose_preview = {
     "rig.cancel_pose_preview", "rig",
@@ -7659,9 +7831,9 @@ static const MethodDescriptor desc_rig_cancel_pose_preview = {
 static const MethodRegistration reg_rig_cancel_pose_preview(desc_rig_cancel_pose_preview);
 
 static const MethodParam params_rig_clear_ik_channels[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_clear_ik_channels = {
     "rig.clear_ik_channels", "rig",
@@ -7690,9 +7862,9 @@ static const MethodDescriptor desc_rig_clear_selection = {
 static const MethodRegistration reg_rig_clear_selection(desc_rig_clear_selection);
 
 static const MethodParam params_rig_commit_fit[] = {
-    {"character", "any", false, "Owned unskinned clip-free rig name", nullptr, nullptr},
-    {"mesh", "any", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr},
-    {"preview", "any", false, "Preview payload from rig.preview_fit; landmarks are revalidated", nullptr, nullptr},
+    {"character", "string", false, "Owned unskinned clip-free rig name", nullptr, nullptr, "string", false},
+    {"mesh", "string", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr, "string", false},
+    {"preview", "any", false, "Preview payload from rig.preview_fit; landmarks are revalidated", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_commit_fit = {
     "rig.commit_fit", "rig",
@@ -7708,8 +7880,8 @@ static const MethodDescriptor desc_rig_commit_fit = {
 static const MethodRegistration reg_rig_commit_fit(desc_rig_commit_fit);
 
 static const MethodParam params_rig_copy_from[] = {
-    {"source_character", "any", false, "Existing source import/rig name; meshless and unskinned, may contain animation clips", nullptr, nullptr},
-    {"character", "any", false, "New distinct owned rig name, ASCII letters/digits/underscore/hyphen, 1-128 characters", nullptr, nullptr},
+    {"source_character", "string", false, "Existing source import/rig name; meshless and unskinned, may contain animation clips", nullptr, nullptr, "string", false},
+    {"character", "string", false, "New distinct owned rig name, ASCII letters/digits/underscore/hyphen, 1-128 characters", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_copy_from = {
     "rig.copy_from", "rig",
@@ -7725,9 +7897,9 @@ static const MethodDescriptor desc_rig_copy_from = {
 static const MethodRegistration reg_rig_copy_from(desc_rig_copy_from);
 
 static const MethodParam params_rig_create[] = {
-    {"character", "any", false, "New character identity; must be unique and not overlap another character prefix.", nullptr, nullptr},
-    {"template_id", "string", false, "", "root", "['root', 'chain3', 'humanoid', 'humanoid_detailed', 'quadruped', 'insect6', 'avian']"},
-    {"height", "float", false, "Positive finite rest layout height <=10000; default 1.8. Catalogue gives family-specific UI suggestions.", "1.8", nullptr},
+    {"character", "string", false, "New character identity; must be unique and not overlap another character prefix.", nullptr, nullptr, "string", false},
+    {"template_id", "string", false, "", "root", "['root', 'chain3', 'humanoid', 'humanoid_detailed', 'quadruped', 'insect6', 'avian']", "string", false},
+    {"height", "float", false, "Positive finite rest layout height <=10000; default 1.8. Catalogue gives family-specific UI suggestions.", "1.8", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_create = {
     "rig.create", "rig",
@@ -7743,9 +7915,9 @@ static const MethodDescriptor desc_rig_create = {
 static const MethodRegistration reg_rig_create(desc_rig_create);
 
 static const MethodParam params_rig_create_aim_control[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"role", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"role", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_create_aim_control = {
     "rig.create_aim_control", "rig",
@@ -7761,9 +7933,9 @@ static const MethodDescriptor desc_rig_create_aim_control = {
 static const MethodRegistration reg_rig_create_aim_control(desc_rig_create_aim_control);
 
 static const MethodParam params_rig_create_chain_control[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"chain", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"chain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_create_chain_control = {
     "rig.create_chain_control", "rig",
@@ -7779,9 +7951,9 @@ static const MethodDescriptor desc_rig_create_chain_control = {
 static const MethodRegistration reg_rig_create_chain_control(desc_rig_create_chain_control);
 
 static const MethodParam params_rig_create_controls[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"controls", "array|null", false, "null/omitted = derive anatomy limbs; array = replace; [] = clear.", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"controls", "array|null", false, "null/omitted = derive anatomy limbs; array = replace; [] = clear.", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_create_controls = {
     "rig.create_controls", "rig",
@@ -7797,21 +7969,21 @@ static const MethodDescriptor desc_rig_create_controls = {
 static const MethodRegistration reg_rig_create_controls(desc_rig_create_controls);
 
 static const MethodParam params_rig_create_human_walk_clip[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
-    {"fps", "float", true, "", nullptr, nullptr},
-    {"cadence", "float", true, "", nullptr, nullptr},
-    {"cycles", "integer", true, "", nullptr, nullptr},
-    {"stride", "float", true, "", nullptr, nullptr},
-    {"step_height", "float", true, "", nullptr, nullptr},
-    {"body_bounce", "float", true, "", nullptr, nullptr},
-    {"arm_swing", "float", true, "", nullptr, nullptr},
-    {"body_motion", "float", false, "", "0.75", nullptr},
-    {"leg_reach", "float", false, "", "0.998", nullptr},
-    {"stance_knee_deg", "float", false, "", "18.0", nullptr},
-    {"heel_strike_deg", "float", false, "", "15.0", nullptr},
-    {"toe_off_deg", "float", false, "", "30.0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"fps", "float", true, "", nullptr, nullptr, "number", false},
+    {"cadence", "float", true, "", nullptr, nullptr, "number", false},
+    {"cycles", "integer", true, "", nullptr, nullptr, "number", false},
+    {"stride", "float", true, "", nullptr, nullptr, "number", false},
+    {"step_height", "float", true, "", nullptr, nullptr, "number", false},
+    {"body_bounce", "float", true, "", nullptr, nullptr, "number", false},
+    {"arm_swing", "float", true, "", nullptr, nullptr, "number", false},
+    {"body_motion", "float", false, "", "0.75", nullptr, "number", false},
+    {"leg_reach", "float", false, "", "0.998", nullptr, "number", false},
+    {"stance_knee_deg", "float", false, "", "18.0", nullptr, "number", false},
+    {"heel_strike_deg", "float", false, "", "15.0", nullptr, "number", false},
+    {"toe_off_deg", "float", false, "", "30.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_create_human_walk_clip = {
     "rig.create_human_walk_clip", "rig",
@@ -7827,13 +7999,13 @@ static const MethodDescriptor desc_rig_create_human_walk_clip = {
 static const MethodRegistration reg_rig_create_human_walk_clip(desc_rig_create_human_walk_clip);
 
 static const MethodParam params_rig_create_mirrored_bone[] = {
-    {"character", "any", false, "Owned meshless, unweighted, clip-free rig name", nullptr, nullptr},
-    {"rig_revision", "any", false, "Expected revision from rig.list_bones; stale operations reject before publication", nullptr, nullptr},
-    {"axis", "string", false, "Mirror plane normal in canonical rig space: x, y or z", "x", nullptr},
-    {"offset", "float", false, "Finite plane coordinate in rig units; actor placement does not change this coordinate", "0.", nullptr},
-    {"bone", "any", false, "One existing unpaired non-root source key", nullptr, nullptr},
-    {"name", "any", false, "New unprefixed valid bone name; canonical key is character_name", nullptr, nullptr},
-    {"source_side", "any", false, "left or right; defines pair orientation explicitly", nullptr, nullptr},
+    {"character", "string", false, "Owned meshless, unweighted, clip-free rig name", nullptr, nullptr, "string", false},
+    {"rig_revision", "float", false, "Expected revision from rig.list_bones; stale operations reject before publication", nullptr, nullptr, "number", false},
+    {"axis", "string", false, "Mirror plane normal in canonical rig space: x, y or z", "x", nullptr, "string", false},
+    {"offset", "float", false, "Finite plane coordinate in rig units; actor placement does not change this coordinate", "0.", nullptr, "number", false},
+    {"bone", "string", false, "One existing unpaired non-root source key", nullptr, nullptr, "string", false},
+    {"name", "string", false, "New unprefixed valid bone name; canonical key is character_name", nullptr, nullptr, "string", false},
+    {"source_side", "string", false, "left or right; defines pair orientation explicitly", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_create_mirrored_bone = {
     "rig.create_mirrored_bone", "rig",
@@ -7849,9 +8021,9 @@ static const MethodDescriptor desc_rig_create_mirrored_bone = {
 static const MethodRegistration reg_rig_create_mirrored_bone(desc_rig_create_mirrored_bone);
 
 static const MethodParam params_rig_create_pose_clip[] = {
-    {"fps", "float", false, "Clip ticks per second, 1..240; does not change the scene FPS.", "24.", nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
+    {"fps", "float", false, "Clip ticks per second, 1..240; does not change the scene FPS.", "24.", nullptr, "number", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_create_pose_clip = {
     "rig.create_pose_clip", "rig",
@@ -7867,12 +8039,12 @@ static const MethodDescriptor desc_rig_create_pose_clip = {
 static const MethodRegistration reg_rig_create_pose_clip(desc_rig_create_pose_clip);
 
 static const MethodParam params_rig_create_rom_clip[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"scale", "float", false, "", "1.0", nullptr},
-    {"frames_per_motion", "integer", false, "", "12", nullptr},
-    {"fps", "float", false, "", "24.0", nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"scale", "float", false, "", "1.0", nullptr, "number", false},
+    {"frames_per_motion", "integer", false, "", "12", nullptr, "number", false},
+    {"fps", "float", false, "", "24.0", nullptr, "number", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_create_rom_clip = {
     "rig.create_rom_clip", "rig",
@@ -7888,8 +8060,8 @@ static const MethodDescriptor desc_rig_create_rom_clip = {
 static const MethodRegistration reg_rig_create_rom_clip(desc_rig_create_rom_clip);
 
 static const MethodParam params_rig_delete_bone[] = {
-    {"character", "any", false, "Owned rig name", nullptr, nullptr},
-    {"bone", "any", false, "Existing prefixed bone key", nullptr, nullptr},
+    {"character", "string", false, "Owned rig name", nullptr, nullptr, "string", false},
+    {"bone", "string", false, "Existing prefixed bone key", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_delete_bone = {
     "rig.delete_bone", "rig",
@@ -7905,8 +8077,8 @@ static const MethodDescriptor desc_rig_delete_bone = {
 static const MethodRegistration reg_rig_delete_bone(desc_rig_delete_bone);
 
 static const MethodParam params_rig_derive_limb_hints[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"overwrite", "bool", false, "", "False", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"overwrite", "bool", false, "", "False", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_derive_limb_hints = {
     "rig.derive_limb_hints", "rig",
@@ -7922,12 +8094,12 @@ static const MethodDescriptor desc_rig_derive_limb_hints = {
 static const MethodRegistration reg_rig_derive_limb_hints(desc_rig_derive_limb_hints);
 
 static const MethodParam params_rig_edit_pose_key[] = {
-    {"character", "string", true, "Active Pose character", nullptr, nullptr},
-    {"bone", "string", true, "Existing prefixed bone key", nullptr, nullptr},
-    {"channel", "string", true, "position or rotation", nullptr, "position|rotation"},
-    {"source_frame", "int", true, "Exact source frame in 0..1000000", nullptr, nullptr},
-    {"target_frame", "int", true, "Destination frame in 0..1000000", nullptr, nullptr},
-    {"value", "array", false, "Optional [x,y,z] or [w,x,y,z]; null preserves value", nullptr, nullptr},
+    {"character", "string", true, "Active Pose character", nullptr, nullptr, "string", false},
+    {"bone", "string", true, "Existing prefixed bone key", nullptr, nullptr, "string", false},
+    {"channel", "string", true, "position or rotation", nullptr, "position|rotation", "string", false},
+    {"source_frame", "int", true, "Exact source frame in 0..1000000", nullptr, nullptr, "number", false},
+    {"target_frame", "int", true, "Destination frame in 0..1000000", nullptr, nullptr, "number", false},
+    {"value", "array", false, "Optional [x,y,z] or [w,x,y,z]; null preserves value", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_edit_pose_key = {
     "rig.edit_pose_key", "rig",
@@ -7943,7 +8115,7 @@ static const MethodDescriptor desc_rig_edit_pose_key = {
 static const MethodRegistration reg_rig_edit_pose_key(desc_rig_edit_pose_key);
 
 static const MethodParam params_rig_get_anatomy[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_anatomy = {
     "rig.get_anatomy", "rig",
@@ -7959,7 +8131,7 @@ static const MethodDescriptor desc_rig_get_anatomy = {
 static const MethodRegistration reg_rig_get_anatomy(desc_rig_get_anatomy);
 
 static const MethodParam params_rig_get_binding[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_binding = {
     "rig.get_binding", "rig",
@@ -7975,8 +8147,8 @@ static const MethodDescriptor desc_rig_get_binding = {
 static const MethodRegistration reg_rig_get_binding(desc_rig_get_binding);
 
 static const MethodParam params_rig_get_bone_envelope[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"bone", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"bone", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_bone_envelope = {
     "rig.get_bone_envelope", "rig",
@@ -7992,7 +8164,7 @@ static const MethodDescriptor desc_rig_get_bone_envelope = {
 static const MethodRegistration reg_rig_get_bone_envelope(desc_rig_get_bone_envelope);
 
 static const MethodParam params_rig_get_controls[] = {
-    {"character", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_rig_get_controls = {
     "rig.get_controls", "rig",
@@ -8008,7 +8180,7 @@ static const MethodDescriptor desc_rig_get_controls = {
 static const MethodRegistration reg_rig_get_controls(desc_rig_get_controls);
 
 static const MethodParam params_rig_get_driven_controls[] = {
-    {"character", "string", true, "Rig character name", nullptr, nullptr},
+    {"character", "string", true, "Rig character name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_driven_controls = {
     "rig.get_driven_controls", "rig",
@@ -8037,8 +8209,8 @@ static const MethodDescriptor desc_rig_get_envelope_overlay = {
 static const MethodRegistration reg_rig_get_envelope_overlay(desc_rig_get_envelope_overlay);
 
 static const MethodParam params_rig_get_fit_setup[] = {
-    {"character", "any", false, "Owned unskinned clip-free rig name", nullptr, nullptr},
-    {"mesh", "any", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr},
+    {"character", "string", false, "Owned unskinned clip-free rig name", nullptr, nullptr, "string", false},
+    {"mesh", "string", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_fit_setup = {
     "rig.get_fit_setup", "rig",
@@ -8054,7 +8226,7 @@ static const MethodDescriptor desc_rig_get_fit_setup = {
 static const MethodRegistration reg_rig_get_fit_setup(desc_rig_get_fit_setup);
 
 static const MethodParam params_rig_get_ik_channels[] = {
-    {"character", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_rig_get_ik_channels = {
     "rig.get_ik_channels", "rig",
@@ -8083,8 +8255,8 @@ static const MethodDescriptor desc_rig_get_joint_limit_overlay = {
 static const MethodRegistration reg_rig_get_joint_limit_overlay(desc_rig_get_joint_limit_overlay);
 
 static const MethodParam params_rig_get_joint_limit_view[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"bone", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"bone", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_joint_limit_view = {
     "rig.get_joint_limit_view", "rig",
@@ -8100,7 +8272,7 @@ static const MethodDescriptor desc_rig_get_joint_limit_view = {
 static const MethodRegistration reg_rig_get_joint_limit_view(desc_rig_get_joint_limit_view);
 
 static const MethodParam params_rig_get_joint_profile[] = {
-    {"character", "any", false, "Exact character name from rig.list_characters.", nullptr, nullptr},
+    {"character", "string", false, "Exact character name from rig.list_characters.", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_joint_profile = {
     "rig.get_joint_profile", "rig",
@@ -8116,11 +8288,11 @@ static const MethodDescriptor desc_rig_get_joint_profile = {
 static const MethodRegistration reg_rig_get_joint_profile(desc_rig_get_joint_profile);
 
 static const MethodParam params_rig_get_mirrored_landmarks[] = {
-    {"character", "any", false, "Owned meshless, unweighted, clip-free rig name", nullptr, nullptr},
-    {"rig_revision", "any", false, "Expected revision from rig.list_bones; stale operations reject before publication", nullptr, nullptr},
-    {"axis", "string", false, "Mirror plane normal in canonical rig space: x, y or z", "x", nullptr},
-    {"offset", "float", false, "Finite plane coordinate in rig units; actor placement does not change this coordinate", "0.", nullptr},
-    {"landmarks", "any", false, "Complete finite world XYZ map for every canonical hierarchy node", nullptr, nullptr},
+    {"character", "string", false, "Owned meshless, unweighted, clip-free rig name", nullptr, nullptr, "string", false},
+    {"rig_revision", "float", false, "Expected revision from rig.list_bones; stale operations reject before publication", nullptr, nullptr, "number", false},
+    {"axis", "string", false, "Mirror plane normal in canonical rig space: x, y or z", "x", nullptr, "string", false},
+    {"offset", "float", false, "Finite plane coordinate in rig units; actor placement does not change this coordinate", "0.", nullptr, "number", false},
+    {"landmarks", "any", false, "Complete finite world XYZ map for every canonical hierarchy node", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_get_mirrored_landmarks = {
     "rig.get_mirrored_landmarks", "rig",
@@ -8149,8 +8321,8 @@ static const MethodDescriptor desc_rig_get_mode = {
 static const MethodRegistration reg_rig_get_mode(desc_rig_get_mode);
 
 static const MethodParam params_rig_get_next_bone_name[] = {
-    {"seed", "string", false, "ASCII authored name seed; defaults to Joint1", "Joint1", nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"seed", "string", false, "ASCII authored name seed; defaults to Joint1", "Joint1", nullptr, "string", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_next_bone_name = {
     "rig.get_next_bone_name", "rig",
@@ -8166,7 +8338,7 @@ static const MethodDescriptor desc_rig_get_next_bone_name = {
 static const MethodRegistration reg_rig_get_next_bone_name(desc_rig_get_next_bone_name);
 
 static const MethodParam params_rig_get_next_name[] = {
-    {"seed", "string", false, "", "Rig", nullptr},
+    {"seed", "string", false, "", "Rig", nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_next_name = {
     "rig.get_next_name", "rig",
@@ -8195,7 +8367,7 @@ static const MethodDescriptor desc_rig_get_overlay_visible = {
 static const MethodRegistration reg_rig_get_overlay_visible(desc_rig_get_overlay_visible);
 
 static const MethodParam params_rig_get_pose_coverage[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_pose_coverage = {
     "rig.get_pose_coverage", "rig",
@@ -8211,7 +8383,7 @@ static const MethodDescriptor desc_rig_get_pose_coverage = {
 static const MethodRegistration reg_rig_get_pose_coverage(desc_rig_get_pose_coverage);
 
 static const MethodParam params_rig_get_pose_state[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_pose_state = {
     "rig.get_pose_state", "rig",
@@ -8227,7 +8399,7 @@ static const MethodDescriptor desc_rig_get_pose_state = {
 static const MethodRegistration reg_rig_get_pose_state(desc_rig_get_pose_state);
 
 static const MethodParam params_rig_get_pose_view[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_pose_view = {
     "rig.get_pose_view", "rig",
@@ -8243,7 +8415,7 @@ static const MethodDescriptor desc_rig_get_pose_view = {
 static const MethodRegistration reg_rig_get_pose_view(desc_rig_get_pose_view);
 
 static const MethodParam params_rig_get_scene_transform[] = {
-    {"character", "any", false, "Owned meshless rig name", nullptr, nullptr},
+    {"character", "string", false, "Owned meshless rig name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_scene_transform = {
     "rig.get_scene_transform", "rig",
@@ -8285,8 +8457,8 @@ static const MethodDescriptor desc_rig_get_selection = {
 static const MethodRegistration reg_rig_get_selection(desc_rig_get_selection);
 
 static const MethodParam params_rig_get_template[] = {
-    {"template_id", "any", false, "", nullptr, "['root', 'chain3', 'humanoid', 'humanoid_detailed', 'quadruped', 'insect6', 'avian']"},
-    {"height", "float", false, "Positive finite layout height, <=10000; default 1.8", "1.8", nullptr},
+    {"template_id", "string", false, "", nullptr, "['root', 'chain3', 'humanoid', 'humanoid_detailed', 'quadruped', 'insect6', 'avian']", "string", false},
+    {"height", "float", false, "Positive finite layout height, <=10000; default 1.8", "1.8", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_get_template = {
     "rig.get_template", "rig",
@@ -8302,9 +8474,9 @@ static const MethodDescriptor desc_rig_get_template = {
 static const MethodRegistration reg_rig_get_template(desc_rig_get_template);
 
 static const MethodParam params_rig_get_weight_map[] = {
-    {"bone", "any", false, "", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
-    {"mesh", "any", false, "", nullptr, nullptr},
+    {"bone", "string", false, "", nullptr, nullptr, "string", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
+    {"mesh", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_get_weight_map = {
     "rig.get_weight_map", "rig",
@@ -8333,8 +8505,8 @@ static const MethodDescriptor desc_rig_get_weight_map_visible = {
 static const MethodRegistration reg_rig_get_weight_map_visible(desc_rig_get_weight_map_visible);
 
 static const MethodParam params_rig_get_weights[] = {
-    {"object", "any", false, "Exact individual flat mesh nodeName", nullptr, nullptr},
-    {"vertex", "any", false, "Zero-based canonical flat vertex index; nonnegative", nullptr, nullptr},
+    {"object", "string", false, "Exact individual flat mesh nodeName", nullptr, nullptr, "string", false},
+    {"vertex", "float", false, "Zero-based canonical flat vertex index; nonnegative", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_get_weights = {
     "rig.get_weights", "rig",
@@ -8350,9 +8522,9 @@ static const MethodDescriptor desc_rig_get_weights = {
 static const MethodRegistration reg_rig_get_weights(desc_rig_get_weights);
 
 static const MethodParam params_rig_insert_ik_key[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_insert_ik_key = {
     "rig.insert_ik_key", "rig",
@@ -8368,8 +8540,8 @@ static const MethodDescriptor desc_rig_insert_ik_key = {
 static const MethodRegistration reg_rig_insert_ik_key(desc_rig_insert_ik_key);
 
 static const MethodParam params_rig_insert_pose_keys[] = {
-    {"bones", "any", false, "", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"bones", "array", false, "", nullptr, nullptr, "string[]", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_insert_pose_keys = {
     "rig.insert_pose_keys", "rig",
@@ -8385,7 +8557,7 @@ static const MethodDescriptor desc_rig_insert_pose_keys = {
 static const MethodRegistration reg_rig_insert_pose_keys(desc_rig_insert_pose_keys);
 
 static const MethodParam params_rig_list_bones[] = {
-    {"character", "any", false, "Import name from rig.list_characters", nullptr, nullptr},
+    {"character", "string", false, "Import name from rig.list_characters", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_list_bones = {
     "rig.list_bones", "rig",
@@ -8440,9 +8612,9 @@ static const MethodDescriptor desc_rig_list_templates = {
 static const MethodRegistration reg_rig_list_templates(desc_rig_list_templates);
 
 static const MethodParam params_rig_match_fk_to_ik[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_match_fk_to_ik = {
     "rig.match_fk_to_ik", "rig",
@@ -8458,9 +8630,9 @@ static const MethodDescriptor desc_rig_match_fk_to_ik = {
 static const MethodRegistration reg_rig_match_fk_to_ik(desc_rig_match_fk_to_ik);
 
 static const MethodParam params_rig_match_ik_to_fk[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_match_ik_to_fk = {
     "rig.match_ik_to_fk", "rig",
@@ -8476,11 +8648,11 @@ static const MethodDescriptor desc_rig_match_ik_to_fk = {
 static const MethodRegistration reg_rig_match_ik_to_fk(desc_rig_match_ik_to_fk);
 
 static const MethodParam params_rig_mirror_pose[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"bones", "array", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"direction", "string", false, "", "selected", nullptr},
-    {"axis", "string", false, "", "x", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"bones", "array", true, "", nullptr, nullptr, "string[]", false},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", false},
+    {"direction", "string", false, "", "selected", nullptr, "string", false},
+    {"axis", "string", false, "", "x", nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_mirror_pose = {
     "rig.mirror_pose", "rig",
@@ -8496,10 +8668,10 @@ static const MethodDescriptor desc_rig_mirror_pose = {
 static const MethodRegistration reg_rig_mirror_pose(desc_rig_mirror_pose);
 
 static const MethodParam params_rig_mirror_rest[] = {
-    {"character", "any", false, "Owned meshless, unweighted, clip-free rig name", nullptr, nullptr},
-    {"rig_revision", "any", false, "Expected revision from rig.list_bones; stale operations reject before publication", nullptr, nullptr},
-    {"axis", "string", false, "Mirror plane normal in canonical rig space: x, y or z", "x", nullptr},
-    {"offset", "float", false, "Finite plane coordinate in rig units; actor placement does not change this coordinate", "0.", nullptr},
+    {"character", "string", false, "Owned meshless, unweighted, clip-free rig name", nullptr, nullptr, "string", false},
+    {"rig_revision", "float", false, "Expected revision from rig.list_bones; stale operations reject before publication", nullptr, nullptr, "number", false},
+    {"axis", "string", false, "Mirror plane normal in canonical rig space: x, y or z", "x", nullptr, "string", false},
+    {"offset", "float", false, "Finite plane coordinate in rig units; actor placement does not change this coordinate", "0.", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_mirror_rest = {
     "rig.mirror_rest", "rig",
@@ -8515,7 +8687,7 @@ static const MethodDescriptor desc_rig_mirror_rest = {
 static const MethodRegistration reg_rig_mirror_rest(desc_rig_mirror_rest);
 
 static const MethodParam params_rig_preflight[] = {
-    {"mesh", "any", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr},
+    {"mesh", "string", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_preflight = {
     "rig.preflight", "rig",
@@ -8531,9 +8703,9 @@ static const MethodDescriptor desc_rig_preflight = {
 static const MethodRegistration reg_rig_preflight(desc_rig_preflight);
 
 static const MethodParam params_rig_preview_bind[] = {
-    {"character", "any", false, "Exact owned rig character", nullptr, nullptr},
-    {"mesh", "any", false, "Exact flat part or model: group target", nullptr, nullptr},
-    {"axes_confirmed", "bool", false, "Caller has inspected axes and rest alignment", "false", nullptr},
+    {"character", "string", false, "Exact owned rig character", nullptr, nullptr, "string", false},
+    {"mesh", "string", false, "Exact flat part or model: group target", nullptr, nullptr, "string", false},
+    {"axes_confirmed", "bool", false, "Caller has inspected axes and rest alignment", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_preview_bind = {
     "rig.preview_bind", "rig",
@@ -8549,9 +8721,9 @@ static const MethodDescriptor desc_rig_preview_bind = {
 static const MethodRegistration reg_rig_preview_bind(desc_rig_preview_bind);
 
 static const MethodParam params_rig_preview_control_values[] = {
-    {"character", "string", true, "Active Pose-mode rig name", nullptr, nullptr},
-    {"values", "object", true, "Object mapping control IDs to scalar values", nullptr, nullptr},
-    {"rig_revision", "uint", true, "Nonnegative revision from rig.get_pose_state or rig.get_driven_controls", nullptr, nullptr},
+    {"character", "string", true, "Active Pose-mode rig name", nullptr, nullptr, "string", false},
+    {"values", "object", true, "Object mapping control IDs to scalar values", nullptr, nullptr, nullptr, false},
+    {"rig_revision", "uint", true, "Nonnegative revision from rig.get_pose_state or rig.get_driven_controls", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_preview_control_values = {
     "rig.preview_control_values", "rig",
@@ -8567,11 +8739,11 @@ static const MethodDescriptor desc_rig_preview_control_values = {
 static const MethodRegistration reg_rig_preview_control_values(desc_rig_preview_control_values);
 
 static const MethodParam params_rig_preview_envelope_weights[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"torso_radius", "float", false, "", "0.16", nullptr},
-    {"limb_radius", "float", false, "", "0.065", nullptr},
-    {"extremity_radius", "float", false, "", "0.05", nullptr},
-    {"falloff", "float", false, "", "2.0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"torso_radius", "float", false, "", "0.16", nullptr, "number", false},
+    {"limb_radius", "float", false, "", "0.065", nullptr, "number", false},
+    {"extremity_radius", "float", false, "", "0.05", nullptr, "number", false},
+    {"falloff", "float", false, "", "2.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_preview_envelope_weights = {
     "rig.preview_envelope_weights", "rig",
@@ -8587,10 +8759,10 @@ static const MethodDescriptor desc_rig_preview_envelope_weights = {
 static const MethodRegistration reg_rig_preview_envelope_weights(desc_rig_preview_envelope_weights);
 
 static const MethodParam params_rig_preview_fit[] = {
-    {"character", "any", false, "Owned unskinned clip-free rig name", nullptr, nullptr},
-    {"mesh", "any", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr},
-    {"landmarks", "any", false, "Every canonical node key maps to three finite world-space coordinates", nullptr, nullptr},
-    {"axes_confirmed", "bool", false, "Caller confirms +Y up, +Z forward and rest pose", "false", nullptr},
+    {"character", "string", false, "Owned unskinned clip-free rig name", nullptr, nullptr, "string", false},
+    {"mesh", "string", false, "Exact flat mesh node name or model:<importName> group target", nullptr, nullptr, "string", false},
+    {"landmarks", "any", false, "Every canonical node key maps to three finite world-space coordinates", nullptr, nullptr, nullptr, false},
+    {"axes_confirmed", "bool", false, "Caller confirms +Y up, +Z forward and rest pose", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_preview_fit = {
     "rig.preview_fit", "rig",
@@ -8606,10 +8778,10 @@ static const MethodDescriptor desc_rig_preview_fit = {
 static const MethodRegistration reg_rig_preview_fit(desc_rig_preview_fit);
 
 static const MethodParam params_rig_preview_geodesic_weights[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"resolution", "integer", false, "", "96", nullptr},
-    {"falloff", "float", false, "", "2.0", nullptr},
-    {"rig_revision", "any", false, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"resolution", "integer", false, "", "96", nullptr, "number", false},
+    {"falloff", "float", false, "", "2.0", nullptr, "number", false},
+    {"rig_revision", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_preview_geodesic_weights = {
     "rig.preview_geodesic_weights", "rig",
@@ -8625,21 +8797,21 @@ static const MethodDescriptor desc_rig_preview_geodesic_weights = {
 static const MethodRegistration reg_rig_preview_geodesic_weights(desc_rig_preview_geodesic_weights);
 
 static const MethodParam params_rig_preview_human_walk[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "any", true, "", nullptr, nullptr},
-    {"fps", "float", true, "", nullptr, nullptr},
-    {"cadence", "float", true, "", nullptr, nullptr},
-    {"cycles", "integer", true, "", nullptr, nullptr},
-    {"stride", "float", true, "", nullptr, nullptr},
-    {"step_height", "float", true, "", nullptr, nullptr},
-    {"body_bounce", "float", true, "", nullptr, nullptr},
-    {"arm_swing", "float", true, "", nullptr, nullptr},
-    {"body_motion", "float", false, "", "0.75", nullptr},
-    {"leg_reach", "float", false, "", "0.998", nullptr},
-    {"stance_knee_deg", "float", false, "", "18.0", nullptr},
-    {"heel_strike_deg", "float", false, "", "15.0", nullptr},
-    {"toe_off_deg", "float", false, "", "30.0", nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "float", true, "", nullptr, nullptr, "number", true},
+    {"fps", "float", true, "", nullptr, nullptr, "number", false},
+    {"cadence", "float", true, "", nullptr, nullptr, "number", false},
+    {"cycles", "integer", true, "", nullptr, nullptr, "number", false},
+    {"stride", "float", true, "", nullptr, nullptr, "number", false},
+    {"step_height", "float", true, "", nullptr, nullptr, "number", false},
+    {"body_bounce", "float", true, "", nullptr, nullptr, "number", false},
+    {"arm_swing", "float", true, "", nullptr, nullptr, "number", false},
+    {"body_motion", "float", false, "", "0.75", nullptr, "number", false},
+    {"leg_reach", "float", false, "", "0.998", nullptr, "number", false},
+    {"stance_knee_deg", "float", false, "", "18.0", nullptr, "number", false},
+    {"heel_strike_deg", "float", false, "", "15.0", nullptr, "number", false},
+    {"toe_off_deg", "float", false, "", "30.0", nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_preview_human_walk = {
     "rig.preview_human_walk", "rig",
@@ -8655,9 +8827,9 @@ static const MethodDescriptor desc_rig_preview_human_walk = {
 static const MethodRegistration reg_rig_preview_human_walk(desc_rig_preview_human_walk);
 
 static const MethodParam params_rig_preview_pose_locals[] = {
-    {"local_transforms", "any", false, "Object mapping bone names to absolute local row-major rigid matrices.", nullptr, nullptr},
-    {"rig_revision", "any", false, "Nonnegative revision from get_pose_state; stale revisions reject without mutation.", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"local_transforms", "any", false, "Object mapping bone names to absolute local row-major rigid matrices.", nullptr, nullptr, nullptr, false},
+    {"rig_revision", "float", false, "Nonnegative revision from get_pose_state; stale revisions reject without mutation.", nullptr, nullptr, "number", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_preview_pose_locals = {
     "rig.preview_pose_locals", "rig",
@@ -8673,10 +8845,10 @@ static const MethodDescriptor desc_rig_preview_pose_locals = {
 static const MethodRegistration reg_rig_preview_pose_locals(desc_rig_preview_pose_locals);
 
 static const MethodParam params_rig_preview_pose_transform[] = {
-    {"world_delta", "any", false, "Row-major rigid world delta; selected parent/child transforms apply once.", nullptr, nullptr},
-    {"rig_revision", "any", false, "Nonnegative revision from get_pose_state; stale revisions reject without mutation.", nullptr, nullptr},
-    {"bones", "any", false, "", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"world_delta", "any", false, "Row-major rigid world delta; selected parent/child transforms apply once.", nullptr, nullptr, nullptr, false},
+    {"rig_revision", "float", false, "Nonnegative revision from get_pose_state; stale revisions reject without mutation.", nullptr, nullptr, "number", false},
+    {"bones", "array", false, "", nullptr, nullptr, "string[]", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_preview_pose_transform = {
     "rig.preview_pose_transform", "rig",
@@ -8692,12 +8864,12 @@ static const MethodDescriptor desc_rig_preview_pose_transform = {
 static const MethodRegistration reg_rig_preview_pose_transform(desc_rig_preview_pose_transform);
 
 static const MethodParam params_rig_preview_rom_test[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "any", true, "", nullptr, nullptr},
-    {"scale", "float", false, "", "1.0", nullptr},
-    {"frames_per_motion", "integer", false, "", "12", nullptr},
-    {"fps", "float", false, "", "24.0", nullptr},
-    {"name", "any", false, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "float", true, "", nullptr, nullptr, "number", true},
+    {"scale", "float", false, "", "1.0", nullptr, "number", false},
+    {"frames_per_motion", "integer", false, "", "12", nullptr, "number", false},
+    {"fps", "float", false, "", "24.0", nullptr, "number", false},
+    {"name", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_preview_rom_test = {
     "rig.preview_rom_test", "rig",
@@ -8713,9 +8885,9 @@ static const MethodDescriptor desc_rig_preview_rom_test = {
 static const MethodRegistration reg_rig_preview_rom_test(desc_rig_preview_rom_test);
 
 static const MethodParam params_rig_remove_ik_key[] = {
-    {"character", "any", true, "", nullptr, nullptr},
-    {"rig_revision", "any", true, "", nullptr, nullptr},
-    {"control", "any", false, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "float", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_remove_ik_key = {
     "rig.remove_ik_key", "rig",
@@ -8731,8 +8903,8 @@ static const MethodDescriptor desc_rig_remove_ik_key = {
 static const MethodRegistration reg_rig_remove_ik_key(desc_rig_remove_ik_key);
 
 static const MethodParam params_rig_remove_pose_keys[] = {
-    {"bones", "any", false, "", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"bones", "array", false, "", nullptr, nullptr, "string[]", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_remove_pose_keys = {
     "rig.remove_pose_keys", "rig",
@@ -8748,9 +8920,9 @@ static const MethodDescriptor desc_rig_remove_pose_keys = {
 static const MethodRegistration reg_rig_remove_pose_keys(desc_rig_remove_pose_keys);
 
 static const MethodParam params_rig_rename_bone[] = {
-    {"character", "any", false, "Owned rig name", nullptr, nullptr},
-    {"bone", "any", false, "Existing prefixed bone key", nullptr, nullptr},
-    {"name", "any", false, "New authored name, 1-128 ASCII letters/digits/underscore/hyphen", nullptr, nullptr},
+    {"character", "string", false, "Owned rig name", nullptr, nullptr, "string", false},
+    {"bone", "string", false, "Existing prefixed bone key", nullptr, nullptr, "string", false},
+    {"name", "string", false, "New authored name, 1-128 ASCII letters/digits/underscore/hyphen", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_rename_bone = {
     "rig.rename_bone", "rig",
@@ -8766,9 +8938,9 @@ static const MethodDescriptor desc_rig_rename_bone = {
 static const MethodRegistration reg_rig_rename_bone(desc_rig_rename_bone);
 
 static const MethodParam params_rig_reparent_bone[] = {
-    {"character", "any", false, "Owned rig name", nullptr, nullptr},
-    {"bone", "any", false, "Existing prefixed bone key", nullptr, nullptr},
-    {"parent", "any", false, "Existing prefixed parent bone key in the same rig", nullptr, nullptr},
+    {"character", "string", false, "Owned rig name", nullptr, nullptr, "string", false},
+    {"bone", "string", false, "Existing prefixed bone key", nullptr, nullptr, "string", false},
+    {"parent", "string", false, "Existing prefixed parent bone key in the same rig", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_reparent_bone = {
     "rig.reparent_bone", "rig",
@@ -8784,8 +8956,8 @@ static const MethodDescriptor desc_rig_reparent_bone = {
 static const MethodRegistration reg_rig_reparent_bone(desc_rig_reparent_bone);
 
 static const MethodParam params_rig_select_bone[] = {
-    {"character", "any", false, "Import name from rig.list_characters", nullptr, nullptr},
-    {"bone", "any", false, "Node name from rig.list_bones; helper nodes are also selectable", nullptr, nullptr},
+    {"character", "string", false, "Import name from rig.list_characters", nullptr, nullptr, "string", false},
+    {"bone", "string", false, "Node name from rig.list_bones; helper nodes are also selectable", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_select_bone = {
     "rig.select_bone", "rig",
@@ -8801,11 +8973,11 @@ static const MethodDescriptor desc_rig_select_bone = {
 static const MethodRegistration reg_rig_select_bone(desc_rig_select_bone);
 
 static const MethodParam params_rig_select_bones[] = {
-    {"bones", "any", false, "Array of unique bone name strings", nullptr, nullptr},
-    {"active", "string", false, "Active member or empty for automatic choice", "", nullptr},
-    {"mode", "any", false, "", nullptr, "['replace', 'add', 'toggle', 'range']"},
-    {"anchor", "any", false, "Optional anchor member override for restoring a selection snapshot; empty uses click/range behavior", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"bones", "array", false, "Array of unique bone name strings", nullptr, nullptr, "string[]", false},
+    {"active", "string", false, "Active member or empty for automatic choice", "", nullptr, "string", false},
+    {"mode", "any", false, "", nullptr, "['replace', 'add', 'toggle', 'range']", nullptr, false},
+    {"anchor", "any", false, "Optional anchor member override for restoring a selection snapshot; empty uses click/range behavior", nullptr, nullptr, nullptr, false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_select_bones = {
     "rig.select_bones", "rig",
@@ -8821,9 +8993,9 @@ static const MethodDescriptor desc_rig_select_bones = {
 static const MethodRegistration reg_rig_select_bones(desc_rig_select_bones);
 
 static const MethodParam params_rig_select_control[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
-    {"handle", "string", false, "", "target", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
+    {"handle", "string", false, "", "target", nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_select_control = {
     "rig.select_control", "rig",
@@ -8839,8 +9011,8 @@ static const MethodDescriptor desc_rig_select_control = {
 static const MethodRegistration reg_rig_select_control(desc_rig_select_control);
 
 static const MethodParam params_rig_select_pose_clip[] = {
-    {"character", "any", false, "", nullptr, nullptr},
-    {"clip", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
+    {"clip", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_select_pose_clip = {
     "rig.select_pose_clip", "rig",
@@ -8856,8 +9028,8 @@ static const MethodDescriptor desc_rig_select_pose_clip = {
 static const MethodRegistration reg_rig_select_pose_clip(desc_rig_select_pose_clip);
 
 static const MethodParam params_rig_set_anatomy[] = {
-    {"anatomy", "any", false, "Full canonical anatomy object version 1..7; use rig.get_anatomy to preserve existing fields", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"anatomy", "any", false, "Full canonical anatomy object version 1..7; use rig.get_anatomy to preserve existing fields", nullptr, nullptr, nullptr, false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_set_anatomy = {
     "rig.set_anatomy", "rig",
@@ -8873,12 +9045,12 @@ static const MethodDescriptor desc_rig_set_anatomy = {
 static const MethodRegistration reg_rig_set_anatomy(desc_rig_set_anatomy);
 
 static const MethodParam params_rig_set_envelope_overlay[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"visible", "boolean", true, "", nullptr, nullptr},
-    {"torso_radius", "float", false, "", "0.16", nullptr},
-    {"limb_radius", "float", false, "", "0.065", nullptr},
-    {"extremity_radius", "float", false, "", "0.05", nullptr},
-    {"falloff", "float", false, "", "2.0", nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"visible", "boolean", true, "", nullptr, nullptr, "bool", false},
+    {"torso_radius", "float", false, "", "0.16", nullptr, "number", false},
+    {"limb_radius", "float", false, "", "0.065", nullptr, "number", false},
+    {"extremity_radius", "float", false, "", "0.05", nullptr, "number", false},
+    {"falloff", "float", false, "", "2.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_set_envelope_overlay = {
     "rig.set_envelope_overlay", "rig",
@@ -8894,10 +9066,10 @@ static const MethodDescriptor desc_rig_set_envelope_overlay = {
 static const MethodRegistration reg_rig_set_envelope_overlay(desc_rig_set_envelope_overlay);
 
 static const MethodParam params_rig_set_ik_contact[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_ik_contact = {
     "rig.set_ik_contact", "rig",
@@ -8913,10 +9085,10 @@ static const MethodDescriptor desc_rig_set_ik_contact = {
 static const MethodRegistration reg_rig_set_ik_contact(desc_rig_set_ik_contact);
 
 static const MethodParam params_rig_set_ik_contact_interval[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"start_frame", "integer", true, "", nullptr, nullptr},
-    {"end_frame", "integer", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"start_frame", "integer", true, "", nullptr, nullptr, "number", true},
+    {"end_frame", "integer", true, "", nullptr, nullptr, "number", true},
 };
 static const MethodDescriptor desc_rig_set_ik_contact_interval = {
     "rig.set_ik_contact_interval", "rig",
@@ -8932,10 +9104,10 @@ static const MethodDescriptor desc_rig_set_ik_contact_interval = {
 static const MethodRegistration reg_rig_set_ik_contact_interval(desc_rig_set_ik_contact_interval);
 
 static const MethodParam params_rig_set_ik_fk[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
-    {"blend", "float", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
+    {"blend", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_set_ik_fk = {
     "rig.set_ik_fk", "rig",
@@ -8951,11 +9123,11 @@ static const MethodDescriptor desc_rig_set_ik_fk = {
 static const MethodRegistration reg_rig_set_ik_fk(desc_rig_set_ik_fk);
 
 static const MethodParam params_rig_set_ik_orientation[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
-    {"orientation_world", "array", true, "", nullptr, nullptr},
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
+    {"orientation_world", "array", true, "", nullptr, nullptr, nullptr, false},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_ik_orientation = {
     "rig.set_ik_orientation", "rig",
@@ -8971,11 +9143,11 @@ static const MethodDescriptor desc_rig_set_ik_orientation = {
 static const MethodRegistration reg_rig_set_ik_orientation(desc_rig_set_ik_orientation);
 
 static const MethodParam params_rig_set_ik_spline[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
-    {"points_world", "array", true, "Two [x,y,z] interior world points; empty only to disable/clear shape.", nullptr, nullptr},
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
+    {"points_world", "array", true, "Two [x,y,z] interior world points; empty only to disable/clear shape.", nullptr, nullptr, nullptr, false},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_ik_spline = {
     "rig.set_ik_spline", "rig",
@@ -8991,11 +9163,11 @@ static const MethodDescriptor desc_rig_set_ik_spline = {
 static const MethodRegistration reg_rig_set_ik_spline(desc_rig_set_ik_spline);
 
 static const MethodParam params_rig_set_ik_target[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
-    {"control", "string", true, "", nullptr, nullptr},
-    {"target_world", "vec3", true, "", nullptr, nullptr},
-    {"pole_world", "vec3", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", true},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", true},
+    {"control", "string", true, "", nullptr, nullptr, "string", false},
+    {"target_world", "vec3", true, "", nullptr, nullptr, nullptr, false},
+    {"pole_world", "vec3", true, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_set_ik_target = {
     "rig.set_ik_target", "rig",
@@ -9011,8 +9183,8 @@ static const MethodDescriptor desc_rig_set_ik_target = {
 static const MethodRegistration reg_rig_set_ik_target(desc_rig_set_ik_target);
 
 static const MethodParam params_rig_set_joint_limit_overlay[] = {
-    {"visible", "bool", true, "", nullptr, nullptr},
-    {"edit", "bool", true, "", nullptr, nullptr},
+    {"visible", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"edit", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_joint_limit_overlay = {
     "rig.set_joint_limit_overlay", "rig",
@@ -9028,12 +9200,12 @@ static const MethodDescriptor desc_rig_set_joint_limit_overlay = {
 static const MethodRegistration reg_rig_set_joint_limit_overlay(desc_rig_set_joint_limit_overlay);
 
 static const MethodParam params_rig_set_joint_limits[] = {
-    {"character", "string", true, "", nullptr, nullptr},
-    {"bone", "string", true, "", nullptr, nullptr},
-    {"minimum", "float", true, "", nullptr, nullptr},
-    {"maximum", "float", true, "", nullptr, nullptr},
-    {"swing", "float", true, "", nullptr, nullptr},
-    {"rig_revision", "integer", true, "", nullptr, nullptr},
+    {"character", "string", true, "", nullptr, nullptr, "string", false},
+    {"bone", "string", true, "", nullptr, nullptr, "string", false},
+    {"minimum", "float", true, "", nullptr, nullptr, "number", false},
+    {"maximum", "float", true, "", nullptr, nullptr, "number", false},
+    {"swing", "float", true, "", nullptr, nullptr, "number", false},
+    {"rig_revision", "integer", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_set_joint_limits = {
     "rig.set_joint_limits", "rig",
@@ -9049,9 +9221,9 @@ static const MethodDescriptor desc_rig_set_joint_limits = {
 static const MethodRegistration reg_rig_set_joint_limits(desc_rig_set_joint_limits);
 
 static const MethodParam params_rig_set_joint_profile[] = {
-    {"character", "any", false, "Exact character name from rig.list_characters.", nullptr, nullptr},
-    {"profile", "any", false, "Complete version 1 profile; omitted existing rows are removed. Unknown fields/bones, duplicate rows, nonfinite numbers, nonunit axes and invalid ranges reject atomically.", nullptr, nullptr},
-    {"rig_revision", "any", false, "Current nonnegative revision from get_joint_profile; stale writes reject.", nullptr, nullptr},
+    {"character", "string", false, "Exact character name from rig.list_characters.", nullptr, nullptr, "string", false},
+    {"profile", "any", false, "Complete version 1 profile; omitted existing rows are removed. Unknown fields/bones, duplicate rows, nonfinite numbers, nonunit axes and invalid ranges reject atomically.", nullptr, nullptr, nullptr, false},
+    {"rig_revision", "float", false, "Current nonnegative revision from get_joint_profile; stale writes reject.", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_set_joint_profile = {
     "rig.set_joint_profile", "rig",
@@ -9067,8 +9239,8 @@ static const MethodDescriptor desc_rig_set_joint_profile = {
 static const MethodRegistration reg_rig_set_joint_profile(desc_rig_set_joint_profile);
 
 static const MethodParam params_rig_set_mode[] = {
-    {"mode", "any", false, "", nullptr, "['scene', 'edit', 'pose']"},
-    {"character", "string", false, "Owned rig required when mode is edit", "", nullptr},
+    {"mode", "string", false, "", nullptr, "['scene', 'edit', 'pose']", "string", false},
+    {"character", "string", false, "Owned rig required when mode is edit", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_set_mode = {
     "rig.set_mode", "rig",
@@ -9084,7 +9256,7 @@ static const MethodDescriptor desc_rig_set_mode = {
 static const MethodRegistration reg_rig_set_mode(desc_rig_set_mode);
 
 static const MethodParam params_rig_set_overlay_visible[] = {
-    {"visible", "any", false, "Overlay visibility for all visible skeletons", nullptr, nullptr},
+    {"visible", "bool", false, "Overlay visibility for all visible skeletons", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_overlay_visible = {
     "rig.set_overlay_visible", "rig",
@@ -9100,7 +9272,7 @@ static const MethodDescriptor desc_rig_set_overlay_visible = {
 static const MethodRegistration reg_rig_set_overlay_visible(desc_rig_set_overlay_visible);
 
 static const MethodParam params_rig_set_pose_auto_key[] = {
-    {"enabled", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_pose_auto_key = {
     "rig.set_pose_auto_key", "rig",
@@ -9116,7 +9288,7 @@ static const MethodDescriptor desc_rig_set_pose_auto_key = {
 static const MethodRegistration reg_rig_set_pose_auto_key(desc_rig_set_pose_auto_key);
 
 static const MethodParam params_rig_set_pose_frame[] = {
-    {"frame", "any", false, "", nullptr, nullptr},
+    {"frame", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_rig_set_pose_frame = {
     "rig.set_pose_frame", "rig",
@@ -9132,8 +9304,8 @@ static const MethodDescriptor desc_rig_set_pose_frame = {
 static const MethodRegistration reg_rig_set_pose_frame(desc_rig_set_pose_frame);
 
 static const MethodParam params_rig_set_pose_view[] = {
-    {"mode", "any", false, "", nullptr, "['rest', 'animated']"},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"mode", "string", false, "", nullptr, "['rest', 'animated']", "string", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_set_pose_view = {
     "rig.set_pose_view", "rig",
@@ -9149,9 +9321,9 @@ static const MethodDescriptor desc_rig_set_pose_view = {
 static const MethodRegistration reg_rig_set_pose_view(desc_rig_set_pose_view);
 
 static const MethodParam params_rig_set_rest_transform[] = {
-    {"character", "any", false, "Owned rig identity.", nullptr, nullptr},
-    {"bone", "any", false, "Existing full unique joint key.", nullptr, nullptr},
-    {"rest_transform", "any", false, "Row-major 16-number local rest transform. Translation and proper rotation only; scale/shear/reflection rejected.", nullptr, nullptr},
+    {"character", "string", false, "Owned rig identity.", nullptr, nullptr, "string", false},
+    {"bone", "string", false, "Existing full unique joint key.", nullptr, nullptr, "string", false},
+    {"rest_transform", "any", false, "Row-major 16-number local rest transform. Translation and proper rotation only; scale/shear/reflection rejected.", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_rig_set_rest_transform = {
     "rig.set_rest_transform", "rig",
@@ -9167,8 +9339,8 @@ static const MethodDescriptor desc_rig_set_rest_transform = {
 static const MethodRegistration reg_rig_set_rest_transform(desc_rig_set_rest_transform);
 
 static const MethodParam params_rig_set_scene_transform[] = {
-    {"scene_transform", "any", false, "16 finite row-major numbers describing translation, proper rotation and positive uniform scale (0.0001 to 10000)", nullptr, nullptr},
-    {"character", "any", false, "Owned meshless rig name", nullptr, nullptr},
+    {"scene_transform", "any", false, "16 finite row-major numbers describing translation, proper rotation and positive uniform scale (0.0001 to 10000)", nullptr, nullptr, nullptr, false},
+    {"character", "string", false, "Owned meshless rig name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_set_scene_transform = {
     "rig.set_scene_transform", "rig",
@@ -9184,7 +9356,7 @@ static const MethodDescriptor desc_rig_set_scene_transform = {
 static const MethodRegistration reg_rig_set_scene_transform(desc_rig_set_scene_transform);
 
 static const MethodParam params_rig_set_selection_pivot[] = {
-    {"mode", "any", false, "", nullptr, "['active', 'center']"},
+    {"mode", "string", false, "", nullptr, "['active', 'center']", "string", false},
 };
 static const MethodDescriptor desc_rig_set_selection_pivot = {
     "rig.set_selection_pivot", "rig",
@@ -9200,7 +9372,7 @@ static const MethodDescriptor desc_rig_set_selection_pivot = {
 static const MethodRegistration reg_rig_set_selection_pivot(desc_rig_set_selection_pivot);
 
 static const MethodParam params_rig_set_weight_map_visible[] = {
-    {"visible", "any", false, "", nullptr, nullptr},
+    {"visible", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_rig_set_weight_map_visible = {
     "rig.set_weight_map_visible", "rig",
@@ -9216,7 +9388,7 @@ static const MethodDescriptor desc_rig_set_weight_map_visible = {
 static const MethodRegistration reg_rig_set_weight_map_visible(desc_rig_set_weight_map_visible);
 
 static const MethodParam params_rig_suggest_joint_profile[] = {
-    {"character", "any", false, "Exact character name from rig.list_characters.", nullptr, nullptr},
+    {"character", "string", false, "Exact character name from rig.list_characters.", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_suggest_joint_profile = {
     "rig.suggest_joint_profile", "rig",
@@ -9232,10 +9404,10 @@ static const MethodDescriptor desc_rig_suggest_joint_profile = {
 static const MethodRegistration reg_rig_suggest_joint_profile(desc_rig_suggest_joint_profile);
 
 static const MethodParam params_rig_transform_rest[] = {
-    {"bones", "any", false, "Unique selected joint keys, >=1 and <=4096", nullptr, nullptr},
-    {"world_delta", "any", false, "16 row-major finite numbers; rigid world transform about caller-chosen pivot", nullptr, nullptr},
-    {"rig_revision", "any", false, "Expected nonnegative uint64 rig revision from rig.list_bones", nullptr, nullptr},
-    {"character", "any", false, "", nullptr, nullptr},
+    {"bones", "array", false, "Unique selected joint keys, >=1 and <=4096", nullptr, nullptr, "string[]", false},
+    {"world_delta", "any", false, "16 row-major finite numbers; rigid world transform about caller-chosen pivot", nullptr, nullptr, nullptr, false},
+    {"rig_revision", "float", false, "Expected nonnegative uint64 rig revision from rig.list_bones", nullptr, nullptr, "number", false},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_transform_rest = {
     "rig.transform_rest", "rig",
@@ -9251,7 +9423,7 @@ static const MethodDescriptor desc_rig_transform_rest = {
 static const MethodRegistration reg_rig_transform_rest(desc_rig_transform_rest);
 
 static const MethodParam params_rig_unbind_mesh[] = {
-    {"character", "any", false, "", nullptr, nullptr},
+    {"character", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_unbind_mesh = {
     "rig.unbind_mesh", "rig",
@@ -9267,7 +9439,7 @@ static const MethodDescriptor desc_rig_unbind_mesh = {
 static const MethodRegistration reg_rig_unbind_mesh(desc_rig_unbind_mesh);
 
 static const MethodParam params_rig_weight_stats[] = {
-    {"mesh", "any", false, "Exact individual flat mesh nodeName; groups not accepted", nullptr, nullptr},
+    {"mesh", "string", false, "Exact individual flat mesh nodeName; groups not accepted", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_rig_weight_stats = {
     "rig.weight_stats", "rig",
@@ -9283,8 +9455,8 @@ static const MethodDescriptor desc_rig_weight_stats = {
 static const MethodRegistration reg_rig_weight_stats(desc_rig_weight_stats);
 
 static const MethodParam params_scatter_add_library_source[] = {
-    {"group", "string", true, "", nullptr, nullptr},
-    {"relative_path", "string", true, "", nullptr, nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", false},
+    {"relative_path", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scatter_add_library_source = {
     "scatter.add_library_source", "scatter",
@@ -9300,13 +9472,13 @@ static const MethodDescriptor desc_scatter_add_library_source = {
 static const MethodRegistration reg_scatter_add_library_source(desc_scatter_add_library_source);
 
 static const MethodParam params_scatter_add_source[] = {
-    {"group", "string", true, "", nullptr, nullptr},
-    {"mesh", "string", true, "", nullptr, nullptr},
-    {"align_to_normal", "bool", false, "", "true", nullptr},
-    {"rotation_y", "float", false, "", "360.0", nullptr},
-    {"scale_max", "float", false, "", "1.2", nullptr},
-    {"scale_min", "float", false, "", "0.8", nullptr},
-    {"weight", "float", false, "", "1.0", nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", false},
+    {"mesh", "string", true, "", nullptr, nullptr, "string", false},
+    {"align_to_normal", "bool", false, "", "true", nullptr, "bool", false},
+    {"rotation_y", "float", false, "", "360.0", nullptr, "number", false},
+    {"scale_max", "float", false, "", "1.2", nullptr, "number", false},
+    {"scale_min", "float", false, "", "0.8", nullptr, "number", false},
+    {"weight", "float", false, "", "1.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_scatter_add_source = {
     "scatter.add_source", "scatter",
@@ -9322,7 +9494,7 @@ static const MethodDescriptor desc_scatter_add_source = {
 static const MethodRegistration reg_scatter_add_source(desc_scatter_add_source);
 
 static const MethodParam params_scatter_clear[] = {
-    {"group", "string", true, "", nullptr, nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scatter_clear = {
     "scatter.clear", "scatter",
@@ -9338,9 +9510,9 @@ static const MethodDescriptor desc_scatter_clear = {
 static const MethodRegistration reg_scatter_clear(desc_scatter_clear);
 
 static const MethodParam params_scatter_create_group[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"target_node", "string", false, "", "", nullptr},
-    {"target_type", "string", false, "", "mesh", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"target_node", "string", false, "", "", nullptr, "string", false},
+    {"target_type", "string", false, "", "mesh", nullptr, "string", false},
 };
 static const MethodDescriptor desc_scatter_create_group = {
     "scatter.create_group", "scatter",
@@ -9356,7 +9528,7 @@ static const MethodDescriptor desc_scatter_create_group = {
 static const MethodRegistration reg_scatter_create_group(desc_scatter_create_group);
 
 static const MethodParam params_scatter_delete_group[] = {
-    {"group", "string", true, "", nullptr, nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scatter_delete_group = {
     "scatter.delete_group", "scatter",
@@ -9372,7 +9544,7 @@ static const MethodDescriptor desc_scatter_delete_group = {
 static const MethodRegistration reg_scatter_delete_group(desc_scatter_delete_group);
 
 static const MethodParam params_scatter_fill[] = {
-    {"group", "string", true, "", nullptr, nullptr},
+    {"group", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scatter_fill = {
     "scatter.fill", "scatter",
@@ -9388,7 +9560,7 @@ static const MethodDescriptor desc_scatter_fill = {
 static const MethodRegistration reg_scatter_fill(desc_scatter_fill);
 
 static const MethodParam params_scatter_get_wind[] = {
-    {"group", "string", true, "Scatter group id or name", nullptr, nullptr},
+    {"group", "string", true, "Scatter group id or name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scatter_get_wind = {
     "scatter.get_wind", "scatter",
@@ -9430,20 +9602,20 @@ static const MethodDescriptor desc_scatter_list_groups = {
 static const MethodRegistration reg_scatter_list_groups(desc_scatter_list_groups);
 
 static const MethodParam params_scatter_set_settings[] = {
-    {"group", "string", true, "Scatter group id or name", nullptr, nullptr},
-    {"target_count", "int", false, "How many instances to aim for on the next fill", nullptr, nullptr},
-    {"seed", "int", false, "Placement seed; the same seed reproduces the same layout", nullptr, nullptr},
-    {"min_distance", "float", false, "Minimum spacing between instances, in metres", nullptr, nullptr},
-    {"slope_max", "float", false, "Reject ground steeper than this, in degrees", nullptr, nullptr},
-    {"height_min", "float", false, "Lowest world height that accepts an instance, in metres", nullptr, nullptr},
-    {"height_max", "float", false, "Highest world height that accepts an instance, in metres", nullptr, nullptr},
-    {"density_mask", "string", false, "INCLUDE field name; its value is a placement PROBABILITY, so 0.3 thins rather than cuts. Empty string turns it off", nullptr, nullptr},
-    {"exclusion_mask", "string", false, "EXCLUDE field name; placement is forbidden where the field is >= exclusion_threshold. Empty string turns it off", nullptr, nullptr},
-    {"exclusion_threshold", "float", false, "Reject at or above this value; drives BOTH exclusion_mask and splat_exclude_channel", nullptr, nullptr},
-    {"scale_mask", "string", false, "Field name that scales instances. Empty string turns it off", nullptr, nullptr},
-    {"scale_mask_influence", "float", false, "0 ignores scale_mask, 1 lets it drive scale fully", nullptr, nullptr},
-    {"splat_include_channel", "int", false, "Splat map channel used as an include weight: -1 off, 0..3 = RGBA", nullptr, nullptr},
-    {"splat_exclude_channel", "int", false, "Splat map channel used as an exclusion: -1 off, 0..3 = RGBA", nullptr, nullptr},
+    {"group", "string", true, "Scatter group id or name", nullptr, nullptr, "string", false},
+    {"target_count", "int", false, "How many instances to aim for on the next fill", nullptr, nullptr, "number", false},
+    {"seed", "int", false, "Placement seed; the same seed reproduces the same layout", nullptr, nullptr, "number", false},
+    {"min_distance", "float", false, "Minimum spacing between instances, in metres", nullptr, nullptr, "number", false},
+    {"slope_max", "float", false, "Reject ground steeper than this, in degrees", nullptr, nullptr, "number", false},
+    {"height_min", "float", false, "Lowest world height that accepts an instance, in metres", nullptr, nullptr, "number", false},
+    {"height_max", "float", false, "Highest world height that accepts an instance, in metres", nullptr, nullptr, "number", false},
+    {"density_mask", "string", false, "INCLUDE field name; its value is a placement PROBABILITY, so 0.3 thins rather than cuts. Empty string turns it off", nullptr, nullptr, "string", false},
+    {"exclusion_mask", "string", false, "EXCLUDE field name; placement is forbidden where the field is >= exclusion_threshold. Empty string turns it off", nullptr, nullptr, "string", false},
+    {"exclusion_threshold", "float", false, "Reject at or above this value; drives BOTH exclusion_mask and splat_exclude_channel", nullptr, nullptr, "number", false},
+    {"scale_mask", "string", false, "Field name that scales instances. Empty string turns it off", nullptr, nullptr, "string", false},
+    {"scale_mask_influence", "float", false, "0 ignores scale_mask, 1 lets it drive scale fully", nullptr, nullptr, "number", false},
+    {"splat_include_channel", "int", false, "Splat map channel used as an include weight: -1 off, 0..3 = RGBA", nullptr, nullptr, "number", false},
+    {"splat_exclude_channel", "int", false, "Splat map channel used as an exclusion: -1 off, 0..3 = RGBA", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_scatter_set_settings = {
     "scatter.set_settings", "scatter",
@@ -9459,14 +9631,14 @@ static const MethodDescriptor desc_scatter_set_settings = {
 static const MethodRegistration reg_scatter_set_settings(desc_scatter_set_settings);
 
 static const MethodParam params_scatter_set_wind[] = {
-    {"group", "string", true, "Scatter group id or name", nullptr, nullptr},
-    {"direction", "vec3", false, "", nullptr, nullptr},
-    {"enabled", "any", false, "", nullptr, nullptr},
-    {"inherit_atmosphere", "any", false, "", nullptr, nullptr},
-    {"speed", "any", false, "", nullptr, nullptr},
-    {"strength", "any", false, "", nullptr, nullptr},
-    {"turbulence", "any", false, "", nullptr, nullptr},
-    {"wave_size", "any", false, "", nullptr, nullptr},
+    {"group", "string", true, "Scatter group id or name", nullptr, nullptr, "string", false},
+    {"direction", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"speed", "float", false, "", nullptr, nullptr, "number", false},
+    {"strength", "float", false, "", nullptr, nullptr, "number", false},
+    {"turbulence", "float", false, "", nullptr, nullptr, "number", false},
+    {"wave_size", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_scatter_set_wind = {
     "scatter.set_wind", "scatter",
@@ -9482,9 +9654,9 @@ static const MethodDescriptor desc_scatter_set_wind = {
 static const MethodRegistration reg_scatter_set_wind(desc_scatter_set_wind);
 
 static const MethodParam params_scene_add_primitive[] = {
-    {"type", "string", true, "Primitive shape", nullptr, "cube|sphere|plane|cylinder|torus"},
-    {"name", "string", false, "Requested name; a numeric suffix is added if it is taken", "", nullptr},
-    {"size", "float", false, "Edge length or radius in metres; must be positive", "1.0", nullptr},
+    {"type", "string", true, "Primitive shape", nullptr, "cube|sphere|plane|cylinder|torus", "string", false},
+    {"name", "string", false, "Requested name; a numeric suffix is added if it is taken", "", nullptr, "string", false},
+    {"size", "float", false, "Edge length or radius in metres; must be positive", "1.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_scene_add_primitive = {
     "scene.add_primitive", "scene",
@@ -9500,7 +9672,7 @@ static const MethodDescriptor desc_scene_add_primitive = {
 static const MethodRegistration reg_scene_add_primitive(desc_scene_add_primitive);
 
 static const MethodParam params_scene_delete[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_delete = {
     "scene.delete", "scene",
@@ -9516,7 +9688,7 @@ static const MethodDescriptor desc_scene_delete = {
 static const MethodRegistration reg_scene_delete(desc_scene_delete);
 
 static const MethodParam params_scene_duplicate[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_duplicate = {
     "scene.duplicate", "scene",
@@ -9532,16 +9704,16 @@ static const MethodDescriptor desc_scene_duplicate = {
 static const MethodRegistration reg_scene_duplicate(desc_scene_duplicate);
 
 static const MethodParam params_scene_export_estimate[] = {
-    {"geometry", "bool", false, "Count meshes", "true", nullptr},
-    {"materials", "bool", false, "Count materials and textures", "true", nullptr},
-    {"cameras", "bool", false, "Count the active camera as a glTF camera node", "false", nullptr},
-    {"lights", "bool", false, "Count scene lights", "false", nullptr},
-    {"animations", "bool", false, "Count animation clips", "true", nullptr},
-    {"skinning", "bool", false, "Count skinning data", "true", nullptr},
-    {"selected_only", "bool", false, "Estimate the current multi-selection only", "false", nullptr},
-    {"bake_terrain_materials", "bool", false, "Assume terrain layers get baked", "true", nullptr},
-    {"terrain_bake_resolution", "int", false, "Terrain bake resolution assumed by the estimate", "1024", nullptr},
-    {"gpu_instancing", "bool", false, "Assume EXT_mesh_gpu_instancing collapses scatter nodes", "true", nullptr},
+    {"geometry", "bool", false, "Count meshes", "true", nullptr, "bool", false},
+    {"materials", "bool", false, "Count materials and textures", "true", nullptr, "bool", false},
+    {"cameras", "bool", false, "Count the active camera as a glTF camera node", "false", nullptr, "bool", false},
+    {"lights", "bool", false, "Count scene lights", "false", nullptr, "bool", false},
+    {"animations", "bool", false, "Count animation clips", "true", nullptr, "bool", false},
+    {"skinning", "bool", false, "Count skinning data", "true", nullptr, "bool", false},
+    {"selected_only", "bool", false, "Estimate the current multi-selection only", "false", nullptr, "bool", false},
+    {"bake_terrain_materials", "bool", false, "Assume terrain layers get baked", "true", nullptr, "bool", false},
+    {"terrain_bake_resolution", "int", false, "Terrain bake resolution assumed by the estimate", "1024", nullptr, "number", false},
+    {"gpu_instancing", "bool", false, "Assume EXT_mesh_gpu_instancing collapses scatter nodes", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_scene_export_estimate = {
     "scene.export_estimate", "scene",
@@ -9557,17 +9729,17 @@ static const MethodDescriptor desc_scene_export_estimate = {
 static const MethodRegistration reg_scene_export_estimate(desc_scene_export_estimate);
 
 static const MethodParam params_scene_export_gltf[] = {
-    {"path", "string", true, "Output file path; extension must be .glb or .gltf", nullptr, nullptr},
-    {"geometry", "bool", false, "Write meshes", "true", nullptr},
-    {"materials", "bool", false, "Write materials and textures", "true", nullptr},
-    {"cameras", "bool", false, "Write the active camera as a glTF camera node", "false", nullptr},
-    {"lights", "bool", false, "Write scene lights via KHR_lights_punctual", "false", nullptr},
-    {"animations", "bool", false, "Write animation clips as glTF samplers/channels", "true", nullptr},
-    {"skinning", "bool", false, "Write the skeleton, JOINTS_0/WEIGHTS_0 and inverse bind matrices", "true", nullptr},
-    {"selected_only", "bool", false, "Export only the current multi-selection; fails if nothing is selected", "false", nullptr},
-    {"bake_terrain_materials", "bool", false, "Flatten splat-blended terrain layers into export textures", "true", nullptr},
-    {"terrain_bake_resolution", "int", false, "Square resolution of each baked terrain texture", "1024", nullptr},
-    {"gpu_instancing", "bool", false, "Collapse scattered objects sharing one source mesh into EXT_mesh_gpu_instancing nodes", "true", nullptr},
+    {"path", "string", true, "Output file path; extension must be .glb or .gltf", nullptr, nullptr, "string", false},
+    {"geometry", "bool", false, "Write meshes", "true", nullptr, "bool", false},
+    {"materials", "bool", false, "Write materials and textures", "true", nullptr, "bool", false},
+    {"cameras", "bool", false, "Write the active camera as a glTF camera node", "false", nullptr, "bool", false},
+    {"lights", "bool", false, "Write scene lights via KHR_lights_punctual", "false", nullptr, "bool", false},
+    {"animations", "bool", false, "Write animation clips as glTF samplers/channels", "true", nullptr, "bool", false},
+    {"skinning", "bool", false, "Write the skeleton, JOINTS_0/WEIGHTS_0 and inverse bind matrices", "true", nullptr, "bool", false},
+    {"selected_only", "bool", false, "Export only the current multi-selection; fails if nothing is selected", "false", nullptr, "bool", false},
+    {"bake_terrain_materials", "bool", false, "Flatten splat-blended terrain layers into export textures", "true", nullptr, "bool", false},
+    {"terrain_bake_resolution", "int", false, "Square resolution of each baked terrain texture", "1024", nullptr, "number", false},
+    {"gpu_instancing", "bool", false, "Collapse scattered objects sharing one source mesh into EXT_mesh_gpu_instancing nodes", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_scene_export_gltf = {
     "scene.export_gltf", "scene",
@@ -9583,26 +9755,26 @@ static const MethodDescriptor desc_scene_export_gltf = {
 static const MethodRegistration reg_scene_export_gltf(desc_scene_export_gltf);
 
 static const MethodParam params_scene_generate_grains[] = {
-    {"type", "string", false, "rock|voronoi|snow|crystal", "voronoi", "rock|voronoi|snow|crystal"},
-    {"name", "string", false, "Authoring control", "Grain", nullptr},
-    {"count", "int", false, "1..64", "12", nullptr},
-    {"seed", "int", false, "0..2147483647", "1337", nullptr},
-    {"resolution", "int", false, "2..16; rock mesh resolution or rounded Voronoi edge detail", "4", nullptr},
-    {"roundness", "float", false, "0..1; rock/voronoi", nullptr, nullptr},
-    {"roughness", "float", false, "0..0.5; rock displacement or snow irregularity", "0.25", nullptr},
-    {"aspect", "vec3", false, "each 0.05..5", "[1,1,1]", nullptr},
-    {"arms", "int", false, "3..12; snow", "6", nullptr},
-    {"branches", "int", false, "0..5 per side; snow", "3", nullptr},
-    {"branch_length", "float", false, "0.001..0.4, limited by spacing; snow", "0.15", nullptr},
-    {"thickness", "float", false, "0.005..0.3 relative to arm length; snow", "0.04", nullptr},
-    {"crystal_sides", "int", false, "3..12", "6", nullptr},
-    {"tip_height", "float", false, "0..0.9; crystal", "0.3", nullptr},
-    {"diameter_min", "float", false, "0.00001..100 metres", "0.02", nullptr},
-    {"diameter_max", "float", false, "diameter_min..100 metres", "diameter_min", nullptr},
-    {"size_distribution", "string", false, "uniform|log_uniform", "uniform", "uniform|log_uniform"},
-    {"origin", "vec3", false, "finite within +/-1e6 metres", "[0,0,0]", nullptr},
-    {"material", "string", false, "existing material name; mutually exclusive with material_weights", "scene default", nullptr},
-    {"material_weights", "array", false, "1..32 entries {material: existing name, weight: 0.00001..1000000}", nullptr, nullptr},
+    {"type", "string", false, "rock|voronoi|snow|crystal", "voronoi", "rock|voronoi|snow|crystal", nullptr, false},
+    {"name", "string", false, "Authoring control", "Grain", nullptr, "string", false},
+    {"count", "int", false, "1..64", "12", nullptr, "number", false},
+    {"seed", "int", false, "0..2147483647", "1337", nullptr, "number", false},
+    {"resolution", "int", false, "2..16; rock mesh resolution or rounded Voronoi edge detail", "4", nullptr, "number", false},
+    {"roundness", "float", false, "0..1; rock/voronoi", nullptr, nullptr, "number", false},
+    {"roughness", "float", false, "0..0.5; rock displacement or snow irregularity", "0.25", nullptr, "number", false},
+    {"aspect", "vec3", false, "each 0.05..5", "[1,1,1]", nullptr, nullptr, false},
+    {"arms", "int", false, "3..12; snow", "6", nullptr, "number", false},
+    {"branches", "int", false, "0..5 per side; snow", "3", nullptr, "number", false},
+    {"branch_length", "float", false, "0.001..0.4, limited by spacing; snow", "0.15", nullptr, "number", false},
+    {"thickness", "float", false, "0.005..0.3 relative to arm length; snow", "0.04", nullptr, "number", false},
+    {"crystal_sides", "int", false, "3..12", "6", nullptr, "number", false},
+    {"tip_height", "float", false, "0..0.9; crystal", "0.3", nullptr, "number", false},
+    {"diameter_min", "float", false, "0.00001..100 metres", "0.02", nullptr, "number", false},
+    {"diameter_max", "float", false, "diameter_min..100 metres", "diameter_min", nullptr, "number", false},
+    {"size_distribution", "string", false, "uniform|log_uniform", "uniform", "uniform|log_uniform", "string", false},
+    {"origin", "vec3", false, "finite within +/-1e6 metres", "[0,0,0]", nullptr, nullptr, false},
+    {"material", "string", false, "existing material name; mutually exclusive with material_weights", "scene default", nullptr, "string", false},
+    {"material_weights", "array", false, "1..32 entries {material: existing name, weight: 0.00001..1000000}", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_scene_generate_grains = {
     "scene.generate_grains", "scene",
@@ -9631,7 +9803,7 @@ static const MethodDescriptor desc_scene_get_fbx_reader = {
 static const MethodRegistration reg_scene_get_fbx_reader(desc_scene_get_fbx_reader);
 
 static const MethodParam params_scene_get_transform[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_get_transform = {
     "scene.get_transform", "scene",
@@ -9647,7 +9819,7 @@ static const MethodDescriptor desc_scene_get_transform = {
 static const MethodRegistration reg_scene_get_transform(desc_scene_get_transform);
 
 static const MethodParam params_scene_get_visible[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_get_visible = {
     "scene.get_visible", "scene",
@@ -9663,7 +9835,7 @@ static const MethodDescriptor desc_scene_get_visible = {
 static const MethodRegistration reg_scene_get_visible(desc_scene_get_visible);
 
 static const MethodParam params_scene_get_world_transform[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_get_world_transform = {
     "scene.get_world_transform", "scene",
@@ -9679,7 +9851,7 @@ static const MethodDescriptor desc_scene_get_world_transform = {
 static const MethodRegistration reg_scene_get_world_transform(desc_scene_get_world_transform);
 
 static const MethodParam params_scene_import_model[] = {
-    {"path", "string", true, "", nullptr, nullptr},
+    {"path", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_import_model = {
     "scene.import_model", "scene",
@@ -9708,7 +9880,7 @@ static const MethodDescriptor desc_scene_list_objects = {
 static const MethodRegistration reg_scene_list_objects(desc_scene_list_objects);
 
 static const MethodParam params_scene_object_exists[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_object_exists = {
     "scene.object_exists", "scene",
@@ -9724,7 +9896,7 @@ static const MethodDescriptor desc_scene_object_exists = {
 static const MethodRegistration reg_scene_object_exists(desc_scene_object_exists);
 
 static const MethodParam params_scene_object_info[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_object_info = {
     "scene.object_info", "scene",
@@ -9740,8 +9912,8 @@ static const MethodDescriptor desc_scene_object_info = {
 static const MethodRegistration reg_scene_object_info(desc_scene_object_info);
 
 static const MethodParam params_scene_pick_gpu[] = {
-    {"u", "number", true, "normalized X in [0,1]", nullptr, nullptr},
-    {"v", "number", true, "normalized Y in [0,1], measured UP from the bottom", nullptr, nullptr},
+    {"u", "number", true, "normalized X in [0,1]", nullptr, nullptr, "number", false},
+    {"v", "number", true, "normalized Y in [0,1], measured UP from the bottom", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_scene_pick_gpu = {
     "scene.pick_gpu", "scene",
@@ -9757,8 +9929,8 @@ static const MethodDescriptor desc_scene_pick_gpu = {
 static const MethodRegistration reg_scene_pick_gpu(desc_scene_pick_gpu);
 
 static const MethodParam params_scene_pick_ray[] = {
-    {"u", "float", true, "", nullptr, nullptr},
-    {"v", "float", true, "", nullptr, nullptr},
+    {"u", "float", true, "", nullptr, nullptr, "number", false},
+    {"v", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_scene_pick_ray = {
     "scene.pick_ray", "scene",
@@ -9774,9 +9946,9 @@ static const MethodDescriptor desc_scene_pick_ray = {
 static const MethodRegistration reg_scene_pick_ray(desc_scene_pick_ray);
 
 static const MethodParam params_scene_raycast[] = {
-    {"origin", "vec3", false, "Ray origin in world space", nullptr, nullptr},
-    {"direction", "vec3", false, "Ray direction; normalized internally, must be non-zero", nullptr, nullptr},
-    {"filter", "string", false, "mesh_and_terrain (default) | terrain_only | ground_plane. An unknown value is REFUSED, not defaulted: silently widening a terrain_only query would report a mesh hit that looks correct", "mesh_and_terrain", nullptr},
+    {"origin", "vec3", false, "Ray origin in world space", nullptr, nullptr, nullptr, false},
+    {"direction", "vec3", false, "Ray direction; normalized internally, must be non-zero", nullptr, nullptr, nullptr, false},
+    {"filter", "string", false, "mesh_and_terrain (default) | terrain_only | ground_plane. An unknown value is REFUSED, not defaulted: silently widening a terrain_only query would report a mesh hit that looks correct", "mesh_and_terrain", nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_raycast = {
     "scene.raycast", "scene",
@@ -9792,7 +9964,7 @@ static const MethodDescriptor desc_scene_raycast = {
 static const MethodRegistration reg_scene_raycast(desc_scene_raycast);
 
 static const MethodParam params_scene_set_fbx_reader[] = {
-    {"reader", "any", false, "", nullptr, nullptr},
+    {"reader", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_scene_set_fbx_reader = {
     "scene.set_fbx_reader", "scene",
@@ -9808,11 +9980,11 @@ static const MethodDescriptor desc_scene_set_fbx_reader = {
 static const MethodRegistration reg_scene_set_fbx_reader(desc_scene_set_fbx_reader);
 
 static const MethodParam params_scene_set_transform[] = {
-    {"name", "string", true, "Object name", nullptr, nullptr},
-    {"matrix", "matrix", false, "Row-major 4x4 matrix; wins over the component form when both are sent", nullptr, nullptr},
-    {"translation", "vec3", false, "World position in metres", nullptr, nullptr},
-    {"rotation", "vec3", false, "Euler angles in degrees", nullptr, nullptr},
-    {"scale", "vec3", false, "Per-axis scale factors", nullptr, nullptr},
+    {"name", "string", true, "Object name", nullptr, nullptr, "string", false},
+    {"matrix", "matrix", false, "Row-major 4x4 matrix; wins over the component form when both are sent", nullptr, nullptr, nullptr, false},
+    {"translation", "vec3", false, "World position in metres", nullptr, nullptr, "vec3", false},
+    {"rotation", "vec3", false, "Euler angles in degrees", nullptr, nullptr, "vec3", false},
+    {"scale", "vec3", false, "Per-axis scale factors", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_scene_set_transform = {
     "scene.set_transform", "scene",
@@ -9828,8 +10000,8 @@ static const MethodDescriptor desc_scene_set_transform = {
 static const MethodRegistration reg_scene_set_transform(desc_scene_set_transform);
 
 static const MethodParam params_scene_set_visible[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"visible", "bool", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"visible", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_scene_set_visible = {
     "scene.set_visible", "scene",
@@ -9845,7 +10017,7 @@ static const MethodDescriptor desc_scene_set_visible = {
 static const MethodRegistration reg_scene_set_visible(desc_scene_set_visible);
 
 static const MethodParam params_script_run_file[] = {
-    {"path", "string", true, "", nullptr, nullptr},
+    {"path", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_script_run_file = {
     "script.run_file", "script",
@@ -9861,7 +10033,7 @@ static const MethodDescriptor desc_script_run_file = {
 static const MethodRegistration reg_script_run_file(desc_script_run_file);
 
 static const MethodParam params_sculpt_get[] = {
-    {"object", "string", true, "", nullptr, nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_sculpt_get = {
     "sculpt.get", "sculpt",
@@ -9877,10 +10049,10 @@ static const MethodDescriptor desc_sculpt_get = {
 static const MethodRegistration reg_sculpt_get(desc_sculpt_get);
 
 static const MethodParam params_sculpt_mask_operation[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"operation", "string", true, "", nullptr, nullptr},
-    {"seed", "int", false, "", "1337", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"operation", "string", true, "", nullptr, nullptr, "string", false},
+    {"seed", "int", false, "", "1337", nullptr, "number", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_sculpt_mask_operation = {
     "sculpt.mask_operation", "sculpt",
@@ -9896,12 +10068,12 @@ static const MethodDescriptor desc_sculpt_mask_operation = {
 static const MethodRegistration reg_sculpt_mask_operation(desc_sculpt_mask_operation);
 
 static const MethodParam params_sculpt_paint_mask[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"radius", "float", true, "", nullptr, nullptr},
-    {"value", "float", true, "", nullptr, nullptr},
-    {"points", "any", false, "", nullptr, nullptr},
-    {"strength", "float", false, "", "1.0", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"radius", "float", true, "", nullptr, nullptr, "number", false},
+    {"value", "float", true, "", nullptr, nullptr, "number", false},
+    {"points", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"strength", "float", false, "", "1.0", nullptr, "number", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_sculpt_paint_mask = {
     "sculpt.paint_mask", "sculpt",
@@ -9917,16 +10089,16 @@ static const MethodDescriptor desc_sculpt_paint_mask = {
 static const MethodRegistration reg_sculpt_paint_mask(desc_sculpt_paint_mask);
 
 static const MethodParam params_sculpt_stroke[] = {
-    {"object", "string", true, "", nullptr, nullptr},
-    {"tool", "string", true, "", nullptr, nullptr},
-    {"points", "array", true, "Stroke path: list of [x, y, z] world points. Required - a stroke with no points does nothing.", nullptr, nullptr},
-    {"direction", "vec3", false, "", nullptr, nullptr},
-    {"falloff", "float", false, "", "0.75", nullptr},
-    {"radius", "float", false, "", "0.25", nullptr},
-    {"seed", "int", false, "", "1337", nullptr},
-    {"strength", "float", false, "", "0.05", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
-    {"use_mask", "bool", false, "", "true", nullptr},
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"tool", "string", true, "", nullptr, nullptr, "string", false},
+    {"points", "array", true, "Stroke path: list of [x, y, z] world points. Required - a stroke with no points does nothing.", nullptr, nullptr, nullptr, false},
+    {"direction", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"falloff", "float", false, "", "0.75", nullptr, "number", false},
+    {"radius", "float", false, "", "0.25", nullptr, "number", false},
+    {"seed", "int", false, "", "1337", nullptr, "number", false},
+    {"strength", "float", false, "", "0.05", nullptr, "number", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
+    {"use_mask", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_sculpt_stroke = {
     "sculpt.stroke", "sculpt",
@@ -9968,7 +10140,7 @@ static const MethodDescriptor desc_select_clear = {
 static const MethodRegistration reg_select_clear(desc_select_clear);
 
 static const MethodParam params_select_deselect_object[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_select_deselect_object = {
     "select.deselect_object", "select",
@@ -9984,8 +10156,8 @@ static const MethodDescriptor desc_select_deselect_object = {
 static const MethodRegistration reg_select_deselect_object(desc_select_deselect_object);
 
 static const MethodParam params_select_light[] = {
-    {"index", "int", true, "", nullptr, nullptr},
-    {"additive", "bool", false, "", "false", nullptr},
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"additive", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_select_light = {
     "select.light", "select",
@@ -10014,8 +10186,8 @@ static const MethodDescriptor desc_select_list = {
 static const MethodRegistration reg_select_list(desc_select_list);
 
 static const MethodParam params_select_object[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"additive", "bool", false, "", "false", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"additive", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_select_object = {
     "select.object", "select",
@@ -10057,8 +10229,8 @@ static const MethodDescriptor desc_sim_get_mode = {
 static const MethodRegistration reg_sim_get_mode(desc_sim_get_mode);
 
 static const MethodParam params_sim_move_domain[] = {
-    {"delta", "vec3", true, "", nullptr, nullptr},
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"delta", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_move_domain = {
     "sim.move_domain", "sim",
@@ -10074,7 +10246,7 @@ static const MethodDescriptor desc_sim_move_domain = {
 static const MethodRegistration reg_sim_move_domain(desc_sim_move_domain);
 
 static const MethodParam params_sim_set_mode[] = {
-    {"mode", "string", true, "", nullptr, nullptr},
+    {"mode", "string", true, "", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_sim_set_mode = {
     "sim.set_mode", "sim",
@@ -10090,10 +10262,10 @@ static const MethodDescriptor desc_sim_set_mode = {
 static const MethodRegistration reg_sim_set_mode(desc_sim_set_mode);
 
 static const MethodParam params_sim_cache_bake[] = {
-    {"cache_dir", "string", true, "", nullptr, nullptr},
-    {"end_frame", "int", true, "", nullptr, nullptr},
-    {"fps", "float", false, "", "24.0", nullptr},
-    {"start_frame", "int", false, "", "0", nullptr},
+    {"cache_dir", "string", true, "", nullptr, nullptr, "string", false},
+    {"end_frame", "int", true, "", nullptr, nullptr, "number", false},
+    {"fps", "float", false, "", "24.0", nullptr, "number", false},
+    {"start_frame", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_sim_cache_bake = {
     "sim_cache.bake", "sim_cache",
@@ -10109,7 +10281,7 @@ static const MethodDescriptor desc_sim_cache_bake = {
 static const MethodRegistration reg_sim_cache_bake(desc_sim_cache_bake);
 
 static const MethodParam params_sim_cache_clear[] = {
-    {"ram_only", "bool", false, "", nullptr, nullptr},
+    {"ram_only", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_sim_cache_clear = {
     "sim_cache.clear", "sim_cache",
@@ -10138,9 +10310,9 @@ static const MethodDescriptor desc_sim_cache_status = {
 static const MethodRegistration reg_sim_cache_status(desc_sim_cache_status);
 
 static const MethodParam params_sim_graph_add_node[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"type", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"type", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_add_node = {
     "sim_graph.add_node", "sim_graph",
@@ -10156,9 +10328,9 @@ static const MethodDescriptor desc_sim_graph_add_node = {
 static const MethodRegistration reg_sim_graph_add_node(desc_sim_graph_add_node);
 
 static const MethodParam params_sim_graph_apply[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"allow_restart", "bool", false, "", "false", nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"allow_restart", "bool", false, "", "false", nullptr, "bool", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_apply = {
     "sim_graph.apply", "sim_graph",
@@ -10174,8 +10346,8 @@ static const MethodDescriptor desc_sim_graph_apply = {
 static const MethodRegistration reg_sim_graph_apply(desc_sim_graph_apply);
 
 static const MethodParam params_sim_graph_clear[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_clear = {
     "sim_graph.clear", "sim_graph",
@@ -10204,12 +10376,12 @@ static const MethodDescriptor desc_sim_graph_clear_overrides = {
 static const MethodRegistration reg_sim_graph_clear_overrides(desc_sim_graph_clear_overrides);
 
 static const MethodParam params_sim_graph_connect[] = {
-    {"from_node", "int", true, "", nullptr, nullptr},
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"to_node", "int", true, "", nullptr, nullptr},
-    {"from_pin", "int", false, "", "0", nullptr},
-    {"owner", "string", false, "", "", nullptr},
-    {"to_pin", "int", false, "", "0", nullptr},
+    {"from_node", "int", true, "", nullptr, nullptr, "number", false},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"to_node", "int", true, "", nullptr, nullptr, "number", false},
+    {"from_pin", "int", false, "", "0", nullptr, "number", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
+    {"to_pin", "int", false, "", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_sim_graph_connect = {
     "sim_graph.connect", "sim_graph",
@@ -10238,8 +10410,8 @@ static const MethodDescriptor desc_sim_graph_couplings = {
 static const MethodRegistration reg_sim_graph_couplings(desc_sim_graph_couplings);
 
 static const MethodParam params_sim_graph_create[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_create = {
     "sim_graph.create", "sim_graph",
@@ -10255,8 +10427,8 @@ static const MethodDescriptor desc_sim_graph_create = {
 static const MethodRegistration reg_sim_graph_create(desc_sim_graph_create);
 
 static const MethodParam params_sim_graph_delete[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_delete = {
     "sim_graph.delete", "sim_graph",
@@ -10272,7 +10444,7 @@ static const MethodDescriptor desc_sim_graph_delete = {
 static const MethodRegistration reg_sim_graph_delete(desc_sim_graph_delete);
 
 static const MethodParam params_sim_graph_domain_intersections[] = {
-    {"domain", "string", true, "", nullptr, nullptr},
+    {"domain", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_domain_intersections = {
     "sim_graph.domain_intersections", "sim_graph",
@@ -10288,8 +10460,8 @@ static const MethodDescriptor desc_sim_graph_domain_intersections = {
 static const MethodRegistration reg_sim_graph_domain_intersections(desc_sim_graph_domain_intersections);
 
 static const MethodParam params_sim_graph_evaluate[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_evaluate = {
     "sim_graph.evaluate", "sim_graph",
@@ -10318,8 +10490,8 @@ static const MethodDescriptor desc_sim_graph_list = {
 static const MethodRegistration reg_sim_graph_list(desc_sim_graph_list);
 
 static const MethodParam params_sim_graph_nodes[] = {
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_nodes = {
     "sim_graph.nodes", "sim_graph",
@@ -10335,11 +10507,11 @@ static const MethodDescriptor desc_sim_graph_nodes = {
 static const MethodRegistration reg_sim_graph_nodes(desc_sim_graph_nodes);
 
 static const MethodParam params_sim_graph_set_node[] = {
-    {"key", "string", true, "", nullptr, nullptr},
-    {"node", "int", true, "", nullptr, nullptr},
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"value", "string", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"key", "string", true, "", nullptr, nullptr, "string", false},
+    {"node", "int", true, "", nullptr, nullptr, "number", false},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"value", "string", true, "", nullptr, nullptr, "string", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_set_node = {
     "sim_graph.set_node", "sim_graph",
@@ -10355,11 +10527,11 @@ static const MethodDescriptor desc_sim_graph_set_node = {
 static const MethodRegistration reg_sim_graph_set_node(desc_sim_graph_set_node);
 
 static const MethodParam params_sim_graph_set_node_value[] = {
-    {"key", "string", true, "", nullptr, nullptr},
-    {"node", "int", true, "", nullptr, nullptr},
-    {"scope", "string", true, "", nullptr, nullptr},
-    {"value", "float", true, "", nullptr, nullptr},
-    {"owner", "string", false, "", "", nullptr},
+    {"key", "string", true, "", nullptr, nullptr, "string", false},
+    {"node", "int", true, "", nullptr, nullptr, "number", false},
+    {"scope", "string", true, "", nullptr, nullptr, "string", false},
+    {"value", "float", true, "", nullptr, nullptr, "number", false},
+    {"owner", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_sim_graph_set_node_value = {
     "sim_graph.set_node_value", "sim_graph",
@@ -10388,8 +10560,8 @@ static const MethodDescriptor desc_spline_animation_self_test = {
 static const MethodRegistration reg_spline_animation_self_test(desc_spline_animation_self_test);
 
 static const MethodParam params_spline_append_point[] = {
-    {"name", "string", true, "Spline object name, as reported by spline.list", nullptr, nullptr},
-    {"position", "vec3", false, "Point position in the spline's LOCAL space", nullptr, nullptr},
+    {"name", "string", true, "Spline object name, as reported by spline.list", nullptr, nullptr, "string", false},
+    {"position", "vec3", false, "Point position in the spline's LOCAL space", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_spline_append_point = {
     "spline.append_point", "spline",
@@ -10405,9 +10577,9 @@ static const MethodDescriptor desc_spline_append_point = {
 static const MethodRegistration reg_spline_append_point(desc_spline_append_point);
 
 static const MethodParam params_spline_create[] = {
-    {"primitive", "string", false, "Initial spline shape", "open_line", "circle|rectangle|open_line|open_arc"},
-    {"name", "string", false, "Requested object name; made unique when necessary", "Spline", nullptr},
-    {"plane", "string", false, "Authoring plane", "xy", "xy|xz|yz"},
+    {"primitive", "string", false, "Initial spline shape", "open_line", "circle|rectangle|open_line|open_arc", "string", false},
+    {"name", "string", false, "Requested object name; made unique when necessary", "Spline", nullptr, "string", false},
+    {"plane", "string", false, "Authoring plane", "xy", "xy|xz|yz", "string", false},
 };
 static const MethodDescriptor desc_spline_create = {
     "spline.create", "spline",
@@ -10423,9 +10595,9 @@ static const MethodDescriptor desc_spline_create = {
 static const MethodRegistration reg_spline_create(desc_spline_create);
 
 static const MethodParam params_spline_extrude[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
-    {"endpoint", "int", true, "0 for first endpoint or last point index", nullptr, nullptr},
-    {"position", "float[3]", true, "New control point position", nullptr, nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
+    {"endpoint", "int", true, "0 for first endpoint or last point index", nullptr, nullptr, "number", false},
+    {"position", "float[3]", true, "New control point position", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_spline_extrude = {
     "spline.extrude", "spline",
@@ -10441,7 +10613,7 @@ static const MethodDescriptor desc_spline_extrude = {
 static const MethodRegistration reg_spline_extrude(desc_spline_extrude);
 
 static const MethodParam params_spline_get[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_spline_get = {
     "spline.get", "spline",
@@ -10457,9 +10629,9 @@ static const MethodDescriptor desc_spline_get = {
 static const MethodRegistration reg_spline_get(desc_spline_get);
 
 static const MethodParam params_spline_insert_point[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
-    {"segment", "int", true, "Zero-based segment start index", nullptr, nullptr},
-    {"t", "float", true, "Segment parameter in [0,1]", "0.5", nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
+    {"segment", "int", true, "Zero-based segment start index", nullptr, nullptr, "number", false},
+    {"t", "float", true, "Segment parameter in [0,1]", "0.5", nullptr, "number", false},
 };
 static const MethodDescriptor desc_spline_insert_point = {
     "spline.insert_point", "spline",
@@ -10475,10 +10647,10 @@ static const MethodDescriptor desc_spline_insert_point = {
 static const MethodRegistration reg_spline_insert_point(desc_spline_insert_point);
 
 static const MethodParam params_spline_keyframe_insert[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
-    {"frame", "int", true, "Non-negative timeline frame", nullptr, nullptr},
-    {"object_transform", "bool", false, "Capture the spline object's location, rotation and scale", "True", nullptr},
-    {"points", "bool", false, "Capture all control positions, handles, radius/user data and colors", "True", nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
+    {"frame", "int", true, "Non-negative timeline frame", nullptr, nullptr, "number", false},
+    {"object_transform", "bool", false, "Capture the spline object's location, rotation and scale", "True", nullptr, "bool", false},
+    {"points", "bool", false, "Capture all control positions, handles, radius/user data and colors", "True", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_spline_keyframe_insert = {
     "spline.keyframe.insert", "spline",
@@ -10494,7 +10666,7 @@ static const MethodDescriptor desc_spline_keyframe_insert = {
 static const MethodRegistration reg_spline_keyframe_insert(desc_spline_keyframe_insert);
 
 static const MethodParam params_spline_keyframe_list[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_spline_keyframe_list = {
     "spline.keyframe.list", "spline",
@@ -10510,10 +10682,10 @@ static const MethodDescriptor desc_spline_keyframe_list = {
 static const MethodRegistration reg_spline_keyframe_list(desc_spline_keyframe_list);
 
 static const MethodParam params_spline_keyframe_remove[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
-    {"frame", "int", true, "Timeline frame containing the key", nullptr, nullptr},
-    {"object_transform", "bool", false, "Remove the object transform portion", "True", nullptr},
-    {"points", "bool", false, "Remove the control-point deformation portion", "True", nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
+    {"frame", "int", true, "Timeline frame containing the key", nullptr, nullptr, "number", false},
+    {"object_transform", "bool", false, "Remove the object transform portion", "True", nullptr, "bool", false},
+    {"points", "bool", false, "Remove the control-point deformation portion", "True", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_spline_keyframe_remove = {
     "spline.keyframe.remove", "spline",
@@ -10542,8 +10714,8 @@ static const MethodDescriptor desc_spline_list = {
 static const MethodRegistration reg_spline_list(desc_spline_list);
 
 static const MethodParam params_spline_set[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
-    {"spline", "object", true, "Versioned spline payload object", nullptr, nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
+    {"spline", "object", true, "Versioned spline payload object", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_spline_set = {
     "spline.set", "spline",
@@ -10559,7 +10731,7 @@ static const MethodDescriptor desc_spline_set = {
 static const MethodRegistration reg_spline_set(desc_spline_set);
 
 static const MethodParam params_spline_skin_clear[] = {
-    {"spline", "string", true, "Spline source owning the live skin display", nullptr, nullptr},
+    {"spline", "string", true, "Spline source owning the live skin display", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_spline_skin_clear = {
     "spline.skin.clear", "spline",
@@ -10575,26 +10747,26 @@ static const MethodDescriptor desc_spline_skin_clear = {
 static const MethodRegistration reg_spline_skin_clear(desc_spline_skin_clear);
 
 static const MethodParam params_spline_skin_create[] = {
-    {"spline", "string", true, "Open spline path object", nullptr, nullptr},
-    {"output", "string", false, "Requested output mesh name; blank derives one from the spline", "", nullptr},
-    {"radius", "float", false, "Global bevel radius", "0.1", nullptr},
-    {"path_samples", "int", false, "Samples along the spline", "48", nullptr},
-    {"radial_segments", "int", false, "Circular cross-section segments", "12", nullptr},
-    {"cap_start", "bool", false, "Cap the first endpoint", "True", nullptr},
-    {"cap_end", "bool", false, "Cap the final endpoint", "True", nullptr},
-    {"use_point_radius", "bool", false, "Multiply bevel radius by interpolated per-point Curve Radius", "True", nullptr},
-    {"custom_profile", "string", false, "Optional closed spline used as the swept cross-section", "", nullptr},
-    {"taper_start", "float", false, "Radius scale at the first control", "1.0", nullptr},
-    {"taper_end", "float", false, "Radius scale at the final control", "1.0", nullptr},
-    {"taper_falloff", "float", false, "Taper interpolation exponent", "1.0", nullptr},
-    {"twist_start_degrees", "float", false, "Profile rotation at the first control", "0.0", nullptr},
-    {"twist_end_degrees", "float", false, "Profile rotation at the final control", "0.0", nullptr},
-    {"wave_amplitude", "float", false, "Wave displacement amplitude", "0.0", nullptr},
-    {"wave_cycles", "float", false, "Wave cycles along the controls", "1.0", nullptr},
-    {"wave_phase_degrees", "float", false, "Wave phase in degrees", "0.0", nullptr},
-    {"wave_noise", "float", false, "Deterministic noise amplitude", "0.0", nullptr},
-    {"wave_seed", "int", false, "Deterministic noise seed", "0", nullptr},
-    {"wave_axis", "int", false, "Local offset axis: 0=X, 1=Y, 2=Z", "1", nullptr},
+    {"spline", "string", true, "Open spline path object", nullptr, nullptr, "string", false},
+    {"output", "string", false, "Requested output mesh name; blank derives one from the spline", "", nullptr, "string", false},
+    {"radius", "float", false, "Global bevel radius", "0.1", nullptr, "number", false},
+    {"path_samples", "int", false, "Samples along the spline", "48", nullptr, "number", false},
+    {"radial_segments", "int", false, "Circular cross-section segments", "12", nullptr, "number", false},
+    {"cap_start", "bool", false, "Cap the first endpoint", "True", nullptr, "bool", false},
+    {"cap_end", "bool", false, "Cap the final endpoint", "True", nullptr, "bool", false},
+    {"use_point_radius", "bool", false, "Multiply bevel radius by interpolated per-point Curve Radius", "True", nullptr, "bool", false},
+    {"custom_profile", "string", false, "Optional closed spline used as the swept cross-section", "", nullptr, "string", false},
+    {"taper_start", "float", false, "Radius scale at the first control", "1.0", nullptr, "number", false},
+    {"taper_end", "float", false, "Radius scale at the final control", "1.0", nullptr, "number", false},
+    {"taper_falloff", "float", false, "Taper interpolation exponent", "1.0", nullptr, "number", false},
+    {"twist_start_degrees", "float", false, "Profile rotation at the first control", "0.0", nullptr, "number", false},
+    {"twist_end_degrees", "float", false, "Profile rotation at the final control", "0.0", nullptr, "number", false},
+    {"wave_amplitude", "float", false, "Wave displacement amplitude", "0.0", nullptr, "number", false},
+    {"wave_cycles", "float", false, "Wave cycles along the controls", "1.0", nullptr, "number", false},
+    {"wave_phase_degrees", "float", false, "Wave phase in degrees", "0.0", nullptr, "number", false},
+    {"wave_noise", "float", false, "Deterministic noise amplitude", "0.0", nullptr, "number", false},
+    {"wave_seed", "int", false, "Deterministic noise seed", "0", nullptr, "number", false},
+    {"wave_axis", "int", false, "Local offset axis: 0=X, 1=Y, 2=Z", "1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_spline_skin_create = {
     "spline.skin.create", "spline",
@@ -10610,7 +10782,7 @@ static const MethodDescriptor desc_spline_skin_create = {
 static const MethodRegistration reg_spline_skin_create(desc_spline_skin_create);
 
 static const MethodParam params_spline_skin_finalize[] = {
-    {"spline", "string", true, "Open spline source owning the live skin display", nullptr, nullptr},
+    {"spline", "string", true, "Open spline source owning the live skin display", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_spline_skin_finalize = {
     "spline.skin.finalize", "spline",
@@ -10626,9 +10798,9 @@ static const MethodDescriptor desc_spline_skin_finalize = {
 static const MethodRegistration reg_spline_skin_finalize(desc_spline_skin_finalize);
 
 static const MethodParam params_spline_subdivide[] = {
-    {"name", "string", true, "Spline object name", nullptr, nullptr},
-    {"segments", "int[]", true, "Segment start indices", nullptr, nullptr},
-    {"cuts", "int", true, "Cuts per segment, from 1 to 128", "1", nullptr},
+    {"name", "string", true, "Spline object name", nullptr, nullptr, "string", false},
+    {"segments", "int[]", true, "Segment start indices", nullptr, nullptr, "number[]", false},
+    {"cuts", "int", true, "Cuts per segment, from 1 to 128", "1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_spline_subdivide = {
     "spline.subdivide", "spline",
@@ -10644,7 +10816,7 @@ static const MethodDescriptor desc_spline_subdivide = {
 static const MethodRegistration reg_spline_subdivide(desc_spline_subdivide);
 
 static const MethodParam params_substance_adopt_object[] = {
-    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_substance_adopt_object = {
     "substance.adopt_object", "substance",
@@ -10660,7 +10832,7 @@ static const MethodDescriptor desc_substance_adopt_object = {
 static const MethodRegistration reg_substance_adopt_object(desc_substance_adopt_object);
 
 static const MethodParam params_substance_clear_object[] = {
-    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_substance_clear_object = {
     "substance.clear_object", "substance",
@@ -10676,8 +10848,8 @@ static const MethodDescriptor desc_substance_clear_object = {
 static const MethodRegistration reg_substance_clear_object(desc_substance_clear_object);
 
 static const MethodParam params_substance_derive[] = {
-    {"based_on", "string", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"based_on", "string", true, "", nullptr, nullptr, "string", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_substance_derive = {
     "substance.derive", "substance",
@@ -10693,7 +10865,7 @@ static const MethodDescriptor desc_substance_derive = {
 static const MethodRegistration reg_substance_derive(desc_substance_derive);
 
 static const MethodParam params_substance_get[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_substance_get = {
     "substance.get", "substance",
@@ -10709,7 +10881,7 @@ static const MethodDescriptor desc_substance_get = {
 static const MethodRegistration reg_substance_get(desc_substance_get);
 
 static const MethodParam params_substance_get_object[] = {
-    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr, "string", true},
 };
 static const MethodDescriptor desc_substance_get_object = {
     "substance.get_object", "substance",
@@ -10727,7 +10899,7 @@ static const MethodRegistration reg_substance_get_object(desc_substance_get_obje
 static const MethodDescriptor desc_substance_list = {
     "substance.list", "substance",
     "List foundation, example/test and project substance profiles with shared family metadata",
-    "Built-ins are read-only (based_on empty). catalogue contains family, family_label, tier (foundation|example|test|project), root_profile, representative, values_kind and acoustic definition flags. Families group authoring, not solver phase. Generic foundations use documented representative starting values. Existing names and physical fields remain intact. category remains liquid|granular|solid|fuel. Names are accepted by object, collider, source and domain bindings.",
+    "Built-ins are read-only (based_on empty). catalogue contains family, family_label, tier (foundation|example|test|project), root_profile, representative, values_kind and acoustic definition flags. Families group authoring, not solver phase. There are 26 concrete built-ins; six duplicate Generic profiles were removed. Foundation marks 12 real starting examples, not copies. model_notes describes known constitutive approximations. See docs/dev/BUILTIN_PRESET_CORRECTIONS.md for physical default changes. Meltable profiles require liquid_cold_viscosity >= liquid_kinematic_viscosity; invalid patches are rejected atomically. category remains liquid|granular|solid|fuel. Names are accepted by object, collider, source and domain bindings.",
     "read", "Read", false, "any",
     "substance|list|material|library|category|derive",
     "substance.get|substance.derive|fluid.set_substance_material",
@@ -10751,7 +10923,7 @@ static const MethodDescriptor desc_substance_list_objects = {
 static const MethodRegistration reg_substance_list_objects(desc_substance_list_objects);
 
 static const MethodParam params_substance_remove[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_substance_remove = {
     "substance.remove", "substance",
@@ -10767,8 +10939,8 @@ static const MethodDescriptor desc_substance_remove = {
 static const MethodRegistration reg_substance_remove(desc_substance_remove);
 
 static const MethodParam params_substance_set[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"fields", "object", true, "Field name -> value, as in substance.get fields; null drops the override", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"fields", "object", true, "Field name -> value, as in substance.get fields; null drops the override", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_substance_set = {
     "substance.set", "substance",
@@ -10784,8 +10956,8 @@ static const MethodDescriptor desc_substance_set = {
 static const MethodRegistration reg_substance_set(desc_substance_set);
 
 static const MethodParam params_substance_set_object[] = {
-    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr},
-    {"binding", "object", true, "substance name and optional overrides: override_ignition, ignition_kelvin, burn_rate_scale, fuel_capacity_scale", nullptr, nullptr},
+    {"object", "string", true, "Canonical flat mesh node name", nullptr, nullptr, "string", true},
+    {"binding", "object", true, "substance name and optional overrides: override_ignition, ignition_kelvin, burn_rate_scale, fuel_capacity_scale", nullptr, nullptr, nullptr, true},
 };
 static const MethodDescriptor desc_substance_set_object = {
     "substance.set_object", "substance",
@@ -10801,7 +10973,7 @@ static const MethodDescriptor desc_substance_set_object = {
 static const MethodRegistration reg_substance_set_object(desc_substance_set_object);
 
 static const MethodParam params_templates_delete_user[] = {
-    {"id", "string", false, "", "", nullptr},
+    {"id", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_templates_delete_user = {
     "templates.delete_user", "templates",
@@ -10817,7 +10989,7 @@ static const MethodDescriptor desc_templates_delete_user = {
 static const MethodRegistration reg_templates_delete_user(desc_templates_delete_user);
 
 static const MethodParam params_templates_get[] = {
-    {"id", "any", false, "", nullptr, nullptr},
+    {"id", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_templates_get = {
     "templates.get", "templates",
@@ -10859,7 +11031,7 @@ static const MethodDescriptor desc_templates_is_hub_visible = {
 static const MethodRegistration reg_templates_is_hub_visible(desc_templates_is_hub_visible);
 
 static const MethodParam params_templates_list[] = {
-    {"include_invalid", "bool", false, "", "false", nullptr},
+    {"include_invalid", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_templates_list = {
     "templates.list", "templates",
@@ -10875,8 +11047,8 @@ static const MethodDescriptor desc_templates_list = {
 static const MethodRegistration reg_templates_list(desc_templates_list);
 
 static const MethodParam params_templates_open[] = {
-    {"conflict_policy", "string", false, "", "reject", nullptr},
-    {"id", "any", false, "", nullptr, nullptr},
+    {"conflict_policy", "string", false, "", "reject", nullptr, "string", false},
+    {"id", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_templates_open = {
     "templates.open", "templates",
@@ -10892,8 +11064,8 @@ static const MethodDescriptor desc_templates_open = {
 static const MethodRegistration reg_templates_open(desc_templates_open);
 
 static const MethodParam params_templates_prepare[] = {
-    {"conflict_policy", "string", false, "", "reject", nullptr},
-    {"id", "any", false, "", nullptr, nullptr},
+    {"conflict_policy", "string", false, "", "reject", nullptr, "string", false},
+    {"id", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_templates_prepare = {
     "templates.prepare", "templates",
@@ -10922,9 +11094,9 @@ static const MethodDescriptor desc_templates_refresh = {
 static const MethodRegistration reg_templates_refresh(desc_templates_refresh);
 
 static const MethodParam params_templates_save_user[] = {
-    {"category", "string", false, "", "user", nullptr},
-    {"description", "string", false, "", "", nullptr},
-    {"display_name", "string", false, "", "", nullptr},
+    {"category", "string", false, "", "user", nullptr, "string", false},
+    {"description", "string", false, "", "", nullptr, "string", false},
+    {"display_name", "string", false, "", "", nullptr, "string", false},
 };
 static const MethodDescriptor desc_templates_save_user = {
     "templates.save_user", "templates",
@@ -10953,7 +11125,7 @@ static const MethodDescriptor desc_templates_show_hub = {
 static const MethodRegistration reg_templates_show_hub(desc_templates_show_hub);
 
 static const MethodParam params_templates_validate[] = {
-    {"id", "any", false, "", nullptr, nullptr},
+    {"id", "string", false, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_templates_validate = {
     "templates.validate", "templates",
@@ -10969,10 +11141,10 @@ static const MethodDescriptor desc_templates_validate = {
 static const MethodRegistration reg_templates_validate(desc_templates_validate);
 
 static const MethodParam params_terrain_apply_preset[] = {
-    {"preset", "string", true, "Preset name", nullptr, "default|snow_layer|snowy_mountain_valley|river_network|biome_temperate|biome_lush|biome_alpine|biome_arid|biome_boreal|biome_foliage|geology_foundation"},
-    {"name", "string", true, "", nullptr, nullptr},
-    {"add_satmap", "bool", false, "Also add and wire a matching SatMap colorizer", "False", nullptr},
-    {"replace_graph", "bool", false, "", "false", nullptr},
+    {"preset", "string", true, "Preset name", nullptr, "default|snow_layer|snowy_mountain_valley|river_network|biome_temperate|biome_lush|biome_alpine|biome_arid|biome_boreal|biome_foliage|geology_foundation", "string", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"add_satmap", "bool", false, "Also add and wire a matching SatMap colorizer", "False", nullptr, "bool", false},
+    {"replace_graph", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_apply_preset = {
     "terrain.apply_preset", "terrain",
@@ -10988,8 +11160,8 @@ static const MethodDescriptor desc_terrain_apply_preset = {
 static const MethodRegistration reg_terrain_apply_preset(desc_terrain_apply_preset);
 
 static const MethodParam params_terrain_apply_satmap_preset[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"preset", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"preset", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_apply_satmap_preset = {
     "terrain.apply_satmap_preset", "terrain",
@@ -11005,7 +11177,7 @@ static const MethodDescriptor desc_terrain_apply_satmap_preset = {
 static const MethodRegistration reg_terrain_apply_satmap_preset(desc_terrain_apply_satmap_preset);
 
 static const MethodParam params_terrain_calculate_flow[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_calculate_flow = {
     "terrain.calculate_flow", "terrain",
@@ -11021,7 +11193,7 @@ static const MethodDescriptor desc_terrain_calculate_flow = {
 static const MethodRegistration reg_terrain_calculate_flow(desc_terrain_calculate_flow);
 
 static const MethodParam params_terrain_cancel_evaluation[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_cancel_evaluation = {
     "terrain.cancel_evaluation", "terrain",
@@ -11037,19 +11209,19 @@ static const MethodDescriptor desc_terrain_cancel_evaluation = {
 static const MethodRegistration reg_terrain_cancel_evaluation(desc_terrain_cancel_evaluation);
 
 static const MethodParam params_terrain_carve_river[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"river", "string", true, "", nullptr, nullptr},
-    {"asymmetric_banks", "bool", false, "", "true", nullptr},
-    {"deep_pools", "bool", false, "", "true", nullptr},
-    {"depth_multiplier", "float", false, "", "1.0", nullptr},
-    {"mode", "string", false, "", "natural", nullptr},
-    {"noise_strength", "float", false, "", "0.3", nullptr},
-    {"point_bars", "bool", false, "", "true", nullptr},
-    {"post_erosion", "bool", false, "", "false", nullptr},
-    {"post_erosion_iterations", "int", false, "", "12", nullptr},
-    {"riffles", "bool", false, "", "true", nullptr},
-    {"smoothness", "float", false, "", "0.5", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"river", "string", true, "", nullptr, nullptr, "string", false},
+    {"asymmetric_banks", "bool", false, "", "true", nullptr, "bool", false},
+    {"deep_pools", "bool", false, "", "true", nullptr, "bool", false},
+    {"depth_multiplier", "float", false, "", "1.0", nullptr, "number", false},
+    {"mode", "string", false, "", "natural", nullptr, "string", false},
+    {"noise_strength", "float", false, "", "0.3", nullptr, "number", false},
+    {"point_bars", "bool", false, "", "true", nullptr, "bool", false},
+    {"post_erosion", "bool", false, "", "false", nullptr, "bool", false},
+    {"post_erosion_iterations", "int", false, "", "12", nullptr, "number", false},
+    {"riffles", "bool", false, "", "true", nullptr, "bool", false},
+    {"smoothness", "float", false, "", "0.5", nullptr, "number", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_carve_river = {
     "terrain.carve_river", "terrain",
@@ -11065,11 +11237,11 @@ static const MethodDescriptor desc_terrain_carve_river = {
 static const MethodRegistration reg_terrain_carve_river(desc_terrain_carve_river);
 
 static const MethodParam params_terrain_create[] = {
-    {"size", "float", false, "World-space extent in metres", "1000.0", nullptr},
-    {"resolution", "int", false, "Heightmap resolution in samples per side", "1024", nullptr},
-    {"height_scale", "float", false, "Vertical scale in metres", "100.0", nullptr},
-    {"mesh_resolution", "int", false, "", "0", nullptr},
-    {"name", "string", false, "", "Terrain", nullptr},
+    {"size", "float", false, "World-space extent in metres", "1000.0", nullptr, "number", false},
+    {"resolution", "int", false, "Heightmap resolution in samples per side", "1024", nullptr, "number", false},
+    {"height_scale", "float", false, "Vertical scale in metres", "100.0", nullptr, "number", false},
+    {"mesh_resolution", "int", false, "", "0", nullptr, "number", false},
+    {"name", "string", false, "", "Terrain", nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_create = {
     "terrain.create", "terrain",
@@ -11085,51 +11257,51 @@ static const MethodDescriptor desc_terrain_create = {
 static const MethodRegistration reg_terrain_create(desc_terrain_create);
 
 static const MethodParam params_terrain_erode[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"type", "string", false, "Erosion model", "hydraulic", "hydraulic|thermal|fluvial|wind"},
-    {"iterations", "int", false, "Droplet count for the hydraulic model; 0 uses the model's own default", "0", nullptr},
-    {"strength", "float", false, "Erosion strength", "0.2", nullptr},
-    {"talus_angle", "float", false, "Repose angle for thermal erosion", "0.5", nullptr},
-    {"fluvial_cycle", "int", false, "Enable the landscape-evolution cycle (1/0); omit to keep the solver setting", "-1", nullptr},
-    {"fluvial_quality", "string", false, "Convergence budget preset. Sets iteration count, relaxation passes, transport steps and pyramid depth ONLY - never the shape parameters - so raising it refines the same landscape instead of producing a different one. Applied before any explicit budget parameter in the same call, so you can pick a preset and override one dial of it.", "", "draft|balanced|high"},
-    {"fluvial_iterations", "int", false, "Cycle iterations. Refines the solve; does NOT change how much material moves", "-1", nullptr},
-    {"fluvial_time_step", "float", false, "Whole-cycle time multiplier: this is the dial for how much material moves", "-1.0", nullptr},
-    {"rain_rate", "float", false, "Runoff depth per unit time; only its ratio to settling_velocity matters", "-1.0", nullptr},
-    {"orographic_rain", "float", false, "Windward/lee rain split, 0..1. The second symmetry breaker after drainage area", "-1.0", nullptr},
-    {"rain_wind_degrees", "float", false, "Prevailing wind bearing in degrees for orographic rain", "-1000.0", nullptr},
-    {"incision_k", "float", false, "Stream-power coefficient, in metres of incision at 1 km2 catchment and slope 1", "-1.0", nullptr},
-    {"stream_power_m", "float", false, "Drainage-area exponent, near 0.5. This is what makes rivers cut faster than rills", "-1.0", nullptr},
-    {"stream_power_n", "float", false, "Slope exponent, near 1.0", "-1.0", nullptr},
-    {"transport_k", "float", false, "Sediment transport capacity coefficient, same units as incision_k", "-1.0", nullptr},
-    {"sediment_cover", "float", false, "Cover effect 0..1: a bed already carrying its capacity is armoured", "-1.0", nullptr},
-    {"settling_velocity", "float", false, "How readily suspended load drops. Larger settles sooner and shortens deltas", "-1.0", nullptr},
-    {"sediment_route_steps", "int", false, "Cells of downstream sediment travel per iteration", "-1", nullptr},
-    {"drainage_refresh_interval", "int", false, "Iterations between depression-fill and drainage-area re-solves", "-1", nullptr},
-    {"drainage_fill_passes", "int", false, "GPU depression-fill budget per pyramid level. Too low leaves spurious lakes", "-1", nullptr},
-    {"drainage_accumulate_passes", "int", false, "GPU area-accumulation budget. Too low under-counts long trunk rivers", "-1", nullptr},
-    {"drainage_coarsest_size", "int", false, "Coarsest pyramid grid for the GPU drainage solve", "-1", nullptr},
-    {"flat_gradient", "float", false, "Slope in m/m assumed for a depression-filled FLAT. A flat has no gradient of its own, so this is what water steers by there; 0 disables it and flat channels go back to straight, grid-locked and unable to incise", "-1.0", nullptr},
-    {"flat_resolve_passes", "int", false, "GPU flat-resolution budget, one cell per pass: the widest flat in cells that resolves. Check unresolved_flat_cells in the stats, not the render", "-1", nullptr},
-    {"mass_wasting", "int", false, "Enable in-loop landslides (1/0). Off means valley walls never collapse", "-1", nullptr},
-    {"repose_angle_degrees", "float", false, "Angle of repose for mass wasting", "-1.0", nullptr},
-    {"mass_wasting_rate", "float", false, "Fraction of the excess above repose shed per pass, 0..1", "-1.0", nullptr},
-    {"mass_wasting_steps", "int", false, "Talus relaxation passes per iteration", "-1", nullptr},
-    {"hillslope_diffusion", "float", false, "Creep coefficient in m2 over the whole cycle; rounds ridges, keeps channels", "-1.0", nullptr},
-    {"incision_safety", "float", false, "Anti-pit limit: max fraction of the drop to the receiver cut in one step", "-1.0", nullptr},
-    {"deposition_safety", "float", false, "Anti-spike limit: max fraction of the rise to the donor built in one step", "-1.0", nullptr},
-    {"max_step_meters", "float", false, "Absolute per-step height change limit; 0 selects half a cell", "-1.0", nullptr},
-    {"lake_epsilon_meters", "float", false, "Fill residue below this is not treated as standing water", "-1.0", nullptr},
-    {"headwater_area_km2", "float", false, "Catchment area at which a cell counts as a channel", "-1.0", nullptr},
-    {"backend", "string", false, "Compute backend; auto picks GPU when available", "auto", nullptr},
-    {"alluvium_consolidation", "float", false, "", "-1.0", nullptr},
-    {"alluvium_rate", "float", false, "", "-1.0", nullptr},
-    {"alluvium_slope_degrees", "float", false, "", "-1.0", nullptr},
-    {"alluvium_steps", "int", false, "", "-1", nullptr},
-    {"amount", "float", false, "", "0.3", nullptr},
-    {"avulsion_interval", "int", false, "", "-1", nullptr},
-    {"direction", "float", false, "", "45.0", nullptr},
-    {"seed", "int", false, "", "1337", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"type", "string", false, "Erosion model", "hydraulic", "hydraulic|thermal|fluvial|wind", "string", false},
+    {"iterations", "int", false, "Droplet count for the hydraulic model; 0 uses the model's own default", "0", nullptr, "number", false},
+    {"strength", "float", false, "Erosion strength", "0.2", nullptr, "number", false},
+    {"talus_angle", "float", false, "Repose angle for thermal erosion", "0.5", nullptr, "number", false},
+    {"fluvial_cycle", "int", false, "Enable the landscape-evolution cycle (1/0); omit to keep the solver setting", "-1", nullptr, "number", false},
+    {"fluvial_quality", "string", false, "Convergence budget preset. Sets iteration count, relaxation passes, transport steps and pyramid depth ONLY - never the shape parameters - so raising it refines the same landscape instead of producing a different one. Applied before any explicit budget parameter in the same call, so you can pick a preset and override one dial of it.", "", "draft|balanced|high", "string", false},
+    {"fluvial_iterations", "int", false, "Cycle iterations. Refines the solve; does NOT change how much material moves", "-1", nullptr, "number", false},
+    {"fluvial_time_step", "float", false, "Whole-cycle time multiplier: this is the dial for how much material moves", "-1.0", nullptr, "number", false},
+    {"rain_rate", "float", false, "Runoff depth per unit time; only its ratio to settling_velocity matters", "-1.0", nullptr, "number", false},
+    {"orographic_rain", "float", false, "Windward/lee rain split, 0..1. The second symmetry breaker after drainage area", "-1.0", nullptr, "number", false},
+    {"rain_wind_degrees", "float", false, "Prevailing wind bearing in degrees for orographic rain", "-1000.0", nullptr, "number", false},
+    {"incision_k", "float", false, "Stream-power coefficient, in metres of incision at 1 km2 catchment and slope 1", "-1.0", nullptr, "number", false},
+    {"stream_power_m", "float", false, "Drainage-area exponent, near 0.5. This is what makes rivers cut faster than rills", "-1.0", nullptr, "number", false},
+    {"stream_power_n", "float", false, "Slope exponent, near 1.0", "-1.0", nullptr, "number", false},
+    {"transport_k", "float", false, "Sediment transport capacity coefficient, same units as incision_k", "-1.0", nullptr, "number", false},
+    {"sediment_cover", "float", false, "Cover effect 0..1: a bed already carrying its capacity is armoured", "-1.0", nullptr, "number", false},
+    {"settling_velocity", "float", false, "How readily suspended load drops. Larger settles sooner and shortens deltas", "-1.0", nullptr, "number", false},
+    {"sediment_route_steps", "int", false, "Cells of downstream sediment travel per iteration", "-1", nullptr, "number", false},
+    {"drainage_refresh_interval", "int", false, "Iterations between depression-fill and drainage-area re-solves", "-1", nullptr, "number", false},
+    {"drainage_fill_passes", "int", false, "GPU depression-fill budget per pyramid level. Too low leaves spurious lakes", "-1", nullptr, "number", false},
+    {"drainage_accumulate_passes", "int", false, "GPU area-accumulation budget. Too low under-counts long trunk rivers", "-1", nullptr, "number", false},
+    {"drainage_coarsest_size", "int", false, "Coarsest pyramid grid for the GPU drainage solve", "-1", nullptr, "number", false},
+    {"flat_gradient", "float", false, "Slope in m/m assumed for a depression-filled FLAT. A flat has no gradient of its own, so this is what water steers by there; 0 disables it and flat channels go back to straight, grid-locked and unable to incise", "-1.0", nullptr, "number", false},
+    {"flat_resolve_passes", "int", false, "GPU flat-resolution budget, one cell per pass: the widest flat in cells that resolves. Check unresolved_flat_cells in the stats, not the render", "-1", nullptr, "number", false},
+    {"mass_wasting", "int", false, "Enable in-loop landslides (1/0). Off means valley walls never collapse", "-1", nullptr, "number", false},
+    {"repose_angle_degrees", "float", false, "Angle of repose for mass wasting", "-1.0", nullptr, "number", false},
+    {"mass_wasting_rate", "float", false, "Fraction of the excess above repose shed per pass, 0..1", "-1.0", nullptr, "number", false},
+    {"mass_wasting_steps", "int", false, "Talus relaxation passes per iteration", "-1", nullptr, "number", false},
+    {"hillslope_diffusion", "float", false, "Creep coefficient in m2 over the whole cycle; rounds ridges, keeps channels", "-1.0", nullptr, "number", false},
+    {"incision_safety", "float", false, "Anti-pit limit: max fraction of the drop to the receiver cut in one step", "-1.0", nullptr, "number", false},
+    {"deposition_safety", "float", false, "Anti-spike limit: max fraction of the rise to the donor built in one step", "-1.0", nullptr, "number", false},
+    {"max_step_meters", "float", false, "Absolute per-step height change limit; 0 selects half a cell", "-1.0", nullptr, "number", false},
+    {"lake_epsilon_meters", "float", false, "Fill residue below this is not treated as standing water", "-1.0", nullptr, "number", false},
+    {"headwater_area_km2", "float", false, "Catchment area at which a cell counts as a channel", "-1.0", nullptr, "number", false},
+    {"backend", "string", false, "Compute backend; auto picks GPU when available", "auto", nullptr, "string", false},
+    {"alluvium_consolidation", "float", false, "", "-1.0", nullptr, "number", false},
+    {"alluvium_rate", "float", false, "", "-1.0", nullptr, "number", false},
+    {"alluvium_slope_degrees", "float", false, "", "-1.0", nullptr, "number", false},
+    {"alluvium_steps", "int", false, "", "-1", nullptr, "number", false},
+    {"amount", "float", false, "", "0.3", nullptr, "number", false},
+    {"avulsion_interval", "int", false, "", "-1", nullptr, "number", false},
+    {"direction", "float", false, "", "45.0", nullptr, "number", false},
+    {"seed", "int", false, "", "1337", nullptr, "number", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_erode = {
     "terrain.erode", "terrain",
@@ -11158,7 +11330,7 @@ static const MethodDescriptor desc_terrain_erosion_stats = {
 static const MethodRegistration reg_terrain_erosion_stats(desc_terrain_erosion_stats);
 
 static const MethodParam params_terrain_evaluate[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_evaluate = {
     "terrain.evaluate", "terrain",
@@ -11174,7 +11346,7 @@ static const MethodDescriptor desc_terrain_evaluate = {
 static const MethodRegistration reg_terrain_evaluate(desc_terrain_evaluate);
 
 static const MethodParam params_terrain_evaluation_status[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_evaluation_status = {
     "terrain.evaluation_status", "terrain",
@@ -11190,8 +11362,8 @@ static const MethodDescriptor desc_terrain_evaluation_status = {
 static const MethodRegistration reg_terrain_evaluation_status(desc_terrain_evaluation_status);
 
 static const MethodParam params_terrain_export_heightmap[] = {
-    {"filepath", "string", true, "", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
+    {"filepath", "string", true, "", nullptr, nullptr, "string", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_export_heightmap = {
     "terrain.export_heightmap", "terrain",
@@ -11207,10 +11379,10 @@ static const MethodDescriptor desc_terrain_export_heightmap = {
 static const MethodRegistration reg_terrain_export_heightmap(desc_terrain_export_heightmap);
 
 static const MethodParam params_terrain_field_stats[] = {
-    {"terrain", "string", true, "Terrain name, as reported by terrain.list", nullptr, nullptr},
-    {"field", "string", true, "Live field name, as reported by terrain.list_fields", nullptr, nullptr},
-    {"histogram_bins", "int", false, "0 omits the histogram; otherwise 2..256 bins over the finite min/max range", "0", nullptr},
-    {"samples", "array", false, "Optional list of integer [x, y] field-grid coordinates", nullptr, nullptr},
+    {"terrain", "string", true, "Terrain name, as reported by terrain.list", nullptr, nullptr, "string", false},
+    {"field", "string", true, "Live field name, as reported by terrain.list_fields", nullptr, nullptr, "string", false},
+    {"histogram_bins", "int", false, "0 omits the histogram; otherwise 2..256 bins over the finite min/max range", "0", nullptr, "number", false},
+    {"samples", "array", false, "Optional list of integer [x, y] field-grid coordinates", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_terrain_field_stats = {
     "terrain.field_stats", "terrain",
@@ -11226,7 +11398,7 @@ static const MethodDescriptor desc_terrain_field_stats = {
 static const MethodRegistration reg_terrain_field_stats(desc_terrain_field_stats);
 
 static const MethodParam params_terrain_flow_authority[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_flow_authority = {
     "terrain.flow_authority", "terrain",
@@ -11242,7 +11414,7 @@ static const MethodDescriptor desc_terrain_flow_authority = {
 static const MethodRegistration reg_terrain_flow_authority(desc_terrain_flow_authority);
 
 static const MethodParam params_terrain_get[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_get = {
     "terrain.get", "terrain",
@@ -11258,11 +11430,11 @@ static const MethodDescriptor desc_terrain_get = {
 static const MethodRegistration reg_terrain_get(desc_terrain_get);
 
 static const MethodParam params_terrain_import_heightmap[] = {
-    {"filepath", "string", true, "", nullptr, nullptr},
-    {"height_scale", "float", false, "", "100.0", nullptr},
-    {"max_resolution", "int", false, "", "2048", nullptr},
-    {"name", "string", false, "", "TerrainImported", nullptr},
-    {"size", "float", false, "", "1000.0", nullptr},
+    {"filepath", "string", true, "", nullptr, nullptr, "string", false},
+    {"height_scale", "float", false, "", "100.0", nullptr, "number", false},
+    {"max_resolution", "int", false, "", "2048", nullptr, "number", false},
+    {"name", "string", false, "", "TerrainImported", nullptr, "string", false},
+    {"size", "float", false, "", "1000.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_terrain_import_heightmap = {
     "terrain.import_heightmap", "terrain",
@@ -11278,7 +11450,7 @@ static const MethodDescriptor desc_terrain_import_heightmap = {
 static const MethodRegistration reg_terrain_import_heightmap(desc_terrain_import_heightmap);
 
 static const MethodParam params_terrain_landform_stats[] = {
-    {"name", "string", true, "Terrain name", nullptr, nullptr},
+    {"name", "string", true, "Terrain name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_landform_stats = {
     "terrain.landform_stats", "terrain",
@@ -11307,7 +11479,7 @@ static const MethodDescriptor desc_terrain_list = {
 static const MethodRegistration reg_terrain_list(desc_terrain_list);
 
 static const MethodParam params_terrain_list_fields[] = {
-    {"terrain", "string", true, "Terrain name, as reported by terrain.list", nullptr, nullptr},
+    {"terrain", "string", true, "Terrain name, as reported by terrain.list", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_list_fields = {
     "terrain.list_fields", "terrain",
@@ -11323,7 +11495,7 @@ static const MethodDescriptor desc_terrain_list_fields = {
 static const MethodRegistration reg_terrain_list_fields(desc_terrain_list_fields);
 
 static const MethodParam params_terrain_list_layers[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_list_layers = {
     "terrain.list_layers", "terrain",
@@ -11365,13 +11537,13 @@ static const MethodDescriptor desc_terrain_list_satmap_presets = {
 static const MethodRegistration reg_terrain_list_satmap_presets(desc_terrain_list_satmap_presets);
 
 static const MethodParam params_terrain_paint_splat[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"dabs", "array", true, "Stroke path: list of [world_x, world_z] pairs, all of which must land on the tile.", nullptr, nullptr},
-    {"channel", "int", false, "Splat channel / layer index 0..3", "0", nullptr},
-    {"dt", "float", false, "Seconds one dab represents; the panel feeds one frame", "0.0166667", nullptr},
-    {"radius", "float", false, "", "5.0", nullptr},
-    {"strength", "float", false, "", "1.0", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"dabs", "array", true, "Stroke path: list of [world_x, world_z] pairs, all of which must land on the tile.", nullptr, nullptr, nullptr, false},
+    {"channel", "int", false, "Splat channel / layer index 0..3", "0", nullptr, "number", false},
+    {"dt", "float", false, "Seconds one dab represents; the panel feeds one frame", "0.0166667", nullptr, "number", false},
+    {"radius", "float", false, "", "5.0", nullptr, "number", false},
+    {"strength", "float", false, "", "1.0", nullptr, "number", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_paint_splat = {
     "terrain.paint_splat", "terrain",
@@ -11387,7 +11559,7 @@ static const MethodDescriptor desc_terrain_paint_splat = {
 static const MethodRegistration reg_terrain_paint_splat(desc_terrain_paint_splat);
 
 static const MethodParam params_terrain_remove[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_remove = {
     "terrain.remove", "terrain",
@@ -11403,8 +11575,8 @@ static const MethodDescriptor desc_terrain_remove = {
 static const MethodRegistration reg_terrain_remove(desc_terrain_remove);
 
 static const MethodParam params_terrain_road_assign_profile[] = {
-    {"spline", "string", true, "SplineObject name, as reported by spline.list", nullptr, nullptr},
-    {"profile", "string", true, "Profile id: footpath | dirt_road | main_road. An unknown id is REFUSED, never substituted - carving a main road where a footpath was asked for looks entirely plausible", nullptr, nullptr},
+    {"spline", "string", true, "SplineObject name, as reported by spline.list", nullptr, nullptr, "string", false},
+    {"profile", "string", true, "Profile id: footpath | dirt_road | main_road. An unknown id is REFUSED, never substituted - carving a main road where a footpath was asked for looks entirely plausible", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_road_assign_profile = {
     "terrain.road.assign_profile", "terrain",
@@ -11420,12 +11592,12 @@ static const MethodDescriptor desc_terrain_road_assign_profile = {
 static const MethodRegistration reg_terrain_road_assign_profile(desc_terrain_road_assign_profile);
 
 static const MethodParam params_terrain_road_build_mesh[] = {
-    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr},
-    {"object", "string", false, "Scene object to write. Empty reuses the object this assignment already owns, or creates <spline>_RoadSurface", "", nullptr},
-    {"include_shoulder", "bool", false, "Include the shoulder in the ribbon. The ditch is never meshed - a ditch is terrain", "true", nullptr},
-    {"surface_offset", "float", false, "Metres above the graded surface. At zero the continuous ribbon and the discretised heightfield interpenetrate and the road reads as torn", nullptr, nullptr},
-    {"uv_meters_per_tile", "float", false, "Metres of road per V tile", nullptr, nullptr},
-    {"skip_tunnels", "bool", false, "Split the ribbon at tunnel spans instead of drawing a deck through the mountain", "true", nullptr},
+    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr, "string", false},
+    {"object", "string", false, "Scene object to write. Empty reuses the object this assignment already owns, or creates <spline>_RoadSurface", "", nullptr, "string", false},
+    {"include_shoulder", "bool", false, "Include the shoulder in the ribbon. The ditch is never meshed - a ditch is terrain", "true", nullptr, "bool", false},
+    {"surface_offset", "float", false, "Metres above the graded surface. At zero the continuous ribbon and the discretised heightfield interpenetrate and the road reads as torn", nullptr, nullptr, "number", false},
+    {"uv_meters_per_tile", "float", false, "Metres of road per V tile", nullptr, nullptr, "number", false},
+    {"skip_tunnels", "bool", false, "Split the ribbon at tunnel spans instead of drawing a deck through the mountain", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_road_build_mesh = {
     "terrain.road.build_mesh", "terrain",
@@ -11441,7 +11613,7 @@ static const MethodDescriptor desc_terrain_road_build_mesh = {
 static const MethodRegistration reg_terrain_road_build_mesh(desc_terrain_road_build_mesh);
 
 static const MethodParam params_terrain_road_clear_carve_override[] = {
-    {"spline", "string", true, "", nullptr, nullptr},
+    {"spline", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_road_clear_carve_override = {
     "terrain.road.clear_carve_override", "terrain",
@@ -11457,7 +11629,7 @@ static const MethodDescriptor desc_terrain_road_clear_carve_override = {
 static const MethodRegistration reg_terrain_road_clear_carve_override(desc_terrain_road_clear_carve_override);
 
 static const MethodParam params_terrain_road_clear_mesh[] = {
-    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr},
+    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_road_clear_mesh = {
     "terrain.road.clear_mesh", "terrain",
@@ -11473,7 +11645,7 @@ static const MethodDescriptor desc_terrain_road_clear_mesh = {
 static const MethodRegistration reg_terrain_road_clear_mesh(desc_terrain_road_clear_mesh);
 
 static const MethodParam params_terrain_road_clear_profile[] = {
-    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_road_clear_profile = {
     "terrain.road.clear_profile", "terrain",
@@ -11489,7 +11661,7 @@ static const MethodDescriptor desc_terrain_road_clear_profile = {
 static const MethodRegistration reg_terrain_road_clear_profile(desc_terrain_road_clear_profile);
 
 static const MethodParam params_terrain_road_get_assignment[] = {
-    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_road_get_assignment = {
     "terrain.road.get_assignment", "terrain",
@@ -11518,8 +11690,8 @@ static const MethodDescriptor desc_terrain_road_get_diagnostics = {
 static const MethodRegistration reg_terrain_road_get_diagnostics(desc_terrain_road_get_diagnostics);
 
 static const MethodParam params_terrain_road_get_route[] = {
-    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr},
-    {"max_samples", "int", false, "0 (default) returns only the counters. A positive value returns that many samples, decimated with both endpoints kept", "0", nullptr},
+    {"spline", "string", true, "SplineObject name of an assigned road", nullptr, nullptr, "string", false},
+    {"max_samples", "int", false, "0 (default) returns only the counters. A positive value returns that many samples, decimated with both endpoints kept", "0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_terrain_road_get_route = {
     "terrain.road.get_route", "terrain",
@@ -11561,19 +11733,19 @@ static const MethodDescriptor desc_terrain_road_list_profiles = {
 static const MethodRegistration reg_terrain_road_list_profiles(desc_terrain_road_list_profiles);
 
 static const MethodParam params_terrain_road_set_carve_override[] = {
-    {"spline", "string", true, "", nullptr, nullptr},
-    {"crown_meters", "float", false, "", nullptr, nullptr},
-    {"ditch_depth", "float", false, "", nullptr, nullptr},
-    {"ditch_width", "float", false, "", nullptr, nullptr},
-    {"elevation_offset", "float", false, "", nullptr, nullptr},
-    {"foliage_margin", "float", false, "", nullptr, nullptr},
-    {"grading_falloff", "float", false, "", nullptr, nullptr},
-    {"max_cut_meters", "float", false, "", nullptr, nullptr},
-    {"max_fill_meters", "float", false, "", nullptr, nullptr},
-    {"max_grade_percent", "float", false, "", nullptr, nullptr},
-    {"road_width", "float", false, "", nullptr, nullptr},
-    {"shoulder_width", "float", false, "", nullptr, nullptr},
-    {"use_point_width", "bool", false, "", nullptr, nullptr},
+    {"spline", "string", true, "", nullptr, nullptr, "string", false},
+    {"crown_meters", "float", false, "", nullptr, nullptr, "number", false},
+    {"ditch_depth", "float", false, "", nullptr, nullptr, "number", false},
+    {"ditch_width", "float", false, "", nullptr, nullptr, "number", false},
+    {"elevation_offset", "float", false, "", nullptr, nullptr, "number", false},
+    {"foliage_margin", "float", false, "", nullptr, nullptr, "number", false},
+    {"grading_falloff", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_cut_meters", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_fill_meters", "float", false, "", nullptr, nullptr, "number", false},
+    {"max_grade_percent", "float", false, "", nullptr, nullptr, "number", false},
+    {"road_width", "float", false, "", nullptr, nullptr, "number", false},
+    {"shoulder_width", "float", false, "", nullptr, nullptr, "number", false},
+    {"use_point_width", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_road_set_carve_override = {
     "terrain.road.set_carve_override", "terrain",
@@ -11589,8 +11761,8 @@ static const MethodDescriptor desc_terrain_road_set_carve_override = {
 static const MethodRegistration reg_terrain_road_set_carve_override(desc_terrain_road_set_carve_override);
 
 static const MethodParam params_terrain_road_set_crossing_mode[] = {
-    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
-    {"mode", "string", true, "auto | terrain | bridge | ford | tunnel. An unknown mode is refused. auto bridges over water when the Road Network node's Water pin is connected and otherwise behaves exactly as terrain; bridge also spans wherever the required fill exceeds max_fill_meters; tunnel bores wherever the required cut exceeds max_cut_meters; ford follows the bed and needs a Water field, reporting crossing_diagnostic when it has none", nullptr, nullptr},
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr, "string", false},
+    {"mode", "string", true, "auto | terrain | bridge | ford | tunnel. An unknown mode is refused. auto bridges over water when the Road Network node's Water pin is connected and otherwise behaves exactly as terrain; bridge also spans wherever the required fill exceeds max_fill_meters; tunnel bores wherever the required cut exceeds max_cut_meters; ford follows the bed and needs a Water field, reporting crossing_diagnostic when it has none", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_road_set_crossing_mode = {
     "terrain.road.set_crossing_mode", "terrain",
@@ -11606,8 +11778,8 @@ static const MethodDescriptor desc_terrain_road_set_crossing_mode = {
 static const MethodRegistration reg_terrain_road_set_crossing_mode(desc_terrain_road_set_crossing_mode);
 
 static const MethodParam params_terrain_road_set_enabled[] = {
-    {"spline", "string", true, "SplineObject name", nullptr, nullptr},
-    {"enabled", "bool", false, "false leaves the assignment in place but stops it carving", "true", nullptr},
+    {"spline", "string", true, "SplineObject name", nullptr, nullptr, "string", false},
+    {"enabled", "bool", false, "false leaves the assignment in place but stops it carving", "true", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_road_set_enabled = {
     "terrain.road.set_enabled", "terrain",
@@ -11623,9 +11795,9 @@ static const MethodDescriptor desc_terrain_road_set_enabled = {
 static const MethodRegistration reg_terrain_road_set_enabled(desc_terrain_road_set_enabled);
 
 static const MethodParam params_terrain_sample_height[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"world_x", "float", true, "", nullptr, nullptr},
-    {"world_z", "float", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"world_x", "float", true, "", nullptr, nullptr, "number", false},
+    {"world_z", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_terrain_sample_height = {
     "terrain.sample_height", "terrain",
@@ -11641,18 +11813,18 @@ static const MethodDescriptor desc_terrain_sample_height = {
 static const MethodRegistration reg_terrain_sample_height(desc_terrain_sample_height);
 
 static const MethodParam params_terrain_sculpt[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"dabs", "array", true, "Stroke path: list of [world_x, world_z] pairs. One dab is a click, several are a drag; every dab must land on the tile or the call is refused.", nullptr, nullptr},
-    {"mode", "string", false, "", "raise", "raise|lower|flatten|smooth|stamp"},
-    {"dt", "float", false, "Seconds one dab represents; the panel feeds one frame", "0.0166667", nullptr},
-    {"strength", "float", false, "Metres of height change per second at full falloff", "0.5", nullptr},
-    {"radius", "float", false, "Brush radius in metres", "5.0", nullptr},
-    {"curve", "float", false, "Falloff exponent, 0.25..4", "2.0", nullptr},
-    {"flatten_target", "float", false, "", "0.0", nullptr},
-    {"stamp_rotation", "float", false, "", "0.0", nullptr},
-    {"stamp_texture", "string", false, "", "", nullptr},
-    {"undo", "bool", false, "", "true", nullptr},
-    {"use_fixed_height", "bool", false, "", "false", nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"dabs", "array", true, "Stroke path: list of [world_x, world_z] pairs. One dab is a click, several are a drag; every dab must land on the tile or the call is refused.", nullptr, nullptr, nullptr, false},
+    {"mode", "string", false, "", "raise", "raise|lower|flatten|smooth|stamp", "string", false},
+    {"dt", "float", false, "Seconds one dab represents; the panel feeds one frame", "0.0166667", nullptr, "number", false},
+    {"strength", "float", false, "Metres of height change per second at full falloff", "0.5", nullptr, "number", false},
+    {"radius", "float", false, "Brush radius in metres", "5.0", nullptr, "number", false},
+    {"curve", "float", false, "Falloff exponent, 0.25..4", "2.0", nullptr, "number", false},
+    {"flatten_target", "float", false, "", "0.0", nullptr, "number", false},
+    {"stamp_rotation", "float", false, "", "0.0", nullptr, "number", false},
+    {"stamp_texture", "string", false, "", "", nullptr, "string", false},
+    {"undo", "bool", false, "", "true", nullptr, "bool", false},
+    {"use_fixed_height", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_terrain_sculpt = {
     "terrain.sculpt", "terrain",
@@ -11668,12 +11840,12 @@ static const MethodDescriptor desc_terrain_sculpt = {
 static const MethodRegistration reg_terrain_sculpt(desc_terrain_sculpt);
 
 static const MethodParam params_terrain_set_layer[] = {
-    {"slot", "int", true, "0-3 splat-weighted, 4-7 semantic overlay (4=Flow 5=Wetness 6=Ice 7=Hardness)", nullptr, nullptr},
-    {"name", "string", true, "", nullptr, nullptr},
-    {"material", "any", false, "Material name to bind; \"\" clears the slot; omit to leave unchanged", nullptr, nullptr},
-    {"uv_scale", "any", false, "Tiling scale; omit to leave unchanged", nullptr, nullptr},
-    {"overlay_strength", "any", false, "Overlay dial [0,1] for slots 4-7; omit to leave unchanged", nullptr, nullptr},
-    {"overlay_ignore_cover", "any", false, "", nullptr, nullptr},
+    {"slot", "int", true, "0-3 splat-weighted, 4-7 semantic overlay (4=Flow 5=Wetness 6=Ice 7=Hardness)", nullptr, nullptr, "number", false},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"material", "string", false, "Material name to bind; \"\" clears the slot; omit to leave unchanged", nullptr, nullptr, nullptr, false},
+    {"uv_scale", "float", false, "Tiling scale; omit to leave unchanged", nullptr, nullptr, nullptr, false},
+    {"overlay_strength", "float", false, "Overlay dial [0,1] for slots 4-7; omit to leave unchanged", nullptr, nullptr, nullptr, false},
+    {"overlay_ignore_cover", "bool", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_terrain_set_layer = {
     "terrain.set_layer", "terrain",
@@ -11689,8 +11861,8 @@ static const MethodDescriptor desc_terrain_set_layer = {
 static const MethodRegistration reg_terrain_set_layer(desc_terrain_set_layer);
 
 static const MethodParam params_terrain_set_mesh_resolution[] = {
-    {"name", "string", true, "Terrain name", nullptr, nullptr},
-    {"mesh_resolution", "int", true, "Vertices per side for the mesh grid, or 0 to follow the field resolution", nullptr, nullptr},
+    {"name", "string", true, "Terrain name", nullptr, nullptr, "string", false},
+    {"mesh_resolution", "int", true, "Vertices per side for the mesh grid, or 0 to follow the field resolution", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_terrain_set_mesh_resolution = {
     "terrain.set_mesh_resolution", "terrain",
@@ -11706,8 +11878,8 @@ static const MethodDescriptor desc_terrain_set_mesh_resolution = {
 static const MethodRegistration reg_terrain_set_mesh_resolution(desc_terrain_set_mesh_resolution);
 
 static const MethodParam params_terrain_set_paint_resolution[] = {
-    {"name", "string", true, "", nullptr, nullptr},
-    {"paint_resolution", "int", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
+    {"paint_resolution", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_terrain_set_paint_resolution = {
     "terrain.set_paint_resolution", "terrain",
@@ -11723,7 +11895,7 @@ static const MethodDescriptor desc_terrain_set_paint_resolution = {
 static const MethodRegistration reg_terrain_set_paint_resolution(desc_terrain_set_paint_resolution);
 
 static const MethodParam params_terrain_slope_area_fit[] = {
-    {"name", "string", true, "", nullptr, nullptr},
+    {"name", "string", true, "", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_terrain_slope_area_fit = {
     "terrain.slope_area_fit", "terrain",
@@ -11778,7 +11950,7 @@ static const MethodDescriptor desc_timeline_play = {
 static const MethodRegistration reg_timeline_play(desc_timeline_play);
 
 static const MethodParam params_timeline_set_frame[] = {
-    {"frame", "int", true, "", nullptr, nullptr},
+    {"frame", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_timeline_set_frame = {
     "timeline.set_frame", "timeline",
@@ -11859,7 +12031,7 @@ static const MethodDescriptor desc_viewport_automatic_cutout = {
 static const MethodRegistration reg_viewport_automatic_cutout(desc_viewport_automatic_cutout);
 
 static const MethodParam params_viewport_capture[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_viewport_capture = {
     "viewport.capture", "viewport",
@@ -12005,7 +12177,7 @@ static const MethodDescriptor desc_viewport_raster_depth_prepass = {
 static const MethodRegistration reg_viewport_raster_depth_prepass(desc_viewport_raster_depth_prepass);
 
 static const MethodParam params_viewport_render_frames[] = {
-    {"count", "int", true, "", nullptr, nullptr},
+    {"count", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_viewport_render_frames = {
     "viewport.render_frames", "viewport",
@@ -12073,10 +12245,10 @@ static const MethodDescriptor desc_viewport_scene_load_guard = {
 static const MethodRegistration reg_viewport_scene_load_guard(desc_viewport_scene_load_guard);
 
 static const MethodParam params_viewport_set_af[] = {
-    {"area_mode", "int", true, "", nullptr, nullptr},
-    {"enabled", "bool", true, "", nullptr, nullptr},
-    {"focus_mode", "int", true, "", nullptr, nullptr},
-    {"selected_point", "int", true, "", nullptr, nullptr},
+    {"area_mode", "int", true, "", nullptr, nullptr, "number", false},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"focus_mode", "int", true, "", nullptr, nullptr, "number", false},
+    {"selected_point", "int", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_viewport_set_af = {
     "viewport.set_af", "viewport",
@@ -12092,7 +12264,7 @@ static const MethodDescriptor desc_viewport_set_af = {
 static const MethodRegistration reg_viewport_set_af(desc_viewport_set_af);
 
 static const MethodParam params_viewport_set_automatic_cutout[] = {
-    {"enabled", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", false, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_viewport_set_automatic_cutout = {
     "viewport.set_automatic_cutout", "viewport",
@@ -12108,9 +12280,9 @@ static const MethodDescriptor desc_viewport_set_automatic_cutout = {
 static const MethodRegistration reg_viewport_set_automatic_cutout(desc_viewport_set_automatic_cutout);
 
 static const MethodParam params_viewport_set_depth_of_field[] = {
-    {"enabled", "bool", false, "", "true", nullptr},
-    {"max_coc_pixels", "float", false, "", "24.0", nullptr},
-    {"max_taps", "int", false, "", "32", nullptr},
+    {"enabled", "bool", false, "", "true", nullptr, "bool", false},
+    {"max_coc_pixels", "float", false, "", "24.0", nullptr, "number", false},
+    {"max_taps", "int", false, "", "32", nullptr, "number", false},
 };
 static const MethodDescriptor desc_viewport_set_depth_of_field = {
     "viewport.set_depth_of_field", "viewport",
@@ -12126,8 +12298,8 @@ static const MethodDescriptor desc_viewport_set_depth_of_field = {
 static const MethodRegistration reg_viewport_set_depth_of_field(desc_viewport_set_depth_of_field);
 
 static const MethodParam params_viewport_set_gizmo_occlusion[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
-    {"hidden_alpha", "any", false, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"hidden_alpha", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_viewport_set_gizmo_occlusion = {
     "viewport.set_gizmo_occlusion", "viewport",
@@ -12143,7 +12315,7 @@ static const MethodDescriptor desc_viewport_set_gizmo_occlusion = {
 static const MethodRegistration reg_viewport_set_gizmo_occlusion(desc_viewport_set_gizmo_occlusion);
 
 static const MethodParam params_viewport_set_preview_lighting[] = {
-    {"preset", "string", true, "Canonical mode name. Realtime/real_lights aliases map to scene; legacy classic/studio/outdoor aliases map to three_point.", nullptr, "three_point|scene"},
+    {"preset", "string", true, "Canonical mode name. Realtime/real_lights aliases map to scene; legacy classic/studio/outdoor aliases map to three_point.", nullptr, "three_point|scene", "string", false},
 };
 static const MethodDescriptor desc_viewport_set_preview_lighting = {
     "viewport.set_preview_lighting", "viewport",
@@ -12159,7 +12331,7 @@ static const MethodDescriptor desc_viewport_set_preview_lighting = {
 static const MethodRegistration reg_viewport_set_preview_lighting(desc_viewport_set_preview_lighting);
 
 static const MethodParam params_viewport_set_quality[] = {
-    {"preset", "string", true, "Canonical preset name. 'no_proxy' and 'full (no proxy)' are accepted aliases for full because that is what the panel combo reads.", nullptr, "auto|performance|balanced|quality|full"},
+    {"preset", "string", true, "Canonical preset name. 'no_proxy' and 'full (no proxy)' are accepted aliases for full because that is what the panel combo reads.", nullptr, "auto|performance|balanced|quality|full", "string", false},
 };
 static const MethodDescriptor desc_viewport_set_quality = {
     "viewport.set_quality", "viewport",
@@ -12175,7 +12347,7 @@ static const MethodDescriptor desc_viewport_set_quality = {
 static const MethodRegistration reg_viewport_set_quality(desc_viewport_set_quality);
 
 static const MethodParam params_viewport_set_raster_depth_prepass[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_viewport_set_raster_depth_prepass = {
     "viewport.set_raster_depth_prepass", "viewport",
@@ -12191,7 +12363,7 @@ static const MethodDescriptor desc_viewport_set_raster_depth_prepass = {
 static const MethodRegistration reg_viewport_set_raster_depth_prepass(desc_viewport_set_raster_depth_prepass);
 
 static const MethodParam params_viewport_set_raster_gpu_instancing[] = {
-    {"enabled", "boolean", true, "True (default) allows the global instance buffer, GPU culling and LOD proxies; False forces the per-mesh fallback", nullptr, nullptr},
+    {"enabled", "boolean", true, "True (default) allows the global instance buffer, GPU culling and LOD proxies; False forces the per-mesh fallback", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_viewport_set_raster_gpu_instancing = {
     "viewport.set_raster_gpu_instancing", "viewport",
@@ -12207,12 +12379,12 @@ static const MethodDescriptor desc_viewport_set_raster_gpu_instancing = {
 static const MethodRegistration reg_viewport_set_raster_gpu_instancing(desc_viewport_set_raster_gpu_instancing);
 
 static const MethodParam params_viewport_set_rt_shadow[] = {
-    {"enabled", "bool", true, "", nullptr, nullptr},
+    {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_viewport_set_rt_shadow = {
     "viewport.set_rt_shadow", "viewport",
     "Turn the screen-space RT shadow mask pass on or off",
-    "Per-light screen mask for visible directional, point, spot and area scene lights (up to 32). Reads the canonical flat TLAS hit/material tables and native SurfaceSDF fields. Point/spot rays stop before the light; area shadows use the same centre sample as RayFusion lighting. One integer bit per light preserves the existing 8-byte-per-pixel allocation. Requires ray query, scene lighting and a depth prepass. Directional cascades may be replaced when no volumes exist; other lights retain their atlas fallback for receivers absent from the mesh depth prepass. SDF receivers use a separate native surface query. Existing viewport.rt_shadow reports support/readiness and rays_per_frame is an upper bound across covered lights, not GPU elapsed time. Compile host, producer and all material-preview consumer shader variants together and restart after this ABI change.",
+    "OFF by default; turn it on wherever ray query is supported. The mask is consumed by the raster MESH shader (rtPreviewShadow returns the screen visibility for the covered light), and the cascade views for that light are then NOT drawn at all - read 'cascades_replaced' from viewport.rt_shadow to confirm the handoff happened. Exactly ONE light is covered: the first visible directional light, else the Nishita world sun. Point, spot and area lights keep their cascades, which is why they look identical with this on and off. WHAT IS GIVEN UP: fragments the screen mask declines - impostors, transparent replay, and any fragment whose depth does not match the prepass - lose that light's shadow instead of falling back to the atlas. WHEN NOTHING IS SAVED: with volumes in the scene the cascades stay up, because the SDF surface shader, the volume shader and the deep transmittance atlas read the atlas and have no screen mask. Motivation: the cascade shadow term measured 113 ms/frame, while a ray budget on this scene's own TLAS gave >=334 Mrays/s - about 5 ms for one ray per pixel at 1680x945. In a foliage scene the cascade cost is dominated by the alpha pipeline: one opacity texture fetch and discard per leaf fragment, per cascade. Requires a depth prepass and turns one on.",
     "render", "Render", false, "any",
     "viewport|set|rt|shadow",
     nullptr,
@@ -12223,7 +12395,7 @@ static const MethodDescriptor desc_viewport_set_rt_shadow = {
 static const MethodRegistration reg_viewport_set_rt_shadow(desc_viewport_set_rt_shadow);
 
 static const MethodParam params_viewport_set_scene_load_guard[] = {
-    {"enabled", "bool", true, "true restores the guard (openings drop to Solid). false reproduces the fault; leave it false only for the duration of a measurement.", nullptr, nullptr},
+    {"enabled", "bool", true, "true restores the guard (openings drop to Solid). false reproduces the fault; leave it false only for the duration of a measurement.", nullptr, nullptr, "bool", false},
 };
 static const MethodDescriptor desc_viewport_set_scene_load_guard = {
     "viewport.set_scene_load_guard", "viewport",
@@ -12239,8 +12411,8 @@ static const MethodDescriptor desc_viewport_set_scene_load_guard = {
 static const MethodRegistration reg_viewport_set_scene_load_guard(desc_viewport_set_scene_load_guard);
 
 static const MethodParam params_viewport_set_shading[] = {
-    {"mode", "string", true, "Canonical mode name. 'preview' is accepted as an alias for material because the panel button reads Preview.", nullptr, "solid|material|rendered|matcap"},
-    {"matcap_preset", "int", false, "0..9, meaningful in matcap mode; -1 leaves it unchanged.", "-1", nullptr},
+    {"mode", "string", true, "Canonical mode name. 'preview' is accepted as an alias for material because the panel button reads Preview.", nullptr, "solid|material|rendered|matcap", "string", false},
+    {"matcap_preset", "int", false, "0..9, meaningful in matcap mode; -1 leaves it unchanged.", "-1", nullptr, "number", false},
 };
 static const MethodDescriptor desc_viewport_set_shading = {
     "viewport.set_shading", "viewport",
@@ -12256,8 +12428,8 @@ static const MethodDescriptor desc_viewport_set_shading = {
 static const MethodRegistration reg_viewport_set_shading(desc_viewport_set_shading);
 
 static const MethodParam params_viewport_set_taa[] = {
-    {"enabled", "bool", false, "Master switch. Off restores the un-jittered, history-free image.", "true", nullptr},
-    {"samples", "int", false, "Stopping condition: how many jittered samples to accumulate before the viewport goes idle. 1-256.", "16", nullptr},
+    {"enabled", "bool", false, "Master switch. Off restores the un-jittered, history-free image.", "true", nullptr, "bool", false},
+    {"samples", "int", false, "Stopping condition: how many jittered samples to accumulate before the viewport goes idle. 1-256.", "16", nullptr, "number", false},
 };
 static const MethodDescriptor desc_viewport_set_taa = {
     "viewport.set_taa", "viewport",
@@ -12312,7 +12484,7 @@ static const MethodDescriptor desc_viewport_taa = {
 static const MethodRegistration reg_viewport_taa(desc_viewport_taa);
 
 static const MethodParam params_water_get_wind[] = {
-    {"surface", "string", true, "Water surface id or name", nullptr, nullptr},
+    {"surface", "string", true, "Water surface id or name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_water_get_wind = {
     "water.get_wind", "water",
@@ -12328,10 +12500,10 @@ static const MethodDescriptor desc_water_get_wind = {
 static const MethodRegistration reg_water_get_wind(desc_water_get_wind);
 
 static const MethodParam params_water_set_wind[] = {
-    {"surface", "string", true, "Water surface id or name", nullptr, nullptr},
-    {"direction_degrees", "any", false, "", nullptr, nullptr},
-    {"inherit_atmosphere", "any", false, "", nullptr, nullptr},
-    {"speed_mps", "any", false, "", nullptr, nullptr},
+    {"surface", "string", true, "Water surface id or name", nullptr, nullptr, "string", false},
+    {"direction_degrees", "float", false, "", nullptr, nullptr, "number", false},
+    {"inherit_atmosphere", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"speed_mps", "float", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_water_set_wind = {
     "water.set_wind", "water",
@@ -12347,7 +12519,7 @@ static const MethodDescriptor desc_water_set_wind = {
 static const MethodRegistration reg_water_set_wind(desc_water_set_wind);
 
 static const MethodParam params_world_apply_cloud_preset[] = {
-    {"preset", "string", true, "Preset name", nullptr, nullptr},
+    {"preset", "string", true, "Preset name", nullptr, nullptr, "string", false},
 };
 static const MethodDescriptor desc_world_apply_cloud_preset = {
     "world.apply_cloud_preset", "world",
@@ -12506,7 +12678,7 @@ static const MethodDescriptor desc_world_local_weather_stats = {
 static const MethodRegistration reg_world_local_weather_stats(desc_world_local_weather_stats);
 
 static const MethodParam params_world_sample_climate[] = {
-    {"position", "vec3", true, "Scene position [x, y, z] in metres.", nullptr, nullptr},
+    {"position", "vec3", true, "Scene position [x, y, z] in metres.", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_world_sample_climate = {
     "world.sample_climate", "world",
@@ -12522,11 +12694,11 @@ static const MethodDescriptor desc_world_sample_climate = {
 static const MethodRegistration reg_world_sample_climate(desc_world_sample_climate);
 
 static const MethodParam params_world_sample_clouds[] = {
-    {"backend", "string", false, "", nullptr, nullptr},
-    {"mode", "string", false, "", nullptr, nullptr},
-    {"points", "any", false, "", nullptr, nullptr},
-    {"segments", "any", false, "", nullptr, nullptr},
-    {"steps", "int", false, "", nullptr, nullptr},
+    {"backend", "string", false, "", nullptr, nullptr, "string", false},
+    {"mode", "string", false, "", nullptr, nullptr, "string", false},
+    {"points", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"segments", "any", false, "", nullptr, nullptr, nullptr, false},
+    {"steps", "int", false, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_sample_clouds = {
     "world.sample_clouds", "world",
@@ -12542,7 +12714,7 @@ static const MethodDescriptor desc_world_sample_clouds = {
 static const MethodRegistration reg_world_sample_clouds(desc_world_sample_clouds);
 
 static const MethodParam params_world_sample_weather_local[] = {
-    {"points", "any", false, "", nullptr, nullptr},
+    {"points", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_world_sample_weather_local = {
     "world.sample_weather_local", "world",
@@ -12558,14 +12730,14 @@ static const MethodDescriptor desc_world_sample_weather_local = {
 static const MethodRegistration reg_world_sample_weather_local(desc_world_sample_weather_local);
 
 static const MethodParam params_world_set_aerial[] = {
-    {"aerial_perspective", "bool", false, "Air scattering between the camera and surfaces on/off.", "true", nullptr},
-    {"fog_enabled", "bool", false, "Height fog on/off.", "false", nullptr},
-    {"fog_density", "float", false, "Fog extinction per METRE at and below fog_height (0.0001 light, 0.001 dense over km views). >= 0.", "0.0", nullptr},
-    {"fog_height", "float", false, "Top of the uniform fog layer, scene Y in metres.", "0.0", nullptr},
-    {"fog_falloff", "float", false, "Exponential thinning above fog_height, per metre. >= 0.", "0.0", nullptr},
-    {"fog_distance", "float", false, "Fog only exists within this many metres of the camera; sky pixels are fogged out to here. > 0.", "0.0", nullptr},
-    {"fog_albedo", "vec3", false, "Single-scattering albedo [r, g, b], each 0..1.", nullptr, nullptr},
-    {"fog_anisotropy", "float", false, "Henyey-Greenstein g of the fog droplets, within (-0.95, 0.95); higher = brighter around the sun.", "0.0", nullptr},
+    {"aerial_perspective", "bool", false, "Air scattering between the camera and surfaces on/off.", "true", nullptr, "bool", false},
+    {"fog_enabled", "bool", false, "Height fog on/off.", "false", nullptr, "bool", false},
+    {"fog_density", "float", false, "Fog extinction per METRE at and below fog_height (0.0001 light, 0.001 dense over km views). >= 0.", "0.0", nullptr, "number", false},
+    {"fog_height", "float", false, "Top of the uniform fog layer, scene Y in metres.", "0.0", nullptr, "number", false},
+    {"fog_falloff", "float", false, "Exponential thinning above fog_height, per metre. >= 0.", "0.0", nullptr, "number", false},
+    {"fog_distance", "float", false, "Fog only exists within this many metres of the camera; sky pixels are fogged out to here. > 0.", "0.0", nullptr, "number", false},
+    {"fog_albedo", "vec3", false, "Single-scattering albedo [r, g, b], each 0..1.", nullptr, nullptr, "vec3", false},
+    {"fog_anisotropy", "float", false, "Henyey-Greenstein g of the fog droplets, within (-0.95, 0.95); higher = brighter around the sun.", "0.0", nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_aerial = {
     "world.set_aerial", "world",
@@ -12581,19 +12753,19 @@ static const MethodDescriptor desc_world_set_aerial = {
 static const MethodRegistration reg_world_set_aerial(desc_world_set_aerial);
 
 static const MethodParam params_world_set_atmosphere[] = {
-    {"air_density", "any", false, "Rayleigh scattering multiplier (Blender 'Air'). 1 = Earth. Must be >= 0.", nullptr, nullptr},
-    {"dust_density", "any", false, "Mie/aerosol scattering multiplier (Blender 'Dust'). Must be >= 0.", nullptr, nullptr},
-    {"ozone_density", "any", false, "Ozone column multiplier; drives blue-hour saturation. Must be >= 0.", nullptr, nullptr},
-    {"ozone_absorption_scale", "any", false, "Scales the ozone absorption coefficients on top of ozone_density. Must be >= 0.", nullptr, nullptr},
-    {"altitude", "any", false, "Viewer height above sea level in METRES; the SkyView LUT is baked from this camera altitude.", nullptr, nullptr},
-    {"mie_anisotropy", "any", false, "Henyey-Greenstein g for the Mie phase function; forward scattering as it approaches 1. Must be within (-1, 1).", nullptr, nullptr},
-    {"planet_radius", "any", false, "Ground sphere radius in METRES (Earth = 6360000). Must be >= 1000.", nullptr, nullptr},
-    {"atmosphere_height", "any", false, "Atmosphere shell thickness above the ground in METRES (Earth = 60000). Must be >= 1000.", nullptr, nullptr},
-    {"rayleigh_scattering", "vec3", false, "Per-channel Rayleigh scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr},
-    {"mie_scattering", "vec3", false, "Per-channel Mie scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr},
-    {"rayleigh_density", "any", false, "Rayleigh SCALE HEIGHT in metres (Earth = 8000). The name says density, the unit is a height. Must be >= 1.", nullptr, nullptr},
-    {"mie_density", "any", false, "Mie SCALE HEIGHT in metres (Earth = 1200). Same naming trap as rayleigh_density. Must be >= 1.", nullptr, nullptr},
-    {"literal", "any", false, "", nullptr, nullptr},
+    {"air_density", "any", false, "Rayleigh scattering multiplier (Blender 'Air'). 1 = Earth. Must be >= 0.", nullptr, nullptr, nullptr, false},
+    {"dust_density", "any", false, "Mie/aerosol scattering multiplier (Blender 'Dust'). Must be >= 0.", nullptr, nullptr, nullptr, false},
+    {"ozone_density", "any", false, "Ozone column multiplier; drives blue-hour saturation. Must be >= 0.", nullptr, nullptr, nullptr, false},
+    {"ozone_absorption_scale", "any", false, "Scales the ozone absorption coefficients on top of ozone_density. Must be >= 0.", nullptr, nullptr, nullptr, false},
+    {"altitude", "any", false, "Viewer height above sea level in METRES; the SkyView LUT is baked from this camera altitude.", nullptr, nullptr, nullptr, false},
+    {"mie_anisotropy", "any", false, "Henyey-Greenstein g for the Mie phase function; forward scattering as it approaches 1. Must be within (-1, 1).", nullptr, nullptr, nullptr, false},
+    {"planet_radius", "any", false, "Ground sphere radius in METRES (Earth = 6360000). Must be >= 1000.", nullptr, nullptr, nullptr, false},
+    {"atmosphere_height", "any", false, "Atmosphere shell thickness above the ground in METRES (Earth = 60000). Must be >= 1000.", nullptr, nullptr, nullptr, false},
+    {"rayleigh_scattering", "vec3", false, "Per-channel Rayleigh scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr, "vec3", false},
+    {"mie_scattering", "vec3", false, "Per-channel Mie scattering coefficients as [r, g, b], in 1/metre.", nullptr, nullptr, "vec3", false},
+    {"rayleigh_density", "any", false, "Rayleigh SCALE HEIGHT in metres (Earth = 8000). The name says density, the unit is a height. Must be >= 1.", nullptr, nullptr, nullptr, false},
+    {"mie_density", "any", false, "Mie SCALE HEIGHT in metres (Earth = 1200). Same naming trap as rayleigh_density. Must be >= 1.", nullptr, nullptr, nullptr, false},
+    {"literal", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_world_set_atmosphere = {
     "world.set_atmosphere", "world",
@@ -12609,7 +12781,7 @@ static const MethodDescriptor desc_world_set_atmosphere = {
 static const MethodRegistration reg_world_set_atmosphere(desc_world_set_atmosphere);
 
 static const MethodParam params_world_set_atmosphere_intensity[] = {
-    {"atmosphere_intensity", "float", true, "", nullptr, nullptr},
+    {"atmosphere_intensity", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_atmosphere_intensity = {
     "world.set_atmosphere_intensity", "world",
@@ -12625,7 +12797,7 @@ static const MethodDescriptor desc_world_set_atmosphere_intensity = {
 static const MethodRegistration reg_world_set_atmosphere_intensity(desc_world_set_atmosphere_intensity);
 
 static const MethodParam params_world_set_background_color[] = {
-    {"background_color", "vec3", true, "", nullptr, nullptr},
+    {"background_color", "vec3", true, "", nullptr, nullptr, "vec3", false},
 };
 static const MethodDescriptor desc_world_set_background_color = {
     "world.set_background_color", "world",
@@ -12641,13 +12813,13 @@ static const MethodDescriptor desc_world_set_background_color = {
 static const MethodRegistration reg_world_set_background_color(desc_world_set_background_color);
 
 static const MethodParam params_world_set_climate[] = {
-    {"surface_temperature_k", "any", false, "Surface air temperature in KELVIN (15 C = 288.15). Must be within 150..400.", nullptr, nullptr},
-    {"lapse_rate_k_per_m", "any", false, "Temperature drop per METRE of altitude (ISA = 0.0065). Negative = inversion. Must be within -0.02..0.02 and must not cool the air below 100 K by 11 km.", nullptr, nullptr},
-    {"surface_relative_humidity", "any", false, "Relative humidity 0..1.", nullptr, nullptr},
-    {"surface_pressure_pa", "any", false, "Surface pressure in PASCAL (sea level 101325). Must be within 30000..120000.", nullptr, nullptr},
-    {"wind_direction", "vec3", false, "Direction the wind blows TOWARD as [x, y, z]; projected onto the horizontal plane and normalized. Must have an x/z component.", nullptr, nullptr},
-    {"wind_speed_mps", "any", false, "Surface wind speed in m/s, 0..150.", nullptr, nullptr},
-    {"instability", "any", false, "", nullptr, nullptr},
+    {"surface_temperature_k", "any", false, "Surface air temperature in KELVIN (15 C = 288.15). Must be within 150..400.", nullptr, nullptr, nullptr, false},
+    {"lapse_rate_k_per_m", "any", false, "Temperature drop per METRE of altitude (ISA = 0.0065). Negative = inversion. Must be within -0.02..0.02 and must not cool the air below 100 K by 11 km.", nullptr, nullptr, nullptr, false},
+    {"surface_relative_humidity", "any", false, "Relative humidity 0..1.", nullptr, nullptr, nullptr, false},
+    {"surface_pressure_pa", "any", false, "Surface pressure in PASCAL (sea level 101325). Must be within 30000..120000.", nullptr, nullptr, nullptr, false},
+    {"wind_direction", "vec3", false, "Direction the wind blows TOWARD as [x, y, z]; projected onto the horizontal plane and normalized. Must have an x/z component.", nullptr, nullptr, "vec3", false},
+    {"wind_speed_mps", "any", false, "Surface wind speed in m/s, 0..150.", nullptr, nullptr, nullptr, false},
+    {"instability", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_world_set_climate = {
     "world.set_climate", "world",
@@ -12663,7 +12835,7 @@ static const MethodDescriptor desc_world_set_climate = {
 static const MethodRegistration reg_world_set_climate(desc_world_set_climate);
 
 static const MethodParam params_world_set_clouds[] = {
-    {"layers", "any", false, "", nullptr, nullptr},
+    {"layers", "any", false, "", nullptr, nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_world_set_clouds = {
     "world.set_clouds", "world",
@@ -12679,7 +12851,7 @@ static const MethodDescriptor desc_world_set_clouds = {
 static const MethodRegistration reg_world_set_clouds(desc_world_set_clouds);
 
 static const MethodParam params_world_set_mode[] = {
-    {"mode", "string", true, "Background model", nullptr, "solid|hdri|nishita"},
+    {"mode", "string", true, "Background model", nullptr, "solid|hdri|nishita", "string", false},
 };
 static const MethodDescriptor desc_world_set_mode = {
     "world.set_mode", "world",
@@ -12695,7 +12867,7 @@ static const MethodDescriptor desc_world_set_mode = {
 static const MethodRegistration reg_world_set_mode(desc_world_set_mode);
 
 static const MethodParam params_world_set_sun_azimuth[] = {
-    {"sun_azimuth", "float", true, "", nullptr, nullptr},
+    {"sun_azimuth", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_sun_azimuth = {
     "world.set_sun_azimuth", "world",
@@ -12711,7 +12883,7 @@ static const MethodDescriptor desc_world_set_sun_azimuth = {
 static const MethodRegistration reg_world_set_sun_azimuth(desc_world_set_sun_azimuth);
 
 static const MethodParam params_world_set_sun_elevation[] = {
-    {"sun_elevation", "float", true, "", nullptr, nullptr},
+    {"sun_elevation", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_sun_elevation = {
     "world.set_sun_elevation", "world",
@@ -12727,7 +12899,7 @@ static const MethodDescriptor desc_world_set_sun_elevation = {
 static const MethodRegistration reg_world_set_sun_elevation(desc_world_set_sun_elevation);
 
 static const MethodParam params_world_set_sun_intensity[] = {
-    {"sun_intensity", "float", true, "", nullptr, nullptr},
+    {"sun_intensity", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_sun_intensity = {
     "world.set_sun_intensity", "world",
@@ -12743,7 +12915,7 @@ static const MethodDescriptor desc_world_set_sun_intensity = {
 static const MethodRegistration reg_world_set_sun_intensity(desc_world_set_sun_intensity);
 
 static const MethodParam params_world_set_sun_size[] = {
-    {"sun_size", "float", true, "", nullptr, nullptr},
+    {"sun_size", "float", true, "", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_sun_size = {
     "world.set_sun_size", "world",
@@ -12759,12 +12931,12 @@ static const MethodDescriptor desc_world_set_sun_size = {
 static const MethodRegistration reg_world_set_sun_size(desc_world_set_sun_size);
 
 static const MethodParam params_world_set_thermal[] = {
-    {"ambient_kelvin", "any", false, "Room temperature everything relaxes toward, in Kelvin. Must be positive.", nullptr, nullptr},
-    {"kelvin_per_unit", "any", false, "Kelvin per normalized solver unit -- the calibration MSF temperature reads through. Must be positive.", nullptr, nullptr},
-    {"convection_coefficient", "any", false, "Scales every substance's passive cooling toward ambient: 1 = authored, higher = draughty, 0 = a perfect thermos.", nullptr, nullptr},
-    {"oxygen_availability", "any", false, "0..1, scales pyrolysis burn rate; 0 smothers combustion entirely. Clamped, not rejected, if out of range.", nullptr, nullptr},
-    {"inherit_atmosphere", "any", false, "true: the ambient follows world.set_climate (default false = the local ambient_kelvin). Turning it on moves the room from 293 K to the climate temperature.", nullptr, nullptr},
-    {"reference_kelvin", "any", false, "Calibration zero: normalized temperature 0 == this many Kelvin. Must be positive. Changing it re-interprets every stored normalized temperature -- a calibration edit, like kelvin_per_unit.", nullptr, nullptr},
+    {"ambient_kelvin", "float", false, "Room temperature everything relaxes toward, in Kelvin. Must be positive.", nullptr, nullptr, "number", false},
+    {"kelvin_per_unit", "float", false, "Kelvin per normalized solver unit -- the calibration MSF temperature reads through. Must be positive.", nullptr, nullptr, "number", false},
+    {"convection_coefficient", "float", false, "Scales every substance's passive cooling toward ambient: 1 = authored, higher = draughty, 0 = a perfect thermos.", nullptr, nullptr, "number", false},
+    {"oxygen_availability", "float", false, "0..1, scales pyrolysis burn rate; 0 smothers combustion entirely. Clamped, not rejected, if out of range.", nullptr, nullptr, "number", false},
+    {"inherit_atmosphere", "bool", false, "true: the ambient follows world.set_climate (default false = the local ambient_kelvin). Turning it on moves the room from 293 K to the climate temperature.", nullptr, nullptr, "bool", false},
+    {"reference_kelvin", "float", false, "Calibration zero: normalized temperature 0 == this many Kelvin. Must be positive. Changing it re-interprets every stored normalized temperature -- a calibration edit, like kelvin_per_unit.", nullptr, nullptr, "number", false},
 };
 static const MethodDescriptor desc_world_set_thermal = {
     "world.set_thermal", "world",

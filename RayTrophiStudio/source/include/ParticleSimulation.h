@@ -1,8 +1,9 @@
-#pragma once
+﻿#pragma once
 #include "SimulationDomainLanes.h"
 #include "Fluid/MatterFogStreams.h"
 #include "Fluid/SourceSplatGeometry.h"
 #include "Fluid/MatterAudioTelemetry.h"
+#include "Fluid/MatterSeedSources.h"
 
 #include "Matrix4x4.h"
 #include "FluidGrid.h"
@@ -345,7 +346,9 @@ struct SimulationGridDomainDesc {
     // Hard combined working-set budget for this domain. The solver clamps grid
     // dimensions before allocation; this is an execution guard, not just a UI
     // estimate. Zero disables the guard for deliberate expert/offline runs.
-    uint32_t resource_budget_mb = 1024;
+    // 4 GiB (2026-11-11, was 1 GiB): a 1M-parcel snow domain measures ~0.6 GB
+    // of VRAM; 1 GiB held mid-size cinematic domains for no device reason.
+    uint32_t resource_budget_mb = 4096;
     bool enforce_resource_budget = true;
     // Cinema-grade volumetric disk cache. Directory auto-derived from project
     // path as <project>.volcache (same pattern as fluid's <project>.simcache).
@@ -365,6 +368,8 @@ struct SimulationGridDomainDesc {
     Fluid::APICSolverParams fluid_params;
     Vec3 fluid_seed_min = Vec3(-0.5f, 1.0f, -0.5f);
     Vec3 fluid_seed_max = Vec3(0.5f, 1.5f, 0.5f);
+    // Runtime provenance: restored/authored boxes survive the first grid sync.
+    bool fluid_seed_box_initialized = false;
     int  fluid_seed_particles_per_cell = 8;
     // Water a SEEDED grain already holds, as a fraction (0..1) of its
     // substance's grain_water_capacity_fraction -- the seed twin of a flow
@@ -381,6 +386,12 @@ struct SimulationGridDomainDesc {
     std::size_t fluid_max_particles = 100000;
     bool fluid_replace_on_seed = true;
     bool fluid_pending_seed = false;
+    std::vector<Fluid::MatterSeedSource> matter_seed_sources;
+    bool matter_seed_sources_enabled = false;
+    bool matter_seed_auto_capacity = true;
+    bool matter_seed_memory_guard = true;
+    uint64_t matter_seed_selected_source = 0; // Transient viewport authoring selection.
+    uint64_t matter_seed_sources_applied_hash = 0;
     // Authored initial-state intent, kept separate from fluid_pending_seed
     // (a one-tick runtime command). Once a replace seed is requested, timeline
     // rewind/cache invalidation must reproduce it; continuous-flow domains leave
@@ -824,7 +835,7 @@ struct SimulationGridDomainDesc {
 
     // Where parcels of each STATE label are drawn (FluidViewResolver). Indexed
     // by Fluid::ParticleLabel. Follow = the substance's view; the default is the
-    // design table (spray/foam/bubble -> splat, mist -> fog). Per label, never
+    // design table (spray -> follow, foam/bubble -> splat, mist -> fog). Per label, never
     // per domain: the substance still decides where its body goes.
     Fluid::LabelRoutes fluid_label_routes = Fluid::defaultLabelRoutes();
     Fluid::MatterPhaseOutput fluid_phase_output;
@@ -1644,6 +1655,7 @@ struct SimulationGridDomainComputeBuffers {
     ComputeBufferHandle cg_scalars;    // double[7]
     Fluid::SparsePressureGpuStorage sparse_pressure;
     Fluid::SparseViscosityGpuStorage sparse_viscosity;
+    Fluid::ViscosityPcgStorage viscosity_pcg;
     Fluid::SparseMacTransferGpuStorage sparse_mac_transfer;
     // Variational solid coupling (GPU Stage 1): MAC-face fractional open weights
     // (uint8_t->float conversion happens on upload) and per-cell solid velocity.
@@ -1788,6 +1800,29 @@ struct SimulationFlowSourceDesc {
     // liquid sprays outward off the geometry like a hose/fountain following the
     // shape. When false every particle uses the single `velocity` vector above.
     bool  fluid_emit_along_normal = false;
+    // How a LIQUID source pours (2026-11-09, Fluid/MatterLiquidInflow.h).
+    //   Rate:    fluid_particles_per_second parcels into the spawn volume, once
+    //            per step. The flux ignores velocity and nozzle size.
+    //   Inflow:  a nozzle (Point: disk of `radius` facing `velocity`;
+    //            ObjectBounds: the box) kept full and its velocity held, so
+    //            the flux is area x |velocity|. MeshSurface is refused.
+    //   Outflow: removes the liquid inside the region (Point: sphere of
+    //            `radius`; ObjectBounds: the box), recorded as Drainage.
+    enum class LiquidEmission : uint8_t { Rate = 0, Inflow = 1, Outflow = 2 };
+    LiquidEmission liquid_emission = LiquidEmission::Rate;
+    bool fluid_inflow_initialized = false;
+    double fluid_inflow_fractional_parcel = 0.0;
+    // Runtime reports, reset with the simulation. fluid_flux_m3_s is the
+    // liquid volume (parcels x h^3 / ppc) poured last step over dt; the
+    // target is area x |v| (Inflow) or the authored rate's volume (Rate).
+    double fluid_flux_m3_s = 0.0;
+    double fluid_flux_target_m3_s = 0.0;
+    // Rate: parcels the over-pack guard dropped since the reset (a nozzle
+    // under a cell capped the authored rate with no other sign).
+    int fluid_overpack_dropped_total = 0;
+    double drained_mass_kg_step = 0.0;
+    double drained_mass_kg_total = 0.0;
+    std::string liquid_emission_status;
     // ── Substance this source pours (fluid only) ─────────────────────────────
     // Empty = untagged: the liquid takes the domain's single surface material,
     // exactly as before substances existed.
@@ -2312,6 +2347,8 @@ struct ParticleSimulationRuntimeState {
     std::vector<float> emitter_accumulators;
     std::vector<uint8_t> emitter_burst_consumed;
     std::vector<float> flow_emit_accumulators;
+    std::vector<uint8_t> flow_inflow_initialized;
+    std::vector<double> flow_inflow_fractional_parcels;
     std::vector<uint64_t> flow_emit_sample_serials;
     std::vector<int> flow_total_emitted_particles;
     std::vector<double> flow_total_emitted_mass_kg;
@@ -2517,6 +2554,7 @@ public:
     std::vector<SimulationGridDomainDesc>& gridDomains();
     const std::vector<SimulationGridDomainDesc>& gridDomains() const;
     const std::vector<SimulationGridDomainState>& gridDomainStates() const;
+    nlohmann::json demBondOperation(const std::string& domain, const nlohmann::json& request);
     std::vector<SimulationGridDomainState> captureGridDomainStatesForCache(
         SimulationComputeContext& compute) const;
     SimulationGasGpuFieldView gasGpuFieldView(
@@ -2598,6 +2636,7 @@ public:
         std::function<std::shared_ptr<const Fluid::MeshVolumeTest>(const std::string&)> resolver) {
         mesh_volume_resolver_ = std::move(resolver);
     }
+    nlohmann::json matterSeedPlan(const SimulationGridDomainDesc& domain) const;
     /// Clear the authoritative live particles. With `clear_seed_recipe`, also
     /// disarm reset-time SeedBox/FillLevel reproduction so emitter-only domains
     /// stay emitter-only after a rewind.

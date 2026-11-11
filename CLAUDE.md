@@ -71,10 +71,22 @@ ve shard'ları kırılabilir yapabiliyordu, ama kesme işlemi yalnızca bir dü�
 
 ---
 
-## 2. Build'i KULLANICI alır
+## 2. C++ build'i KULLANICI alır — shader'ları AJAN derler
 
 `msbuild`, `cmake`, `dotnet build` **çalıştırma**. Derleme kullanıcının
 makinesinde ve onun kontrolünde. Kodu yaz, ne test edileceğini söyle, bırak.
+
+★ **Shader'lar 2026-11-09'dan beri ajanın işi:** yalnız **senin yazdığın/değiştirdiğin**
+shader'ları derle ve `.spv`'yi **iki yere** koy:
+1. `RayTrophiStudio/source/shaders/<ad>.spv` — komut, o shader'ın ilgili `compile_*.bat`
+   satırındakiyle aynı (ör. `glslc <ad>.comp -o <ad>.spv --target-env=vulkan1.2`;
+   glslc: `E:/RayTrophi_projesi/external_dependencies/1.3.275.0/Bin/glslc`);
+2. `x64/Release/shaders/<ad>.spv` — uygulamanın okuduğu yer.
+
+Gerekçe: kullanıcı toplu derliyor; `compile_*.bat`'i çalıştırmak her seferinde **bütün**
+shader'ları derliyordu. Ayrıca derleme hatası (ör. GLSL'de ayrılmış kelime `active`)
+kullanıcıya gitmeden yakalanır. Yeni shader'ı yine `.bat` listesine ekle (tam derleme
+onu da kapsasın). Kullanıcı "şu an derliyorum" diyorsa bekle.
 
 Yeni bir `.cpp` eklediysen `.vcxproj`'a da eklemeyi unutma.
 
@@ -134,6 +146,16 @@ dosyayı okumadan yapılacak ilk tahmin tam olarak odur.
 Ayrıntı: `docs/dev/OPTIX_DONDURULDU.md`.
 
 ## 7. Tek branch: `main`
+
+## 8. Paralel ajanlar (Claude + Codex) aynı ağaçta — ortak pano
+
+Birbirine mesaj atamayan ajanlar (Claude Code, Codex) aynı çalışma ağacında çalışıyor.
+Kanal `docs/dev/AJAN_KOORDINASYON.md`: ortak bir dosyaya dokunmadan ÖNCE oku; işe başlarken
+dosyalarını §1'e yaz, bitirince sil; diğerinin derlemesini bozabilecek arayüz değişikliğini
+(shader bağlama sayısı/push boyutu, kayıt satırı, yaygın struct düzeni, IPC alan anlamı) §2'ye,
+derleme bekleyen partiyi §3'e, fikir/soru/iş bölümünü §4'e yaz. Gerekçe: 2026-11-10'da DEM
+kırılması (Codex) ile sıvı–MPM bağı (Claude) aynı gözenekli diverjans çekirdeğine ve kayıt
+tablosuna dokunuyordu; biri diğerinin bağlama sayısını ezseydi DEM sahneleri sessizce kırılırdı.
 
 ---
 

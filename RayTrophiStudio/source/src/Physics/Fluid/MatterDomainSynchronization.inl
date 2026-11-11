@@ -233,21 +233,7 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
                     Fluid::translateLiquidParticles(state, delta_min);
                 }
             } else {
-                // First sync as a fluid domain. Drop a sensible default seed
-                // AABB inside the domain (upper half, quarter-sized) so the
-                // user sees the cyan box inside the bounds instead of stuck
-                // at the legacy (0..1, 1..1.5, 0..1) world coords that may
-                // be far outside an arbitrary domain center.
-                const Vec3 domain_extent = mx - mn;
-                const Vec3 seed_extent = Vec3(domain_extent.x * 0.45f,
-                                              domain_extent.y * 0.35f,
-                                              domain_extent.z * 0.45f);
-                const Vec3 current_center = (mn + mx) * 0.5f;
-                const Vec3 seed_center = Vec3(current_center.x,
-                                              mn.y + domain_extent.y * 0.75f,
-                                              current_center.z);
-                domain.fluid_seed_min = seed_center - seed_extent * 0.5f;
-                domain.fluid_seed_max = seed_center + seed_extent * 0.5f;
+                Fluid::initializeFluidSeedBox(domain, mn, mx);
             }
             domain.fluid_seed_anchor_min = mn;
             domain.fluid_seed_anchor_max = mx;
@@ -272,6 +258,20 @@ void ParticleSimulationSystem::synchronizeGridDomains() {
         // FluidObject seeded directly from the panel; the unified path keeps
         // the seed deferred so it applies on the next sim tick with a freshly
         // resized grid.
+        if (simulationDomainHasLiquid(domain) && domain.fluid_pending_seed &&
+            state.valid && domain.matter_seed_sources_enabled) {
+            const bool applied = Fluid::applyMatterSeedSources(domain, state,
+                fluidDomainAmbientKelvin(domain, world_thermal_), mesh_volume_resolver_,
+                &flow_sources_, static_cast<int>(i));
+            if (applied && i < grid_domain_compute_buffers_.size()) {
+                if (grid_domain_compute_buffers_[i].matter_runtime) {
+                    Fluid::invalidateMatterGrainAfterReset(
+                        grid_domain_compute_buffers_[i].matter_runtime->grain);
+                }
+                grid_domain_compute_buffers_[i].invalidateDeviceCopies();
+                grid_domain_compute_buffers_[i].gpu_resident_fields_valid = false;
+            }
+        }
         if (simulationDomainHasLiquid(domain) &&
             domain.fluid_pending_seed && state.valid) {
             if (domain.fluid_replace_on_seed) {
