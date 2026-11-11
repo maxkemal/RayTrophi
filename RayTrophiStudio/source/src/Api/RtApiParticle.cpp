@@ -1194,6 +1194,7 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
     if (!out.measured) return Result::success();
 
     const auto& fluid = state.fluid_stats;
+    out.mixed_stages = fluid.mixed_stages;
     out.normalize_window_used = fluid.normalize_window_used;
     out.normalize_window_cells = fluid.normalize_window_used ? fluid.normalize_window_cells : 0;
     out.full_grid_cells = fluid.grid_cell_count;
@@ -1225,6 +1226,10 @@ Result getFluidStepStats(const std::string& domain_id_or_name, FluidStepStats& o
         ? fluid.viscosity_sparse_allocated_tiles : 0;
     out.viscosity_sparse_resident_bytes = out.viscosity_sparse_used
         ? fluid.viscosity_sparse_resident_bytes : 0;
+    out.viscosity_pcg_iterations = fluid.viscosity_on_gpu ? fluid.viscosity_pcg_iterations : 0;
+    out.viscosity_pcg_relative_residual =
+        fluid.viscosity_on_gpu ? fluid.viscosity_pcg_relative_residual : 0.0f;
+    out.viscosity_pcg_unconverged = fluid.viscosity_on_gpu ? fluid.viscosity_pcg_unconverged : 0;
     out.resolution[0] = RayTrophiSim::Fluid::liquidGrid(state).nx;
     out.resolution[1] = RayTrophiSim::Fluid::liquidGrid(state).ny;
     out.resolution[2] = RayTrophiSim::Fluid::liquidGrid(state).nz;

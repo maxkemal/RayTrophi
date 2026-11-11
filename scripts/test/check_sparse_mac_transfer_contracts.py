@@ -25,6 +25,14 @@ def expand(filename, defines=None):
                 condition = not condition
             stack.append([active, condition])
             active = active and condition
+        elif part.startswith("#if "):
+            # `#if defined(A) && !defined(B)` (clustered P2G guard) and friends.
+            expr = re.sub(r"defined\((\w+)\)", lambda m: str(m.group(1) in defines), part[4:])
+            expr = expr.replace("&&", " and ").replace("||", " or ")
+            expr = re.sub(r"!(?!=)", " not ", expr)
+            condition = bool(eval(expr, {"__builtins__": {}}, {}))
+            stack.append([active, condition])
+            active = active and condition
         elif part.startswith("#elif defined("):
             condition = re.search(r"defined\((\w+)\)", part).group(1) in defines
             parent, taken = stack[-1]
@@ -81,7 +89,7 @@ def main():
     assert "bool publishCompactMacToHost(" in host
     assert "max_storage_buffer_bytes" in host
     assert "mixed_working_set_budget_bytes" in host
-    assert "lookup_bytes + page_fields * bytes > budget" in host
+    assert "lookup_bytes + source_bytes + page_fields * bytes > budget" in host
     assert "canonical && params.variational_solids ? 14u : 11u" in host
     assert "compute.getBufferSize(handle)" in host
     assert "storage.flip_gather_used" in host
@@ -91,7 +99,8 @@ def main():
     pure = read("src/Physics/Fluid/FluidDomainStep.inl")
     mixed = read("src/Physics/Fluid/MatterGpuStep.inl")
     assert pure.index("captureSparseMacFlip(") < pure.index("runGpuFluidViscosity(")
-    assert mixed.index("runGpuFluidZeroSolidFaces(grid") < mixed.index("captureSparseMacFlip(")
+    # Solid faces are zeroed through the per-lane solid_faces() helper since 2026-11-10.
+    assert mixed.index("solid_faces(lane, lane_dt)") < mixed.index("captureSparseMacFlip(")
     assert mixed.index("captureSparseMacFlip(") < mixed.index("runGpuFluidViscosity(")
     fields = ("transfer_sparse_used", "flip_sparse_used", "transfer_sparse_active_tiles",
               "transfer_sparse_allocated_tiles", "transfer_sparse_resident_bytes",

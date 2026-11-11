@@ -96,6 +96,15 @@
     <ClCompile Include="source\src\UI\MatterLaneControls.cpp" />
     <ClCompile Include="source\src\Physics\SubstanceCatalogue.cpp" />
     <ClInclude Include="source\include\Fluid\FluidDomainSubstance.h" />
+    <ClInclude Include="source\include\Fluid\MatterLiquidInflow.h" />
+    <ClInclude Include="source\include\Fluid\MixedGpuStageStats.h" />
+    <ClInclude Include="source\include\Fluid\GranularFrameReadback.h" />
+    <ClInclude Include="source\include\Fluid\MixedGpuStageDiagnostics.h" />
+    <ClInclude Include="source\src\UI\MixedGpuStageUI.h" />
+    <ClInclude Include="source\include\Fluid\LiquidEmissionAuthoring.h" />
+    <ClInclude Include="source\src\Api\RtIpcLiquidEmission.h" />
+    <ClInclude Include="source\src\Api\RtPythonLiquidEmission.h" />
+    <ClInclude Include="source\src\UI\LiquidEmissionControls.h" />
     <ClInclude Include="source\include\Fluid\FluidLiquidAdvection.h" />
     <ClInclude Include="source\include\Fluid\FluidDensityProjection.h" />
     <ClInclude Include="source\include\Fluid\MatterSubstanceState.h" />
@@ -106,17 +115,20 @@
     <ClInclude Include="source\include\Fluid\SparseViscosityGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseMacTransferGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseMacSolidWeightsGpu.h" />
+    <ClInclude Include="source\include\Fluid\SparseMacSolidWeightSource.h" />
     <ClInclude Include="source\include\Fluid\SparseGridGpu.h" />
     <ClInclude Include="source\include\Fluid\SparseGridStorage.h" />
     <ClInclude Include="source\include\Fluid\FluidGpuDispatch.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainFluidGpuCoupling.h" />
     <ClCompile Include="source\src\Physics\SubstanceLibrary.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainSubstance.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\MatterLiquidInflow.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterSubstanceState.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparsePressureGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseViscosityGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseMacTransferGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeightsGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeightSource.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeights.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseGridGpu.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\SparseGridStorage.cpp" />
@@ -1039,6 +1051,9 @@
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\src\Api\RtIpcMethodRegistry.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcParamValidation.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
     <ClInclude Include="source\include\Api\RtApiKinematicCollider.h">
@@ -3214,6 +3229,9 @@
     <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcParamValidation.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -4039,6 +4057,22 @@
     <ClInclude Include="source\include\Fluid\MatterGrainCoupling.h" />
     <ClInclude Include="source\include\Fluid\MatterGrainGeometry.h" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainParams.cpp" />
+    <ClInclude Include="source\include\Fluid\DemBondMechanics.h" />
+    <ClCompile Include="source\src\Physics\Fluid\DemBondMechanics.cpp" />
+    <ClInclude Include="source\include\Fluid\DemBondNetwork.h" />
+    <ClInclude Include="source\include\Fluid\DemBondSeed.h" />
+    <ClCompile Include="source\src\Physics\Fluid\DemBondSeed.cpp" />
+    <ClInclude Include="source\include\Fluid\DemBondGpu.h" />
+    <ClInclude Include="source\include\Fluid\DemContactTimeBounds.h" />
+    <ClInclude Include="source\include\Fluid\DemBondCache.h" />
+    <ClInclude Include="source\include\Api\DemBondApi.h" />
+    <ClInclude Include="source\src\UI\DemBondControls.h" />
+    <ClCompile Include="source\src\Physics\Fluid\DemBondNetwork.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\DemBondGpu.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\DemBondCache.cpp" />
+    <ClCompile Include="source\src\Physics\Fluid\DemBondAuthoring.cpp" />
+    <ClCompile Include="source\src\Api\RtApiDemBonds.cpp" />
+    <ClCompile Include="source\src\UI\DemBondControls.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainBirth.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainDiagnostics.cpp" />
     <ClCompile Include="source\src\Physics\Fluid\MatterGrainGpu.cpp" />

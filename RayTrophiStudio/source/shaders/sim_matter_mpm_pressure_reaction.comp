@@ -1,0 +1,88 @@
+// sim_matter_mpm_pressure_reaction.comp
+// The liquid pressure's push on the MPM lane (docs/dev/MATTER_SIVI_MPM_BASINC_BAGLASIMI.md,
+// step 1). The porous projection (sim_fluid_divergence_porous) saw the MPM
+// solid fraction phi of every face; the liquid then took
+//   u_liquid -= dt/h (p_hi - p_lo)
+// on its open part (sim_fluid_subtract_gradient_var). The same pressure
+// gradient acts on the solid's volume phi V, whose mass is rho_c phi V, so the
+// MPM face accelerates by grad p / rho_c: the liquid's step times
+// density_ratio = rho_liquid / rho_constituent. This is Archimedes for a
+// submerged body and the pressure push of a moving liquid -- the force the
+// inelastic contact impulse used to stand in for.
+// Dense MPM faces (the granular lane is never compact). One lane per face slot
+// of all three components, like the gradient kernel.
+#version 450
+#extension GL_GOOGLE_include_directive : require
+#include "sim_dispatch.glsl"
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int   nx; int ny; int nz;
+    int   boundary;        // 0 open (air beyond the box), else closed
+    float voxel_size;
+    float dt;              // the projection's dt
+    float density_ratio;   // rho_liquid / rho_constituent
+    float inv_full_mass;   // 1 / (rho_constituent h^3)
+    float max_fraction;    // 1 - minimum voidage (the projection's cap)
+    uint  lanes;           // max face count over the three axes
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Pressure { float pressure[]; };
+layout(set = 0, binding = 1) readonly buffer Mask     { float fluid_mask[]; };
+layout(set = 0, binding = 2) buffer VelX { float vel_x[]; };
+layout(set = 0, binding = 3) buffer VelY { float vel_y[]; };
+layout(set = 0, binding = 4) buffer VelZ { float vel_z[]; };
+layout(set = 0, binding = 5) readonly buffer MassX { float mass_x[]; };
+layout(set = 0, binding = 6) readonly buffer MassY { float mass_y[]; };
+layout(set = 0, binding = 7) readonly buffer MassZ { float mass_z[]; };
+
+float maskAt(ivec3 c) {
+    if (any(lessThan(c, ivec3(0))) || c.x >= pc.nx || c.y >= pc.ny || c.z >= pc.nz) {
+        return pc.boundary == 0 ? 0.0 : -1.0;
+    }
+    return fluid_mask[c.x + c.y * pc.nx + c.z * pc.nx * pc.ny];
+}
+
+// Pressure difference across the face between cells lo and hi: air is p = 0,
+// a solid side carries no liquid pressure across (0 returned, no push).
+bool pressureStep(ivec3 lo, ivec3 hi, out float dp) {
+    dp = 0.0;
+    float ml = maskAt(lo), mh = maskAt(hi);
+    if (ml < -0.5 || mh < -0.5) return false;
+    bool fl = ml > 0.5, fh = mh > 0.5;
+    if (!fl && !fh) return false;
+    float pl = fl ? pressure[lo.x + lo.y * pc.nx + lo.z * pc.nx * pc.ny] : 0.0;
+    float ph = fh ? pressure[hi.x + hi.y * pc.nx + hi.z * pc.nx * pc.ny] : 0.0;
+    dp = ph - pl;
+    return true;
+}
+
+void main() {
+    uint lane = simLane256(pc.lanes);
+    if (lane >= pc.lanes) return;
+    float h = pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0;
+    float scale = pc.dt / h * pc.density_ratio;
+    int i = int(lane);
+    // X faces: (nx+1) * ny * nz
+    int fx = (pc.nx + 1) * pc.ny * pc.nz;
+    if (i < fx && mass_x[i] > 0.0 &&
+        min(mass_x[i] * pc.inv_full_mass, pc.max_fraction) > 1e-4) {
+        ivec3 f = ivec3(i % (pc.nx + 1), (i / (pc.nx + 1)) % pc.ny, i / ((pc.nx + 1) * pc.ny));
+        float dp;
+        if (pressureStep(f - ivec3(1, 0, 0), f, dp)) vel_x[i] -= scale * dp;
+    }
+    int fy = pc.nx * (pc.ny + 1) * pc.nz;
+    if (i < fy && mass_y[i] > 0.0 &&
+        min(mass_y[i] * pc.inv_full_mass, pc.max_fraction) > 1e-4) {
+        ivec3 f = ivec3(i % pc.nx, (i / pc.nx) % (pc.ny + 1), i / (pc.nx * (pc.ny + 1)));
+        float dp;
+        if (pressureStep(f - ivec3(0, 1, 0), f, dp)) vel_y[i] -= scale * dp;
+    }
+    int fz = pc.nx * pc.ny * (pc.nz + 1);
+    if (i < fz && mass_z[i] > 0.0 &&
+        min(mass_z[i] * pc.inv_full_mass, pc.max_fraction) > 1e-4) {
+        ivec3 f = ivec3(i % pc.nx, (i / pc.nx) % pc.ny, i / (pc.nx * pc.ny));
+        float dp;
+        if (pressureStep(f - ivec3(0, 0, 1), f, dp)) vel_z[i] -= scale * dp;
+    }
+}

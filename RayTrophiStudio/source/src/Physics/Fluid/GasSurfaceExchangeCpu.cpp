@@ -118,12 +118,49 @@ bool exchangeGasSurfaceCpu(
                 const double psat_air = atmosphere * std::exp(a * (1.0 / boil - 1.0 / std::min(ta, boil)));
                 const double pv = std::max(humidity * psat_air,
                     static_cast<double>(m) / volume * gas_constant * ta / molar);
-                const double flux = coefficient(pv) * std::max(0.0, psat - pv) *
-                    std::sqrt(molar / (2.0 * pi * gas_constant * tp));
+                (void)psat;
                 const double mass = rest * input.fraction;
                 const double c = input.specific_heat;
-                const double thermal_budget = cp * std::max(0.0, tp - 1.0) / latent;
-                const double dm = std::min({flux * input.share * dt, 0.5 * mass, thermal_budget});
+                // ★ Backward Euler (2026-11-11). The flux used to be taken at
+                // the START temperature and applied in one step, bounded only
+                // by "stay above 1 K": 353 K water next to its boiling point
+                // lost its latent heat at that rate for a whole step and
+                // landed at 24-35 K, froze, and the frozen carriers held the
+                // mixed GPU step (honey/snow scene with thermal on). Now the
+                // flux is evaluated at the END temperature, T = tp - m(T) L/cp
+                // with m(T) = HK flux * share * dt. The flux grows with T and
+                // is zero at the dew point, so the root is unique and never
+                // below it; small steps give the old answer.
+                const auto evaporated = [&](double T) {
+                    const double ps = atmosphere * std::exp(a * (1.0 / boil - 1.0 / T));
+                    return coefficient(pv) * std::max(0.0, ps - pv) *
+                        std::sqrt(molar / (2.0 * pi * gas_constant * T)) * input.share * dt;
+                };
+                // ★★ Wet-bulb floor (2026-11-11). The dew point is no bound in
+                // DRY air (pv -> 0): splashing hot water still reached 212 K.
+                // A wet surface cannot evaporate itself below the wet-bulb
+                // temperature, where the heat the air brings in pays for the
+                // evaporation: c_air (Ta - Twb) = L (w_s(Twb) - w), with the
+                // mixing ratio w = eps pv / (P - pv), eps = M_vapour / M_air.
+                const double eps = molar / air_molar;
+                const double w_air = eps * pv / std::max(atmosphere - pv, 1.0);
+                const auto wetBulbExcess = [&](double T) {
+                    const double ps = std::min(atmosphere * std::exp(a * (1.0 / boil - 1.0 / T)),
+                                               0.99 * atmosphere);
+                    return 1005.0 * (ta - T) - latent * (eps * ps / (atmosphere - ps) - w_air);
+                };
+                double wb_lo = 1.0, wb_hi = std::max(1.0, std::min(ta, boil));
+                for (int it = 0; it < 40 && wb_hi - wb_lo > 1.0e-3; ++it) {
+                    const double mid = 0.5 * (wb_lo + wb_hi);
+                    if (wetBulbExcess(mid) > 0.0) wb_lo = mid; else wb_hi = mid;
+                }
+                const double wet_bulb = wb_lo;
+                double lo = std::min(wet_bulb, tp), hi = tp;
+                for (int it = 0; it < 40 && hi - lo > 1.0e-4; ++it) {
+                    const double mid = 0.5 * (lo + hi);
+                    if ((tp - mid) * cp / latent > evaporated(mid)) lo = mid; else hi = mid;
+                }
+                const double dm = std::min(std::max(0.0, (tp - hi) * cp / latent), 0.5 * mass);
                 if (dm > 0 && cp > 0) {
                     tp -= dm * latent / cp;
                     value.fraction = static_cast<float>((mass - dm) / rest);

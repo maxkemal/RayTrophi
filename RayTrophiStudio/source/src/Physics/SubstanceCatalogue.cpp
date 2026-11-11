@@ -3,8 +3,6 @@
 #endif
 #include "SubstanceCatalogue.h"
 #include "SubstanceLibrary.h"
-#include <algorithm>
-#include <stdexcept>
 #include <string>
 #include <utility>
 
@@ -13,18 +11,23 @@ namespace {
 
 struct Foundation {
     const char* name;
-    const char* example;
     const char* family;
     const char* label;
 };
 
 constexpr Foundation foundations[] = {
-    {"Generic metal", "Steel", "metals", "Metals"},
-    {"Generic mineral", "Stone", "minerals", "Minerals and ceramics"},
-    {"Generic polymer", "Plastic (PE)", "polymers", "Polymers and elastomers"},
-    {"Generic fibrous solid", "Wood (Oak)", "fibrous", "Fibrous and porous materials"},
-    {"Generic liquid", "Water", "liquids", "Liquids"},
-    {"Generic mineral grains", "Sand", "minerals", "Minerals and ceramics"},
+    {"Steel", "metals", "Metals"},
+    {"Stone", "minerals", "Minerals and ceramics"},
+    {"Plastic (PE)", "polymers", "Polymers and elastomers"},
+    {"Wood (Oak)", "fibrous", "Fibrous and porous materials"},
+    {"Water", "liquids", "Liquids"},
+    {"Oil", "liquids", "Liquids"},
+    {"Honey", "liquids", "Liquids"},
+    {"Sand", "minerals", "Minerals and ceramics"},
+    {"Soil", "minerals", "Minerals and ceramics"},
+    {"Snow", "liquids", "Liquids"},
+    {"Mud", "soft_materials", "Soft solids and pastes"},
+    {"Gelatin", "soft_materials", "Soft solids and pastes"},
 };
 
 std::pair<std::string, std::string> family(const SubstanceProfile& profile) {
@@ -49,6 +52,9 @@ std::pair<std::string, std::string> family(const SubstanceProfile& profile) {
     if (name == "Flesh") {
         return {"biological", "Biological examples"};
     }
+    if (name == "Mud Slurry" || name == "Dough" || name == "Chewing Gum") {
+        return {"soft_materials", "Soft solids and pastes"};
+    }
     // Identity is not a runtime phase: frozen water remains in the liquid family.
     if (profile.category == SubstanceCategory::Liquid ||
         profile.category == SubstanceCategory::Fuel || name == "Ice" || name == "Snow") {
@@ -58,22 +64,6 @@ std::pair<std::string, std::string> family(const SubstanceProfile& profile) {
 }
 
 } // namespace
-
-void appendFoundationSubstances(std::vector<SubstanceProfile>& profiles) {
-    for (const auto& entry : foundations) {
-        const auto source = std::find_if(profiles.begin(), profiles.end(),
-            [&](const SubstanceProfile& value) { return value.name == entry.example; });
-        if (source == profiles.end()) {
-            throw std::logic_error("Foundation substance example is unavailable");
-        }
-        // Copy the already configured representative, including its solver hints.
-        // No existing named material or saved binding is renamed or retuned.
-        auto profile = *source;
-        profile.name = entry.name;
-        profile.based_on.clear();
-        profiles.push_back(std::move(profile));
-    }
-}
 
 nlohmann::json substanceCatalogueInfo(const SubstanceProfile& profile) {
     const auto* root = &profile;
@@ -90,7 +80,7 @@ nlohmann::json substanceCatalogueInfo(const SubstanceProfile& profile) {
     std::string representative;
     for (const auto& entry : foundations) {
         if (root->name == entry.name) {
-            representative = entry.example;
+            representative = entry.name;
             if (profile.based_on.empty()) {
                 tier = "foundation";
             }
@@ -100,7 +90,27 @@ nlohmann::json substanceCatalogueInfo(const SubstanceProfile& profile) {
     if (profile.based_on.empty() && root->name == "Flesh") {
         tier = "test";
     }
+    std::string model_notes;
+    if (root->name == "Chocolate") {
+        model_notes = "Molten chocolate, constant-viscosity approximation; "
+            "yield stress and shear thinning are not implemented.";
+    } else if (root->name == "Honey" || root->name == "Oil") {
+        model_notes = "Fixed reference viscosity; temperature and composition "
+            "dependence are not fitted. Resolution can skip the viscous solve.";
+    } else if (root->name == "Stone") {
+        model_notes = "Molten rock uses the existing Lava starting viscosity and "
+            "an equal-density approximation, not a fitted magma rheology.";
+    } else if (root->name == "Plastic (PE)") {
+        model_notes = "Constant-viscosity polymer melt approximation; "
+            "temperature and shear-rate dependence are not fitted.";
+    } else if (root->name == "Alcohol") {
+        model_notes = "Ethanol reference composition; not a generic alcohol mixture.";
+    } else if (root->name == "Chewing Gum") {
+        model_notes = "Viscoelastoplastic starting recipe: heating reduces stiffness, "
+            "viscosity, yield strain and relaxation time. Not fitted to measured gum data.";
+    }
     return {{"family", key}, {"family_label", label}, {"tier", tier},
+        {"model_notes", model_notes},
         {"root_profile", root->name}, {"representative", representative},
         {"values_kind", "representative_starting_values"},
         {"acoustic_surface_defined", profile.acoustic_defined},

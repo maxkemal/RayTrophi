@@ -1,6 +1,6 @@
 #pragma once
 
-#include "MatterConstitutive.h"
+#include "MatterConstitutiveState.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -90,7 +90,6 @@ bool substanceHasSolidSkeleton(const SubstanceProfile* profile);
 // A parcel is in the solid state while at least this share of it is solid
 // (fusion_solid_fraction). The latent heat of half the parcel separates the
 // two switch points, so the state does not flicker at the melt point.
-constexpr float kFusionSolidThreshold = 0.5f;
 MatterConstitutiveModel substanceBirthModel(uint32_t tag, const APICSolverParams& params,
                                           float kelvin);
 // A source that does not set its own temperature pours the substance as

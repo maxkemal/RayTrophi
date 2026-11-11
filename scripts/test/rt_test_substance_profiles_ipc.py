@@ -22,7 +22,8 @@ NUMERIC_FIELDS = {
     "liquid_kinematic_viscosity", "ignition_kelvin", "flash_kelvin",
     "autoignition_kelvin", "melt_kelvin", "boiling_kelvin",
     "latent_heat_fusion", "latent_heat_vaporization", "vaporization_rate",
-    "flame_persistence",
+    "flame_persistence", "liquid_cold_viscosity", "elastic_thermal_viscosity_power",
+    "elastic_thermal_yield_power", "elastic_thermal_relaxation_power",
     "granular_friction_degrees", "granular_cohesion",
 }
 HONEY, DARK, COLLIDER = "T1_Honey", "T1_HoneyDark", "T1_SubstanceRefCollider"
@@ -42,7 +43,7 @@ def main():
         return client.call("substance.get", name=name)
 
     try:
-        # ── Part 1: built-ins ──────────────────────────────────────────────
+        # â”€â”€ Part 1: built-ins â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         listing = client.call("substance.list")["substances"]
         names = [row["name"] for row in listing]
         assert len(names) == len(set(names)), "duplicate substance ids"
@@ -64,10 +65,25 @@ def main():
             assert fields["density"] > 0.0 and fields["liquid_density"] > 0.0
             assert fields["specific_heat"] > 0.0
             assert fields["liquid_kinematic_viscosity"] >= 0.0
+            if fields["meltable"]:
+                assert fields["liquid_cold_viscosity"] >= fields["liquid_kinematic_viscosity"]
             rows[name] = fields
         assert math.isclose(rows["Plastic (PE)"]["liquid_kinematic_viscosity"], 0.30, abs_tol=1e-7)
         assert math.isclose(rows["Wax"]["liquid_kinematic_viscosity"], 5.0e-6, abs_tol=1e-10)
         assert math.isclose(rows["Iron"]["liquid_kinematic_viscosity"], 1.0e-6, abs_tol=1e-10)
+        for name in ("Snow", "Ice"):
+            assert rows[name]["liquid_kinematic_viscosity"] == rows["Water"]["liquid_kinematic_viscosity"]
+            assert rows[name]["liquid_density"] == rows["Water"]["liquid_density"]
+        for name in ("Honey", "Oil", "Chocolate"):
+            assert rows[name]["solver_internal_friction"] == 0.0
+        assert math.isclose(rows["Chewing Gum"]["granular_residual_strength"], 0.02, abs_tol=1e-6)
+        assert rows["Chewing Gum"]["elastic_thermal_yield_power"] == 1.0
+        assert rows["Chewing Gum"]["elastic_thermal_relaxation_power"] == 1.0
+        assert rows["Stone"]["liquid_kinematic_viscosity"] == 0.5
+        assert rows["Stone"]["liquid_density"] == rows["Stone"]["density"]
+        assert math.isclose(rows["Gasoline"]["flash_kelvin"], 230.37, abs_tol=1e-3)
+        assert math.isclose(rows["Alcohol"]["flash_kelvin"], 285.93, abs_tol=1e-3)
+        assert math.isclose(rows["Alcohol"]["autoignition_kelvin"], 638.15, abs_tol=1e-3)
         for name in ("Sand", "Gravel", "Soil"):
             for key in ("solver_flip_blend", "solver_internal_friction"):
                 assert rows[name][key] == 0.0, (name, key, rows[name][key])
@@ -92,11 +108,17 @@ def main():
         assert math.isclose(rows["Water"]["liquid_surface_tension_n_m"], 0.072, abs_tol=1e-6)
         assert {"Honey", "Chocolate", "Mud"}.issubset(rows)
         # Elastic solids on the MPM lane (docs/dev/ELASTIK_MPM.md, 2026-11-02).
-        for name in ("Gelatin", "Dough", "Chewing Gum"):
+        for name in ("Gelatin", "Dough", "Chewing Gum", "Mud"):
             assert rows[name]["default_constitutive_model"] == "elastic", (name, rows[name])
             assert rows[name]["elastic_young_modulus"] > 0.0
         assert rows["Gelatin"]["elastic_yield_strain"] == 0.0
         assert rows["Dough"]["elastic_yield_strain"] > 0.0
+        assert by_name["Mud"]["category"] == "solid"
+        assert rows["Mud"]["elastic_yield_strain"] > 0.0
+        assert rows["Mud"]["elastic_viscosity_pa_s"] > 0.0
+        assert rows["Mud"]["elastic_relaxation_s"] == 0.0
+        assert rows["Mud Slurry"]["default_constitutive_model"] == "fluid"
+        assert rows["Mud Slurry"]["liquid_kinematic_viscosity"] > 0.0
         assert rows["Chewing Gum"]["elastic_relaxation_s"] > 0.0
         # P5 2026-10-19: the quench chemistry is retired; water is just not a fuel.
         assert rows["Water"]["fluid_flammable"] is False
@@ -109,7 +131,7 @@ def main():
             "unknown substance silently fell back"
         print(f"part 1 PASS: {len(rows)} built-ins, categories right", flush=True)
 
-        # ── Part 2: derive ─────────────────────────────────────────────────
+        # â”€â”€ Part 2: derive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         water = rows["Water"]
         assert rejected("substance.set", name="Water", fields={"density": 1.0}), \
             "a built-in accepted an edit"
@@ -134,6 +156,13 @@ def main():
         honey = get(HONEY)
         assert math.isclose(honey["fields"]["liquid_kinematic_viscosity"], 2.0e-3, rel_tol=1e-6)
         assert honey["overridden"] == ["liquid_kinematic_viscosity"], honey["overridden"]
+        stable = get(HONEY)
+        assert rejected("substance.set", name=HONEY,
+                        fields={"elastic_thermal_relaxation_power": -1.0})
+        assert get(HONEY) == stable
+        assert rejected("substance.set", name=HONEY,
+                        fields={"liquid_cold_viscosity": 1.0e-3})
+        assert get(HONEY) == stable, "rejected freeze curve edit changed the profile"
         assert {k: v for k, v in honey["fields"].items() if k != "liquid_kinematic_viscosity"} == \
             {k: v for k, v in water.items() if k != "liquid_kinematic_viscosity"}
 

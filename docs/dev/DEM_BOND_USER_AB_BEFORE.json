@@ -1,0 +1,213 @@
+{
+  "control": {
+    "driver": "user",
+    "dropped_seeds": [
+      "Physics Domain 1"
+    ],
+    "epoch": 4620,
+    "frame": 0,
+    "last_rewind": {
+      "absorbed": false,
+      "first_changed_part": "fluid 'Physics Domain 1' solver/seed",
+      "fluid_affected": true,
+      "frame": 0
+    },
+    "playing": false,
+    "rewind_history": [
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'T_CodexDemBond' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'T_CodexDemBond' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'T_CodexDemBond' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "emitters / colliders",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'Physics Domain 1' grid/gas",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "domain 'Physics Domain 1' grid/gas",
+        "fluid_affected": false,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "fluid 'Physics Domain 1' solver/seed",
+        "fluid_affected": true,
+        "frame": 0
+      },
+      {
+        "absorbed": false,
+        "first_changed_part": "fluid 'Physics Domain 1' solver/seed",
+        "fluid_affected": true,
+        "frame": 0
+      }
+    ],
+    "script_driving": false,
+    "script_sim_seconds": 0.0
+  },
+  "recipe": {
+    "application": "replace_all_layers_then_shared_settle",
+    "domain": "Physics Domain 1",
+    "enabled": true,
+    "environment_kelvin": 293.0,
+    "max_particles": 68064,
+    "particles_per_cell": 8,
+    "pending_recipe_changes": true,
+    "plan": {
+      "estimate_kind": "conservative_bounds_and_memory_allowance",
+      "gpu_planning_bytes": 203395072,
+      "gpu_required": true,
+      "host_planning_bytes": 406790144,
+      "layers": [
+        {
+          "id": 1,
+          "particle_upper_bound": 59130
+        }
+      ],
+      "memory": {
+        "available_fraction": 0.7,
+        "gpu_available_bytes": 11122032640,
+        "gpu_measured": true,
+        "host_available_bytes": 27458826240,
+        "host_measured": true
+      },
+      "memory_check_passed": true,
+      "memory_guard": true,
+      "memory_message": "",
+      "particle_upper_bound": 59130,
+      "suggested_capacity": 68064
+    },
+    "selected_source_id": 1,
+    "settings": {
+      "auto_capacity": true,
+      "memory_guard": true,
+      "particles_per_cell": 8,
+      "settle": false,
+      "settle_max_steps": 240,
+      "settle_tolerance": 0.00019999999494757503
+    },
+    "sources": [
+      {
+        "bond_body": {
+          "enabled": true,
+          "poisson": 0.25,
+          "reach_ratio": 1.25,
+          "section_ratio": 0.5,
+          "shear_strength_pa": 100000.0,
+          "tensile_strength_pa": 10000.0,
+          "young_pa": 1000000.0
+        },
+        "bounds_max": [
+          1.6799999475479126,
+          1.1190001964569092,
+          1.3650000095367432
+        ],
+        "bounds_min": [
+          -1.6799999475479126,
+          0.43899980187416077,
+          -1.3650000095367432
+        ],
+        "enabled": true,
+        "grain_saturation": 0.0,
+        "id": 1,
+        "mesh_object": "",
+        "name": "Seed Layer 1",
+        "resolved_birth_kelvin": 263.1499938964844,
+        "substance": "Ice",
+        "temperature_kelvin": 293.1499938964844,
+        "temperature_mode": "material",
+        "velocity": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    ]
+  },
+  "digest": {
+    "bounds_max": [
+      1.6269378662109375,
+      1.0921001434326172,
+      1.3153399229049683
+    ],
+    "bounds_measured": true,
+    "bounds_min": [
+      -1.6549971103668213,
+      0.4639999270439148,
+      -1.3399999141693115
+    ],
+    "bounds_p05": [
+      -1.5068100690841675,
+      0.46534764766693115,
+      -1.2284787893295288
+    ],
+    "bounds_p95": [
+      1.4787496328353882,
+      1.0907411575317383,
+      1.2038345336914062
+    ],
+    "centroid": [
+      -0.014028091523896336,
+      0.7780516187763247,
+      -0.012330247602100584
+    ],
+    "live": true,
+    "mean_speed": 0.0,
+    "ok": true,
+    "particles": 59130,
+    "position_hash": "84714c6069a13ea3",
+    "velocity_hash": "228eea56daaf4e23",
+    "whitewater_particles": 0,
+    "whitewater_position_hash": "14650fb0739d0383"
+  },
+  "bonds": {
+    "bodies": 1,
+    "body_ids": [
+      1
+    ],
+    "bonds": 335953,
+    "broken": 0,
+    "dissipated_energy_j": 0.0,
+    "elastic_energy_j": 0.0,
+    "particles": 59130
+  },
+  "settings": {
+    "compact_sleep_work": true,
+    "contact_probe_enabled": false,
+    "contact_resolution": 24,
+    "fluid_coupling": true,
+    "large_grain_fraction": 0.10000000149011612,
+    "max_substeps": 1024,
+    "radius_m": 0.02500000037252903,
+    "radius_max_m": 0.0,
+    "size_distribution": "uniform",
+    "size_seed": 1337,
+    "sleep": true,
+    "sleep_speed_m_s": 0.0020000000949949026,
+    "sleep_time_s": 0.20000000298023224,
+    "sliding_damping_n_s_m": 4.0,
+    "stiffness_scale": 1.0,
+    "volume_exclusion": true
+  }
+}

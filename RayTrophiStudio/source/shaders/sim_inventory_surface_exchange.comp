@@ -155,12 +155,36 @@ void main() {
             // Device mass is the current advected vapour, never a stale CPU mirror.
             double pv = max(double(pc.humidity) * psat_air,
                 double(m) / double(pc.cell_volume) * gas_constant * ta / molar);
-            double flux = hkCoefficient(pv, atmosphere) * max(0.0, psat - pv) *
-                double(sqrt(float(molar / (2.0 * pi * gas_constant * tp))));
             double mass = rest * double(p.fraction);
-            double thermal_budget = cp * max(0.0, tp - 1.0) / latent;
-            double dm = min(min(flux * double(p.share) * double(pc.dt), 0.5 * mass),
-                            thermal_budget);
+            // Backward Euler in the end temperature (CPU reference: the flux
+            // taken at the start temperature cooled 353 K water to ~30 K in one
+            // step). Bisection on T = tp - m(T) L / cp; m(T) grows with T and is
+            // zero at the dew point, so the root is unique and above it.
+            double hk = hkCoefficient(pv, atmosphere);
+            // Wet-bulb floor (CPU reference): dry air made the dew point 0 K
+            // and splashing hot water still reached 212 K.
+            // c_air (Ta - Twb) = L (w_s(Twb) - w), w = eps pv / (P - pv).
+            double eps = molar / air_molar;
+            double w_air = eps * pv / max(atmosphere - pv, 1.0);
+            double wb_lo = 1.0, wb_hi = max(1.0, min(ta, boil));
+            for (int it = 0; it < 40 && wb_hi - wb_lo > 1.0e-3; ++it) {
+                double mid = 0.5 * (wb_lo + wb_hi);
+                double ps = min(atmosphere * double(exp(float(a * (1.0 / boil - 1.0 / mid)))),
+                                0.99 * atmosphere);
+                double excess = 1005.0 * (ta - mid) - latent * (eps * ps / (atmosphere - ps) - w_air);
+                if (excess > 0.0) wb_lo = mid; else wb_hi = mid;
+            }
+            double lo = min(wb_lo, tp), hi = tp;
+            for (int it = 0; it < 40 && hi - lo > 1.0e-4; ++it) {
+                double mid = 0.5 * (lo + hi);
+                double ps = atmosphere * double(exp(float(a * (1.0 / boil - 1.0 / mid))));
+                double m_mid = hk * max(0.0, ps - pv) *
+                    double(sqrt(float(molar / (2.0 * pi * gas_constant * mid)))) *
+                    double(p.share) * double(pc.dt);
+                if ((tp - mid) * cp / latent > m_mid) lo = mid; else hi = mid;
+            }
+            double dm = min(max(0.0, (tp - hi) * cp / latent), 0.5 * mass);
+
             if (dm > 0.0 && cp > 0.0) {
                 double c = double(p.specific_heat);
                 // The vapour and remaining liquid share this final temperature.

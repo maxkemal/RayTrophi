@@ -47,7 +47,6 @@ bool parseLabelRoute(const std::string& name, LabelRoute& out) {
 LabelRoutes defaultLabelRoutes() {
     LabelRoutes r;
     r.fill(LabelRoute::Follow);
-    r[static_cast<std::size_t>(ParticleLabel::Spray)]  = LabelRoute::Splat;
     r[static_cast<std::size_t>(ParticleLabel::Foam)]   = LabelRoute::Splat;
     r[static_cast<std::size_t>(ParticleLabel::Bubble)] = LabelRoute::Splat;
     r[static_cast<std::size_t>(ParticleLabel::Mist)]   = LabelRoute::Fog;

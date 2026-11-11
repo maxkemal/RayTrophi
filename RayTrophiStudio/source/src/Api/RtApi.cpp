@@ -15,6 +15,7 @@
 #include "Backend/VulkanRecoveryPolicy.h"
 
 #include <deque>
+#include <SDL.h>
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -428,8 +429,23 @@ bool isBound() { return g_ctx != nullptr; }
 
 void enqueue(std::function<void(UIContext&)> fn) {
     if (!fn) return;
-    std::lock_guard<std::mutex> lock(g_queue_mutex);
-    g_queue.push_back(std::move(fn));
+    {
+        std::lock_guard<std::mutex> lock(g_queue_mutex);
+        g_queue.push_back(std::move(fn));
+    }
+    // ★ Wake the main loop. With the window unfocused it sleeps in
+    // SDL_WaitEventTimeout for up to 500 ms (Viewport::backgroundWaitMilliseconds)
+    // and nothing else wakes it, so every IPC request waited out that sleep:
+    // a script-driven app that was not the foreground window ran its tests
+    // 10-16x slower and its GPU dropped clocks between requests (2026-11-11,
+    // session-to-session spread of +-20 % in GPU timings). SDL_PushEvent is
+    // thread-safe; the loop drains the queue at the top of the next iteration.
+    static const Uint32 wake_event = SDL_RegisterEvents(1);
+    if (wake_event != static_cast<Uint32>(-1)) {
+        SDL_Event event{};
+        event.type = wake_event;
+        SDL_PushEvent(&event);
+    }
 }
 
 void drainMainThreadQueue() {

@@ -20,7 +20,7 @@ def main():
     for path in ("sim_fluid_p2g_scatter.glsl", "sim_fluid_g2p.glsl",
                  "sim_fluid_clear_float.comp", "sim_fluid_p2g_normalize.comp",
                  "sim_fluid_normalize_window.comp", "sim_matter_copy.comp",
-                 "sim_matter_clear.comp", "sim_matter_contact.glsl"):
+                 "sim_matter_clear.comp", "sim_matter_liquid_drag.glsl"):
         source = read("shaders/" + path)
         assert '#include "sim_dispatch.glsl"' in source, path
         assert "simLane256(" in source, path

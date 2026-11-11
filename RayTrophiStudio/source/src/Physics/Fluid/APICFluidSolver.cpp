@@ -1,3 +1,4 @@
+#include "Fluid/DomainWallGridContact.h"
 /*
  * =========================================================================
  * Project:       RayTrophi Studio
@@ -2054,21 +2055,26 @@ struct MpmContact {
         const Vec3 vs = solidVelocity(wi, wj, wk);
         const float mu = std::max(cellField(grid.solid_contact_friction, wi, wj, wk), 0.0f);
         const float glue = std::max(cellField(grid.solid_contact_adhesion, wi, wj, wk), 0.0f);
+        if (band && glue <= 0.0f) return v;  // outside an unglued surface: free
         Vec3 rel = Vec3(u[0], u[1], u[2]) - vs;
         const float vn = rel.dot(n);
         Vec3 vt = rel - n * vn;
-        if (band) {
-            if (glue <= 0.0f || vn <= 0.0f) return v;
-            const float hold = glue * dt / (std::max(density, 1.0f) * h);
-            rel = vt + n * std::max(vn - hold, 0.0f);
-        } else if (vn < 0.0f) {
-            const float slip = vt.length();
-            if (slip > 1e-9f) vt = vt * (std::max(slip - mu * (-vn), 0.0f) / slip);
-            rel = vt;
-        } else if (glue > 0.0f) {
-            const float hold = glue * dt / (std::max(density, 1.0f) * h);
-            rel = vt + n * std::max(vn - hold, 0.0f);
+        // Cohesive Coulomb (the kernel's header says why): the glue is one
+        // budget shared by tension and shear, pressing in adds mu * |v_n|.
+        const float hold = glue > 0.0f ? glue * dt / (std::max(density, 1.0f) * h) : 0.0f;
+        float shear = 0.0f;
+        float vn_kept = 0.0f;
+        if (vn < 0.0f) {
+            vn_kept = band ? vn : 0.0f;
+            shear = (band ? 0.0f : mu * (-vn)) + hold;
+        } else {
+            const float tension = std::min(vn, hold);
+            vn_kept = vn - tension;
+            shear = hold - tension;
         }
+        const float slip = vt.length();
+        if (slip > 1e-9f) vt = vt * (std::max(slip - shear, 0.0f) / slip);
+        rel = vt + n * vn_kept;
         return comp(vs, axis) + comp(rel, axis);
     }
 };
@@ -2159,14 +2165,24 @@ std::size_t applyMpmParticleContact(FluidParticles& particles, const FluidSim::F
 }
 
 static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverParams& params,
-                                   float dt) {
+                                   float dt, bool wall_contact = true) {
     const int thread_count = solverThreadCount(params);
     const bool grid_parallel = shouldParallelGrid(params,
         static_cast<size_t>(grid.nx) * static_cast<size_t>(grid.ny) * static_cast<size_t>(grid.nz));
     if (params.granular_enabled) {
+        if (wall_contact) {
+            applyDomainWallGridContact(grid, params, dt);
+        }
         enforceMpmContact(grid, dt, params.granular_density);
         return;
     }
+    // Separating wall: only faces INSIDE a collider (both cells solid) are
+    // clamped here; a collider face carries the liquid's own velocity on to the
+    // device, which holds or releases it (sim_matter_liquid_wall.glsl).
+    const bool keep_collider_faces = params.liquid_collider_wall;
+    const auto clamp_face = [&](bool solid_lo, bool solid_hi) {
+        return keep_collider_faces ? (solid_lo && solid_hi) : (solid_lo || solid_hi);
+    };
 #ifdef _OPENMP
 #pragma omp parallel for schedule(static) num_threads(thread_count) if(grid_parallel)
 #endif
@@ -2174,8 +2190,8 @@ static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverPa
         const int i = static_cast<int>(raw % (grid.nx + 1));
         const int j = static_cast<int>((raw / (grid.nx + 1)) % grid.ny);
         const int k = static_cast<int>(raw / (static_cast<int64_t>(grid.nx + 1) * grid.ny));
-        if ((i > 0 && grid.isSolid(i - 1, j, k)) ||
-            (i < grid.nx && grid.isSolid(i, j, k))) {
+        if (clamp_face(i > 0 && grid.isSolid(i - 1, j, k),
+                       i < grid.nx && grid.isSolid(i, j, k))) {
             grid.vel_x[grid.velXIndex(i, j, k)] = 0.0f;
         }
     }
@@ -2186,8 +2202,8 @@ static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverPa
         const int i = static_cast<int>(raw % grid.nx);
         const int j = static_cast<int>((raw / grid.nx) % (grid.ny + 1));
         const int k = static_cast<int>(raw / (static_cast<int64_t>(grid.nx) * (grid.ny + 1)));
-        if ((j > 0 && grid.isSolid(i, j - 1, k)) ||
-            (j < grid.ny && grid.isSolid(i, j, k))) {
+        if (clamp_face(j > 0 && grid.isSolid(i, j - 1, k),
+                       j < grid.ny && grid.isSolid(i, j, k))) {
             grid.vel_y[grid.velYIndex(i, j, k)] = 0.0f;
         }
     }
@@ -2198,8 +2214,8 @@ static void enforceSolidBoundaries(FluidSim::FluidGrid& grid, const APICSolverPa
         const int i = static_cast<int>(raw % grid.nx);
         const int j = static_cast<int>((raw / grid.nx) % grid.ny);
         const int k = static_cast<int>(raw / (static_cast<int64_t>(grid.nx) * grid.ny));
-        if ((k > 0 && grid.isSolid(i, j, k - 1)) ||
-            (k < grid.nz && grid.isSolid(i, j, k))) {
+        if (clamp_face(k > 0 && grid.isSolid(i, j, k - 1),
+                       k < grid.nz && grid.isSolid(i, j, k))) {
             grid.vel_z[grid.velZIndex(i, j, k)] = 0.0f;
         }
     }
@@ -2440,9 +2456,16 @@ static void applyViscosity(FluidSim::FluidGrid& grid,
                     diag += a_link;
                 } else if (kind == FaceKind::Solid) {
                     // Dirichlet at the solid's velocity, scaled by how much of
-                    // the no-slip condition the material asks for.
-                    sum  += a_link * solid_weight * nv;
-                    diag += a_link * solid_weight;
+                    // the no-slip condition the material asks for. A wall
+                    // ACROSS the face's own axis sits half a cell away, not a
+                    // whole one: the ghost is 2 v_s - u, so the link counts
+                    // twice. Weight 1 put the no-slip plane h/2 inside the wall
+                    // and a thin honey film flowed as if h/2 thicker
+                    // (Huppert test 2026-11-09, sim_fluid_viscosity_pcg.glsl).
+                    const int link_axis = o[0] != 0 ? 0 : (o[1] != 0 ? 1 : 2);
+                    const float wall = link_axis == comp ? 1.0f : 2.0f;
+                    sum  += a_link * wall * solid_weight * nv;
+                    diag += a_link * wall * solid_weight;
                 }
                 // Air: stress-free — contributes to neither side.
             }
@@ -2825,12 +2848,7 @@ static int advectParticles(FluidParticles& parts,
                 // Without this guard, particles stuck at the floor can feed
                 // energy back into the next pressure solve and explode outward.
                 Vec3& pv = parts.velocity[pi];
-                if (pn.x < lo.x) { pn.x = lo.x; pv.x = std::abs(pv.x) * wall_damping; }
-                if (pn.x > hi.x) { pn.x = hi.x; pv.x = -std::abs(pv.x) * wall_damping; }
-                if (pn.y < lo.y) { pn.y = lo.y; pv.y = std::abs(pv.y) * wall_damping; }
-                if (pn.y > hi.y) { pn.y = hi.y; pv.y = -std::abs(pv.y) * wall_damping; }
-                if (pn.z < lo.z) { pn.z = lo.z; pv.z = std::abs(pv.z) * wall_damping; }
-                if (pn.z > hi.z) { pn.z = hi.z; pv.z = -std::abs(pv.z) * wall_damping; }
+                resolveDomainWallTail(pn, pv, lo, hi, params, sub_dt, grid.voxel_size);
                 parts.position[pi] = pn;
             }
         }

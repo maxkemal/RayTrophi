@@ -1,4 +1,5 @@
 #include "Fluid/MatterGrain.h"
+#include "DemBondControls.h"
 #include "Fluid/MatterSubstanceState.h"
 #include "ParticleSimulation.h"
 #include "MaterialStateField.h"
@@ -196,6 +197,7 @@ void drawMatterGrainSolver(const SimulationGridDomainDesc& domain,
     }
     ImGui::PushID(domain.name.c_str());
     auto p = domain.fluid_params.grain;
+    drawDemBondControls(domain, state);
     bool changed = false;
     // No switch: grains follow the substances. This block only says which
     // solver the granular material gets and, when it is not DEM, why.

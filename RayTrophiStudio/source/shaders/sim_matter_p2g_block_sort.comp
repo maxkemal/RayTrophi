@@ -1,0 +1,92 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+// sim_matter_p2g_block_sort.comp -- counting sort of the MPM lane's parcels by
+// 4^3-cell block, for the shared-memory block P2G (sim_matter_p2g_block.comp,
+// docs/dev/OLCEK_MILYON_PARCACIK.md S5). Produces a PERMUTATION only
+// (items = parcel ids grouped by block); the canonical parcel order is never
+// touched, so sleep/cache/identity state indexed by parcel is unaffected.
+//
+//   pass 0, lane per block:  counts = 0
+//   pass 1, lane per parcel: counts[block(parcel)] += 1
+//   pass 2, one group:       offsets = exclusive scan(counts), cursor = offsets
+//   pass 3, lane per parcel: items[cursor[block]++] = parcel id
+//
+// meta layout: [0, nb) counts | [nb, 2nb + 1) offsets (offsets[nb] = total)
+//              | [2nb + 1, 3nb + 1) cursor
+#include "sim_dispatch.glsl"
+layout(local_size_x = 256) in;
+
+layout(push_constant) uniform PC {
+    int nx; int ny; int nz;
+    int particle_count;
+    int pass;
+    uint matter_lane;
+    float origin_x; float origin_y; float origin_z;
+    float voxel_size;
+    int bx; int by; int bz;   // blocks per axis
+    int pad0; int pad1; int pad2;
+} pc;
+
+layout(set = 0, binding = 0) readonly buffer Positions { float pos_data[]; };
+layout(set = 0, binding = 1) readonly buffer MatterIndices { uint matter_index[]; };
+layout(set = 0, binding = 2) readonly buffer MatterCounts { uint matter_count[]; };
+layout(set = 0, binding = 3) buffer Meta { uint meta[]; };
+layout(set = 0, binding = 4) buffer Items { uint items[]; };
+
+const int kBlock = 4;
+shared uint partial[256];
+
+uint blockCount() { return uint(pc.bx * pc.by * pc.bz); }
+
+uint blockOf(int id) {
+    vec3 p = vec3(pos_data[id * 3], pos_data[id * 3 + 1], pos_data[id * 3 + 2]);
+    if (any(isnan(p)) || any(isinf(p)) || pc.voxel_size <= 1e-6) return 0u;
+    vec3 g = (p - vec3(pc.origin_x, pc.origin_y, pc.origin_z)) / pc.voxel_size;
+    ivec3 cell = clamp(ivec3(floor(g)), ivec3(0), ivec3(pc.nx, pc.ny, pc.nz) - ivec3(1));
+    ivec3 b = cell / kBlock;
+    return uint(b.x + pc.bx * (b.y + pc.by * b.z));
+}
+
+void main() {
+    uint lane = simLane256(pc.pass == 0 ? blockCount() : uint(pc.particle_count));
+    uint nb = blockCount();
+    if (pc.pass == 0) {
+        if (lane < nb) meta[lane] = 0u;
+        return;
+    }
+    if (pc.pass == 2) {
+        // One workgroup: each lane scans a contiguous run serially, the 256 run
+        // totals are scanned in shared memory (sim_surface_scan pattern).
+        uint t = gl_LocalInvocationID.x;
+        uint run = (nb + 255u) / 256u;
+        uint begin = min(t * run, nb);
+        uint end = min(begin + run, nb);
+        uint sum = 0u;
+        for (uint i = begin; i < end; ++i) sum += meta[i];
+        partial[t] = sum;
+        barrier();
+        for (uint stride = 1u; stride < 256u; stride <<= 1u) {
+            uint add = t >= stride ? partial[t - stride] : 0u;
+            barrier();
+            partial[t] += add;
+            barrier();
+        }
+        uint running = partial[t] - sum;
+        for (uint i = begin; i < end; ++i) {
+            meta[nb + i] = running;
+            meta[2u * nb + 1u + i] = running;
+            running += meta[i];
+        }
+        if (t == 255u) meta[2u * nb] = partial[255];
+        return;
+    }
+    if (lane >= matter_count[pc.matter_lane]) return;
+    int id = int(matter_index[lane]);
+    if (id >= pc.particle_count) return;
+    uint b = blockOf(id);
+    if (pc.pass == 1) {
+        atomicAdd(meta[b], 1u);
+    } else {
+        items[atomicAdd(meta[2u * nb + 1u + b], 1u)] = uint(id);
+    }
+}

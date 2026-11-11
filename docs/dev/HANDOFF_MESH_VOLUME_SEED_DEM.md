@@ -1,7 +1,9 @@
 # Devir: Mesh Volume seed + DEM kum "step held" + açık kalanlar
 
 > **Durum:** AKTİF — 2026-11-05 devir notu. Mesh Volume seed CANLI. DEM komşuluk kovası taşması kökü
-> BULUNMADI.
+> BULUNMADI. 2026-11-07 (§9): fışkırmanın kökü keyframe'li kürenin tabana ezdiği kum + DEM mesh
+> temasının iki yüzlü olması (tane kapalı cismin içine geçiyor); IPC'de bozuk float parametresi
+> uygulamayı abort ediyor (`ExceptionHandling=false`).
 
 ## 1. Bitenler (canlı doğrulandı)
 
@@ -300,3 +302,91 @@ Yani taşma seed yoğunluğundan değil, tanelerin collider yüzeyine **yığıl
 - doğrulama: aynı seed, collider kapalı → bekletme yok; collider açık → temasla birlikte
   `gpu_status` "bucket overflow". Taşma anındaki kare ve kova konumu (collider yüzeyinde mi)
   ölçülmeli.
+
+## 8. Canlı ölçüm (2026-11-07, kullanıcı sahnesi, kod değişmedi)
+
+Sahne: 74 439 DEM tanesi (r 0,025 m, k 20 000 N/m), gizli `Default_Cube` (y −1,95…0,05) içine
+Mesh Volume seed, domain tabanı −2,26 (küp tabanının **0,31 m altında**), collider `Sphere_1`
+y 0,25…2,25. `fluid.run` dt 1/24, 37 adım.
+
+- **Bekletme yok** (`gpu_status` "Dry grain Vulkan DEM candidate"), 236 alt adım, sınır `damping`,
+  medyan adım 215 ms (devirdeki ~1490 ms yerine). ★ **Ama kum collider'a hiç değmedi** (kumun
+  tepesi y −0,44, küre 0,25'te başlıyor): §7'deki "taşma collider temasıyla başlıyor" koşulu bu
+  koşuda oluşmadı. Bu sonuç A'nın kapandığını KANITLAMAZ.
+- Köşelerdeki 5–6 m/s taneler hata değil: seed'in son kimlikleri (üst katman), küp köşelerinden
+  çapraz devrilip havada düşüyorlar; bir adım sonra yere inip listeden çıkıyorlar.
+- ★ **Sinsi olan:** ~1,1 s'de yığının tepesinde ortadan bir fışkırma: en hızlı 64 tanenin tamamı
+  x,z ≈ 0'da, +11…12 m/s **yukarı** (12 m/s için 7,3 m düşüş gerekir, sahnedeki en büyük düşüş
+  2,3 m). Aynı anda **bütün yığının ağırlık merkezi 5 adımda +4,9 cm yükseliyor**
+  (−2,0296 → −1,9807), sonra geri düşüyor: yığın trambolin gibi zıplıyor.
+  Enerji: `E/kg ≥ g·y_c + ½·mean|v|²` alt sınırı bu sırada +0,16 J/kg artıyor, ama mean|v|² gerçek
+  ⟨v²⟩'yi eksik sayar (hızlı kuyruk); enerji üretimi **kanıtlanmadı**.
+  Aday (ölçülmedi): "yığılmış bilye" etkisi. 2 m'lik sütun 0,31 m düşüp tabana 2,5 m/s çarpıyor;
+  basınç dalgası serbest üst yüzeyde en üst taneleri fırlatıyor. Doğum neredeyse kristal
+  (`MatterGrainBirth.cpp` jitter 0,03 R): kuvvet zincirleri hizalı, dalga dağılmadan taşınıyor;
+  yumuşak yaylar (gerçek kumdan ~100× yumuşak) sıkışmayı büyütüyor.
+  Ayırma deneyi (derlemesiz): (1) seed kutusu tabana oturtulmuş, düşüş yok → fışkırma kalıyor mu;
+  (2) `stiffness_scale` 10 → tepe hızı ve ağırlık merkezi sıçraması küçülüyor mu.
+  Düzeltme adayı ancak (1) sonrası: doğum jitter'ı / düzensizliği.
+- IPC boşluğu: DEM toplam kinetik enerjisi (öteleme) okunamıyor; `grain_diagnostics` yalnız
+  `spin_energy_j` veriyor. Enerji kapısı için ⟨½mv²⟩ ve potansiyel enerji okuması eklenmeli.
+
+## 9. Ayırma deneyleri ve KÖK (2026-11-07, aynı gün, kod değişmedi) — §8'in adayı ÇÜRÜDÜ
+
+★ **Fışkırmanın sebebi animasyonlu collider.** `Sphere_1`'de 0. ve 20. karede dönüşüm
+keyframe'i var (`anim.list_keys`). Küre ease-in/out ile y 1,252 → −1,417 iniyor (tepe hız
+10–11. karede 4,8 m/s) ve **alt yüzü domain tabanının 15,5 cm altında** duruyor: kumu tabana
+ezen, kaçış yolu olmayan kinematik (sonsuz enerjili) bir sürücü. `scene.object_info` 0. kare
+temel pozunu okuduğu için küre "yerinde" görünüyordu; çözümlenen collider sınırları
+(`collider.list` `resolved_world_*`) animasyonu izliyor. Bu yüzden §8'deki "2,3 m düşüş en
+fazla 6,7 m/s verir" akıl yürütmesi yanlış zemindeydi: enerji kaynağı animasyon.
+
+Deneyler (her biri `project.open` ile taze; 74 439 tane; 1/24 s adım):
+
+| Koşu | Tepe yukarı hız | Kare |
+|---|---|---|
+| temel | 13,2 m/s | 19 |
+| küp tabana oturtulmuş (düşüş yok) | 12,8 | 19 |
+| `stiffness_scale` 10 | 24,4 | 21 |
+| `contact_resolution` 96 (≈2,6× alt adım) | 12,6 | 19 |
+
+Temas sondası (16–22. kare): `max_grain_overlap_fraction` 0,57–0,71 (taneler birbirine %70
+giriyor), `max_collider_overlap_fraction` 0,99999 (tane merkezi collider yüzünün üstünde).
+
+★★ **Çözücü açığı (gerçek, sahne tetikliyor):** DEM mesh teması İKİ YÜZLÜ
+(`sim_matter_grain.glsl` BVH yaprağı: `n = (p-q)/d`, derinlik `r-d`). Kapalı bir cisme ezilen
+tanenin merkezi yüzeyi geçince itme yönü TERSİNE döner, tane cismin içine çekilir ve içeriden
+fırlar. Fışkıran taneler (0, −0,9, 0) civarında, yani 19. karede kürenin İÇİNDE. MPM yolu
+işaretli SDF kullanıyor, DEM kullanmıyor. Düzeltme adayı: kapalı collider için yüz normalinin
+tarafı (ya da SDF işareti) içerideki taneyi DIŞA, derinlik `r+d` ile iter; açık levha iki
+yüzlü kalır (collider'ın kapalılık bilgisi shader'a taşınmalı). Sertlik arttıkça fışkırmanın
+büyümesi burada çözücü hatasının kanıtı DEĞİL: kinematik sürücü sınırsız enerji veriyor.
+
+★ **Yarım seed hata değil:** simüle edilmiş bir karede seed atılınca, o karenin collider
+damgası (küre tabanda) sıvı ızgarasında katı sayılıyor ve taneler küreyle çakışan hücrelere
+doğmuyor (küp 74 439 yerine 37 379). Doğru davranış. Tuzak: `fluid.sample_solid_phi`
+`state->grid`'i okuyor, seed ise `liquidGrid(state)`'i. İki fazlı Matter domain'de bunlar ayrı
+ızgaralar, ölçü aleti boş gösterdi.
+
+★★★ **Ayrı bulgu: bozuk tek bir IPC parametresi uygulamayı ÖLDÜRÜYOR.** `fluid.seed`'e
+`seed_max` dizisinde bir dize eleman gitti (PowerShell komut kipi `-1.25`'i dize geçirdi).
+`optionalVec3` → `json::get<float>` → `abort()` → SIGABRT
+(`x64/Release/StartupCrash*.txt`, 14:22:26). Kök: projede `ExceptionHandling=false`
+varsayılan (Debug/Release/ReleaseDev); istisnasız derlenen birimlerde nlohmann `JSON_THROW`'u
+`std::abort()` açıyor, linker o COMDAT kopyasını seçince `processJsonMessage`'in
+`catch (json::exception)` blokları ölü kod. Aynı tuzak her `get<T>` tür hatasında (proje
+dosyası okuma dahil) geçerli. Düzeltme kararı kullanıcıda: (a) proje çapında `/EHsc`
+(tam rebuild) ya da (b) IPC yardımcılarında eleman başına `is_number()` kontrolü (yerel).
+
+**2026-11-07 YAZILDI, derlenmedi:** kapalı kabuk tek yüzlü temas (host `closedShellFlags` → patch bit 30/31, shader rev 39, `closed_collider_faces` okuması) ve IPC Vec3/matris eleman tür kontrolü (`numberElement`). Kontrol listesi NEXT_BUILD_CHECKS en üstte. Proje çapında `/EHsc` kararı hâlâ açık.
+
+**2026-11-07 canlı (exe 15:31):** IPC düzeltmesi PASS (bozuk `seed_max` ve `matrix` hata
+döndürdü, uygulama ayakta). Toleranslı kaynakla küre kapalı tanındı (`closed_collider_faces`
+1770). Ama fışkırma BÜYÜDÜ: 22. karede yukarı 38 m/s (önce 13), `max_collider_overlap_fraction`
+2,0, tane örtüşmesi 0,83; 21. kareden sonra alt adım 512 tavanında (`travel (capped)`), 30. karede
+`stiffness adapted` 0,84 (kullanıcının gördüğü "yumuşatma"). Kök sahne geometrisi: küre 20–29.
+karelerde y −2,472'ye iniyor, yani **tabanın 21 cm altına**. Tabanla kürenin alt yüzü arasındaki
+kum için geçerli bir konum yok. İki yüzlüyken taneler kürenin içine kaçıyordu; tek yüzlüde kaçamıyor,
+sıkışma daha büyük. Kinematik sürücü sınırsız enerji veriyor, bu bir çözücü kararlılık hatası değil.
+Seçenekler: (a) animasyon kürenin altını tabanın üstünde bitirir; (b) çözücü güvenliği: temas
+itmesinin ürettiği ayrılma hızına tavan ("max depenetration velocity", fizik motorlarındaki gibi).

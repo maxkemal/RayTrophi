@@ -24,6 +24,7 @@
 #include "../Vec3.h"
 #include "MatterConstitutive.h"
 #include "MatterParticleIdentity.h"
+#include "DemBondNetwork.h"
 #include <algorithm>
 #include <stdexcept>
 #include <vector>
@@ -64,6 +65,7 @@ class FluidParticles {
 public:
     std::vector<uint64_t> particle_id;
     uint64_t next_particle_id = 1;
+    DemBond::Network dem_bonds;
 
     void ensureParticleIdentities() {
         extendMatterParticleIds(particle_id, next_particle_id, position.size());
@@ -259,6 +261,7 @@ public:
     }
 
     void clear() {
+        dem_bonds = {};
         particle_id.clear();
         position.clear();
         velocity.clear();

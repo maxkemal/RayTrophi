@@ -176,7 +176,7 @@ void step(FluidParticles& particles,
             applyViscosity(grid, params, dt, mask_ptr, sweeps_run);
             out_stats.viscosity_sweeps_run = sweeps_run;
             if (sweeps_run > 0) {
-                enforceSolidBoundaries(grid, params, dt);
+                enforceSolidBoundaries(grid, params, dt, false);
             }
         }
         stage_end = SolverClock::now();
@@ -300,6 +300,9 @@ void step(FluidParticles& particles,
         sp.elastic_solid = params.elastic_solid;
         sp.elastic_yield_strain = params.elastic_yield_strain;
         sp.elastic_relaxation_s = params.elastic_relaxation_s;
+        sp.elastic_thermal_viscosity_power = params.elastic_thermal_viscosity_power;
+        sp.elastic_thermal_yield_power = params.elastic_thermal_yield_power;
+        sp.elastic_thermal_relaxation_power = params.elastic_thermal_relaxation_power;
         sp.elastic_fracture_strain = params.elastic_fracture_strain;
         sp.elastic_viscosity = std::min(params.elastic_viscosity_pa_s,
             G::elasticViscosityLimit(grid.voxel_size, dt, params.granular_density));

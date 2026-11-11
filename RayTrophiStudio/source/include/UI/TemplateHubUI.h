@@ -30,6 +30,8 @@ public:
     bool isVisible() const { return visible_; }
 
     void render(UIContext& context, SceneUI& ui, SceneHistory* history);
+    // Called after menu/Hub drawing has released all recent-list references.
+    void dispatchPendingProjectOpen(UIContext& context, SceneUI& ui);
 
     // Recent project management
     void addRecentProject(const std::filesystem::path& project_path);
@@ -44,6 +46,7 @@ public:
 
 private:
     TemplateHubUI();
+    void queueProjectOpen(const std::filesystem::path& path);
     ~TemplateHubUI() = default;
 
     void renderHeader();
@@ -57,6 +60,8 @@ private:
     void launchTemplate(const std::string& template_id, const std::string& policy,
                         UIContext& context, SceneUI& ui, SceneHistory* history);
 
+    bool project_open_pending_ = false;
+    std::string pending_project_path_;
     bool visible_ = false;
     bool startup_auto_show_done_ = false;
     bool sidebar_collapsed_ = false;

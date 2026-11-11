@@ -62,6 +62,12 @@ MatterGrainOwnership matterGrainOwnership(const SimulationGridDomainDesc& domain
     // so its material is the one that runs. Disabled sources count too:
     // `enabled` is keyable, and the owner is fixed when the first grain is
     // born. An untagged source pours the Default Substance, considered last.
+    for (const auto& source : domain.matter_seed_sources) {
+        if (domain.matter_seed_sources_enabled && source.enabled) {
+            consider(source.substance, "seed source '" + source.name + "'");
+            wet_birth |= source.grain_saturation > 0.0f;
+        }
+    }
     for (const auto& source : sources) {
         if (source.domain_index == domain_index &&
             source.phase != SimulationFlowSourceDesc::Phase::Gas) {
@@ -250,26 +256,13 @@ const SubstanceProfile* particleSubstance(uint32_t tag, const APICSolverParams& 
 }
 
 bool substanceHasSolidSkeleton(const SubstanceProfile* profile) {
-    return profile && profile->meltable &&
-        (profile->default_constitutive_model == MatterConstitutiveModel::Granular ||
-         profile->default_constitutive_model == MatterConstitutiveModel::Elastic);
+    return hasMatterSolidSkeleton(profile);
 }
 
 MatterConstitutiveModel substanceBirthModel(uint32_t tag, const APICSolverParams& params,
                                           float kelvin) {
-    const auto* profile = particleSubstance(tag, params);
-    if (profile && profile->default_constitutive_model != MatterConstitutiveModel::Auto) {
-        // A meltable mechanical skeleton becomes liquid at its own threshold.
-        // The temperature is state; the cooling switch does not choose a model.
-        if (profile->meltable && std::isfinite(kelvin) && kelvin >= profile->melt_kelvin &&
-            (profile->default_constitutive_model == MatterConstitutiveModel::Granular ||
-             profile->default_constitutive_model == MatterConstitutiveModel::Elastic)) {
-            return MatterConstitutiveModel::Fluid;
-        }
-        return profile->default_constitutive_model;
-    }
-    return params.granular_enabled ? MatterConstitutiveModel::Granular
-                                   : MatterConstitutiveModel::Fluid;
+    return resolveMatterConstitutiveState(particleSubstance(tag, params),
+        params.granular_enabled, kelvin).model;
 }
 
 float substanceAmbientBirthKelvin(uint32_t tag, const APICSolverParams& params,
@@ -369,13 +362,9 @@ void refreshMatterConstitutiveModels(FluidParticles& particles,
             ? particles.substance_tag[index] : kSubstanceUntagged;
         const float kelvin = index < particles.temperature.size()
             ? particles.temperature[index] : std::numeric_limits<float>::quiet_NaN();
-        auto model = substanceBirthModel(tag, params, kelvin);
-        const SubstanceProfile* profile = particleSubstance(tag, params);
-        if (std::isfinite(solid[index]) && substanceHasSolidSkeleton(profile)) {
-            model = solid[index] >= kFusionSolidThreshold
-                ? profile->default_constitutive_model : MatterConstitutiveModel::Fluid;
-        }
-        assignMatterModel(particles, index, model);
+        const auto resolved = resolveMatterConstitutiveState(particleSubstance(tag, params),
+            params.granular_enabled, kelvin, solid[index]);
+        assignMatterModel(particles, index, resolved.model);
     }
 }
 

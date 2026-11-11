@@ -7,6 +7,7 @@
 // the library does not (CLAUDE.md §1).
 
 #include "Api/RtApi.h"
+#include "UI/TemperatureLabel.h"
 #include "SubstanceLibrary.h"
 #include "imgui.h"
 #include "json.hpp"
@@ -120,10 +121,11 @@ inline bool drawPicker(const char* id, std::string& name, const char* empty_labe
                 }
                 if (ImGui::IsItemHovered()) {
                     const auto representative = info.at("representative").get<std::string>();
-                    ImGui::SetTooltip("%s\n%s%s", row.category.c_str(),
+                    const auto notes = info.value("model_notes", std::string());
+                    ImGui::SetTooltip("%s\n%s%s%s%s", row.category.c_str(),
                         representative.empty() ? "Base: " : "Starting values from: ",
                         representative.empty() ? info.at("root_profile").get_ref<const std::string&>().c_str() :
-                            representative.c_str());
+                            representative.c_str(), notes.empty() ? "" : "\n", notes.c_str());
                 }
                 if (selected) {
                     ImGui::SetItemDefaultFocus();
@@ -236,7 +238,13 @@ inline bool draw(const char* id, std::string& assigned,
                 ImGui::SetNextItemWidth(160.0f);
                 // Applied on release: dragging would republish the library
                 // and invalidate the bake on every pixel of the drag.
-                ImGui::DragFloat("##v", &v, speed, spec.min, spec.max, "%.5g",
+                // Absolute Kelvin fields also show Celsius.
+                const std::string key = spec.key;
+                const bool kelvin = key.size() > 7 && key.compare(key.size() - 7, 7, "_kelvin") == 0;
+                char kelvin_fmt[48];
+                ImGui::DragFloat("##v", &v, speed, spec.min, spec.max,
+                                 kelvin ? UiTemperature::kelvinFormat(v, kelvin_fmt, sizeof(kelvin_fmt), "%.5g")
+                                        : "%.5g",
                                  ImGuiSliderFlags_AlwaysClamp);
                 if (ImGui::IsItemActive()) {
                     pending_key = edit_key;

@@ -37,7 +37,7 @@ def main():
         client.call("fluid.create_domain", name=domain, type="fluid",
                     domain_min=[-1, 0, -1], domain_max=[1, 2, 1], voxel_size=0.1)
         created_domain = True
-        for name in ("Water", "Honey", "Chocolate", "Mud", "Sand", "Gravel", "Soil", "Wax"):
+        for name in ("Water", "Honey", "Chocolate", "Mud", "Mud Slurry", "Sand", "Gravel", "Soil", "Wax"):
             client.call("fluid.set_param", domain=domain, default_substance=name)
             got = get()
             fields = client.call("substance.get", name=name)["fields"]

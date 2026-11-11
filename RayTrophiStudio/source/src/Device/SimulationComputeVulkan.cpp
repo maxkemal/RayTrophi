@@ -15,7 +15,9 @@
  *   HOST_VISIBLE staging buffers created on demand for upload/download.
  *
  * Dispatch model: Commands are recorded into a single command buffer.
- *   dispatch() records; synchronize() submits + waits then resets.
+ *   dispatch() records; synchronize() submits + waits then resets. Every 512
+ *   dispatches the recording is submitted WITHOUT waiting and the other of two
+ *   slots records on (one in flight at most); synchronize() waits both.
  *
  * Descriptor strategy: One descriptor set layout per buffer count (1..9).
  *   A large descriptor pool is reset each synchronize() call.
@@ -114,15 +116,18 @@ public:
         }
         for (auto& dl : m_descLayouts)
             if (dl != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, dl, nullptr);
-        if (m_descPool)  vkDestroyDescriptorPool(m_device, m_descPool, nullptr);
+        for (VkDescriptorPool pool : m_descPools)
+            if (pool) vkDestroyDescriptorPool(m_device, pool, nullptr);
         if (m_queryPool) vkDestroyQueryPool(m_device, m_queryPool, nullptr);
         destroyStaging(m_stagingUp);
         destroyStaging(m_stagingDown);
         for (auto& s : m_retiredStaging) destroyStaging(s);
         if (m_copyCmdBuf) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
-        if (m_cmdBuf)    vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_cmdBuf);
+        for (VkCommandBuffer cb : m_cmdBufs)
+            if (cb) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cb);
         if (m_cmdPool)   vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
-        if (m_fence)     vkDestroyFence(m_device, m_fence, nullptr);
+        for (VkFence fence : m_fences)
+            if (fence) vkDestroyFence(m_device, fence, nullptr);
 
         for (auto& kv : m_buffers) {
             if (kv.second.buffer) vkDestroyBuffer(m_device, kv.second.buffer, nullptr);
@@ -157,7 +162,7 @@ public:
         // Turning instrumentation on or off mid-command-buffer would leave the
         // pool half reset and the label list out of step with the slots. Close
         // the submission first, then flip.
-        if (m_recording) synchronize();
+        if (m_recording || m_inFlight) synchronize();
         m_timestampsEnabled = enabled;
         m_tsCursor = 0;
         m_tsOverflowed = false;
@@ -317,8 +322,9 @@ public:
         // VkBuffer (recorded transfers/dispatches can outlive a phase that
         // bailed out before its synchronize). Freeing it now would make the
         // next submit touch a destroyed handle — adaptive domains hit exactly
-        // this by resizing buffers between steps. Flush first.
-        if (m_recording) synchronize();
+        // this by resizing buffers between steps. Flush first (and drain a
+        // submission still in flight, which may read it too).
+        if (m_recording || m_inFlight) synchronize();
         // synchronize() fences only this compute queue. Live Gas fields may
         // also be referenced by Vulkan RT on another queue of the same device.
         // Destruction/resizing is a rare structural operation, so use a full
@@ -338,7 +344,7 @@ public:
         // adaptive-domain growth.
         const ComputeBufferUsage old_usage = it->second.usage;
         const std::string old_name = it->second.debug_name;
-        if (m_recording) synchronize(); // see destroyBuffer — same stale-handle window
+        if (m_recording || m_inFlight) synchronize(); // see destroyBuffer — same stale-handle window
         vkDeviceWaitIdle(m_device);      // also covers external RT/viewport queues
         if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
@@ -391,12 +397,12 @@ public:
         if (it == m_buffers.end() || !data || size_bytes == 0) return false;
         if (dst_offset + size_bytes > it->second.size) return false;
 
-        // ReBAR buffer: the destination is host-visible VRAM — write it
-        // directly, no staging copy / submit / fence. Safe even mid-batch or
-        // while recording: every GPU submission in this backend is fence-waited
-        // before returning, so there is never in-flight work reading the
-        // buffer, and coherent host writes are visible to any later submit.
-        if (it->second.mapped) {
+        // Direct ReBAR writes are safe only before recording begins. Earlier
+        // queued dispatches must observe their old inputs, even when not yet
+        // submitted; stage later uploads in command order instead.
+        // A submission still in flight counts as queued work: it may read the
+        // old contents.
+        if (it->second.mapped && !m_recording && !m_inFlight) {
             std::memcpy(static_cast<uint8_t*>(it->second.mapped) + dst_offset,
                         data, size_bytes);
             return true;
@@ -411,7 +417,7 @@ public:
         // recorded stream must be preserved). Host data is captured into
         // staging immediately, so the caller may reuse its buffer right away;
         // the GPU copy lands with the next synchronize().
-        if (m_batchActive || m_recording || m_stagingUpCursor > 0) {
+        if (m_batchActive || m_recording || m_inFlight || m_stagingUpCursor > 0) {
             const std::size_t off =
                 stagingReserve(m_stagingUp, m_stagingUpCursor, size_bytes, /*for_download=*/false);
             if (off == SIZE_MAX || !ensureRecording()) return false;
@@ -466,6 +472,9 @@ public:
                 { data, static_cast<const uint8_t*>(self->m_stagingDown.mapped) + off, size_bytes });
             return true;
         }
+        // The immediate copy has no barrier against a submission still in
+        // flight: drain it first.
+        self->waitInFlight();
         const std::size_t off =
             self->stagingReserve(self->m_stagingDown, self->m_stagingDownCursor,
                                  size_bytes, /*for_download=*/true);
@@ -521,27 +530,36 @@ public:
     }
 
     void synchronize() override {
-        if (!m_recording) return;
-        vkEndCommandBuffer(m_cmdBuf);
+        if (!m_recording && !m_inFlight) return;
+        if (!m_recording) {
+            // Only the async submission is left: wait for it, then fall
+            // through to the host-side flush below.
+            waitInFlight();
+        } else {
+            vkEndCommandBuffer(m_cmdBuf);
 
-        VkSubmitInfo si{};
-        si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount   = 1;
-        si.pCommandBuffers      = &m_cmdBuf;
-        vkQueueSubmit(m_queue, 1, &si, m_fence);
-        vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
-        vkResetFences(m_device, 1, &m_fence);
+            VkSubmitInfo si{};
+            si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.commandBufferCount   = 1;
+            si.pCommandBuffers      = &m_cmdBuf;
+            vkQueueSubmit(m_queue, 1, &si, m_fence);
+            // The earlier slot was submitted first on the same queue; waiting
+            // for it releases its pool and command buffer.
+            waitInFlight();
+            vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
+            vkResetFences(m_device, 1, &m_fence);
 
-        // Read the timestamps BEFORE the command buffer is reset: resetting it
-        // does not clear the pool, but collecting here keeps the pool's lifetime
-        // reasoning in one place with the submission that wrote it.
-        if (m_timestampsEnabled) collectKernelTimestamps();
+            // Read the timestamps BEFORE the command buffer is reset: resetting it
+            // does not clear the pool, but collecting here keeps the pool's lifetime
+            // reasoning in one place with the submission that wrote it.
+            if (m_timestampsEnabled) collectKernelTimestamps();
 
-        vkResetCommandBuffer(m_cmdBuf, 0);
-        vkResetDescriptorPool(m_device, m_descPool, 0);
-        m_descriptorCache.clear();
-        m_recordedDispatches = 0;
-        m_recording = false;
+            vkResetCommandBuffer(m_cmdBuf, 0);
+            vkResetDescriptorPool(m_device, m_descPool, 0);
+            m_descriptorCache.clear();
+            m_recordedDispatches = 0;
+            m_recording = false;
+        }
 
         // Recorded transfers are now complete: flush deferred download
         // memcpys, release retired staging buffers, rewind the cursors.
@@ -588,6 +606,8 @@ public:
         const bool needs_atomics = (kernel == "sim_fluid_p2g_scatter" ||
                                     kernel == "sim_sparse_mac_p2g" ||
                                     kernel == "sim_sparse_mac_matter_p2g" ||
+                                    kernel == "sim_matter_p2g_fused" ||
+                                    kernel == "sim_matter_p2g_block" ||
                                     kernel == "sim_fluid_occupancy" ||
                                     kernel == "sim_fluid_density_splat" ||
                                     kernel == "terrain_thermal" ||
@@ -598,6 +618,9 @@ public:
                                     kernel == "terrain_fluvial_runoff" ||
                                     kernel == "terrain_fluvial_talus");
         if (needs_atomics && !m_has_float_atomics) return false;
+        // The block P2G also adds floats in SHARED memory: refused (the host
+        // falls back to the fused kernel) unless that feature is on as well.
+        if (kernel == "sim_matter_p2g_block" && !m_has_shared_float_atomics) return false;
 
         // The MGPCG dot / device-scalar kernels work in double — running them
         // without the shaderFloat64 device feature is UB. Failing here sends
@@ -608,6 +631,10 @@ public:
              kernel == "sim_audio_gas_flow" ||
              kernel == "sim_inventory_surface_exchange" ||
              kernel.rfind("sim_sparse_pressure_", 0) == 0 ||
+             // The viscosity PCG reduces in double as well.
+             kernel == "sim_fluid_viscosity_pcg" ||
+             kernel == "sim_sparse_viscosity_pcg" ||
+             kernel == "sim_sparse_mac_viscosity_pcg" ||
              (kernel == "sim_fluid_cg_dot" ||
               kernel == "sim_fluid_cg_dot_window") ||
              kernel == "sim_fluid_cg_scalar_step" ||
@@ -648,7 +675,15 @@ public:
         // so one submission stays as long as before descriptor reuse existed
         // and below the 1024 timestamp-pair limit.
         if (m_recordedDispatches >= MAX_DESC_SETS) {
-            synchronize();
+            // Hand the full pool to the GPU and keep recording into the other
+            // slot (2026-11-11). A full submit+wait here left the GPU idle
+            // while the host recorded the next 512 dispatches and the host
+            // idle while the GPU ran them: snow + water, 10.8k dispatches a
+            // frame, ran host-bound (host ~140 ms vs GPU ~100 ms). Timestamps
+            // keep the old wait (one query pool), and so does an open transfer
+            // batch (its deferred upload barrier belongs to its own buffer).
+            if (m_timestampsEnabled || m_batchActive) synchronize();
+            else submitRecordingAsync();
         }
         // Ensure command buffer is recording.
         if (!ensureRecording()) return false;
@@ -771,6 +806,16 @@ private:
     uint32_t         m_queueFamily = 0;
 
     VkCommandPool    m_cmdPool  = VK_NULL_HANDLE;
+    // Two recording slots (command buffer + descriptor pool + fence). At most
+    // one is in flight (submitted, not yet waited) while the other records;
+    // m_cmdBuf / m_descPool / m_fence name the recording slot.
+    static constexpr int kSlots = 2;
+    std::array<VkCommandBuffer, kSlots>  m_cmdBufs{};
+    std::array<VkDescriptorPool, kSlots> m_descPools{};
+    std::array<VkFence, kSlots>          m_fences{};
+    int              m_slot = 0;
+    bool             m_inFlight = false;
+    int              m_inFlightSlot = 0;
     VkCommandBuffer  m_cmdBuf   = VK_NULL_HANDLE;
     VkFence          m_fence    = VK_NULL_HANDLE;
     VkDescriptorPool m_descPool = VK_NULL_HANDLE;
@@ -813,6 +858,7 @@ private:
     std::unordered_map<std::string, KernelTimeAccum> m_kernelTimes;
     bool     m_has_float_atomics = false;
     bool     m_clustered_p2g = false;  // P2G kernels loaded in the clustered variant
+    bool     m_has_shared_float_atomics = false;  // gates sim_matter_p2g_block
     bool     m_has_shader_float64 = false;
 
     // Persistent staging + copy command buffer (see stagingReserve /
@@ -894,13 +940,17 @@ private:
         ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
         ai.commandPool        = m_cmdPool;
         ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ai.commandBufferCount = 1;
-        if (vkAllocateCommandBuffers(m_device, &ai, &m_cmdBuf) != VK_SUCCESS)
+        ai.commandBufferCount = kSlots;
+        if (vkAllocateCommandBuffers(m_device, &ai, m_cmdBufs.data()) != VK_SUCCESS)
             return false;
 
         VkFenceCreateInfo fi{};
         fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        return vkCreateFence(m_device, &fi, nullptr, &m_fence) == VK_SUCCESS;
+        for (VkFence& fence : m_fences)
+            if (vkCreateFence(m_device, &fi, nullptr, &fence) != VK_SUCCESS) return false;
+        m_cmdBuf = m_cmdBufs[0];
+        m_fence  = m_fences[0];
+        return true;
     }
 
     bool initDescriptorPool() {
@@ -914,7 +964,10 @@ private:
         pi.poolSizeCount = 1;
         pi.pPoolSizes    = &ps;
         pi.flags         = 0; // will be reset via vkResetDescriptorPool
-        return vkCreateDescriptorPool(m_device, &pi, nullptr, &m_descPool) == VK_SUCCESS;
+        for (VkDescriptorPool& pool : m_descPools)
+            if (vkCreateDescriptorPool(m_device, &pi, nullptr, &pool) != VK_SUCCESS) return false;
+        m_descPool = m_descPools[0];
+        return true;
     }
 
     bool initDescLayouts() {
@@ -1085,12 +1138,11 @@ private:
             // fracture-history telemetry remains permanently zero.
             { "sim_matter_p2g", "sim_matter_p2g.spv", 10, 40 },
             { "sim_matter_g2p", "sim_matter_g2p.spv", 12, 72 },
-            { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 116 },
+            { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 128 },
             { "sim_matter_stress_p2g", "sim_matter_stress_p2g.spv", 9, 52 },
             { "sim_matter_settle", "sim_matter_settle.spv", 7, 52 },
-            { "sim_matter_advect", "sim_matter_advect.spv", 11, 84 },
+            { "sim_matter_advect", "sim_matter_advect.spv", 11, 104 },
             { "sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40 },
-            { "sim_matter_contact", "sim_matter_contact.spv", 19, 16 },
             { "sim_grain_mpm_init", "sim_grain_mpm_init.spv", 13, 32 },
             { "sim_grain_mpm_clear", "sim_grain_mpm_clear.spv", 13, 32 },
             { "sim_grain_mpm_hash", "sim_grain_mpm_hash.spv", 13, 32 },
@@ -1107,9 +1159,11 @@ private:
             { "sim_grain_fluid_solid", "sim_grain_fluid_solid.spv", 21, 96 },
             { "sim_matter_copy", "sim_matter_copy.spv", 2, 4 },
             { "sim_matter_clear", "sim_matter_clear.spv", 1, 4 },
+            { "sim_matter_mpm_pressure_reaction", "sim_matter_mpm_pressure_reaction.spv", 8, 40 },
             { "sim_matter_pores", "sim_matter_pores.spv", 13, 40 },
             { "sim_matter_zero_faces", "sim_matter_zero_faces.spv", 4, 36 },
-            { "sim_matter_mpm_boundary", "sim_matter_mpm_boundary.spv", 13, 32 },
+            { "sim_matter_liquid_wall", "sim_matter_liquid_wall.spv", 12, 32 },
+            { "sim_matter_mpm_boundary", "sim_matter_mpm_boundary.spv", 13, 52 },
             { "sim_collider_bvh_query", "sim_collider_bvh_query.spv", 3, 80 },
             { "sim_matter_mpm_particle_contact", "sim_matter_mpm_particle_contact.spv", 10, 48 },
             { "sim_matter_partition", "sim_matter_partition.spv", 4, 8 },
@@ -1131,11 +1185,14 @@ private:
             { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 17, 128 },
             { "sim_matter_grain_list_build", "sim_matter_grain_list_build.spv", 17, 128 },
             { "sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128 },
+            { "sim_dem_bond_evaluate", "sim_dem_bond_evaluate.spv", 10, 32 },
+            { "sim_dem_bond_kick", "sim_dem_bond_kick.spv", 10, 32 },
+            { "sim_dem_bond_orient", "sim_dem_bond_orient.spv", 10, 32 },
             { "sim_matter_grain_active_classify", "sim_matter_grain_active_classify.spv", 17, 128 },
-            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 112 },
+            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 124 },
             { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
             { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        5, 48 },
-            { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 80 },
+            { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 100 },
             { "sim_fluid_occupancy",                "sim_fluid_occupancy.spv",             4, 36 },
             // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
             // declare only the leading fields; the pipeline range must cover the
@@ -1161,6 +1218,10 @@ private:
             // overrides). The push block stayed 52 bytes — a pad word became
             // has_nu — so only the descriptor count moved.
             { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       11, 52 },
+            // Viscosity solved to a tolerance (Jacobi PCG): 11 RBGS bindings +
+            // r/p/q/d/scalars/partials, then the sparse tile pair, then the
+            // compact MAC pair. Push = 72 bytes (PcgConstants).
+            { "sim_fluid_viscosity_pcg",            "sim_fluid_viscosity_pcg.spv",        17, 72 },
             { "sim_sparse_grid_map_clear", "sim_sparse_grid_map_clear.spv", 7, 48 },
             { "sim_sparse_grid_map_seed", "sim_sparse_grid_map_seed.spv", 7, 48 },
             { "sim_sparse_grid_retire", "sim_sparse_grid_retire.spv", 7, 48 },
@@ -1180,21 +1241,32 @@ private:
             // the dense kernel plus the MAC tile map and list.
             { "sim_sparse_mac_zero_faces", "sim_sparse_mac_zero_faces.spv", 6, 36 },
             { "sim_sparse_mac_matter_zero_faces", "sim_sparse_mac_matter_zero_faces.spv", 6, 36 },
+            { "sim_sparse_mac_matter_liquid_wall", "sim_sparse_mac_matter_liquid_wall.spv", 14, 32 },
             { "sim_sparse_mac_divergence", "sim_sparse_mac_divergence.spv", 7, 52 },
             { "sim_sparse_mac_divergence_var", "sim_sparse_mac_divergence_var.spv", 13, 52 },
-            { "sim_sparse_mac_divergence_porous", "sim_sparse_mac_divergence_porous.spv", 13, 52 },
+            { "sim_sparse_mac_divergence_porous", "sim_sparse_mac_divergence_porous.spv", 14, 52 },
             { "sim_sparse_mac_subtract_gradient", "sim_sparse_mac_subtract_gradient.spv", 7, 52 },
             { "sim_sparse_mac_subtract_gradient_var", "sim_sparse_mac_subtract_gradient_var.spv", 13, 52 },
             { "sim_sparse_mac_capture_compact", "sim_sparse_mac_capture_compact.spv", 8, 36 },
-            { "sim_sparse_mac_advect", "sim_sparse_mac_advect.spv", 11, 80 },
-            { "sim_sparse_mac_matter_advect", "sim_sparse_mac_matter_advect.spv", 13, 84 },
-            { "sim_sparse_mac_matter_contact", "sim_sparse_mac_matter_contact.spv", 21, 16 },
+            { "sim_sparse_mac_solid_weights", "sim_sparse_mac_solid_weights.spv", 5, 16 },
+            { "sim_sparse_mac_advect", "sim_sparse_mac_advect.spv", 11, 100 },
+            { "sim_sparse_mac_matter_advect", "sim_sparse_mac_matter_advect.spv", 13, 104 },
+            { "sim_matter_liquid_drag", "sim_matter_liquid_drag.spv", 19, 32 },
+            { "sim_matter_p2g_fused", "sim_matter_p2g_fused.spv", 19, 48 },
+            // Shared-memory block P2G + its per-substep block sort (S5, 2026-11-11).
+            { "sim_matter_p2g_block", "sim_matter_p2g_block.spv", 21, 64 },
+            { "sim_matter_p2g_block_sort", "sim_matter_p2g_block_sort.spv", 5, 64 },
+            { "sim_matter_mpm_porosity", "sim_matter_mpm_porosity.spv", 14, 32 },
+            { "sim_sparse_mac_matter_mpm_porosity", "sim_sparse_mac_matter_mpm_porosity.spv", 16, 32 },
+            { "sim_sparse_mac_matter_liquid_drag", "sim_sparse_mac_matter_liquid_drag.spv", 21, 32 },
             { "sim_sparse_mac_viscosity_capture", "sim_sparse_mac_viscosity_capture.spv", 15, 68 },
             { "sim_sparse_mac_viscosity_sweep", "sim_sparse_mac_viscosity_sweep.spv", 15, 68 },
             { "sim_sparse_viscosity_clear", "sim_sparse_viscosity_clear.spv", 13, 68 },
             { "sim_sparse_viscosity_mark", "sim_sparse_viscosity_mark.spv", 13, 68 },
             { "sim_sparse_viscosity_capture", "sim_sparse_viscosity_capture.spv", 13, 68 },
             { "sim_sparse_viscosity_sweep", "sim_sparse_viscosity_sweep.spv", 13, 68 },
+            { "sim_sparse_viscosity_pcg", "sim_sparse_viscosity_pcg.spv", 19, 72 },
+            { "sim_sparse_mac_viscosity_pcg", "sim_sparse_mac_viscosity_pcg.spv", 21, 72 },
             { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
             { "sim_fluid_divergence_window", "sim_fluid_divergence_window.spv",
               5, 76 },
@@ -1216,7 +1288,7 @@ private:
             // Porous grains (H1 B5): var divergence whose non-solid faces take
             // the grains' velocity for their closed part. Matter path only, so
             // never windowed.
-            { "sim_fluid_divergence_porous",        "sim_fluid_divergence_porous.spv",    11, 52 },
+            { "sim_fluid_divergence_porous",        "sim_fluid_divergence_porous.spv",    12, 52 },
             { "sim_fluid_subtract_gradient_var",    "sim_fluid_subtract_gradient_var.spv",11, 52 },
             { "sim_fluid_cg_build_diag_var",        "sim_fluid_cg_build_diag_var.spv",     5, 52 },
             { "sim_fluid_cg_build_diag_var_window", "sim_fluid_cg_build_diag_var_window.spv",
@@ -1425,15 +1497,30 @@ private:
         // sim_fluid_p2g_scatter.glsl P2G_CLUSTERED). Same name, bindings and
         // constants; a device without them keeps the per-lane kernels.
         const bool clustered = supportsClusteredSubgroups();
+        m_has_shared_float_atomics = m_has_float_atomics && supportsSharedFloatAtomicAdd();
         for (const auto& d : defs) {
             std::string spv = d.spv;
             if (clustered && (std::string(d.name) == "sim_matter_p2g" ||
-                              std::string(d.name) == "sim_matter_stress_p2g")) {
+                              std::string(d.name) == "sim_matter_stress_p2g" ||
+                              std::string(d.name) == "sim_matter_p2g_fused")) {
                 spv = std::string(d.name) + "_clustered.spv";
             }
             createPipeline(d.name, sd + "/" + spv, d.bufs, d.pc);
         }
         m_clustered_p2g = clustered;
+    }
+
+    // VulkanBackend enables shaderSharedFloat32AtomicAdd whenever the physical
+    // device supports it and buffer float atomics are enabled (same extension);
+    // the fallback device enables neither, and m_has_float_atomics is then false.
+    bool supportsSharedFloatAtomicAdd() const {
+        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomics{};
+        atomics.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 features{};
+        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        features.pNext = &atomics;
+        vkGetPhysicalDeviceFeatures2(m_physDevice, &features);
+        return atomics.shaderSharedFloat32AtomicAdd == VK_TRUE;
     }
 
     bool supportsClusteredSubgroups() const {
@@ -1609,6 +1696,7 @@ private:
             ai.commandBufferCount = 1;
             if (vkAllocateCommandBuffers(m_device, &ai, &m_copyCmdBuf) != VK_SUCCESS) return;
         }
+        waitInFlight();
         vkResetCommandBuffer(m_copyCmdBuf, 0);
 
         VkCommandBufferBeginInfo bi{};
@@ -1685,6 +1773,41 @@ private:
         m_tsLabels.clear();
     }
 
+    // Submit the recording slot without waiting and switch to the other one.
+    // Staging cursors, pending downloads and retired staging are NOT touched:
+    // the in-flight buffer still reads/writes them, and only the full
+    // synchronize() (which waits both slots) releases them.
+    void submitRecordingAsync() {
+        if (!m_recording) return;
+        waitInFlight();  // at most one in flight: the other slot must be free
+        vkEndCommandBuffer(m_cmdBuf);
+        VkSubmitInfo si{};
+        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers    = &m_cmdBuf;
+        vkQueueSubmit(m_queue, 1, &si, m_fence);
+        m_inFlight = true;
+        m_inFlightSlot = m_slot;
+        m_slot = 1 - m_slot;
+        m_cmdBuf   = m_cmdBufs[m_slot];
+        m_descPool = m_descPools[m_slot];
+        m_fence    = m_fences[m_slot];
+        m_descriptorCache.clear();  // the cached sets belong to the other pool
+        m_recordedDispatches = 0;
+        m_recording = false;
+    }
+
+    // Wait for the in-flight slot and make it reusable.
+    void waitInFlight() {
+        if (!m_inFlight) return;
+        const int slot = m_inFlightSlot;
+        vkWaitForFences(m_device, 1, &m_fences[slot], VK_TRUE, UINT64_MAX);
+        vkResetFences(m_device, 1, &m_fences[slot]);
+        vkResetCommandBuffer(m_cmdBufs[slot], 0);
+        vkResetDescriptorPool(m_device, m_descPools[slot], 0);
+        m_inFlight = false;
+    }
+
     bool ensureRecording() {
         if (m_recording) return true;
         VkCommandBufferBeginInfo bi{};
@@ -1692,6 +1815,22 @@ private:
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(m_cmdBuf, &bi) != VK_SUCCESS) return false;
         m_recording = true;
+        if (m_inFlight) {
+            // The in-flight buffer ends with a compute->compute barrier, which
+            // does not order a TRANSFER here (an upload copy overwriting a
+            // buffer a queued dispatch still reads). One full barrier: its
+            // first scope is every earlier command on this queue, including
+            // the other submission.
+            VkMemoryBarrier mb{};
+            mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(m_cmdBuf,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 1, &mb, 0, nullptr, 0, nullptr);
+        }
         // A query must be reset before it is written, and the reset has to be
         // recorded into the same command buffer that writes it.
         if (m_timestampsEnabled && m_queryPool) {

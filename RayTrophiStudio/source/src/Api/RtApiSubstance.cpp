@@ -4,6 +4,7 @@
 #include "SubstanceCatalogue.h"
 #include "Fluid/FluidDomainSubstance.h"
 #include "Fluid/MatterSubstanceState.h"
+#include "Fluid/SubstanceTag.h"
 #include <algorithm>
 
 namespace rtapi {
@@ -39,7 +40,22 @@ std::vector<std::string> substanceReferences(const std::string& name) {
                 refs.push_back("collider '" + collider.name + "'");
             }
         }
+        const auto live_tag = RayTrophiSim::Fluid::substanceTag(name);
+        const auto& live_domains = system.runtime->gridDomains();
+        const auto& live_states = system.runtime->gridDomainStates();
+        for (std::size_t index = 0; index < live_domains.size() && index < live_states.size(); ++index) {
+            const auto& particles = live_states[index].particles;
+            if (live_states[index].valid && std::find(particles.substance_tag.begin(),
+                    particles.substance_tag.end(), live_tag) != particles.substance_tag.end()) {
+                refs.push_back("live particle material in '" + live_domains[index].name + "'");
+            }
+        }
         for (const auto& domain : system.runtime->gridDomains()) {
+            for (const auto& source : domain.matter_seed_sources) {
+                if (source.substance == name) {
+                    refs.push_back("seed source '" + source.name + "' in '" + domain.name + "'");
+                }
+            }
             if (domain.fluid_params.default_substance == name) {
                 refs.push_back("domain '" + domain.name + "' default substance");
             }

@@ -24,20 +24,7 @@ bool downloadGpuGranularParticles(Fluid::FluidParticles& particles,
         download(buffers.fluid_velocities, particles.velocity);
         download(buffers.fluid_affine, particles.affine);
     }
-    download(buffers.granular.stress_diag, particles.granular_stress_diag);
-    download(buffers.granular.stress_shear, particles.granular_stress_shear);
-    download(buffers.granular.plastic_volume, particles.granular_plastic_volume);
-    download(buffers.granular.state_flags, particles.granular_material_flags);
-    download(buffers.granular.yield_value, particles.granular_yield_value);
-    download(buffers.granular.plastic_increment, particles.granular_plastic_increment);
-    download(buffers.granular.damage, particles.granular_damage);
-    download(buffers.granular.hardening, particles.granular_hardening);
-    download(buffers.granular.fracture_history, particles.granular_fracture_history);
-    download(buffers.granular.support_prev_vg, particles.granular_support_prev_vg);
-    download(buffers.granular.support_accel, particles.granular_support_accel);
-    download(buffers.granular.deformation_col0, particles.granular_deformation_col0);
-    download(buffers.granular.deformation_col1, particles.granular_deformation_col1);
-    download(buffers.granular.deformation_col2, particles.granular_deformation_col2);
+    ok = Fluid::enqueueGranularSidecars(*compute, buffers.granular, particles, count) && ok;
     return compute->endTransferBatch() && ok;
 }
 
@@ -411,6 +398,9 @@ bool runGpuFluidG2P(SimulationGridDomainState& state,
         gp.elastic_solid = elastic_solid;
         gp.elastic_yield_strain = fluid_params.elastic_yield_strain;
         gp.elastic_relaxation_s = fluid_params.elastic_relaxation_s;
+        gp.elastic_thermal_viscosity_power = fluid_params.elastic_thermal_viscosity_power;
+        gp.elastic_thermal_yield_power = fluid_params.elastic_thermal_yield_power;
+        gp.elastic_thermal_relaxation_power = fluid_params.elastic_thermal_relaxation_power;
         gp.elastic_fracture_strain = fluid_params.elastic_fracture_strain;
         // Explicit Kelvin-Voigt cap (elasticViscosityLimit says why 1/12).
         gp.elastic_viscosity = std::min(fluid_params.elastic_viscosity_pa_s,
@@ -582,7 +572,7 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
         params.boundary == Fluid::APICSolverParams::BoundaryMode::Open ? 1 :
         params.boundary == Fluid::APICSolverParams::BoundaryMode::Periodic ? 2 : 0;
     // Bits 0..1 retain the boundary enum; bit 2 selects Lagrangian MPM
-    // advection. Reuse the existing word so the 64-byte push ABI is unchanged.
+    // advection. Wall contact uses the shared extended advection push prefix.
     c.boundary = boundary_mode | ((params.granular_enabled || contact_lagrangian) ? 4 : 0);
     c.origin_x = grid.origin.x;
     c.origin_y = grid.origin.y;
@@ -591,7 +581,14 @@ bool runGpuFluidAdvectTail(SimulationGridDomainState& state,
     c.dt = dt;
     c.velocity_damping = std::clamp(params.velocity_damping, 0.0f, 1.0f);
     c.max_velocity = params.max_velocity;
-    c.wall_damping = params.wall_damping;
+    c.wall_damping = params.granular_enabled ? 0.0f : params.wall_damping;
+    c.wall_friction = params.granular_enabled ? 0.0f : params.wall_friction;
+    const auto domain_wall = Fluid::domainWallContact(params, grid.voxel_size);
+    c.wall_adhesion_acceleration = params.granular_enabled ? 0.0f
+        : domain_wall.adhesion_pa / std::max(domain_wall.mass_per_area, 1.0e-6f);
+    c.gravity_x = params.gravity.x;
+    c.gravity_y = params.gravity.y;
+    c.gravity_z = params.gravity.z;
     c.air_drag = params.air_drag;
     {
         const Vec3 air = Fluid::atmosphereAirVelocity(params);

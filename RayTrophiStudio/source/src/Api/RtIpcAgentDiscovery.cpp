@@ -86,6 +86,10 @@ json serializeParams(const MethodDescriptor* desc) {
         if (p.description && p.description[0] != '\0') entry["description"] = p.description;
         if (p.default_value) entry["default"] = p.default_value;
         if (p.enum_values) entry["enum"] = p.enum_values;
+        // What the dispatcher enforces before the handler runs (see
+        // RtIpcParamValidation.h). Absent = the handler checks it itself.
+        if (p.check) entry["validated_as"] = p.check;
+        if (p.check_required) entry["rejected_if_missing"] = true;
         params_obj[p.name] = entry;
     }
     return params_obj;

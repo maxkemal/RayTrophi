@@ -34,6 +34,8 @@ inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
 
     const auto& particles = state.particles;
     bytes += allocationBytes(particles.particle_id);
+    bytes += allocationBytes(particles.dem_bonds.edges);
+    bytes += particles.dem_bonds.nodes.size() * (sizeof(Fluid::DemBond::Node) + 64u);
     bytes += allocationBytes(particles.birth_source_uid);
     bytes += allocationBytes(particles.position);
     bytes += allocationBytes(particles.velocity);

@@ -1,4 +1,6 @@
+#include "Fluid/LiquidEmissionAuthoring.h"
 #include "Fluid/MatterFogStreams.h"
+#include "Fluid/MatterSeedSources.h"
 #include "Fluid/SourceSplatGeometryJson.h"
 #include "Fluid/MatterPhaseOutputJson.h"
 #include "Atmosphere/LensWeatherState.h"
@@ -5830,6 +5832,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["temperature"] = source.temperature;
         f["fuel"] = source.fuel;
         f["falloff"] = source.falloff;
+        RayTrophiSim::Fluid::writeLiquidEmission(f, source);
         f["fluid_particles_per_second"] = source.fluid_particles_per_second;
         f["fluid_velocity_spread"] = source.fluid_velocity_spread;
         f["fluid_emit_along_normal"] = source.fluid_emit_along_normal;
@@ -5933,6 +5936,8 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"max_velocity", domain.fluid_params.max_velocity},
             {"velocity_damping", domain.fluid_params.velocity_damping},
             {"wall_damping", domain.fluid_params.wall_damping},
+            {"wall_friction", domain.fluid_params.wall_friction},
+            {"wall_adhesion_pa", domain.fluid_params.wall_adhesion_pa},
             {"domain_motion_coupling", domain.fluid_params.domain_motion_coupling},
             // Renamed keys, deliberately not aliased to the old ones: the old
             // `viscosity` was a unitless 0..200 dial, and reading 20.0 back as
@@ -5954,6 +5959,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
             {"uvw_refresh_period", domain.fluid_params.uvw_refresh_period},
             {"internal_friction", domain.fluid_params.internal_friction},
             {"air_drag", domain.fluid_params.air_drag},
+            {"liquid_physics_substance", domain.fluid_params.liquid_physics_substance},
             {"inherit_atmosphere", domain.fluid_params.inherit_atmosphere},
             {"density_relaxation_s", domain.fluid_params.density_relaxation_s},
             // ★ The domain's material is its Default Substance. Viscosity, the
@@ -6152,6 +6158,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         if (domain.fluid_fog_shader) {
             d["fluid_fog_shader"] = domainVolumeShaderToJson(*domain.fluid_fog_shader);
         }
+        RayTrophiSim::Fluid::writeMatterSeedSources(d, domain);
         return d;
     };
 
@@ -6392,6 +6399,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         source.temperature = item.value("temperature", source.temperature);
         source.fuel = item.value("fuel", source.fuel);
         source.falloff = item.value("falloff", source.falloff);
+        RayTrophiSim::Fluid::readLiquidEmission(item, source);
         source.fluid_particles_per_second = item.value("fluid_particles_per_second", source.fluid_particles_per_second);
         source.fluid_velocity_spread = item.value("fluid_velocity_spread", source.fluid_velocity_spread);
         source.fluid_emit_along_normal = item.value("fluid_emit_along_normal", source.fluid_emit_along_normal);
@@ -6494,7 +6502,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         domain.quality_profile = static_cast<RayTrophiSim::SimulationDomainQualityProfile>(
             std::clamp(item.value("quality_profile", static_cast<uint32_t>(domain.quality_profile)), 0u, 4u));
         domain.resource_budget_mb = std::clamp(
-            item.value("resource_budget_mb", domain.resource_budget_mb), 128u, 32768u);
+            item.value("resource_budget_mb", domain.resource_budget_mb), 64u, 65536u);
         domain.enforce_resource_budget =
             item.value("enforce_resource_budget", domain.enforce_resource_budget);
         domain.voxel_size = item.value("voxel_size", domain.voxel_size);
@@ -6510,6 +6518,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             const auto& f = item["fluid"];
             if (f.contains("seed_min")) domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
             if (f.contains("seed_max")) domain.fluid_seed_max = jsonToVec3(f["seed_max"]);
+            domain.fluid_seed_box_initialized = f.contains("seed_min") && f.contains("seed_max");
             domain.fluid_seed_particles_per_cell = f.value("seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
             domain.fluid_seed_grain_saturation = std::clamp(
                 f.value("seed_grain_saturation", domain.fluid_seed_grain_saturation), 0.0f, 1.0f);
@@ -6536,6 +6545,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.max_velocity = f.value("max_velocity", domain.fluid_params.max_velocity);
             domain.fluid_params.velocity_damping = f.value("velocity_damping", domain.fluid_params.velocity_damping);
             domain.fluid_params.wall_damping = f.value("wall_damping", domain.fluid_params.wall_damping);
+            domain.fluid_params.wall_friction = f.value("wall_friction", domain.fluid_params.wall_friction);
+            domain.fluid_params.wall_adhesion_pa = f.value("wall_adhesion_pa", 0.0f);
             domain.fluid_params.domain_motion_coupling = f.value("domain_motion_coupling", domain.fluid_params.domain_motion_coupling);
             domain.fluid_params.viscosity_sweeps = f.value("viscosity_sweeps", domain.fluid_params.viscosity_sweeps);
             domain.fluid_params.viscosity_wall_slip = f.value("viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip);
@@ -6558,6 +6569,11 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             domain.fluid_params.uvw_refresh_period = f.value("uvw_refresh_period", domain.fluid_params.uvw_refresh_period);
             domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
             domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
+            // Which liquid's solver hints the domain holds (adoptParcelLiquidSubstance).
+            if (f.contains("liquid_physics_substance") && f["liquid_physics_substance"].is_string()) {
+                domain.fluid_params.liquid_physics_substance =
+                    f["liquid_physics_substance"].get<std::string>();
+            }
             domain.fluid_params.inherit_atmosphere = f.value("inherit_atmosphere", true);
             domain.fluid_params.density_relaxation_s = f.value("density_relaxation_s", domain.fluid_params.density_relaxation_s);
             // Numerical settings (the substance's solver hints, editable on the
@@ -6854,6 +6870,7 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
             // fog volume start from the preset.
             domain.fluid_fog_shader = std::make_shared<VolumeShader>(*domain.shader);
         }
+        RayTrophiSim::Fluid::readMatterSeedSources(item, domain);
         return domain;
     };
 

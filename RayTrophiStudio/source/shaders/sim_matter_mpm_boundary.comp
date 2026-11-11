@@ -20,6 +20,8 @@
 //   shrinks by mu * |v_n| (Coulomb); moving out -> the surface's adhesion holds
 //   it: the stress to stop a face is rho * h * v_n / dt, up to the adhesion it
 //   stays, beyond it its separation slows by adhesion * dt / (rho * h).
+//   The adhesion is a cohesion too: what the tension leaves of it resists slip
+//   (tau <= adhesion + mu * pressure), so a glued face does not slide.
 // Adhesion also acts on separating faces just OUTSIDE the surface
 // (0 <= phi_face < h), reading the glue and velocity of the solid cell across
 // it. Inside-only adhesion let go as soon as a rising plate opened half a face
@@ -29,18 +31,20 @@
 // deep in a collider that holds no mass reads v = 0 and keeps its slip relative
 // to the solid: a frictionless plate drags nothing through the G2P stencil.
 //
-// Cells without a distance (domain walls, kinematic proxies) keep the old rule:
-// a face next to one takes the solid's speed only while the body moves into it.
+// Domain walls apply shared Coulomb friction and restitution from a snapshot.
+// Kinematic proxies without a distance retain their normal-only rule.
 // Dense only: the MPM lane never owns compact pages.
 // CPU twin: APICFluidSolver.cpp enforceMpmContact.
 layout(local_size_x = 256) in;
 layout(push_constant) uniform PC {
     int nx; int ny; int nz;
-    uint flags;    // bit 0: out-of-domain cells are walls (closed boundary)
+    uint flags;    // bit 0: closed domain; bit 1: apply wall traction/restitution
     float dt;      // transfer step the grid velocity advances by
     float density; // MPM body density, kg/m^3
     float h;       // voxel size
-    float _pad;
+    float friction;
+    float restitution; float gravity_x; float gravity_y; float gravity_z;
+    float adhesion_pa;
 } pc;
 layout(set = 0, binding = 0) buffer VelX { float vel_x[]; };
 layout(set = 0, binding = 1) buffer VelY { float vel_y[]; };
@@ -102,6 +106,8 @@ float snapFace(int component, ivec3 f) {
     }
     return component == 0 ? snap_x[a] : (component == 1 ? snap_y[a] : snap_z[a]);
 }
+
+#include "sim_domain_wall_grid.glsl"
 
 // The old rule, for walls without a distance.
 float plainContact(float v, ivec3 low, ivec3 high, int component) {
@@ -165,27 +171,39 @@ float phiContact(float v, ivec3 low, ivec3 high, int component) {
     int q = cellIndex(wall);
     float mu = max(contact_mu[q], 0.0);
     float glue = max(contact_glue[q], 0.0);
+    if (band && glue <= 0.0) {
+        // Outside an unglued surface: no support, no friction.
+        return v;
+    }
     vec3 rel = u - vs;
     float vn = dot(rel, n);
     vec3 vt = rel - vn * n;
-    if (band) {
-        // Outside: no support, no friction; only a glued surface holds a
-        // separating face.
-        if (glue <= 0.0 || vn <= 0.0) {
-            return v;
-        }
-        float hold = glue * pc.dt / (max(pc.density, 1.0) * pc.h);
-        rel = vt + n * max(vn - hold, 0.0);
-    } else if (vn < 0.0) {
-        float slip = length(vt);
-        if (slip > 1e-9) {
-            vt *= max(slip - mu * (-vn), 0.0) / slip;
-        }
-        rel = vt;
-    } else if (glue > 0.0) {
-        float hold = glue * pc.dt / (max(pc.density, 1.0) * pc.h);
-        rel = vt + n * max(vn - hold, 0.0);
+    // Cohesive Coulomb: the glue is one stress budget shared by tension and
+    // shear (velocity units: the stress to stop a face is rho h dv / dt).
+    // Pressing in adds mu * |v_n| of shear on top. A glued face is held in
+    // BOTH directions: holding only the normal turned the glue into a
+    // frictionless rail -- snow on the side of a sphere slid down it, was
+    // bent round the underside by the glue and shot off sideways at
+    // ~sqrt(2 g R) (2026-11-08, mu 20 + 1 MPa; friction only acted on
+    // approaching faces, and under a sphere every face separates).
+    float hold = glue > 0.0 ? glue * pc.dt / (max(pc.density, 1.0) * pc.h) : 0.0;
+    float shear;
+    float vn_kept;
+    if (vn < 0.0) {
+        // Approaching: inside the normal part goes; in the band (outside)
+        // nothing supports it yet, so it keeps coming.
+        vn_kept = band ? vn : 0.0;
+        shear = (band ? 0.0 : mu * (-vn)) + hold;
+    } else {
+        float tension = min(vn, hold);
+        vn_kept = vn - tension;
+        shear = hold - tension;
     }
+    float slip = length(vt);
+    if (slip > 1e-9) {
+        vt *= max(slip - shear, 0.0) / slip;
+    }
+    rel = vt + n * vn_kept;
     return vs[component] + rel[component];
 }
 
@@ -202,6 +220,7 @@ void main() {
         float result = (plainWall(low) || plainWall(f))
             ? plainContact(v, low, f, component)
             : phiContact(v, low, f, component);
+        result = domainWallFace(result, component, f);
         if (component == 0) vel_x[a] = result;
         else if (component == 1) vel_y[a] = result;
         else vel_z[a] = result;

@@ -337,6 +337,8 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         Fluid::kMatterGrainResortDisorder, resorted);
     auto liquid = Fluid::selectMatterParticles(state.particles, liquid_order);
     auto grains = Fluid::selectMatterParticles(state.particles, grain_order);
+    grains.dem_bonds = state.particles.dem_bonds;
+    Fluid::DemBond::retain(grains.dem_bonds, grains.particle_id);
     // Frozen liquid: pinned ice, outside both lanes (the liquid sees it as the
     // solid-phase overlay). Grains meet it as the held-ice triangles above.
     const auto held = Fluid::selectMatterParticles(state.particles, held_order);
@@ -424,6 +426,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
             // face closed further would stall the projection's CG.
             Fluid::applyMatterGrainPorosity(state.grid, grains, params.grain.radius_m,
                 params.variational_solids, .3f, porosity.backup, report, &params.grain);
+            buffers.sparse_mac_transfer.solid_weight_source_valid = false;
             buffers.porous_solid_velocity = true;
             liquid_params.variational_solids = true;
         }
@@ -642,6 +645,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
         }
         const auto dem_budget = grain_budget
             ? grain_budget - mpm_contact.workingSetBytes() : 0;
+        motion.domain_wall = Fluid::domainWallContact(params);
         if (!Fluid::stepMatterGrainGpu(grains, low, high, params.grain, dt, params.gravity,
                 dem_budget, *compute, buffers.matter_runtime->grain, triangles,
                 coupled ? &frame.inputs : nullptr, coupled ? &drag : nullptr, report, error,
@@ -677,6 +681,7 @@ bool runMatterGrainStep(SimulationGridDomainState& state,
     if (!Fluid::mergeMatterGrainOwners(state.particles, liquid, grains, held, error)) {
         return false;
     }
+    state.particles.dem_bonds = std::move(grains.dem_bonds);
     report.host_merge_ms = ms_since(merge_start);
     report.grains = grains.size();
     report.host_step_ms = ms_since(step_start);

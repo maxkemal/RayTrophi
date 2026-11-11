@@ -1,4 +1,5 @@
 #include "scene_ui_fluid_thermal.hpp"
+#include "UI/TemperatureLabel.h"
 
 #include "Fluid/MatterSubstanceState.h"
 #include "Fluid/SubstanceTag.h"
@@ -108,13 +109,14 @@ void drawBoundaryOverride(RayTrophiSim::SimulationGridDomainDesc& domain,
     }
 
     ImGui::BeginDisabled(!domain.thermal_override_enabled);
+    char ambient_fmt[48];
     ImGui::DragFloat(
-        "Ambient Temperature (K)##DomThermalK",
+        "Ambient Temperature##DomThermalK",
         &domain.thermal_ambient_kelvin,
         1.0f,
         0.0f,
         3000.0f,
-        "%.1f");
+        UiTemperature::kelvinFormat(domain.thermal_ambient_kelvin, ambient_fmt, sizeof(ambient_fmt)));
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip(
             "Temperature that object surfaces and thermal liquid approach inside\n"
@@ -174,7 +176,9 @@ bool drawDomainControls(
             "their birth temperature. A source only chooses that birth temperature.");
     }
 
-    ImGui::TextDisabled("Effective Ambient: %.1f K", ambient_kelvin);
+    char effective_text[64];
+    ImGui::TextDisabled("Effective Ambient: %s",
+        UiTemperature::kelvinText(ambient_kelvin, effective_text, sizeof(effective_text)));
     ImGui::BeginDisabled(!params.thermal_liquid_enabled);
     // The freeze point, the thickening curve and the latent heat are each
     // parcel's substance (edit them in the Substance tree above). The Default
@@ -372,13 +376,14 @@ void drawSourceControls(
     }
 
     if (source.fluid_temperature_override) {
+        char custom_fmt[48];
         ImGui::DragFloat(
-            "Custom Temperature (K)",
+            "Custom Temperature",
             &source.fluid_temperature_kelvin,
             0.5f,
             1.0f,
             5000.0f,
-            "%.1f");
+            UiTemperature::kelvinFormat(source.fluid_temperature_kelvin, custom_fmt, sizeof(custom_fmt)));
         source.fluid_temperature_kelvin =
             std::max(1.0f, source.fluid_temperature_kelvin);
     }

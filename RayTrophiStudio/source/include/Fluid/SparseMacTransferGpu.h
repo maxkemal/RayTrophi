@@ -22,6 +22,10 @@ struct SparseMacTransferGpuStorage {
     // map, list/count, velocity XYZ, P2G weight XYZ, FLIP baseline XYZ,
     // variational solid-face weight XYZ (canonical variational owners only).
     std::array<ComputeBufferHandle, 14> owned{};
+    // Immutable, sparse byte-packed collider metadata. Refreshed once per mixed
+    // frame; GPU gathers it into current P2G slots without reading the list back.
+    ComputeBufferHandle solid_weight_source;
+    bool solid_weight_source_valid = false;
     uint64_t active_tiles = 0;
     uint64_t allocated_tiles = 0;
     uint64_t resident_bytes = 0;

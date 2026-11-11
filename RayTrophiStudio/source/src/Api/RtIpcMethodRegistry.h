@@ -35,6 +35,13 @@ struct MethodParam {
     const char* description;    // short human/agent-readable text
     const char* default_value;  // nullptr if no default; otherwise JSON-like string
     const char* enum_values;    // nullptr or "fluid|gas"
+    // ★ Pre-dispatch validation (rtipc_validation::checkParams). Derived by
+    // scripts/gen_ipc_descriptors.py from HOW the handler reads the key, not
+    // from `type`: this build aborts on get<T>() of a wrong type or null and on
+    // .at() of a missing key, so a single bad request used to kill the app.
+    // Hand-written tables leave both at their defaults = not checked.
+    const char* check = nullptr;  // "string"|"number"|"bool"|"vec3"|"string[]"|"number[]"
+    bool        check_required = false;  // handler reads it with an unguarded .at()
 };
 
 // ---------------------------------------------------------------------------

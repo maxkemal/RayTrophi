@@ -117,7 +117,8 @@ def main():
             verdicts['bound_composition'] = bool(
                 name and parity_gate(p) and p.get('composition_cpu') and
                 p.get('composition_gpu') and p.get('composition_slot_mismatch') == 0 and
-                (p.get('composition_weight_max_abs') or 1.0) <= 1e-4 and
+                # an exact 0.0 difference is a pass, not a missing field (`0.0 or 1.0` == 1.0)
+                (p.get('composition_weight_max_abs') if p.get('composition_weight_max_abs') is not None else 1.0) <= 1e-4 and
                 bound_route['surface_route'] in ('gpu_host', 'gpu_live'))
         finally:
             call('fluid.remove_domain', domain=DOMAIN)

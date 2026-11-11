@@ -150,6 +150,85 @@ C_TYPES = {
     "unsigned": "int", "bool": "bool",
 }
 
+# ---------------------------------------------------------------------------
+# Pre-dispatch validation kinds
+# ---------------------------------------------------------------------------
+# ★ This build defines JSON_NOEXCEPTION, so `get<T>()` on a value of the wrong
+# type -- or on null -- and `.at()` on a missing key call abort(): one bad
+# request from an agent killed the whole application (2026-11-09,
+# `fluid.get_seed_sources` with `domain: null`). The dispatcher therefore checks
+# every request against a `check` kind derived from HOW THE CODE READS the key,
+# before any handler runs. It is deliberately separate from the advertised
+# `type`: the overlay may describe a key in friendlier words, but only the read
+# itself says what would abort.
+#   "string" / "number" / "bool" / "vec3" / "string[]" / "number[]"
+#   None -> not checked (raw json, polymorphic, or a reader that validates itself)
+CHECK_BY_TYPE = {"string": "string", "float": "number", "int": "number",
+                 "bool": "bool", "vec3": "vec3"}
+NUMBER_TYPES = {"float", "double", "int", "unsigned", "unsigned int", "long",
+                "int64_t", "uint64_t", "int32_t", "uint32_t", "int16_t",
+                "uint16_t", "int8_t", "uint8_t", "size_t", "std::size_t",
+                "std::int64_t", "std::uint64_t", "std::int32_t",
+                "std::uint32_t"}
+
+
+# What a `.is_xxx()` probe on the key tells about the shapes it accepts.
+PROBE_KIND = {"string": "string", "number": "number",
+              "number_integer": "number", "number_unsigned": "number",
+              "number_float": "number", "boolean": "bool", "array": "array",
+              "object": "object", "null": "null"}
+# Probe kinds that are only a guard in front of a read of the given check kind.
+GUARD_PROBES = {"string": {"string"}, "number": {"number"}, "bool": {"bool"},
+                "vec3": {"array"}, "string[]": {"array"},
+                "number[]": {"array"}}
+
+
+def final_check(info):
+    """The single kind enforced before dispatch, or None.
+
+    None when the key is read as two different types (the handler branches on
+    the value) or when the handler probes a shape other than the one it reads
+    (`is_null()` = "unset", `is_array()` in front of a string read = "a name OR
+    a list"): enforcing one kind there would reject valid calls.
+    """
+    if len(info["checks"]) != 1:
+        return None
+    check = next(iter(info["checks"]))
+    if not info["probes"] <= GUARD_PROBES.get(check, set()):
+        return None
+    return check
+
+
+def value_check(default):
+    """Kind for a `value("k", default)` whose default is not a plain literal:
+    `0u`, `int64_t{0}`, `std::vector<float>{...}`. A `json` default is never
+    converted, so it stays unchecked."""
+    default = default.strip()
+    if re.fullmatch(r"-?\d+(?:u|ul|ull|l|ll)", default, re.I):
+        return "number"
+    typed = re.fullmatch(r"((?:std::)?\w+(?:\s*<(?:[^<>]|<[^<>]*>)+>)?)\s*[({].*[)}]",
+                         default, re.S)
+    if typed and "json" not in typed.group(1):
+        return check_for_cpp(typed.group(1))
+    return None
+
+
+def check_for_cpp(cpp):
+    """Validation kind for the T of a `get<T>()` read, or None."""
+    cpp = re.sub(r"\s+", " ", cpp.strip()).replace("const ", "")
+    if cpp in ("std::string", "string"):
+        return "string"
+    if cpp == "bool":
+        return "bool"
+    if cpp in NUMBER_TYPES:
+        return "number"
+    inner = re.fullmatch(r"std::vector\s*<\s*(.+?)\s*>", cpp)
+    if inner:
+        element = check_for_cpp(inner.group(1))
+        if element in ("string", "number"):
+            return element + "[]"
+    return None
+
 
 def literal_type(text):
     """Infer a parameter type from the default value written in the code."""
@@ -364,15 +443,37 @@ def extract_params(body, root="params", macros=None, helpers=None, seen=None):
         r'\s*return\s+(?:rtapi::)?Result::fail\([^;]*;\s*\}', re.S)
     body = rejection.sub('', body)
 
-    def note(name, ptype, requiredness, default=None):
+    def note(name, ptype, requiredness, default=None, check=None,
+             at_required=False, probe=None):
         entry = found.setdefault(name, {"type": None, "required": False,
-                                        "default": None})
+                                        "default": None, "checks": set(),
+                                        "probes": set(), "at_required": False})
         if ptype and (entry["type"] is None or entry["type"] == "any"):
             entry["type"] = ptype
         if requiredness:
             entry["required"] = True
         if default is not None and entry["default"] is None:
             entry["default"] = default
+        if at_required:
+            entry["at_required"] = True
+        if check:
+            entry["checks"].add(check)
+        if probe:
+            entry["probes"].add(probe)
+
+    # `child_params.at(...)` must not count as a read of `params`.
+    bare = r'(?<![\w.>])' + esc
+    # A key whose value the handler INSPECTS. `.is_string()` before a string
+    # read is just the handler's own guard; `.is_null()`, `.is_array()` before
+    # a string read, or a `.find()` mean the key takes more than one shape on
+    # purpose (a name OR a list, null = unset) -- see final_check().
+    for match in re.finditer(
+            bare + r'(?:\[\s*"([^"]+)"\s*\]|\.at\(\s*"([^"]+)"\s*\))'
+            r'\s*\.is_(\w+)\(', body):
+        note(match.group(1) or match.group(2), "any", False,
+             probe=PROBE_KIND.get(match.group(3), "other"))
+    for match in re.finditer(bare + r'\.find\(\s*"([^"]+)"', body):
+        note(match.group(1), "any", False, probe="other")
 
     # A `requireX` inside a `<root>.contains("x")` guard is NOT required -- the
     # handler offers it as one of several forms (`scene.set_transform` takes
@@ -383,23 +484,42 @@ def extract_params(body, root="params", macros=None, helpers=None, seen=None):
         for match in re.finditer(helper + r'\(\s*' + esc + r'\s*,\s*"([^"]+)"',
                                  body):
             key = match.group(1)
-            note(key, ptype, key not in guarded)
+            note(key, ptype, key not in guarded, check=CHECK_BY_TYPE.get(ptype))
     for helper, ptype in OPTIONAL_TYPES.items():
         for match in re.finditer(
                 helper + r'\(\s*' + esc + r'\s*,\s*"([^"]+)"([^;]*)', body):
             args = split_args(match.group(2).lstrip(","))
             default = literal_type(args[0])[1] if args and args[0] else None
-            note(match.group(1), ptype, False, default)
+            note(match.group(1), ptype, False, default,
+                 check=CHECK_BY_TYPE.get(ptype))
     for match in re.finditer(esc + r'\.value\(\s*"([^"]+)"\s*,([^;]*)', body):
         args = split_args(match.group(2))
         ptype, default = literal_type(args[0]) if args else (None, None)
-        note(match.group(1), ptype or "any", False, default)
+        # `value()` converts with get<T> as well; a literal default fixes T.
+        # A Vec3 default goes through a custom from_json: not checked.
+        note(match.group(1), ptype or "any", False, default,
+             check=(CHECK_BY_TYPE.get(ptype) if ptype != "vec3" else None)
+             or value_check(args[0] if args else ""))
+    for match in re.finditer(
+            bare + r'(?:\[\s*"([^"]+)"\s*\]|\.at\(\s*"([^"]+)"\s*\))'
+            r'\s*\.get\s*<\s*((?:[^<>]|<[^<>]*>)+?)\s*>\s*\(', body):
+        check = check_for_cpp(match.group(3))
+        note(match.group(1) or match.group(2),
+             {"string": "string", "number": "float", "bool": "bool",
+              "string[]": "array", "number[]": "array"}.get(check, "any"),
+             False, check=check)
     for match in re.finditer(esc + r'\.contains\(\s*"([^"]+)"', body):
         note(match.group(1), "any", False)
     for match in re.finditer(esc + r'\[\s*"([^"]+)"\s*\]', body):
         note(match.group(1), "any", False)
     for match in re.finditer(esc + r'\.at\(\s*"([^"]+)"', body):
         note(match.group(1), "any", match.group(1) not in guarded)
+    # ★ `.at()` on a missing key aborts as well. Only these reads are enforced
+    # as required before dispatch; `requireX` helpers already answer with an
+    # error of their own.
+    for match in re.finditer(bare + r'\.at\(\s*"([^"]+)"', body):
+        if match.group(1) not in guarded:
+            note(match.group(1), "any", False, at_required=True)
 
     # The `#define` line itself looks exactly like a call site, and would
     # register the macro's own argument name (`key`) as a request parameter.
@@ -416,7 +536,7 @@ def extract_params(body, root="params", macros=None, helpers=None, seen=None):
             ptype = "any"
             if type_index is not None and type_index < len(args):
                 ptype = C_TYPES.get(args[type_index].strip(), "any")
-            note(key, ptype, False)
+            note(key, ptype, False, check=CHECK_BY_TYPE.get(ptype))
 
     for setter, (key_index, ptype) in lambda_setters(body, root).items():
         for match in re.finditer(r'\b' + setter + r'\s*\(([^;]*)\)',
@@ -427,7 +547,9 @@ def extract_params(body, root="params", macros=None, helpers=None, seen=None):
             key = args[key_index].strip()
             if not (key.startswith('"') and key.endswith('"')):
                 continue
-            note(key.strip('"'), ptype, False)
+            # A setter lambda parses its own Vec3 shape: not checked.
+            note(key.strip('"'), ptype, False,
+                 check=CHECK_BY_TYPE.get(ptype) if ptype != "vec3" else None)
 
     for name, (helper_body, helper_root) in helpers.items():
         if name in seen:
@@ -435,8 +557,20 @@ def extract_params(body, root="params", macros=None, helpers=None, seen=None):
         if re.search(r'\b' + name + r'\s*\([^;]*\b' + esc + r'\b', body):
             nested = extract_params(helper_body, helper_root, macros, helpers,
                                     seen | {name})
+            # Validation follows a helper only when it receives the request
+            # object ITSELF. `readSettings(params.at("settings"))` reads keys
+            # of a nested object; enforcing those at the top level would
+            # reject every valid call.
+            direct = any(
+                arg == root
+                for call in re.finditer(r'\b' + name + r'\s*\(', body)
+                for arg in split_args(body[call.end():]))
             for key, info in nested.items():
-                note(key, info["type"], info["required"], info["default"])
+                note(key, info["type"], info["required"], info["default"],
+                     at_required=info["at_required"] and direct)
+                if direct:
+                    found[key]["checks"] |= info["checks"]
+                    found[key]["probes"] |= info["probes"]
     return found
 
 
@@ -485,8 +619,14 @@ def build(overlay, namespaces):
         for root in roots:
             for key, info in extract_params(blocks[method], root, macros,
                                             helpers).items():
+                fresh = key not in params
                 current = params.setdefault(key, dict(info))
                 current["required"] = current["required"] or info["required"]
+                if not fresh:
+                    current["at_required"] = (current["at_required"]
+                                              or info["at_required"])
+                    current["checks"] = current["checks"] | info["checks"]
+                    current["probes"] = current["probes"] | info["probes"]
                 if current["type"] in (None, "any"):
                     current["type"] = info["type"]
                 if current["default"] is None:
@@ -506,6 +646,8 @@ def build(overlay, namespaces):
                 "description": hand.get("description", ""),
                 "default": hand.get("default", info["default"]),
                 "enum": hand.get("enum"),
+                "check": final_check(info),
+                "check_required": info["at_required"],
             })
         # Tags are what agent.search_capabilities scores against. The domain and
         # the words of the method name are free and always true, so they are
@@ -592,11 +734,13 @@ def emit(records):
         if record["params"]:
             out.append("static const MethodParam params_%s[] = {\n" % name)
             for row in record["params"]:
-                out.append("    {%s, %s, %s, %s, %s, %s},\n" % (
+                out.append("    {%s, %s, %s, %s, %s, %s, %s, %s},\n" % (
                     c_string(row["name"]), c_string(row["type"]),
                     "true" if row["required"] else "false",
                     c_string(row["description"]),
-                    c_string(row["default"]), c_string(row["enum"])))
+                    c_string(row["default"]), c_string(row["enum"]),
+                    c_string(row["check"]),
+                    "true" if row["check_required"] else "false"))
             out.append("};\n")
         out.append("static const MethodDescriptor desc_%s = {\n" % name)
         out.append("    %s, %s,\n" % (c_string(record["method"]),

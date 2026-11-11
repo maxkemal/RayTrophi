@@ -118,6 +118,9 @@ const std::vector<FieldAccess>& fieldTable() {
         RT_FLOAT(elastic_yield_strain, 0.0f, 2.0f, "", "Elastic (MPM)"),
         RT_FLOAT(elastic_relaxation_s, 0.0f, 1000.0f, "s", "Elastic (MPM)"),
         RT_FLOAT(elastic_viscosity_pa_s, 0.0f, 1.0e5f, "Pa s", "Elastic (MPM)"),
+        RT_FLOAT(elastic_thermal_viscosity_power, 0.0f, 4.0f, "softening exponent", "Elastic (MPM)"),
+        RT_FLOAT(elastic_thermal_yield_power, 0.0f, 4.0f, "softening exponent", "Elastic (MPM)"),
+        RT_FLOAT(elastic_thermal_relaxation_power, 0.0f, 4.0f, "softening exponent", "Elastic (MPM)"),
         RT_FLOAT(elastic_fracture_strain, 0.0f, 5.0f, "", "Elastic (MPM)"),
         RT_FLOAT(elastic_damage_rate, 0.0f, 100.0f, "1/s", "Elastic (MPM)"),
         RT_FLOAT(granular_softening_kelvin, 0.0f, 10000.0f, "K", "Granular"),
@@ -308,6 +311,11 @@ bool validateProfile(const SubstanceProfile& p, std::string& error) {
     }
     if (p.meltable && !(p.melt_kelvin < p.boiling_kelvin)) {
         error = p.name + ": melt_kelvin must be below boiling_kelvin";
+        return false;
+    }
+    if (p.meltable && p.liquid_cold_viscosity < p.liquid_kinematic_viscosity) {
+        error = p.name + ": liquid_cold_viscosity must be >= liquid_kinematic_viscosity "
+            "for the freeze viscosity curve";
         return false;
     }
     return true;

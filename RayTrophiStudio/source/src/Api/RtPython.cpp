@@ -1,3 +1,7 @@
+#include "Fluid/MixedGpuStageDiagnostics.h"
+#include "RtPythonLiquidEmission.h"
+#include "RtPythonDomainWalls.h"
+#include "RtPythonMatterSeedSources.h"
 #include "RtUvBindings.h"
 #include "RtLensWeatherBindings.h"
 #include "RtObjectSubstanceBindings.h"
@@ -1553,6 +1557,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     // ── Fluid & Gas Simulation Engine (Faz 5.3b) ────────────────────────
     py::module_ fluid = module.def_submodule("fluid", "APIC liquid & fluid domain simulation");
+    rtpy::registerDomainWallBindings(fluid);
+    rtpy::registerMatterSeedSources(fluid);
     registerSubstanceSplatGeometry(fluid);
     rtpy::registerPhaseGridBindings(fluid);
     rtpy::registerMatterLaneBindings(fluid);
@@ -1608,6 +1614,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["kinematic_viscosity"] = info.kinematic_viscosity;
         d["viscosity_sweeps"] = info.viscosity_sweeps;
         d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["liquid_physics_substance"] = info.liquid_physics_substance;
         d["granular_enabled"] = info.granular_enabled;
         d["granular_friction_angle"] = info.granular_friction_angle_degrees;
         d["granular_cohesion"] = info.granular_cohesion;
@@ -1976,6 +1983,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             d["kinematic_viscosity"] = info.kinematic_viscosity;
             d["viscosity_sweeps"] = info.viscosity_sweeps;
             d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["liquid_physics_substance"] = info.liquid_physics_substance;
             d["granular_enabled"] = info.granular_enabled;
             d["granular_friction_angle"] = info.granular_friction_angle_degrees;
             d["granular_cohesion"] = info.granular_cohesion;
@@ -2326,6 +2334,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["kinematic_viscosity"] = info.kinematic_viscosity;
         d["viscosity_sweeps"] = info.viscosity_sweeps;
         d["viscosity_wall_slip"] = info.viscosity_wall_slip;
+        d["liquid_physics_substance"] = info.liquid_physics_substance;
         d["granular_enabled"] = info.granular_enabled;
         d["granular_friction_angle"] = info.granular_friction_angle_degrees;
         d["granular_cohesion"] = info.granular_cohesion;
@@ -2848,6 +2857,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        py::arg("phase") = py::none());
 
     fluid.def("set_param", [](const std::string& domain, const py::kwargs& kwargs) {
+        // Retired 2026-11-11 (liquid + MPM always on the liquid's own clock):
+        // refused before anything is applied.
+        if (kwargs.contains("matter_liquid_multirate"))
+            throw std::runtime_error("matter_liquid_multirate was removed: liquid + MPM "
+                                     "domains always run the liquid on its own clock");
         Vec3 dmin_val; const Vec3* p_dmin = nullptr;
         if (kwargs.contains("domain_min")) { dmin_val = vec3FromPython(kwargs["domain_min"]); p_dmin = &dmin_val; }
 
@@ -3089,6 +3103,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["viscosity_sparse_active_tiles"] = s.viscosity_sparse_active_tiles;
         d["viscosity_sparse_allocated_tiles"] = s.viscosity_sparse_allocated_tiles;
         d["viscosity_sparse_resident_bytes"] = s.viscosity_sparse_resident_bytes;
+        d["viscosity_pcg_iterations"] = s.viscosity_pcg_iterations;
+        d["viscosity_pcg_relative_residual"] = s.viscosity_pcg_relative_residual;
+        d["viscosity_pcg_unconverged"] = s.viscosity_pcg_unconverged;
         d["occupancy_on_gpu"] = s.occupancy_on_gpu;
         d["particle_count"] = s.particle_count;
         d["gpu_status"] = s.gpu_status;
@@ -3118,6 +3135,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         d["upload_call_ms"] = s.upload_call_ms;
         d["download_call_ms"] = s.download_call_ms;
         d["dispatch_call_ms"] = s.dispatch_call_ms;
+        d["mixed_stages"] = py::module_::import("json").attr("loads")(
+            RayTrophiSim::Fluid::mixedGpuStagesJson(s.mixed_stages).dump());
         d["batch_end_ms"] = s.batch_end_ms;
         d["synchronize_ms"] = s.synchronize_ms;
         return d;
@@ -3833,6 +3852,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     auto flow_to_dict = [](const rtapi::SimulationFlowSourceInfo& s) {
         py::dict d;
+        writeLiquidEmissionPython(d, s);
         d["producer_uid"] = s.producer_uid;
         d["name"] = s.name; d["domain"] = s.domain; d["phase"] = s.phase;
         d["source_mode"] = s.source_mode; d["source_object"] = s.source_object;
@@ -3871,6 +3891,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     };
     auto apply_flow_kwargs = [](rtapi::SimulationFlowSourceInfo& s,
                                 const py::kwargs& kw) {
+        applyLiquidEmissionPython(s, kw);
         applySourceSplatGeometry(s, kw);
 #define RT_FLOW_KW(name,type) if (kw.contains(#name)) s.name = py::cast<type>(kw[#name])
         RT_FLOW_KW(name, std::string); RT_FLOW_KW(domain, std::string);

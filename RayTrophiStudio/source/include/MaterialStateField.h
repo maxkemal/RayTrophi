@@ -356,6 +356,9 @@ struct SubstanceProfile {
     float elastic_poisson_ratio = 0.40f;
     float elastic_yield_strain = 0.0f;         // deviatoric Hencky strain
     float elastic_relaxation_s = 0.0f;         // s
+    float elastic_thermal_viscosity_power = 1.0f;
+    float elastic_thermal_yield_power = 0.0f;
+    float elastic_thermal_relaxation_power = 0.0f;
     float elastic_viscosity_pa_s = 0.0f;       // Pa s
     // Tearing (E2): past this principal Hencky stretch the parcel accumulates
     // damage at elastic_damage_rate per unit relative overshoot per second, and

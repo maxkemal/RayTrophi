@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Fluid/DomainWallContact.h"
+
 #include "../SimulationCompute.h"
 #include "../Vec3.h"
 #include "MatterConstitutive.h"
@@ -138,7 +140,11 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 30: runtime-sized contact history with four mask words and matching CFL bounds.
 // 31: neighbour hash buckets hold 32 grains (contact-born dense seed).
 // 32: no liquid bridge below kMatterGrainBridgeMinVolumeFraction.
-inline constexpr uint32_t kMatterGrainShaderRevision = 38;
+// 39: closed collider shells are one-sided (patch bits 30/31, see below).
+// 40: bound the aggregate normal contact impulse using sleep.x.
+// 41: shared domain-wall surface in the four extra mass-buffer metadata words.
+// 42: domain adhesion in metadata word 7; tensile wall contact and wake policy.
+inline constexpr uint32_t kMatterGrainShaderRevision = 42;
 // Smallest pendular bridge, as a fraction of the smaller grain's volume
 // (BRIDGE_MIN_VOLUME_FRACTION in sim_matter_grain.glsl; the host CFL uses the
 // same floor). Less water than this is an adsorbed film, not a bridge:
@@ -201,6 +207,12 @@ inline constexpr float kMatterGrainResortDisorder = 0.02f;
 // sim_matter_grain.glsl). Device memory (storage-buffer limit) binds first and
 // reports itself; there is no face decimation, so the mesh is used as given.
 inline constexpr std::size_t kMatterGrainMaxColliderFaces = std::size_t{1} << 30;
+// Bits above the patch id in the patch buffer (PATCH_CLOSED / PATCH_INWARD in
+// sim_matter_grain.glsl). Closed: the face bounds a solid shell, so a grain
+// whose centre is behind it is pushed OUT with depth r + d. Inward: the
+// shell's winding points in; the shader flips the face normal.
+inline constexpr uint32_t kMatterGrainPatchClosed = 1u << 30;
+inline constexpr uint32_t kMatterGrainPatchInward = 1u << 31;
 
 inline constexpr float kMatterGrainStiffnessPerRadius = 8.0e5f;  // N/m per m of radius
 bool patchMatterGrainParams(const nlohmann::json& patch, MatterGrainParams& params,
@@ -355,8 +367,10 @@ struct MatterGrainStepReport {
     // Moving colliders and force fields seen by this step.
     std::size_t collider_faces = 0;
     std::size_t ice_faces = 0;        // of collider_faces: held (frozen) liquid
+    std::size_t closed_collider_faces = 0;  // of collider_faces: on a closed shell (one-sided)
     double pore_heat_mixed_j = 0.0;   // heat absorbed water brought into grains
     float collider_speed_max = 0.0f;       // fastest collider vertex, m/s
+    float separation_speed_cap_m_s = 0.0f; // GPU normal-contact recovery speed budget
     float field_acceleration_max = 0.0f;   // largest force-field acceleration on a grain, m/s^2
     // Grain-substeps whose collider contacts exceeded 8 features / 4 supports;
     // the deepest were kept (a dense tessellated curve, not an error).
@@ -431,6 +445,7 @@ struct MatterGrainCouplingOutput {
 };
 
 struct MatterGrainGpuRuntime {
+    std::array<ComputeBufferHandle, 5> bond_buffers{};
     MatterGrainContactProbe last_contact_probe;
     uint32_t last_sleeping_grains = 0;
     ComputeBufferHandle positions;
@@ -456,6 +471,7 @@ struct MatterGrainGpuRuntime {
     ComputeBufferHandle build_positions;
     uint64_t collider_fingerprint = 0;
     uint32_t collider_node_count = 0;
+    std::size_t collider_closed_faces = 0;  // of the uploaded BVH (one-sided shells)
     // Float offset of the vertex velocities in `triangles` (0 = static).
     uint32_t collider_velocity_offset = 0;
     bool collider_uploaded = false;
@@ -472,7 +488,7 @@ struct MatterGrainGpuRuntime {
     // Exact bits of the last published sleep/force law and substep duration.
     // An edit or collider change invalidates equilibrium, without changing the
     // contact history or allocating another per-grain bank.
-    std::array<uint32_t, 24> sleep_context{};
+    std::array<uint32_t, 28> sleep_context{};
     uint64_t sleep_collider_fingerprint = 0;
     bool sleep_context_valid = false;
     // Device contact history is valid only for the grain state it was
@@ -507,6 +523,7 @@ struct MatterGrainGpuRuntime {
 
 // Per-frame motion inputs of one grain step (optional, empty = none).
 struct MatterGrainMotion {
+    DomainWallContact domain_wall;
     // One velocity per triangle vertex, same order as the triangles (m/s).
     // The shader places each triangle at end - v * (frame time left), so the
     // collider sweeps through the substeps instead of jumping per frame.

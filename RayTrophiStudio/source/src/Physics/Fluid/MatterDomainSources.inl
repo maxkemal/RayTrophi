@@ -16,6 +16,117 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
     const float time_scale = std::max(0.0f, dt);
     // Parent motion first, unconditionally — see advanceFlowSourceMotion().
     advanceFlowSourceMotion(dt, frame);
+
+    using LiquidEmission = SimulationFlowSourceDesc::LiquidEmission;
+    // A liquid source's inflow/outflow region this step (MatterLiquidInflow.h).
+    // Inflow sweeps the nozzle upstream by what crosses its face in dt.
+    const auto liquidFlowRegion = [&](SimulationFlowSourceDesc& source,
+                                      const SimulationFlowSourceFrame& resolved,
+                                      const SimulationGridDomainState& state,
+                                      Fluid::LiquidFlowRegion& region) -> bool {
+        const bool inflow = source.liquid_emission == LiquidEmission::Inflow;
+        const float h = std::max(1e-4f, Fluid::liquidGrid(state).voxel_size);
+        const float speed = resolved.velocity.length();
+        if (inflow) {
+            if (!(speed > 1e-5f)) {
+                source.liquid_emission_status =
+                    "inflow needs a velocity: nothing crosses the nozzle face";
+                return false;
+            }
+            region.axis = resolved.velocity * (1.0f / speed);
+            region.sweep = std::max(speed * std::max(0.0f, dt), h);
+        }
+        if (source.source_mode == SimulationFlowSourceMode::Point) {
+            region.shape = inflow ? Fluid::LiquidFlowRegion::Shape::Disk
+                                  : Fluid::LiquidFlowRegion::Shape::Sphere;
+            region.center = resolved.position;
+            region.radius = std::max(1e-4f, resolved.keyed.radius);
+            return true;
+        }
+        if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
+            Vec3 a, b;
+            if (!flow_source_bounds_resolver_ || !flow_source_bounds_resolver_(source, a, b)) {
+                source.liquid_emission_status = "source object bounds not found";
+                return false;
+            }
+            region.shape = Fluid::LiquidFlowRegion::Shape::Box;
+            region.box_min = Vec3::min(a, b);
+            region.box_max = Vec3::max(a, b);
+            return true;
+        }
+        source.liquid_emission_status =
+            "inflow/outflow need source_mode point or object_bounds";
+        return false;
+    };
+    const auto liquidSourceActive = [&](const SimulationFlowSourceDesc& source,
+                                        const SimulationFlowSourceFrame& resolved) {
+        if (source.domain_index < 0 ||
+            source.domain_index >= static_cast<int>(grid_domain_states_.size()) ||
+            source.domain_index >= static_cast<int>(grid_domains_.size())) {
+            return false;
+        }
+        const auto& state = grid_domain_states_[static_cast<std::size_t>(source.domain_index)];
+        return state.valid && !resolved.parent_missing && resolved.keyed.enabled &&
+            simulationDomainHasLiquid(state) &&
+            source.phase == SimulationFlowSourceDesc::Phase::Liquid &&
+            !(source.use_time_limit &&
+              (time_seconds < source.start_time || time_seconds > source.end_time));
+    };
+
+    // Outflow first: removal compacts the parcel arrays, and the inflow plans
+    // below hold parcels by index.
+    for (auto& source : flow_sources_) {
+        source.fluid_flux_m3_s = 0.0;
+        source.fluid_flux_target_m3_s = 0.0;
+        source.liquid_emission_status.clear();
+        source.drained_mass_kg_step = 0.0;
+        if (source.liquid_emission == LiquidEmission::Rate) {
+            source.liquid_emission_status.clear();
+        }
+        if (source.liquid_emission != LiquidEmission::Outflow) continue;
+        const auto resolved = resolveFlowSourceFrame(source, frame);
+        if (!liquidSourceActive(source, resolved)) continue;
+        auto& state = grid_domain_states_[static_cast<std::size_t>(source.domain_index)];
+        Fluid::LiquidFlowRegion region;
+        if (!liquidFlowRegion(source, resolved, state, region)) continue;
+        source.liquid_emission_status.clear();
+        std::vector<uint8_t> remove;
+        if (Fluid::markLiquidOutflow(region, state.particles, remove) == 0) continue;
+        // Match the solver's mass preparation before removing even the first
+        // seed parcel. Grain sphere masses must be resolved before voxel masses.
+        const auto& params = grid_domains_[source.domain_index].fluid_params;
+        const bool legacy_granular = params.granular_enabled && !params.grain.enabled;
+        if (params.grain.enabled) {
+            Fluid::ensureMatterGrainRestMasses(state.particles, params.grain,
+                Fluid::domainSubstance(params), legacy_granular);
+        }
+        Fluid::ensureFluidParticleRestMasses(state.particles, Fluid::domainSubstance(params),
+            state.voxel_size, params.particles_per_cell, legacy_granular);
+        double drained = 0.0;
+        for (std::size_t p = 0; p < remove.size(); ++p) {
+            if (!remove[p]) continue;
+            drained += double(p < state.particles.rest_mass_kg.size()
+                                  ? state.particles.rest_mass_kg[p] : 0.0f) *
+                           (p < state.particles.mass_fraction.size()
+                                ? state.particles.mass_fraction[p] : 1.0f) +
+                       (p < state.particles.pore_water_mass_kg.size()
+                            ? state.particles.pore_water_mass_kg[p] : 0.0f);
+        }
+        state.particles.compact(remove);
+        source.drained_mass_kg_step += drained;
+        source.drained_mass_kg_total += drained;
+        if (drained > 0.0) {
+            MatterExchangeRecord record;
+            record.kind = MatterExchangeKind::Drainage;
+            record.source = "domain:" + grid_domains_[static_cast<std::size_t>(source.domain_index)].name;
+            record.target = "flow_source:" + source.name;
+            record.source_mass_kg = record.target_mass_kg = drained;
+            matter_exchange_ledger_.record(std::move(record));
+        }
+    }
+
+    // Inflow plans: which parcels the nozzle needs and which it holds.
+    std::vector<Fluid::LiquidInflowPlan> inflow_plans(flow_sources_.size());
     // Plan all liquid sources before any source consumes the shared free slots.
     // This is an emission allocation, not ownership of existing material points.
     std::vector<std::vector<Fluid::MatterEmissionRequest>> pool_requests(
@@ -39,12 +150,44 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
              (time_seconds < source.start_time || time_seconds > source.end_time))) {
             continue;
         }
-        const double requested = source.fluid_emit_accumulator +
-            std::max(0.0f, resolved.keyed.flow_rate) * std::max(0.0f, dt);
-        if (!std::isfinite(requested) || requested <= 0.0) {
-            continue;
+        if (source.liquid_emission == LiquidEmission::Outflow) continue;
+        const auto& lattice_grid = Fluid::liquidGrid(state);
+        const int ppc = std::max(1, grid_domains_[static_cast<std::size_t>(source.domain_index)]
+                                        .fluid_params.particles_per_cell);
+        const double parcel_volume = double(lattice_grid.voxel_size) * lattice_grid.voxel_size *
+                                     lattice_grid.voxel_size / ppc;
+        int count = 0;
+        if (source.liquid_emission == LiquidEmission::Inflow) {
+            Fluid::LiquidFlowRegion region;
+            if (!liquidFlowRegion(source, resolved, state, region)) continue;
+            source.liquid_emission_status.clear();
+            source.fluid_flux_target_m3_s =
+                double(Fluid::liquidFlowRegionArea(region)) * resolved.velocity.length();
+            Fluid::LiquidLattice lattice;
+            lattice.origin = lattice_grid.origin;
+            lattice.h = lattice_grid.voxel_size;
+            lattice.nx = lattice_grid.nx;
+            lattice.ny = lattice_grid.ny;
+            lattice.nz = lattice_grid.nz;
+            Fluid::planLiquidInflow(region, lattice, ppc, state.particles,
+                (static_cast<uint64_t>(source.timeline_uid) << 32) ^ source.fluid_emit_sample_serial,
+                inflow_plans[si]);
+            Fluid::limitLiquidInflowBirths(inflow_plans[si],
+                source.fluid_flux_target_m3_s * std::max(0.0f, dt) / parcel_volume,
+                source.fluid_inflow_initialized, source.fluid_inflow_fractional_parcel,
+                source.timeline_uid ^ source.fluid_emit_sample_serial);
+            count = static_cast<int>(std::min<std::size_t>(inflow_plans[si].births.size(),
+                                                           2147483647u));
+        } else {
+            source.fluid_flux_target_m3_s =
+                double(std::max(0.0f, resolved.keyed.flow_rate)) * parcel_volume;
+            const double requested = source.fluid_emit_accumulator +
+                std::max(0.0f, resolved.keyed.flow_rate) * std::max(0.0f, dt);
+            if (!std::isfinite(requested) || requested <= 0.0) {
+                continue;
+            }
+            count = static_cast<int>(std::min(requested, 2147483647.0));
         }
-        int count = static_cast<int>(std::min(requested, 2147483647.0));
         // The exact kilogram cut happens while emitting (parcel masses are
         // resolved there); a spent budget asks the shared pool for nothing.
         if (source.use_mass_limit &&
@@ -99,21 +242,43 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
         const bool liquid_source = simulationDomainHasLiquid(state) &&
             source.phase == SimulationFlowSourceDesc::Phase::Liquid;
         if (liquid_source) {
+            if (source.liquid_emission == LiquidEmission::Outflow) continue;  // ran above
             const auto& fluid_domain = grid_domains_[static_cast<std::size_t>(source.domain_index)];
-            const float rate = std::max(0.0f, keyed.flow_rate);
-            source.fluid_emit_accumulator += rate * std::max(0.0f, dt);
-            if (!std::isfinite(source.fluid_emit_accumulator)) {
-                source.fluid_emit_accumulator = 0.0f;
-                continue;
+            const std::size_t si = static_cast<std::size_t>(&source - flow_sources_.data());
+            const bool inflow = source.liquid_emission == LiquidEmission::Inflow;
+            const Fluid::LiquidInflowPlan* plan = inflow ? &inflow_plans[si] : nullptr;
+            // The nozzle carries its column's weight: v - g dt now leaves the
+            // face at v after the step's gravity (MatterLiquidInflow.h).
+            const Vec3 inflow_hold = resolved.velocity -
+                fluid_domain.fluid_params.gravity * std::max(0.0f, dt);
+            int emit_count = 0;
+            if (inflow) {
+                if (!source.liquid_emission_status.empty()) continue;  // no region
+                for (const std::size_t held : plan->held) {
+                    if (held >= state.particles.size()) continue;
+                    state.particles.velocity[held] = inflow_hold;
+                    if (held < state.particles.affine.size()) {
+                        state.particles.affine[held] = Fluid::AffineC{};
+                    }
+                }
+                emit_count = static_cast<int>(std::min<std::size_t>(plan->births.size(),
+                                                                    2147483647u));
+            } else {
+                const float rate = std::max(0.0f, keyed.flow_rate);
+                source.fluid_emit_accumulator += rate * std::max(0.0f, dt);
+                if (!std::isfinite(source.fluid_emit_accumulator)) {
+                    source.fluid_emit_accumulator = 0.0f;
+                    continue;
+                }
+                emit_count = static_cast<int>(std::min(
+                    static_cast<double>(source.fluid_emit_accumulator), 2147483647.0));
             }
-            int emit_count = static_cast<int>(std::min(
-                static_cast<double>(source.fluid_emit_accumulator), 2147483647.0));
             if (emit_count <= 0) continue;
             // Birth cost per liquid source. Covers the spawn that follows this
             // point in the iteration; the first-water frames showed 170-210 ms
             // spikes that no existing section attributes.
             RTPERF_FRAME_SCOPE("sim.matter.emit");
-            source.fluid_emit_accumulator -= static_cast<float>(emit_count);
+            if (!inflow) source.fluid_emit_accumulator -= static_cast<float>(emit_count);
 
             if (source.use_mass_limit &&
                 source.total_emitted_mass_kg >= double(source.max_emitted_mass_kg)) {
@@ -180,6 +345,13 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             const bool grain_birth = Fluid::substanceTransportOwner(
                 emit_substance, emit_model, fluid_domain.fluid_params) ==
                 Fluid::MatterTransportOwner::Grain;
+            if (inflow && grain_birth) {
+                // DEM grains are born at contact through MatterGrainBirthFilter,
+                // not on a parcel lattice: the nozzle fill does not apply.
+                source.liquid_emission_status =
+                    "inflow pours parcels; a DEM grain substance uses emission rate";
+                continue;
+            }
 
             // Over-pack guard: a high particles/sec dumped into a small spawn
             // volume in ONE step stacks dozens of particles into a single cell.
@@ -192,7 +364,9 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // Grains skip it: MatterGrainBirthFilter rejects overlapping births
             // itself, and the liquid PPC ceiling capped a grain burst at
             // spawn_cells x 16 (329k for a 1.7 m sphere at 0.1 m voxels).
-            if (!grain_birth && source.source_mode != SimulationFlowSourceMode::MeshSurface) {
+            // Inflow fills to particles_per_cell by construction.
+            if (!inflow && !grain_birth &&
+                source.source_mode != SimulationFlowSourceMode::MeshSurface) {
                 const float h = std::max(1e-4f, Fluid::liquidGrid(state).voxel_size);
                 float spawn_volume;
                 if (source.source_mode == SimulationFlowSourceMode::ObjectBounds) {
@@ -214,6 +388,8 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     // the delayed particle avalanche mistaken for a seed replay.
                     const int deferred = std::min(emit_count - cap, cap);
                     source.fluid_emit_accumulator += static_cast<float>(deferred);
+                    // The rest is gone: the authored rate is not what pours.
+                    source.fluid_overpack_dropped_total += emit_count - cap - deferred;
                     emit_count = cap;
                 }
             }
@@ -319,7 +495,10 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 const float u3 = hashUnitFloat(s ^ 0x9e3779b9u);
                 Vec3 spawn_pos;
                 Vec3 spawn_normal(0.0f, 0.0f, 0.0f); // valid only for MeshSurface
-                if (source.source_mode == SimulationFlowSourceMode::MeshSurface && flow_source_surface_sampler_) {
+                if (inflow) {
+                    spawn_pos = plan->births[static_cast<std::size_t>(attempts)];
+                } else if (source.source_mode == SimulationFlowSourceMode::MeshSurface &&
+                           flow_source_surface_sampler_) {
                     ParticleSurfaceSample sample;
                     if (flow_source_surface_sampler_(source, s, sample)) {
                         // Offset slightly along normal so particles spawn just
@@ -348,7 +527,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 // without a per-particle perturbation the emitted mass falls as
                 // a coherent sheet/plate. Add random jitter scaled by the
                 // emission speed (0 spread => exact source.velocity, laminar).
-                Vec3 emit_vel = resolved.velocity;
+                Vec3 emit_vel = inflow ? inflow_hold : resolved.velocity;
                 // MeshSurface + emit-along-normal: redirect the emission speed
                 // along the local surface normal so the liquid sprays off the
                 // geometry instead of all moving in one global direction.
@@ -363,7 +542,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                     }
                 }
                 if (source.fluid_velocity_spread > 0.0f) {
-                    const float jitter_mag = source.fluid_velocity_spread * emit_vel.length();
+                    const float jitter_mag = source.fluid_velocity_spread * resolved.velocity.length();
                     if (jitter_mag > 1e-6f) {
                         const uint32_t vs = s ^ 0x1b56c4e9u;
                         const Vec3 jitter(
@@ -408,6 +587,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             source.total_emitted_particles +=
                 static_cast<int>(state.particles.size() - before_emission);
             source.total_emitted_mass_kg += emitted_mass;
+            if (!grain_birth && dt > 0.0f) {
+                const double h = Fluid::liquidGrid(state).voxel_size;
+                source.fluid_flux_m3_s =
+                    double(state.particles.size() - before_emission) * h * h * h /
+                    std::max(1, fluid_domain.fluid_params.particles_per_cell) / dt;
+            }
             if (emitted_mass > 0.0) {
                 MatterExchangeRecord record;
                 record.kind = MatterExchangeKind::Emission;

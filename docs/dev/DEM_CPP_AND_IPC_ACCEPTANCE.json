@@ -1,0 +1,122 @@
+{
+  "cpp": {
+    "compiler": "MSVC 14.44.35207 x64, C++17, /UNDEBUG; standalone executables, no application build",
+    "passed": [
+      "dem_contact_time_bounds_test",
+      "dem_bond_mechanics_test",
+      "matter_grain_stages_test",
+      "matter_granular_damping_test",
+      "matter_common_clock_test"
+    ],
+    "not_passed": {
+      "dem_bond_network_test": "standalone link unresolved application/substance dependencies; no runtime acceptance claimed",
+      "dem_bond_compaction_test": "not executed",
+      "dem_bond_gpu_reference_test": "not executed; initialized Vulkan fixture required"
+    }
+  },
+  "live": {
+    "transport": "external named-pipe IPC",
+    "materials": [
+      {
+        "name": "Sand",
+        "particles": 63,
+        "steps": 4,
+        "dt": 0.005,
+        "no_hold": true,
+        "no_particle_loss": true,
+        "position_changed": true
+      },
+      {
+        "name": "Gravel",
+        "particles": 63,
+        "steps": 4,
+        "dt": 0.005,
+        "no_hold": true,
+        "no_particle_loss": true,
+        "position_changed": true
+      },
+      {
+        "name": "Ice",
+        "particles": 63,
+        "steps": 4,
+        "dt": 0.005,
+        "no_hold": true,
+        "no_particle_loss": true,
+        "position_changed": true
+      }
+    ],
+    "ice_body_authoring": "passed existing rt_test_dem_bodies_ipc.main validation/bind/rebind rejection/remove test",
+    "scope": "small smoke; not impact, restitution, wet coupling or fracture convergence acceptance"
+  },
+  "cleanup": {
+    "domains": {
+      "domains": []
+    },
+    "control": {
+      "driver": "user",
+      "dropped_seeds": [],
+      "epoch": 13,
+      "frame": 0,
+      "last_rewind": {
+        "absorbed": false,
+        "first_changed_part": "emitters / colliders",
+        "fluid_affected": true,
+        "frame": 1
+      },
+      "playing": false,
+      "rewind_history": [
+        {
+          "absorbed": false,
+          "first_changed_part": "fluid 'T_CodexDemAcceptance' solver/seed",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "fluid 'T_CodexDemAcceptance' solver/seed",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "emitters / colliders",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "domain 'T_CodexDemAcceptance' grid/gas",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "fluid 'T_CodexDemAcceptance' solver/seed",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "fluid 'T_CodexDemAcceptance' solver/seed",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "fluid 'T_CodexDemAcceptance' solver/seed",
+          "fluid_affected": true,
+          "frame": 0
+        },
+        {
+          "absorbed": false,
+          "first_changed_part": "emitters / colliders",
+          "fluid_affected": true,
+          "frame": 1
+        }
+      ],
+      "script_driving": false,
+      "script_sim_seconds": 0.0
+    }
+  },
+  "harness_note": "All live assertions passed. Original finalizer used nonexistent sim.pause; corrected to timeline.pause and cleanup verified separately. Per-step in-memory diagnostics were not saved; this report records assertions and observed output only."
+}

@@ -40,9 +40,9 @@ def main():
     assert "resolved == 2u || resolved == 3u" in shader
     assert "atomicAdd(count[3], 1u)" in shader
     specs = {
-        "p2g": (10, 40), "g2p": (12, 72), "stress_update": (18, 116),
-        "stress_p2g": (9, 52), "settle": (7, 52), "advect": (11, 84),
-        "occupancy": (6, 40), "contact": (19, 16), "copy": (2, 4),
+        "p2g": (10, 40), "g2p": (12, 72), "stress_update": (18, 128),
+        "stress_p2g": (9, 52), "settle": (7, 52), "advect": (11, 104),
+        "occupancy": (6, 40), "liquid_drag": (19, 32), "copy": (2, 4),
         "clear": (1, 4), "zero_faces": (4, 36), "pores": (13, 40),
     }
     def expand(filename, defines=None):
@@ -87,16 +87,23 @@ def main():
         assert f"sim_matter_{name}" in read("shaders/compile_sim_shaders.bat")
     driver = read("src/Physics/Fluid/MatterGpuStep.inl")
     assert driver.index("working_set >") < driver.index("if (!ensure(primary))")
-    assert driver.index("runGpuFluidMGPCGPressure(") < driver.index('contact.kernel = Fluid::macKernel(liquid_mac, "sim_matter_contact"')
-    assert driver.index('contact.kernel = Fluid::macKernel(liquid_mac, "sim_matter_contact"') < driver.index("runGpuFluidG2P(")
-    assert driver.index("runGpuFluidG2P(") < driver.index("auto liquid_result = particles;")
-    assert driver.index("mixed GPU produced nonfinite") < driver.index("particles = std::move(liquid_result)")
-    assert "copyParticleFrom(i, granular_result, i)" in driver
-    assert "liquid_result.advanceMaterialCoordinates();" in driver
+    assert driver.index("runGpuFluidMGPCGPressure(") < driver.index('drag.kernel = Fluid::macKernel(liquid_mac, "sim_matter_liquid_drag"')
+    assert driver.index('drag.kernel = Fluid::macKernel(liquid_mac, "sim_matter_liquid_drag"') < driver.index("runGpuFluidG2P(")
+    assert "sim_matter_contact" not in read("src/Device/SimulationComputeVulkan.cpp")
+    # Publication (scale S1 slice A, 2026-11-11): staged columns, validated, then
+    # swapped in; the adaptive snow sizing check comes before both.
+    assert driver.index("runGpuFluidG2P(") < driver.index("static thread_local PublicationStaging staging_scratch;")
+    assert driver.index("retry_at_ceiling = true;") < driver.index("mixed GPU produced nonfinite canonical particle state") \
+        < driver.index("particles.position.swap(staging.position);")
+    assert "granular_result.commitParticle(particles, static_cast<std::size_t>(i));" in driver
+    assert "particles.advanceMaterialCoordinates();" in driver
+    # The ceiling re-run happens in the wrapper, after the first attempt's scope ended.
+    assert "bool runMatterGpuStep(" in driver and "static bool runMatterGpuStepOnce(" in driver
     assert "CPU fallback" in driver
     assert "Fluid::MatterGpuParticleLease shared_particles;" in driver
     assert "shared_particles.bind(*lanes[1], primary, count, error)" in driver
-    assert "downloadGpuGranularParticles(granular_result, compute, *lanes[1], false)" in driver
+    assert "Fluid::enqueueGranularSidecars(*compute, lanes[1]->granular," in driver
+    assert "granular_result.canCommit(particles, count)" in driver
     lease = read("include/Fluid/MatterGpuParticleLease.h")
     assert "~MatterGpuParticleLease()" in lease and "restore();" in lease
     assert "source.fluid_uploaded_particle_count != count" in lease
@@ -114,17 +121,20 @@ def main():
     assert "substep_forces->frame_start_seconds + substep * dt" in driver
     # 2026-11-02: the MPM lane's walls move and let go (COLLIDER_TEMAS_YUZEYI.md).
     assert "runGpuMpmSolidFaces(grid, compute, *lanes[1], closed_boundary, step_dt," in driver
-    assert driver.count("solid_faces(lane, transfer_dt)") == 2
+    assert driver.count("solid_faces(lane, lane_dt)") == 1
+    assert "solid_faces(lane, lane_dt, false)" in driver
     mpm_wall = read("shaders/sim_matter_mpm_boundary.comp")
-    assert '"sim_matter_mpm_boundary", "sim_matter_mpm_boundary.spv", 13, 32' in read(
+    assert '"sim_matter_mpm_boundary", "sim_matter_mpm_boundary.spv", 13, 52' in read(
         "src/Device/SimulationComputeVulkan.cpp")
     # The GRID carries contact: grid-SDF collision per face (phi_face < 0,
     # n = grad phi, Coulomb on approach, adhesion while leaving), the old
     # moving/separating rule only for walls without a distance. A parcel-only
     # contact piled a jelly into the h/2 band (2026-11-02 live).
     assert "float phiContact(float v, ivec3 low, ivec3 high, int component)" in mpm_wall
-    assert "vt *= max(slip - mu * (-vn), 0.0) / slip;" in mpm_wall
-    assert "rel = vt + n * max(vn - hold, 0.0);" in mpm_wall
+    assert "vt *= max(slip - shear, 0.0) / slip;" in mpm_wall
+    assert "shear = (band ? 0.0 : mu * (-vn)) + hold;" in mpm_wall
+    assert "float tension = min(vn, hold);" in mpm_wall
+    assert "rel = vt + n * vn_kept;" in mpm_wall
     assert "(plainWall(low) || plainWall(f))" in mpm_wall
     # A ridge face (phi_face < 0, no slope: a shell thinner than ~2h) blocks
     # flow across instead of being skipped (a jelly fell through, 2026-11-03).
@@ -140,11 +150,11 @@ def main():
         "src/Physics/Fluid/FluidParticleSolidRecovery.cpp")
     assert 'j["mpm_surface_pushed_particles"]' in read("src/Api/RtIpc.cpp")
     assert 'method == "fluid.sample_solid_phi"' in read("src/Api/RtIpc.cpp")
-    # Without liquid the P2G skips the face mass gradient (its only reader is
-    # sim_matter_contact, which needs liquid): bit 31 of the lane word.
+    # The P2G skips the face mass gradient (its only reader, sim_matter_contact,
+    # was removed 2026-11-11): bit 31 of the lane word.
     p2g = read("shaders/sim_fluid_p2g_scatter.glsl")
     assert "const bool write_gradient = (pc.matter_lane & 0x80000000u) == 0u;" in p2g
-    assert "view.mass_gradient_wanted = has_fluid;" in read("src/Physics/Fluid/MatterGpuStep.inl")
+    assert "view.mass_gradient_wanted = false;" in read("src/Physics/Fluid/MatterGpuStep.inl")
     # Clustered P2G (same-address contention): loaded only where the device
     # reports clustered subgroup ops; the per-lane kernels stay the fallback.
     vk = read("src/Device/SimulationComputeVulkan.cpp")
@@ -247,10 +257,12 @@ def main():
     # "not all granular", which counted an all-elastic domain as liquid.
     assert "const bool has_fluid = std::any_of(" in driver
     assert "return !mpm_parcel(" in driver
-    assert "if (has_fluid && !runGpuFluidMGPCGPressure(" in driver
-    assert "if (has_fluid && !compute->dispatch(contact))" in driver
-    # Separate transfer, gather and advection loops each skip the empty lane.
-    assert driver.count("if (lane == 0 && !has_fluid)") == 3
+    assert "if (liquid_step && !runGpuFluidMGPCGPressure(" in driver
+    assert "if (liquid_multirate && !compute->dispatch(drag))" in driver
+    # Separate transfer, gather and advection loops each skip the empty lane;
+    # transfer and gather skip it between liquid steps (liquid_step implies has_fluid).
+    assert driver.count("if (lane == 0 && !has_fluid)") == 2
+    assert driver.count("if (lane == 0 && !liquid_step)") == 2
     assert driver.index("clock->contact(substep") < driver.index("runGpuFluidAdvectTail(")
     assert "mixed GPU empty fluid field clear failed" in driver
     assert driver.index("mixed GPU empty fluid field clear failed") < driver.index(

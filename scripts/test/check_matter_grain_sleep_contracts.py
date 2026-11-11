@@ -73,7 +73,9 @@ def check_source():
     assert 'bool still = sleepOn() && balanced &&' in shader
     assert 'constants.sleep[3] = params.sleep_time_s;' in host
     assert 'sleep_context[8] = 0u;' in host
-    assert 'constants.sleep[0] = 0.0f;' in host
+    assert 'report.separation_speed_cap_m_s = constants.sleep[0];' in host
+    assert 'sleep_context.data() + 24, masses.data() + 2 * count + 4' in host
+    assert 'std::array<uint32_t, 28> sleep_context' in host
     assert 'next_rest = floatBitsToUint(min(advanced_time,target_time));' in shader
     assert 'runtime.sleep_context != sleep_context' in host
     assert 'runtime.sleep_collider_fingerprint != runtime.collider_fingerprint' in host
@@ -110,7 +112,7 @@ def check_physical_specification():
     assert 9.81 > min(1.0 / .01, .25 * 9.81)  # force guard rejects the aggressive fixture.
     # Independent next-representable-float oracle for the shader's position ULP.
     # An 8 mm, 5.7 g grain at y=2 m has a quantized spring-force residual far
-    # above .01 m/s². Rejecting all of that noise would disable large-N sleep.
+    # above .01 m/sÂ². Rejecting all of that noise would disable large-N sleep.
     for coordinate in (.008, .025, .233, 1., 2., 10., 1000.):
         bits = struct.unpack('<I', struct.pack('<f', coordinate))[0]
         actual = struct.unpack('<f', struct.pack('<I', bits))[0]

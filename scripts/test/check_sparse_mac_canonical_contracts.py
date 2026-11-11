@@ -104,11 +104,11 @@ def check_abis():
     compact = {
         "sim_sparse_mac_zero_faces": (6, 36), "sim_sparse_mac_matter_zero_faces": (6, 36),
         "sim_sparse_mac_divergence": (7, 52), "sim_sparse_mac_divergence_var": (13, 52),
-        "sim_sparse_mac_divergence_porous": (13, 52),
+        "sim_sparse_mac_divergence_porous": (14, 52),
         "sim_sparse_mac_subtract_gradient": (7, 52),
         "sim_sparse_mac_subtract_gradient_var": (13, 52),
-        "sim_sparse_mac_capture_compact": (8, 36), "sim_sparse_mac_advect": (11, 80),
-        "sim_sparse_mac_matter_advect": (13, 84), "sim_sparse_mac_matter_contact": (21, 16),
+        "sim_sparse_mac_capture_compact": (8, 36), "sim_sparse_mac_advect": (11, 100),
+        "sim_sparse_mac_matter_advect": (13, 104),
         "sim_sparse_mac_viscosity_capture": (15, 68), "sim_sparse_mac_viscosity_sweep": (15, 68),
         "sim_sparse_pressure_init_mac_weights": (18, 80),
         "sim_sparse_pressure_spmv_mac_weights": (18, 80),
@@ -117,9 +117,9 @@ def check_abis():
     dense = {
         "sim_fluid_zero_solid_faces": (4, 36), "sim_matter_zero_faces": (4, 36),
         "sim_fluid_divergence": (5, 52), "sim_fluid_divergence_var": (11, 52),
-        "sim_fluid_divergence_porous": (11, 52), "sim_fluid_subtract_gradient": (5, 52),
-        "sim_fluid_subtract_gradient_var": (11, 52), "sim_fluid_advect_tail": (9, 80),
-        "sim_matter_advect": (11, 84), "sim_matter_contact": (19, 16),
+        "sim_fluid_divergence_porous": (12, 52), "sim_fluid_subtract_gradient": (5, 52),
+        "sim_fluid_subtract_gradient_var": (11, 52), "sim_fluid_advect_tail": (9, 100),
+        "sim_matter_advect": (11, 104),
         "sim_sparse_viscosity_capture": (13, 68), "sim_sparse_viscosity_sweep": (13, 68),
         "sim_fluid_viscosity_rbgs": (11, 52), "sim_sparse_mac_capture": (8, 36),
         "sim_sparse_pressure_init": (16, 80), "sim_sparse_pressure_spmv": (16, 80),
@@ -161,7 +161,7 @@ def check_host():
     mixed = read("src/Physics/Fluid/MatterGpuStep.inl")
     assert mixed.index("mac_storage.compact_owner = compact_wanted") < mixed.index("if (!ensure(primary))")
     assert "Fluid::publishCompactMacToHost(*compute, primary," in mixed
-    assert "\"sim_sparse_mac_matter_contact\"" in mixed
+    assert "\"sim_sparse_mac_matter_liquid_drag\"" in mixed
     assert "liquid_mac.compact ? 21 : 19" in mixed
     pure = read("src/Physics/Fluid/FluidDomainStep.inl")
     assert pure.count("gpu_buffers.sparse_mac_transfer.compact_owner = false;") == 2

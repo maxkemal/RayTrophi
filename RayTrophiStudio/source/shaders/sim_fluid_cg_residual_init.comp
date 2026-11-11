@@ -1,5 +1,9 @@
 // sim_fluid_cg_residual_init.comp
 // MGPCG: r0 = b = -div*h*h/dt at fluid cells (0 elsewhere); pressure reset 0.
+// pc.iterations == 1 (warm start, 2026-11-09): pressure is KEPT at fluid cells
+// as the initial guess (zeroed elsewhere: air/solid are p = 0); the host then
+// forms r = b - A p (FluidGpuPressure.inl). Matter substeps re-solve an almost
+// identical system 180 times a frame; a cold start paid ~64 iterations each.
 // 1:1 port of the CUDA fluid_cg_residual_init_kernel, including the density
 // relaxation term (mask carries the per-cell parcel count): the 27-cell mean
 // count is pulled to particles_per_cell over density_relaxation_s seconds,
@@ -37,8 +41,8 @@ float rtDensityMask(ivec3 c) {
 void main() {
     int id = int(gl_GlobalInvocationID.x);
     if (id >= pc.nx * pc.ny * pc.nz) return;
-    pressure[id] = 0.0;
-    if (fluid_mask[id] < 0.5) { r[id] = 0.0; return; }
+    if (pc.iterations != 1) pressure[id] = 0.0;
+    if (fluid_mask[id] < 0.5) { r[id] = 0.0; pressure[id] = 0.0; return; }
     float h      = pc.voxel_size > 1e-6 ? pc.voxel_size : 1.0;
     float inv_dt = pc.dt > 1e-8 ? 1.0 / pc.dt : 0.0;
     float rhs = -divergence[id] * h * h * inv_dt;

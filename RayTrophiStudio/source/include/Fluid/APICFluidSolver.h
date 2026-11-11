@@ -30,6 +30,7 @@
 #include "../FluidGrid.h"
 #include "MatterPoreExchange.h"
 #include "MatterGrain.h"
+#include "MixedGpuStageStats.h"
 #include "FluidParticles.h"
 #include <algorithm>
 #include <cstddef>
@@ -141,7 +142,10 @@ struct APICSolverParams {
     // Granular paths interpret this value at 60 Hz and scale by physical dt;
     // liquid retains its per-outer-step multiplier. Elastic substeps preserve it.
     float velocity_damping = 0.999f;
-    float wall_damping = 0.15f;
+    // Shared stationary domain-wall surface for liquid, MPM and DEM.
+    float wall_friction = 0.5f;
+    float wall_adhesion_pa = 0.0f; // Tensile/cohesive wall traction; Pa.
+    float wall_damping = 0.15f; // normal restitution; API name: restitution
 
     // Density-targeted pressure projection (Bridson 2007). Pure
     // divergence-from-velocity pressure does not see static over-packing:
@@ -212,6 +216,9 @@ struct APICSolverParams {
     bool  elastic_solid = false;
     float elastic_yield_strain = 0.0f;     // Hencky deviatoric; 0 = never yields
     float elastic_relaxation_s = 0.0f;     // Maxwell deviatoric creep; 0 = off
+    float elastic_thermal_viscosity_power = 1.0f;
+    float elastic_thermal_yield_power = 0.0f;
+    float elastic_thermal_relaxation_power = 0.0f;
     float elastic_viscosity_pa_s = 0.0f;   // Kelvin-Voigt damping; 0 = off
     // Tear threshold (principal Hencky stretch; 0 = no tear). The tear RATE is
     // granular_damage_rate: the MPM lane has one damage-per-second field.
@@ -331,6 +338,9 @@ struct APICSolverParams {
         granular_snow_clump_size = std::clamp(granular_snow_clump_size, 0.001f, 10.0f);
         elastic_yield_strain = std::clamp(elastic_yield_strain, 0.0f, 2.0f);
         elastic_relaxation_s = std::clamp(elastic_relaxation_s, 0.0f, 1000.0f);
+        elastic_thermal_viscosity_power = std::clamp(elastic_thermal_viscosity_power, 0.0f, 4.0f);
+        elastic_thermal_yield_power = std::clamp(elastic_thermal_yield_power, 0.0f, 4.0f);
+        elastic_thermal_relaxation_power = std::clamp(elastic_thermal_relaxation_power, 0.0f, 4.0f);
         elastic_viscosity_pa_s = std::clamp(elastic_viscosity_pa_s, 0.0f, 1.0e5f);
         elastic_fracture_strain = std::clamp(elastic_fracture_strain, 0.0f, 5.0f);
         elastic_flip_blend = std::clamp(elastic_flip_blend, 0.0f, 1.0f);
@@ -473,6 +483,11 @@ struct APICSolverParams {
     // substance table that could disagree with it and with each other
     // (docs/dev/MADDE_TIPLERI_TASARIMI.md).
     std::string default_substance = "Water";
+    // The substance whose LIQUID physics the solver runs this step (viscosity,
+    // wall slip, FLIP/APIC, density relaxation...). The default substance,
+    // unless none of the domain's liquid parcels is of it: then the dominant
+    // parcel liquid (adoptParcelLiquidSubstance). Read-only report.
+    std::string liquid_physics_substance;
     // Derived from default_substance; never authored directly.
     FluidFuelProfile fuel_profile;
     void applySubstanceProfile(const SubstanceProfile& profile,
@@ -536,6 +551,13 @@ struct APICSolverParams {
     // path when false or when the weight arrays aren't present. CPU path.
     bool  variational_solids = true;
 
+    // Separating collider wall for the liquid (sim_matter_liquid_wall.glsl):
+    // the host boundary pass keeps every face between a collider cell and a
+    // non-solid cell, so the FLIP delta and the GPU pressure solve see the
+    // liquid's own velocity there; the device decides held / released. Set by
+    // the GPU liquid step only; a host-only step keeps the old zeroing.
+    bool  liquid_collider_wall = false;
+
     // Ghost-fluid free surface (Gibou/Enright). The default free-surface
     // projection puts the p=0 Dirichlet boundary at the AIR cell centre (1st
     // order → the surface snaps to cell centres, visible voxel staircase). With
@@ -560,6 +582,7 @@ inline int effectivePressureIterationCap(const APICSolverParams& params, int nx,
 }
 
 struct APICSolverStats {
+    MixedGpuStageStats mixed_stages;
     bool mixed_model_step = false;
     bool mixed_step_held = false;
     int mixed_common_substeps = 0;
@@ -725,6 +748,12 @@ struct APICSolverStats {
     uint64_t viscosity_sparse_active_tiles = 0;
     uint64_t viscosity_sparse_allocated_tiles = 0;
     uint64_t viscosity_sparse_resident_bytes = 0;
+    // GPU viscosity PCG (docs/dev/VISKOZ_SIVI_URETIM_KALITESI.md): the largest
+    // iteration count and final relative residual over the step's solves, and
+    // how many solves hit the iteration cap unconverged.
+    int   viscosity_pcg_iterations = 0;
+    float viscosity_pcg_relative_residual = 0.0f;
+    int   viscosity_pcg_unconverged = 0;
     bool  viscosity_on_gpu = false;
     bool  density_on_gpu = false;
     // mesh_bvh shell distances computed on the GPU this step (P3), the query's

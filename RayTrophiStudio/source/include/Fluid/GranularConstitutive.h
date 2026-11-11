@@ -1,4 +1,5 @@
 #pragma once
+#include "ElasticThermalResponse.h"
 
 #include "../Vec3.h"
 #include "FluidParticles.h"
@@ -166,23 +167,34 @@ inline float softeningFactor(float temperature, float mass_fraction,
 // transition curve in GLSL is a copy that drifts silently the first time either
 // side is tuned, and the drift shows up as "the CPU and GPU melt differently"
 // with nothing to point at.
-inline void updateSoftening(FluidParticles& particles, const SofteningParams& sp) {
+inline void updateSoftening(FluidParticles& particles, const SofteningParams& sp,
+                            const std::vector<uint8_t>* mask = nullptr) {
     const std::size_t n = particles.size();
     if (particles.granular_softening.size() != n) return;
+    if (mask && mask->size() != n) {
+        return;
+    }
     const bool has_bond = particles.granular_bond_scale.size() == n;
     const bool has_temperature = particles.temperature.size() == n;
     const bool has_mass = particles.mass_fraction.size() == n;
     if (!(sp.softening_temperature > 0.0f)) {
         // Disabled must be a BIT-EXACT no-op: 1.0 in both arrays reproduces the
         // pre-softening numbers exactly. Verified against the standalone run.
-        std::fill(particles.granular_softening.begin(),
-                  particles.granular_softening.end(), 1.0f);
-        if (has_bond)
-            std::fill(particles.granular_bond_scale.begin(),
-                      particles.granular_bond_scale.end(), 1.0f);
+        for (std::size_t i = 0; i < n; ++i) {
+            if (mask && !(*mask)[i]) {
+                continue;
+            }
+            particles.granular_softening[i] = 1.0f;
+            if (has_bond) {
+                particles.granular_bond_scale[i] = 1.0f;
+            }
+        }
         return;
     }
     for (std::size_t i = 0; i < n; ++i) {
+        if (mask && !(*mask)[i]) {
+            continue;
+        }
         const float temp = has_temperature ? particles.temperature[i] : 0.0f;
         const float mass = has_mass ? particles.mass_fraction[i] : 1.0f;
         const float soft = softeningFactor(temp, mass, sp);
@@ -226,6 +238,9 @@ struct Parameters {
     bool  elastic_solid = false;
     float elastic_yield_strain = 0.0f;
     float elastic_relaxation_s = 0.0f;
+    float elastic_thermal_viscosity_power = 1.0f;
+    float elastic_thermal_yield_power = 0.0f;
+    float elastic_thermal_relaxation_power = 0.0f;
     float elastic_viscosity = 0.0f;            // Pa s, already stability-capped
     float elastic_fracture_strain = 0.0f;      // 0 = never tears; rate: damage_rate
 };
@@ -263,6 +278,9 @@ struct StressUpdateParams {
     bool  elastic_solid = false;
     float elastic_yield_strain = 0.0f;
     float elastic_relaxation_s = 0.0f;
+    float elastic_thermal_viscosity_power = 1.0f;
+    float elastic_thermal_yield_power = 0.0f;
+    float elastic_thermal_relaxation_power = 0.0f;
     float elastic_viscosity = 0.0f;
     // E2 tear threshold. The rate is damage_rate above: damage per second,
     // the same meaning in both laws.
@@ -692,14 +710,19 @@ inline void elasticStressUpdateParticle(const AffineC& affine,
     float dev[3] = { eps[0] - mean, eps[1] - mean, eps[2] - mean };
     const float trial_dev[3] = { dev[0], dev[1], dev[2] };
     if (pc.elastic_relaxation_s > 0.0f) {
-        const float keep = std::exp(-pc.dt / pc.elastic_relaxation_s);
+        const float relaxation = std::max(1.0e-6f, pc.elastic_relaxation_s *
+            elasticThermalScale(soft, pc.elastic_thermal_relaxation_power));
+        const float keep = std::exp(-pc.dt / relaxation);
         for (float& e : dev) e *= keep;
     }
     const float dev_norm = std::sqrt(dev[0] * dev[0] + dev[1] * dev[1] + dev[2] * dev[2]);
     float overshoot = 0.0f;
-    if (pc.elastic_yield_strain > 0.0f && dev_norm > pc.elastic_yield_strain) {
-        overshoot = dev_norm - pc.elastic_yield_strain;
-        const float scale = pc.elastic_yield_strain / dev_norm;
+    const float yield_strain = pc.elastic_yield_strain > 0.0f
+        ? std::max(1.0e-6f, pc.elastic_yield_strain *
+            elasticThermalScale(soft, pc.elastic_thermal_yield_power)) : 0.0f;
+    if (yield_strain > 0.0f && dev_norm > yield_strain) {
+        overshoot = dev_norm - yield_strain;
+        const float scale = yield_strain / dev_norm;
         for (float& e : dev) e *= scale;
     }
     float s[3];
@@ -740,7 +763,8 @@ inline void elasticStressUpdateParticle(const AffineC& affine,
     }
     if (pc.elastic_viscosity > 0.0f && pc.dt > 0.0f) {
         const Mat3 rate = dC * (1.0f / pc.dt);
-        S = S + (rate + transpose(rate)) * (pc.elastic_viscosity * soft * je * (1.0f - damage));
+        S = S + (rate + transpose(rate)) * (pc.elastic_viscosity *
+            elasticThermalScale(soft, pc.elastic_thermal_viscosity_power) * je * (1.0f - damage));
     }
     if (!isFiniteMat(S) || !isFiniteMat(F_elastic)) {
         S = Mat3(); F_elastic = Mat3::identity();
