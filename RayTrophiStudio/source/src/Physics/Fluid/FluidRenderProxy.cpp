@@ -211,9 +211,7 @@ float fluidRenderProxyIsolatedRadiusFactor(uint32_t child_index,
     if (children_per_parent <= 1u || !isolated) {
         return 1.0f;
     }
-    return child_index % children_per_parent == 0u
-        ? std::cbrt(static_cast<float>(children_per_parent))
-        : 0.0f;
+    return child_index % children_per_parent == 0u ? 1.0f : 0.0f;
 }
 
 Vec3 fluidRenderProxyNeighborOffset(uint32_t parent_index,

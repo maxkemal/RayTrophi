@@ -70,15 +70,17 @@ Vec3 fluidRenderProxyOffset(uint32_t parent_index,
 // the children exist to fill the gaps BETWEEN parcels of a bulk, and a lone
 // parcel has no gap to fill. The render bridge marks a parcel the solver
 // labelled Spray (its own neighbourhood count, with hysteresis) by a NEGATIVE
-// scale.y on its point-sphere instance; such a parcel is drawn as ONE drop of
-// the parent's volume. ★ Not from the listed index neighbours: parcels keep
+// scale.y on its point-sphere instance; such a parcel is drawn as ONE droplet
+// of the SAME size as the bulk's children. (It first drew one sphere of the
+// whole parent's volume: next to a bulk of small children those read as
+// oversized balls, also where spray lies on the surface.) ★ Not from the listed index neighbours: parcels keep
 // birth order, so after mixing an index neighbour is nowhere near, and the
 // first version of this merged half the bulk into big spheres.
 inline bool fluidRenderProxyIsolated(const Vec3& instance_scale) {
     return instance_scale.y < 0.0f;
 }
-// Radius multiplier of an isolated parcel's children: child 0 carries the
-// whole parent, the others vanish.
+// Radius multiplier of an isolated parcel's children: child 0 keeps its size
+// at the parcel's centre, the others vanish.
 float fluidRenderProxyIsolatedRadiusFactor(uint32_t child_index,
                                            uint32_t children_per_parent,
                                            bool isolated);
