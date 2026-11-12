@@ -9,6 +9,7 @@
 */
 #include "SimCache.h"
 #include "Fluid/DemBondCache.h"
+#include "Fluid/DomainVisualService.h"
 #include "Fluid/GasSourceCache.h"
 #include "PerfProfile.h"
 #include "globals.h"
@@ -509,6 +510,9 @@ bool writeSystemFrame(const std::string& cache_dir, uint32_t system_id, int fram
         if (!Fluid::DemBond::writeCache(os, d.particles.dem_bonds)) {
             return false;
         }
+        if (!Fluid::writeDomainVisualCache(os, d)) {
+            return false;
+        }
         // Foam — position + type + remaining lifetime.
         const uint64_t fcount = d.foam.position.size();
         writePod(os, fcount);
@@ -742,6 +746,10 @@ bool readSystemFrame(const std::string& cache_dir, uint32_t system_id, int frame
         d.particles.dem_bonds = {};
         if (version >= 20u && !Fluid::DemBond::readCache(
                 is, d.particles.particle_id, d.particles.dem_bonds)) {
+            return false;
+        }
+        d.visual_cache_unavailable = version < 21u;
+        if (version >= 21u && !Fluid::readDomainVisualCache(is, d)) {
             return false;
         }
         // Foam — position + type + lifetime restored; velocity zeroed.

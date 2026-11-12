@@ -164,7 +164,7 @@ void appendFluidSphereProxies(const SceneData& scene,
             // its own owner (granular -> 2 * grain radius, liquid -> voxel
             // radius), while this proxy has one radius per domain, and the
             // resident position stream holds only the liquid lane's subset.
-            if (!state.valid || desc.fluid_params.grain.enabled ||
+            if (!state.valid || desc.fluid_visual_samples.enabled || desc.fluid_params.grain.enabled ||
                 desc.fluid_grain_mesh_near_enabled ||
                 RayTrophiSim::Fluid::hasSourceSplatMeshes(*system.runtime, d) ||
                 desc.fluid_render_mode != RayTrophiSim::Fluid::FluidRenderMode::Particles ||
@@ -305,13 +305,18 @@ bool appendGroupSphereProxies(const InstanceGroup& group,
                             RayTrophiSim::Fluid::
                                 kFluidRenderProxyNeighborSupportScale,
                         group.point_sphere_visual_spread_radius);
-                const Vec3 center = position + offset;
+                const Vec3 center =
+                    RayTrophiSim::Fluid::fluidRenderProxyIsolated(instance.scale)
+                        ? position : position + offset;
                 const float radius = parent_radius *
                     RayTrophiSim::Fluid::fluidRenderProxyChildRadiusScale(
                         static_cast<uint32_t>(parent),
                         child,
                         children,
-                        group.point_sphere_visual_size_variation);
+                        group.point_sphere_visual_size_variation) *
+                    RayTrophiSim::Fluid::fluidRenderProxyIsolatedRadiusFactor(
+                        child, children,
+                        RayTrophiSim::Fluid::fluidRenderProxyIsolated(instance.scale));
                 out.spheres.push_back(
                     {{center.x, center.y, center.z, radius}});
             }

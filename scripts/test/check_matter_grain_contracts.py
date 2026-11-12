@@ -26,7 +26,7 @@ def main():
     audio = read('shaders/sim_matter_grain_audio.glsl')
     header_words = int(re.search(r'kDiagnosticWords = (\d+)', gpu).group(1))
     audio_header = int(re.search(r'AUDIO_HEADER_WORDS = (\d+)u', audio).group(1))
-    assert header_words == audio_header == 47
+    assert header_words == audio_header == 48
     host_revision = re.search(r'kMatterGrainShaderRevision = (\d+)',
                               read('include/Fluid/MatterGrain.h')).group(1)
     assert re.search(r'REVISION = (\d+)u', shader).group(1) == host_revision
@@ -246,7 +246,8 @@ def main():
     # Matter tab shows the substance's material read-only; the domain edits none of it.
     assert 'p.fluid_coupling' in ui and 's->grain_restitution' in ui and 'p.restitution' not in ui
     bridge = read('src/Physics/ParticleRenderBridge.cpp')
-    assert 'const float d = GF::splatCarrierDiameter(' in bridge
+    bridge += read('src/Physics/Fluid/DomainSplatRenderBridge.inl')
+    assert 'GF::splatCarrierDiameter(' in bridge
     assert 'float splatCarrierDiameter(' in read('src/Physics/Fluid/GrainMeshNear.cpp')
     assert 'return dem ? 2.0f * matterGrainRadius(domain.fluid_params.grain, particles, index)' in read('src/Physics/Fluid/GrainMeshNear.cpp')
     assert '--coexist-only' in runtime_test

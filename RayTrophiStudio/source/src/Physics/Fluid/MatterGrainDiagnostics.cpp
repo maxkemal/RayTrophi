@@ -334,6 +334,7 @@ nlohmann::json matterGrainDiagnostics(const FluidParticles& p, const MatterGrain
             {"effective_stiffness_n_m", c.effective_stiffness_n_m},
             {"effective_source", c.effective_source},
             {"aggregate_damping_ratio", c.aggregate_damping_ratio},
+            {"measured_damping_rate_s", c.measured_damping_rate_s},
             {"accuracy_dt_s", c.accuracy_dt_s}, {"stability_dt_s", c.stability_dt_s},
             {"travel_dt_s", c.travel_dt_s}, {"contacts_assumed", c.contacts_assumed},
             {"requested_substeps", c.requested_substeps}, {"substeps", c.substeps},

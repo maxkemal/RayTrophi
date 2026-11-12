@@ -1,4 +1,31 @@
 {
+  "fluid.visual_samples": {
+    "summary": "Read field-sample settings, publication status and an optional bounded sample page",
+    "access": "read",
+    "tags": "splat|density|samples|mesh|render",
+    "params": {
+      "domain": {"type": "string", "required": true},
+      "offset": {"type": "integer", "required": false, "default": 0},
+      "limit": {"type": "integer", "required": false, "default": 0}
+    },
+    "notes": "limit 0 means metadata only; maximum 256. cpu_soa_reconstruction is an explicit host route, separate per source/substance/mechanics stream. It is not the projected solver MAC field. current=false distinguishes publication failure from a valid empty sample population. Physics, Fog and SurfaceSDF continue to use canonical physical state.",
+    "related": "fluid.set_visual_samples|fluid.reset_visual_samples|fluid.state_digest"
+  },
+  "fluid.set_visual_samples": {
+    "summary": "Author persistent field-sample refinement without changing physical particle capacity",
+    "params": {
+      "domain": {"type": "string", "required": true},
+      "settings": {"type": "object", "required": true}
+    },
+    "notes": "Atomic patch: enabled, target_volume (m3), max_samples (1..4000000), seed, cfl (0..1 exclusive zero), max_substeps, reseed_hysteresis (0..0.5), working_budget_mb (16..16384). CPU staging reserves 768 bytes per maximum sample plus physical render staging. Open/closed domains supported; periodic and spatial wet appearance explicitly rejected. DEM grains, frozen parcels and spray remain physical. Uses existing splat geometry/source selections. Undoable, saved in project; visual checkpoints persist in cache v21. Old caches require reset/rebake when enabled. GPU sample transport is not implemented.",
+    "related": "fluid.visual_samples|fluid.set_splat_geometry"
+  },
+  "fluid.reset_visual_samples": {
+    "summary": "Explicitly reseed the current visual population without resetting physics",
+    "params": {"domain": {"type": "string", "required": true}},
+    "notes": "Undoable appearance reset. Rebuilds samples from the current physical snapshot; cannot recover missing sample history in pre-v21 caches.",
+    "related": "fluid.visual_samples|fluid.set_visual_samples"
+  },
   "fluid.dem_bodies": {
     "summary": "Inspect or explicitly bind/release breakable bodies in a paused DEM population",
     "returns": "Body/bond counts, fracture and energy summary; snapshot returns canonical graph",
@@ -2159,7 +2186,7 @@
       },
       "liquid_emission": {
         "type": "string",
-        "description": "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid only; mesh_surface refused."
+        "description": "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid parcels fill to particles_per_cell; a DEM grain substance pours jittered layers at ~40% solids (planGrainInflow). mesh_surface refused."
       }
     }
   },
@@ -2324,7 +2351,7 @@
       },
       "liquid_emission": {
         "type": "string",
-        "description": "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid only; mesh_surface refused."
+        "description": "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid parcels fill to particles_per_cell; a DEM grain substance pours jittered layers at ~40% solids (planGrainInflow). mesh_surface refused."
       }
     }
   },

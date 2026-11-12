@@ -2,6 +2,7 @@
 
 #include "ParticleSimulation.h"
 #include "MatterGridFrameCache.h"
+#include "Fluid/DomainVisualService.h"
 
 #include <cstddef>
 #include <vector>
@@ -18,6 +19,7 @@ std::size_t allocationBytes(const std::vector<T>& values) {
 inline std::size_t metaAllocationBytes(const SimulationGridDomainState& state) {
     const auto& grid = state.grid;
     std::size_t bytes = 0;
+    bytes += Fluid::domainVisualAllocationBytes(state);
     bytes += allocationBytes(state.gas_phase_mass_kg);
     bytes += allocationBytes(state.gas_phase_energy_j);
     bytes += allocationBytes(state.gas_phase_condensate_kg);

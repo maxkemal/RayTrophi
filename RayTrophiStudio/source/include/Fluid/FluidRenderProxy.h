@@ -44,6 +44,8 @@ uint64_t fluidRenderProxyCarrierCapacity(uint64_t primary_capacity,
 float fluidRenderProxyObjectRandom(int group_id,
                                    uint32_t parent_index,
                                    uint32_t child_index);
+float fluidRenderProxyObjectRandom(const InstanceGroup& group,
+    uint32_t instance_index, uint32_t child_index);
 
 // Resolve one RayFusion triangle-sphere child from the same parent metadata
 // used by Vulkan RT and the raster impostor path. Returns false for bad indices.
@@ -63,6 +65,24 @@ Vec3 fluidRenderProxyOffset(uint32_t parent_index,
 // carriers. The caller supplies a small stable candidate window; candidates
 // outside support_radius are ignored. With no usable neighbor this falls back
 // to the deterministic free-space pattern above.
+// ★ Isolated parcels (2026-11-12). A parcel alone in the air drew its visual
+// children as a tight cluster of small spheres around nothing ("satellites"):
+// the children exist to fill the gaps BETWEEN parcels of a bulk, and a lone
+// parcel has no gap to fill. The render bridge marks a parcel the solver
+// labelled Spray (its own neighbourhood count, with hysteresis) by a NEGATIVE
+// scale.y on its point-sphere instance; such a parcel is drawn as ONE drop of
+// the parent's volume. ★ Not from the listed index neighbours: parcels keep
+// birth order, so after mixing an index neighbour is nowhere near, and the
+// first version of this merged half the bulk into big spheres.
+inline bool fluidRenderProxyIsolated(const Vec3& instance_scale) {
+    return instance_scale.y < 0.0f;
+}
+// Radius multiplier of an isolated parcel's children: child 0 carries the
+// whole parent, the others vanish.
+float fluidRenderProxyIsolatedRadiusFactor(uint32_t child_index,
+                                           uint32_t children_per_parent,
+                                           bool isolated);
+
 Vec3 fluidRenderProxyNeighborOffset(uint32_t parent_index,
                                     uint32_t child_index,
                                     uint32_t children_per_parent,

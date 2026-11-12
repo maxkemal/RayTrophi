@@ -46,6 +46,7 @@ def main():
     assert "matterWetAppearanceBand(" in read("src/Physics/Fluid/MatterAcceptanceMetrics.cpp")
     assert "Triangle" not in appearance
     bridge = read("src/Physics/ParticleRenderBridge.cpp")
+    bridge += read("src/Physics/Fluid/DomainSplatRenderBridge.inl")
     assert "wet_palette.sourceIndex(" in bridge and "wet_palette.appendMaterialKeys(" in bridge
     assert "wet_appearance_enabled" in read("src/UI/ParticleBillboardBuilder.cpp")
     for name in ["src/Core/ProjectManager.cpp", "src/Utils/SceneSerializer.cpp"]:

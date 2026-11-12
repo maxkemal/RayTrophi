@@ -89,6 +89,19 @@ float fluidRenderProxyObjectRandom(int group_id,
     return static_cast<float>(key >> 8u) * (1.0f / 16777216.0f);
 }
 
+float fluidRenderProxyObjectRandom(const InstanceGroup& group,
+    uint32_t instance_index, uint32_t child_index) {
+    if (instance_index >= group.point_sphere_ids.size() ||
+        group.point_sphere_ids[instance_index] == 0) {
+        return fluidRenderProxyObjectRandom(group.id, instance_index, child_index);
+    }
+    const auto id = group.point_sphere_ids[instance_index];
+    uint32_t key = proxyHash(static_cast<uint32_t>(id));
+    key = proxyHash(key ^ static_cast<uint32_t>(id >> 32));
+    key = proxyHash(key ^ (child_index * 0xc2b2ae35u));
+    return static_cast<float>(key >> 8u) * (1.0f / 16777216.0f);
+}
+
 bool resolveFluidRenderProxyTransform(const InstanceGroup& group,
                                       uint32_t parent_index,
                                       uint32_t child_index,
@@ -162,8 +175,11 @@ bool resolveFluidRenderProxyTransform(const InstanceGroup& group,
         parent_index,
         child_index,
         children,
-        group.point_sphere_visual_size_variation);
-    transform.position = parent.position + offset;
+        group.point_sphere_visual_size_variation) *
+        fluidRenderProxyIsolatedRadiusFactor(child_index, children,
+            fluidRenderProxyIsolated(parent.scale));
+    transform.position = fluidRenderProxyIsolated(parent.scale)
+        ? parent.position : parent.position + offset;
     transform.scale = Vec3(radius * 2.0f);
     return true;
 }
@@ -187,6 +203,17 @@ Vec3 fluidRenderProxyOffset(uint32_t parent_index,
     }
     return direction *
         (spread_radius * radial_scale);
+}
+
+float fluidRenderProxyIsolatedRadiusFactor(uint32_t child_index,
+                                           uint32_t children_per_parent,
+                                           bool isolated) {
+    if (children_per_parent <= 1u || !isolated) {
+        return 1.0f;
+    }
+    return child_index % children_per_parent == 0u
+        ? std::cbrt(static_cast<float>(children_per_parent))
+        : 0.0f;
 }
 
 Vec3 fluidRenderProxyNeighborOffset(uint32_t parent_index,

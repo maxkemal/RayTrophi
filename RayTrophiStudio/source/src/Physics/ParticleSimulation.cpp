@@ -1,4 +1,5 @@
 #include "Fluid/GranularFrameReadback.h"
+#include "Fluid/DomainVisualService.h"
 #include "Fluid/DomainWallGpuConstants.h"
 #include "ParticleSimulation.h"
 #include "Fluid/FluidSeedBox.h"
@@ -9433,6 +9434,10 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
             state.gas_stats.total_ms += state.gas_stats.analysis_ms;
         }
         ++state.version;
+        if (analysis_index < grid_domains_.size() &&
+            (!settling_ || state.settle_stats.pending)) {
+            Fluid::advanceDomainVisualSamples(grid_domains_[analysis_index], state, dt);
+        }
     }
 
     // ★ ONE readback per frame, after every domain has stepped. It used to sit at

@@ -1234,10 +1234,10 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
                     ri.mask = zeroScale ? 0 : 0xFF;
                     ri.simPoolSlot = group.transient;
                     ri.scatterGroupId = group.id;
-                    if (group.point_sphere_mode) {
+                    if (group.point_sphere_mode || !group.point_sphere_ids.empty()) {
                         ri.objectRandom =
                             RayTrophiSim::Fluid::fluidRenderProxyObjectRandom(
-                                group.id,
+                                group,
                                 static_cast<uint32_t>(i),
                                 child);
                     }

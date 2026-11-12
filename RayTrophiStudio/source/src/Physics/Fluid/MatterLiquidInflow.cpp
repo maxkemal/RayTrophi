@@ -199,6 +199,79 @@ void planLiquidInflow(const LiquidFlowRegion& region, const LiquidLattice& latti
     }
 }
 
+void planGrainInflow(const LiquidFlowRegion& region, float speed, float dt,
+                     float maximum_radius, bool& initialized, double& layer_phase_m,
+                     uint64_t seed, LiquidInflowPlan& out) {
+    out.births.clear();
+    out.held.clear();
+    out.region_parcels = 0;
+    if (!(maximum_radius > 0.0f) || !(speed > 0.0f) || !(dt > 0.0f)) return;
+    const float pitch = 2.3f * maximum_radius;
+    // Each grain moves at most 0.14 R from its site: neighbours a pitch apart
+    // stay 2.02 R from each other.
+    const float jitter = 0.14f * maximum_radius / 1.7320508f;
+    if (!initialized || !std::isfinite(layer_phase_m) || layer_phase_m < 0.0 ||
+        layer_phase_m > double(pitch)) {
+        layer_phase_m = 0.5 * double(pitch);
+        initialized = true;
+    }
+    const Vec3 a = region.axis;
+    const Vec3 up = std::fabs(a.y) < 0.9f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+    Vec3 e1 = Vec3::cross(a, up);
+    const float e1_length = e1.length();
+    if (!(e1_length > 1e-6f)) return;
+    e1 = e1 * (1.0f / e1_length);
+    const Vec3 e2 = Vec3::cross(a, e1);
+    const bool box = region.shape == LiquidFlowRegion::Shape::Box;
+    const Vec3 centre = box ? (region.box_min + region.box_max) * 0.5f : region.center;
+    const float reach = box ? (region.box_max - region.box_min).length() * 0.5f
+                            : region.radius - maximum_radius;
+    const bool single_file = !box && reach < 0.5f * pitch;
+    const float row = pitch * 0.8660254f;
+    const int rows = single_file ? 0 : static_cast<int>(std::ceil(reach / row)) + 1;
+    const int columns = single_file ? 0 : static_cast<int>(std::ceil(reach / pitch)) + 1;
+    const double travel = double(speed) * double(dt);
+    double upstream = layer_phase_m;
+    uint64_t layer = 0;
+    for (; upstream <= travel; upstream += double(pitch), ++layer) {
+        const uint64_t layer_key = mix64(seed + 0x9e3779b97f4a7c15ull * (layer + 1u));
+        const float angle = 6.2831853f * unit01(layer_key);
+        const float c = std::cos(angle), s = std::sin(angle);
+        const Vec3 f1 = e1 * c + e2 * s;
+        const Vec3 f2 = e2 * c - e1 * s;
+        const float ox = pitch * (unit01(layer_key ^ 0x17ull) - 0.5f);
+        const float oy = row * (unit01(layer_key ^ 0x2bull) - 0.5f);
+        const Vec3 plane = centre - a * static_cast<float>(upstream);
+        for (int j = -rows; j <= rows; ++j) {
+            for (int i = -columns; i <= columns; ++i) {
+                const uint64_t key = mix64(layer_key ^
+                    (static_cast<uint64_t>(static_cast<uint32_t>(i)) << 32) ^
+                    static_cast<uint64_t>(static_cast<uint32_t>(j)));
+                float x = 0.0f, y = 0.0f;
+                if (!single_file) {
+                    x = (static_cast<float>(i) + ((j & 1) ? 0.5f : 0.0f)) * pitch + ox;
+                    y = static_cast<float>(j) * row + oy;
+                    if (!box && x * x + y * y > reach * reach) continue;
+                }
+                const Vec3 site = f1 * x + f2 * y;
+                if (box) {
+                    const Vec3 q = centre + site;
+                    if (q.x < region.box_min.x || q.y < region.box_min.y || q.z < region.box_min.z ||
+                        q.x > region.box_max.x || q.y > region.box_max.y || q.z > region.box_max.z) {
+                        continue;
+                    }
+                }
+                const Vec3 wobble((unit01(key ^ 0x31ull) * 2.0f - 1.0f) * jitter,
+                                  (unit01(key ^ 0x47ull) * 2.0f - 1.0f) * jitter,
+                                  (unit01(key ^ 0x5dull) * 2.0f - 1.0f) * jitter);
+                out.births.push_back(plane + site + wobble);
+            }
+        }
+    }
+    layer_phase_m = upstream - travel;
+    out.region_parcels = out.births.size();
+}
+
 void limitLiquidInflowBirths(LiquidInflowPlan& plan, double requested_parcels,
                             bool& initialized, double& fractional_parcel,
                             uint64_t seed) {

@@ -461,6 +461,7 @@ json domainToJson(const RayTrophiSim::SimulationGridDomainDesc& d) {
     j["fluid_particle_geometry_source"] = d.fluid_particle_geometry_source;
     j["fluid_substance_splat_geometry"] = d.fluid_substance_splat_geometry;
     j["fluid_phase_output"] = d.fluid_phase_output;
+    j["fluid_visual_samples"] = d.fluid_visual_samples;
     j["matter_fog_streams"] = RayTrophiSim::Fluid::writeFogAppearances(d.matter_fog_streams);
     j["fluid_grain_mesh_near_enabled"] = d.fluid_grain_mesh_near_enabled;
     j["fluid_grain_mesh_near_source_materials"] = d.fluid_grain_mesh_near_source_materials;
@@ -719,6 +720,8 @@ RayTrophiSim::SimulationGridDomainDesc jsonToDomain(const json& j) {
     if (j.contains("fluid_particle_geometry_mode")) d.fluid_particle_geometry_mode = j["fluid_particle_geometry_mode"];
     if (j.contains("fluid_particle_geometry_source")) d.fluid_particle_geometry_source = j["fluid_particle_geometry_source"];
     d.fluid_phase_output = RayTrophiSim::Fluid::readMatterPhaseOutput(j);
+    d.fluid_visual_samples = j.value("fluid_visual_samples",
+        RayTrophiSim::Fluid::DomainVisualSettings{});
     d.matter_fog_streams = RayTrophiSim::Fluid::readFogAppearances(j);
     d.fluid_substance_splat_geometry =
         RayTrophiSim::Fluid::readSubstanceSplatGeometries(j);

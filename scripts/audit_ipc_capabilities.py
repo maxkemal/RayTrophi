@@ -89,7 +89,7 @@ def required(method, namespaces):
                          "capture_start", "capture_finish", "design_job_start", "design_render", "design_undo", "design_redo", "design_reuse"}:
             return "SceneWrite|FilesRead"
         return "SceneWrite"
-    if method in ("fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings",
+    if method in ("fluid.visual_samples", "fluid.grain_reference", "fluid.matter_models", "fluid.grain_settings",
                   "fluid.inspect_fog_fields", "fluid.get_lanes",
                   "fluid.particle_extremes", "fluid.gas_cell_extremes",
                   "fluid.surface_parity", "fluid.sample_solid_phi"):

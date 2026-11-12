@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Fluid/DomainVisualService.h"
 #include "Api/SourceSplatGeometryApi.h"
 #include "Fluid/GrainMeshNear.h"
 #include "Fluid/SourceSplatRenderPlan.h"
@@ -113,6 +114,9 @@ void finalizeSourceSplatProxyStats(
         ? std::min(info.virtual_grains_effective, static_cast<int>(
               plan.visualChildren(d)))
         : 1;
+    if (d.fluid_visual_samples.enabled) {
+        info.primary_visual_children = 1;
+    }
     info.whitewater_visual_children = refines_whitewater
         ? info.virtual_grains_effective
         : 1;
@@ -134,6 +138,18 @@ void finalizeSourceSplatProxyStats(
                 rendered_spheres += view.whitewater *
                     static_cast<uint64_t>(info.whitewater_visual_children);
             }
+        }
+    }
+    if (d.fluid_visual_samples.enabled && index >= 0) {
+        const auto& states = runtime.gridDomainStates();
+        if (static_cast<std::size_t>(index) < states.size()) {
+            const auto& particles = RayTrophiSim::Fluid::domainSplatParticles(d, states[index]);
+            const auto views = RayTrophiSim::Fluid::resolveFluidViews(d,
+                RayTrophiSim::Fluid::distinctViewKeys(particles));
+            const auto counts = RayTrophiSim::Fluid::countParticlesPerView(views, particles);
+            rendered_spheres -= std::min(rendered_spheres, primary_spheres);
+            primary_spheres = counts.splat;
+            rendered_spheres += primary_spheres;
         }
     }
     const uint64_t mesh_spheres = info.grain_mesh_near_instances *

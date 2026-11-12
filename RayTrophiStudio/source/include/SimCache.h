@@ -95,11 +95,13 @@ constexpr uint32_t kMagic   = 0x43465452u; // 'RTFC'
 // v18 adds stable gas-source density/fuel ownership for independent live VDBs.
 // v19 records Matter lane ownership; specialized Gas/Fluid caches are rejected.
 // v20 adds canonical DEM body orientations, bonds and irreversible fracture state.
-constexpr uint32_t kVersion = 20u;
+// v21 adds immutable visual sample checkpoints; older caches require rebaking
+// when field-sample rendering is explicitly enabled.
+constexpr uint32_t kVersion = 21u;
 constexpr bool supportsVersion(uint32_t version) {
     return version == 11u || version == 12u || version == 13u || version == 14u ||
            version == 15u || version == 16u || version == 17u || version == 18u ||
-           version == 19u ||
+           version == 19u || version == 20u ||
            version == kVersion;
 }
 

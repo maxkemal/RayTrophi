@@ -344,6 +344,9 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "timeline.play" || method == "timeline.pause" ||
         method == "sim.set_mode") return SceneWrite;
     if (method == "fluid.matter_models") return Read;
+    if (method == "fluid.visual_samples") return Read;
+    if (method == "fluid.set_visual_samples" || method == "fluid.reset_visual_samples")
+        return SceneWrite;
     if (method == "fluid.get_lanes") return Read;
     if (method == "fluid.inspect_fog_fields") return Read;
     if (method == "fluid.grain_reference") return Read;

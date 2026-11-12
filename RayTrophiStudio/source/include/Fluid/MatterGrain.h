@@ -144,7 +144,7 @@ inline constexpr int kMatterGrainContactBudget = 24;
 // 40: bound the aggregate normal contact impulse using sleep.x.
 // 41: shared domain-wall surface in the four extra mass-buffer metadata words.
 // 42: domain adhesion in metadata word 7; tensile wall contact and wake policy.
-inline constexpr uint32_t kMatterGrainShaderRevision = 42;
+inline constexpr uint32_t kMatterGrainShaderRevision = 43;
 // Smallest pendular bridge, as a fraction of the smaller grain's volume
 // (BRIDGE_MIN_VOLUME_FRACTION in sim_matter_grain.glsl; the host CFL uses the
 // same floor). Less water than this is an adsorbed film, not a bridge:
@@ -168,6 +168,9 @@ struct MatterGrainCflTerms {
     double effective_stiffness_n_m = 0.0;  // max of the four below, after scaling
     std::string effective_source;          // contact | tangential | rolling | bridge
     double aggregate_damping_ratio = 0.0;
+    // Device-measured damping rate the bound used (stiffness scale 1); 0 = the
+    // collinear full-budget assumption.
+    double measured_damping_rate_s = 0.0;
     double accuracy_dt_s = 0.0;
     double stability_dt_s = 0.0;
     double travel_dt_s = 0.0;
@@ -479,6 +482,9 @@ struct MatterGrainGpuRuntime {
     // maximum + 4, clamped to [12, kMatterGrainContactBudget]. A frame that
     // measures more is re-run at the full budget (stepMatterGrainGpu).
     uint32_t cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+    // Largest per-grain normal damping rate the last published frame measured,
+    // divided by sqrt(its stiffness scale), 1/s. 0 = none yet.
+    double cfl_damping_rate_hint = 0.0;
     // Last frame's substep terms, also when that frame was held.
     MatterGrainCflTerms last_cfl;
     bool history_fresh = true;

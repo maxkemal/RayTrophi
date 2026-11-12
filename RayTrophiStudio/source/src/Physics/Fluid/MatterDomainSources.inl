@@ -125,6 +125,21 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
         }
     }
 
+    // Whether a liquid-phase source pours DEM grains (granular carrier in a
+    // grain-enabled domain) rather than parcels. Same resolution the emission
+    // below makes; the inflow plan needs it before the pool is shared out.
+    const auto flowSourceBirthsGrains = [&](const SimulationFlowSourceDesc& source) {
+        const auto& domain = grid_domains_[static_cast<std::size_t>(source.domain_index)];
+        const uint32_t tag = RayTrophiSim::Fluid::substanceTag(source.fluid_substance);
+        const float kelvin = source.fluid_temperature_override
+            ? std::max(1.0f, source.fluid_temperature_kelvin)
+            : Fluid::substanceAmbientBirthKelvin(tag, domain.fluid_params,
+                  fluidDomainAmbientKelvin(domain, world_thermal_));
+        return Fluid::substanceTransportOwner(tag,
+                   Fluid::substanceBirthModel(tag, domain.fluid_params, kelvin),
+                   domain.fluid_params) == Fluid::MatterTransportOwner::Grain;
+    };
+
     // Inflow plans: which parcels the nozzle needs and which it holds.
     std::vector<Fluid::LiquidInflowPlan> inflow_plans(flow_sources_.size());
     // Plan all liquid sources before any source consumes the shared free slots.
@@ -163,6 +178,20 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             source.liquid_emission_status.clear();
             source.fluid_flux_target_m3_s =
                 double(Fluid::liquidFlowRegionArea(region)) * resolved.velocity.length();
+            const auto& inflow_params =
+                grid_domains_[static_cast<std::size_t>(source.domain_index)].fluid_params;
+            if (flowSourceBirthsGrains(source)) {
+                // DEM grains: layers extruded through the face, not a parcel
+                // fill (planGrainInflow). The layer phase rides the liquid
+                // nozzle's checkpointed carry field.
+                const float grain_radius = Fluid::matterGrainMaximumRadius(inflow_params.grain);
+                Fluid::planGrainInflow(region, resolved.velocity.length(), std::max(0.0f, dt),
+                    grain_radius, source.fluid_inflow_initialized,
+                    source.fluid_inflow_fractional_parcel,
+                    (static_cast<uint64_t>(source.timeline_uid) << 32) ^
+                        source.fluid_emit_sample_serial,
+                    inflow_plans[si]);
+            } else {
             Fluid::LiquidLattice lattice;
             lattice.origin = lattice_grid.origin;
             lattice.h = lattice_grid.voxel_size;
@@ -176,6 +205,7 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
                 source.fluid_flux_target_m3_s * std::max(0.0f, dt) / parcel_volume,
                 source.fluid_inflow_initialized, source.fluid_inflow_fractional_parcel,
                 source.timeline_uid ^ source.fluid_emit_sample_serial);
+            }
             count = static_cast<int>(std::min<std::size_t>(inflow_plans[si].births.size(),
                                                            2147483647u));
         } else {
@@ -345,13 +375,6 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             const bool grain_birth = Fluid::substanceTransportOwner(
                 emit_substance, emit_model, fluid_domain.fluid_params) ==
                 Fluid::MatterTransportOwner::Grain;
-            if (inflow && grain_birth) {
-                // DEM grains are born at contact through MatterGrainBirthFilter,
-                // not on a parcel lattice: the nozzle fill does not apply.
-                source.liquid_emission_status =
-                    "inflow pours parcels; a DEM grain substance uses emission rate";
-                continue;
-            }
 
             // Over-pack guard: a high particles/sec dumped into a small spawn
             // volume in ONE step stacks dozens of particles into a single cell.
@@ -475,9 +498,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             // ones. A fixed 262144 used to cap a frame's grain births at ~200k
             // whatever the source asked for (the rest only carried over while
             // the source's time window stayed open).
+            // A grain nozzle walks its planned layer sites once: a site the
+            // filter refuses (grains standing in the nozzle) is not retried.
             const uint64_t attempt_limit = grain_birth
-                ? std::max<uint64_t>(static_cast<uint64_t>(emit_count) * 4u,
-                      std::min<uint64_t>(static_cast<uint64_t>(emit_count) * 64u, 262144u))
+                ? (inflow ? static_cast<uint64_t>(plan->births.size())
+                          : std::max<uint64_t>(static_cast<uint64_t>(emit_count) * 4u,
+                                std::min<uint64_t>(static_cast<uint64_t>(emit_count) * 64u, 262144u)))
                 : static_cast<uint64_t>(emit_count);
             uint64_t attempts = 0;
             double emitted_mass = 0.0;
@@ -604,8 +630,12 @@ void ParticleSimulationSystem::injectFlowSourcesIntoGridDomains(
             }
             if (grain_birth) {
                 source.fluid_emit_sample_serial += attempts;
-                source.fluid_emit_accumulator += static_cast<float>(emit_count -
-                    static_cast<int>(state.particles.size() - before_emission));
+                // A blocked nozzle owes nothing; only the rate source carries
+                // refused births over.
+                if (!inflow) {
+                    source.fluid_emit_accumulator += static_cast<float>(emit_count -
+                        static_cast<int>(state.particles.size() - before_emission));
+                }
             }
             continue;
         }
