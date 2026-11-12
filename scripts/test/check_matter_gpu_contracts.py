@@ -42,7 +42,7 @@ def main():
     specs = {
         "p2g": (10, 40), "g2p": (12, 72), "stress_update": (18, 128),
         "stress_p2g": (9, 52), "settle": (7, 52), "advect": (11, 104),
-        "occupancy": (6, 40), "liquid_drag": (19, 32), "copy": (2, 4),
+        "occupancy": (6, 40), "liquid_drag": (19, 48), "copy": (2, 4),
         "clear": (1, 4), "zero_faces": (4, 36), "pores": (13, 40),
     }
     def expand(filename, defines=None):

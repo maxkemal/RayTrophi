@@ -877,14 +877,17 @@ static bool runMatterGpuStepOnce(SimulationGridDomainState& state,
             struct DragConstants {
                 int nx, ny, nz;
                 float dt, drag_prefactor, inv_full_mass, max_fraction, face_volume;
+                float min_liquid_mass, pad0, pad1, pad2;
             } drag_constants{grid.nx, grid.ny, grid.nz, transfer_dt,
                 180.0f * mpm_liquid_viscosity /
                     (kMpmPoreGrainDiameter * kMpmPoreGrainDiameter),
                 1.0f / (std::max(mpm_constituent_density, 1.0f) *
                         grid.voxel_size * grid.voxel_size * grid.voxel_size),
                 1.0f - kMpmMinimumVoidage,
-                grid.voxel_size * grid.voxel_size * grid.voxel_size};
-            static_assert(sizeof(DragConstants) == 32);
+                grid.voxel_size * grid.voxel_size * grid.voxel_size,
+                0.05f * mpm_liquid_density * grid.voxel_size * grid.voxel_size * grid.voxel_size,
+                0.0f, 0.0f, 0.0f};
+            static_assert(sizeof(DragConstants) == 48);
             ComputeDispatch drag;
             drag.kernel = Fluid::macKernel(liquid_mac, "sim_matter_liquid_drag",
                                            "sim_sparse_mac_matter_liquid_drag");
@@ -1093,31 +1096,6 @@ static bool runMatterGpuStepOnce(SimulationGridDomainState& state,
     particles.position.swap(staging.position);
     particles.velocity.swap(staging.velocity);
     particles.affine.swap(staging.affine);
-    {   // SPEED-PROBE (temporary, 2026-11-11): who runs away at the splash?
-        std::size_t fast[4] = {0, 0, 0, 0};
-        float vmax = 0.0f; std::size_t at = 0;
-        for (std::size_t i = 0; i < count; ++i) {
-            const float v = particles.velocity[i].length();
-            const uint32_t m = i < particles.constitutive_model.size() ? std::min<uint32_t>(particles.constitutive_model[i], 3u) : 0u;
-            if (v > 10.0f) ++fast[m];
-            if (v > vmax) { vmax = v; at = i; }
-        }
-        if (vmax > 10.0f) {
-            const auto& pp = particles.position[at];
-            const uint32_t tag = at < particles.substance_tag.size() ? particles.substance_tag[at] : 0u;
-            const auto* prof = RayTrophiSim::tryFindSubstanceByTag(tag);
-            const float age_id = at < particles.particle_id.size() ? static_cast<float>(particles.particle_id[at]) : -1.0f;
-            SCENE_LOG_WARN("[SPEED-PROBE] vmax " + std::to_string(vmax) + " parcel " + std::to_string(at) +
-                " id " + std::to_string(age_id) + " " + (prof ? prof->name : std::string("untagged")) +
-                " model " + std::to_string(at < particles.constitutive_model.size() ? particles.constitutive_model[at] : 0u) +
-                " pos (" + std::to_string(pp.x) + "," + std::to_string(pp.y) + "," + std::to_string(pp.z) +
-                ") fast>10: auto " + std::to_string(fast[0]) + " fluid " + std::to_string(fast[1]) +
-                " granular " + std::to_string(fast[2]) + " elastic " + std::to_string(fast[3]) +
-                " | grid origin (" + std::to_string(grid.origin.x) + "," + std::to_string(grid.origin.y) + "," +
-                std::to_string(grid.origin.z) + ") n " + std::to_string(grid.nx) + "x" + std::to_string(grid.ny) + "x" + std::to_string(grid.nz) +
-                " h " + std::to_string(grid.voxel_size));
-        }
-    }
     // Held parcels did not move; they carry no velocity of their own.
     for (std::size_t i = 0; i < held_parcels.size() && i < count; ++i) {
         if (held_parcels[i]) {

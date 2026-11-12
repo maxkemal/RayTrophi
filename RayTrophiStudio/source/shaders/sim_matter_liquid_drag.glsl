@@ -39,6 +39,8 @@ layout(push_constant) uniform Params {
     float inv_full_mass;   // 1 / (rho_constituent h^3)
     float max_fraction;    // 1 - minimum voidage (the projection's cap)
     float face_volume;     // h^3
+    float min_liquid_mass; // 5 % of a full liquid face (rho_l h^3), see relax
+    float pad0; float pad1; float pad2;
 } pc;
 #ifdef RT_SPARSE_MAC
 // Liquid lane (0) velocity and mass on compact pages at 0..2 and 6..8; the
@@ -49,7 +51,17 @@ layout(set = 0, binding = 20) readonly buffer MacTileList { uint mac_tile_list[]
 #include "sim_mac_lane.glsl"
 
 void relax(inout float vl, inout float vg, float ml, float mg) {
-    if (!(ml > 1e-8) || !(mg > 1e-8)) return;
+    // ★★ Only where the liquid face holds a real share of liquid (2026-11-12).
+    // The liquid's face masses are rebuilt on LIQUID steps only, but its parcels
+    // advect every MPM substep: a fast splash parcel enters faces whose mass is
+    // still ~0 from the last liquid P2G. A ~0-mass face relaxed fully onto the
+    // snow velocity, and the delta/FLIP gather then handed that change to the
+    // parcel now standing there AT ITS FULL MASS -- momentum not conserved,
+    // pumped every interval: water at a snow pile ran away to the 50 m/s
+    // clamp while the liquid grid stayed under ~10 m/s (a temporary probe measured: every
+    // drag face in the splash held < 4 % of a full face). Liquid in the pores
+    // of a pack fills 30-70 % of a face and keeps its drag.
+    if (!(ml >= pc.min_liquid_mass) || !(mg > 1e-8)) return;
     float phi = min(mg * pc.inv_full_mass, pc.max_fraction);
     if (phi < 1e-4) return;
     float eps = 1.0 - phi;

@@ -31,6 +31,22 @@ açılışında gözle bakabileceği ve otomatik testin göremediği şeyler iç
 - P2G permütasyon denemesi söküldü (exe değişmedi, yalnız `.spv`).
 - Doğrulama: smoke 30/30, multirate 7/7, yüzey 8/8.
 
+**11:48 derlemesi (ajan, 2026-11-12): kar yanında fırlayan su ÇÖZÜLDÜ.**
+- Kök: gözenek sürüklemesi. Su yüz kütleleri yalnız sıvı adımında yenileniyor, parseller ise
+  her MPM alt adımında ilerliyor. Sıçrama parselleri kütlesi ~0 kalmış yüzlere giriyor; sürükleme
+  o yüzü kar hızına çekiyor; FLIP/delta bunu parsele tam kütlesiyle aktarıyor. Momentum
+  korunmuyor, 50 m/s tavanına pompalanıyordu.
+- Düzeltme: `sim_matter_liquid_drag.glsl` yalnız su kütlesi ≥ %5 · ρ_sıvı·h³ olan yüzlerde.
+  Push 32 → 48 B, iki kayıt satırı güncellendi.
+- Eleme sırası: sürükleme kapalı / yalnız su yazımı kapalı → yok; gözenekli, tepki, delta kapalı
+  → var. Denenip sökülenler: φ ≥ %5 kapısı, MPM hız kelepçesi, sıvı adımında sürüklemeyi
+  atlamak, MPM malzeme (FLIP taban) hızı.
+- bal: en yüksek hız 9.1 m/s (önce 44–50), sıvı alt adımı 17–36 (önce 180'e kadar), sıçrama
+  karesi 0.55–0.72 s (önce 1.6–2.4 s).
+- Testler: smoke 30/30, multirate PASS, sıcak su + kar PASS.
+  `mpm_porous` floats/near_surface ve `liquid_drag` converged FAIL, ama düzeltmesiz eski
+  shader'la da aynı FAIL; önceden var olan açık konular.
+
 **10:36 derlemesi (ajan, 2026-11-12): hareketli kollider dinlenik karı uyutmuyordu.**
 - `MatterMpmSleep.cpp`: domain'in HERHANGİ bir yerinde hareketli kollider (solid_vel ≠ 0)
   dinlenik karı uyanık tutuyordu; voksel imzası her karede değiştiği için dinlenme sayacı da
