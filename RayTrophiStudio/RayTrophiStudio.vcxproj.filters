@@ -490,6 +490,48 @@
     <ClInclude Include="source\include\Fluid\FluidRenderProxy.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainFieldSnapshot.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainFieldSampling.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainFieldStorage.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualSamples.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualReseed.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualRuntime.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualSettings.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualService.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualField.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Fluid\DomainVisualMesh.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\DomainVisualApi.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UI\DomainVisualUI.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtDomainVisualBindings.h">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Physics\Fluid\DomainSplatRenderBridge.inl">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Fluid\FluidActiveWindow.h">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClInclude>
@@ -1991,6 +2033,27 @@
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidRenderProxy.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DomainVisualField.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DomainVisualService.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DomainVisualCache.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDomainVisual.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonDomainVisual.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcDomainVisual.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\DomainVisualUI.cpp">
       <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp">

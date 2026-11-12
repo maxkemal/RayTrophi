@@ -1416,7 +1416,7 @@ static const MethodParam params_flow_source_create[] = {
     {"enabled", "bool", false, "Emitter active", nullptr, nullptr, nullptr, false},
     {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr, nullptr, false},
     {"splat_geometry", "object", false, "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry.", nullptr, nullptr, nullptr, false},
-    {"liquid_emission", "string", false, "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid only; mesh_surface refused.", nullptr, nullptr, "string", false},
+    {"liquid_emission", "string", false, "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid parcels fill to particles_per_cell; a DEM grain substance pours jittered layers at ~40% solids (planGrainInflow). mesh_surface refused.", nullptr, nullptr, "string", false},
     {"end_time", "any", false, "", nullptr, nullptr, nullptr, false},
     {"falloff", "any", false, "", nullptr, nullptr, nullptr, false},
     {"fluid_emit_along_normal", "any", false, "", nullptr, nullptr, nullptr, false},
@@ -1509,7 +1509,7 @@ static const MethodParam params_flow_source_update[] = {
     {"name", "string", true, "", nullptr, nullptr, "string", false},
     {"particle_pool_weight", "float", false, "Relative share of free live particle capacity, finite in [0.001, 1000], default 1. Unused shares return to the common pool. Not a live-particle reservation or lifetime emission limit.", nullptr, nullptr, nullptr, false},
     {"splat_geometry", "object", false, "Overlay: mode, objects, source_materials, near_distance, mesh_budget. Same validation as flow_source.set_splat_geometry.", nullptr, nullptr, nullptr, false},
-    {"liquid_emission", "string", false, "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid only; mesh_surface refused.", nullptr, nullptr, "string", false},
+    {"liquid_emission", "string", false, "rate (legacy parcels/s), inflow (fill point disk or object bounds, Q=A*speed), outflow (drain point sphere or object bounds). Liquid parcels fill to particles_per_cell; a DEM grain substance pours jittered layers at ~40% solids (planGrainInflow). mesh_surface refused.", nullptr, nullptr, "string", false},
     {"density", "any", false, "", nullptr, nullptr, nullptr, false},
     {"domain", "any", false, "", nullptr, nullptr, nullptr, false},
     {"enabled", "any", false, "", nullptr, nullptr, nullptr, false},
@@ -2004,6 +2004,22 @@ static const MethodDescriptor desc_fluid_reset = {
     true
 };
 static const MethodRegistration reg_fluid_reset(desc_fluid_reset);
+
+static const MethodParam params_fluid_reset_visual_samples[] = {
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+};
+static const MethodDescriptor desc_fluid_reset_visual_samples = {
+    "fluid.reset_visual_samples", "fluid",
+    "Explicitly reseed the current visual population without resetting physics",
+    "Undoable appearance reset. Rebuilds samples from the current physical snapshot; cannot recover missing sample history in pre-v21 caches.",
+    "write", "SceneWrite", false, "any",
+    "fluid|reset|visual|samples",
+    "fluid.visual_samples|fluid.set_visual_samples",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_reset_visual_samples, 1,
+    true
+};
+static const MethodRegistration reg_fluid_reset_visual_samples(desc_fluid_reset_visual_samples);
 
 static const MethodParam params_fluid_run[] = {
     {"domains", "any", false, "", nullptr, nullptr, nullptr, false},
@@ -2509,6 +2525,23 @@ static const MethodDescriptor desc_fluid_set_surface_interior = {
 };
 static const MethodRegistration reg_fluid_set_surface_interior(desc_fluid_set_surface_interior);
 
+static const MethodParam params_fluid_set_visual_samples[] = {
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"settings", "object", true, "", nullptr, nullptr, nullptr, true},
+};
+static const MethodDescriptor desc_fluid_set_visual_samples = {
+    "fluid.set_visual_samples", "fluid",
+    "Author persistent field-sample refinement without changing physical particle capacity",
+    "Atomic patch: enabled, target_volume (m3), max_samples (1..4000000), seed, cfl (0..1 exclusive zero), max_substeps, reseed_hysteresis (0..0.5), working_budget_mb (16..16384). CPU staging reserves 768 bytes per maximum sample plus physical render staging. Open/closed domains supported; periodic and spatial wet appearance explicitly rejected. DEM grains, frozen parcels and spray remain physical. Uses existing splat geometry/source selections. Undoable, saved in project; visual checkpoints persist in cache v21. Old caches require reset/rebake when enabled. GPU sample transport is not implemented.",
+    "write", "SceneWrite", false, "any",
+    "fluid|set|visual|samples",
+    "fluid.visual_samples|fluid.set_splat_geometry",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_set_visual_samples, 2,
+    true
+};
+static const MethodRegistration reg_fluid_set_visual_samples(desc_fluid_set_visual_samples);
+
 static const MethodParam params_fluid_set_wall_contact[] = {
     {"domain", "string", true, "Particle matter domain name or id", nullptr, nullptr, "string", false},
     {"settings", "object", false, "Atomic partial object: friction [0,2], restitution [0,1], adhesion_pa [0,1e9] Pa.", "{}", nullptr, nullptr, false},
@@ -2667,6 +2700,24 @@ static const MethodDescriptor desc_fluid_update_seed_source = {
     true
 };
 static const MethodRegistration reg_fluid_update_seed_source(desc_fluid_update_seed_source);
+
+static const MethodParam params_fluid_visual_samples[] = {
+    {"domain", "string", true, "", nullptr, nullptr, "string", true},
+    {"offset", "integer", false, "", "0", nullptr, nullptr, false},
+    {"limit", "integer", false, "", "0", nullptr, nullptr, false},
+};
+static const MethodDescriptor desc_fluid_visual_samples = {
+    "fluid.visual_samples", "fluid",
+    "Read field-sample settings, publication status and an optional bounded sample page",
+    "limit 0 means metadata only; maximum 256. cpu_soa_reconstruction is an explicit host route, separate per source/substance/mechanics stream. It is not the projected solver MAC field. current=false distinguishes publication failure from a valid empty sample population. Physics, Fog and SurfaceSDF continue to use canonical physical state.",
+    "read", "Read", false, "any",
+    "fluid|visual|samples|splat|density|mesh|render",
+    "fluid.set_visual_samples|fluid.reset_visual_samples|fluid.state_digest",
+    nullptr, nullptr, nullptr, nullptr,
+    params_fluid_visual_samples, 3,
+    true
+};
+static const MethodRegistration reg_fluid_visual_samples(desc_fluid_visual_samples);
 
 static const MethodParam params_forcefield_create[] = {
     {"type", "string", true, "", nullptr, nullptr, "string", false},

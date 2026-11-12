@@ -1,6 +1,6 @@
 // Per-grain frame totals in the diagnostics tail, owned by one invocation.
 // No float atomics, fixed-point quantization, or additional GPU submission.
-const uint AUDIO_HEADER_WORDS = 47u;
+const uint AUDIO_HEADER_WORDS = 48u;
 const uint AUDIO_WORDS_PER_GRAIN = 12u;
 vec4 contactAudio[3] = vec4[3](vec4(0), vec4(0), vec4(0));
 

@@ -141,13 +141,18 @@ bool gatherSphereCloudUnchecked(
                         spread * RayTrophiSim::Fluid::
                             kFluidRenderProxyNeighborSupportScale,
                         spread);
-                const Vec3 center = instance.position + offset;
+                const Vec3 center =
+                    RayTrophiSim::Fluid::fluidRenderProxyIsolated(instance.scale)
+                        ? instance.position : instance.position + offset;
                 const float radius = parentRadius *
                     RayTrophiSim::Fluid::fluidRenderProxyChildRadiusScale(
                         stableParentIndex,
                         child,
                         children,
-                        group.point_sphere_visual_size_variation);
+                        group.point_sphere_visual_size_variation) *
+                    RayTrophiSim::Fluid::fluidRenderProxyIsolatedRadiusFactor(
+                        child, children,
+                        RayTrophiSim::Fluid::fluidRenderProxyIsolated(instance.scale));
                 Backend::VulkanProceduralSphereRecord sphere{};
                 sphere.centerRadius[0] = center.x;
                 sphere.centerRadius[1] = center.y;
@@ -161,7 +166,7 @@ bool gatherSphereCloudUnchecked(
                 // 32-byte record already carried three padding words.
                 sphere.objectRandom =
                     RayTrophiSim::Fluid::fluidRenderProxyObjectRandom(
-                        group.id, stableParentIndex, child);
+                        group, stableParentIndex, child);
                 spheres.push_back(sphere);
 
                 VkAabbPositionsKHR aabb{};

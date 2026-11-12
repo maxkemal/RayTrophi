@@ -184,6 +184,8 @@ struct InstanceGroup {
     
     // Instances
     std::vector<InstanceTransform> instances;   // All instance transforms
+    // Optional runtime sample identities, aligned with instances (0 = slack).
+    std::vector<uint64_t> point_sphere_ids;
 
     // Point-sphere render mode (foam / fluid splat). When true, the OptiX
     // backend does NOT emit one TLAS instance per InstanceTransform; instead it

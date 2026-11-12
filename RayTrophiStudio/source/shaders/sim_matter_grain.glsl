@@ -76,7 +76,7 @@ const uint PATCH_KEY = 0xc0000000u;
 // Shell flags above the 30-bit patch id (kMatterGrainPatchClosed/Inward).
 const uint PATCH_CLOSED = 0x40000000u;
 const uint PATCH_INWARD = 0x80000000u;
-const uint REVISION = 42u;
+const uint REVISION = 43u;
 const uint AUDIT = 0x80000000u;
 const uint SLOT_WORDS = 7u;
 const uint FRESH = 0x80000000u;
@@ -235,6 +235,8 @@ bool sleepOn() { return pc.sleep.y > 0.0; }
 #include "sim_matter_grain_sleep_probe.glsl"
 // This grain is moving; only a meaningful transferred kick requests an audit.
 bool g_fast = false;
+// Sum of c_n n n^T over this grain's contacts (diagnostics[47], see main).
+mat3 g_damping = mat3(0.0);
 bool g_probe_sleep_transfer = false;
 float g_history_dt = 0.0;
 vec3 g_pair_dynamic_impulse = vec3(0.0);
@@ -363,6 +365,7 @@ void contact(uint i, uint key, vec3 n, float overlap, vec3 arm, vec3 relative,
     float damping_ratio = domain_wall ? masses[2u * pc.meta.x + 5u] : pc.step_contact.y;
     float friction = domain_wall ? masses[2u * pc.meta.x + 4u] : pc.step_contact.w;
     float cn = 2.0 * damping_ratio * sqrt(k / inverse_normal_mass);
+    g_damping += cn * outerProduct(n, n);
     float fn = max(0.0, k*overlap-cn*normal_speed);
     // Budget all contacts against the input velocity. Dividing by BUDGET
     // prevents simultaneous wall, mesh and grain contacts from each spending
@@ -866,6 +869,18 @@ void main() {
         history_blocks[ownerWord()+1u+word] = g_touched[word] | g_allocated[word];
     }
     atomicMax(diagnostics[2],g_contacts);
+    {
+        // Measured damping rate of this grain, 1/s: the infinity norm of
+        // (1/m) sum c_n n n^T bounds its largest eigenvalue. The host sizes
+        // the substep from last frame's maximum instead of assuming every
+        // dashpot of a full contact budget pushes along one line (normal
+        // dashpots of a packed grain point all around it: ~1/3 of that).
+        vec3 rows = abs(g_damping[0]) + abs(g_damping[1]) + abs(g_damping[2]);
+        float rate = im * max(rows.x, max(rows.y, rows.z));
+        if (rate > 0.0 && !isinf(rate) && !isnan(rate)) {
+            atomicMax(diagnostics[47], floatBitsToUint(rate));
+        }
+    }
     if (pc.substep.x == pc.substep.w) {
         atomicAdd(diagnostics[3],g_sticking);
         atomicAdd(diagnostics[4],g_contacts);

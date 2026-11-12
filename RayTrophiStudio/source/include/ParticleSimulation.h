@@ -4,6 +4,7 @@
 #include "Fluid/SourceSplatGeometry.h"
 #include "Fluid/MatterAudioTelemetry.h"
 #include "Fluid/MatterSeedSources.h"
+#include "Fluid/DomainVisualSettings.h"
 
 #include "Matrix4x4.h"
 #include "FluidGrid.h"
@@ -696,6 +697,7 @@ struct SimulationGridDomainDesc {
     // unchanged; Vulkan raster/RT derive virtual children on demand. Granular
     // domains default to one visible sphere per physical MPM carrier.
     int   fluid_particle_visual_children = 8;
+    Fluid::DomainVisualSettings fluid_visual_samples;
     float fluid_particle_visual_size_variation = 0.22f;
     bool  fluid_granular_physical_carriers = true;
     uint64_t fluid_particle_visual_budget =
@@ -1182,6 +1184,9 @@ struct SimulationGridDomainState {
     uint32_t channels = 0u;
     bool valid = false;
     uint64_t version = 0;
+    double render_physical_time = 0.0;
+    bool visual_cache_unavailable = false;
+    mutable std::shared_ptr<const Fluid::DomainVisualState> visual_samples;
     // MAC staggered storage. For Gas this is the source of truth (advected
     // density/temperature/fuel). For Fluid this is per-step scratch for the
     // pressure projection; the source of truth is `particles`.

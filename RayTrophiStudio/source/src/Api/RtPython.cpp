@@ -13,6 +13,7 @@
 #include "RtMatterLanes.h"
 #include "RtSimulationTransport.h"
 #include "RtMatterModels.h"
+#include "RtDomainVisualBindings.h"
 #include "RtFluidLabelBindings.h"
 #include "RtViewportCutoutBindings.h"
 #include "RtRasterDiagnosticsBindings.h"
@@ -1563,6 +1564,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     rtpy::registerPhaseGridBindings(fluid);
     rtpy::registerMatterLaneBindings(fluid);
     rtpy::registerMatterModelBindings(fluid);
+    rtpy::registerDomainVisualBindings(fluid);
     auto py_create_domain = [](const std::string& name, const py::tuple& domain_min, const py::tuple& domain_max, float voxel_size, const std::string& type) -> py::dict {
         Vec3 dmin = vec3FromPython(domain_min);
         Vec3 dmax = vec3FromPython(domain_max);

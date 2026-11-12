@@ -29,6 +29,7 @@ def main():
     assert "computeFluidFillSeedAABB(Fluid::liquidGrid(state).origin," in simulation
 
     for path in ["src/Physics/ParticleRenderBridge.cpp",
+                 "src/Physics/Fluid/DomainSplatRenderBridge.inl",
                  "src/UI/ParticleBillboardBuilder.cpp"]:
         text = source(path)
         assert "liquidGrid(state)" in text, path

@@ -72,6 +72,22 @@ void planLiquidInflow(const LiquidFlowRegion& region, const LiquidLattice& latti
                       int particles_per_cell, const FluidParticles& particles,
                       uint64_t seed, LiquidInflowPlan& out);
 
+// ★ DEM grain nozzle (2026-11-12). Grains are discrete spheres, not parcels on
+// the cell lattice: filling to particles_per_cell would bury them in each
+// other, and random insertion jams near 38 % solids. The nozzle instead
+// extrudes jittered hexagonal LAYERS normal to the flow, one pitch
+// (2.3 x the largest radius) apart, each with its own rotation and offset so
+// the stream is not a crystal. A layer is born when it crosses the face:
+// `layer_phase_m` is how far upstream the next layer stands, so the flux is
+// exactly A |v| at ~40 % solids whatever the frame rate, with no rate
+// accumulator and nothing owed by a blocked nozzle (the overlap filter drops
+// those births). Disk: layers through `center`; Box: through the box centre,
+// clipped to the box. A disk too narrow for a hexagon pours single file.
+// Births stand upstream of the face by what each layer still has to travel.
+void planGrainInflow(const LiquidFlowRegion& region, float speed, float dt,
+                     float maximum_radius, bool& initialized, double& layer_phase_m,
+                     uint64_t seed, LiquidInflowPlan& out);
+
 // First activation may fill the upstream reservoir. Later steps may add at most
 // Q*dt/parcel_volume parcels, carrying only the fractional parcel between steps.
 // Unused whole-parcel capacity is discarded: blocked or pool-limited nozzles

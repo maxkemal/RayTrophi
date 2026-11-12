@@ -37,8 +37,9 @@ constexpr uint32_t kFreshHistoryBlock = 0x80000000u;
 // 0 overflow bits, 1 revision, 2 max contacts, 3-6 contact counts, 7-11 cost
 // counters, 12-14 neighbour-list rebuild flags (substep % 3), 15 list builds,
 // 16 sleepers, 17-26 contact probe, 27 probe gate, 28-43 sleep probe,
-// 44 sleep counter overflow (counts are invalid if set).
-constexpr std::size_t kDiagnosticWords = 47;
+// 44 sleep counter overflow (counts are invalid if set), 45 compact sleep,
+// 46 active grain count, 47 largest per-grain damping rate (float bits).
+constexpr std::size_t kDiagnosticWords = 48;
 // Per grain {count, kMatterGrainListCapacity neighbour indices}.
 std::size_t listBytesPerGrain(uint32_t capacity) {
     return (std::size_t(capacity) + 1) * sizeof(uint32_t);
@@ -238,6 +239,7 @@ bool ensureCollider(SimulationComputeContext& compute, MatterGrainGpuRuntime& ru
 void invalidateMatterGrainAfterReset(MatterGrainGpuRuntime& runtime) {
     runtime.last_sleeping_grains = 0;
     runtime.cfl_contact_hint = static_cast<uint32_t>(kMatterGrainContactBudget);
+    runtime.cfl_damping_rate_hint = 0.0;
     runtime.last_cfl = {};
     runtime.history_fresh = true;
     runtime.coupling_zero = false;
@@ -521,7 +523,9 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
         m, contact_k, params.tangential_stiffness_ratio, mu_r, rolling_factor,
         bridge_stiffness, zeta, budget, double(params.contact_resolution)
     };
-    const auto bounds_at = [&](double scale) {
+    DemContactTimeInput contact_time_measured = contact_time;
+    contact_time_measured.measured_damping_rate_s = runtime.cfl_damping_rate_hint;
+    const auto bounds_at = [&, contact_time = contact_time_measured](double scale) {
         return demExplicitContactTimeBounds(contact_time, scale);
     };
     const auto substeps_for = [&](double step) { return std::ceil(dt / step - 1e-9); };
@@ -540,6 +544,7 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     cfl.minimum_bridge_volume_m3 = std::isfinite(minimum_bridge_volume) ? minimum_bridge_volume : 0.0;
     cfl.travel_dt_s = travel_dt;
     cfl.contacts_assumed = cfl_contacts;
+    cfl.measured_damping_rate_s = runtime.cfl_damping_rate_hint;
     cfl.requested_substeps = requested;
     cfl.max_substeps = static_cast<uint32_t>(params.max_substeps);
     // Over the ceiling: soften the contact springs until the STABILITY bound
@@ -1246,6 +1251,13 @@ bool stepMatterGrainGpu(FluidParticles& p, const Vec3& low, const Vec3& high,
     report.cfl_budget_retry = false;
     runtime.cfl_contact_hint = std::clamp(diagnostics[2] + 4u, 12u,
         contact_capacity);
+    {
+        float measured_rate = 0.0f;
+        std::memcpy(&measured_rate, &diagnostics[47], sizeof(measured_rate));
+        runtime.cfl_damping_rate_hint = std::isfinite(measured_rate) && measured_rate > 0.0f
+            ? double(measured_rate) / std::sqrt(std::max(1e-6, double(runtime.last_cfl.stiffness_scale)))
+            : 0.0;
+    }
     report.sticking_contacts = diagnostics[3];
     report.contacts = diagnostics[4];
     report.liquid_bridges = diagnostics[5];

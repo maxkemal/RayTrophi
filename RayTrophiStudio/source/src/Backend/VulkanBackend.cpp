@@ -15663,10 +15663,10 @@ bool VulkanBackendAdapter::refreshRasterScatterInstances() {
                     instance.mask = zeroScale ? 0 : 0xFF;
                     instance.simPoolSlot = group.transient;
                     instance.scatterGroupId = group.id;
-                    if (group.point_sphere_mode) {
+                    if (group.point_sphere_mode || !group.point_sphere_ids.empty()) {
                         instance.objectRandom =
                             RayTrophiSim::Fluid::fluidRenderProxyObjectRandom(
-                                group.id,
+                                group,
                                 static_cast<uint32_t>(instanceIndex),
                                 child);
                     }

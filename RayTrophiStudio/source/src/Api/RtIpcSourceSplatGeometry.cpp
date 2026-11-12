@@ -1,5 +1,6 @@
 ﻿#include "Fluid/SourceSplatGeometryJson.h"
 #include "RtIpcSourceSplatGeometry.h"
+#include "RtDomainVisualBindings.h"
 #include "Api/RtApi.h"
 #include "Api/SourceSplatGeometryApi.h"
 #include "Api/MatterPhaseOutputApi.h"
@@ -7,6 +8,9 @@
 
 bool dispatchSourceSplatGeometryIpc(const std::string& method, const nlohmann::json& params,
     const RtIpcParticleEnqueue& enqueue, nlohmann::json& output) {
+    if (dispatchDomainVisualIpc(method, params, enqueue, output)) {
+        return true;
+    }
     if (method == "fluid.inspect_fog_fields") {
         output = enqueue([params](UIContext&) {
             try {

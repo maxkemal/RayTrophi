@@ -21,6 +21,9 @@ struct DemContactTimeInput {
     double damping_ratio = 0.0;
     double contacts = 0.0;
     double contact_resolution = 0.0;
+    // Largest per-grain damping rate measured on the device last frame at
+    // stiffness scale 1, 1/s: ||(1/m) sum c_n n n^T||. 0 = not measured.
+    double measured_damping_rate_s = 0.0;
 };
 
 struct DemContactTimeBounds {
@@ -53,7 +56,20 @@ inline DemContactTimeBounds demExplicitContactTimeBounds(
         input.contact_resolution;
     const double normal_damping = 2.0 * input.damping_ratio *
         std::sqrt(k * input.mass_kg);
-    const double damping_rate = input.contacts * 2.0 * normal_damping / input.mass_kg;
+    // lambda_max(M^-1 C) <= 2 max_i lambda_max(C_ii / m_i) for pair dashpots.
+    // Without a measurement every contact of the budget is assumed to damp
+    // along ONE line. Normal dashpots of a packed grain point all around it
+    // (12 touching neighbours sum to ~4 n n^T per axis), and that assumption
+    // made a resting pile overdamped on paper (aggregate zeta 1.14 at 14
+    // contacts), which cost 2.7x in the step. The measured rate carries a 1.5x
+    // margin and never drops under four collinear dashpots, so a frame that
+    // packs tighter than the last stays inside the halved limit below.
+    double damping_rate = input.contacts * 2.0 * normal_damping / input.mass_kg;
+    if (input.measured_damping_rate_s > 0.0) {
+        const double floor_rate = 4.0 * normal_damping / input.mass_kg;
+        damping_rate = std::min(damping_rate, 2.0 * std::max(floor_rate,
+            1.5 * input.measured_damping_rate_s * std::sqrt(stiffness_scale)));
+    }
     const double omega = std::sqrt(2.0 * input.contacts * result.k_effective /
         input.mass_kg);
     result.aggregate_zeta = damping_rate / (2.0 * omega);

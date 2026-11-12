@@ -31,6 +31,67 @@ açılışında gözle bakabileceği ve otomatik testin göremediği şeyler iç
 - P2G permütasyon denemesi söküldü (exe değişmedi, yalnız `.spv`).
 - Doğrulama: smoke 30/30, multirate 7/7, yüzey 8/8.
 
+**14:40 derlemesi (ajan, 2026-11-12): yalnız parsel tek damla ("uydu" kümeleri).**
+- Görsel çocuklar (parsel başına 8 küçük küre) yığındaki boşlukları doldurmak için var; havada
+  tek kalan parselde ana noktanın çevresinde sıkı bir küme olarak görünüyordu. Artık çözücünün
+  Sprey etiketini taşıyan parsel tek küre çiziliyor (ana parselin hacmi). Köprü bunu point-sphere
+  örneğinde NEGATİF `scale.y` ile işaretler (`fluidRenderProxyIsolated`).
+- Yalnız çizim tarafı; çözücüye, adım süresine ve cache'e yük yok.
+- ★ İlk deneme dizi komşuluğuna bakıyordu ve yığının yarısını da büyük küreye çevirdi:
+  parseller doğum sırasını korur, karıştıktan sonra dizi komşusu uzayda komşu değildir.
+- Canlı (10 648 su parseli, 84 sprey): yığın içi düzgün küçük küreler, havadakiler tek damla.
+- ⚠ Kapsam dışı: raster "resident" GPU yolu (`fluid_sphere_proxy.vert`) etiketi göremiyor,
+  o yol devredeyken eski kümeler kalır. Bu sahnede CPU impostor yolu çalışıyordu.
+- Codex'in Field samples yolu ölçüldü (87k parsel): her adımda
+  "transport unavailable or CFL budget exceeded", 0 örnek, adım başına 0.4–6 s CPU. Kapalı kalmalı.
+- 1. Gözle: sıçrama sahnesi, Solid ve Rendered. Havadaki damlalar tek küre, yığın eskisi gibi.
+- 2. Damla yığına geri düşerken küçük bir "pop" (tek küre → 8 çocuk) beklenir; rahatsız
+  ediyorsa etiket histerezisini (ayrılma ≤ 2, katılma ≥ 6 komşu) gevşet.
+- 3. ★ Sinsi durum: mesh splat (icosphere vb.) kullanan bir domainde negatif ölçek geometriyi
+  ters çevirirdi. İşaret yalnız procedural kürede konuyor; mesh splat sahnesinde spreyin
+  normal göründüğünü bir kez kontrol et.
+
+**13:43 derlemesi (ajan, 2026-11-12): DEM alt adımı ölçülen sönümden.**
+- Kararlılık sınırı sönümü "bütçedeki bütün temaslar tek doğrultuda" sayıyordu (14 temasta
+  toplam sönüm oranı 1.14, adımda 2.7× ceza). Shader artık tane başına gerçek sönüm oranını
+  ölçüyor (`diagnostics[47]`), host geçen karenin en büyüğünü 1.5× payla kullanıyor; dört
+  doğrusal temasın altına inmez. Kuvvet yasası DEĞİŞMEDİ, yalnız adım boyu.
+- ★ Arayüz: tane shader revizyonu 43, tanı başlığı 48 kelime (ses telemetrisi bir kelime kaydı).
+  Beş tane shader'ı derlendi, `.spv` iki yerde.
+- 74k kum (R = 1 cm): 496 → 382 alt adım/kare, toplam sönüm oranı 1.14 → 0.51. Artık doğruluk
+  sınırı (çarpışma başına 24 adım) belirliyor. Yığın oturuyor: en hızlı tane 2 s'de 0.02 m/s.
+  IPC: `fluid.matter_models` → `cfl_terms.measured_damping_rate_s`.
+- Testler: hızlı duman 16/16, grain_sleep 3/3, grain_inflow 6/6, tane sözleşmesi PASS.
+- ⚠ İki FAIL, bu değişiklikle bağı DOĞRULANMADI (önceki exe ile koşulmadı):
+  `grain_heat` 7/8 (`cools_at_physical_rate`; ısıl bir geçit) ve `sleep_transfer`
+  (ilk adımda `sim.control_state` eşitlik assert'i, fizik koşmadan düşüyor).
+- 1. Gözle: bilinen bir kum sahnesini oynat. Yığın eskisi gibi oturmalı. Titreyen ya da
+  yavaşça "kaynayan" yığın görürsen ölçülen sönüm payı yetmiyor demektir:
+  `DemContactTimeBounds.h`'de 1.5 çarpanını büyüt.
+- 2. Hızlı çarpma (yüksekten dökülen kum, hızlı kollider): patlama OLMAMALI. Olursa çarpma
+  karesi önceki karenin seyrek temas ölçümünü kullanmıştır; taban değeri (4) yükselt.
+- 3. ★ Sinsi durum: yığın biraz daha "yumuşak" sönerse kimse hata demez. Aynı sahnede
+  `cfl_terms.substeps` ile birlikte yığının son yüksekliğini eski kayıtla karşılaştır.
+
+**13:24 derlemesi (kullanıcı, 2026-11-12): DEM tane nozulu (inflow).**
+- Tane maddesi artık `liquid_emission=inflow` ile dökülüyor (`planGrainInflow`): akışa dik,
+  titretilmiş altıgen katmanlar, katman yüzeyi geçince doğar. Debi = alan × hız, kare hızından
+  bağımsız; tıkalı nozul borç biriktirmez.
+- Canlı: `rt_test_grain_inflow_ipc.py` 6/6 (458 tane, beklenen 466; kare başına en çok 19,
+  ortalama 14.8). Bağımsız planlayıcı testi 3/3: en yakın çift 2R × 1.05–1.07, sayı %1 içinde.
+- Katı oranı nozul kesitine göre ~%27 (taneler duvardan bir yarıçap içeride doğar).
+- 1. Gözle: panelden Sand kaynağını inflow yap, hız ver. Kesintisiz bir sütun dökülmeli.
+  Kare başına ayrı öbekler görürsen katman fazı kareler arasında taşınmıyor demektir.
+- 2. Nozulu zemine ya da yığına göm, birkaç saniye beklet, çek. Çekince topluca boşalma
+  OLMAMALI. Olursa reddedilen doğumlar birikime geri yazılıyor demektir.
+- 3. ★ Sinsi durum: kutu (object bounds) nozulu yalnız kutunun orta düzleminden döker;
+  ince uzun bir kutuda hız ekseni yanlışsa debi makul görünür ama beklenenden düşüktür.
+  `fluid_flux_target_m3_s` ile `total_emitted_particles` artışını karşılaştır.
+- Ölçüm (değişiklik yok): 74k kum, R = 1 cm, 496 alt adım/kare, 348 ms/kare
+  (`sim_matter_grain_step` 0.70 ms/çağrı). Sınırlayan kararlılık: 14 temas varsayımı ve
+  toplam sönüm oranı 1.14 (aşırı sönümlü). Doğruluk sınırı tek başına 381 alt adım ister.
+  Komşu listesi her alt adımda yeniden kuruluyor (22 ms/kare).
+
 **12:06 derlemesi (ajan, 2026-11-12): kollider yüz ağırlıklarında tam kesin kısayol.**
 - `computeSolidFaceWeights`: yüz merkezindeki SDF mesafesi Lipschitz payından uzaksa yüz
   tamamen içte (0) ya da tamamen dışta (255) sayılır, 16 örnek atlanır. Kesin bir sınır,

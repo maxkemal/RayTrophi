@@ -1,4 +1,5 @@
 #include "UI/SourceSplatGeometryUI.h"
+#include "UI/DomainVisualUI.h"
 #include "Api/MatterPhaseOutputApi.h"
 #include "Fluid/MatterModelService.h"
 #include "Fluid/MatterSubstanceState.h"
@@ -161,6 +162,7 @@ void drawMatterOutputControls(SceneData& scene, const SimulationGridDomainDesc& 
     }
     ImGui::PushID(domain.name.c_str());
     drawPhaseOutputControls(domain);
+    drawDomainVisualControls(domain);
     ImGui::TextWrapped(
         "Each substance chooses its appearance independently. "
         "Changing output or scene material does not change physics or combustion.");
