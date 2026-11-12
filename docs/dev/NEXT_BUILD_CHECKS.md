@@ -31,6 +31,19 @@ açılışında gözle bakabileceği ve otomatik testin göremediği şeyler iç
 - P2G permütasyon denemesi söküldü (exe değişmedi, yalnız `.spv`).
 - Doğrulama: smoke 30/30, multirate 7/7, yüzey 8/8.
 
+**10:36 derlemesi (ajan, 2026-11-12): hareketli kollider dinlenik karı uyutmuyordu.**
+- `MatterMpmSleep.cpp`: domain'in HERHANGİ bir yerinde hareketli kollider (solid_vel ≠ 0)
+  dinlenik karı uyanık tutuyordu; voksel imzası her karede değiştiği için dinlenme sayacı da
+  her karede sıfırlanıyordu.
+- Artık yalnız parsel kutusunun yakını (3 hücre + 2 × kollider kare kayması) ve oraya varacak
+  ayak izi sayılıyor.
+- dem1: temastan önce 150 → **55 ms** (uykuda), kollider ~0.65 m kala uyanıyor, temas
+  davranışı aynı.
+- Smoke 30/30, `collider_phi` 12/12.
+- ★ Sessiz başarısızlık: hızlı bir kollider uyuyan karın içine bir kare geç girerse kar o kare
+  tepkisiz kalır. Bakılacak: hızlı kollider (> 1 hücre/kare) karın içine dalarken ilk temas
+  karesi.
+
 **00:13 derlemesi (ajan, 2026-11-12): hareketli kollider maliyeti.**
 - `computeSolidFaceWeights` tek iş parçacığındaydı. Hareketli 2.5 m mesh-SDF küre her karede
   ~3M SDF örneği çekiyordu: 205 ms/kare, karla temastan bağımsız.
