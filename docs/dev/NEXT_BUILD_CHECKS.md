@@ -31,10 +31,12 @@ açılışında gözle bakabileceği ve otomatik testin göremediği şeyler iç
 - P2G permütasyon denemesi söküldü (exe değişmedi, yalnız `.spv`).
 - Doğrulama: smoke 30/30, multirate 7/7, yüzey 8/8.
 
-**14:40 derlemesi (ajan, 2026-11-12): yalnız parsel tek damla ("uydu" kümeleri).**
+**15:11 derlemesi (ajan, 2026-11-12): yalnız parsel tek damla ("uydu" kümeleri).**
 - Görsel çocuklar (parsel başına 8 küçük küre) yığındaki boşlukları doldurmak için var; havada
   tek kalan parselde ana noktanın çevresinde sıkı bir küme olarak görünüyordu. Artık çözücünün
-  Sprey etiketini taşıyan parsel tek küre çiziliyor (ana parselin hacmi). Köprü bunu point-sphere
+  Sprey etiketini taşıyan parsel, yığındaki çocuklarla AYNI BOYDA tek küre çiziliyor.
+  (14:40 sürümü ana parselin hacminde tek küre çiziyordu; küçük çocukların yanında iri top
+  gibi durduğu için kullanıcı gözlemiyle değişti.) Köprü bunu point-sphere
   örneğinde NEGATİF `scale.y` ile işaretler (`fluidRenderProxyIsolated`).
 - Yalnız çizim tarafı; çözücüye, adım süresine ve cache'e yük yok.
 - ★ İlk deneme dizi komşuluğuna bakıyordu ve yığının yarısını da büyük küreye çevirdi:
@@ -45,7 +47,8 @@ açılışında gözle bakabileceği ve otomatik testin göremediği şeyler iç
 - Codex'in Field samples yolu ölçüldü (87k parsel): her adımda
   "transport unavailable or CFL budget exceeded", 0 örnek, adım başına 0.4–6 s CPU. Kapalı kalmalı.
 - 1. Gözle: sıçrama sahnesi, Solid ve Rendered. Havadaki damlalar tek küre, yığın eskisi gibi.
-- 2. Damla yığına geri düşerken küçük bir "pop" (tek küre → 8 çocuk) beklenir; rahatsız
+- 2. Damla yığına geri düşerken küçük bir "pop" (tek küre → 8 çocuk) beklenir; sprey görsel
+  olarak hacminin 1/çocuk sayısı kadarını gösterir (ince serpinti). Pop rahatsız
   ediyorsa etiket histerezisini (ayrılma ≤ 2, katılma ≥ 6 komşu) gevşet.
 - 3. ★ Sinsi durum: mesh splat (icosphere vb.) kullanan bir domainde negatif ölçek geometriyi
   ters çevirirdi. İşaret yalnız procedural kürede konuyor; mesh splat sahnesinde spreyin
