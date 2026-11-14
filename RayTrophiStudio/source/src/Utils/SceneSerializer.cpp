@@ -13,7 +13,6 @@
 #include "Fluid/MatterPhaseConfig.h"
 #include "globals.h"
 #include "Renderer.h"
-#include "OptixWrapper.h"
 #include "Triangle.h"
 #include "PointLight.h"
 #include "DirectionalLight.h"
@@ -47,7 +46,6 @@
 #endif
 #endif
 #include "Backend/IBackend.h"
-#include "Backend/OptixBackend.h"
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 

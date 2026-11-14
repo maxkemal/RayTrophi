@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
 #include "Api/RtApiRigSelection.h"
 #include "Animation/RigSelection.h"
 #include <exception>

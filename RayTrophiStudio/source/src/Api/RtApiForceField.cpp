@@ -28,6 +28,8 @@
 */
 
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
+#include "Renderer.h"
 
 #include <algorithm>
 #include <cctype>

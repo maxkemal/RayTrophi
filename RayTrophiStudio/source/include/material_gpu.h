@@ -9,7 +9,7 @@
 * =========================================================================
 */
 #pragma once  
-#include <cuda_runtime.h>  
+#include "GpuInteropTypes.h"
 #include "../shaders/surface_coverage.h"
 #include <functional>
 #include <cmath>

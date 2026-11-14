@@ -1,7 +1,6 @@
 #include "WaterSystem.h"
 #include "scene_data.h"
 #include "Renderer.h"
-#include "OptixWrapper.h"
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"

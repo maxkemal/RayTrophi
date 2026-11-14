@@ -273,7 +273,8 @@ class MixtureAdaptiveContracts(unittest.TestCase):
         self.assertIn('volume_material::configure(shader, {{"adaptive_stepping", adaptive}}', ui)
         binding = read('src/Api/RtVolumeMaterialBindings.cpp')
         self.assertIn('volume.set_material', binding)
-        self.assertIn('volume.def("set_material"', binding)
+        self.assertRegex(read('src/Api/RtPythonVolumeMaterialBindings.cpp'),
+                         r'volume\.def\(\s*"set_material"')
 
     def test_both_integrators_and_conservative_fallbacks(self):
         shader = read('shaders/volume_mixture.glsl')

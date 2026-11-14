@@ -1,4 +1,5 @@
-﻿#include "EmbreeBVH.h"
+#include <embree4/rtcore.h>
+#include "EmbreeBVH.h"
 #include "HittableInstance.h"
 #include "PerfProfile.h"
 #include "VDBVolume.h" // Add VDB support

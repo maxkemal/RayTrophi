@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
 
 #include "GeometryNodesV2.h"
 #include "MeshEdit/SplineObject.h"

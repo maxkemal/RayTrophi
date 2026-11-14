@@ -1,4 +1,5 @@
 #include "PostProcess/PostService.h"
+#include "Core/RuntimeProjectHost.h"
 /*
 * =========================================================================
 * Project:       RayTrophi Studio
@@ -11,6 +12,8 @@
 */
 #include "Api/RtApi.h"
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
+#include "Renderer.h"
 #include "RtManualSimulationStep.h"
 #include "Backend/VulkanRecoveryPolicy.h"
 
@@ -49,11 +52,6 @@
 #include "ProjectManager.h"
 #include <chrono>
 #include "Autosave.h"
-#include "Backend/OptixBackend.h"
-#include "OptixWrapper.h"
-// Ilk CUDA hatasi mandali (OptixWrapper.cpp'de tanimli).
-int rtOptixFirstCudaError();
-std::string rtOptixFirstCudaErrorSite();
 #include "SceneExporter.h"          // scene.export_gltf (rtapi::exportSceneGltf)
 #include "Api/RtPython.h"
 #include "MaterialManager.h"
@@ -2412,35 +2410,7 @@ Result viewportRetryDeviceRecovery() {
     return Result::success();
 }
 
-Result optixAccumStatus(OptixAccumStatus& out) {
-    out = OptixAccumStatus{};
-    if (!g_ctx) return notBound();
-    auto* ob = dynamic_cast<Backend::OptixBackend*>(g_ctx->backend_ptr);
-    if (!ob) return Result::success();   // available=false; "OptiX yok" bir HATA degil
-    OptixWrapper* w = ob->getOptixWrapper();
-    if (!w) return Result::success();
-    out.available = true;
-    out.accumulated_samples = w->getAccumulatedSamples();
-    out.wipe_count = w->getAccumWipeCount();
-    out.wipe_resolution = w->getAccumWipeResolutionCount();
-    out.wipe_camera = w->getAccumWipeCameraCount();
-    w->getAccumLastWipeSizes(out.last_wipe_from[0], out.last_wipe_from[1],
-                             out.last_wipe_to[0], out.last_wipe_to[1]);
-    out.buffer_w_read = w->sampleAccumulationW(out.buffer_w_mean, out.buffer_w_max,
-                                               out.buffer_w_center);
-    out.adaptive_sampling = w->getUseAdaptiveSampling();
-    out.min_samples = w->getMinSamplesParam();
-    out.variance_threshold = w->getVarianceThresholdParam();
-    out.samples_per_pixel = w->getSamplesPerPixelParam();
-    out.prev_zero_pixels = w->getAccumPrevZeroLastLaunch();
-    w->getAccumSampleGeometry(out.read_w, out.read_h, out.image_w, out.image_h);
-    out.reset_buffers_calls = w->getResetBuffersCalls();
-    out.set_render_params_calls = g_set_render_params_calls.load(std::memory_order_acquire);
-    out.set_render_params_reason = g_set_render_params_reason;
-    out.first_cuda_error = rtOptixFirstCudaError();
-    out.first_cuda_error_site = rtOptixFirstCudaErrorSite();
-    return Result::success();
-}
+
 
 Result autosaveStatus(AutosaveStatus& out) {
     out = AutosaveStatus{};
@@ -2473,8 +2443,13 @@ Result openProject(const std::string& filepath) {
         return Result::fail("cannot open project while rendering");
     if (filepath.empty()) return Result::fail("project path is empty");
     std::error_code file_error;
-    if (!std::filesystem::is_regular_file(filepath, file_error)) {
+    if (!std::filesystem::is_regular_file(
+            AppRuntime::projectPathFromUtf8(filepath), file_error)) {
         return Result::fail("project file not found: " + filepath);
+    }
+
+    if (auto runtime_result = AppRuntime::tryOpenRuntimeProject(*g_ctx, filepath)) {
+        return *runtime_result;
     }
 
     // ★★ BEFORE the load, and the pairing matters as much as the calls do.

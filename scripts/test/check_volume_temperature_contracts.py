@@ -41,7 +41,8 @@ class VolumeTemperatureContracts(unittest.TestCase):
         self.assertIn("volume_material::configure(shader, patch, error)", ui)
         binding = read("src/Api/RtVolumeMaterialBindings.cpp")
         self.assertIn("volume_material::configure(next, material_patch, error)", binding)
-        self.assertIn('volume.def("set_material"', binding)
+        self.assertRegex(read("src/Api/RtPythonVolumeMaterialBindings.cpp"),
+                         r'volume\.def\(\s*"set_material"')
         self.assertIn('method != "volume.set_material"', binding)
 
     def test_serialization_and_presets_preserve_source_policy(self):

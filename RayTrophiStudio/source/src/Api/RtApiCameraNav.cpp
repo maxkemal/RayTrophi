@@ -35,6 +35,7 @@
  */
 
 #include "Api/RtApiInternal.h"
+#include "Renderer.h"
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Camera.h"

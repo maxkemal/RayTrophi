@@ -11,7 +11,8 @@
 #pragma once
 
 #include "Api/RtApi.h"
-#include "scene_ui.h"
+#include "UIContext.h"
+#include "SceneHistory.h"
 #include "scene_data.h"
 #include "SceneCommand.h"
 #include <atomic>

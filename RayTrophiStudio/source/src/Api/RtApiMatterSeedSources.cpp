@@ -3,6 +3,8 @@
 #include "Fluid/MatterSeedSources.h"
 #include "MaterialStateField.h"
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
+#include "Renderer.h"
 
 #include <algorithm>
 #include <limits>

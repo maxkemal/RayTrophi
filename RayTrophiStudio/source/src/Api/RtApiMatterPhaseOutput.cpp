@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Api/MatterPhaseOutputApi.h"
 #include "ProjectManager.h"
 

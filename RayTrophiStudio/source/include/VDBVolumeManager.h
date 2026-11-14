@@ -241,6 +241,8 @@ public:
     std::string getLastError() const { return last_error; }
     
 private:
+    void trimCudaBuffers(VDBVolumeData& volume, size_t grid_size, size_t temperature_size);
+
     VDBVolumeManager();
     ~VDBVolumeManager();
     

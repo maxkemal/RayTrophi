@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <None Include="source\src\Physics\Fluid\APICFluidStep.inl" />
@@ -700,6 +700,12 @@
     </ClInclude>
     <ClInclude Include="external\imgui\imconfig.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\GpuVolumeTypes.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\UIContext.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
     <ClInclude Include="source\include\scene_ui.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
@@ -2339,6 +2345,54 @@
     <ClCompile Include="source\src\Utils\PerfProfile.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
+    <ClInclude Include="source\include\Core\StudioLaunchOptions.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\StudioLaunchOptions.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Core\AppWindow.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\AppWindow.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Core\AppFrame.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\AppFrame.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Core\RuntimeProjectHost.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\RuntimeProjectHost.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Core\VulkanSceneSync.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\VulkanSceneSync.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Core\RuntimeSimulationClock.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\RuntimeSimulationClock.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Core\RuntimeSceneViewer.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClCompile Include="source\src\Core\RuntimeSceneViewer.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RuntimeState.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\ImageCodecs.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Core\Main.cpp">
       <Filter>Kaynak Dosyalar\Core</Filter>
     </ClCompile>
@@ -2369,6 +2423,9 @@
     <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp">
       <Filter>Kaynak Dosyalar\Core</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Render\RendererOidn.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Render\Renderer.cpp">
       <Filter>Kaynak Dosyalar\Render</Filter>
     </ClCompile>
@@ -2396,6 +2453,42 @@
     <ClCompile Include="source\src\Render\Texture.cpp">
       <Filter>Kaynak Dosyalar\Render</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Render\TextureCuda.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\AtmosphereLUTCuda.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <None Include="source\src\Render\AtmosphereLUTHost.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </None>
+    <None Include="source\src\Render\TextureHost.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </None>
+    <None Include="source\src\Core\PlayerMain.cpp">
+      <Filter>Kaynak Dosyalar\Core</Filter>
+    </None>
+    <None Include="source\src\Render\RendererOidnHost.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </None>
+    <None Include="source\src\Physics\SimulationComputeCudaHost.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </None>
+    <None Include="source\src\Api\PythonUnavailableHost.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </None>
+    <None Include="source\src\Physics\WaterSystemHost.cpp">
+      <Filter>Kaynak Dosyalar\Physics</Filter>
+    </None>
+    <None Include="source\src\Api\StudioOnlyIpcHost.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </None>
+    <None Include="source\src\UI\SceneUIStateHost.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </None>
+    <None Include="source\src\Render\EmbreeBVHHost.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </None>
     <ClCompile Include="source\src\Render\AtmosphereLUT.cpp">
       <Filter>Kaynak Dosyalar\Render</Filter>
     </ClCompile>
@@ -3454,6 +3547,12 @@
     <ClCompile Include="source\src\Api\RtApiWeatherEffects.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiVdbVolume.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Api\RtApiVdbVolume.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClCompile Include="source\src\Api\RtWeatherEffectsBindings.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -4373,5 +4472,105 @@
     <ClCompile Include="source\src\MeshEdit\GeometryRemap.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
     <ClCompile Include="source\src\UV\UvCornerRemap.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
     <ClCompile Include="source\src\UV\UvGeometryTransaction.cpp"><Filter>Kaynak Dosyalar\Source_file</Filter></ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Backend\VulkanDenoiserCuda.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <None Include="source\src\Backend\VulkanDenoiserHost.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </None>
+    <ClCompile Include="source\src\Api\RtApiOptixDiagnostics.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <None Include="source\src\Api\RtApiOptixDiagnosticsHost.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </None>
+    <ClCompile Include="source\src\Render\OfflineDeviceCuda.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <None Include="source\src\Render\OfflineDeviceHost.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </None>
+    <ClCompile Include="source\src\Physics\GasSimulatorCuda.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <None Include="source\src\Physics\GasSimulatorHost.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </None>
+    <ClCompile Include="source\src\Physics\GasVolumeCuda.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <None Include="source\src\Physics\GasVolumeHost.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </None>
+    <ClCompile Include="source\src\Physics\VDBVolumeCuda.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <None Include="source\src\Physics\VDBVolumeHost.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </None>
+    <ClCompile Include="source\src\Render\OfflineRenderOptix.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </ClCompile>
+    <None Include="source\src\Render\OfflineRenderHost.cpp">
+      <Filter>Kaynak Dosyalar\Render</Filter>
+    </None>
+    <ClCompile Include="source\src\Physics\TerrainManagerCuda.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainFoliageOptix.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </ClCompile>
+    <None Include="source\src\Physics\TerrainOfflineHost.cpp">
+      <Filter>Kaynak Dosyalar\Physics\Fluid</Filter>
+    </None>
+    <ClInclude Include="source\include\OfflineDeviceHooks.h" />
+    <ClInclude Include="source\include\OfflineRenderBridge.h" />
+    <ClInclude Include="source\include\TerrainErosionGpuTypes.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\TerrainErosionBoundary.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Hair\HairEmbree.cpp">
+      <Filter>Kaynak Dosyalar\Hair</Filter>
+    </ClCompile>
+    <None Include="source\src\Hair\HairQueryHost.cpp">
+      <Filter>Kaynak Dosyalar\Hair</Filter>
+    </None>
+    <ClInclude Include="source\include\EmbreeHandles.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Api\RtPythonAudioBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonFluidLabelBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonLensWeatherBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonObjectSubstanceBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonPostExposureBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonViewportCutoutBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonUvBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonVolumeMaterialBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonRayGpuTimingBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonWeatherEffectsBindings.cpp">
+      <Filter>Kaynak Dosyalar\Api</Filter>
+    </ClCompile>
   </ItemGroup>
 </Project>

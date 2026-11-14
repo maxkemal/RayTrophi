@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Api/RtApiRigPoseView.h"
 #include "Animation/RigPoseView.h"
 #include "Backend/IBackend.h"

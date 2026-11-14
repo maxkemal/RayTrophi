@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Api/RtApiRigJointProfile.h"
 #include "Animation/RigJointRules.h"
 #include "Animation/RigPosePreview.h"

@@ -26,7 +26,27 @@
 #include "sbt_data.h"
 #include <SDL.h>
 #include <SDL_image.h>
-#include <OptixWrapper.h>
+// Only OptixGeometryData::TextureBundle is needed here. This used to be
+// <OptixWrapper.h>, which dragged optix.h and OIDN into every file that sees a
+// Triangle. The headers below are the first-party ones OptixWrapper.h supplied
+// transitively; they stay so existing includers keep compiling.
+#include <mutex>
+#include <functional>
+#include <unordered_map>
+#include <cstdint>
+#include "Vec3.h"
+#include "Ray.h"
+#include <Camera.h>
+#include <Light.h>
+#include "World.h"
+#include <AreaLight.h>
+#include <PointLight.h>
+#include <DirectionalLight.h>
+#include <SDL_surface.h>
+#include "material_gpu.h"
+#include <ColorProcessingParams.h>
+#include "PrincipledBSDF.h"
+#include <OptixTypes.h>
 #include "TriangleMesh.h"
 
 // Forward declarations

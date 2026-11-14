@@ -1,12 +1,24 @@
 ﻿#include "globals.h"
 #include "AtmosphereLUT.h"
-#include "vec3_utils.cuh"
 #include <cmath>
 #include <algorithm>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
 #endif
+
+namespace {
+
+float worldDot(const float3& a, const float3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+float3 worldNormalize(const float3& v) {
+    const float magnitude = sqrtf(worldDot(v, v));
+    return make_float3(v.x / magnitude, v.y / magnitude, v.z / magnitude);
+}
+
+} // namespace
 
 // Helper for float3
 inline float3 to_float3(const Vec3& v) { return make_float3(v.x, v.y, v.z); }
@@ -50,7 +62,7 @@ World::World() {
     
     // Standard conversion (Y-up, assuming +Z is South/Forward)
     // Adjust signs to match Renderer coordinate system (Match UI Logic: Positive Z)
-    data.nishita.sun_direction = normalize(make_float3(
+    data.nishita.sun_direction = worldNormalize(make_float3(
         cosf(elevRad) * sinf(azimRad), 
         sinf(elevRad), 
         cosf(elevRad) * cosf(azimRad)
@@ -573,8 +585,8 @@ Vec3 World::evaluate(const Vec3& ray_dir, const Vec3& origin) {
 
 // MATCHED TO GPU: High-Quality LUT based Sky radiance
 Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
-    float3 dir = normalize(to_float3(ray_dir));
-    float3 sunDir = normalize(data.nishita.sun_direction);
+    float3 dir = worldNormalize(to_float3(ray_dir));
+    float3 sunDir = worldNormalize(data.nishita.sun_direction);
     
     Vec3 L(0.0f);
 
@@ -589,7 +601,7 @@ Vec3 World::calculateNishitaSky(const Vec3& ray_dir, const Vec3& origin) {
     }
 
     // --- PROCEDURAL SUN GLOW (Matches GPU Exactly) ---
-    float mu = dot(dir, sunDir);
+    float mu = worldDot(dir, sunDir);
     float g_mie = data.nishita.mie_anisotropy;
     float phaseM = (1.0f - g_mie * g_mie) / (4.0f * 3.14159f * powf(std::max(1.0f + g_mie * g_mie - 2.0f * g_mie * mu, 0.0001f), 1.5f));
     
@@ -714,7 +726,7 @@ void World::reset() {
     // Recalculate sun direction from default angles
     float elevRad = defaults.sun_elevation * 3.14159265f / 180.0f;
     float azimRad = defaults.sun_azimuth * 3.14159265f / 180.0f;
-    defaults.sun_direction = normalize(make_float3(
+    defaults.sun_direction = worldNormalize(make_float3(
         cosf(elevRad) * sinf(azimRad), 
         sinf(elevRad), 
         cosf(elevRad) * cosf(azimRad)
@@ -1172,7 +1184,7 @@ void World::deserialize(const nlohmann::json& j) {
         // Update Sun Direction
         float elevRad = data.nishita.sun_elevation * 3.14159265f / 180.0f;
         float azimRad = data.nishita.sun_azimuth * 3.14159265f / 180.0f;
-        data.nishita.sun_direction = normalize(make_float3(
+        data.nishita.sun_direction = worldNormalize(make_float3(
             cosf(elevRad) * sinf(azimRad), 
             sinf(elevRad), 
             cosf(elevRad) * cosf(azimRad)

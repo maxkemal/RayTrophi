@@ -1,5 +1,5 @@
 #pragma once
-#include <cuda_runtime.h>
+#include "GpuInteropTypes.h"
 #include "World.h"
 
 // LUT Resolutions (Optimized for quality/performance)
@@ -39,6 +39,10 @@ public:
 
 private:
     void cleanup();
+    // Link-selected residency implementation; LUT computation stays shared.
+    void uploadCudaTransmittance();
+    void uploadCudaMultiScatter();
+    void uploadCudaSkyView();
     
     // CUDA resources
     cudaArray_t transmittance_array = nullptr;

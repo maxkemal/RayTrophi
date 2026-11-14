@@ -2375,8 +2375,9 @@ inline void drawNodeCanvas(UIContext& ctx, AnimationGraph::AnimationNodeGraph* g
 // ANIMATION GRAPH PANEL (Embedded in Bottom Panel - like Terrain Graph)
 // ============================================================================
 
-// External reference for AnimClipNodes to see all scene animations
-inline std::vector<std::shared_ptr<AnimationData>>* g_uiClipsRef = nullptr;
+// External reference for AnimClipNodes to see all scene animations.
+// Defined in Core/RuntimeState.cpp (shared with the Player).
+extern std::vector<std::shared_ptr<AnimationData>>* g_uiClipsRef;
 inline void drawAnimationGraphPanel(UIContext& ctx) {
     UIWidgets::PushControlSurfaceStyle(ImVec4(0.98f, 0.62f, 0.86f, 1.0f));
     // Set global reference for AnimClipNodes to list all available clips

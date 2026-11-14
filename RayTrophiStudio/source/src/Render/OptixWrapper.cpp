@@ -3,6 +3,7 @@
 #include <cstdlib>   // std::getenv (RAYTROPHI_OPTIX_VALIDATION)
 #include "oidn_blend_cuda.h"
 #include "OptixWrapper.h"
+#include <OpenImageDenoise/oidn.hpp>
 #include "fft_ocean.cuh"
 #include "Stylize/StylizeKernel.h"
 #include "OptixAccelManager.h"

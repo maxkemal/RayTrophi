@@ -74,7 +74,9 @@ class FogOpticalBoundsContracts(unittest.TestCase):
         self.assertIn('row["optical_bounds"]', inspection)
         bindings = (SRC / "src/Api/RtVolumeMaterialBindings.cpp").read_text(encoding="utf-8")
         self.assertIn('volume.set_material', bindings)
-        self.assertIn('volume.def("set_material"', bindings)
+        python_bindings = (SRC / "src/Api/RtPythonVolumeMaterialBindings.cpp").read_text(
+            encoding="utf-8")
+        self.assertRegex(python_bindings, r'volume\.def\(\s*"set_material"')
 
     def test_project_registration_is_valid_xml(self):
         for name in ("RayTrophiStudio.vcxproj", "RayTrophiStudio.vcxproj.filters"):

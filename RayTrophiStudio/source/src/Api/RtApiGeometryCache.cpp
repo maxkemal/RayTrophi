@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 
 #include "Animation/GeometryCache.h"
 #include "GeometryNodesV2.h"

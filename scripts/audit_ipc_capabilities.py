@@ -102,7 +102,7 @@ def required(method, namespaces):
         return "Scripts|FilesRead"
     if method in ("addons.enable", "addons.disable", "addons.reload"):
         return "Addons"
-    if method in ("project.open", "scene.import_model",
+    if method in ("project.open", "scene.import_model", "scene.import_vdb",
                   "terrain.import_heightmap", "paint.import_channel"):
         return "FilesRead|SceneWrite"
     # audio.*: these read a sound file from disk while changing scene audio

@@ -448,6 +448,9 @@ public:
     void restoreState(const StateSnapshot& snapshot);
 
 private:
+    bool cudaBackendAvailable() const;
+    void bindCudaThread();
+
     // ═══════════════════════════════════════════════════════════════════════
     // SIMULATION STEPS (CPU)
     // ═══════════════════════════════════════════════════════════════════════

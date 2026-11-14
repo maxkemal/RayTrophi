@@ -8,6 +8,8 @@
  */
 
 #include "RtApiInternal.h"
+#include "Renderer.h"
+#include "scene_ui.h"
 #include "TerrainManager.h"
 #include "TerrainNodesV2.h"
 #include "TerrainSystem.h"

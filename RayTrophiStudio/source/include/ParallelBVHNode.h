@@ -17,7 +17,31 @@
 #include "Hittable.h"
 #include "Material.h"
 #include "AABB.h"
-#include "OptixWrapper.h"
+// Only a shared_ptr<OptixWrapper> is stored here, so a forward declaration is
+// enough. Including OptixWrapper.h made optix.h/CUDA/OIDN reachable from
+// scene_data.h (via HittableList.h) and so from most of the code base.
+// Code that calls into OptixWrapper must include OptixWrapper.h itself.
+class OptixWrapper;
+#include <mutex>
+#include <functional>
+#include <unordered_map>
+#include <cstdint>
+#include "Vec3.h"
+#include "Ray.h"
+#include <Camera.h>
+#include <Light.h>
+#include "World.h"
+#include <AreaLight.h>
+#include <PointLight.h>
+#include <DirectionalLight.h>
+#include <SDL.h>
+#include <SDL_image.h>
+#include "material_gpu.h"
+#include <sbt_data.h>
+#include <ColorProcessingParams.h>
+#include "PrincipledBSDF.h"
+#include "Matrix4x4.h"
+#include <OptixTypes.h>
 #include <queue>
 
 class ParallelBVHNode : public Hittable {

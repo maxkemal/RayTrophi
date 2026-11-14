@@ -10,6 +10,8 @@
  */
 
 #include "RtApiInternal.h"
+#include "Renderer.h"
+#include "scene_ui.h"
 #include "RtManualSimulationStep.h"
 #include "Api/SourceSplatGeometryApi.h"
 #include "Fluid/MatterGrain.h"

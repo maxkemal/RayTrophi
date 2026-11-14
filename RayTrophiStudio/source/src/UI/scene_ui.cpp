@@ -1,4 +1,5 @@
 #include "UI/GrainGeneratorUI.h"
+#include "Core/RuntimeSimulationClock.h"
 #include "PostProcess/PostService.h"
 #include "UI/VolumeMaterialUI.h"
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -108,28 +109,8 @@
 #include <windows.h>
 #include <commdlg.h>
 
-// System RAM query for the "RAM sim cache is large, bake to disk" nudge. Declared in
-// scene_ui_forcefield.hpp (which is included before <windows.h>), defined here where
-// the Win32 API is available.
-std::uint64_t queryAvailablePhysicalRamBytes() {
-    MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
-    if (GlobalMemoryStatusEx(&ms)) return static_cast<std::uint64_t>(ms.ullAvailPhys);
-    return 0;
-}
-
-std::size_t simFrameCacheBudgetFromHardware() {
-    // Total RAM is constant for the process; query once.
-    static const std::size_t budget = [] {
-        constexpr std::uint64_t kGiB = 1024ull * 1024ull * 1024ull;
-        MEMORYSTATUSEX ms; ms.dwLength = sizeof(ms);
-        if (!GlobalMemoryStatusEx(&ms) || ms.ullTotalPhys == 0) return std::size_t(4) * kGiB;
-        const std::uint64_t total = ms.ullTotalPhys;
-        const std::uint64_t by_fraction = total / 10ull * 7ull;
-        const std::uint64_t by_headroom = total > 2ull * kGiB ? total - 2ull * kGiB : 0ull;
-        return static_cast<std::size_t>((std::max)(kGiB, (std::min)(by_fraction, by_headroom)));
-    }();
-    return budget;
-}
+// queryAvailablePhysicalRamBytes() / simFrameCacheBudgetFromHardware() are
+// defined in Core/RuntimeState.cpp (shared with the Player).
 
 namespace ForceFieldUI {
     std::uint64_t queryTotalPhysicalRamBytes() {
@@ -163,7 +144,7 @@ float getMainMenuReservedHeight() {
 // ★★★★ Bayrağın KAPATILABİLİR olmasının gerekçesi de scene_ui.h'de: kural,
 //   device-lost'a giden tek yolu kapattığı için onu arayan tripwire'ı da
 //   susturdu. Kapatma anahtarı olmadan tripwire'ın sessizliği ölçüm sayılırdı.
-bool g_scene_load_solid_guard = true;
+// g_scene_load_solid_guard is defined in Core/RuntimeState.cpp (shared state).
 
 void enterSolidViewportForSceneLoad(SceneUI& ui, const char* reason) {
     extern bool g_hasVulkan;
@@ -3797,84 +3778,34 @@ void SceneUI::draw(UIContext& ctx)
     const bool render_owns_sim =
         ctx.is_animation_mode && rendering_in_progress.load() && !g_seq_save_active;
 
-    if (ctx.scene.isSimulationBaking()) {
-        // A cooperative disk bake owns the sim timeline while it runs. Advance it
-        // a time-budgeted slice per UI tick (the progress bar + Cancel live in the
-        // sim panel) and keep the loop awake so the next slice fires and the
-        // progress redraws. Skip the normal live/timeline drive entirely — the
-        // bake is the sole stepper, so the two cannot race on sim state.
-        ctx.scene.tickSimulationDiskBake(20.0 /* ms budget per UI frame */);
-        ctx.start_render = true;
-    } else if (!render_owns_sim && ctx.scene.anySimulationRuntimeEnabled()) {
-        const float rt_dt = std::clamp(io.DeltaTime, 0.0f, 1.0f / 30.0f);
-        const bool live_mode = !g_sim_timeline_mode;
-        // Vulkan RT samples live Gas fields directly from the simulation
-        // compute buffers (device addresses, not a copied NanoVDB snapshot).
-        // The interactive renderer may have two asynchronous frame slots still
-        // reading those buffers. Do not let the next simulation step overwrite
-        // them until both RT reads have completed. Queue ordering inside the
-        // simulation compute context alone cannot protect a different render
-        // queue; the old race eventually presented as a pause-independent TDR
-        // during particle-driven explosions.
-        Backend::IBackend* simulationRenderBackend = getSceneUiRenderBackend(ctx);
-        const bool simulation_playing = timeline.isPlaying();
-        static bool previous_simulation_playing = false;
-        const bool play_to_pause_edge = previous_simulation_playing && !simulation_playing;
-        const int requested_sim_frame = timeline.getCurrentFrame();
-        const int resident_sim_frame = ctx.scene.simulationTimelineFrame();
-        const bool paused_frame_replace = !live_mode && !simulation_playing &&
-            resident_sim_frame >= 0 && requested_sim_frame != resident_sim_frame;
-        if ((live_mode || simulation_playing || paused_frame_replace || play_to_pause_edge) &&
-            dynamic_cast<Backend::VulkanBackendAdapter*>(
-                simulationRenderBackend) != nullptr) {
-            simulationRenderBackend->waitForCompletion();
-        }
-        previous_simulation_playing = simulation_playing;
-        // Timeline mode (default): play bakes into the cache, scrub restores, a
-        // stopped timeline stays frozen. Live mode: continuous free-run preview.
-        // ui_editing: while a widget is held (slider drag, etc.) the sim-config
-        // signature changes every tick. Pass this so the cache invalidation is
-        // deferred until the edit settles (no per-tick re-bake-from-0 thrash).
-        const bool ui_editing = ImGui::IsAnyItemActive();
-        // Timeline Start/End only changes the playback window. It must never
-        // invalidate a settled melt/fluid state or jump a heavy RT scene to
-        // frame zero merely because the generic ImGui settle gate just closed.
-        static int previous_timeline_start = timeline.getStartFrame();
-        static int previous_timeline_end = timeline.getEndFrame();
-        const bool timeline_range_changed =
-            timeline.getStartFrame() != previous_timeline_start ||
-            timeline.getEndFrame() != previous_timeline_end;
-        if (timeline_range_changed) {
-            ctx.scene.preserveSimulationForTimelineRangeEdit();
-            previous_timeline_start = timeline.getStartFrame();
-            previous_timeline_end = timeline.getEndFrame();
-        }
-        ctx.scene.updateSimulationTimeline(timeline.getCurrentFrame(), timeline.isPlaying(), rt_dt, 24.0f, live_mode, ui_editing);
-        if (!RayTrophiSim::Fluid::gasInventoryStepError(ctx.scene).empty()) {
+    // Simulation clock: the body lives in Core/RuntimeSimulationClock (the Player
+    // ticks the same clock). SceneUI only supplies its UI facts and applies the
+    // UI-side results (playhead, toast, render wake-up).
+    {
+        AppRuntime::SimulationClockInput clock_input;
+        clock_input.dt_seconds = io.DeltaTime;
+        clock_input.timeline_frame = timeline.getCurrentFrame();
+        clock_input.timeline_start = timeline.getStartFrame();
+        clock_input.timeline_end = timeline.getEndFrame();
+        clock_input.playing = timeline.isPlaying();
+        clock_input.live_mode = !g_sim_timeline_mode;
+        clock_input.ui_editing = ImGui::IsAnyItemActive();
+        clock_input.render_owns_sim = render_owns_sim;
+        clock_input.render_backend = getSceneUiRenderBackend(ctx);
+        const AppRuntime::SimulationClockResult clock =
+            AppRuntime::simulationClock().tick(ctx.scene, clock_input);
+        if (clock.pause_requested) {
             timeline.pausePlayback();
             ctx.render_settings.animation_is_playing = false;
         }
-        // A fluid-affecting edit rewinds the sim to frame 0 instead of auto-resimming
-        // up to a high parked frame; move the playhead to start so the cost of the
-        // re-bake is opt-in (the user plays forward when ready). Flash a transient
-        // HUD toast at the moment it happens — far more noticeable than a static
-        // panel note, and it tells the user why the playhead just jumped.
-        if (ctx.scene.consumeSimRewindRequest()) {
-            // This rewind request is generated after the earlier frame-change
-            // check. Fence before frame-zero restores mutate RT-visible geometry.
-            if (dynamic_cast<Backend::VulkanBackendAdapter*>(
-                    simulationRenderBackend) != nullptr) {
-                simulationRenderBackend->waitForCompletion();
-            }
-            ctx.scene.deferMeltDisplacementOnce();
+        if (clock.rewind_to_start) {
             timeline.setCurrentFrame(timeline.getStartFrame());
             addViewportMessage("Sim changed - cache reset, rewound to start. Press Play to re-bake.",
                                4.0f, ImVec4(1.00f, 0.62f, 0.10f, 1.00f));
         }
-        // Keep rendering / reset accumulation only while the gas is actually
-        // changing (live mode, or a baked/scrubbed frame). A frozen timeline lets
-        // the render converge and the loop go idle — the cheap default.
-        if (live_mode || ctx.scene.simulation_render_updated) {
+        if (clock.disk_bake_slice) {
+            ctx.start_render = true;
+        } else if (clock.render_updated) {
             ctx.start_render = true;
             resetSceneUiSamplingAccumulation(ctx);
         }

@@ -1,5 +1,7 @@
 #include "PostProcess/PostService.h"
 #include "Api/RtApiInternal.h"
+#include "ColorProcessingParams.h"
+#include "scene_ui.h"
 #include "Camera.h"
 #include "ProjectManager.h"   // configure(): ayar projeye yaziliyor
 #include <chrono>

@@ -8,6 +8,7 @@
  */
 
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include "MeshModifiers.h"
 #include "TriangleMesh.h"
 #include <algorithm>

@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Api/RtApiRigIK.h"
 #include "Animation/RigPoseAuthoring.h"
 #include "Animation/RigIKTimeline.h"

@@ -19,6 +19,7 @@
 
 #include "Api/RtApi.h"
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 
 #include <string>
 

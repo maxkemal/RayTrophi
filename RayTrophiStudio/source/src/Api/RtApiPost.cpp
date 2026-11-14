@@ -1,4 +1,6 @@
 #include "Api/RtApiInternal.h"
+#include "ColorProcessingParams.h"
+#include "Renderer.h"
 #include "PostProcess/PostService.h"
 #include <algorithm>
 

@@ -19,7 +19,10 @@
 #include <string>
 #include <unordered_map>
 #include <functional>
-#include <embree4/rtcore.h>
+// Embree is an offline-only dependency: only the scene HANDLE lives in this
+// header, so forward-declare it (same typedef as rtcore_scene.h) instead of
+// pulling <embree4/rtcore.h> into every translation unit that sees hair.
+#include "EmbreeHandles.h"
 #include "json.hpp"
 #include "ForceField.h" // Add ForceField support
 #include <mutex>
@@ -562,6 +565,7 @@ private:
     // Does the actual Embree scene build. Non-const (it clears per-groom dirty flags);
     // ensureBVH() is the const entry point that drives it.
     void buildBVHImpl(bool includeInterpolated);
+    void releaseCpuBVH();
 
     void interpolateChildren(HairGroom& groom);
     void restyleGroomImpl(const std::string& name,

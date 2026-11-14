@@ -1,5 +1,6 @@
 #include "RtVolumeMaterialBindings.h"
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include "RtIpcMethodRegistry.h"
 #include "VolumeMaterialAuthoring.h"
 #include "VolumeMaterialService.h"
@@ -9,14 +10,13 @@
 #include "Renderer.h"
 #include "Backend/IBackend.h"
 
-#include <pybind11/stl.h>
 #include <functional>
 #include <algorithm>
 #include <memory>
 #include <stdexcept>
 #include <vector>
 
-namespace py = pybind11;
+
 using json = nlohmann::json;
 
 namespace {
@@ -142,12 +142,7 @@ json executeMaterial(UIContext& ctx, const std::string& operation, const std::st
     return executeMaterial(ctx, "get", id);
 }
 
-py::object toPython(const json& result) {
-    if (result.contains("__error")) {
-        throw std::runtime_error(result["__error"].get<std::string>());
-    }
-    return py::module_::import("json").attr("loads")(result.dump());
-}
+
 
 const MethodParam params[] = {
     {"target", "string", true, "Exact target from volume.list_materials", nullptr, nullptr},
@@ -238,28 +233,4 @@ bool dispatchVolumeMaterialIpc(const std::string& method, const json& params,
         return volume_material::execute(ctx, list ? "list" : (write ? "set" : "get"), id, patch);
     });
     return true;
-}
-
-void registerVolumeMaterialPython(py::module_& module) {
-    auto volume = module.def_submodule("volume", "Shared gas/VDB material authoring");
-    volume.def("list_materials", [] {
-        if (!rtapi::g_ctx) {
-            throw std::runtime_error("rtapi is not bound");
-        }
-        return toPython(volume_material::execute(*rtapi::g_ctx, "list", ""));
-    });
-    volume.def("get_material", [](const std::string& target) {
-        if (!rtapi::g_ctx) {
-            throw std::runtime_error("rtapi is not bound");
-        }
-        return toPython(volume_material::execute(*rtapi::g_ctx, "get", target));
-    }, py::arg("target"));
-    volume.def("set_material", [](const std::string& target, const py::kwargs& kwargs) {
-        if (!rtapi::g_ctx) {
-            throw std::runtime_error("rtapi is not bound");
-        }
-        const auto text = py::module_::import("json").attr("dumps")(
-            kwargs, py::arg("allow_nan") = false).cast<std::string>();
-        return toPython(volume_material::execute(*rtapi::g_ctx, "set", target, json::parse(text)));
-    }, py::arg("target"));
 }

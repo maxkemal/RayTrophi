@@ -1,6 +1,8 @@
 #include "Api/RtApiRigEnvelopeWeights.h"
 #include "ProjectManager.h"
 #include "RtApiInternal.h"
+#include "Renderer.h"
+#include "scene_ui.h"
 #include "TriangleMesh.h"
 #include <exception>
 #include <utility>

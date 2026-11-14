@@ -4,7 +4,6 @@
 #include "ProjectManager.h"
 #include "globals.h"
 #include "Backend/IBackend.h"
-#include <pybind11/pybind11.h>
 #include <stdexcept>
 
 namespace rtapi {
@@ -42,13 +41,4 @@ bool dispatchViewportCutoutIpc(const std::string& method, const json& params,
         return true;
     }
     return false;
-}
-void registerViewportCutoutPython(pybind11::module_& viewport) {
-    viewport.def("automatic_cutout", &rtapi::viewportAutomaticCutout);
-    viewport.def("set_automatic_cutout", [](pybind11::object value) {
-        if (!pybind11::isinstance<pybind11::bool_>(value))
-            throw pybind11::type_error("enabled must be a boolean");
-        const auto r = rtapi::setViewportAutomaticCutout(value.cast<bool>());
-        if (!r.ok) throw std::runtime_error(r.error);
-    }, pybind11::arg("enabled"));
 }

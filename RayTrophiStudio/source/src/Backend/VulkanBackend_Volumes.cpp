@@ -27,13 +27,7 @@
 #include "VDBVolume.h"
 #include "GasVolume.h"
 #include "VDBVolumeManager.h"
-// params.h declares OptixTraversableHandle members but does NOT include an
-// OptiX header itself; it relies on the including translation unit having one
-// already. VulkanBackend.cpp satisfies that by accident, through
-// ParallelBVHNode.h -> OptixWrapper.h. Depend on it explicitly here rather than
-// dragging in the BVH headers for a typedef.
-#include <optix.h>
-#include "params.h"  // GpuVDBVolume, GpuGasVolume definitions
+#include "GpuVolumeTypes.h"
 
 #include <algorithm>
 #include <cmath>

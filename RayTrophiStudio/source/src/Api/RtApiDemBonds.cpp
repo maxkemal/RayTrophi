@@ -1,5 +1,6 @@
 #include "Api/DemBondApi.h"
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include <stdexcept>
 
 namespace rtapi {

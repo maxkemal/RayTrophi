@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Api/DomainWallsApi.h"
 #include "Fluid/DomainWallSettings.h"
 

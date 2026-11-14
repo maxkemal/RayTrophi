@@ -24,6 +24,7 @@
 */
 
 #include "RtApiInternal.h"
+#include "Renderer.h"
 
 #include <memory>
 #include <string>
