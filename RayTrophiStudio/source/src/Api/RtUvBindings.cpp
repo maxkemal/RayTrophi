@@ -5,11 +5,11 @@
 #include "UI/UvEditorUI.h"
 #include "UV/UvService.h"
 
-#include <pybind11/pybind11.h>
 #include <array>
 #include <stdexcept>
 
 using nlohmann::json;
+using rt_uv_binding::operations;
 
 json invokeUv(const std::string& operation, const json& params) {
     if (operation == "open") {
@@ -28,10 +28,7 @@ json invokeUv(const std::string& operation, const json& params) {
 
 namespace {
 
-const char* const operations[] = {
-    "capabilities", "targets", "info", "layout", "transform", "normalize", "pack", "unwrap", "open",
-    "flip_u", "flip_v", "swap_uv", "project_view", "set_corners"
-};
+
 
 // Kept with the adapter, not in the generated aggregate descriptor file.
 const MethodParam read_params[] = {
@@ -119,20 +116,3 @@ struct Descriptors {
 const Descriptors descriptors;
 
 } // namespace
-
-void registerUvPython(pybind11::module_& module) {
-    namespace py = pybind11;
-    auto uv = module.def_submodule("uv", "Flat mesh UV authoring (main thread)");
-    for (const char* operation : operations) {
-        uv.def(operation, [operation = std::string(operation)](py::kwargs kwargs) {
-            const auto codec = py::module_::import("json");
-            const std::string encoded = codec.attr("dumps")(kwargs,
-                py::arg("allow_nan") = false).cast<std::string>();
-            const json result = invokeUv(operation, json::parse(encoded));
-            if (result.is_object() && result.contains("__error")) {
-                throw std::runtime_error(result.at("__error").get<std::string>());
-            }
-            return codec.attr("loads")(result.dump());
-        }, "Keyword arguments match the uv.* IPC method schema.");
-    }
-}

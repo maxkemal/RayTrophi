@@ -9917,6 +9917,23 @@ static const MethodDescriptor desc_scene_import_model = {
 };
 static const MethodRegistration reg_scene_import_model(desc_scene_import_model);
 
+static const MethodParam params_scene_import_vdb[] = {
+    {"path", "string", true, "", nullptr, nullptr, "string", false},
+    {"orientation", "int", false, "", "0", nullptr, "number", false},
+};
+static const MethodDescriptor desc_scene_import_vdb = {
+    "scene.import_vdb", "scene",
+    "Import an OpenVDB volume file into the scene and return its placement",
+    "Same import the VDB panel runs: a volume larger than 50 units is scaled to 5, centred on X/Z and sat on Y = 0; a temperature grid gets the fire shader preset, otherwise smoke. orientation 0 = auto (EmberGen axis conversion), 1 = keep file axes, 2 = Z-up to Y-up. gpu_uploaded false means CPU-only, not a failure.",
+    "write", "FilesRead|SceneWrite", false, "any",
+    "scene|import|vdb|load|asset|volume|smoke|cloud|fire",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_scene_import_vdb, 2,
+    true
+};
+static const MethodRegistration reg_scene_import_vdb(desc_scene_import_vdb);
+
 static const MethodDescriptor desc_scene_list_objects = {
     "scene.list_objects", "scene",
     "List every object in the scene by name",

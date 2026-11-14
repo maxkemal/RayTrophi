@@ -1,6 +1,7 @@
 #pragma once
 
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 
 namespace rtapi {
 

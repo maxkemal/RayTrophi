@@ -1,3 +1,4 @@
+#include "OfflineDeviceHooks.h"
 #include "Fluid/LiquidEmissionAuthoring.h"
 #include "Fluid/MatterFogStreams.h"
 #include "Fluid/MatterSeedSources.h"
@@ -17,7 +18,6 @@
 #include "ProjectSimulationCache.h"
 #include "globals.h"
 #include "Renderer.h"
-#include "OptixWrapper.h"
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
@@ -28,7 +28,6 @@
 #include "Animation/RigEditing.h"
 #include <stdexcept>
 #include "Triangle.h"
-#include "OptixAccelManager.h"
 #include "InstanceManager.h"
 #include "PrincipledBSDF.h"
 #include "PointLight.h"
@@ -1154,7 +1153,7 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
         try { g_backend->waitForCompletion(); } catch (...) {}
     }
     if (render_settings.use_optix) {
-        try { cudaDeviceSynchronize(); } catch (...) {}
+        try { OfflineDeviceHooks::synchronize(); } catch (...) {}
     }
 
     g_project.clear();

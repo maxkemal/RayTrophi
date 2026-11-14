@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Fluid/DomainVisualService.h"
 #include "Api/SourceSplatGeometryApi.h"
 #include "Fluid/GrainMeshNear.h"

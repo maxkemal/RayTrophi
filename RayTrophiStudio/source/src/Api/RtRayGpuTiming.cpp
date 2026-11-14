@@ -3,7 +3,6 @@
 #include "RtRayGpuTimingBindings.h"
 #include "Backend/VulkanBackend.h"
 #include "imgui.h"
-#include <pybind11/pybind11.h>
 #include <algorithm>
 #include <stdexcept>
 
@@ -70,19 +69,7 @@ nlohmann::json rayGpuTimingCaptureStats() {
 }
 }
 
-void bindRayGpuTimingPython(pybind11::module_& render) {
-    namespace py = pybind11;
-    render.def("set_gpu_timing", [](bool enabled) {
-        const auto result = rtapi::setRayGpuTimingCapture(enabled);
-        if (!result.ok) {
-            throw std::runtime_error(result.error);
-        }
-    }, py::arg("enabled"));
-    render.def("gpu_timing_stats", [] {
-        return py::module_::import("json").attr("loads")(
-            rtapi::rayGpuTimingCaptureStats().dump());
-    });
-}
+
 
 void drawRayGpuTimingCapture() {
     static nlohmann::json cached;

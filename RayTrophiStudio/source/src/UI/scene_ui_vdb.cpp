@@ -9,6 +9,9 @@
  */
 
 #include "UI/VolumeMaterialUI.h"
+#include "Api/RtApiVdbVolume.h"
+#include "Api/RtApi.h"
+#include "Core/VulkanSceneSync.h"
 #include "scene_ui.h"
 #include "UI/CloudMaterialUI.h"
 #include "VDBVolume.h"
@@ -79,39 +82,17 @@ void SceneUI::syncVDBVolumesToGPU(UIContext& ctx) {
     // second target is safe — and it must be a second CALL rather than a shared
     // buffer, because the live dense-gas device addresses inside the packet are
     // resolved per target device (see VolumetricRenderer::syncVolumetricData).
-    WorldData wd = ctx.renderer.world.getGPUData();
-    Backend::IBackend* published = nullptr;
-    if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
-        VolumetricRenderer::syncVolumetricData(ctx.scene, renderBackend, &wd);
-        published = renderBackend;
-    }
-    if (Backend::IBackend* viewportBackend = g_viewport_backend.get()) {
-        if (viewportBackend != published) {
-            VolumetricRenderer::syncVolumetricData(ctx.scene, viewportBackend, &wd);
-        }
-    }
+    // Body shared with the Player (Core/VulkanSceneSync::publishVolumes).
+    AppRuntime::publishVolumes(ctx.scene, ctx.renderer, getVdbRenderBackend(ctx),
+                               g_viewport_backend.get());
 }
 
 bool SceneUI::shouldApplySpecialVDBOrientation(const std::string& source_hint) {
-    std::string lowered = source_hint;
-    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
-        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return lowered.find("embergen") != std::string::npos;
+    return rtapi::shouldApplySpecialVdbOrientation(source_hint);
 }
 
 void SceneUI::applyVDBImportOrientation(VDBVolume& vdb, int orientation_preset, const std::string& source_hint) {
-    bool apply_axis_conversion = false;
-    if (orientation_preset == 2) {
-        apply_axis_conversion = true;
-    } else if (orientation_preset == 0) {
-        apply_axis_conversion = shouldApplySpecialVDBOrientation(source_hint);
-    }
-
-    if (apply_axis_conversion) {
-        vdb.setRotation(Vec3(-90.0f, 0.0f, 0.0f));
-    } else if (orientation_preset == 1) {
-        vdb.setRotation(Vec3(0.0f, 0.0f, 0.0f));
-    }
+    rtapi::applyVdbImportOrientation(vdb, orientation_preset, source_hint);
 }
 
 SceneUI::VDBShaderDefaults SceneUI::estimateVDBShaderDefaults(const VDBVolume& vdb) {
@@ -185,89 +166,21 @@ void SceneUI::applyEstimatedVDBShaderDefaults(VDBVolume& vdb) {
 void SceneUI::importVDBVolume(UIContext& ctx) {
     std::string path = openFileDialogW(L"OpenVDB Files\0*.vdb;*.nvdb\0All Files\0*.*\0", "", "");
     if (path.empty()) return;
-    
-    // Create VDB Volume object
-    auto vdb = std::make_shared<VDBVolume>();
-    
-    if (!vdb->loadVDB(path)) {
-        addViewportMessage("Failed to load VDB: " + path, 3.0f, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+
+    // The import itself is core API (scripts/IPC reach it as scene.import_vdb);
+    // the panel only owns the dialog, the toast and the selection.
+    rtapi::VdbImportInfo info;
+    const rtapi::Result result =
+        rtapi::importVdbVolume(path, vdb_import_orientation_preset, info);
+    if (!result.ok) {
+        addViewportMessage(result.error, 3.0f, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
         return;
     }
-    
-    // Auto-scale huge VDBs (likely cm instead of m)
-    Vec3 bmin = vdb->getLocalBoundsMin();
-    Vec3 bmax = vdb->getLocalBoundsMax();
-    float dim_x = bmax.x - bmin.x;
-    float dim_y = bmax.y - bmin.y;
-    float dim_z = bmax.z - bmin.z;
-    float max_dim = (dim_x > dim_y) ? ((dim_x > dim_z) ? dim_x : dim_z) : ((dim_y > dim_z) ? dim_y : dim_z);
-    
-    if (max_dim > 50.0f) {
-        float target_size = 5.0f;
-        float scale_factor = target_size / max_dim;
-        vdb->setScale(Vec3(scale_factor));
-        SCENE_LOG_INFO("[Import] Auto-scaled VDB from " + std::to_string(max_dim) + " to " + std::to_string(target_size) + " units.");
+    if (!ctx.scene.vdb_volumes.empty()) {
+        const auto& vdb = ctx.scene.vdb_volumes.back();
+        ctx.selection.selectVDBVolume(vdb, -1, vdb->name);
     }
-    
-    // Auto-Align to Ground (Y=0) and Center (X/Z=0)
-    // Shift position so that the bottom-center of the volume sits at world origin (0,0,0)
-    Vec3 scale = vdb->getScale();
-    Vec3 center = (bmin + bmax) * 0.5f;
-    
-    float offset_x = -center.x * scale.x;
-    float offset_y = -bmin.y * scale.y; // Bottom aligns to 0
-    float offset_z = -center.z * scale.z;
-    
-    vdb->setPosition(Vec3(offset_x, offset_y, offset_z));
-    
-    SCENE_LOG_INFO("[Import] Auto-aligned VDB. Center X/Z, Ground Y. Pos: " + 
-        std::to_string(offset_x) + ", " + std::to_string(offset_y) + ", " + std::to_string(offset_z));
-
-    // Upload to GPU
-    if (!vdb->uploadToGPU()) {
-        SCENE_LOG_WARN("VDB uploaded to CPU only (GPU upload failed)");
-    }
-    
-    // Create default shader based on available grids
-    if (vdb->hasGrid("temperature")) {
-        vdb->setShader(VolumeShader::createFirePreset());
-    } else {
-        vdb->setShader(VolumeShader::createSmokePreset());
-    }
-    applyVDBImportOrientation(*vdb, vdb_import_orientation_preset, path);
-    
-    // Add to scene VDB list
-    ctx.scene.addVDBVolume(vdb);
-    
-    // Also add to world.objects as Hittable for CPU ray intersection
-    ctx.scene.world.objects.push_back(vdb);
-    
-    // Trigger BVH rebuild for the new hittable
-    ctx.renderer.rebuildBVH(ctx.scene, ctx.render_settings.UI_use_embree);
-    ctx.renderer.resetCPUAccumulation();
-    
-    if (vdbRenderBackendIsVulkan(ctx)) {
-        // Vulkan: must rebuild TLAS to add the new AABB instance.
-        extern bool g_viewport_raster_rebuild_pending;
-        g_viewport_raster_rebuild_pending = true;
-        g_vulkan_rebuild_pending = true;
-    } else if (Backend::IBackend* renderBackend = getVdbRenderBackend(ctx)) {
-        syncVDBVolumesToGPU(ctx);
-        renderBackend->resetAccumulation();
-        extern bool g_viewport_raster_rebuild_pending;
-        g_viewport_raster_rebuild_pending = true;
-    }
-    
-    g_ProjectManager.markModified();
-    
-    // Auto-select the new VDB
-    ctx.selection.selectVDBVolume(vdb, -1, vdb->name);
-    
-    // Auto-switch to VDB tab removed per user request
-    
-    addViewportMessage("Imported VDB: " + vdb->name, 3.0f, ImVec4(0.5f, 1.0f, 0.5f, 1.0f));
-    
-    SCENE_LOG_INFO("Imported VDB Volume: " + path);
+    addViewportMessage("Imported VDB: " + info.name, 3.0f, ImVec4(0.5f, 1.0f, 0.5f, 1.0f));
 }
 
 // Import VDB Sequence

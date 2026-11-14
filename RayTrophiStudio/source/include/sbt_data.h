@@ -10,7 +10,7 @@
 */
 #pragma once
 #include "material_gpu.h" // GpuMaterial zaten ayrı bir yapıda tanımlı
-#include <cuda_runtime.h>
+#include "GpuInteropTypes.h"
 
 struct __align__(16) HitGroupData
 {

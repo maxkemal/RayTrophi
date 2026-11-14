@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include "Api/RtApiRigBinding.h"
 #include "Animation/RigBinding.h"
 #include "Animation/RigSelection.h"

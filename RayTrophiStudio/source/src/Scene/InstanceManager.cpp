@@ -2,7 +2,6 @@
 #include "Triangle.h"
 #include "scene_data.h"
 #include "EmbreeBVH.h"
-#include "OptixWrapper.h"
 #include "Backend/IBackend.h"
 #include "FoliageWindSystem.h"
 #include "FoliageAssetLibrary.h"

@@ -9,6 +9,7 @@
 * =========================================================================
 */
 #pragma once
+#include "OfflineDeviceHooks.h"
 
 /**
  * @file scene_ui_nodeeditor.hpp
@@ -1910,7 +1911,7 @@ private:
             }
 
             if (ctx.optix_gpu_ptr) {
-                if (g_hasCUDA) cudaDeviceSynchronize();
+                if (g_hasCUDA) OfflineDeviceHooks::synchronize();
                 ctx.optix_gpu_ptr->resetAccumulation();
             }
         }

@@ -2,10 +2,9 @@
 #include "RtApiInternal.h"
 #include "Atmosphere/LensWeatherService.h"
 #include "Camera.h"
-#include <pybind11/pybind11.h>
 #include <stdexcept>
 
-namespace {
+namespace rt_lens_weather {
 using json = nlohmann::json;
 json invoke(UIContext& context, const std::string& method, const json& params) {
     if (!context.scene.camera) {
@@ -49,28 +48,7 @@ bool dispatchLensWeatherIpc(const std::string& method, const nlohmann::json& par
         return false;
     }
     result = enqueue([method, params](UIContext& context) {
-        return invoke(context, method, params);
+        return rt_lens_weather::invoke(context, method, params);
     });
     return true;
 }
-
-namespace rtpy {
-void registerLensWeatherBindings(pybind11::module_& camera) {
-    namespace py = pybind11;
-    for (const char* operation : {"get_lens_weather", "set_lens_weather",
-                                "reset_lens_weather", "sample_lens_weather"}) {
-        const std::string method = std::string("camera.") + operation;
-        camera.def(operation, [method](const py::kwargs& kwargs) {
-            if (!rtapi::g_ctx) {
-                throw std::runtime_error("No active UI context");
-            }
-            const auto params = json::parse(py::cast<std::string>(
-                py::module_::import("json").attr("dumps")(kwargs)));
-            const auto request = method == "camera.set_lens_weather" ?
-                json{{"patch", params}} : params;
-            const auto result = invoke(*rtapi::g_ctx, method, request);
-            return py::module_::import("json").attr("loads")(result.dump());
-        });
-    }
-}
-} // namespace rtpy

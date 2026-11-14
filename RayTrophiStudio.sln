@@ -5,6 +5,8 @@ VisualStudioVersion = 17.10.35013.160
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RayTrophi Studio", "RayTrophiStudio\RayTrophiStudio.vcxproj", "{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "RayTrophi Player", "RayTrophiStudio\RayTrophiPlayer.vcxproj", "{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|ARM = Debug|ARM
@@ -36,6 +38,15 @@ Global
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x64.Build.0 = ReleaseDev|x64
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x86.ActiveCfg = ReleaseDev|Win32
 		{5BAC7720-07DF-4C9C-B8AC-AAF8FE410CD8}.ReleaseDev|x86.Build.0 = ReleaseDev|Win32
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.Debug|ARM.ActiveCfg = Debug|ARM
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.Debug|x64.ActiveCfg = Debug|x64
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.Debug|x86.ActiveCfg = Debug|Win32
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.Release|ARM.ActiveCfg = Release|ARM
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.Release|x64.ActiveCfg = Release|x64
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.Release|x86.ActiveCfg = Release|Win32
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.ReleaseDev|ARM.ActiveCfg = ReleaseDev|ARM
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.ReleaseDev|x64.ActiveCfg = ReleaseDev|x64
+		{7E2C4B1A-3D5F-4A8E-9C61-2B7F0D4E9A53}.ReleaseDev|x86.ActiveCfg = ReleaseDev|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

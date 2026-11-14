@@ -11,6 +11,7 @@
 #pragma once
 
 #include "globals.h"
+#include "UIContext.h"
 
 // Forward Declarations
 class Renderer;
@@ -81,50 +82,6 @@ namespace MeshEdit { class SplineObject; }
 //   - scene_ui_selection.cpp : Selection logic & Marquee
 //   - scene_ui_world.cpp     : World environment settings
 // ═══════════════════════════════════════════════════════════════════════════════
-
-
-struct UIContext {
-    SceneData& scene;
-    Renderer& renderer;
-    OptixWrapper* optix_gpu_ptr;
-    Backend::IBackend* backend_ptr;
-    ColorProcessor& color_processor;
-    RenderSettings& render_settings;
-    SceneSelection& selection;  // Scene selection manager
-    class SceneUI* scene_ui_ptr = nullptr; // Optional pointer back to UI host
-   
-
-    int& sample_count;                // dynamic counter (not in settings)
-    bool& start_render;              // trigger flag
-    std::string& active_model_path;
-
-    bool& apply_tonemap;
-    bool& reset_tonemap;
-
-    bool& mouse_control_enabled;
-    
-    // Animation Preview Buffer (Thread-Safe)
-    // Moved to end to preserve initializer list compatibility
-    std::vector<uint32_t> animation_preview_buffer;
-    std::atomic<bool> animation_preview_ready{false};
-    std::mutex animation_preview_mutex;
-    int animation_preview_width = 0;
-    int animation_preview_height = 0;
-    SDL_Texture* animation_preview_texture = nullptr;
-    bool show_animation_preview = false;
-    // Particle viewport display mode: 0=Solid (Vulkan billboards), 1=Debug (ImGui
-    // dots clipped to the viewport background layer), 2=Render (path-traced;
-    // previews as Solid for now).
-    int particle_display_mode = 0;
-    bool is_animation_mode = false; // NEW: For Unified Render Window
-    struct SDL_Texture* ray_texture; // Forward decl or void* if header dependency issues, but SDL.h is included in Renderer.h
-    
-    // Note: SDL_Texture* requires SDL.h. Renderer.h includes it.
-    // If SceneUI.h doesn't include SDL, we need forward declaration or include.
-    // Renderer.h is included at top (line 3). So SDL.h is available.
-
-	
-};
 
 namespace MeshModifiers { struct ModifierStack; }
 bool hasEnabledSubdivisionPreview(const MeshModifiers::ModifierStack& stack);

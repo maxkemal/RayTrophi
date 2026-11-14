@@ -1,6 +1,7 @@
 /* RayTrophi Studio - deterministic flat-mesh sculpt scripting (Faz 5.4c) */
 
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "SceneHistory.h"
 #include "GeometryNodesV2.h"
 #include "ProjectManager.h"

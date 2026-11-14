@@ -58,7 +58,12 @@ def main():
     finally:
         try:
             if edited and original is not None:
-                ipc.call("volume.set_material", target=args.target, settings=original)
+                # Inspection includes derived smoke controls alongside their raw
+                # scattering/absorption source. Restore the canonical raw fields;
+                # the authoring service correctly rejects mixing both vocabularies.
+                restore = {key: value for key, value in original.items()
+                           if key not in ("smoke_color", "smoke_opacity", "smoke_tint")}
+                ipc.call("volume.set_material", target=args.target, settings=restore)
                 assert ipc.call("volume.get_material", target=args.target) == original
         finally:
             ipc.close()

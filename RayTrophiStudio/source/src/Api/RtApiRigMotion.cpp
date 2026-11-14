@@ -4,6 +4,7 @@
 #include "Backend/IBackend.h"
 #include "ProjectManager.h"
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "TriangleMesh.h"
 #include "scene_data.h"
 #include <functional>

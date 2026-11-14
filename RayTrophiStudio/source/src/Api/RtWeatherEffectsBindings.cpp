@@ -4,12 +4,17 @@
 
 #include <stdexcept>
 
-namespace {
+namespace rt_weather_effects {
 void requireWeatherResult(const rtapi::Result& result) {
     if (!result.ok) {
         throw std::runtime_error(result.error);
     }
 }
+}
+using rt_weather_effects::requireWeatherResult;
+
+namespace {
+
 
 const MethodParam weatherPatch[] = {
     {"patch", "object", true, "Weather effect fields; wind is climate-owned", nullptr, nullptr}
@@ -31,21 +36,7 @@ const MethodRegistration registerWeatherGet(weatherGet);
 const MethodRegistration registerWeatherSet(weatherSet);
 } // namespace
 
-namespace rtpy {
-void registerWeatherEffectsBindings(pybind11::module_& world) {
-    namespace py = pybind11;
-    world.def("get_weather_effects", [] {
-        std::string out;
-        requireWeatherResult(rtapi::getWeatherEffectsJson(out));
-        return py::module_::import("json").attr("loads")(out);
-    });
-    world.def("set_weather_effects", [](const py::kwargs& kwargs) {
-        const std::string patch = py::cast<std::string>(
-            py::module_::import("json").attr("dumps")(kwargs));
-        requireWeatherResult(rtapi::setWeatherEffectsJson(patch));
-    }, "Partial patch of the manual surface cover (wet/snow/dust).");
-}
-} // namespace rtpy
+
 
 bool dispatchWeatherEffectsIpc(const std::string& method, const nlohmann::json& params,
                               const RtIpcTemplateEnqueue& enqueue, nlohmann::json& result) {

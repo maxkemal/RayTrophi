@@ -22,6 +22,7 @@
 */
 
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 
 #include <memory>
 #include <string>

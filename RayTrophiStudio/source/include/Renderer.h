@@ -48,7 +48,7 @@
 #include "Vec3SIMD.h"
 #include "CpuPhotonMap.h"
 #include "World.h"
-#include <OpenImageDenoise/oidn.hpp>
+#include <mutex>
 #include <ColorProcessingParams.h>
 #include <functional>
 #include "FoliageWindSystem.h"
@@ -102,6 +102,10 @@ public:
         const float* normal = nullptr;
     };
 
+    // SDK-neutral values; RendererOidn.cpp asserts parity with the offline SDK.
+    static constexpr int kOidnQualityDefault = 0;
+    static constexpr int kOidnQualityFast = 4;
+
     static bool isCudaAvailable();
 
     void applyOIDNDenoising(SDL_Surface* surface, int numThreads, bool denoise, float blend);
@@ -109,7 +113,7 @@ public:
     // final-render saves). The viewport CPU-fallback (AMD/Intel without CUDA interop)
     // passes the user's tier so the host path isn't stuck on the slow High model.
     bool applyOIDNDenoising(const OIDNFrameData& frame, float blend, std::vector<float>& output,
-                            int quality = OIDN_QUALITY_DEFAULT);
+                            int quality = kOidnQualityDefault);
     // GPU zero-copy variant with fused on-device tonemap. Inputs stay on CUDA
     // device; the only host transfer is the tonemapped RGBA8 buffer (4 B/px,
     // already in SDL_Surface channel layout). Returns false if binding fails;
@@ -137,7 +141,7 @@ public:
         bool     flipY      = true;
         // OIDN model tier (OIDN_QUALITY_FAST/BALANCED/HIGH). Caller maps the
         // user setting; viewport defaults to Fast, final render forces High.
-        int      quality    = OIDN_QUALITY_FAST;
+        int      quality    = kOidnQualityFast;
     };
     bool applyOIDNDenoisingGPU(const Backend::DenoiserFrameDataGPU& frame,
                                float blend,
@@ -350,18 +354,18 @@ private:
     Vec3 calculate_global_illumination(const ParallelBVHNode* bvh, const std::vector<std::shared_ptr<Light>>& lights, const HitRecord& rec, const Vec3& normal, const Vec3& view_direction, const Vec3& background_color);
    
     
-    // OIDN Members
-    oidn::DeviceRef oidnDevice;
-    oidn::FilterRef oidnFilter;
+    // SDK objects live in the offline module. The custom deleter allows this
+    // header and Renderer destruction to work with an incomplete SDK state.
+    struct OidnState;
+    struct OidnStateDeleter {
+        void operator()(OidnState* state) const;
+    };
+    using OidnStatePtr = std::unique_ptr<OidnState, OidnStateDeleter>;
+    static OidnStatePtr createOidnState();
+    OidnStatePtr oidnState = createOidnState();
     std::mutex oidnMutex;
     bool oidnInitialized = false;
 
-    // OIDN Buffer Cache - performans optimizasyonu
-    // Boyut değişmedikçe buffer'lar yeniden kullanılır
-    oidn::BufferRef oidnColorBuffer;
-    oidn::BufferRef oidnAlbedoBuffer;
-    oidn::BufferRef oidnNormalBuffer;
-    oidn::BufferRef oidnOutputBuffer;
 
     // GPU-path binding cache (Faz 2 — zero-copy CUDA)
     bool oidnCudaInitialized = false;

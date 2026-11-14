@@ -1,6 +1,7 @@
 #include "PostProcess/PostSurface.h"
 #include "PostProcess/PostService.h"
 #include "Api/RtApiInternal.h"
+#include "Renderer.h"
 #include "Stylize/StylizePostProcess.h"
 #include "Camera.h"
 #include <execution>

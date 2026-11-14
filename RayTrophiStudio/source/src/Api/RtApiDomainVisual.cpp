@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "Renderer.h"
 #include "Api/DomainVisualApi.h"
 #include "Fluid/DomainVisualService.h"
 #include "ProjectManager.h"

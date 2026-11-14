@@ -1,8 +1,6 @@
 #include "RtFluidLabelBindings.h"
-#include <pybind11/pybind11.h>
 
 using nlohmann::json;
-namespace py = pybind11;
 
 json fluidLabelsToJson(const RayTrophiSim::Fluid::ParticleLabelReport& report) {
     using namespace RayTrophiSim::Fluid;
@@ -40,11 +38,4 @@ json fluidLabelsToJson(const RayTrophiSim::Fluid::ParticleLabelReport& report) {
             {"changed", report.last_step.changed}
         }}
     };
-}
-
-py::dict fluidLabelsToPython(const RayTrophiSim::Fluid::ParticleLabelReport& report) {
-    // One wire vocabulary for both transports, not two independently maintained
-    // dictionaries. This is a read-only report; importing json cannot run IPC.
-    return py::module_::import("json").attr("loads")(fluidLabelsToJson(report).dump())
-        .cast<py::dict>();
 }

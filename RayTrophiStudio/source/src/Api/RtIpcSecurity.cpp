@@ -293,6 +293,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "addons.enable" || method == "addons.disable" || method == "addons.reload")
         return Addons;
     if (method == "project.open" || method == "scene.import_model" ||
+        method == "scene.import_vdb" ||
         method == "terrain.import_heightmap" || method == "paint.import_channel")
         return FilesRead | SceneWrite;
     // ★ scene.export_gltf lives in the `scene.` namespace but does NOT write the

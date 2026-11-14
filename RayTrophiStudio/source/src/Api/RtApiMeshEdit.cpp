@@ -31,6 +31,8 @@
 
 #include "Api/RtApi.h"
 #include "Api/RtApiInternal.h"
+#include "SceneSelection.h"
+#include "scene_ui.h"
 #include "MeshEdit/FlatMeshValidator.h"
 #include "MeshEdit/MeshOperation.h"
 #include "MeshEdit/MeshTool.h"

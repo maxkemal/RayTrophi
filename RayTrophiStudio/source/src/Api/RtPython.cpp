@@ -1,4 +1,5 @@
 #include "Fluid/MixedGpuStageDiagnostics.h"
+#include "Api/RtApiVdbVolume.h"
 #include "RtPythonLiquidEmission.h"
 #include "RtPythonDomainWalls.h"
 #include "RtPythonMatterSeedSources.h"
@@ -401,6 +402,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         return newName;
     });
     scene.def("import_model", [](const std::string& path) { requireResult(rtapi::importModel(path)); });
+    scene.def("import_vdb", [](const std::string& path, int orientation) {
+        rtapi::VdbImportInfo info;
+        requireResult(rtapi::importVdbVolume(path, orientation, info));
+        py::dict out;
+        out["name"] = info.name;
+        out["auto_scaled"] = info.auto_scaled;
+        out["gpu_uploaded"] = info.gpu_uploaded;
+        out["fire_shader"] = info.fire_shader;
+        out["scene_vdb_count"] = info.scene_vdb_count;
+        return out;
+    }, py::arg("path"), py::arg("orientation") = 0);
     scene.def("export_gltf", [](const std::string& path, bool geometry, bool materials,
                                 bool cameras, bool lights, bool animations, bool skinning,
                                 bool selected_only, bool bake_terrain_materials,

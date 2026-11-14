@@ -1,5 +1,6 @@
 #include "Api/RtApi.h"
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include "Backend/VulkanBackend.h"
 #include "globals.h"
 #include "ProjectManager.h"

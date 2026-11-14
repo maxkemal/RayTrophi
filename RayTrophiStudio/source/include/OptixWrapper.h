@@ -46,7 +46,6 @@
 #include "material_gpu.h"
 #include "sbt_record.h"
 #include <ColorProcessingParams.h>
-#include <OpenImageDenoise/oidn.hpp>
 #include <sbt_data.h>
 #include "Matrix4x4.h"
 #include <OptixAccelManager.h>

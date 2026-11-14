@@ -1,5 +1,7 @@
 #include "Api/DomainCreationApi.h"
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
+#include "Renderer.h"
 #include "Transform.h"
 #include "TriangleMesh.h"
 #include <algorithm>

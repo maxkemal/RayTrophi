@@ -1,4 +1,6 @@
 #include "RtApiInternal.h"
+#include "SceneSelection.h"
+#include "scene_ui.h"
 #include "Api/RtApiRig.h"
 #include "Animation/RigEditing.h"
 namespace rtapi {

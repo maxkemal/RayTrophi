@@ -1366,6 +1366,11 @@
     "summary": "Import a model file (glTF/FBX/OBJ) into the scene",
     "tags": "load|asset|mesh"
   },
+  "scene.import_vdb": {
+    "summary": "Import an OpenVDB volume file into the scene and return its placement",
+    "notes": "Same import the VDB panel runs: a volume larger than 50 units is scaled to 5, centred on X/Z and sat on Y = 0; a temperature grid gets the fire shader preset, otherwise smoke. orientation 0 = auto (EmberGen axis conversion), 1 = keep file axes, 2 = Z-up to Y-up. gpu_uploaded false means CPU-only, not a failure.",
+    "tags": "load|asset|volume|vdb|smoke|cloud|fire"
+  },
   "select.object": {
     "summary": "Select an object by name, optionally adding to the current selection",
     "tags": "selection"

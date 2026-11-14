@@ -22,6 +22,7 @@
  * =========================================================================
  */
 
+#include "RtPlayerIpcPolicy.h"
 #include "RtIpcTransport.h"
 #include "RtIpcSession.h"
 
@@ -46,7 +47,7 @@ using json = nlohmann::json;
 namespace rtipc_transport {
 namespace {
 
-constexpr const wchar_t* kPipeName = L"\\\\.\\pipe\\RayTrophiStudio";
+constexpr const wchar_t* kPipeName = rtipc_product::pipeName;
 constexpr DWORD kBufferSize = 65536;
 // One for the agent runtime, one for a PowerShell/pytest session driving the
 // app, and headroom for a second agent and an ad-hoc probe.

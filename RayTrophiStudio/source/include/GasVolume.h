@@ -375,5 +375,6 @@ public:
 
     static constexpr size_t kMaxTimelineSnapshots = 12;
     std::deque<TimelineSnapshotEntry> timeline_snapshot_cache;
+    void uploadCudaTextures(void* stream_ptr);
 };
 

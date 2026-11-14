@@ -9,7 +9,7 @@
 * =========================================================================
 */
 #pragma once
-#include <embree4/rtcore.h>
+#include "EmbreeHandles.h"
 #include "Vec3.h"
 #include "Ray.h"
 #include "Hittable.h"
@@ -20,7 +20,7 @@ class HittableInstance; // Forward decl
 #include <vector>
 #include "AABB.h"
 #include <cstdint>
-#include "OptixWrapper.h"
+#include "OptixTypes.h"
 
 /**
  * @brief Optimized triangle data for Embree BVH

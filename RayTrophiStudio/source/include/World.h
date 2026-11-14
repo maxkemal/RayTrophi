@@ -9,8 +9,7 @@
 * =========================================================================
 */
 #pragma once
-#include <cuda_runtime.h>
-#include <vector_types.h>
+#include "GpuInteropTypes.h"
 
 #ifndef __CUDACC__
 #include "Vec3.h"

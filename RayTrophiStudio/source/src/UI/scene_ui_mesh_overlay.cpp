@@ -5,6 +5,7 @@
 #include <omp.h>
 
 #include "Backend/OptixBackend.h"
+#include "OptixWrapper.h"
 #include "Backend/IViewportBackend.h"
 #include "Backend/VulkanBackend.h"
 #include "Viewport/ViewportSceneSync.h"

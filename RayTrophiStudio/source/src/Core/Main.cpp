@@ -1,16 +1,20 @@
+#include "Core/StudioLaunchOptions.h"
+#include "Core/AppWindow.h"
+#include "Core/AppFrame.h"
+#include "Core/VulkanSceneSync.h"
 #include "PostProcess/PostSurface.h"
 #include "Core/FatalSignalTrace.h"
 #include "Backend/VulkanRecoveryPolicy.h"
 #include "Viewport/ViewportGpuWorkPolicy.h"
 #include "Viewport/ViewportPresentationStats.h"
 #include "PostProcess/PostService.h"
+#include <OpenImageDenoise/oidn.h>
 #include <SDL_main.h> 
 #include <fstream>
 #include <locale>
 #include <chrono>
 #include <vector>
 #include <atomic>
-#include <charconv>
 #include <thread>
 #include <future>
 #include <algorithm>
@@ -78,12 +82,9 @@
 #include <malloc.h>
 #include "SplashScreen.h"  // Splash screen support
 #include <cstdlib>
-#define STB_IMAGE_IMPLEMENTATION
+// stb_image / stb_image_write / tinyexr implementations: Utils/ImageCodecs.cpp
 #include "stb_image.h"
-#define STB_IMAGE_WRITE_IMPLEMENTATION
 #include "stb_image_write.h"
-#define TINYEXR_USE_MINIZ 0
-#define TINYEXR_USE_STB_ZLIB 1  // Use stb's zlib if available
 // Fix Windows.h min/max macro conflicts
 #ifdef min
 #undef min
@@ -92,7 +93,6 @@
 #undef max
 #endif
 #define NOMINMAX
-#define TINYEXR_IMPLEMENTATION
 #include "tinyexr.h"
 #include <InstanceManager.h>
 #include "DllLoadPolicy.h"
@@ -169,16 +169,6 @@ bool hasArg(int argc, char* argv[], std::string_view arg) {
     return false;
 }
 
-bool parseIntArgument(std::string_view text, int minimum, int& out) {
-    if (text.empty()) return false;
-    int value = 0;
-    const char* begin = text.data();
-    const char* end = begin + text.size();
-    const auto parsed = std::from_chars(begin, end, value);
-    if (parsed.ec != std::errc() || parsed.ptr != end || value < minimum) return false;
-    out = value;
-    return true;
-}
 }
 
 extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -595,9 +585,6 @@ bool start_render = false;
 bool quit = false;
 bool apply_tonemap = false;
 bool reset_tonemap = false;
-// Request a display rebuild + stylize re-apply WITHOUT re-rendering and WITHOUT forcing
-// tonemap on — honors the current persistent_tonemap setting. Set by Stylize param changes.
-bool stylize_redisplay = false;
 bool mouse_control_enabled = true;
 bool camera_moved = false;
 bool use_denoiser = false;
@@ -622,88 +609,25 @@ float u;
 float v;
 bool rayhit = false;
 
-// ===========================================================================
-// DIRTY FLAGS - Prevents unnecessary GPU buffer updates when data unchanged
-// ===========================================================================
-bool g_camera_dirty = true;
-bool g_lights_dirty = true;
-// ★★★★ Iki tuketici, iki bayrak. Gerekcesi globals.h'te yazili: tek bayragi
-//   once kosan tuketici yutuyordu ve oteki adapter (ayri VkDevice) dunyayi HIC
-//   almiyordu. Ureticiler `markWorldDirty()` cagirir; bayraklari TEK TEK set
-//   eden yeni kod eklersen o tuketici yine ac kalir.
-bool g_world_dirty = true;
-bool g_viewport_world_dirty = true;
-void markWorldDirty() {
-    g_world_dirty = true;
-    g_viewport_world_dirty = true;
-}
-bool g_original_surface_needs_sync = true;
-
-// Granular scene-sync dirty flags
-bool g_geometry_dirty = true;        // Mesh/triangle data changed
-bool g_materials_dirty = true;       // Material properties changed
-bool g_gas_volumes_dirty = true;     // Gas/VDB volumes changed
-bool g_texture_pool_dirty = false;   // Evict SceneTextureManager pool inside uploadMaterials (after waitIdle)
-
-// Scene geometry generation counter
-std::atomic<uint64_t> g_scene_geometry_generation{1};
-
-// ===========================================================================
-// DEFERRED REBUILD FLAGS - For optimized batched rebuilds
-// Set these instead of calling rebuild immediately, Main loop handles them
-// ===========================================================================
-bool g_bvh_rebuild_pending = false;      // CPU BVH needs rebuild
-bool g_gpu_refit_pending = false;        // GPU Geometry needs update (Deferred)
-// A transform refit consumed by the Solid/Matcap raster backend still has to be
-// applied to the inactive RT backend when Rendered mode resumes. Keeping this
-// separate avoids either losing the RT update or refitting raster every idle frame.
-bool g_render_backend_refit_pending = false;
-bool g_vulkan_rebuild_pending = false;    // GPU Vulkan geometry needs rebuild
-bool g_vulkan_device_cc_refit_pending = false; // Slice 4: device-resident CC position-only edit — MODE_UPDATE-refit the BLAS instead of a full rebuild
-bool g_vulkan_geometry_append_pending = false; // Additive-only mutation (scatter etc.) — try incremental TLAS refit first
-bool g_geometry_deform_pending = false; // Physics body baked new verts — refit only those nodes in place on the active path (raster/OptiX/Vulkan) + CPU Embree refit (vs full rebuild)
-bool g_viewport_raster_rebuild_pending = false; // Interactive raster viewport needs rebuild
-bool g_viewport_raster_cache_invalid = false;   // Raster-only representation change; see globals.h
-bool g_viewport_raster_scatter_update_pending = false; // Foliage-only instance-table refresh
-bool g_vulkan_scatter_refresh_pending = false; // InstanceGroup topology only; preserve BLASes
-bool g_optix_rebuild_pending = false;
-bool g_optix_scatter_refresh_pending = false;
-bool g_particle_cpu_geometry_dirty = false; // Particle bridge changed; CPU-active path re-expands particles into the BVH
-
-// ── Viewport-driven sequence save ───────────────────────────────────────────
-// Renders an animation to disk through the SAME fast interactive viewport path
-// (scrub each frame → converge to the interactive quality → save) instead of the
-// separate render_Animation worker, which ran slower than and diverged from the
-// viewport (foam/TLAS/rebuild differences). Quality + denoiser come from the
-// interactive render-panel settings. Driven by a state machine in the main loop.
-bool        g_seq_save_active = false;
-int         g_seq_save_frame = 0;
-int         g_seq_save_end = 0;
-std::string g_seq_save_dir;
-bool        g_seq_save_denoise = false;
-
-// True while the active viewport is an interactive raster shading mode, i.e.
-// NOT Rendered. All raster modes share the native NanoVDB SurfaceSDF buffer.
-bool g_solid_viewport_active = false;
-bool g_native_surface_sdf_viewport_available = false;
-bool g_material_preview_viewport_active = false;
-bool g_dense_gas_host_mirror_needed = false;
-bool g_sim_timeline_mode = true;  // true = timeline-driven (bake/scrub, idle when stopped); false = live free-run preview
-bool g_sim_use_gpu_solver = false; // GPU simulation compute (Vulkan, or CUDA where present): grid solver + APIC fluid + NanoVDB bridge
-bool g_gpu_subdivide_enabled = true; // GPU linear mesh subdivision (CPU fallback when unavailable / small mesh)
-RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx{};
-std::atomic<bool> g_optix_rebuild_in_progress{false}; // True while TLAS rebuild is happening // GPU OptiX geometry needs rebuild
-std::atomic<bool> g_viewport_rebuild_in_progress{false}; // True while viewport backend resources are being torn down/rebuilt
-std::atomic<bool> g_anim_backend_needs_full_rebuild{false}; // See globals.h — set by aborted-anim cleanup and backend-swap paths
-bool g_mesh_cache_dirty = false;         // UI mesh cache needs rebuild
-bool g_cpu_sync_pending = false;         // CPU data needs sync after TLAS mode changes
-bool g_cpu_bvh_refit_pending = false;    // CPU BVH fast refit (Embree only)
-bool g_cpu_bvh_stale = false;            // Lazy CPU BVH refit (see globals.h)
-int g_bvh_rebuild_deferred_frames = 0;
-uint64_t g_cpu_bvh_requested_generation = 0;
-uint64_t g_cpu_bvh_future_generation = 0;
-bool g_viewport_hovered = false;         // True when mouse is over the main RenderView
-int g_backend_switch_cooldown_frames = 0; // Skip a few GPU animation/render ticks right after backend switch
+// Render/scene dirty flags, deferred-rebuild flags and sequence-save state are
+// defined in Core/RuntimeState.cpp (shared with the Player); see globals.h.
+// The ones globals.h does not declare (Main-loop bookkeeping) are declared here.
+extern bool stylize_redisplay;
+extern bool g_original_surface_needs_sync;
+extern bool g_render_backend_refit_pending;
+extern bool g_vulkan_device_cc_refit_pending;
+extern bool g_viewport_raster_scatter_update_pending;
+extern bool g_vulkan_scatter_refresh_pending;
+extern bool g_optix_scatter_refresh_pending;
+extern bool g_cpu_sync_pending;
+extern uint64_t g_cpu_bvh_requested_generation;
+extern uint64_t g_cpu_bvh_future_generation;
+extern int g_backend_switch_cooldown_frames;
+extern bool        g_seq_save_active;
+extern int         g_seq_save_frame;
+extern int         g_seq_save_end;
+extern std::string g_seq_save_dir;
+extern bool        g_seq_save_denoise;
 
 // Helper to ensure original_surface matches main surface dimensions
 // This prevents tonemap accumulation issues by giving us a clean "Raw" buffer
@@ -720,14 +644,9 @@ void EnsureOriginalSurface(SDL_Surface* reference) {
     }
 }
 
-// ===========================================================================
-// SCENE LOADING FLAGS - Thread safety for project load/save operations
-// ===========================================================================
-std::atomic<bool> g_scene_loading_in_progress{false};  // Prevents concurrent load operations
-std::atomic<bool> g_needs_geometry_rebuild{false};   // Set by loader thread, main loop does actual rebuild
-std::atomic<bool> g_needs_optix_sync{false};         // Set by loader thread, main loop syncs backend buffers
-std::atomic<bool> g_deferred_render_backend_prepare_pending{false};
-int g_deferred_render_backend_prepare_delay_frames = 0;
+// Scene loading flags: Core/RuntimeState.cpp.
+extern std::atomic<bool> g_deferred_render_backend_prepare_pending;
+extern int g_deferred_render_backend_prepare_delay_frames;
 
 // Async OptiX rebuild handle/state. Kept at file scope so backend switch can safely wait.
 std::future<void> g_optix_future;
@@ -807,11 +726,13 @@ const void* transparencyPreviewPixels(SDL_Surface* source,
 }
 
 // GLOBAL
-SDL_Window* window = nullptr;
-SDL_Renderer* renderer = nullptr;
-SDL_Surface* surface = nullptr;
-SDL_Surface* original_surface = nullptr;
-SDL_Texture* raytrace_texture = nullptr;
+// window / renderer / surface / original_surface / raytrace_texture are owned
+// by the shared runtime window module (Core/AppWindow.cpp).
+extern SDL_Window* window;
+extern SDL_Renderer* renderer;
+extern SDL_Surface* surface;
+extern SDL_Surface* original_surface;
+extern SDL_Texture* raytrace_texture;
 int saved_viewport_width = -1;
 int saved_viewport_height = -1;
 bool saved_window_maximized = false;
@@ -819,13 +740,13 @@ std::mutex surface_mutex;  // Surface eri�imi i�in mutex
 SceneUI ui;
 SceneData scene;
 Renderer ray_renderer(image_width, image_height, 1, 1);
-std::unique_ptr<Backend::IBackend> g_backend;
+extern std::unique_ptr<Backend::IBackend> g_backend;  // Core/RuntimeState.cpp
 // OptiX core residency cache. Scene-sized allocations are released when the
 // backend is suspended, but its context/modules/pipeline survive so repeated
 // Vulkan RT <-> OptiX switches do not continually grow the CUDA driver JIT cache.
 static std::unique_ptr<Backend::IBackend> g_suspended_optix_backend;
-std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
-ColorProcessor color_processor(image_width, image_height);
+extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;  // Core/RuntimeState.cpp
+extern ColorProcessor color_processor;  // Core/RuntimeState.cpp
 
 // Sync material data to the raster viewport backend. Walks Texture::vulkan_dirty
 // so paint strokes refresh the material preview descriptor in-place. When the
@@ -1255,7 +1176,7 @@ static std::vector<std::shared_ptr<Hittable>> collectVisibleSceneObjects(SceneDa
     return visibleObjects;
 }
 
-std::string active_model_path;
+extern std::string active_model_path;  // Core/RuntimeState.cpp
 SceneSelection scene_selection;  // Scene selection manager
 UIContext ui_ctx{
    scene,
@@ -1286,35 +1207,12 @@ void reset_render_resolution(int w, int h)
     // ------------------------------------------------------------------
     // 2. SDL kaynaklar�n� s�f�rla (DESTROY)
     // ------------------------------------------------------------------
-    if (raytrace_texture) SDL_DestroyTexture(raytrace_texture);
-    if (surface) SDL_FreeSurface(surface);
-    if (original_surface) SDL_FreeSurface(original_surface);
-
-    // ------------------------------------------------------------------
-    // 3. Yeni kaynaklar� olu�tur (CREATE)
-    // ------------------------------------------------------------------
-    surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
-    original_surface = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
-    raytrace_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
-        SDL_TEXTUREACCESS_STREAMING, w, h);
-
-    if (!surface || !original_surface || !raytrace_texture) {
-        SCENE_LOG_ERROR("Failed to create SDL surfaces or texture!");
+    // 2-3. Shared runtime: destroy + recreate surfaces/presentation texture,
+    // clear to black and present it.
+    if (!AppRuntime::recreatePresentationTargets(w, h)) {
         return;
     }
-
-    // Siyah ekranla ba�la
-    SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
-    SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
     g_original_surface_needs_sync = true;
-    
-    // Texture'� g�ncelle
-    SDL_UpdateTexture(raytrace_texture, nullptr, surface->pixels, surface->pitch);
-    
-    // Ekran� g�ncelle
-    SDL_RenderClear(renderer);
-    SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-    SDL_RenderPresent(renderer);
 
     // ------------------------------------------------------------------
     // 4. Aspect ratio ve global de�i�kenleri g�ncelle
@@ -1864,123 +1762,21 @@ int main(int argc, char* argv[]) try {
     setlocale(LC_ALL, "Turkish");
     startupDiagLog("[Startup] locale set");
     
-    // Save project path passed via command line
-    std::string project_to_load;
-    std::string script_to_run;
-    std::string cli_render_output;
-    int cli_render_spp = 128;
-    int cli_render_frame = -1;
-    // Multi-frame sequence render: --frames N-M [--frames-dir dir] [--spp N]
-    int  cli_seq_start_frame = -1;
-    int  cli_seq_end_frame   = -1;
-    std::string cli_seq_output_dir;
-    bool headless_requested = false;
-    bool cli_argument_error = false;
-    std::vector<std::string> cli_argument_errors;
-    int app_exit_code = 0;
-    for (int i = 1; i < argc; ++i) {
-        if (!argv[i]) continue;
-        const std::string_view arg(argv[i]);
-        if (arg == "--script") {
-            if (i + 1 < argc && argv[i + 1]) {
-                script_to_run = std::filesystem::absolute(argv[++i]).string();
-            } else {
-                SCENE_LOG_ERROR("--script requires a Python file path");
-                cli_argument_errors.push_back("--script requires a Python file path");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--project") {
-            if (i + 1 < argc && argv[i + 1]) {
-                project_to_load = std::filesystem::absolute(argv[++i]).string();
-            } else {
-                SCENE_LOG_ERROR("--project requires an .rtp file path");
-                cli_argument_errors.push_back("--project requires an .rtp file path");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--render") {
-            if (i + 1 < argc && argv[i + 1]) {
-                cli_render_output = std::filesystem::absolute(argv[++i]).string();
-            } else {
-                SCENE_LOG_ERROR("--render requires an output .png path");
-                cli_argument_errors.push_back("--render requires an output .png path");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--spp") {
-            if (i + 1 >= argc || !argv[i + 1] ||
-                !parseIntArgument(argv[++i], 1, cli_render_spp)) {
-                SCENE_LOG_ERROR("--spp requires a positive integer");
-                cli_argument_errors.push_back("--spp requires a positive integer");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--frame") {
-            if (i + 1 >= argc || !argv[i + 1] ||
-                !parseIntArgument(argv[++i], 0, cli_render_frame)) {
-                SCENE_LOG_ERROR("--frame requires a non-negative integer");
-                cli_argument_errors.push_back("--frame requires a non-negative integer");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--frames") {
-            // Accept "N-M" format, e.g. --frames 0-100
-            if (i + 1 < argc && argv[i + 1]) {
-                const std::string_view range(argv[++i]);
-                const auto dash = range.find('-');
-                int sf = -1, ef = -1;
-                bool parse_ok = dash != std::string_view::npos &&
-                    parseIntArgument(range.substr(0, dash), 0, sf) &&
-                    parseIntArgument(range.substr(dash + 1), sf, ef);
-                if (parse_ok) {
-                    cli_seq_start_frame = sf;
-                    cli_seq_end_frame   = ef;
-                } else {
-                    SCENE_LOG_ERROR("--frames requires a range in the form N-M (e.g. 0-100)");
-                    cli_argument_errors.push_back("--frames requires a range in the form N-M (e.g. 0-100)");
-                    cli_argument_error = true;
-                }
-            } else {
-                SCENE_LOG_ERROR("--frames requires a range argument (e.g. 0-100)");
-                cli_argument_errors.push_back("--frames requires a range argument (e.g. 0-100)");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--frames-dir") {
-            if (i + 1 < argc && argv[i + 1]) {
-                cli_seq_output_dir = std::filesystem::absolute(argv[++i]).string();
-            } else {
-                SCENE_LOG_ERROR("--frames-dir requires a directory path");
-                cli_argument_errors.push_back("--frames-dir requires a directory path");
-                cli_argument_error = true;
-            }
-        } else if (arg == "--headless") {
-            headless_requested = true;
-        } else if (!arg.empty() && arg.front() != '-' && project_to_load.empty()) {
-            project_to_load = std::filesystem::absolute(argv[i]).string();
-        }
-    }
-    const bool cli_render_mode = !cli_render_output.empty();
-    const bool cli_seq_mode = cli_seq_start_frame >= 0 && !cli_render_mode;
-    const bool run_hidden = cli_render_mode || cli_seq_mode || headless_requested;
-    if (headless_requested && !cli_render_mode && !cli_seq_mode) {
-        SCENE_LOG_ERROR("--headless requires --render <output.png> or --frames N-M");
-        cli_argument_errors.push_back("--headless requires --render <output.png> or --frames N-M");
-        cli_argument_error = true;
-    }
-    if (cli_render_mode && cli_seq_mode) {
-        SCENE_LOG_ERROR("--render and --frames cannot be combined; use one or the other");
-        cli_argument_errors.push_back("--render and --frames cannot be combined");
-        cli_argument_error = true;
-    }
-    // Default sequence output directory: EXE folder / frames
-    if (cli_seq_mode && cli_seq_output_dir.empty()) {
-        cli_seq_output_dir = (std::filesystem::current_path() / "frames").string();
-    }
-    if ((cli_render_mode || cli_seq_mode) && !project_to_load.empty()) {
-        std::error_code project_path_error;
-        if (!std::filesystem::is_regular_file(project_to_load, project_path_error)) {
-            SCENE_LOG_ERROR("CLI project file not found: " + project_to_load);
-            cli_argument_errors.push_back("CLI project file not found: " + project_to_load);
-            cli_argument_error = true;
-        }
-    }
-    if (cli_argument_error) app_exit_code = 2;
+    auto options = StudioShell::parseLaunchOptions(argc, argv);
+    auto& project_to_load = options.project_to_load;
+    auto& script_to_run = options.script_to_run;
+    auto& cli_render_output = options.cli_render_output;
+    auto& cli_render_spp = options.cli_render_spp;
+    auto& cli_render_frame = options.cli_render_frame;
+    auto& cli_seq_start_frame = options.cli_seq_start_frame;
+    auto& cli_seq_end_frame = options.cli_seq_end_frame;
+    auto& cli_seq_output_dir = options.cli_seq_output_dir;
+    auto& cli_argument_error = options.cli_argument_error;
+    auto& cli_argument_errors = options.cli_argument_errors;
+    auto& cli_render_mode = options.cli_render_mode;
+    auto& cli_seq_mode = options.cli_seq_mode;
+    auto& run_hidden = options.run_hidden;
+    int app_exit_code = cli_argument_error ? 2 : 0;
     startupDiagLog("[Startup] argv parsed");
     
 #ifdef _WIN32
@@ -2007,15 +1803,10 @@ int main(int argc, char* argv[]) try {
     notifyIfVcRuntimeMissing();
 #endif
 
-   // SDL_SetHint(SDL_HINT_RENDER_DRIVER, "opengl");
- // �nce SDL a��lacak
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) {
-        SCENE_LOG_ERROR(std::string("SDL_Init Error: ") + SDL_GetError());
+    // Shared runtime: SDL platform first (splash needs it).
+    if (!AppRuntime::initPlatform(startupDiagLog)) {
         return 1;
     }
-    startupDiagLog("[Startup] SDL_Init done");
-    SDL_EnableScreenSaver();
-    startupDiagLog("[Startup] SDL_EnableScreenSaver done");
     // ===========================================================================
     // SPLASH SCREEN - Frameless startup screen with loading status
     // ===========================================================================
@@ -2040,67 +1831,30 @@ int main(int argc, char* argv[]) try {
     detectOptixHardware();
         startupDiagLog("[Startup] detectOptixHardware done");
 
-    // Enable IME UI (must be set before creating window) so SDL can show native IME when needed
-    SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
-
-    // Create main window
+    // Create main window (shared runtime). Studio owns the title and splash status.
     if (splashOk) { splash.setStatus("Creating main window..."); splash.render(); }
-    startupDiagLog("[Startup] before SDL_CreateWindow");
-      window = SDL_CreateWindow("RayTrophi Studio",
-        SDL_WINDOWPOS_CENTERED,
-        SDL_WINDOWPOS_CENTERED,
-        image_width,
-        image_height,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
-      startupDiagLog(std::string("[Startup] SDL_CreateWindow done, ptr=") + (window ? "valid" : "null"));
+    {
+        AppRuntime::WindowConfig window_config;
+        window_config.title = "RayTrophi Studio";
+        window_config.width = image_width;
+        window_config.height = image_height;
+        window_config.startup_log = startupDiagLog;
+        AppRuntime::createMainWindow(window_config);
+    }
 
-     renderer =
-        SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-      startupDiagLog(std::string("[Startup] SDL_CreateRenderer done, ptr=") + (renderer ? "valid" : "null"));
-
-     surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
-     original_surface = SDL_CreateRGBSurfaceWithFormat(0, image_width, image_height, 32, SDL_PIXELFORMAT_RGBA32);
-     // [FIX] Prevent uninitialized pixel data causing random black/white on startup
-     if (surface) SDL_FillRect(surface, nullptr, SDL_MapRGBA(surface->format, 0, 0, 0, 255));
-     if (original_surface) SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
-    startupDiagLog("[Startup] SDL_CreateRGBSurfaceWithFormat done");
-
-     raytrace_texture =
-        SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
-            SDL_TEXTUREACCESS_STREAMING, image_width, image_height);
-     startupDiagLog(std::string("[Startup] SDL_CreateTexture done, ptr=") + (raytrace_texture ? "valid" : "null"));
-
-    SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
-     startupDiagLog("[Startup] SDL_SetTextureBlendMode done");
-    // Ensure SDL_TEXTINPUT events are enabled so ImGui_ImplSDL2 can receive UTF-8 characters
-    SDL_StartTextInput();
-    
-    // Initialize ImGui
+    // Initialize ImGui (shared runtime). Studio: Segoe UI with Turkish glyphs,
+    // keyboard navigation and internal docking for the panel layout.
     if (splashOk) { splash.setStatus("Initializing ImGui..."); splash.render(); }
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    startupDiagLog("[Startup] ImGui::CreateContext done");
+    {
+        AppRuntime::ImGuiConfig imgui_config;
+        imgui_config.font_path = "C:\\Windows\\Fonts\\segoeui.ttf";
+        imgui_config.font_size = 16.0f;
+        imgui_config.enable_keyboard_nav = true;
+        imgui_config.enable_docking = true;
+        imgui_config.startup_log = startupDiagLog;
+        AppRuntime::initImGui(imgui_config);
+    }
     ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-    
-    // --- Load UI Font with Extended Latin Support (Turkish) ---
-    static const ImWchar ext_ranges[] = {
-        0x0020, 0x00FF, // Basic Latin + Latin Supplement
-        0x0100, 0x017F, // Latin Extended-A (includes Turkish characters ş, ğ, ı, etc.)
-        0
-    };
-    ImFontConfig font_cfg;
-    font_cfg.OversampleH = 2;
-    font_cfg.OversampleV = 2;
-    io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f, &font_cfg, ext_ranges);
-    // ----------------------------------------------------------
-    // Modern dockable panel layout. Internal docking only — the SDLRenderer2 backend
-    // does not support multi-viewport (OS-detached) windows, so we do NOT set
-    // ImGuiConfigFlags_ViewportsEnable here.
-    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
-    ImGui_ImplSDLRenderer2_Init(renderer);
-    startupDiagLog("[Startup] ImGui SDL init done");
 
     // Initialize Theme using ThemeManager (prevents style overriding issues)
     if (!ThemeManager::instance().loadThemeSettings("theme.cfg", ui.panel_alpha)) {
@@ -2141,137 +1895,9 @@ int main(int argc, char* argv[]) try {
     // SkyView/transmittance yeniden uretimi ATLANIR. Physical Sky slider'i
     // surulurken ~15 Hz'e sinirlanan tek sey odur; dokuyu de birlikte atlamak
     // HDRI'yi hicbir zaman yuklememek demekti.
-    auto syncVulkanWorldToBackend = [&](Backend::VulkanBackendAdapter* vulkanBackend, WorldData& wd,
-                                        bool allowLutRegen = true) {
-        if (!vulkanBackend) {
-            return;
-        }
-
-        Backend::IBackend* envCacheKey = static_cast<Backend::IBackend*>(vulkanBackend);
-        struct VulkanEnvCache {
-            const Texture* texture = nullptr;
-            int64_t handle = 0;
-            uint64_t textureCacheGeneration = 0;
-        };
-        // Adapter basina onbellek: iki adapter AYRI VkDevice, yani ayni CPU
-        // Texture'i her ikisine de ayri ayri yuklenir ve handle'lari karismaz.
-        static std::unordered_map<Backend::IBackend*, VulkanEnvCache> s_vulkanEnvCache;
-
-        auto uploadVulkanEnvironmentTexture = [&](const Texture* texture) -> int64_t {
-            if (!texture || !texture->is_loaded() || texture->width <= 0 || texture->height <= 0) {
-                s_vulkanEnvCache.erase(envCacheKey);
-                return 0;
-            }
-
-            auto& cache = s_vulkanEnvCache[envCacheKey];
-            VulkanRT::ImageHandle existingEnvImage{};
-            const VkFormat expectedFormat = (texture->is_hdr && !texture->float_pixels.empty())
-                ? VK_FORMAT_R32G32B32A32_SFLOAT
-                : VK_FORMAT_R8G8B8A8_UNORM;
-            const bool cacheValid =
-                cache.texture == texture &&
-                cache.handle != 0 &&
-                cache.textureCacheGeneration == vulkanBackend->textureCacheGeneration() &&
-                vulkanBackend->tryGetUploadedImageHandle(cache.handle, existingEnvImage) &&
-                existingEnvImage.width == static_cast<uint32_t>(texture->width) &&
-                existingEnvImage.height == static_cast<uint32_t>(texture->height) &&
-                existingEnvImage.format == expectedFormat;
-            if (cacheValid) {
-                return cache.handle;
-            }
-
-            int64_t envHandle = 0;
-            if (texture->is_hdr && !texture->float_pixels.empty()) {
-                envHandle = vulkanBackend->uploadTexture2D(
-                    texture->float_pixels.data(),
-                    static_cast<uint32_t>(texture->width),
-                    static_cast<uint32_t>(texture->height),
-                    4,
-                    false,
-                    true);
-            } else if (!texture->pixels.empty()) {
-                envHandle = vulkanBackend->uploadTexture2D(
-                    texture->pixels.data(),
-                    static_cast<uint32_t>(texture->width),
-                    static_cast<uint32_t>(texture->height),
-                    4,
-                    false,
-                    false);
-            }
-            cache.texture = texture;
-            cache.handle = envHandle;
-            cache.textureCacheGeneration = vulkanBackend->textureCacheGeneration();
-            return envHandle;
-        };
-
-        if (wd.mode == WORLD_MODE_HDRI) {
-            // ★ HDRI tembel yuklenir (`World::setMode`). Proje acilisinda mod
-            //   HDRI olarak deserialize edilip doku henuz yuklenmemis olabilir;
-            //   burada bir kez zorlamak, "dosya var ama arka plan duz renk"
-            //   halini sessiz birakmamak icin.
-            // ★ Bir kez DENENIR, path basina. Dosya yoksa `setHDRI` sessizce
-            //   basarisiz olur; kapisiz birakmak her senkronda bir disk
-            //   erisimi demekti (kare basina, HDRI modunda).
-            if (!ray_renderer.world.hasHDRI() && !ray_renderer.world.getHDRIPath().empty()) {
-                static std::unordered_set<std::string> s_attemptedHdriPaths;
-                if (s_attemptedHdriPaths.insert(ray_renderer.world.getHDRIPath()).second) {
-                    ray_renderer.world.setMode(WORLD_MODE_HDRI);
-                    wd = ray_renderer.world.getGPUData();
-                }
-            }
-            int64_t envHandle = uploadVulkanEnvironmentTexture(ray_renderer.world.getHDRITexture());
-            vulkanBackend->setEnvironmentMap(envHandle != 0 ? envHandle : 0);
-            if (envHandle == 0) {
-                static std::unordered_set<Backend::IBackend*> s_warnedMissingEnv;
-                if (s_warnedMissingEnv.insert(envCacheKey).second) {
-                    SCENE_LOG_WARN("[World] HDRI mode is active but no environment texture "
-                                   "reached this backend; its background falls back to the "
-                                   "world solid colour. Path: '" +
-                                   ray_renderer.world.getHDRIPath() + "'");
-                }
-            }
-        } else if (wd.mode == WORLD_MODE_NISHITA && wd.advanced.env_overlay_enabled != 0) {
-            int64_t envHandle = uploadVulkanEnvironmentTexture(
-                ray_renderer.world.getNishitaEnvOverlayTexture());
-            vulkanBackend->setEnvironmentMap(envHandle != 0 ? envHandle : 0);
-        } else {
-            s_vulkanEnvCache.erase(envCacheKey);
-            vulkanBackend->setEnvironmentMap(0);
-        }
-
-        // ★★★★ Iki olcu, TEK kapi: paylasilan `needsLUTUpdate()` (dunya degisti)
-        //   VEYA bu adapter'in KENDI imzasi tutmuyor (oteki adapter uretip
-        //   paylasilan bayragi yuttu). Ikisi de kisitin ICINDE, yani slider
-        //   surerken maliyet artmaz.
-        const bool lutStaleHere =
-            wd.mode == WORLD_MODE_NISHITA &&
-            (ray_renderer.world.needsLUTUpdate() || vulkanBackend->atmosphereLutStale(wd));
-        if (allowLutRegen && lutStaleHere) {
-            if (vulkanBackend->generateAtmosphereLUTGPU(&wd)) {
-                ray_renderer.world.clearLUTDirty();
-                wd = ray_renderer.world.getGPUData();
-                return;
-            }
-
-            if (ray_renderer.world.flushLUT()) {
-                wd = ray_renderer.world.getGPUData();
-            }
-            if (auto* al = ray_renderer.world.getLUT()) {
-                if (al->is_initialized()) {
-                    vulkanBackend->uploadAtmosphereLUT(al);
-                    wd = ray_renderer.world.getGPUData();
-                }
-            }
-        }
-
-        vulkanBackend->setWorldData(&wd);
-        // The cloud authority is not in WorldData (CUDA-shared POD); same
-        // funnel, own call. After setWorldData: the packet needs this sync's
-        // planet radius / altitude.
-        vulkanBackend->setCloudState(ray_renderer.world.getClouds(),
-                                     ray_renderer.world.getCloudTime(),
-                                     ray_renderer.world.cloudWindOffset(),
-                                     ray_renderer.world.cloudWindVelocity());
+    auto syncVulkanWorldToBackend = [&](Backend::VulkanBackendAdapter* backend, WorldData& data,
+                                       bool allowLutRegen = true) {
+        AppRuntime::syncVulkanWorld(backend, ray_renderer.world, data, allowLutRegen);
     };
 
     auto syncWorldDataToBackend = [&](Backend::IBackend* backend, bool allowLutRegen = true) {
@@ -2807,7 +2433,9 @@ int main(int argc, char* argv[]) try {
     }
 
     SDL_Event e;
+    AppRuntime::FrameCycle frame_cycle;
     while (!quit) {
+        frame_cycle.beginIteration();
         // ★★★ ANA DONGU OLCUMU (2026-09-03).
         // Buraya kadar yalnizca backend'in `renderProgressive`'i ve ekran
         // yolunun iki kopyasi olculuyordu. Olcum sunu gosterdi: surekli kamera
@@ -2913,9 +2541,8 @@ int main(int argc, char* argv[]) try {
             }
         }
 
-        if (!ui.scene_loading.load() && !g_scene_loading_in_progress.load()) {
-            rtapi::drainMainThreadQueue();
-        }
+        frame_cycle.pumpMainThreadWork(
+            !ui.scene_loading.load() && !g_scene_loading_in_progress.load());
         // If Vulkan reported memory pressure (typically OOM/shared-memory exhaustion),
         // schedule a safe backend recreate using the already hardened switch path.
         // ★★★ This used to be a NO-OP that looked like a recovery: it only set
@@ -3440,11 +3067,11 @@ int main(int argc, char* argv[]) try {
         bool window_focus_gained_event = false;
         {
         RTPERF_FRAME_SCOPE("loop.events");
-        while (SDL_PollEvent(&e)) {
-            ImGui_ImplSDL2_ProcessEvent(&e);
-            if (e.type == SDL_QUIT) ui.tryExit();
-            if (e.type == SDL_WINDOWEVENT &&
-                e.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
+        AppRuntime::EventInfo event_info;
+        while (frame_cycle.pollEvent(e, event_info)) {
+            // Studio shell: quit goes through the save prompt.
+            if (event_info.quit_requested) ui.tryExit();
+            if (event_info.focus_gained) {
                 window_focus_gained_event = true;
             }
             const bool python_console_captures_input =
@@ -4136,9 +3763,7 @@ int main(int argc, char* argv[]) try {
         // Prevent any scene/backend mutation while loader thread is active.
         // =========================================================================
         if (ui.scene_loading.load()) {
-            ImGui_ImplSDLRenderer2_NewFrame();
-            ImGui_ImplSDL2_NewFrame();
-            ImGui::NewFrame();
+            frame_cycle.beginUiFrame();
 
             if (!ImGui::IsPopupOpen("Loading Scene...")) {
                 ImGui::OpenPopup("Loading Scene...");
@@ -4173,9 +3798,9 @@ int main(int argc, char* argv[]) try {
                 SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
             }
 
-            ImGui::Render();
-            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-            SDL_RenderPresent(renderer);
+            frame_cycle.endUiFrame();
+            frame_cycle.drawUi();
+            frame_cycle.present();
 
             SDL_Delay(10);
             continue;
@@ -4370,9 +3995,7 @@ int main(int argc, char* argv[]) try {
             // 1. DRAIN EVENTS (Done above)
             
             // 2. START NEW FRAME
-            ImGui_ImplSDLRenderer2_NewFrame();
-            ImGui_ImplSDL2_NewFrame();
-            ImGui::NewFrame();
+            frame_cycle.beginUiFrame();
 
             // 3. DRAW LOADING POPUP
             if (!ImGui::IsPopupOpen("Loading Scene...")) {
@@ -4411,9 +4034,9 @@ int main(int argc, char* argv[]) try {
                 SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
             }
             
-            ImGui::Render();
-            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-            SDL_RenderPresent(renderer);
+            frame_cycle.endUiFrame();
+            frame_cycle.drawUi();
+            frame_cycle.present();
 
             // 5. DO NOT HOG CPU - Give cycles to the loader thread
             SDL_Delay(10); 
@@ -4497,9 +4120,7 @@ int main(int argc, char* argv[]) try {
         // =========================================================================
         // NORMAL UI & RENDER LOOP (Starts here)
         // =========================================================================
-        ImGui_ImplSDLRenderer2_NewFrame();
-        ImGui_ImplSDL2_NewFrame();
-        ImGui::NewFrame();
+        frame_cycle.beginUiFrame();
         ui_ctx.ray_texture = raytrace_texture;
         
         ui_ctx.backend_ptr = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
@@ -4832,9 +4453,9 @@ int main(int argc, char* argv[]) try {
             SCENE_LOG_INFO("Resolution changed to " + std::to_string(image_width) + "x" + std::to_string(image_height));
             
             // Skip to next loop iteration - render starts next frame
-            ImGui::Render();
-            ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-            SDL_RenderPresent(renderer);
+            frame_cycle.endUiFrame();
+            frame_cycle.drawUi();
+            frame_cycle.present();
             continue;  // Skip rest of loop
         }
         const Uint8* key_state = SDL_GetKeyboardState(NULL);
@@ -7360,7 +6981,7 @@ int main(int argc, char* argv[]) try {
             {
                 // Draw listelerinin uretilmesi (CPU tarafi).
                 RTPERF_FRAME_SCOPE("loop.imgui_render");
-                ImGui::Render();
+                frame_cycle.endUiFrame();
             }
             {
                 // ★ SDL_Renderer (Windows'ta D3D11) uzerinden sunum. vsync
@@ -7370,8 +6991,8 @@ int main(int argc, char* argv[]) try {
                 SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
                 SDL_RenderClear(renderer);
                 SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-                ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
-                SDL_RenderPresent(renderer);
+                frame_cycle.drawUi();
+                frame_cycle.present();
             }
 
             // ★★ YALNIZCA gercekten sunulan karelerde yayinla. Atlanan karede
@@ -7392,7 +7013,7 @@ int main(int argc, char* argv[]) try {
         } else {
             // Idle — consume ImGui draw data without GPU work.
             Viewport::resetPresentationStats();
-            ImGui::Render();
+            frame_cycle.endUiFrame();
             ImGui::GetDrawData();
 
             if (tier4_background || !window_visible) {
@@ -7808,8 +7429,7 @@ int main(int argc, char* argv[]) try {
                     vkBackend->invalidateRasterGeometryCache("raster_representation_change");
                     g_viewport_raster_cache_invalid = false;
                 }
-                vkBackend->buildRasterGeometry(scene.world.objects);
-                vkBackend->syncRasterSkinnedVertices(scene.world.objects, ray_renderer.finalBoneMatrices);
+                AppRuntime::buildRasterScene(*vkBackend, scene, ray_renderer);
                 applyPendingDeleteVisibilityToBackend(scene, vkBackend);
                 syncMaterialBufferToViewportBackend(scene, ray_renderer);
                 // Hair viewport lines must be refreshed here: Renderer::uploadHairToGPU
@@ -7883,24 +7503,10 @@ int main(int argc, char* argv[]) try {
             bool refit_ok = true;
             if (interactive_viewport_active) {
                 // Solid / Matcap: refit the raster viewport mesh(es) in place.
-                if (!rasterViewportBackend || g_viewport_raster_rebuild_pending) {
-                    refit_ok = false;
-                } else {
-                    for (const auto& node : deform_nodes) {
-                        auto tris = scene.collectNodeTriangles(node);
-                        bool ok;
-                        if (!tris.empty()) {
-                            ok = rasterViewportBackend->updateRasterMeshFromTriangles(node, tris);
-                        } else if (TriangleMesh* fm = scene.getFlatNodeMesh(node)) {
-                            // Flat (direct SoA) mesh has no facades — refit the raster verts from its
-                            // SoA so a rigid-on-flat body stays realtime in Solid (no full rebuild).
-                            ok = rasterViewportBackend->updateRasterMeshFromMeshSoA(node, fm);
-                        } else {
-                            ok = false;
-                        }
-                        if (!ok) { refit_ok = false; break; }
-                    }
-                }
+                // Shared with the Player loop (Core/VulkanSceneSync).
+                refit_ok = rasterViewportBackend && !g_viewport_raster_rebuild_pending &&
+                           AppRuntime::refitRasterDeformedNodes(*rasterViewportBackend, scene,
+                                                                deform_nodes);
                 if (!refit_ok) g_viewport_raster_rebuild_pending = true;  // full raster rebuild fallback
                 else start_render = true;  // wake the Solid viewport this frame so the refit is presented
                                            // (a full rebuild used to keep it awake via pending_scene_refresh;
@@ -8007,18 +7613,13 @@ int main(int argc, char* argv[]) try {
         try { g_viewport_backend->shutdown(); } catch (...) {}
         g_viewport_backend.reset();
     }
+    // Studio editor textures live on the SDL renderer: release them before the
+    // shared runtime tears the renderer down.
     ui.releaseTerrainNodePreviewTexture();
-    SDL_DestroyTexture(raytrace_texture);
-    ImGui_ImplSDLRenderer2_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
-    ImGui::DestroyContext();
-    SDL_FreeSurface(surface);
-    SDL_FreeSurface(original_surface);
-    SDL_DestroyRenderer(renderer);
-    SDL_DestroyWindow(window);
+    AppRuntime::destroyMainWindowAndImGui();
     // Perform clean-shutdown cleanup: remove StartupCrash.log since shutdown is clean.
     removeStartupCrashLogIfExists();
-    SDL_Quit();
+    AppRuntime::shutdownPlatform();
     g_sceneLog.closeLogFile();
     return app_exit_code;
 }

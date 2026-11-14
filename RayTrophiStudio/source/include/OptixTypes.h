@@ -2,7 +2,7 @@
 #include <vector>
 #include <string>
 #include <memory>
-#include <cuda_runtime.h>
+#include "GpuInteropTypes.h"
 #include "Vec3.h"
 #include "material_gpu.h"
 

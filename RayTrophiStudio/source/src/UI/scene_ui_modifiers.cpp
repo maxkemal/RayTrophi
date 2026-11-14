@@ -41,7 +41,8 @@
 // materialize (~5s) + facade soup (~1.6 GB) for dense subdivide. With it ON, CPU (Embree) and
 // Vulkan RT render the dense mesh; OptiX / picking / sculpt of that mesh are later increments
 // (graceful degradation, no crash). Flip to true + rebuild to measure the win.
-bool g_dense_mesh_as_hittable = true;
+// Defined in Core/RuntimeState.cpp (shared state).
+extern bool g_dense_mesh_as_hittable;
 #include <filesystem>
 #include <SDL.h>
 #include <omp.h>

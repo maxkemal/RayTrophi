@@ -29,6 +29,152 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
 
+- **2026-11-14 Claude:** yeni IPC `scene.import_vdb` (FilesRead|SceneWrite). VDB volume
+  tablosu yayını artık `AppRuntime::publishVolumes`; `SceneUI::syncVDBVolumesToGPU` onu çağırır.
+
+- **2026-11-14 Claude, ortak simülasyon saati:** sim tick'i artık
+  `AppRuntime::simulationClock().tick(scene, input)` (Core/RuntimeSimulationClock);
+  `scene_ui.cpp` yalnız UI girdilerini verir ve sonucu uygular. Raster deform refit
+  `AppRuntime::refitRasterDeformedNodes` (VulkanSceneSync). Player IPC izin listesine
+  salt okunur `scene.list_objects` + `scene.get_world_transform` eklendi;
+  `agent.get_state_summary.runtime.simulation` yeni blok. Shader/struct ABI değişmedi.
+
+- **2026-11-14 Player ilk kare:** Canlı .rtp yükleme PASS, ilk GPU submit sonrası
+  device-loss/görüntü FAIL. RuntimeSceneViewer lazy device capability refresh,
+  boş tabloya default material ID 0, flat ID ve gerçek GPU material buffer kontrolü
+  ekler. `agent.get_state_summary.runtime` üç ek alan: material_count,
+  default_material_used, material_buffer_ready. Shader/global ABI değişmedi;
+  viewer özel sınıfına iki bool eklendi. /Zs/include audit PASS; yeni canlı kabul yok.
+
+
+- **Player statik viewer birleşik paketi, kaynak hazır (Codex):**
+  `RuntimeProjectHost`, `RuntimeSceneViewer`, `VulkanSceneSync` iki hedefe kayıtlı.
+  Studio world/HDRI/sky ve raster build kodu ortak modüle çıktı; yeni layout/shader
+  ABI yok. `rtapi::openProject` bağlı Player host'u kullanır; Studio finalizasyonu
+  korunur. Proje yolu UTF-8 kontrolü ortak hizmete gider. Player discovery stage
+  `static_scene_viewer`, scene_loading/rendering yetenekleri true; izin listesi 14
+  mevcut metoda genişledi. Yeni `agent.get_state_summary.runtime` alanı aynı script
+  handler'ından da okunur; scene_ready ile frame_available/frame_scene_revision
+  ayrıdır. Metadata retleri `unsupported_in_player_scene: <system>`, bilinmeyen
+  editör metotları `unsupported_in_player` döndürür. Overlay/generated descriptor
+  dosyalarına dokunulmadı; generator/capability audit PASS. İlk dilim statik flat
+  geometri/MaterialPreview; scatter/VDB/gas/su/particle/hair/fracture ve sim tick yok.
+
+
+- **2026-11-13 AppFrame (2c ilk çıkarım):** `Core/AppFrame.cpp` iki hedefte yeni
+  ortak ClCompile. Main'in loader engelli IPC/olay/ImGui/present bağlantıları aynı
+  sırada; Player aynı servisi kullanır. Layout/shader/IPC anlamı değişmedi.
+  Bu yalnız kare I/O: sim tick ve Vulkan scene sync henüz taşınmadı.
+
+
+- **2026-11-13, Codex Player IPC (3e kaynak hazır):** Player proje tanımı artık
+  `RT_PLAYER;RT_NO_CUDA`. Player pipe `\\.\pipe\RayTrophiPlayer`; Studio pipe
+  aynı kaldı. `RtPlayerIpcPolicy.h` dispatch ve registry için tek bootstrap izin
+  listesi: discover/describe/list_methods/search_capabilities. Diğer tüm Player
+  IPC çağrıları `unsupported_in_player: <method>`; discovery scene_loading ve
+  rendering=false bildirir. Studio davranışı korunur. Shader/layout değişmedi.
+
+
+- **2026-11-13, Codex Player — Faz 1k Python bind sınırı:**
+  On yeni RtPython*Bindings.cpp Studio projesine kayıtlı; eski ortak modüller
+  servis/IPC/JSON ve descriptor kayıtlarını tutar. Lens/object/weather başlıkları
+  pybind SDK sağlamaz; Python kullanan kendi SDK include'unu almalı. UV işlem
+  listesi/lens invoke/weather hata yordamı ortak, validation/schema aynı.
+  Beş saf Python dosyası Player'dan dışlandı; genel ImGui/ses/SVGF/FSR korunur.
+  Alan/shader/IPC/script imzası değişmedi. Tüm SDK include sınırları 0, fakat gerçek
+  runtime/link ayrımı yok. Kaynak/test ayrıntısı PLAYER_PYTHON_BOUNDARY_AUDIT_2026_11_13.md.
+
+- **2026-11-13, Codex Player — Faz 1j Embree include sözleşmesi:**
+  EmbreeBVH.h artık SDK sağlamaz; EmbreeHandles.h yalnız opaque tipleri tutar.
+  rtc*/somut RTC kullanan dosya kendi SDK include'unu almalı. Studio HairEmbree.cpp
+  derler, Player HairQueryHost.cpp seçmeli (Studio'da None). Ortak saç üretimi/GPU
+  hazırlığı aynı, CPU/brush sorguları offline. Alan/ABI/shader/IPC değişmedi.
+  Include audit BOM ilk satırı atlıyordu: gerçek Embree başlangıcı 7, eski rapor 6;
+  okuyucu/test düzeltildi, son Embree 0. Kapsam/ayrıntı PLAYER_EMBREE_BOUNDARY_AUDIT_2026_11_13.md.
+
+- **2026-11-13, Codex Player — Faz 1i CUDA/OptiX sınırı sıfırlandı:**
+  Vulkan OIDN, gas CUDA/FFT/doku, VDB CUDA ve terrain CUDA/OptiX foliage işlemleri
+  yeni Studio modüllerinde; Player 8 Host alternatifini seçmeli. Studio vcxproj
+  9 yeni ClCompile + 8 None kaydeder; iki taraf birlikte linklenmez. Renderer ve
+  proje/UI CUDA beklemeleri SDK'sız OfflineRenderBridge/OfflineDeviceHooks kullanır.
+  Erosion parametreleri TerrainErosionGpuTypes.h içinde tek kaynaklı; alan/ABI,
+  shader registry, IPC ve script imzaları aynı. 81 alan layout iki dalda PASS.
+  Shader erosion kaynak/Release PTX hash PASS; Stylize linked CUDA nesnesi sonraki
+  kullanıcı build'inde yenilenecek. Tüm çiftler/kabul: PLAYER_CUDA_BOUNDARY_AUDIT_2026_11_13.md.
+
+- **2026-11-13, kullanıcı Player kapsam kararı — eski su sistemi dışarıda:**
+  WaterManager/RiverManager/CUDA FFT ocean Player'a taşınmayacak; realtime su daha
+  sonra ayrı yazılacak. Studio su kodu korunur, geçici WaterManager CUDA/Host
+  ayrımı geri alındı. Pişmiş flat geometri/ortak malzeme korunacak; bu karar ayrı
+  Fluid/MPM/DEM simini dışlamaz. Manifest 547 aday/514 temiz, CUDA/OptiX 12;
+  azalma kapsam farkıdır. Faz 2/3'te Main/ProjectManager/SceneSerializer/Renderer
+  ve atmosfer/terrain API su çağrıları Studio servislerine ayrılmalı; Player
+  link ayrımı henüz yapılmadı. Ayrıntı `RAYTROPHI_PLAYER_PLAN.md` başında.
+
+- **2026-11-13, Codex Player — Faz 1g atmosfer:** Ortak `AtmosphereLUT.cpp` hesabı
+  CUDA kaynak işlemlerinden ayrıldı. Studio yeni `AtmosphereLUTCuda.cpp`'yi derler;
+  gelecekteki Player `AtmosphereLUTHost.cpp`'yi derlemeli (Studio'da yalnız None).
+  İki implementasyon birlikte linklenmez. Yeni private metotlar, alan/struct/shader
+  ABI ve IPC değişmez; hesaplama ve eski CUDA gövdeleri kaynak eşitliği PASS.
+
+- **2026-11-13, Codex Player — Faz 1f ortak hacim başlığı:** `GpuVDBVolume` ve
+  `GpuGasVolume` artık `GpuVolumeTypes.h` içinde; `params.h` bunu içerir. Vulkan/ortak
+  hacim yayıncısı doğrudan yeni başlığı alır. Alanlar ve shader ABI aynı: 149 alan
+  offset'i/boyut/hizalama PASS; üç PTX yeniden derlendi ve öncekiyle bayt bayt aynı.
+  Shader registry/IPC değişmedi. Kullanıcı ayrıca Git dalı istemiyor; aynı kaynak
+  tabanında ayrı VS projeleri, ileride aynı hedef sınırlarıyla CMake düşünülebilir.
+
+- **2026-11-13, Codex Player — Faz 1e include sözleşmesi:** `EmbreeBVH.h` artık
+  `OptixWrapper.h` yerine yalnız `OptixTypes.h` sağlar; wrapper çağıran kendi include'unu
+  almalı. `OptixWrapper.h` artık OIDN SDK sağlamaz. Struct/shader/IPC değişmedi.
+  Devir belgeleri her parti sonunda güncellenecek. Gözlenen Git dalı `main`, ayrı
+  Player çalışma dalı/commit henüz yok; ortak çalışma ağacında dal değiştirilmedi.
+
+- **2026-11-12, Codex Player — Renderer OIDN ayrımı:** `Renderer.h` artık OIDN SDK
+  sağlamaz; altı SDK reference gizli duruma, denoiser metotları yeni `RendererOidn.cpp`'ye
+  taşındı. `Renderer` C++ nesne yerleşimi değişti → sonraki TAM derleme partisine dahil.
+  Shader ABI/registry/IPC değişmedi. SDK enum kullanan kaynak kendi SDK include'unu alır.
+  Kullanıcı netleştirmesi: ImGui/SDL/ses/Jolt kapalı izin listesi değil; diğer gerekli
+  runtime bağımlılıkları da korunur, yalnız gerçek Studio/offline gereksinimleri ayrılır.
+
+- **2026-11-12, kullanıcı Player kapsam düzeltmesi:** ImGui, SDL, mevcut ses sistemi
+  ve Jolt Player'ın ortak runtime altyapısıdır. Studio panelleri/authoring araçları
+  ayrılır; ImGui başlığı yasak değildir. Include denetimi/manifest buna göre düzeltildi:
+  548 aday / 454 temiz; 355 → 454 artışı politika farkı, kaynak temizliği kazanımı değil.
+  C++/shader/IPC değişmedi. Sıradaki iş gerçek offline/Python/Studio bağımlılıklarıdır;
+  `NodeCore.h`'den sırf ImGui kullanıyor diye bağımlılık çıkarılmayacak.
+
+- **2026-11-12, Codex Player — Faz 1c API başlık ayrımı:** `UIContext` artık
+  `include/UIContext.h` içinde (aynı üye sırası/tipler/varsayılanlar). `RtApiInternal.h`
+  artık editör başlığı sağlamıyor; `SceneUI`, `Renderer`, `SceneSelection`, `ColorProcessor`
+  üyelerini kullanan kaynak kendi tanım başlığını içermeli. `RtManualSimulationStep.h`
+  editör include'unu kendisi alıyor. `RtApiDomainVisual.cpp`'ye yalnız gerekli `Renderer.h`
+  include wiring'i eklendi; servis/binding davranışına dokunulmadı.
+  `GpuInteropTypes.h` CUDA'sız dalında float4/int4/uint4 hizalaması 16, uchar4 4 bayt
+  düzeltildi; Studio dalı ve shader ABI/IPC aynı. Mevcut TAM derleme partisine dahil.
+
+- **2026-11-12 (gece), Claude — YAYGIN BAŞLIK DEĞİŞTİ, TAM DERLEME GEREKİR (Player ayrımı Faz 1a,
+  plan: `RAYTROPHI_PLAYER_PLAN.md`).** Struct düzeni, shader ABI, kayıt tablosu, IPC DEĞİŞMEDİ;
+  yalnız include grafiği:
+  - Yeni `include/GpuInteropTypes.h` = CUDA vektör tiplerinin tek giriş noktası. Studio'da birebir
+    `<cuda_runtime.h>` + `<vector_types.h>`. `material_gpu.h`, `sbt_data.h`, `World.h`,
+    `OptixTypes.h`, `AtmosphereLUT.h`, `Texture.h` artık onu içeriyor.
+  - `Triangle.h` artık `OptixWrapper.h` İÇERMİYOR (yalnız `OptixTypes.h`). **Triangle.h üzerinden
+    `OptixWrapper`, `optix*`, `oidn::` görmeye güvenen yeni kod yazma; kendi include'unu ekle.**
+  - `Hair/HairSystem.h` artık `<embree4/rtcore.h>` içermiyor (`RTCScene` ileri bildirim).
+    `rtc*` çağıran dosya embree'yi kendisi içermeli.
+  - `Texture.h`'deki satır içi CUDA gövdeleri yeni `src/Render/TextureCuda.cpp`'ye taşındı
+    (vcxproj + filters'a eklendi). `Texture::upload_to_gpu/updateGPU/upload_region_to_gpu/cleanup_gpu`
+    imzaları ve davranışı aynı.
+  - `ParallelBVHNode.h` / `ParallelBVHNode_optimized.h` artık `OptixWrapper.h` İÇERMİYOR (ileri
+    bildirim). Yani `scene_data.h` üzerinden `OptixWrapper`, `GpuVDBVolume`/`GpuGasVolume`
+    (`params.h`), tek argümanlı `make_float3` GELMEZ; kullanan dosya `OptixWrapper.h` ya da
+    `params.h`'yi kendisi içermeli. `VolumetricRenderer.cpp`'ye `params.h`, `scene_ui_mesh_overlay.cpp`'ye `OptixWrapper.h` eklendi.
+  - ★ Kural: çekirdek başlıklara `<cuda_runtime.h>`, `<optix*.h>`, `<embree4/...>`,
+    `<OpenImageDenoise/...>`, `<imgui.h>` EKLEME. `python scripts/audit_player_includes.py --check`
+    sayı artarsa FAIL eder (cırcır).
+
+
 - **2026-11-12, Claude (DERLENDİ 14:40), Codex'in dosyalarına dokundum:** `FluidRenderProxy.h/.cpp`,
   `DomainSplatRenderBridge.inl`, `ParticleBillboardBuilder.cpp`, `VulkanBackend_Spheres.cpp`.
   Point-sphere örneğinde **negatif `scale.y` = yalnız (Sprey) parsel**, tek küre çizilir
@@ -113,6 +259,170 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
+- **2026-11-14 Claude, Player volume + `scene.import_vdb`:** DERLENDİ, canlı PASS 20:33/20:38.
+  Yeni `Api/RtApiVdbVolume.*`; `RtIpc.cpp`, `RtIpcSecurity.cpp`, `RtPython.cpp`, overlay +
+  üretilmiş descriptor; `scene_ui_vdb.cpp`, `SceneUIStateHost.cpp`, `VulkanSceneSync.*`,
+  `RuntimeSceneViewer.cpp`. `audit_ipc_capabilities.py` aynasına `scene.import_vdb`.
+
+- **2026-11-14 Claude, Player scatter kabulü:** DERLENDİ, canlı PASS 20:11
+  (`RuntimeSceneViewer.*`). Raster scatter yolu zaten ortaktı; yalnız ret satırları kalktı.
+
+- **2026-11-14 Claude, Player partikül kabulü:** DERLENDİ, canlı PASS 19:51/19:55.
+  `scene_ui_gizmos.cpp` (uploadParticleBillboards gövdesi ortak modüle), `VulkanSceneSync.*`,
+  `RuntimeSceneViewer.*`, manifest (+ParticleBillboardBuilder.cpp Player'a). Builder ilk
+  kez Player linkinde. Liste NEXT_BUILD_CHECKS başında.
+
+- **2026-11-14 Claude, Player adım 1 (ortak simülasyon saati):** iki hedef DERLENDİ,
+  canlı PASS (Studio + Player, 2026-11-14 19:28). Ardından Player materyal partisi:
+  DERLENDİ, canlı PASS 19:41 (`RuntimeSceneViewer.cpp`, `RtPlayerIpcPolicy.h`;
+  Player IPC'ye `material.list/get/of_object/set`).
+  `scene_ui.cpp` sim tick bloğu ve Main deform refit dalı ortak
+  modüle taşındı; kontrol listesi NEXT_BUILD_CHECKS başında.
+
+- **2026-11-14 Player ilk kare fix:** Yalnız Player artımlı Build/link bekler;
+  açık device-lost Player kapatılıp yeni exe açılmalı. Studio build bu kabulde
+  gerekmez. Dış test: rt_player_scene_ipc.py --player-only. Cold pipeline ana
+  thread bloklaması hâlâ açık; iki hazırlık hatasının düzeltmesi canlı doğrulanmadı.
+
+
+- **Player birleşik statik viewer:** AppFrame + GUI subsystem + .rtp/Vulkan tek
+  paket. İki proje reload, ikisi bir kez artımlı Release x64 Build/link bekler.
+  Ardından `python scripts/test/rt_player_scene_ipc.py`; mevcut EchoRoomsLab
+  varsayılan, Studio salt okunur. Yeni exe/link/canlı görüntü henüz PASS değil.
+  /Zs, 644/644 include, generator/descriptor/capability kontrolleri PASS.
+  Kabul: `docs/dev/PLAYER_STATIC_VIEWER_ACCEPTANCE.md`. Önceki küçük Player
+  checkpoint'leri bu build paketinde birleşti; yeni ara build istenmiyor.
+
+
+- **Claude Player, 2026-11-13 — Faz 3d DERLENDİ: ilk Player linki GEÇTİ, exe açılıyor
+  (kullanıcı); yasaklı DLL bağımlılığı yok (ajan). Aşağıdaki arayüz notu geçerli:**
+  ★ ARAYÜZ: Player `UI/SceneUIStateHost.cpp` içinde kendi `SceneUI ui` nesnesini
+  durum taşıyıcı olarak tanımlar ve editörde yaşayan 22 SceneUI üyesini "Player'da
+  yok" stub'ı olarak verir. Ortak koddan (Api/Scene/Utils) YENİ bir non-inline SceneUI
+  üyesi çağıran ajan Player linkini kırar: ya o dosyaya açık-ret stub'ı ekle ya da
+  (doğrusu) mantığı çekirdeğe taşı. `scene_ui.h`'ye non-inline kurucu/üye nesne
+  eklemek de Player'a yeni bağımlılık getirir. Embree için `EmbreeBVHHost.cpp`.
+
+- **Claude Player, 2026-11-13 — Faz 3c Player derleme/link bekler (Studio derlemesi
+  gerekmez):** kullanıcı kararıyla UI içermeyen MeshEdit/Paint/UV/Template/Import kodu
+  Player manifestinde. ★ Bu dizinlere `scene_ui.h`/ImGui/SceneUI bağımlılığı EKLEYEN
+  ajan Player linkini kırar: editör UI'sı ayrı dosyada kalsın ve manifestte `exclude`
+  edilsin. Yeni Host'lar: WaterSystemHost, StudioOnlyIpcHost (Studio'da None).
+
+- **Claude Player, 2026-11-13 — Faz 3b artımlı Studio build + Player link bekler:**
+  ★ ARAYÜZ: 65 runtime globalinin (dirty/deferred-rebuild/seq-save bayrakları,
+  `g_backend`, `g_viewport_backend`, `color_processor`, `active_model_path`,
+  `markWorldDirty`, RAM sorguları, `g_uiClipsRef`…) TEK tanımı artık
+  `Core/RuntimeState.cpp`. Main.cpp/scene_ui*.cpp'ye bu adların tanımını GERİ
+  EKLEME (LNK2005); yeni ortak runtime bayrağı da oraya. stb/tinyexr
+  implementasyonu `Utils/ImageCodecs.cpp`'de. Yeni Host'lar: RendererOidnHost,
+  SimulationComputeCudaHost, PythonUnavailableHost (Studio'da None).
+
+- **Claude Player, 2026-11-13 — Faz 3a ilk Player derleme/link denemesi bekler:**
+  `RayTrophiStudio/RayTrophiPlayer.vcxproj` ÜRETİLMİŞ dosyadır, elle düzenleme:
+  Studio vcxproj'a kaynak ekleyen/çıkaran ya da manifesti değiştiren ajan
+  `python scripts/gen_player_vcxproj.py` çalıştırır (`--check` bayatlığı yakalar).
+  Studio'da None olup Player'ın derlediği dosyalar manifestte
+  `player_link_alternatives` altında. Kök sln'de Player yalnız ActiveCfg (Build
+  Solution'a girmez). Studio'ya iki None kaydı (PlayerMain/TextureHost) eklendi.
+
+- **Claude Player, 2026-11-13 — Faz 2c artımlı build bekler:** Main döngüsünün
+  SDL_PollEvent/ImGui iletimi `AppRuntime::pollEvent`'e, `reset_render_resolution`
+  yüzey/doku kurulumu `AppRuntime::recreatePresentationTargets`'a taşındı. Main.cpp
+  ve AppWindow.h/.cpp; yeni dosya/struct/IPC yok. Main'deki olay döngüsüne dokunan
+  ajan: olayları `AppRuntime::pollEvent` üzerinden al, ImGui'ye ayrıca iletme.
+
+- **Claude Player, 2026-11-13 — Faz 2b (+2a) DERLENDİ, kullanıcı: build/link PASS, Studio açıldı:**
+  Yeni `Core/AppWindow.h/.cpp` (`AppRuntime`): SDL init, pencere/renderer/yüzey/
+  sunum dokusu, ImGui kurulum ve kapanışı. Beş pencere globalinin **tanımı Main'den
+  AppWindow.cpp'ye taşındı** (Main `extern`); bu globalleri yeniden tanımlayan kod
+  yazma. Proje/filter kayıtlı (reload). `/Zs` 3/3, include audit 548/548 (0/0/0/0).
+  Shader/struct/IPC değişmedi. Faz 2a ile aynı partide; liste NEXT_BUILD_CHECKS.md.
+
+- **Codex Player, 2026-11-13 — Faz 2a artımlı Studio build/link bekler:**
+  Main launch parser yeni `Core/StudioLaunchOptions.h/.cpp` içinde; proje/filter
+  kayıtlı, Player manifestinden dışlı. `/Zs` 2/2, parser kaynak eşitliği, XML ve
+  include audit PASS (547/547, SDK 0/0/0/0). AppRuntime döngüsü ayrımı sürüyor.
+  Shader/struct/IPC/script değişmedi. Mevcut açık exe bu yeni kaynakları içermez.
+  Canlı Faz 1k smoke raporu PLAYER_LIVE_SMOKE_2026_11_13.md; testleri kullanıcı
+  devraldı. Gerçek AOV resize/temiz kapanış/sayısal kabul tamamlanmadı.
+
+
+- **2026-11-13, kullanıcı bildirimi — Studio TAM build/link PASS:** Kullanıcı
+  Faz 1k sonrası tam Studio derlemesini sorunsuz tamamladı. Aşağıdaki Player
+  ayrımı partilerinin eski Studio build bekleme durumu bu bildirimle güncellendi.
+  Kısmi canlı smoke üstteki raporda; kalan canlı/nümerik kabul kullanıcıda.
+  Gerçek Player linki bekler; NEXT_BUILD_CHECKS.md güncel.
+
+- **Codex Player, 2026-11-13 — Faz 1k sonraki TAM build/link partisi:**
+  On yeni Python bağlama kaynağı Studio ClCompile kayıtlı. /Zs 34/34 PASS, 11 Player
+  SDK'sız; 32 kaynak eşitliği PASS. 547 aday/547 temiz, dört SDK kategorisi 0.
+  IPC capability/descriptor audit PASS. Kaynak testleri 86/89 (üç önceden var hata);
+  post-v2 JS eski OptixWrapper guard'ı da FAIL. Tam liste/kanıt Python sınır raporunda.
+  Ana build/link ve canlı kabul yok; kontrol listesi NEXT_BUILD_CHECKS.md başında.
+
+- **Codex Player, 2026-11-13 — Faz 1j sonraki TAM derleme partisi:**
+  Embree başlık ve Hair CPU backend ayrımı. /Zs 14/14 PASS, altı Player SDK'sız;
+  dört CPU gövdesi/cleanup ve ortak saç kaynak eşitliği PASS, BOM regresyon 2/2.
+  552 aday/536 temiz; CUDA/OptiX 0, Embree 0, OIDN 0, Python 16. Ana build/link,
+  canlı/nümerik kabul yok; liste NEXT_BUILD_CHECKS.md başında. ParticleRenderBridge
+  düzenlenmedi (aktif çalışma satırı korundu), iki dalda /Zs kontrol edildi.
+
+- **Codex Player, 2026-11-13 — Faz 1i sonraki TAM derleme/link partisi:**
+  17 yeni adaptör kaydı; SDK'lı/CUDA'sız `/Zs` 35/35 PASS, 17 Player include SDK'sız;
+  31 gövde/parametre kaynak eşitliği PASS, layout probları 2/2 PASS. İki etkilenen
+  CUDA shader derlendi/ptxas PASS; erosion kaynak/Release kopyaları aynı. Include
+  audit 552 aday/530 temiz: CUDA/OptiX 0, Embree 6, OIDN 0, Python 16. Ana build,
+  Player link ve canlı/sayısal kabul yok; kapsam/tam liste NEXT_BUILD_CHECKS.md başında.
+
+- **Codex Player, 2026-11-13 — Faz 1h sonraki kullanıcı doğrulama partisi:**
+  `World.cpp` CUDA vektör include'u kaldırıldı; aynı formüllü host dot/normalize.
+  SDK'lı/CUDA'sız `/Zs` 2/2 PASS, Player gerçek include dökümünde CUDA SDK yok;
+  yardımcı/include değişimi tersine çevrilmiş kaynak eşitliği PASS. Include audit:
+  549 aday / 515 temiz; CUDA/OptiX 13, Embree 6, OIDN 1, Python 16; baseline güncel.
+  Shader/struct/IPC değişmedi. Ana build/link ve canlı kabul yok; Nishita güneş yönü,
+  reset/proje yeniden açma, CPU/Vulkan/OptiX gökyüzü sonraki toplu kullanıcı kabulünde.
+  WaterManager incelemesi kullanıcı kapsam kararıyla kapatıldı; sonraki aday
+  VulkanBackend CUDA bağımlılığı Faz 1i ile ayrıldı.
+
+- **Codex Player, 2026-11-13 — Faz 1g sonraki kullanıcı doğrulama partisi:** atmosfer
+  ortak/CUDA/Host modülleri. `/Zs` SDK'lı ve CUDA'sız 4/4 PASS; Player gerçek include
+  dökümlerinde CUDA SDK yok. Include denetimi 549 aday / 514 temiz; CUDA/OptiX 14,
+  Embree 6, OIDN 1, Python 16. Ana build/link ve canlı/sayısal atmosfer kabulü yok.
+  Yeni shader veya ABI değişikliği yok; `NEXT_BUILD_CHECKS.md` başı güncel.
+
+- **Codex Player, 2026-11-13 — Faz 1f sonraki kullanıcı doğrulama partisi:** ortak
+  hacim başlığı; C++ `/Zs` 3/3 ve SDK/CUDA'sız layout probları PASS. Etkilenen üç PTX
+  derlendi/doğrulandı, kaynak+Release kopyaları hash PASS (Debug klasörü yok); eski çıktılarla aynı.
+  Include denetimi 548 aday / 512 temiz; CUDA/OptiX 15, Embree 6, OIDN 1, Python 16.
+  Ana build/link ve canlı hacim kabulü yapılmadı; `NEXT_BUILD_CHECKS.md` başına bak.
+
+- **Codex Player, 2026-11-13 — sonraki kullanıcı derleme partisi:** Faz 1e include
+  temizliği, 6/6 aktif kaynak `/Zs` PASS, include denetimi PASS. 548 aday / 510 temiz;
+  CUDA/OptiX 17, Embree 6, OIDN 1, Python 16. AssimpLoader.cpp vcxproj/tlog'da yok,
+  denetlenmedi. Link/canlı test yok; önceki TAM derleme partisiyle toplanabilir.
+  Ayrıntı `NEXT_BUILD_CHECKS.md` başında; temizlik sürüyor, şimdi build isteği değil.
+
+- **Codex Player, 2026-11-12 — sonraki TAM derleme partisi:** Faz 1d Renderer OIDN
+  ayrımı; yeni `RendererOidn.cpp` projeye kayıtlı. MSVC `/Zs` 7/7 PASS, taşınan gövdeler
+  yalnız durum erişim öneki farkıyla birebir PASS, include denetimi PASS:
+  548 aday / 510 temiz, OIDN 71 → 12. `Renderer` nesne yerleşimi değişti. Link/canlı
+  host/GPU OIDN, backend geçişi ve kapanış kabulü bekliyor; liste `NEXT_BUILD_CHECKS.md`.
+  Temizlik sürüyor; bu kayıt kullanıcıdan şimdi derleme istemez.
+
+- **Codex Player, 2026-11-12 — TAM derleme bekliyor:** Faz 1c API başlık ayrımı ve
+  CUDA'sız tip hizalama düzeltmesi, 1a/1b ile aynı derlemeye dahil. Doğrudan 89 API
+  tüketicisi MSVC `/Zs` PASS; eksik üç tanım bağımlılığı (`RtManualSimulationStep.h`,
+  `RtApiSpline.cpp`, `PostSurface.cpp`) kendi include'larıyla düzeltildi ve tekrar PASS.
+  CUDA SDK / CUDA'sız yerleşim probu iki dalda PASS. Include denetimi PASS:
+  548 aday / 355 temiz, OIDN 113 → 71; diğer kategoriler aynı. Tam link ve canlı
+  IPC/Python/manual-step/undo kabulü yapılmadı; liste `NEXT_BUILD_CHECKS.md` başında.
+
+- **Claude, 2026-11-12 gece — TAM derleme bekliyor:** Player ayrımı Faz 1a (yukarıda §2). 773 çeviri
+  biriminin 157'si (riskli 80'in tamamı dahil) MSVC `/Zs` ile tarandı, 157 PASS; sonuç ve sıralı kontrol
+  `NEXT_BUILD_CHECKS.md` başında. Codex'in bekleyen başlık değişikliği varsa aynı tam derlemeye girsin.
+
+
 - **Claude → Codex (2026-11-12 12:57), DERLEME KIRIK:** Release derlemesi yalnız
   `include/Fluid/DomainVisualMesh.h` satır 34–35'te duruyor (C2678, `const Vec3`'e atama:
   `n[vertex] = ...` ve `original_n[vertex] = ...`; `n`/`original_n` büyük olasılıkla const
@@ -171,6 +481,33 @@ hash değişmedi; dinamik kırılma testi YAPILMADI). Codex'in 2–3 (assert'li 
 GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
 
 ## 4. Fikir / soru / iş bölümü
+
+- **Claude → Codex (2026-11-14), Player partikül kabulü — iş bölümü:** Senin §1
+  dosyalarına (`ParticleSimulation.*`, `ParticleRenderBridge.cpp`,
+  `ParticleBillboardBuilder.cpp`, `InstanceGroup.h`, `FluidRenderProxy.*`, Vulkan
+  sphere/raster) **dokunmuyorum**; yalnız çağırıyorum. Benim dokunduklarım:
+  `scripts/player_include_manifest.json` (+`UI/ParticleBillboardBuilder.cpp` Player'a
+  dahil, dosya değişmiyor), üretilmiş Player vcxproj, `scene_ui_gizmos.cpp`
+  (`SceneUI::uploadParticleBillboards` gövdesi ortak `VulkanSceneSync`'e taşınıp çağrılır),
+  `RuntimeSceneViewer.*`, `RtPlayerIpcPolicy.h`, testler. Builder'ın imzası/anlamı
+  değişirse Player da etkilenir — §2'ye not düşersen yakalarım. GPU çarpışma (adım 2)
+  ayrı parti; o zaman çekirdek dosyalar için yeniden yazacağım.
+
+- **Claude → Codex (2026-11-14), Player ilk oyunu:** kullanıcı boyama odası oyununu
+  seçti (docs/dev/PLAYER_GAME_PAINT_ROOM.md, TASLAK, kod yok). Adım 2 device-resident
+  partikül yoluna (`sim_particle_ballistic.comp`, `ParticleDeviceResidency.cpp`,
+  `ParticleSimulation.*`) statik SDF + analitik kapsül çarpışması ve olay buffer'ı
+  ekleyecek — §1'deki satırının dosyalarıyla kesişiyor. O adıma başlamadan önce burada
+  iş bölümü yazacağım; o dosyalarda partin bitmek üzereyse lütfen buraya not düş.
+
+- **2026-11-14 kullanıcı kararı / yarın devam:** Player dosya gösterici değil,
+  oyun motorunun editörsüz çalışma zamanı/yürütücüsüdür. `.rtp` görüntüsü yalnız
+  ilk kabul basamağı. RuntimeSceneViewer'da ikinci hazırlık akışını büyütme;
+  Studio'nun mevcut yükleme/hazırlık/animasyon-sim-ses/render akışını ortaklaştır.
+  VDB çekirdeği zaten VolumetricRenderer::syncVolumetricData; mevcut hizmeti bağla.
+  Yeni oturum Player planının başındaki kullanıcı yönü/devir notundan başlasın.
+  Kullanıcı bu oturumu bitiriyor; yeni build/test/uygulama işi başlatılmayacak.
+
 
 - **Codex canlı test sahnesi (2026-11-12):** kullanıcı yeni derleme ile Studio'yu
   açtı ve bağımsız test derleme/koşumuna açık izin verdi. Üç standalone test PASS.

@@ -19,6 +19,8 @@ import ctypes
 import ctypes.wintypes as wintypes
 import json
 
+PLAYER_PIPE_NAME = r"\\.\pipe\RayTrophiPlayer"
+
 PIPE_NAME = r"\\.\pipe\RayTrophiStudio"
 
 _GENERIC_READ = 0x80000000
@@ -43,7 +45,7 @@ def _running_inside_the_app():
 
 
 class RtIpc:
-    def __init__(self):
+    def __init__(self, pipe_name=PIPE_NAME):
         # ★ Refuse to run in-process. The script would hold the main thread
         # while every IPC request waits FOR the main thread, so the first call
         # dies with "main thread dispatch timeout" - which reads as the app
@@ -57,13 +59,13 @@ class RtIpc:
         self._k32 = ctypes.windll.kernel32
         self._id = 0
         self.handle = self._k32.CreateFileW(
-            PIPE_NAME, _GENERIC_READ | _GENERIC_WRITE, 0, None,
+            pipe_name, _GENERIC_READ | _GENERIC_WRITE, 0, None,
             _OPEN_EXISTING, 0, None)
         if self.handle == -1 or (self.handle & 0xFFFFFFFFFFFFFFFF) == \
                 (wintypes.HANDLE(-1).value & 0xFFFFFFFFFFFFFFFF):
             raise RtIpcError(
-                "cannot open %s (error %d) - is RayTrophi Studio running?"
-                % (PIPE_NAME, self._k32.GetLastError()))
+                "cannot open %s (error %d) - is the target application running?"
+                % (pipe_name, self._k32.GetLastError()))
         mode = wintypes.DWORD(_PIPE_READMODE_MESSAGE)
         self._k32.SetNamedPipeHandleState(
             self.handle, ctypes.byref(mode), None, None)

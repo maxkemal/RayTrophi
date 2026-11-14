@@ -16,7 +16,7 @@
 #include <SDL_image.h>
 #include "stb_image.h"
 #include "tinyexr.h"
-#include <cuda_runtime.h>
+#include "GpuInteropTypes.h"
 #include "Vec2.h"
 #include "Vec3SIMD.h"
 #include <iostream>
@@ -820,117 +820,9 @@ public:
         if (is_gpu_uploaded || !m_is_loaded)
             return false;
 
-        // Texture türüne göre sRGB dönüşümü gerekip gerekmediğini belirle
-        // SADECE Albedo texture'ları sRGB formatında saklanır → Linear'a dönüştürülmeli
-        // Emission: Intensity/HDR değerleri içerir, sRGB dönüşümü karartır → dönüşüm yok
-        // Normal, Roughness, Metallic, AO, Transmission, Opacity → Linear data, dönüşüm yok
-        bool needs_srgb_conversion = (type == TextureType::Albedo);
-        cudaError_t err;
-
-        if (is_hdr) {
-            // Float4 Texture Upload
-            cudaChannelFormatDesc desc = cudaCreateChannelDesc<float4>();
-            err = cudaMallocArray(&cuda_array, &desc, width, height);
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("cudaMallocArray (float) failed for " + std::to_string(width) + "x" + std::to_string(height) + ": " + std::string(cudaGetErrorString(err)));
-                return false;
-            }
-            err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
-                width * sizeof(float4),
-                width * sizeof(float4), height,
-                cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("cudaMemcpy2DToArray (float) failed: " + std::string(cudaGetErrorString(err)));
-                return false;
-            }
-        }
-        else {
-            // Pixel verilerini uchar4'e dönüştür
-            std::vector<uchar4> cuda_data(pixels.size());
-
-            if (needs_srgb_conversion) {
-                // sRGB → Linear dönüşümü LUT ile HIZLI yap
-                const auto& lut = SRGBToLinearLUT::instance();
-                for (size_t i = 0; i < pixels.size(); ++i) {
-                    auto& p = pixels[i];
-                    cuda_data[i] = make_uchar4(
-                        lut[p.r],
-                        lut[p.g],
-                        lut[p.b],
-                        p.a  // Alpha kanalı linear kalır
-                    );
-                }
-            }
-            else {
-                // Linear data texture'ları - dönüşüm yok
-                for (size_t i = 0; i < pixels.size(); ++i) {
-                    auto& p = pixels[i];
-                    cuda_data[i] = make_uchar4(p.r, p.g, p.b, p.a);
-                }
-            }
-
-            // CUDA array oluştur
-            cudaChannelFormatDesc desc = cudaCreateChannelDesc<uchar4>();
-            err = cudaMallocArray(&cuda_array, &desc, width, height);
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("cudaMallocArray failed for " + std::to_string(width) + "x" + std::to_string(height) + ": " + std::string(cudaGetErrorString(err)));
-                return false;
-            }
-
-            // Veriyi GPU'ya kopyala
-            err = cudaMemcpy2DToArray(cuda_array, 0, 0, cuda_data.data(),
-                width * sizeof(uchar4),
-                width * sizeof(uchar4), height,
-                cudaMemcpyHostToDevice);
-            if (err != cudaSuccess) {
-                SCENE_LOG_ERROR("cudaMemcpy2DToArray failed: " + std::string(cudaGetErrorString(err)));
-                return false;
-            }
-        }
-
-        // Texture descriptor oluştur
-        cudaResourceDesc resDesc = {};
-        resDesc.resType = cudaResourceTypeArray;
-        resDesc.res.array.array = cuda_array;
-
-        cudaTextureDesc texDesc = {};
-        texDesc.addressMode[0] = cudaAddressModeWrap;
-        texDesc.addressMode[1] = cudaAddressModeWrap;
-        texDesc.filterMode = cudaFilterModeLinear;
-        texDesc.readMode = is_hdr ? cudaReadModeElementType : cudaReadModeNormalizedFloat;
-        texDesc.normalizedCoords = 1;
-        // NOT: cudaTextureDesc'te sRGB flag yok - dönüşümü CPU'da yaptık
-
-        // Texture object oluştur
-        err = cudaCreateTextureObject(&tex_obj, &resDesc, &texDesc, nullptr);
-        if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("cudaCreateTextureObject failed: " + std::string(cudaGetErrorString(err)));
-            return false;
-        }
-
-        is_gpu_uploaded = true;
-
-        // Texture türünü string'e çevir
-        const char* type_str = "Unknown";
-        switch (type) {
-        case TextureType::Albedo: type_str = "Albedo"; break;
-        case TextureType::Normal: type_str = "Normal"; break;
-        case TextureType::Roughness: type_str = "Roughness"; break;
-        case TextureType::Metallic: type_str = "Metallic"; break;
-        case TextureType::Emission: type_str = "Emission"; break;
-        case TextureType::AO: type_str = "AO"; break;
-        case TextureType::Transmission: type_str = "Transmission"; break;
-        case TextureType::Opacity: type_str = "Opacity"; break;
-        case TextureType::Specular: type_str = "Specular"; break;
-        default: break;
-        }
-
-        // SCENE_LOG_INFO("Texture uploaded to GPU | " +
-        //     std::to_string(width) + "x" + std::to_string(height) +
-        //     " | Type: " + std::string(type_str) +
-        //     (needs_srgb_conversion ? " | sRGB->Linear converted" : " | Linear (no conversion)"));
-
-        return true;
+        // The CUDA calls live in TextureCuda.cpp (offline/OptiX build only), so
+        // this header no longer needs the CUDA SDK.
+        return cudaUploadFull();
     }
 
     // Efficiently update GPU data from current CPU pixels
@@ -940,39 +832,7 @@ public:
         markVulkanDirtyFull();
         markSaveDirty();
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return;
-
-        cudaError_t err = cudaSuccess;
-        if (is_hdr) {
-             err = cudaMemcpy2DToArray(cuda_array, 0, 0, float_pixels.data(),
-                width * sizeof(float4),
-                width * sizeof(float4), height,
-                cudaMemcpyHostToDevice);
-        } else {
-             std::vector<uchar4> cuda_data(pixels.size());
-             // No sRGB conversion for update usually, assuming we write directly linear values or consistent with initial upload
-             // But for safety, replicate logic or assume SplatMap (RGBA8 unorm) which is Linear-ish data for Mask
-             bool needs_srgb_conversion = (type == TextureType::Albedo);
-             
-             if (needs_srgb_conversion) {
-                 const auto& lut = SRGBToLinearLUT::instance();
-                 for (size_t i = 0; i < pixels.size(); ++i) {
-                     cuda_data[i] = make_uchar4(lut[pixels[i].r], lut[pixels[i].g], lut[pixels[i].b], pixels[i].a);
-                 }
-             } else {
-                 for (size_t i = 0; i < pixels.size(); ++i) {
-                     cuda_data[i] = make_uchar4(pixels[i].r, pixels[i].g, pixels[i].b, pixels[i].a);
-                 }
-             }
-             
-             err = cudaMemcpy2DToArray(cuda_array, 0, 0, cuda_data.data(),
-                width * sizeof(uchar4),
-                width * sizeof(uchar4), height,
-                cudaMemcpyHostToDevice);
-        }
-
-        if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("Texture update failed: " + std::string(cudaGetErrorString(err)));
-        }
+        cudaUpdateFull();
     }
 
     // Convenience wrapper matching updateGPU naming for partial region upload.
@@ -998,73 +858,14 @@ public:
         markSaveDirty();
 
         if (!is_gpu_uploaded || !g_hasOptix || !cuda_array) return false;
-
-        cudaError_t err = cudaSuccess;
-        if (is_hdr) {
-            std::vector<float4> region_data(w * h);
-            for (int j = 0; j < h; ++j) {
-                std::memcpy(&region_data[j * w], &float_pixels[(y + j) * width + x], w * sizeof(float4));
-            }
-            err = cudaMemcpy2DToArray(cuda_array, x * sizeof(float4), y, region_data.data(),
-                w * sizeof(float4),
-                w * sizeof(float4), h,
-                cudaMemcpyHostToDevice);
-        } else {
-            bool needs_srgb_conversion = (type == TextureType::Albedo);
-            std::vector<uchar4> region_data(w * h);
-            
-            if (needs_srgb_conversion) {
-                const auto& lut = SRGBToLinearLUT::instance();
-                for (int j = 0; j < h; ++j) {
-                    for (int i = 0; i < w; ++i) {
-                        auto& p = pixels[(y + j) * width + (x + i)];
-                        region_data[j * w + i] = make_uchar4(lut[p.r], lut[p.g], lut[p.b], p.a);
-                    }
-                }
-            } else {
-                for (int j = 0; j < h; ++j) {
-                    std::memcpy(&region_data[j * w], &pixels[(y + j) * width + x], w * sizeof(uchar4));
-                }
-            }
-            
-            err = cudaMemcpy2DToArray(cuda_array, x * sizeof(uchar4), y, region_data.data(),
-                w * sizeof(uchar4),
-                w * sizeof(uchar4), h,
-                cudaMemcpyHostToDevice);
-        }
-
-        if (err != cudaSuccess) {
-            SCENE_LOG_ERROR("Texture region update failed: " + std::string(cudaGetErrorString(err)));
-            return false;
-        }
-        return true;
+        return cudaUpdateRegion(x, y, w, h);
     }
 
     cudaTextureObject_t getTextureObject() const { return tex_obj; }
     bool isUploaded() const { return is_gpu_uploaded; }
 
     void cleanup_gpu(bool synchronize = true) {
-        if (tex_obj) {
-            // Notify SceneTextureManager FIRST so any cached optixTextureId entries
-            // pointing at this handle are cleared before the CUDA object is destroyed.
-            // Otherwise concurrent material resolves can fetch a stale handle that
-            // CUDA may have just recycled to a different texture — manifesting as
-            // wrong textures wrapping wrong meshes after a delete/replace.
-            notifyOptixTextureDestroyed(static_cast<int64_t>(tex_obj));
-
-            // Texture slot deletion can race with an in-flight OptiX launch.
-            // Wait for outstanding CUDA work before freeing the texture object.
-            if (synchronize && (g_hasOptix || rendering_in_progress.load(std::memory_order_acquire))) {
-                cudaDeviceSynchronize();
-            }
-
-            cudaDestroyTextureObject(tex_obj);
-            tex_obj = 0;
-        }
-        if (cuda_array) {
-            cudaFreeArray(cuda_array);
-            cuda_array = nullptr;
-        }
+        if (tex_obj || cuda_array) cudaRelease(synchronize);
         is_gpu_uploaded = false;
     }
 
@@ -1265,6 +1066,14 @@ private:
     std::vector<uint8_t> alphas;  // float yerine 1 byte kullanıyoruz
 
    
+
+    // CUDA texture residency. Defined in src/Render/TextureCuda.cpp; a build
+    // without CUDA links a no-op definition instead. Callers reach these only
+    // through the guarded wrappers above (g_hasOptix / is_gpu_uploaded).
+    bool cudaUploadFull();
+    void cudaUpdateFull();
+    bool cudaUpdateRegion(int x, int y, int w, int h);
+    void cudaRelease(bool synchronize);
 
     cudaArray_t cuda_array = nullptr;
     cudaTextureObject_t tex_obj = 0;

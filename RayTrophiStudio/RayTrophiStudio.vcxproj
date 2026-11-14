@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003" DefaultTargets="Build">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM">
@@ -534,6 +534,8 @@
     <None Include="source\src\Device\hair_intersect.cuh" />
     <ClInclude Include="source\src\Main.h" />
     <ClInclude Include="source\include\scene_data.h" />
+    <ClInclude Include="source\include\GpuVolumeTypes.h" />
+    <ClInclude Include="source\include\UIContext.h" />
     <ClInclude Include="source\include\scene_ui.h" />
     <ClInclude Include="source\src\UI\scene_ui_agent_chat.hpp" />
     <ClInclude Include="source\src\UI\scene_ui_fluid_thermal.hpp" />
@@ -1955,6 +1957,17 @@
     <ClCompile Include="source\src\Viewport\RasterViewportFrameRing.cpp" />
     <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
+    <ClCompile Include="source\src\Render\AtmosphereLUTCuda.cpp" />
+    <None Include="source\src\Render\AtmosphereLUTHost.cpp" />
+    <None Include="source\src\Render\TextureHost.cpp" />
+    <None Include="source\src\Core\PlayerMain.cpp" />
+    <None Include="source\src\Render\RendererOidnHost.cpp" />
+    <None Include="source\src\Physics\SimulationComputeCudaHost.cpp" />
+    <None Include="source\src\Api\PythonUnavailableHost.cpp" />
+    <None Include="source\src\Physics\WaterSystemHost.cpp" />
+    <None Include="source\src\Api\StudioOnlyIpcHost.cpp" />
+    <None Include="source\src\UI\SceneUIStateHost.cpp" />
+    <None Include="source\src\Render\EmbreeBVHHost.cpp" />
     <ClCompile Include="source\src\Render\AtmosphereLUT.cpp" />
     <ClCompile Include="source\src\Render\Camera.cpp" />
     <ClCompile Include="source\src\Physics\CurlNoise.cpp" />
@@ -1973,6 +1986,22 @@
     <ClCompile Include="source\src\Scene\GpuFoliageScatter.cpp" />
     <ClCompile Include="source\src\Scene\InstanceManager.cpp" />
     <ClCompile Include="source\src\Scene\Light.cpp" />
+    <ClInclude Include="source\include\Core\StudioLaunchOptions.h" />
+    <ClCompile Include="source\src\Core\StudioLaunchOptions.cpp" />
+    <ClInclude Include="source\include\Core\AppWindow.h" />
+    <ClCompile Include="source\src\Core\AppWindow.cpp" />
+    <ClInclude Include="source\include\Core\AppFrame.h" />
+    <ClCompile Include="source\src\Core\AppFrame.cpp" />
+    <ClInclude Include="source\include\Core\RuntimeProjectHost.h" />
+    <ClCompile Include="source\src\Core\RuntimeProjectHost.cpp" />
+    <ClInclude Include="source\include\Core\VulkanSceneSync.h" />
+    <ClCompile Include="source\src\Core\VulkanSceneSync.cpp" />
+    <ClInclude Include="source\include\Core\RuntimeSimulationClock.h" />
+    <ClCompile Include="source\src\Core\RuntimeSimulationClock.cpp" />
+    <ClInclude Include="source\include\Core\RuntimeSceneViewer.h" />
+    <ClCompile Include="source\src\Core\RuntimeSceneViewer.cpp" />
+    <ClCompile Include="source\src\Core\RuntimeState.cpp" />
+    <ClCompile Include="source\src\Utils\ImageCodecs.cpp" />
     <ClCompile Include="source\src\Core\Main.cpp" />
     <ClCompile Include="source\src\Scene\Material.cpp" />
     <ClCompile Include="source\src\Math\Matrix4x4.cpp" />
@@ -1992,6 +2021,7 @@
     <ClCompile Include="source\src\Template\UserTemplateManager.cpp" />
     <ClCompile Include="source\src\UI\TemplateHubUI.cpp" />
     <ClCompile Include="source\src\Core\RenderStateManager.cpp" />
+    <ClCompile Include="source\src\Render\RendererOidn.cpp" />
     <ClCompile Include="source\src\Render\Renderer.cpp" />
     <ClCompile Include="source\src\Physics\RiverManager.cpp" />
     <ClCompile Include="source\src\Utils\image_filters.cpp" />
@@ -2082,6 +2112,8 @@
     <ClCompile Include="source\src\Scene\VolumeMaterialAuthoring.cpp" />
     <ClCompile Include="source\src\UI\VolumeMaterialUI.cpp" />
     <ClCompile Include="source\src\Api\RtApiWeatherEffects.cpp" />
+    <ClCompile Include="source\src\Api\RtApiVdbVolume.cpp" />
+    <ClInclude Include="source\include\Api\RtApiVdbVolume.h" />
     <ClCompile Include="source\src\Api\RtWeatherEffectsBindings.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp" />
     <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp" />
@@ -2553,6 +2585,7 @@
     <ClCompile Include="source\src\Physics\SnowComputeGPU.cpp" />
     <ClCompile Include="source\src\Physics\TerrainFFT.cpp" />
     <ClCompile Include="source\src\Render\Texture.cpp" />
+    <ClCompile Include="source\src\Render\TextureCuda.cpp" />
     <ClCompile Include="source\src\Utils\TextureCompressionCache.cpp" />
     <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\src\UI\TimelineWidget.cpp" />
@@ -3597,5 +3630,47 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Backend\VulkanDenoiserCuda.cpp" />
+    <None Include="source\src\Backend\VulkanDenoiserHost.cpp" />
+    <ClCompile Include="source\src\Api\RtApiOptixDiagnostics.cpp" />
+    <None Include="source\src\Api\RtApiOptixDiagnosticsHost.cpp" />
+    <ClCompile Include="source\src\Render\OfflineDeviceCuda.cpp" />
+    <None Include="source\src\Render\OfflineDeviceHost.cpp" />
+    <ClCompile Include="source\src\Physics\GasSimulatorCuda.cpp" />
+    <None Include="source\src\Physics\GasSimulatorHost.cpp" />
+    <ClCompile Include="source\src\Physics\GasVolumeCuda.cpp" />
+    <None Include="source\src\Physics\GasVolumeHost.cpp" />
+    <ClCompile Include="source\src\Physics\VDBVolumeCuda.cpp" />
+    <None Include="source\src\Physics\VDBVolumeHost.cpp" />
+    <ClCompile Include="source\src\Render\OfflineRenderOptix.cpp" />
+    <None Include="source\src\Render\OfflineRenderHost.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainManagerCuda.cpp" />
+    <ClCompile Include="source\src\Physics\TerrainFoliageOptix.cpp" />
+    <None Include="source\src\Physics\TerrainOfflineHost.cpp" />
+    <ClInclude Include="source\include\OfflineDeviceHooks.h" />
+    <ClInclude Include="source\include\OfflineRenderBridge.h" />
+    <ClInclude Include="source\include\TerrainErosionGpuTypes.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="source\include\TerrainErosionBoundary.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Hair\HairEmbree.cpp" />
+    <None Include="source\src\Hair\HairQueryHost.cpp" />
+    <ClInclude Include="source\include\EmbreeHandles.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="source\src\Api\RtPythonAudioBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonFluidLabelBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonLensWeatherBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonObjectSubstanceBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonPostExposureBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonViewportCutoutBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonUvBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonVolumeMaterialBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonRayGpuTimingBindings.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonWeatherEffectsBindings.cpp" />
   </ItemGroup>
 </Project>

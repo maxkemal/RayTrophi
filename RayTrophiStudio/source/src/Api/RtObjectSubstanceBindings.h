@@ -1,6 +1,6 @@
 #pragma once
 #include "RtIpcTemplates.h"
-#include <pybind11/pybind11.h>
+namespace pybind11 { class module_; }
 
 namespace rtpy {
 void registerObjectSubstanceBindings(pybind11::module_& substance);

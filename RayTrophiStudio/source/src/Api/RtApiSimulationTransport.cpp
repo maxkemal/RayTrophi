@@ -1,5 +1,6 @@
 #include "RtSimulationTransport.h"
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include "UI/SimulationTransport.h"
 #include "globals.h"
 

@@ -1,5 +1,6 @@
 #include "Api/RtApi.h"
 #include "Api/RtApiInternal.h"
+#include "TerrainNodesV2.h"
 #include "MeshEdit/SplineEditService.h"
 #include "MeshEdit/SplineSerialization.h"
 #include "MeshEdit/SplineObject.h"

@@ -21,6 +21,8 @@
 */
 
 #include "RtApiInternal.h"
+#include "Renderer.h"
+#include "scene_ui.h"
 
 #include <algorithm>
 #include <cctype>

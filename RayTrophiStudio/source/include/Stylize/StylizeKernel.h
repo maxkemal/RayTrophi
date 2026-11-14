@@ -21,7 +21,7 @@
 
 #include "Stylize/StylizeCore.h"
 
-#include <vector_types.h>   // float3, float4
+#include "GpuInteropTypes.h" // shared float3/float4 layout; Player has no CUDA SDK
 #include <cstdint>
 
 namespace StylizeGPU {

@@ -7,6 +7,7 @@
  * =========================================================================
  */
 
+#include "RtPlayerIpcPolicy.h"
 #include "RtIpcMethodRegistry.h"
 
 #include <algorithm>
@@ -19,6 +20,9 @@ MethodRegistry& MethodRegistry::instance() {
 }
 
 void MethodRegistry::registerMethod(const MethodDescriptor& desc) {
+    if (!rtipc_product::supportsMethod(desc.name)) {
+        return;
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
     m_methods.push_back(&desc);
     m_indexed = false;

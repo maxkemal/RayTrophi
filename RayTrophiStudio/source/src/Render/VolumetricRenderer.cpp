@@ -7,6 +7,8 @@
 */
 #include "VolumetricRenderer.h"
 #include "Backend/IBackend.h"
+// Shared volume records; no offline launch parameters are needed here.
+#include "GpuVolumeTypes.h"
 #include "Backend/VulkanBackend.h"
 #include "VDBVolume.h"
 #include "VDBVolumeManager.h"
@@ -861,7 +863,7 @@ void VolumetricRenderer::syncVolumetricData(SceneData& scene, Backend::IBackend*
         } else {
             // Default VDB fallback
             gv.density_multiplier = vdb->density_scale;
-            gv.scatter_color = make_float3(1.0f);
+            gv.scatter_color = make_float3(1.0f, 1.0f, 1.0f);
             gv.scatter_coefficient = 1.0f;
             gv.absorption_coefficient = 0.1f;
             gv.step_size = (std::max)(renderVoxelSize, 1e-4f);

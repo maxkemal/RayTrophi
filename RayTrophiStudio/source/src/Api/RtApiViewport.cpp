@@ -32,6 +32,8 @@
  */
 
 #include "Api/RtApiInternal.h"
+#include "Renderer.h"
+#include "scene_ui.h"
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
 #include "globals.h"

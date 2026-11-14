@@ -1,3 +1,5 @@
+#include "RtPlayerIpcPolicy.h"
+#include "Api/RtApiVdbVolume.h"
 #include "Fluid/MixedGpuStageDiagnostics.h"
 #include "RtIpcLiquidEmission.h"
 #include "RtIpcDomainWalls.h"
@@ -1086,6 +1088,9 @@ json fluidDomainListJson(const rtapi::FluidDomainInfo& info) {
 }
 
 json dispatchMethod(const std::string& method, const json& params) {
+    if (!rtipc_product::supportsMethod(method)) {
+        return json{{"__error", "unsupported_in_player: " + method}};
+    }
     // ★ Before ANY handler: a null, wrong-typed or missing parameter reaching a
     // get<T>()/at() aborts the process in this build (JSON_NOEXCEPTION). The
     // check kinds come from the generated descriptor table; batch children
@@ -1994,6 +1999,24 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string path = requireString(params, "path");
         return enqueueResult([path](UIContext&) {
             return rtapi::importModel(path);
+        });
+    }
+    if (method == "scene.import_vdb") {
+        std::string path = requireString(params, "path");
+        const int orientation = params.value("orientation", 0);
+        return enqueueQuery([path, orientation](UIContext&) {
+            rtapi::VdbImportInfo info;
+            const rtapi::Result r = rtapi::importVdbVolume(path, orientation, info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"name", info.name},
+                        {"local_bounds_min", vec3ToJson(info.local_bounds_min)},
+                        {"local_bounds_max", vec3ToJson(info.local_bounds_max)},
+                        {"position", vec3ToJson(info.position)},
+                        {"scale", vec3ToJson(info.scale)},
+                        {"auto_scaled", info.auto_scaled},
+                        {"gpu_uploaded", info.gpu_uploaded},
+                        {"fire_shader", info.fire_shader},
+                        {"scene_vdb_count", info.scene_vdb_count}};
         });
     }
     if (method == "scene.export_gltf") {
@@ -8033,7 +8056,8 @@ bool authorizeRemoteCall(uint32_t capabilities, const std::string& method,
                          const json& params, std::string& error) {
     if (!rtipc_security::authorize(capabilities, method, error)) return false;
     const char* key = nullptr;
-    if (method == "scene.import_model" || method == "project.open" ||
+    if (method == "scene.import_model" || method == "scene.import_vdb" ||
+        method == "project.open" ||
         method == "project.save" || method == "script.run_file") key = "path";
     else if (method == "sim_cache.bake") key = "cache_dir";
     else if (method == "terrain.import_heightmap" || method == "terrain.export_heightmap" ||

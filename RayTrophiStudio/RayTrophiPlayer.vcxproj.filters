@@ -1,0 +1,2524 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="external" />
+    <Filter Include="external\imgui" />
+    <Filter Include="external\imgui-knobs" />
+    <Filter Include="external\JoltPhysics" />
+    <Filter Include="external\JoltPhysics\Jolt" />
+    <Filter Include="external\JoltPhysics\Jolt\AABBTree" />
+    <Filter Include="external\JoltPhysics\Jolt\Core" />
+    <Filter Include="external\JoltPhysics\Jolt\Geometry" />
+    <Filter Include="external\JoltPhysics\Jolt\Math" />
+    <Filter Include="external\JoltPhysics\Jolt\ObjectStream" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Body" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Character" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Collision" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Collision\Shape" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Constraints" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Ragdoll" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\SoftBody" />
+    <Filter Include="external\JoltPhysics\Jolt\Physics\Vehicle" />
+    <Filter Include="external\JoltPhysics\Jolt\Renderer" />
+    <Filter Include="external\JoltPhysics\Jolt\Skeleton" />
+    <Filter Include="external\JoltPhysics\Jolt\TriangleSplitter" />
+    <Filter Include="external\ozz-animation" />
+    <Filter Include="external\ozz-animation\src" />
+    <Filter Include="external\ozz-animation\src\animation" />
+    <Filter Include="external\ozz-animation\src\animation\offline" />
+    <Filter Include="external\ozz-animation\src\animation\runtime" />
+    <Filter Include="external\ozz-animation\src\base" />
+    <Filter Include="external\ozz-animation\src\base\containers" />
+    <Filter Include="external\ozz-animation\src\base\encode" />
+    <Filter Include="external\ozz-animation\src\base\io" />
+    <Filter Include="external\ozz-animation\src\base\maths" />
+    <Filter Include="external\ozz-animation\src\base\memory" />
+    <Filter Include="external\xatlas" />
+    <Filter Include="external\xatlas\source" />
+    <Filter Include="external\xatlas\source\xatlas" />
+    <Filter Include="source" />
+    <Filter Include="source\src" />
+    <Filter Include="source\src\Animation" />
+    <Filter Include="source\src\Api" />
+    <Filter Include="source\src\Atmosphere" />
+    <Filter Include="source\src\Backend" />
+    <Filter Include="source\src\Core" />
+    <Filter Include="source\src\Device" />
+    <Filter Include="source\src\Hair" />
+    <Filter Include="source\src\Import" />
+    <Filter Include="source\src\Math" />
+    <Filter Include="source\src\MeshEdit" />
+    <Filter Include="source\src\Paint" />
+    <Filter Include="source\src\Physics" />
+    <Filter Include="source\src\Physics\Fluid" />
+    <Filter Include="source\src\Physics\Jolt" />
+    <Filter Include="source\src\PostProcess" />
+    <Filter Include="source\src\RayFusion" />
+    <Filter Include="source\src\Render" />
+    <Filter Include="source\src\Scene" />
+    <Filter Include="source\src\Stylize" />
+    <Filter Include="source\src\Template" />
+    <Filter Include="source\src\UI" />
+    <Filter Include="source\src\Utils" />
+    <Filter Include="source\src\UV" />
+    <Filter Include="source\src\Viewport" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="external\imgui-knobs\imgui-knobs.cpp">
+      <Filter>external\imgui-knobs</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui\imgui.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui\imgui_draw.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui\imgui_tables.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="external\imgui\imgui_widgets.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
+      <Filter>external\JoltPhysics\Jolt\AABBTree</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Color.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Factory.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\IssueReporting.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemSingleThreaded.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemThreadPool.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\JobSystemWithBarrier.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\LinearCurve.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Memory.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Profiler.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\RTTI.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\Semaphore.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\StringTools.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Core\TickCounter.cpp">
+      <Filter>external\JoltPhysics\Jolt\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\ConvexHullBuilder.cpp">
+      <Filter>external\JoltPhysics\Jolt\Geometry</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\ConvexHullBuilder2D.cpp">
+      <Filter>external\JoltPhysics\Jolt\Geometry</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\Indexify.cpp">
+      <Filter>external\JoltPhysics\Jolt\Geometry</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Geometry\OrientedBox.cpp">
+      <Filter>external\JoltPhysics\Jolt\Geometry</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Math\Vec3.cpp">
+      <Filter>external\JoltPhysics\Jolt\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStream.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamBinaryIn.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamBinaryOut.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamIn.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamOut.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamTextIn.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\ObjectStreamTextOut.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\SerializableObject.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\ObjectStream\TypeDeclarations.cpp">
+      <Filter>external\JoltPhysics\Jolt\ObjectStream</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\Body.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Body</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyCreationSettings.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Body</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyInterface.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Body</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\BodyManager.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Body</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\MassProperties.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Body</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Body\MotionProperties.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Body</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\Character.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Character</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\CharacterBase.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Character</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Character\CharacterVirtual.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Character</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhase.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\BroadPhase</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhaseBruteForce.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\BroadPhase</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\BroadPhaseQuadTree.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\BroadPhase</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\BroadPhase\QuadTree.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\BroadPhase</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CastConvexVsTriangles.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CastSphereVsTriangles.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollideConvexVsTriangles.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollideSphereVsTriangles.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollisionDispatch.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\CollisionGroup.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\EstimateCollisionResponse.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\GroupFilter.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\GroupFilterTable.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\ManifoldBetweenTwoFaces.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\NarrowPhaseQuery.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\NarrowPhaseStats.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\PhysicsMaterial.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\PhysicsMaterialSimple.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\BoxShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CapsuleShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CompoundShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ConvexHullShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ConvexShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\CylinderShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\DecoratedShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\EmptyShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\HeightFieldShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\MeshShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\MutableCompoundShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\OffsetCenterOfMassShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\PlaneShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\RotatedTranslatedShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\ScaledShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\Shape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\SphereShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\StaticCompoundShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TaperedCapsuleShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TaperedCylinderShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\Shape\TriangleShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision\Shape</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Collision\TransformedShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Collision</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ConeConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\Constraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ConstraintManager.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\ContactConstraintManager.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\DistanceConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\FixedConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\GearConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\HingeConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\MotorSettings.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraintPath.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PathConstraintPathHermite.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PointConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\PulleyConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\RackAndPinionConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SixDOFConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SliderConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SpringSettings.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\SwingTwistConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Constraints\TwoBodyConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Constraints</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\DeterminismLog.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\IslandBuilder.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\LargeIslandSplitter.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsScene.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsSystem.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\PhysicsUpdateContext.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Ragdoll\Ragdoll.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Ragdoll</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyCreationSettings.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\SoftBody</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyMotionProperties.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\SoftBody</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodyShape.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\SoftBody</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\SoftBody\SoftBodySharedSettings.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\SoftBody</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\StateRecorderImpl.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\MotorcycleController.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\TrackedVehicleController.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleAntiRollBar.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleCollisionTester.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleConstraint.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleController.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleDifferential.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleEngine.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleTrack.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\VehicleTransmission.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\Wheel.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Physics\Vehicle\WheeledVehicleController.cpp">
+      <Filter>external\JoltPhysics\Jolt\Physics\Vehicle</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\RegisterTypes.cpp">
+      <Filter>external\JoltPhysics\Jolt</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRenderer.cpp">
+      <Filter>external\JoltPhysics\Jolt\Renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererPlayback.cpp">
+      <Filter>external\JoltPhysics\Jolt\Renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererRecorder.cpp">
+      <Filter>external\JoltPhysics\Jolt\Renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Renderer\DebugRendererSimple.cpp">
+      <Filter>external\JoltPhysics\Jolt\Renderer</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletalAnimation.cpp">
+      <Filter>external\JoltPhysics\Jolt\Skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\Skeleton.cpp">
+      <Filter>external\JoltPhysics\Jolt\Skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletonMapper.cpp">
+      <Filter>external\JoltPhysics\Jolt\Skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\Skeleton\SkeletonPose.cpp">
+      <Filter>external\JoltPhysics\Jolt\Skeleton</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitter.cpp">
+      <Filter>external\JoltPhysics\Jolt\TriangleSplitter</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitterBinning.cpp">
+      <Filter>external\JoltPhysics\Jolt\TriangleSplitter</Filter>
+    </ClCompile>
+    <ClCompile Include="external\JoltPhysics\Jolt\TriangleSplitter\TriangleSplitterMean.cpp">
+      <Filter>external\JoltPhysics\Jolt\TriangleSplitter</Filter>
+    </ClCompile>
+    <ClCompile Include="external\miniz.c">
+      <Filter>external</Filter>
+    </ClCompile>
+    <ClCompile Include="external\miniz_tdef.c">
+      <Filter>external</Filter>
+    </ClCompile>
+    <ClCompile Include="external\miniz_tinfl.c">
+      <Filter>external</Filter>
+    </ClCompile>
+    <ClCompile Include="external\miniz_zip.c">
+      <Filter>external</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\additive_animation_builder.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\animation_builder.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_archive.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_animation_utils.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\raw_skeleton_archive.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\offline\skeleton_builder.cc">
+      <Filter>external\ozz-animation\src\animation\offline</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\animation.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\animation_utils.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\blending_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\ik_aim_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\ik_two_bone_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\local_to_model_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\motion_blending_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\sampling_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\skeleton.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\skeleton_utils.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track_sampling_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\animation\runtime\track_triggering_job.cc">
+      <Filter>external\ozz-animation\src\animation\runtime</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\containers\string_archive.cc">
+      <Filter>external\ozz-animation\src\base\containers</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\encode\group_varint.cc">
+      <Filter>external\ozz-animation\src\base\encode</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\io\archive.cc">
+      <Filter>external\ozz-animation\src\base\io</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\io\stream.cc">
+      <Filter>external\ozz-animation\src\base\io</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\log.cc">
+      <Filter>external\ozz-animation\src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\box.cc">
+      <Filter>external\ozz-animation\src\base\maths</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\math_archive.cc">
+      <Filter>external\ozz-animation\src\base\maths</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\simd_math.cc">
+      <Filter>external\ozz-animation\src\base\maths</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\simd_math_archive.cc">
+      <Filter>external\ozz-animation\src\base\maths</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\maths\soa_math_archive.cc">
+      <Filter>external\ozz-animation\src\base\maths</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\memory\allocator.cc">
+      <Filter>external\ozz-animation\src\base\memory</Filter>
+    </ClCompile>
+    <ClCompile Include="external\ozz-animation\src\base\platform.cc">
+      <Filter>external\ozz-animation\src\base</Filter>
+    </ClCompile>
+    <ClCompile Include="external\xatlas\source\xatlas\xatlas.cpp">
+      <Filter>external\xatlas\source\xatlas</Filter>
+    </ClCompile>
+    <ClCompile Include="external\xatlas\xatlas.cpp">
+      <Filter>external\xatlas</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\AnimationController.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\AnimationNodes.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\ClipBinding.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\GeometryCache.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\GraphRestDefaults.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\NodeHierarchy.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\OzzRuntime.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\Retarget.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAimIK.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAnatomy.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigAutoLandmarks.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBatchRest.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBinding.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBindingScope.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBindMath.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigBoneCurves.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigChainIK.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigClipRuntimeSync.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigControlDisplay.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigDrivenControls.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigEditing.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigEnvelopeWeights.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigFitting.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigGeodesicWeights.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIK.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKChannels.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigIKTimeline.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigJointLimits.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigJointRules.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigMirror.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoring.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseAuthoringMath.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPosePreview.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPoseView.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigPreflight.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigRomTest.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSelection.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSerialization.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigSplineIK.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigTemplates.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigTimelineProjection.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigView.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigWalkRecipe.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RigWeights.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Animation\RootMotionUnroll.cpp">
+      <Filter>source\src\Animation</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\PythonUnavailableHost.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAgentLifecycleManager.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApi.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiAnim.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiCameraNav.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiClipBinding.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiClouds.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDebris.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDemBonds.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDenoiser.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDomainCreation.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDomainVisual.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiDomainWalls.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFluid.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFluidSurface.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiForceField.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiFracture.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGasFieldStats.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGeometryCache.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGpuMemory.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGrainGenerator.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGrainReference.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiHair.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiKinematicCollider.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiLights.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMassTransfer.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMaterial.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterExchange.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterFogInspection.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterGrain.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterLanes.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterModels.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterPhaseOutput.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterPores.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMatterSeedSources.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMeshEdit.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMeshTransaction.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiModifiers.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiMotion.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiNodes.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiObjectVisibility.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiOptixDiagnosticsHost.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPaint.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiParticle.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPerf.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPhaseGrid.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPost.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRayFusion.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRealtimeDenoiser.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiReflection.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRig.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigAnatomy.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigBinding.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEditing.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigEnvelopeWeights.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigIK.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointLimits.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigJointProfile.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigMirror.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigMotion.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseAuthoring.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigPoseView.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigSelection.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigTemplates.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRigWeightMap.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiRoadMesh.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiScreenGi.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSculpt.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSelect.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSimNodes.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSimulationTransport.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSourceSplatGeometry.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSpline.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSplineSkin.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiSubstance.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiTerrain.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiUiState.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiUpscale.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiVdbVolume.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiViewport.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiWeatherEffects.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtAudioBindings.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtFluidLabelBindings.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpc.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcAudit.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcClipBinding.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcDomainVisual.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcDomainWalls.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcFracture.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcGrainGenerator.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcLensWeather.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMatterLanes.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMatterModels.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMatterSeedSources.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMeshEdit.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMeshToolDescriptors.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMeshTools.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMethodDescriptors.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcMethodRegistry.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcObjectSubstance.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPanel.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcParamValidation.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcParticle.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPhaseGrid.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPostExposure.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRayFusion.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRayGpuTiming.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRealtimeDenoiser.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcReflection.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRig.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcRigIK.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcScreenGi.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSecurity.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSession.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSimulationTransport.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcSourceSplatGeometry.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcTransportLocal.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcTransportTls.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcUpscale.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcUv.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcViewportCutout.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcWorkflowRecipes.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtRayGpuTiming.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtUvBindings.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtVolumeMaterialBindings.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtWeatherEffectsBindings.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\StudioOnlyIpcHost.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\AtmosphereClimate.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\AtmosphereClouds.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\AtmosphereLocalWeather.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LensWeatherService.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LensWeatherState.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LightningStrike.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Atmosphere\LightningStrikeResolver.cpp">
+      <Filter>source\src\Atmosphere</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuBackend.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuIdle.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuPass.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticGpuRasterIdle.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticRenderDebugBackend.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\AcousticSurfacePass.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\LensWeatherCamera.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\SceneTextureManager.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Spheres.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_UvUpdate.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanDenoiserHost.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanFsrLoader.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanLensWeather.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMotionHistory.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanRawGuard.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanRayGpuTiming.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiser.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiserAdapter.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanRTPipelineBuild.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanUpscaleInputs.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanViewportParticles.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeInstrumentation.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeResidency.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeStageSplit.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanVolumeTemporal.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\AppFrame.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\AppWindow.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\Autosave.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\FatalSignalTrace.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\globals.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\PlayerMain.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\ProjectManager.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\ProjectTimelineReset.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RenderStateManager.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RuntimeProjectHost.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RuntimeSceneViewer.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RuntimeSimulationClock.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\RuntimeState.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\VulkanSceneSync.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp">
+      <Filter>source\src\Device</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairBSDF.cpp">
+      <Filter>source\src\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairQueryHost.cpp">
+      <Filter>source\src\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairStrand.cpp">
+      <Filter>source\src\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairSystem.cpp">
+      <Filter>source\src\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Hair\HairSystem_Skinning.cpp">
+      <Filter>source\src\Hair</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\GltfDirectReader.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ModelImport.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ModelImportScene.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\ObjReader.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxMaterials.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxReader.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Import\UfbxVendor.cpp">
+      <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Matrix4x4.cpp">
+      <Filter>source\src\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Vec2.cpp">
+      <Filter>source\src\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Vec3.cpp">
+      <Filter>source\src\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Math\Vec3SIMD.cpp">
+      <Filter>source\src\Math</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshGeometryCommand.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshPublisher.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshUndoSnapshot.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\FlatMeshValidator.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\GeometryRemap.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\MeshOperation.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\MeshTool.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\MeshTopologyTransaction.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\PolygonTriangulation.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileAuthoringService.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileLoft.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileRevolve.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSweep.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\ProfileSweepService.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineAnimation.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineEditService.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineEvaluationService.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineObject.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineObjectLifecycle.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineObjectService.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp">
+      <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\PaintLayerStack.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\PaintModeState.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\PaintTextureSet.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\AshDebrisSystem.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\CurlNoise.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\EmitterSystem.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\APICFluidSolver.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\BuiltinPresetPhysics.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\ColliderGpuQuery.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DemBondAuthoring.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DemBondCache.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DemBondGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DemBondMechanics.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DemBondNetwork.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DemBondSeed.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DomainVisualCache.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DomainVisualField.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\DomainVisualService.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidCombustionExchange.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainFogVolume.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainParticleAuthoring.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainRenderLifecycle.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidDomainSubstance.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidFoam.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidFogDensity.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidGasMovingBoundary.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidLevelSet.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidMaterialCoordinates.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidMistCoupling.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidMistPhaseExchange.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabelReport.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabels.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleLabelsGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleRedistribution.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleSeedPattern.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleSolidRecovery.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidParticleVisualRadius.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidPhysicalMass.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidRenderProxy.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSimulationSystem.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialAuthoring.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSplatMaterialPolicy.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSurfaceGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidSurfaceWater.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidThermalLiquid.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidThermalPhaseExchange.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FluidViewResolver.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\FrozenSurfaceMaterial.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasCombustionAir.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryDevice.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryDiagnostics.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryFrameCapture.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasInventoryGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasPhaseMomentum.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSaturation.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSourceCache.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSourceProvenance.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangeCpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangeGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceExchangePlan.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GasSurfaceGeometry.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GrainMeshNear.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GranularContact.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\GranularReference.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAcceptanceMetrics.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAudioGasGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterAudioTelemetry.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterConstitutiveState.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterEmissionBudget.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogFields.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogPublisher.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogSnapshot.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterFogStreams.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGpuModelView.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGpuPartition.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainBirth.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainColliderBvh.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainCoupling.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainDiagnostics.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainFluidGpuCoupling.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGasCoupling.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGeometry.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainMpmContact.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainParams.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGrainThermal.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterGranularLoad.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterIceCollider.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterLiquidInflow.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMacContact.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMaterialPreset.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMaterialResolution.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMixedStep.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterModelBatch.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterModelService.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMpmSleep.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterMpmSoftening.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterPhaseConfig.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterPoreAuthoring.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterPoreExchange.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterSeedPlanning.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterSeedSources.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterSolverStages.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterSubstanceState.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterTransfer.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterWetAppearance.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MatterWetResponse.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\MudMaterial.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SourceSplatRenderPlan.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseGridGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseGridStorage.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeights.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeightsGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacSolidWeightSource.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseMacTransferGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparsePressureGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SparseViscosityGpu.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SurfaceParticleBins.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\SurfaceWorkTiles.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Fluid\WhitewaterRuntime.cpp">
+      <Filter>source\src\Physics\Fluid</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ForceField.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\FractureGenerator.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\FractureSourceAdapter.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasPressurePulse.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasSimulator.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasSimulatorHost.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasStructuralImpulseBridge.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasVolume.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GasVolumeHost.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\GridFluidSolver.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Jolt\JoltSmokeTest.cpp">
+      <Filter>source\src\Physics\Jolt</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Jolt\JoltWorld.cpp">
+      <Filter>source\src\Physics\Jolt</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Jolt\RigidBodySystem.cpp">
+      <Filter>source\src\Physics\Jolt</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderScene.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderSerialization.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderSource.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\KinematicColliderVoxelizer.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MaterialDamagePattern.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MaterialMassBudget.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MaterialStateField.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MatterExchangeLedger.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MeltSurfaceFlow.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\MoltenMassTransfer.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleDeviceResidency.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleSimulation.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleSimulationAppearance.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimCache.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationCompute.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationComputeCudaHost.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationDomainLanes.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationSystems.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SimulationWorld.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SnowComputeGPU.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SubstanceCatalogue.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SubstanceLibrary.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SurfaceField.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\SurfaceFlowField.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainCurveMask.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainCurveNodes.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainCurveSceneSnapshot.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainErosionLem.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainFFT.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainManager.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainNodePortPresentation.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainNodesV2.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainOfflineHost.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainPaintEvaluation.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRiverNetworkCore.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadCarve.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadCarveNode.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadFieldsOutput.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadMesh.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadNetwork.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadNetworkNode.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainRoadProfile.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSatMapNodes.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSatMapPresetLibrary.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSatMapSetup.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSemanticMap.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\TerrainSurfaceNodes.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ThermalFractureBridge.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\ThermalFractureSerialization.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\VDBVolume.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\VDBVolumeHost.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\VDBVolumeManager.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\Volumetric.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Physics\WaterSystemHost.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\PostProcess\Exposure.cpp">
+      <Filter>source\src\PostProcess</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\PostProcess\PostPanel.cpp">
+      <Filter>source\src\PostProcess</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\PostProcess\PostService.cpp">
+      <Filter>source\src\PostProcess</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\PostProcess\PostSurface.cpp">
+      <Filter>source\src\PostProcess</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\PostProcess\VulkanExposure.cpp">
+      <Filter>source\src\PostProcess</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\RayFusion\ProbeField.cpp">
+      <Filter>source\src\RayFusion</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\RayFusion\ProbeFieldChecks.cpp">
+      <Filter>source\src\RayFusion</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\AtmosphereLUT.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\AtmosphereLUTHost.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\Camera.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\EmbreeBVHHost.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\FoliageWindSystem.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\HitMaterialResolver.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OfflineDeviceHost.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OfflineRenderHost.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\OptixMaterialTables.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\ParallelBVHNode.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\Renderer.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\RendererOidnHost.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\Texture.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\TextureHost.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\unified_converters.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Render\VolumetricRenderer.cpp">
+      <Filter>source\src\Render</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AABB.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticBoundary.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticGpuPreview.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticMaterial.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticPlayback.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticPreview.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticRenderDebug.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticScene.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticSurfaceScene.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AcousticTrace.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AreaLight.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AssetRegistry.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioAcousticSettings.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioArrangementPreview.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioAuthoring.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioCapture.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClipBatch.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClipRuntime.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioClips.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignAnalysis.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignEffects.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignJobs.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignLayers.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDesignSpectral.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDomainBridge.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioDspModules.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioEmitterSchema.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioEnvironment.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioLiveAnalysis.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioMixer.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioMixerRuntime.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioOffline.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioParametricEq.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioPcm.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioReaction.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioRequestValidation.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioService.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioSoundDesign.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioSourceRuntime.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioSynthesis.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTelemetryPolicy.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioThunder.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioThunderAssets.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioThunderBridge.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTimelineMix.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTracks.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioTransport.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioWeatherBridge.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioWorkspaceState.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Dielectric.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\DirectionalLight.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\FoliageAssetLibrary.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\GpuFoliageScatter.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\GrainGenerator.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\HittableList.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\InstanceGroup.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\InstanceManager.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Light.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Material.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\MaterialGraphApply.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\MaterialManager.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\MaterialNodesV2.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Mesh.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstance.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstanceAuthoring.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\ObjectSubstanceHistory.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioAuthoring.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioBake.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioCharacterDsp.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioDsp.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioHistory.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioNaturalDsp.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioReplay.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioSchedule.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioSource.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PhysicalAudioTimeline.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PointLight.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\PrincipledBSDF.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\SceneDataParticlePresets.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\SimulationNodes.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\SpotLight.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\Triangle.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\TriangleMesh.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\VolumeMaterialAuthoring.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\World.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\simdjson.cpp">
+      <Filter>source\src</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Stylize\StylizeModeState.cpp">
+      <Filter>source\src\Stylize</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Stylize\StylizePostProcess.cpp">
+      <Filter>source\src\Stylize</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\StartupPreferences.cpp">
+      <Filter>source\src\Template</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateLoader.cpp">
+      <Filter>source\src\Template</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateRecipeStage.cpp">
+      <Filter>source\src\Template</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Template\TemplateRegistry.cpp">
+      <Filter>source\src\Template</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\GizmoOcclusion.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ParticleBillboardBuilder.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\scene_ui_agent_chat.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SceneSelection.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SceneUIStateHost.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\SimulationTransport.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ui_modern.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\ui_section_style.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\GltfDirectWriter.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\image_filters.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\image_resample.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\ImageCodecs.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\MeshModifiers.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\PerfProfile.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneCommand.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneExporter.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneHistory.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\SceneSerializer.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\TextureCompressionCache.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Utils\TriangleProxyConverter.cpp">
+      <Filter>source\src\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvAttributeUpdate.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvCornerRemap.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvGeometryTransaction.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvLayout.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvProjection.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvService.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UV\UvXatlasBackend.cpp">
+      <Filter>source\src\UV</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewCoverage.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewIbl.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewProbeField.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewReflection.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewRtShadow.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewSdfSurface.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewShadow.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewTransmission.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewVolume.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\MaterialPreviewVolumeShadow.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ObjectPick.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterGpuCull.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterGpuTimers.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterInstanceUpload.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterObjectMotion.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterStageInstrumentation.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterStageTimings.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterTaa.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RasterViewportFrameRing.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionBounce.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionProbeOverlay.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionProbeTrace.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionSceneAS.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ScreenGi.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\SelectionOutlineUpload.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ViewportPresentationStats.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+  </ItemGroup>
+</Project>

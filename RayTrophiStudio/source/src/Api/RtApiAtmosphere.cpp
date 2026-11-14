@@ -15,6 +15,7 @@
 */
 
 #include "RtApiInternal.h"
+#include "Renderer.h"
 
 #include <cmath>
 #include <string>

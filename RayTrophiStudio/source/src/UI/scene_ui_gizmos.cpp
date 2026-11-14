@@ -1,4 +1,5 @@
 #include "MatterSeedViewport.h"
+#include "Core/VulkanSceneSync.h"
 // ===============================================================================
 // SCENE UI - GIZMOS & TRANSFORM
 // ===============================================================================
@@ -1007,25 +1008,9 @@ void SceneUI::uploadParticleBillboards(UIContext& ctx) {
     if (!vpb) {
         return;
     }
-    static ParticleBillboardUpload upload;  // reused: keeps vector capacity
-    // Debug display mode uses the ImGui overlay instead; clear any billboards so we
-    // don't render both. Solid (0) and Render (2) draw real billboards.
-    if (ctx.particle_display_mode == 1 || !ctx.scene.camera) {
-        upload.additive.clear();
-        upload.alpha.clear();
-        upload.pulled.clear();
-        upload.spheres.clear();
-        vpb->uploadParticleBillboards(upload);
-        return;
-    }
-    // The viewport's own device decides which systems can be pulled from the
-    // simulation buffers; the rest become CPU quads.
-    void* viewport_device = nullptr;
-    if (auto* dev = vpb->getVulkanDevice()) {
-        viewport_device = static_cast<void*>(dev->getDevice());
-    }
-    ParticleBillboardBuilder::build(ctx.scene, viewport_device, upload);
-    vpb->uploadParticleBillboards(upload);
+    // Debug display mode (1) uses the ImGui overlay instead, so the raster pass
+    // gets empty lists. The body is shared with the Player (Core/VulkanSceneSync).
+    AppRuntime::uploadParticleBillboards(*vpb, ctx.scene, ctx.particle_display_mode == 1);
 }
 
 void SceneUI::moveObjectPivot(UIContext& ctx, const std::string& objectName, const Vec3& worldDelta) {

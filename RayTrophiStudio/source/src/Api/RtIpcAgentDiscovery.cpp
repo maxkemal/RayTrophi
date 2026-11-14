@@ -15,6 +15,8 @@
  * =========================================================================
  */
 
+#include "RtPlayerIpcPolicy.h"
+#include "Core/RuntimeProjectHost.h"
 #include "RtIpcAgentDiscovery.h"
 #include "RtIpcMethodRegistry.h"
 #include "RtIpcWorkflowRecipes.h"
@@ -205,6 +207,38 @@ bool dispatchAgentMethod(const std::string& method,
         if (method == "agent.discover") {
             out_result = enqueue([](auto&) {
                 const auto& registry = MethodRegistry::instance();
+                if (rtipc_product::isPlayer) {
+                    json methods = json::array();
+                    json agent_methods = json::array();
+                    json domains = json::array();
+                    for (const auto* descriptor : registry.all()) {
+                        methods.push_back(descriptor->name);
+                        if (std::string(descriptor->name).rfind("agent.", 0) == 0) {
+                            agent_methods.push_back(descriptor->name);
+                        }
+                    }
+                    for (const auto& domain : registry.domains()) {
+                        domains.push_back({{"name", domain.name},
+                                           {"method_count", domain.method_count}});
+                    }
+                    return json{
+                        {"app", rtipc_product::appName},
+                        {"discovery_version", 2},
+                        {"version", std::to_string(rtapi::version().major) + "." +
+                                    std::to_string(rtapi::version().minor) + "." +
+                                    std::to_string(rtapi::version().patch)},
+                        {"description", "Player static scene viewer: flat meshes, materials, camera and lights"},
+                        {"domains", domains},
+                        {"runtime_stage", "static_scene_viewer"},
+                        {"scene_loading", true},
+                        {"rendering", true},
+                        {"scripting", false},
+                        {"registered_methods", registry.registeredCount()},
+                        {"agent_methods", agent_methods},
+                        {"methods", methods},
+                        {"unsupported_method_error", "unsupported_in_player"}
+                    };
+                }
 
                 json domains = json::array();
                 for (const auto& d : registry.domains()) {
@@ -357,8 +391,11 @@ bool dispatchAgentMethod(const std::string& method,
             const int limit = std::clamp(params.value("limit", 10), 1, 50);
             out_result = enqueue([query, limit](auto&) {
                 json workflows = json::array();
-                for (const auto* recipe : WorkflowRecipeRegistry::instance().search(query))
-                    workflows.push_back(serializeRecipe(recipe));
+                if (!rtipc_product::isPlayer) {
+                    for (const auto* recipe : WorkflowRecipeRegistry::instance().search(query)) {
+                        workflows.push_back(serializeRecipe(recipe));
+                    }
+                }
 
                 json methods = json::array();
                 for (const auto& hit : MethodRegistry::instance().search(query)) {
@@ -440,7 +477,7 @@ bool dispatchAgentMethod(const std::string& method,
 
         if (method == "agent.get_state_summary") {
             const bool include_probe = params.value("include_probe", true);
-            out_result = enqueue([include_probe](auto&) {
+            out_result = enqueue([include_probe](auto& context) {
                 json scene = json::object();
                 const std::vector<std::string> objects = rtapi::listObjects();
                 scene["object_count"] = objects.size();
@@ -514,6 +551,7 @@ bool dispatchAgentMethod(const std::string& method,
                 }
 
                 return json{
+                    {"runtime", AppRuntime::runtimeStatus(context)},
                     {"scene", scene},
                     {"lights", lights},
                     {"camera", camera},

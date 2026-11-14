@@ -1,4 +1,5 @@
 #include "RtApiInternal.h"
+#include "scene_ui.h"
 #include "ThermalFractureBridge.h"
 
 #include <algorithm>

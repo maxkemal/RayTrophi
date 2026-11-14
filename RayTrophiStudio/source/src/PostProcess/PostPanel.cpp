@@ -1,5 +1,6 @@
 #include "PostProcess/PostService.h"
 #include "Api/RtApiInternal.h"
+#include "ColorProcessingParams.h"
 #include "imgui.h"
 #include <cmath>
 #include <cfloat>

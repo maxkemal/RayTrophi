@@ -10,6 +10,10 @@
 */
 #pragma once
 
+namespace TerrainPhysics {
+struct StreamPowerParamsGPU;
+}
+
 #include "TerrainSystem.h"
 #include "json.hpp"
 #include <vector>
@@ -699,6 +703,20 @@ public:
     void removeAllTerrains(SceneData& scene);
 
 private:
+    void hydraulicErosionGPUCuda(
+        TerrainObject* terrain, const HydraulicErosionParams& params,
+        const std::vector<float>& mask);
+    void thermalErosionGPUCuda(
+        TerrainObject* terrain, const ThermalErosionParams& p, const std::vector<float>& mask);
+    void windErosionGPUCuda(
+        TerrainObject* terrain, float strength, float direction, int iterations,
+        const std::vector<float>& mask);
+    void fluvialErosionGPUCuda(
+        TerrainObject* terrain, const HydraulicErosionParams& p,
+        const std::vector<float>& mask, const std::vector<float>& flowGuide,
+        TerrainPhysics::StreamPowerParamsGPU sp, int numPasses,
+        const std::function<void()>& updateFlowCPU);
+
     TerrainManager() = default;
     
     std::vector<TerrainObject> terrains;
