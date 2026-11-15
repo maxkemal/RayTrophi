@@ -1,4 +1,5 @@
 #include "Core/RuntimeSceneViewer.h"
+#include "Audio/AudioRuntime.h"
 
 #include "Core/VulkanSceneSync.h"
 #include "Core/RuntimeSimulationClock.h"
@@ -25,6 +26,8 @@
 #include <filesystem>
 #include <fstream>
 #include <exception>
+#include <algorithm>
+#include <chrono>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern bool g_camera_dirty;
@@ -257,6 +260,14 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
     syncVulkanWorld(dynamic_cast<Backend::VulkanBackendAdapter*>(backend_),
                     context_.renderer.world, world_data);
     context_.scene.camera->update_camera_vectors();
+    // Clouds continue from the time the project was saved at; a new device or
+    // project always gets a fresh push.
+    cloud_time_s_ = context_.renderer.world.getCloudTime();
+    audio_time_s_ = 0.0;
+    audio_ticks_ = 0;
+    cloud_push_.invalidate();
+    cloud_pushes_ = 0;
+    world_syncs_ = 0;
     backend_->syncCamera(*context_.scene.camera);
     backend_->resetAccumulation();
     Backend::RasterFrameTelemetry previous_frame;
@@ -435,6 +446,35 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         }
     }
 
+    // Scene audio: the same per-frame tick Studio's Audio panel runs, with the
+    // game clock as the transport (playing from project open).
+    audio_time_s_ += dt_seconds > 0.0f ? (std::min)(static_cast<double>(dt_seconds), 0.25) : 0.0;
+    audio::tickRuntime(context_, audio_time_s_, true);
+    ++audio_ticks_;
+
+    // Clouds / local weather. Time only runs while a cloud layer is enabled: a
+    // per-frame push resets accumulation, so a cloudless scene must not pay a
+    // continuous redraw for a sky it does not draw.
+    if (context_.renderer.world.getClouds().anyEnabled()) {
+        cloud_time_s_ += dt_seconds > 0.0f ? (std::min)(dt_seconds, 0.25f) : 0.0f;
+    }
+    if (pushCloudState(context_.renderer.world, scene, cloud_time_s_,
+                       scene.camera ? scene.camera->lookfrom : Vec3(0.0f), cloud_push_,
+                       nullptr, backend_)) {
+        ++cloud_pushes_;
+        changed = true;
+    }
+    // Sky / atmosphere / sun edits: same world sync Studio's dirty servicing runs.
+    if (g_world_dirty || g_viewport_world_dirty) {
+        auto world_data = context_.renderer.world.getGPUData();
+        syncVulkanWorld(dynamic_cast<Backend::VulkanBackendAdapter*>(backend_),
+                        context_.renderer.world, world_data);
+        g_world_dirty = false;
+        g_viewport_world_dirty = false;
+        ++world_syncs_;
+        changed = true;
+    }
+
     // Volume edits (VDB transform/shader, gas settings): Studio services the same
     // flag with syncVDBVolumesToGPU + updateBackendGasVolumes.
     if (g_gas_volumes_dirty) {
@@ -463,6 +503,14 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         backend_->resetAccumulation();
         refresh_requested_ = true;
     }
+}
+
+void RuntimeSceneViewer::forceRedraw() {
+    if (!scene_ready_ || !backend_) {
+        return;
+    }
+    backend_->resetAccumulation();
+    refresh_requested_ = true;
 }
 
 bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
@@ -502,10 +550,21 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
             backend_->resetAccumulation();
             g_camera_dirty = false;
         }
+        // Two measured halves: the backend frame (GPU work + its readback into
+        // the CPU surface) and the SDL texture upload that presents it.
+        const auto render_start = std::chrono::steady_clock::now();
         backend_->renderProgressive(surface, nullptr, nullptr, width_, height_,
                                      &framebuffer_, nullptr);
-        if (g_vulkan_device_lost || SDL_UpdateTexture(texture, nullptr,
-                surface->pixels, surface->pitch) != 0) {
+        const auto upload_start = std::chrono::steady_clock::now();
+        const bool upload_failed = g_vulkan_device_lost ||
+            SDL_UpdateTexture(texture, nullptr, surface->pixels, surface->pitch) != 0;
+        const auto upload_end = std::chrono::steady_clock::now();
+        last_render_ms_ = std::chrono::duration<double, std::milli>(upload_start - render_start).count();
+        last_upload_ms_ = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
+        if (!backend_->getInteractiveViewportFrameTelemetry(last_telemetry_)) {
+            last_telemetry_ = Backend::RasterFrameTelemetry{};
+        }
+        if (upload_failed) {
             error_ = g_vulkan_device_lost ? "Vulkan device lost" : SDL_GetError();
             scene_ready_ = false;
             frame_available_ = false;
@@ -581,7 +640,11 @@ nlohmann::json RuntimeSceneViewer::simulationStatus() const {
         {"clock_ticks", clock.ticks}, {"driven_ticks", clock.driven_ticks},
         {"driven_seconds", clock.driven_seconds}, {"last_dt_seconds", clock.last_dt_seconds},
         {"live_mode", clock.last_live_mode}, {"render_updates", clock.render_updates},
-        {"raster_refits", raster_refits_}, {"raster_rebuilds", raster_rebuilds_}
+        {"raster_refits", raster_refits_}, {"raster_rebuilds", raster_rebuilds_},
+        {"clouds_enabled", context_.renderer.world.getClouds().anyEnabled()},
+        {"cloud_time_s", cloud_time_s_}, {"cloud_pushes", cloud_pushes_},
+        {"world_syncs", world_syncs_},
+        {"audio_time_s", audio_time_s_}, {"audio_ticks", audio_ticks_}
     };
 }
 
@@ -614,7 +677,8 @@ nlohmann::json RuntimeSceneViewer::status() const {
         {"vdb_volumes", context_.scene.vdb_volumes.size()},
         {"gas_volumes", context_.scene.gas_volumes.size()},
         {"scatter_instances", scatterInstanceCount()},
-        {"simulation", simulationStatus()}
+        {"simulation", simulationStatus()},
+        {"loop", loop_status_}
     };
 }
 

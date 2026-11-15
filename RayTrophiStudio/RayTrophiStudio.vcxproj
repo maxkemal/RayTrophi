@@ -2221,6 +2221,10 @@
     <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp" />
     <ClCompile Include="source\src\Physics\ParticleSimulationAppearance.cpp" />
     <ClCompile Include="source\src\Physics\ParticleDeviceResidency.cpp" />
+    <ClCompile Include="source\src\Physics\ParticleDeviceCollision.cpp" />
+    <ClCompile Include="source\src\Scene\AudioRuntime.cpp" />
+    <ClInclude Include="source\include\Audio\AudioRuntime.h" />
+    <ClInclude Include="source\include\Api\RtApiParticleCollision.h" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshUndoSnapshot.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshGeometryCommand.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp" />

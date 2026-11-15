@@ -5611,6 +5611,25 @@ static const MethodDescriptor desc_particle_clear_systems = {
 };
 static const MethodRegistration reg_particle_clear_systems(desc_particle_clear_systems);
 
+static const MethodParam params_particle_collision_events[] = {
+    {"consume", "bool", false, "", "false", nullptr, "bool", false},
+    {"max_events", "int", false, "", "64", nullptr, "number", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+};
+static const MethodDescriptor desc_particle_collision_events = {
+    "particle.collision_events", "particle",
+    "Read (and optionally consume) the recorded particle contacts: point, normal, collider, colour profile, speed",
+    "Events accumulate until consumed (consume=true empties the buffer); pending <= capacity, overflow counts dropped contacts. collider -1 is the system ground plane. On the device path this is a small synchronous download - a measurement / consumer call. Also reports where the last step ran (gpu_status, collision_stage_on_device).",
+    "write", "SceneWrite", false, "any",
+    "particle|collision|events|contact|hits|paint|splat|measure",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_collision_events, 4,
+    true
+};
+static const MethodRegistration reg_particle_collision_events(desc_particle_collision_events);
+
 static const MethodParam params_particle_emitters[] = {
     {"system", "string", false, "", "", nullptr, "string", false},
     {"system_id", "int", false, "", "-1", nullptr, "number", false},
@@ -5645,6 +5664,23 @@ static const MethodDescriptor desc_particle_get_appearance = {
     true
 };
 static const MethodRegistration reg_particle_get_appearance(desc_particle_get_appearance);
+
+static const MethodParam params_particle_get_collision[] = {
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+};
+static const MethodDescriptor desc_particle_get_collision = {
+    "particle.get_collision", "particle",
+    "Read a particle system's contact behaviour: response (bounce|die), event recording and capacity",
+    nullptr,
+    "read", "Read", false, "any",
+    "particle|get|collision|contact|response|events|paint",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_get_collision, 2,
+    true
+};
+static const MethodRegistration reg_particle_get_collision(desc_particle_get_collision);
 
 static const MethodParam params_particle_get_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr, "string", false},
@@ -5886,6 +5922,26 @@ static const MethodDescriptor desc_particle_set_appearance = {
     true
 };
 static const MethodRegistration reg_particle_set_appearance(desc_particle_set_appearance);
+
+static const MethodParam params_particle_set_collision[] = {
+    {"event_capacity", "int", false, "", "65536", nullptr, "number", false},
+    {"record_events", "bool", false, "", "false", nullptr, "bool", false},
+    {"response", "string", false, "", "", nullptr, "string", false},
+    {"system", "string", false, "", "", nullptr, "string", false},
+    {"system_id", "int", false, "", "-1", nullptr, "number", false},
+};
+static const MethodDescriptor desc_particle_set_collision = {
+    "particle.set_collision", "particle",
+    "Set a particle system's contact behaviour: response bounce|die, record contact events, event capacity",
+    "Die removes the particle at the contact (a paint droplet becomes paint). Same on the CPU reference and on the device-resident GPU path, which now resolves plane / sphere / capsule / AABB / OBB / cooked mesh-SDF colliders and the system ground plane; convex and mesh-BVH colliders keep the system on the CPU (gpu_status says which).",
+    "write", "SceneWrite", false, "any",
+    "particle|set|collision|contact|response|die|bounce|events|paint|gpu",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_particle_set_collision, 5,
+    true
+};
+static const MethodRegistration reg_particle_set_collision(desc_particle_set_collision);
 
 static const MethodParam params_particle_set_emitter[] = {
     {"emitter", "string", true, "", nullptr, nullptr, "string", false},
@@ -6625,6 +6681,41 @@ static const MethodDescriptor desc_physics_unfracture_object = {
     true
 };
 static const MethodRegistration reg_physics_unfracture_object(desc_physics_unfracture_object);
+
+static const MethodDescriptor desc_player_display = {
+    "player.display", "player",
+    "Report the Player's display surface and a one-second frame timing window",
+    "Player only (Studio returns an error). frame: fps, frame_ms_avg/max, loop_hz, renders_per_s and per-stage averages (advance = simulation/runtime, render = GPU frame incl. readback into the CPU surface, upload = SDL texture upload, present = HUD + present). render is the actual render resolution (output x render_scale).",
+    "render", "Render", false, "any",
+    "player|display|fps|frame|timing|window|fullscreen|resolution|debug",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_player_display(desc_player_display);
+
+static const MethodParam params_player_set_display[] = {
+    {"continuous", "bool", false, "", "false", nullptr, "bool", false},
+    {"fullscreen", "bool", false, "", "false", nullptr, "bool", false},
+    {"height", "int", false, "", "0", nullptr, "number", false},
+    {"hud", "bool", false, "", "true", nullptr, "bool", false},
+    {"pacing_hz", "float", false, "", "60.0", nullptr, "number", false},
+    {"render_scale", "float", false, "", "1.0", nullptr, "number", false},
+    {"width", "int", false, "", "0", nullptr, "number", false},
+};
+static const MethodDescriptor desc_player_set_display = {
+    "player.set_display", "player",
+    "Change the Player's window mode, render resolution scale, frame pacing or HUD",
+    "Player only. All keys optional and validated before any is applied: fullscreen (borderless desktop), width/height (windowed only, >= 320x240), render_scale 0.25..1, pacing_hz 0 = uncapped or 10..1000, continuous (render every iteration for measurement), hud. Returns the new display status.",
+    "render", "Render", false, "any",
+    "player|set|display|fullscreen|resolution|scale|pacing|vsync|fps|hud",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_player_set_display, 7,
+    true
+};
+static const MethodRegistration reg_player_set_display(desc_player_set_display);
 
 static const MethodParam params_post_configure_exposure[] = {
     {"settings", "object", true, "Exposure patch: mode, ev, min_ev, max_ev, low_percent, high_percent, key, speed_up, speed_down, center_weight, locked, locked_ev", nullptr, nullptr, nullptr, false},

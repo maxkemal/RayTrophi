@@ -10,6 +10,8 @@
 #include "globals.h"
 #include "UI/ParticleBillboardBuilder.h"
 #include "VolumetricRenderer.h"
+#include "Atmosphere/AtmosphereLocalWeather.h"
+#include "Atmosphere/LightningStrikeResolver.h"
 
 #include <unordered_map>
 #include <unordered_set>
@@ -207,6 +209,52 @@ void publishVolumes(SceneData& scene, Renderer& renderer, Backend::IBackend* ren
     if (viewport_backend && viewport_backend != render_backend) {
         VolumetricRenderer::syncVolumetricData(scene, viewport_backend, &world_data);
     }
+}
+
+bool pushCloudState(World& world, SceneData& scene, float cloud_time_s, const Vec3& camera,
+                    CloudPushState& state, Backend::IBackend* render_backend,
+                    Backend::IBackend* viewport_backend) {
+    world.setCloudTime(cloud_time_s);
+    // Local weather (ATMOSPHERE_LOCAL_WINDS_FOG.md §2-4): terrain copy, birth
+    // environment and fog map. Before the push below: the cells the push packs
+    // read the environment published here.
+    atmosphere::syncLocalWeather(world, cloud_time_s, camera);
+    // Ground strikes attach to this scene's geometry (LightningStrike.h). One
+    // resolver per scene object for the life of the process.
+    static const SceneData* s_lightning_scene = nullptr;
+    if (s_lightning_scene != &scene) {
+        atmosphere::installLightningStrikeResolver(scene);
+        s_lightning_scene = &scene;
+    }
+    const auto local_env = atmosphere::localWeatherEnvironment();
+    const auto local_fog = atmosphere::localFogMapSnapshot();
+    // Environment and fog map revisions in one key: both are published here,
+    // outside the cloud revision. A terrain edit or a sun move re-places the
+    // cell births and a new fog map changes the fog layer without touching
+    // the cloud revision; both must reach the GPU too.
+    const unsigned long long local_revision =
+        (local_env ? local_env->revision : 0) * 1000003ull + (local_fog ? local_fog->revision : 0);
+    const unsigned long long cloud_revision = world.cloudRevision();
+    if (cloud_time_s == state.time && cloud_revision == state.cloud_revision &&
+        local_revision == state.local_revision && render_backend == state.render_backend &&
+        viewport_backend == state.viewport_backend) {
+        return false;
+    }
+    state.time = cloud_time_s;
+    state.cloud_revision = cloud_revision;
+    state.local_revision = local_revision;
+    state.render_backend = render_backend;
+    state.viewport_backend = viewport_backend;
+    for (Backend::IBackend* backend : {render_backend, viewport_backend}) {
+        if (auto* vulkan = dynamic_cast<Backend::VulkanBackendAdapter*>(backend)) {
+            vulkan->setCloudState(world.getClouds(), cloud_time_s, world.cloudWindOffset(),
+                                  world.cloudWindVelocity());
+        }
+        if (render_backend == viewport_backend) {
+            break;  // one device, one push
+        }
+    }
+    return true;
 }
 
 } // namespace AppRuntime

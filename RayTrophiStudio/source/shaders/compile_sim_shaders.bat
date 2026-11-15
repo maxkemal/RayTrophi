@@ -120,6 +120,9 @@ glslc "%SHADER_DIR%sim_grid_maccormack_velocity.comp" -o "%SHADER_DIR%sim_grid_m
 glslc "%SHADER_DIR%sim_gas_inject.comp"               -o "%SHADER_DIR%sim_gas_inject.spv"               --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_gas_buoyancy.comp"             -o "%SHADER_DIR%sim_gas_buoyancy.spv"             --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_gas_combustion.comp"           -o "%SHADER_DIR%sim_gas_combustion.spv"           --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_particle_ballistic.comp"       -o "%SHADER_DIR%sim_particle_ballistic.spv"       --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_particle_spawn.comp"           -o "%SHADER_DIR%sim_particle_spawn.spv"           --target-env=vulkan1.2
+glslc "%SHADER_DIR%sim_particle_collide.comp"         -o "%SHADER_DIR%sim_particle_collide.spv"         --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_gas_divergence.comp"           -o "%SHADER_DIR%sim_gas_divergence.spv"           --target-env=vulkan1.2
 glslc "%SHADER_DIR%sim_gas_majorant.comp"             -o "%SHADER_DIR%sim_gas_majorant.spv"             --target-env=vulkan1.2
 glslc "%SHADER_DIR%terrain_snow_solver.comp"           -o "%SHADER_DIR%terrain_snow_solver.spv"           --target-env=vulkan1.2

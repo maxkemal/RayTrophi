@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Core/RuntimeProjectHost.h"
+#include "Viewport/RasterFrameTelemetry.h"
+#include "Core/VulkanSceneSync.h"
 
 #include <cstdint>
 #include <memory>
@@ -30,11 +32,23 @@ public:
     static std::uint64_t scatterInstanceCount();
     bool needsFrame() const;
     void requestFrame();
+    // Measurement mode: make the backend record and submit a real frame. A plain
+    // requestFrame() on a converged raster frame returns without recording
+    // (measured: 0 frames drawn, cpu_record 0 ms, while "continuous" was on).
+    void forceRedraw();
     // Drive the shared simulation clock in live mode and apply its write-back
     // (deformed bodies, moved instances) to the raster scene. Called once per
     // Player loop iteration; a scene without simulation runtime costs nothing.
     void advanceRuntime(float dt_seconds);
     bool render(SDL_Surface* surface, SDL_Texture* texture);
+    // Milliseconds of the last render() call: backend frame (GPU + readback
+    // into the CPU surface) and SDL texture upload.
+    double lastRenderMs() const { return last_render_ms_; }
+    double lastUploadMs() const { return last_upload_ms_; }
+    // Backend telemetry of the last drawn frame (CPU record, submit, slot wait).
+    const Backend::RasterFrameTelemetry& lastTelemetry() const { return last_telemetry_; }
+    // Frame-loop telemetry owned by the executable, reported under "loop".
+    void setLoopStatus(nlohmann::json status) { loop_status_ = std::move(status); }
     bool hasScene() const {
         return scene_ready_;
     }
@@ -61,6 +75,18 @@ private:
     std::uint64_t raster_refits_ = 0;
     std::uint64_t raster_rebuilds_ = 0;
     std::uint64_t particle_draws_ = 0;
+    double last_render_ms_ = 0.0;
+    // Clouds evolve on the game clock (Studio uses its timeline frame).
+    float cloud_time_s_ = 0.0f;
+    // Scene audio transport runs on the game clock from project open.
+    double audio_time_s_ = 0.0;
+    std::uint64_t audio_ticks_ = 0;
+    std::uint64_t cloud_pushes_ = 0;
+    std::uint64_t world_syncs_ = 0;
+    CloudPushState cloud_push_{};
+    double last_upload_ms_ = 0.0;
+    Backend::RasterFrameTelemetry last_telemetry_{};
+    nlohmann::json loop_status_ = nlohmann::json::object();
     std::uint64_t particle_uploads_ = 0;
     std::string project_path_;
     std::string error_;

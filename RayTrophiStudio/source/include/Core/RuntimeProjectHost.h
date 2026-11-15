@@ -29,4 +29,21 @@ std::optional<rtapi::Result> tryOpenRuntimeProject(UIContext& context,
                                                 const std::string& path);
 nlohmann::json runtimeStatus(UIContext& context);
 
+// Executable-owned display surface (window mode, render resolution, frame
+// pacing, frame timing). The Player installs one; Studio has none, so the
+// player.display / player.set_display IPC calls fail there with an explicit
+// error instead of pretending. `params` keys: fullscreen (bool), width/height
+// (windowed size, px), render_scale (0.25..1), pacing_hz (0 = uncapped), hud.
+class DisplayHost {
+public:
+    virtual ~DisplayHost() = default;
+    virtual nlohmann::json displayStatus() const = 0;
+    virtual rtapi::Result setDisplay(const nlohmann::json& params) = 0;
+};
+
+void bindDisplayHost(DisplayHost& host);
+void unbindDisplayHost(DisplayHost& host);
+rtapi::Result runtimeDisplayStatus(nlohmann::json& out);
+rtapi::Result setRuntimeDisplay(const nlohmann::json& params);
+
 } // namespace AppRuntime

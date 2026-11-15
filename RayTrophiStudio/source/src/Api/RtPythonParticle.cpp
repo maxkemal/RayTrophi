@@ -21,6 +21,7 @@
 */
 
 #include "RtPythonParticle.h"
+#include "Api/RtApiParticleCollision.h"
 
 #include "RtPyCommon.h"
 
@@ -465,6 +466,56 @@ void registerParticleBindings(py::module_& module) {
     });
 
     // ── Solver settings ──────────────────────────────────────────────────
+    particle.def("get_collision", [](const py::kwargs& kwargs) -> py::dict {
+        rtapi::ParticleCollisionSettingsInfo info;
+        requireResult(rtapi::getParticleCollisionSettings(info, systemRefFromKwargs(kwargs)));
+        py::dict d;
+        d["response"] = info.response;
+        d["record_events"] = info.record_events;
+        d["event_capacity"] = info.event_capacity;
+        return d;
+    });
+    particle.def("set_collision", [](const py::kwargs& kwargs) {
+        const rtapi::ParticleSystemRef ref = systemRefFromKwargs(kwargs);
+        rtapi::ParticleCollisionSettingsInfo info;
+        requireResult(rtapi::getParticleCollisionSettings(info, ref));
+        if (kwargs.contains("response")) info.response = py::cast<std::string>(kwargs["response"]);
+        if (kwargs.contains("record_events")) info.record_events = py::cast<bool>(kwargs["record_events"]);
+        if (kwargs.contains("event_capacity"))
+            info.event_capacity = py::cast<uint32_t>(kwargs["event_capacity"]);
+        requireResult(rtapi::setParticleCollisionSettings(info, ref));
+    });
+    particle.def("collision_events", [](const py::kwargs& kwargs) -> py::dict {
+        const uint32_t max_events =
+            kwargs.contains("max_events") ? py::cast<uint32_t>(kwargs["max_events"]) : 64u;
+        const bool consume = kwargs.contains("consume") && py::cast<bool>(kwargs["consume"]);
+        rtapi::ParticleCollisionEventsInfo info;
+        requireResult(rtapi::readParticleCollisionEvents(max_events, consume, info,
+                                                         systemRefFromKwargs(kwargs)));
+        py::list events;
+        for (const auto& e : info.events) {
+            py::dict ev;
+            ev["position"] = py::make_tuple(e.position[0], e.position[1], e.position[2]);
+            ev["normal"] = py::make_tuple(e.normal[0], e.normal[1], e.normal[2]);
+            ev["collider"] = e.collider;
+            ev["profile"] = e.profile;
+            ev["speed"] = e.speed;
+            ev["age_fraction"] = e.age_fraction;
+            ev["particle"] = e.particle;
+            ev["died"] = e.died;
+            events.append(ev);
+        }
+        py::dict d;
+        d["pending"] = info.pending;
+        d["overflow"] = info.overflow;
+        d["capacity"] = info.capacity;
+        d["device"] = info.device;
+        d["gpu_status"] = info.gpu_status;
+        d["collision_stage_on_device"] = info.collision_stage_on_device;
+        d["gpu_colliders"] = info.gpu_colliders;
+        d["events"] = events;
+        return d;
+    });
     particle.def("get_physics", [](const py::object& system, int system_id) -> py::dict {
         rtapi::ParticlePhysicsInfo info;
         requireResult(rtapi::getParticlePhysics(info, systemRef(system, system_id)));

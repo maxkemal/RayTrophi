@@ -85,9 +85,9 @@ const char* ParticleSimulationSystem::residentIneligibility() const {
     // Exactly the stages that read HOST positions in the middle of a step.
     // Phase 6 moves them to the device; until then they keep the system on
     // the CPU reference, and the reason is reported, not hidden.
-    for (const auto& collider : colliders_) {
-        if (collider.enabled) return "host_consumer_colliders";
-    }
+    // Colliders run on the device (ParticleDeviceCollision.cpp) except the
+    // modes that still need host geometry; the reason names which.
+    if (const char* reason = deviceColliderIneligibility()) return reason;
     if (physics_settings_.self_collision_enabled) return "host_consumer_self_collision";
     if (!grid_domains_.empty()) return "host_consumer_grid_domains";
     return nullptr;
@@ -261,12 +261,21 @@ bool ParticleSimulationSystem::downloadResidentKinematics(SimulationComputeConte
         resident_buffers_.position_x, resident_buffers_.position_y, resident_buffers_.position_z,
         resident_buffers_.velocity_x, resident_buffers_.velocity_y, resident_buffers_.velocity_z,
     };
+    // Contacts with response Die kill on the device only; the alive stream has
+    // to come home too or those particles would reappear on the host.
+    const bool device_kills =
+        physics_settings_.collision_response == ParticleCollisionResponse::Die;
+    if (device_kills) resident_u32_scratch_.resize(n);
     // One batch: the copies ride behind whatever this step recorded and land
     // with ONE submit + fence.
     compute.beginTransferBatch();
     bool ok = true;
     for (int s = 0; s < 6 && ok; ++s) {
         ok = compute.downloadBuffer(handles[s], resident_download_[s].data(), n * sizeof(float));
+    }
+    if (ok && device_kills) {
+        ok = compute.downloadBuffer(resident_buffers_.alive, resident_u32_scratch_.data(),
+                                    n * sizeof(uint32_t));
     }
     ok = compute.endTransferBatch() && ok;
     if (!ok) {
@@ -291,6 +300,18 @@ bool ParticleSimulationSystem::downloadResidentKinematics(SimulationComputeConte
         for (std::size_t i = 0; i < n; ++i) {
             if (!resident_slot_mask_[i]) dst[i] = src[i];
         }
+    }
+    if (device_kills) {
+        // Only deaths travel home: a slot the device killed at a contact.
+        // Births are always host decisions (slot records).
+        for (std::size_t i = 0; i < n; ++i) {
+            if (!resident_slot_mask_[i] && buffers_.alive[i] != 0u &&
+                resident_u32_scratch_[i] == 0u) {
+                buffers_.alive[i] = 0u;
+                if (alive_count_ > 0) --alive_count_;
+            }
+        }
+        host_snapshot_stats_.download_bytes += static_cast<uint64_t>(n) * sizeof(uint32_t);
     }
 
     residency_ = ParticleKinematicResidency::Equal;
@@ -480,6 +501,11 @@ bool ParticleSimulationSystem::stepDeviceResident(const SimulationContext& conte
         cmd.constants_size = sizeof(constants);
         cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + 255u) / 256u;
         dispatched = compute.dispatch(cmd);
+    }
+    // Colliders (and the system ground plane, which this path used to ignore
+    // silently) resolve after integration, in the same submission.
+    if (dispatched && n > 0 && deviceCollisionStageNeeded()) {
+        dispatched = stepDeviceCollisions(compute, dt);
     }
     if (!dispatched) {
         // Records not consumed stay pending; the caller pulls the device state

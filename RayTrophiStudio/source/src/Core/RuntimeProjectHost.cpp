@@ -4,6 +4,7 @@ namespace AppRuntime {
 namespace {
 UIContext* host_context = nullptr;
 ProjectHost* project_host = nullptr;
+DisplayHost* display_host = nullptr;
 } // namespace
 
 std::filesystem::path projectPathFromUtf8(const std::string& path) {
@@ -40,6 +41,31 @@ nlohmann::json runtimeStatus(UIContext& context) {
         return {{"host_active", false}, {"host", "studio"}};
     }
     return project_host->status();
+}
+
+void bindDisplayHost(DisplayHost& host) {
+    display_host = &host;
+}
+
+void unbindDisplayHost(DisplayHost& host) {
+    if (display_host == &host) {
+        display_host = nullptr;
+    }
+}
+
+rtapi::Result runtimeDisplayStatus(nlohmann::json& out) {
+    if (!display_host) {
+        return rtapi::Result::fail("player.display requires the RayTrophi Player runtime");
+    }
+    out = display_host->displayStatus();
+    return rtapi::Result::success();
+}
+
+rtapi::Result setRuntimeDisplay(const nlohmann::json& params) {
+    if (!display_host) {
+        return rtapi::Result::fail("player.set_display requires the RayTrophi Player runtime");
+    }
+    return display_host->setDisplay(params);
 }
 
 } // namespace AppRuntime

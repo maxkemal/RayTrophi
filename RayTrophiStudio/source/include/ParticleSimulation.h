@@ -106,6 +106,41 @@ enum class ParticleExecutionPolicy {
     CPU
 };
 
+// What a particle does when a collider (or the system's ground plane) stops it.
+// Bounce keeps the restitution/friction response; Die removes the particle at
+// the contact (a paint droplet becomes paint). Same on the CPU reference and on
+// the device-resident path (sim_particle_collide.comp).
+enum class ParticleCollisionResponse : uint8_t {
+    Bounce = 0,
+    Die = 1
+};
+
+// One contact, recorded when ParticlePhysicsSettings::record_collision_events is
+// on. Shared byte for byte with sim_particle_collide.comp (std430, 48 bytes).
+// collider: index into the system's collider list, kCollisionPlaneCollider for
+// the system ground plane.
+struct ParticleCollisionEvent {
+    float position[3] = {0.0f, 0.0f, 0.0f};  // contact point (resolved position)
+    uint32_t collider = 0;
+    float normal[3] = {0.0f, 1.0f, 0.0f};    // surface normal, world space
+    uint32_t profile = 0;                    // appearance profile id (colour source)
+    float speed = 0.0f;                      // |v| before the response, m/s
+    float age_fraction = 0.0f;               // age / lifetime (appearance LUT row position)
+    uint32_t particle = 0;                   // slot index
+    uint32_t flags = 0;                      // bit 0: particle died at this contact
+};
+static_assert(sizeof(ParticleCollisionEvent) == 48, "ParticleCollisionEvent is shared with sim_particle_collide.comp");
+inline constexpr uint32_t kCollisionPlaneCollider = 0xFFFFFFFEu;
+
+// Events are kept until a consumer takes them (readCollisionEvents with consume).
+struct ParticleCollisionEventReadout {
+    uint32_t pending = 0;     // events held (<= capacity)
+    uint64_t overflow = 0;    // contacts dropped because the buffer was full
+    uint32_t capacity = 0;
+    bool device = false;      // read from the device buffer (resident path)
+    std::vector<ParticleCollisionEvent> events;  // first min(pending, max) events
+};
+
 // Matter is the live domain identity. Legacy values retain their serialized
 // numbers solely for migration; lane switches select the actual solvers.
 enum class SimulationDomainType {
@@ -286,6 +321,12 @@ struct ParticlePhysicsSettings {
     // Scale deposit by remaining life (full at birth → 0 at death). A cooling
     // ember should stop igniting things long before it disappears.
     bool grid_deposit_fade_with_age = true;
+
+    // Contact behaviour (Boyama Odasi step 2). Bounce = previous behaviour.
+    ParticleCollisionResponse collision_response = ParticleCollisionResponse::Bounce;
+    // Record one ParticleCollisionEvent per contact until a consumer takes them.
+    bool record_collision_events = false;
+    uint32_t collision_event_capacity = 65536u;
 };
 
 // How many turbulence octaves this grid can actually CARRY.
@@ -2207,6 +2248,15 @@ struct ParticleResidentBuffers {
     ComputeBufferHandle slot_records;        // ParticleResidentSlotRecord upload
     std::size_t capacity = 0;
     std::size_t record_capacity = 0;
+    // Device collision stage (ParticleDeviceCollision.cpp).
+    ComputeBufferHandle colliders;           // ParticleGpuCollider[] (packed per step)
+    ComputeBufferHandle collider_sdf;        // concatenated cooked SDF grids
+    ComputeBufferHandle collision_events;    // ParticleCollisionEvent[capacity]
+    ComputeBufferHandle collision_counter;   // uint32 {count, overflow}
+    std::size_t collider_capacity = 0;
+    std::size_t sdf_capacity = 0;            // floats
+    std::size_t event_capacity = 0;
+    uint64_t sdf_signature = 0;              // identity of the uploaded SDF set
 };
 
 // One host-decided slot write (spawn or external kill), scattered into every
@@ -2306,6 +2356,14 @@ struct ParticleSimulationStats {
     // resident step only known when the state came home (nonfinite_measured).
     uint32_t nonfinite_particles = 0;
     bool nonfinite_measured = false;
+
+    // ── Collisions ──────────────────────────────────────────────────────────
+    // CPU path: counted every step. Device path: the stage ran (contact counts
+    // live on the device; read them with readCollisionEvents).
+    uint32_t collision_hits = 0;
+    uint32_t collision_kills = 0;
+    bool collision_stage_on_device = false;
+    uint32_t gpu_colliders = 0;          // colliders packed for the device stage
 };
 
 struct MoltenMassTransferRequest {
@@ -2730,6 +2788,11 @@ public:
     // here: a consumer that reads them calls syncHostState(reason) first.
     const ParticleSoABuffers& buffers() const;
     const ParticleSimulationStats& stats() const;
+    // Contacts recorded since the last consume (record_collision_events). Reads
+    // the device buffer on the resident path (a small synchronous download:
+    // a measurement / consumer call, never part of the step).
+    bool readCollisionEvents(uint32_t max_events, bool consume,
+                             ParticleCollisionEventReadout& out);
 
     // ── Device residency (particle roadmap Phase 1.5 Batch B) ───────────────
     // Brings device-authoritative position/velocity home: an explicit,
@@ -2772,6 +2835,14 @@ private:
         ParticleColliderDesc desc;
         ParticleColliderOBB obb;
         bool has_obb = false;
+        uint32_t source_index = 0;   // index in colliders_ (event "collider" field)
+    };
+    // The collider that moved a particle in applyColliders: the last one that
+    // changed its position or velocity, with the push-out normal.
+    struct ColliderHit {
+        bool hit = false;
+        uint32_t collider = 0;
+        Vec3 normal = Vec3(0.0f, 1.0f, 0.0f);
     };
 
     void resizeStorage(std::size_t capacity);
@@ -2783,7 +2854,11 @@ private:
     bool hasActiveGridSimulation() const;
     void emitFromEmitters(const SimulationContext& context);
     void refreshResolvedColliders(float particle_radius);
-    void applyColliders(Vec3& position, Vec3& velocity, const Vec3* previous_position = nullptr) const;
+    void applyColliders(Vec3& position, Vec3& velocity, const Vec3* previous_position = nullptr,
+                        ColliderHit* hit = nullptr) const;
+    // CPU-path contact bookkeeping: response (Die) and event recording.
+    void recordCollisionHit(std::size_t index, const Vec3& position, const Vec3& velocity_before,
+                            const ColliderHit& hit);
     void synchronizeGridDomains();
     void stepGridDomains(const SimulationContext& context);
     void settleGridDomains(const SimulationContext& context);
@@ -2805,6 +2880,14 @@ private:
     bool uploadResidentFullState(SimulationComputeContext& compute);
     bool downloadResidentKinematics(SimulationComputeContext& compute, const char* reason,
                                     bool in_step);
+    // Device collision stage (ParticleDeviceCollision.cpp).
+    const char* deviceColliderIneligibility() const;
+    bool deviceCollisionStageNeeded() const;
+    bool stepDeviceCollisions(SimulationComputeContext& compute, float dt);
+    bool readDeviceCollisionEvents(SimulationComputeContext& compute, uint32_t max_events,
+                                   bool consume, ParticleCollisionEventReadout& out);
+    // Collision buffers outlive a stream capacity growth (pending events stay).
+    void releaseDeviceCollisionBuffers(SimulationComputeContext& compute);
     void releaseResidentBuffers(SimulationComputeContext& compute);
     void forgetResidentBuffers();
     // Surface-water vapour (MaterialStateFieldSystem::stepSurfaceWater) into the
@@ -2833,6 +2916,10 @@ private:
 
     ParticleSoABuffers buffers_;
     ParticleResidentBuffers resident_buffers_;
+    // CPU-path collision events, kept until consumed (same contract as the device buffer).
+    std::vector<ParticleCollisionEvent> host_collision_events_;
+    uint64_t host_collision_overflow_ = 0;
+    std::vector<uint8_t> collider_gpu_scratch_;
     ParticleKinematicResidency residency_ = ParticleKinematicResidency::Host;
     // The context the resident buffers live in; set by the resident step.
     SimulationComputeContext* resident_compute_ = nullptr;

@@ -213,6 +213,9 @@ def required(method, namespaces):
     # through to None — which is how this mirror first went stale.
     if method.startswith("viewport."):
         return "Render"
+    # player.* sets and measures the Player's display surface, like viewport.*.
+    if method.startswith("player."):
+        return "Render"
     # sim.control_state reports who is driving the solvers and changes
     # nothing. An agent must be able to read it to know whether its own
     # measurement was invalidated, so gating it above Read would make the

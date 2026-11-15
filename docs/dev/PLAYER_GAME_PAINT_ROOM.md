@@ -6,6 +6,18 @@
 [PARTICLE_SYSTEM_GPU_ROADMAP.md](PARTICLE_SYSTEM_GPU_ROADMAP.md) §9. İlk kare kabulü:
 [PLAYER_STATIC_VIEWER_ACCEPTANCE.md](PLAYER_STATIC_VIEWER_ACCEPTANCE.md) (2026-11-14 PASS).
 
+## Devir notu
+
+- **2026-11-15 — adım 2 CANLI PASS (Claude):** GPU/CPU olay sayısı birebir (4214), konum hatası
+  < 1e-7 m, normaller ≥ 0.9999999; bounce'ta zeminin altında partikül yok. Yazılanlar: GPU partikül çarpışması
+  (`sim_particle_collide`, `ParticleDeviceCollision.cpp`) + sistem düzeyi `collision_response`
+  (bounce|die) + cihazda olay tamponu (`ParticleCollisionEvent`, 48 B; tüketilene dek birikir).
+  CPU referansı aynı davranışı aldı. IPC `particle.get_collision/set_collision/collision_events`,
+  Python, panel, kayıt. Adım 3 (GPU ıslak boya) bu olayları tüketecek: `readCollisionEvents`
+  yerine cihazda doğrudan `resident_buffers_.collision_events` + `collision_counter` okunmalı
+  (CPU'ya inmeden), tüketim = sayaç sıfırlama. Kabul: `rt_particle_gpu_collision_ipc.py`.
+  Önceki adımlar (ortak sim saati, materyal/partikül/scatter/VDB/bulut, ekran+FPS) CANLI.
+
 ## 0. Ürün bağlamı — bu bir PC oyunu değil
 
 İlk oyunlar AVM'deki kapalı oyun alanlarında koşacak: bir oda, duvara/zemine yansıtma
@@ -33,6 +45,38 @@ demodan çok **motorun** gereksinimlerini belirler:
 
 Ortak olan her şey (poz, kurallar, partikül, boya, ses) iki modda aynı; fark yalnız
 kamera/çıkış eşlemesi ve video kartının açık olması.
+
+### 0.2 Erişim seviyeleri ve kurulum profili (karar 2026-11-15)
+
+Genel bir motor katmanı, demoya özel değil:
+
+| Seviye | Kim | Erişim | Yol |
+|---|---|---|---|
+| 0 Oyuncu | çocuklar | hiçbir şey (tuş, menü, HUD yok) | kiosk modu varsayılan |
+| 1 Görevli | oyun alanı personeli | oturum başlat/durdur, ses, içerik seçimi, sıfırla | **uzaktan**: telefon/tablet, yalnız oturum+ses yetkili rol token'ı (TLS IPC) |
+| 2 Teknisyen | kurulum/test | kalibrasyon, ekran, tanılama HUD, log, test modları | **ekranda** gizli tuş kombinasyonu + PIN ile kurulum katmanı (ImGui) + uzaktan |
+| 3 Geliştirici | biz | her şey | yerel IPC |
+
+- **Kurulum profili** `kiosk.json` (projeden ayrı, kuruluma ait): ekran, ses, kalibrasyon,
+  içerik listesi, kilit modu, hash'li PIN'ler. `--profile` ile; alanlar IPC'den rol yetkisiyle.
+- **Girdi kapısı:** ★ 2026-11-14'te eklenen F1–F11 operatör tuşları şu an HERKESE açık; kiosk
+  modunda kapalı, yalnız teknisyen kilidi açıkken çalışmalı. Saha demosundan önce şart.
+- **Rol yetkileri:** mevcut `RtIpcSecurity` yetki bitleri + uzak token; Görevli / Teknisyen
+  hazır yetki setleri.
+- Sıra kararı (kullanıcı): önce oynanış (ses tick'i → adım 3 ıslak boya), kiosk katmanı ilk
+  saha demosundan önce.
+
+### 0.3 Ses
+
+Ses sistemi (sahne sesi, mikser, transport, fizik kaynaklı ses, hava tepkileri, gök gürültüsü,
+akustik) Player projesinde derleniyor ama **Player'da ilerletilmiyor**: tick'i
+(`audio::updateListener`: transport + dinleyici + akustik + gök gürültüsü + hava tepkileri)
+panel dosyası `UI/AudioUI.cpp`'de; sim saatiyle aynı kök. Çözüm: gövde çekirdeğe, panel ve
+Player aynı fonksiyonu çağırır; Player transport'u oyun saatiyle sürer. **Kaynak hazır (2026-11-15):**
+`audio::tickRuntime` (Scene/AudioRuntime.cpp); **CANLI PASS 01:23**: transport oyun saatiyle,
+pozlar çözülüyor, Player IPC `audio.play` ile cihaz `ready` + kaynak `playing`. Manuel kaynaklar
+çalınana dek sessiz (Studio'da da aynı). Oyun sesleri (balon
+patlaması, boya sıçraması) mevcut ses API'siyle, yeni ses sistemi yazılmadan.
 
 ## 1. Rakiplerden ayrışma — ne "daha etkileşimli" demek
 

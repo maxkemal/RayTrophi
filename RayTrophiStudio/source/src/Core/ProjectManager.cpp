@@ -6201,6 +6201,11 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
                 {"grid_temperature_deposit", physics.grid_temperature_deposit},
                 {"grid_fuel_deposit", physics.grid_fuel_deposit},
                 {"grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age},
+                {"collision_response",
+                 physics.collision_response == RayTrophiSim::ParticleCollisionResponse::Die
+                     ? "die" : "bounce"},
+                {"record_collision_events", physics.record_collision_events},
+                {"collision_event_capacity", physics.collision_event_capacity},
                 {"vorticity", physics.vorticity}
             }}
         };
@@ -6912,6 +6917,20 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
                 p.value("grid_fuel_deposit", physics.grid_fuel_deposit);
             physics.grid_deposit_fade_with_age =
                 p.value("grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age);
+            // Contact behaviour (absent in older projects = bounce, no events).
+            if (p.contains("collision_response") && p["collision_response"].is_string()) {
+                physics.collision_response = p["collision_response"].get<std::string>() == "die"
+                    ? RayTrophiSim::ParticleCollisionResponse::Die
+                    : RayTrophiSim::ParticleCollisionResponse::Bounce;
+            }
+            if (p.contains("record_collision_events") && p["record_collision_events"].is_boolean()) {
+                physics.record_collision_events = p["record_collision_events"].get<bool>();
+            }
+            if (p.contains("collision_event_capacity") &&
+                p["collision_event_capacity"].is_number_unsigned()) {
+                physics.collision_event_capacity = std::max<uint32_t>(
+                    1u, p["collision_event_capacity"].get<uint32_t>());
+            }
             physics.vorticity = p.value("vorticity", physics.vorticity);
         }
         if (settings.contains("world_thermal") && settings["world_thermal"].is_object()) {

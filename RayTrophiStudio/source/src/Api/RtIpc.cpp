@@ -1,4 +1,5 @@
 #include "RtPlayerIpcPolicy.h"
+#include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiVdbVolume.h"
 #include "Fluid/MixedGpuStageDiagnostics.h"
 #include "RtIpcLiquidEmission.h"
@@ -1999,6 +2000,40 @@ json dispatchMethod(const std::string& method, const json& params) {
         std::string path = requireString(params, "path");
         return enqueueResult([path](UIContext&) {
             return rtapi::importModel(path);
+        });
+    }
+    if (method == "player.display") {
+        return enqueueQuery([](UIContext&) {
+            json out;
+            const rtapi::Result r = AppRuntime::runtimeDisplayStatus(out);
+            if (!r.ok) return json{{"__error", r.error}};
+            return out;
+        });
+    }
+    if (method == "player.set_display") {
+        // Optional keys, all validated by the Player's display host before any
+        // is applied: fullscreen, width, height, render_scale, pacing_hz,
+        // continuous, hud. The value() reads below are what the descriptor
+        // generator types each key from, and so what checkParams() rejects
+        // before dispatch: a wrong-typed value never reaches the host.
+        json patch = json::object();
+        for (const char* key : {"fullscreen", "width", "height", "render_scale",
+                                "pacing_hz", "continuous", "hud"}) {
+            if (params.contains(key)) patch[key] = params[key];
+        }
+        (void)params.value("fullscreen", false);
+        (void)params.value("width", 0);
+        (void)params.value("height", 0);
+        (void)params.value("render_scale", 1.0);
+        (void)params.value("pacing_hz", 60.0);
+        (void)params.value("continuous", false);
+        (void)params.value("hud", true);
+        return enqueueQuery([patch](UIContext&) {
+            const rtapi::Result r = AppRuntime::setRuntimeDisplay(patch);
+            if (!r.ok) return json{{"__error", r.error}};
+            json out;
+            AppRuntime::runtimeDisplayStatus(out);
+            return out;
         });
     }
     if (method == "scene.import_vdb") {

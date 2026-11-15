@@ -20,6 +20,8 @@
 */
 
 #include "RtIpcParticle.h"
+#include <algorithm>
+#include "Api/RtApiParticleCollision.h"
 
 #include "Api/RtApi.h"
 
@@ -713,6 +715,70 @@ bool dispatchParticleIpc(const std::string& method, const json& params,
             if (!read.ok) return resultToJson(read);
             applyParticlePhysicsPatch(patch, info);
             return resultToJson(rtapi::updateParticlePhysics(info, ref));
+        });
+        return true;
+    }
+
+    // ── Contacts (RtApiParticleCollision.h) ──────────────────────────────
+    if (method == "particle.get_collision") {
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        out_result = enqueue([ref](UIContext&) {
+            rtapi::ParticleCollisionSettingsInfo info;
+            const rtapi::Result r = rtapi::getParticleCollisionSettings(info, ref);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"response", info.response}, {"record_events", info.record_events},
+                        {"event_capacity", info.event_capacity}};
+        });
+        return true;
+    }
+    if (method == "particle.set_collision") {
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        // Every key optional; checkParams() types them before dispatch.
+        const bool has_response = params.contains("response");
+        const std::string response = optionalString(params, "response", "");
+        const bool has_record = params.contains("record_events");
+        const bool record = params.value("record_events", false);
+        const bool has_capacity = params.contains("event_capacity");
+        const int capacity = optionalInt(params, "event_capacity", 65536);
+        out_result = enqueue([=](UIContext&) {
+            rtapi::ParticleCollisionSettingsInfo info;
+            const rtapi::Result read = rtapi::getParticleCollisionSettings(info, ref);
+            if (!read.ok) return resultToJson(read);
+            if (has_response) info.response = response;
+            if (has_record) info.record_events = record;
+            if (has_capacity) {
+                if (capacity < 1) return json{{"__error", "event_capacity must be positive"}};
+                info.event_capacity = static_cast<uint32_t>(capacity);
+            }
+            return resultToJson(rtapi::setParticleCollisionSettings(info, ref));
+        });
+        return true;
+    }
+    if (method == "particle.collision_events") {
+        const rtapi::ParticleSystemRef ref = readSystemRef(params);
+        const int max_events = optionalInt(params, "max_events", 64);
+        const bool consume = params.value("consume", false);
+        out_result = enqueue([=](UIContext&) {
+            rtapi::ParticleCollisionEventsInfo info;
+            const rtapi::Result r = rtapi::readParticleCollisionEvents(
+                static_cast<uint32_t>(std::max(0, max_events)), consume, info, ref);
+            if (!r.ok) return json{{"__error", r.error}};
+            json events = json::array();
+            for (const auto& e : info.events) {
+                events.push_back({{"position", {e.position[0], e.position[1], e.position[2]}},
+                                  {"normal", {e.normal[0], e.normal[1], e.normal[2]}},
+                                  {"collider", e.collider}, {"profile", e.profile},
+                                  {"speed", e.speed}, {"age_fraction", e.age_fraction},
+                                  {"particle", e.particle}, {"died", e.died}});
+            }
+            return json{{"pending", info.pending}, {"overflow", info.overflow},
+                        {"capacity", info.capacity}, {"device", info.device},
+                        {"gpu_status", info.gpu_status},
+                        {"collision_stage_on_device", info.collision_stage_on_device},
+                        {"gpu_colliders", info.gpu_colliders},
+                        {"cpu_hits_last_step", info.cpu_hits_last_step},
+                        {"cpu_kills_last_step", info.cpu_kills_last_step},
+                        {"events", events}};
         });
         return true;
     }

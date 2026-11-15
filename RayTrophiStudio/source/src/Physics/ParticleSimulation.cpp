@@ -6322,6 +6322,7 @@ void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext&
         downloadResidentKinematics(compute, "release", /*in_step=*/false);
     }
     releaseResidentBuffers(compute);
+    releaseDeviceCollisionBuffers(compute);
 
     for (auto& state : grid_domain_states_) {
         if (preserve_inventory) {
@@ -9567,6 +9568,10 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     }
 
     const auto integrate_start = SimulationClock::now();
+    // Contact bookkeeping costs a few compares per collider; only when asked.
+    const bool track_contacts =
+        physics_settings_.collision_response == ParticleCollisionResponse::Die ||
+        physics_settings_.record_collision_events;
     refreshResolvedColliders(std::max(0.0f, physics_settings_.particle_radius));
     for (std::size_t i = 0; i < buffers_.alive.size(); ++i) {
         if (buffers_.alive[i] == 0u) {
@@ -9600,7 +9605,13 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
         velocity = air_wind + (velocity + acceleration * dt - air_wind) * drag_factor;
         position = position + velocity * dt;
 
-        applyColliders(position, velocity, &previous_position);
+        const Vec3 velocity_before_contact = velocity;
+        ColliderHit hit;
+        applyColliders(position, velocity, &previous_position,
+                       track_contacts ? &hit : nullptr);
+        if (hit.hit) {
+            recordCollisionHit(i, position, velocity_before_contact, hit);
+        }
         if (!std::isfinite(position.x) || !std::isfinite(position.y) ||
             !std::isfinite(position.z) || !std::isfinite(velocity.x) ||
             !std::isfinite(velocity.y) || !std::isfinite(velocity.z)) {
@@ -9652,6 +9663,7 @@ void ParticleSimulationSystem::refreshResolvedColliders(float particle_radius) {
 
         ResolvedCollider resolved;
         resolved.desc = collider;
+        resolved.source_index = static_cast<uint32_t>(&collider - colliders_.data());
 
         if (collider.source_mode == ParticleColliderSourceMode::Sphere) {
             if (!collider.source_name.empty() && collider_bounds_resolver_) {
@@ -9793,18 +9805,86 @@ void ParticleSimulationSystem::refreshResolvedColliders(float particle_radius) {
     }
 }
 
-void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity, const Vec3* previous_position) const {
-    const float particle_radius = std::max(0.0f, physics_settings_.particle_radius);
-    if (collision_plane_enabled_ &&
-        ((previous_position && previous_position->y >= collision_plane_y_ + particle_radius && position.y < collision_plane_y_ + particle_radius) ||
-         position.y < collision_plane_y_ + particle_radius)) {
-        position.y = collision_plane_y_ + particle_radius;
-        if (velocity.y < 0.0f) {
-            velocity.y = -velocity.y * collision_restitution_;
+void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity,
+                                              const Vec3* previous_position,
+                                              ColliderHit* hit) const {
+    // A contact is whatever moved the particle: each resolver below pushes the
+    // position out and/or reflects the velocity. The hit records the LAST
+    // collider that did so. Its normal is the SURFACE normal at the resolved
+    // position, from the collider's geometry: the push-out direction is only
+    // radial for the discrete tests, and the CPU's swept tests place the
+    // particle where its path entered (measured: sphere event normals 0.11 off
+    // radial). SDF / convex / mesh BVH push out along their surface normal, so
+    // the push direction is exact there. The device has no swept tests and its
+    // push-out directions are exact (sim_particle_collide.comp).
+    const auto surfaceNormal = [&](const ResolvedCollider* rc, const Vec3& dp,
+                                   const Vec3& dv) -> Vec3 {
+        if (rc) {
+            const ParticleColliderDesc& d = rc->desc;
+            switch (d.source_mode) {
+                case ParticleColliderSourceMode::PlaneY:
+                    return Vec3(0.0f, 1.0f, 0.0f);
+                case ParticleColliderSourceMode::Sphere:
+                    return finiteDirectionOrUp(position - d.sphere_center);
+                case ParticleColliderSourceMode::Capsule:
+                    return finiteDirectionOrUp(
+                        position - closestPointOnSegment(position, d.capsule_start, d.capsule_end));
+                case ParticleColliderSourceMode::ObjectAABB:
+                case ParticleColliderSourceMode::ObjectOBB: {
+                    const bool obb = d.source_mode == ParticleColliderSourceMode::ObjectOBB;
+                    const Vec3 lp = obb ? rc->obb.local_to_world.inverse().transform_point(position)
+                                        : position;
+                    const Vec3 lo = obb ? rc->obb.local_bounds_min : d.bounds_min;
+                    const Vec3 hi = obb ? rc->obb.local_bounds_max : d.bounds_max;
+                    const Vec3 mn = Vec3::min(lo, hi) - d.thickness;
+                    const Vec3 mx = Vec3::max(lo, hi) + d.thickness;
+                    const float dist[6] = {std::abs(lp.x - mn.x), std::abs(mx.x - lp.x),
+                                           std::abs(lp.y - mn.y), std::abs(mx.y - lp.y),
+                                           std::abs(lp.z - mn.z), std::abs(mx.z - lp.z)};
+                    int face = 0;
+                    for (int f = 1; f < 6; ++f) {
+                        if (dist[f] < dist[face]) face = f;
+                    }
+                    static const Vec3 kFace[6] = {Vec3(-1, 0, 0), Vec3(1, 0, 0), Vec3(0, -1, 0),
+                                                  Vec3(0, 1, 0), Vec3(0, 0, -1), Vec3(0, 0, 1)};
+                    return obb ? finiteDirectionOrUp(rc->obb.local_to_world.transform_vector(kFace[face]))
+                               : kFace[face];
+                }
+                default:
+                    break;
+            }
         }
+        const Vec3 n = dp.length_squared() > 1e-20f ? dp : dv;
+        const float len = n.length();
+        return len > 1e-12f ? n * (1.0f / len) : Vec3(0.0f, 1.0f, 0.0f);
+    };
+    const auto noteHit = [&](uint32_t collider_index, const ResolvedCollider* rc,
+                             const Vec3& p0, const Vec3& v0) {
+        if (!hit) return;
+        const Vec3 dp = position - p0;
+        const Vec3 dv = velocity - v0;
+        if (dp.length_squared() <= 0.0f && dv.length_squared() <= 0.0f) return;
+        hit->hit = true;
+        hit->collider = collider_index;
+        hit->normal = surfaceNormal(rc, dp, dv);
+    };
+    const float particle_radius = std::max(0.0f, physics_settings_.particle_radius);
+    {
+        const Vec3 p0 = position;
+        const Vec3 v0 = velocity;
+        if (collision_plane_enabled_ &&
+            ((previous_position && previous_position->y >= collision_plane_y_ + particle_radius &&
+              position.y < collision_plane_y_ + particle_radius) ||
+             position.y < collision_plane_y_ + particle_radius)) {
+            position.y = collision_plane_y_ + particle_radius;
+            if (velocity.y < 0.0f) {
+                velocity.y = -velocity.y * collision_restitution_;
+            }
+        }
+        noteHit(kCollisionPlaneCollider, nullptr, p0, v0);
     }
 
-    for (const auto& resolved_collider : resolved_colliders_) {
+    const auto resolveOne = [&](const ResolvedCollider& resolved_collider) {
         const auto& collider = resolved_collider.desc;
 
         if (collider.source_mode == ParticleColliderSourceMode::PlaneY) {
@@ -9820,7 +9900,7 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity, co
                     velocity.y = -velocity.y * restitution;
                 }
             }
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::Sphere) {
@@ -9829,7 +9909,7 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity, co
             } else if (!previous_position) {
                 resolveSphereCollision(collider, particle_radius, position, velocity);
             }
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::Capsule) {
@@ -9838,7 +9918,7 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity, co
             } else if (!previous_position) {
                 resolveCapsuleCollision(collider, particle_radius, position, velocity);
             }
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectAABB) {
@@ -9847,7 +9927,7 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity, co
             } else if (!previous_position) {
                 resolveAABBCollision(collider, position, velocity);
             }
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectOBB) {
@@ -9856,24 +9936,90 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity, co
             } else if (!previous_position) {
                 resolveOBBCollision(collider, resolved_collider.obb, position, velocity);
             }
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectMeshSDF) {
             resolveSDFCollision(collider, resolved_collider.obb, particle_radius, position, velocity);
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectConvexDecomp) {
             resolveConvexDecompCollision(collider, resolved_collider.obb, particle_radius, position, velocity);
-            continue;
+            return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectMeshBVH) {
             resolveMeshBVHCollision(collider, resolved_collider.obb, particle_radius, position, velocity);
-            continue;
+            return;
+        }
+    };
+    for (const auto& resolved_collider : resolved_colliders_) {
+        const Vec3 p0 = position;
+        const Vec3 v0 = velocity;
+        resolveOne(resolved_collider);
+        noteHit(resolved_collider.source_index, &resolved_collider, p0, v0);
+    }
+}
+
+void ParticleSimulationSystem::recordCollisionHit(std::size_t index, const Vec3& position,
+                                                  const Vec3& velocity_before,
+                                                  const ColliderHit& hit) {
+    ++stats_.collision_hits;
+    const bool dies = physics_settings_.collision_response == ParticleCollisionResponse::Die;
+    if (physics_settings_.record_collision_events) {
+        const uint32_t capacity = std::max<uint32_t>(1u, physics_settings_.collision_event_capacity);
+        if (host_collision_events_.size() < capacity) {
+            ParticleCollisionEvent event;
+            event.position[0] = position.x;
+            event.position[1] = position.y;
+            event.position[2] = position.z;
+            event.collider = hit.collider;
+            event.normal[0] = hit.normal.x;
+            event.normal[1] = hit.normal.y;
+            event.normal[2] = hit.normal.z;
+            event.profile = buffers_.appearance_profile[index];
+            event.speed = velocity_before.length();
+            const float lifetime = buffers_.lifetime_seconds[index];
+            event.age_fraction = lifetime > 0.0f
+                ? std::clamp(buffers_.age_seconds[index] / lifetime, 0.0f, 1.0f) : 0.0f;
+            event.particle = static_cast<uint32_t>(index);
+            event.flags = dies ? 1u : 0u;
+            host_collision_events_.push_back(event);
+        } else {
+            ++host_collision_overflow_;
         }
     }
+    if (dies && buffers_.alive[index] != 0u) {
+        buffers_.alive[index] = 0u;
+        if (alive_count_ > 0) --alive_count_;
+        ++stats_.collision_kills;
+    }
+}
+
+bool ParticleSimulationSystem::readCollisionEvents(uint32_t max_events, bool consume,
+                                                   ParticleCollisionEventReadout& out) {
+    out = ParticleCollisionEventReadout{};
+    out.capacity = std::max<uint32_t>(1u, physics_settings_.collision_event_capacity);
+    // The device buffer holds the resident path's contacts, the host vector the
+    // CPU reference's. A system can switch between the two, so both are read.
+    if (resident_compute_ && resident_buffers_.collision_counter.valid()) {
+        ParticleCollisionEventReadout device;
+        if (readDeviceCollisionEvents(*resident_compute_, max_events, consume, device)) {
+            out = device;
+        }
+    }
+    out.pending += static_cast<uint32_t>(host_collision_events_.size());
+    out.overflow += host_collision_overflow_;
+    for (const auto& event : host_collision_events_) {
+        if (out.events.size() >= max_events) break;
+        out.events.push_back(event);
+    }
+    if (consume) {
+        host_collision_events_.clear();
+        host_collision_overflow_ = 0;
+    }
+    return true;
 }
 
 void ParticleSimulationSystem::buildNeighborGrid(float cell_size) {

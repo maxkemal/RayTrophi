@@ -61,6 +61,21 @@ Python + yetki + tarif. Animasyonlu VDB dizisi Player'da yok.
 **CANLI PASS (20:33):** VDB Player'da görünüyor; regresyon 6/6. Kararlaştırılan ret
 kapatma sırası (materyal → partikül → scatter → volume) TAMAMLANDI; kalan retler
 saç / su / fracture (ihtiyaç olunca).
+**Ekran + FPS — kaynak hazır (2026-11-14):** tespit: Player zaten RayFusion
+(MaterialPreview) ile çiziyor; bulut durumu (`setCloudState`, yerel hava, şimşek
+çözücüsü) yalnız Studio Main'den gönderiliyor → Player'a ulaşmıyor (sıradaki iş). Bu
+parti: kare zamanlaması (aşama dağılımlı), tam ekran, pencere boyutu, render ölçeği,
+pacing, sürekli render, HUD; IPC `player.display/set_display`. Klavye/fare oyun girdisi
+eylem katmanıyla (poz girişi) birlikte; şimdilik yalnız operatör tuşları. Risk: sunum
+her kare GPU→CPU yüzey→SDL doku kopyası; tablo bedelini gösterecek.
+**Ekran + FPS CANLI (23:26):** maliyet yalnız çizilen karelerden; basit sahnede upload
+karenin ~%30'u (1.35/4.54 ms), iç odada GPU 24.5 ms (main pass 17.3). Ölçüm dersi:
+capture senkron sunuma geçirir, kare maliyeti capture kapalı ölçülür. Sıradaki: bulut/
+atmosfer gönderimi; ayrı aday: iç oda main pass maliyeti (Studio ile ortak raster).
+**Bulutlar — kaynak hazır (2026-11-14):** Main'deki bulut/yerel hava/şimşek bloğu
+`AppRuntime::pushCloudState` oldu; Player bulut zamanını oyun saatinden ilerletir (yalnız
+bulut açıkken), dünya kirliliğini Studio'nun `syncVulkanWorld` çağrısıyla servis eder.
+**CANLI PASS (23:51):** bulutlar Player RayFusion'da görünür ve oyun saatiyle akar; bulutsuz sahne boşta kalır. Capture'sız ölçüm: tam ekran 1080p hafif sahnede upload karenin %42'si → swapchain'e doğrudan sunum, hafif oyun sahneleri için ilk kaldıraç.
 
 ### Kullanıcı yönü ve sonraki oturum başlangıcı — 2026-11-14
 

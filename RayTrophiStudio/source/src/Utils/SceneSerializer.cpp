@@ -1124,6 +1124,9 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
             sj["runtime"]["physics_settings"]["buoyancy"] = ps.buoyancy;
             sj["runtime"]["physics_settings"]["gravity_scale"] = ps.gravity_scale;
             sj["runtime"]["physics_settings"]["vorticity"] = ps.vorticity;
+            sj["runtime"]["physics_settings"]["collision_response"] = (int)ps.collision_response;
+            sj["runtime"]["physics_settings"]["record_collision_events"] = ps.record_collision_events;
+            sj["runtime"]["physics_settings"]["collision_event_capacity"] = ps.collision_event_capacity;
 
             // World thermal boundary conditions (Phase 4). Must be written here
             // AND in ProjectManager — this project has two serializers and a
@@ -1672,6 +1675,14 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
                     if (psj.contains("buoyancy")) ps.buoyancy = psj["buoyancy"];
                     if (psj.contains("gravity_scale")) ps.gravity_scale = psj["gravity_scale"];
                     if (psj.contains("vorticity")) ps.vorticity = psj["vorticity"];
+                    if (psj.contains("collision_response") && psj["collision_response"].is_number_integer())
+                        ps.collision_response = psj["collision_response"].get<int>() == 1
+                            ? RayTrophiSim::ParticleCollisionResponse::Die
+                            : RayTrophiSim::ParticleCollisionResponse::Bounce;
+                    if (psj.contains("record_collision_events") && psj["record_collision_events"].is_boolean())
+                        ps.record_collision_events = psj["record_collision_events"].get<bool>();
+                    if (psj.contains("collision_event_capacity") && psj["collision_event_capacity"].is_number_unsigned())
+                        ps.collision_event_capacity = std::max<uint32_t>(1u, psj["collision_event_capacity"].get<uint32_t>());
                 }
 
                 // World Thermal (Phase 4)

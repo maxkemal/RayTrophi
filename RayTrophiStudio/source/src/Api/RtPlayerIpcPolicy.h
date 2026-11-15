@@ -30,6 +30,17 @@ inline bool supportsMethod(const std::string& method) {
            // Materials: the shared Renderer::updateBackendMaterial path uploads to
            // the Player's single viewport device; game rules and paint change them.
            method == "material.list" || method == "material.get" ||
-           method == "material.of_object" || method == "material.set";
+           method == "material.of_object" || method == "material.set" ||
+           // Display surface and frame timing (window, render scale, pacing, FPS).
+           method == "player.display" || method == "player.set_display" ||
+           // Per-stage host timings of the shared raster frame (read + reset).
+           method == "viewport.frame_timings" || method == "viewport.reset_frame_timings" ||
+           // Scene audio state (read-only): the Player ticks audio on its game clock.
+           method == "audio.status" || method == "audio.list" ||
+           method == "audio.source_runtime" || method == "audio.mixer_get" ||
+           // Playback actions game rules use (a pop sound, a splash). Manual
+           // emitters stay silent until played - same as in Studio.
+           method == "audio.play" || method == "audio.play_all" ||
+           method == "audio.stop" || method == "audio.stop_all";
 }
 } // namespace rtipc_product

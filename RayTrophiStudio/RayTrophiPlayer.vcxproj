@@ -1911,6 +1911,7 @@
     <ClCompile Include="source\src\Physics\MeltSurfaceFlow.cpp" />
     <ClCompile Include="source\src\Physics\MoltenMassTransfer.cpp" />
     <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp" />
+    <ClCompile Include="source\src\Physics\ParticleDeviceCollision.cpp" />
     <ClCompile Include="source\src\Physics\ParticleDeviceResidency.cpp" />
     <ClCompile Include="source\src\Physics\ParticleRenderBridge.cpp" />
     <ClCompile Include="source\src\Physics\ParticleSimulation.cpp" />
@@ -2124,6 +2125,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioRuntime.cpp" />
     <ClCompile Include="source\src\Scene\AudioService.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>

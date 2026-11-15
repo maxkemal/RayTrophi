@@ -336,6 +336,9 @@ uint32_t requiredCapabilities(const std::string& method) {
     // scene, so Render is the whole requirement — and authorize() is
     // fail-closed, so a namespace missing from this table is silently refused.
     if (method.rfind("viewport.", 0) == 0) return Render;
+    // player.* sets and measures the Player's display surface (window mode,
+    // render resolution, pacing, frame timing) - the same class as viewport.*.
+    if (method.rfind("player.", 0) == 0) return Render;
     // sim.control_state only reports WHO is driving the solvers and an epoch
     // counter. It changes nothing, and an agent has to be able to read it to
     // know whether its own measurement was invalidated - gating it any higher

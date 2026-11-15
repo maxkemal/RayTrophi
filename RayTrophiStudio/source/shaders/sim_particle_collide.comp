@@ -1,0 +1,289 @@
+#version 450
+// Device-resident particle collisions (docs/dev/PLAYER_GAME_PAINT_ROOM.md step 2).
+//
+// Runs after sim_particle_ballistic.comp. Mirrors the CPU reference
+// ParticleSimulationSystem::applyColliders collider by collider, with the same
+// resolved descriptors (packed by ParticleDeviceCollision.cpp) and the same
+// discrete formulas: system ground plane first, then each collider in order.
+// No swept tests (the CPU has them for sphere/capsule/AABB/OBB).
+//
+// The previous position is reconstructed as p - v*dt: the ballistic step wrote
+// p = p_prev + v*dt with the same v, so this is the CPU's previous_position.
+//
+// A contact is whatever moved the particle (position pushed out or velocity
+// changed). The LAST collider that did so is the event's collider, its push-out
+// direction the normal. Response Die kills the particle on the device only (the
+// host keeps the slot until its lifetime; see ParticleDeviceCollision.cpp).
+layout(local_size_x=256) in;
+
+struct GpuCollider {
+    uint type; uint source_index; uint sdf_offset; int sdf_nx;
+    int sdf_ny; int sdf_nz; float restitution; float friction;
+    float thickness; float plane_y; float radius; float _pad0;
+    float a[4];
+    float b[4];
+    float l2w[12];
+    float w2l[12];
+    float sdf_origin[4];   // xyz scaled origin, w = avg world-per-local scale
+    float sdf_extents[4];  // xyz scaled extents, w = mean cooked-to-local scale
+};
+
+struct CollisionEvent {
+    float position[3]; uint collider;
+    float normal[3]; uint profile;
+    float speed; float age_fraction; uint particle; uint flags;
+};
+
+layout(push_constant) uniform PC {
+    int particle_count; uint collider_count; float dt; float particle_radius;
+    uint response; uint record_events; uint event_capacity; uint plane_enabled;
+    float plane_y; float plane_restitution; float _pad0; float _pad1;
+} pc;
+
+layout(set=0,binding=0) buffer PX {float px[];};
+layout(set=0,binding=1) buffer PY {float py[];};
+layout(set=0,binding=2) buffer PZ {float pz[];};
+layout(set=0,binding=3) buffer VX {float vx[];};
+layout(set=0,binding=4) buffer VY {float vy[];};
+layout(set=0,binding=5) buffer VZ {float vz[];};
+layout(set=0,binding=6) buffer Alive {uint alive[];};
+layout(set=0,binding=7) readonly buffer Age {float age[];};
+layout(set=0,binding=8) readonly buffer Lifetime {float lifetime[];};
+layout(set=0,binding=9) readonly buffer Profile {uint profile[];};
+layout(set=0,binding=10,std430) readonly buffer Colliders {GpuCollider colliders[];};
+layout(set=0,binding=11) readonly buffer Sdf {float sdf[];};
+layout(set=0,binding=12,std430) buffer Events {CollisionEvent events[];};
+layout(set=0,binding=13) buffer Counter {uint counter[];};  // {count, overflow}
+
+const uint PLANE_COLLIDER = 0xFFFFFFFEu;
+
+vec3 finiteDirectionOrUp(vec3 d) {
+    if (any(isnan(d)) || any(isinf(d))) return vec3(0.0, 1.0, 0.0);
+    float len = length(d);
+    return len > 1e-5 ? d / len : vec3(0.0, 1.0, 0.0);
+}
+
+vec3 xformPoint(float m[12], vec3 p) {
+    return vec3(m[0]*p.x + m[1]*p.y + m[2]*p.z + m[3],
+                m[4]*p.x + m[5]*p.y + m[6]*p.z + m[7],
+                m[8]*p.x + m[9]*p.y + m[10]*p.z + m[11]);
+}
+vec3 xformVector(float m[12], vec3 v) {
+    return vec3(m[0]*v.x + m[1]*v.y + m[2]*v.z,
+                m[4]*v.x + m[5]*v.y + m[6]*v.z,
+                m[8]*v.x + m[9]*v.y + m[10]*v.z);
+}
+
+// resolveVelocityAgainstNormal
+void reflectVelocity(float restitution, float friction, vec3 n, inout vec3 v) {
+    float vn = dot(v, n);
+    if (vn < 0.0) {
+        vec3 normal_component = n * vn;
+        vec3 tangent_component = v - normal_component;
+        v = tangent_component * (1.0 - friction) - normal_component * restitution;
+    }
+}
+
+// resolveAABBCollision (thickness already includes the particle radius)
+void resolveAABB(vec3 mn_in, vec3 mx_in, float thickness, float restitution, float friction,
+                 inout vec3 p, inout vec3 v) {
+    vec3 mn = min(mn_in, mx_in) - vec3(thickness);
+    vec3 mx = max(mn_in, mx_in) + vec3(thickness);
+    if (p.x < mn.x || p.x > mx.x || p.y < mn.y || p.y > mx.y || p.z < mn.z || p.z > mx.z) return;
+    float d[6] = float[6](abs(p.x - mn.x), abs(mx.x - p.x), abs(p.y - mn.y),
+                          abs(mx.y - p.y), abs(p.z - mn.z), abs(mx.z - p.z));
+    int face = 0;
+    for (int i = 1; i < 6; ++i) if (d[i] < d[face]) face = i;
+    vec3 n = vec3(0.0, 1.0, 0.0);
+    if (face == 0) { p.x = mn.x; n = vec3(-1.0, 0.0, 0.0); }
+    else if (face == 1) { p.x = mx.x; n = vec3(1.0, 0.0, 0.0); }
+    else if (face == 2) { p.y = mn.y; n = vec3(0.0, -1.0, 0.0); }
+    else if (face == 3) { p.y = mx.y; n = vec3(0.0, 1.0, 0.0); }
+    else if (face == 4) { p.z = mn.z; n = vec3(0.0, 0.0, -1.0); }
+    else { p.z = mx.z; n = vec3(0.0, 0.0, 1.0); }
+    reflectVelocity(restitution, friction, n, v);
+}
+
+float sdfAt(uint c, int x, int y, int z) {
+    GpuCollider g = colliders[c];
+    int ix = clamp(x, 0, g.sdf_nx - 1);
+    int iy = clamp(y, 0, g.sdf_ny - 1);
+    int iz = clamp(z, 0, g.sdf_nz - 1);
+    return sdf[g.sdf_offset + uint(iz * (g.sdf_nx * g.sdf_ny) + iy * g.sdf_nx + ix)];
+}
+
+// Trilinear cooked distance at a LOCAL position, scaled to local units
+// (resolveSDFCollision's interpSDF).
+float sdfLocal(uint c, vec3 lp) {
+    GpuCollider g = colliders[c];
+    vec3 origin = vec3(g.sdf_origin[0], g.sdf_origin[1], g.sdf_origin[2]);
+    vec3 ext = vec3(g.sdf_extents[0], g.sdf_extents[1], g.sdf_extents[2]);
+    vec3 s = lp - origin;
+    vec3 t = vec3(ext.x > 1e-6 ? s.x / ext.x : 0.0,
+                  ext.y > 1e-6 ? s.y / ext.y : 0.0,
+                  ext.z > 1e-6 ? s.z / ext.z : 0.0);
+    t = clamp(t, 0.0, 1.0);
+    float fx = t.x * float(g.sdf_nx - 1);
+    float fy = t.y * float(g.sdf_ny - 1);
+    float fz = t.z * float(g.sdf_nz - 1);
+    int ix = clamp(int(floor(fx)), 0, g.sdf_nx - 1);
+    int iy = clamp(int(floor(fy)), 0, g.sdf_ny - 1);
+    int iz = clamp(int(floor(fz)), 0, g.sdf_nz - 1);
+    int ix1 = clamp(ix + 1, 0, g.sdf_nx - 1);
+    int iy1 = clamp(iy + 1, 0, g.sdf_ny - 1);
+    int iz1 = clamp(iz + 1, 0, g.sdf_nz - 1);
+    float dx = fx - float(ix), dy = fy - float(iy), dz = fz - float(iz);
+    float v00 = mix(sdfAt(c, ix, iy, iz),   sdfAt(c, ix1, iy, iz),   dx);
+    float v10 = mix(sdfAt(c, ix, iy1, iz),  sdfAt(c, ix1, iy1, iz),  dx);
+    float v01 = mix(sdfAt(c, ix, iy, iz1),  sdfAt(c, ix1, iy, iz1),  dx);
+    float v11 = mix(sdfAt(c, ix, iy1, iz1), sdfAt(c, ix1, iy1, iz1), dx);
+    float v0 = mix(v00, v10, dy);
+    float v1 = mix(v01, v11, dy);
+    return mix(v0, v1, dz) * g.sdf_extents[3];
+}
+
+// resolveSDFCollision. Note: like the CPU reference, the particle radius is in
+// `thickness` (refreshResolvedColliders) AND added again here.
+void resolveSDF(uint c, inout vec3 p, inout vec3 v) {
+    GpuCollider g = colliders[c];
+    vec3 lp = xformPoint(g.w2l, p);
+    float avg_scale = g.sdf_origin[3];
+    float world_thick = max(0.0, g.thickness) + pc.particle_radius;
+    float local_thick = world_thick / avg_scale;
+    vec3 origin = vec3(g.sdf_origin[0], g.sdf_origin[1], g.sdf_origin[2]);
+    vec3 ext = vec3(g.sdf_extents[0], g.sdf_extents[1], g.sdf_extents[2]);
+    vec3 s = lp - origin;
+    if (s.x < -local_thick || s.x > ext.x + local_thick ||
+        s.y < -local_thick || s.y > ext.y + local_thick ||
+        s.z < -local_thick || s.z > ext.z + local_thick) return;
+    float dist_local = sdfLocal(c, lp);
+    if (dist_local > local_thick) return;
+    vec3 step = vec3(ext.x / max(1.0, float(g.sdf_nx - 1)),
+                     ext.y / max(1.0, float(g.sdf_ny - 1)),
+                     ext.z / max(1.0, float(g.sdf_nz - 1)));
+    vec3 ln = vec3(sdfLocal(c, lp + vec3(step.x, 0.0, 0.0)) - sdfLocal(c, lp - vec3(step.x, 0.0, 0.0)),
+                   sdfLocal(c, lp + vec3(0.0, step.y, 0.0)) - sdfLocal(c, lp - vec3(0.0, step.y, 0.0)),
+                   sdfLocal(c, lp + vec3(0.0, 0.0, step.z)) - sdfLocal(c, lp - vec3(0.0, 0.0, step.z)));
+    float ln_len = length(ln);
+    ln = ln_len > 1e-6 ? ln / ln_len : vec3(0.0, 1.0, 0.0);
+    vec3 wn = xformVector(g.l2w, ln);
+    float wn_len = length(wn);
+    wn = wn_len > 1e-6 ? wn / wn_len : vec3(0.0, 1.0, 0.0);
+    float world_dist = dist_local * avg_scale;
+    p += wn * (world_thick - world_dist);
+    reflectVelocity(g.restitution, g.friction, wn, v);
+}
+
+void resolveOne(uint c, vec3 prev, inout vec3 p, inout vec3 v) {
+    GpuCollider g = colliders[c];
+    float pr = pc.particle_radius;
+    if (g.type == 0u) {            // PlaneY
+        float py0 = g.plane_y + pr;
+        if ((prev.y >= py0 && p.y < py0) || p.y < py0) {
+            p.y = py0;
+            if (v.y < 0.0) {
+                v.x *= 1.0 - g.friction;
+                v.z *= 1.0 - g.friction;
+                v.y = -v.y * g.restitution;
+            }
+        }
+    } else if (g.type == 1u || g.type == 2u) {   // Sphere / Capsule
+        float eff = max(0.0, g.radius) + max(0.0, g.thickness) + max(0.0, pr);
+        if (eff <= 1e-6) return;
+        vec3 a = vec3(g.a[0], g.a[1], g.a[2]);
+        vec3 closest = a;
+        if (g.type == 2u) {
+            vec3 b = vec3(g.b[0], g.b[1], g.b[2]);
+            vec3 ab = b - a;
+            float denom = dot(ab, ab);
+            float t = denom > 1e-8 ? clamp(dot(p - a, ab) / denom, 0.0, 1.0) : 0.0;
+            closest = a + ab * t;
+        }
+        vec3 delta = p - closest;
+        float dist = length(delta);
+        if (dist >= eff) return;
+        vec3 n = vec3(0.0, 1.0, 0.0);
+        if (dist > 1e-6) n = delta / dist;
+        else if (length(v) > 1e-6) n = finiteDirectionOrUp(-v);
+        p = closest + n * eff;
+        reflectVelocity(g.restitution, g.friction, n, v);
+    } else if (g.type == 3u) {     // AABB
+        resolveAABB(vec3(g.a[0], g.a[1], g.a[2]), vec3(g.b[0], g.b[1], g.b[2]), g.thickness,
+                    g.restitution, g.friction, p, v);
+    } else if (g.type == 4u) {     // OBB: AABB in the local frame
+        vec3 lp = xformPoint(g.w2l, p);
+        vec3 lv = xformVector(g.w2l, v);
+        resolveAABB(vec3(g.a[0], g.a[1], g.a[2]), vec3(g.b[0], g.b[1], g.b[2]), g.thickness,
+                    g.restitution, g.friction, lp, lv);
+        p = xformPoint(g.l2w, lp);
+        v = xformVector(g.l2w, lv);
+    } else if (g.type == 5u) {     // cooked mesh SDF
+        resolveSDF(c, p, v);
+    }
+}
+
+void main() {
+    int id = int(gl_GlobalInvocationID.x);
+    if (id >= pc.particle_count || alive[id] == 0u) return;
+    vec3 p = vec3(px[id], py[id], pz[id]);
+    vec3 v = vec3(vx[id], vy[id], vz[id]);
+    vec3 prev = p - v * pc.dt;
+    vec3 v_before = v;
+
+
+    bool hit = false;
+    uint hit_collider = 0u;
+    vec3 hit_normal = vec3(0.0, 1.0, 0.0);
+
+    // System ground plane (setCollisionPlane).
+    if (pc.plane_enabled != 0u) {
+        vec3 p0 = p, v0 = v;
+        float py0 = pc.plane_y + pc.particle_radius;
+        if ((prev.y >= py0 && p.y < py0) || p.y < py0) {
+            p.y = py0;
+            if (v.y < 0.0) v.y = -v.y * pc.plane_restitution;
+        }
+        vec3 dp = p - p0, dv = v - v0;
+        if (dot(dp, dp) > 0.0 || dot(dv, dv) > 0.0) {
+            vec3 n = dot(dp, dp) > 1e-20 ? dp : dv;
+            float len = length(n);
+            hit = true; hit_collider = PLANE_COLLIDER;
+            hit_normal = len > 1e-12 ? n / len : vec3(0.0, 1.0, 0.0);
+        }
+    }
+    for (uint c = 0u; c < pc.collider_count; ++c) {
+        vec3 p0 = p, v0 = v;
+        resolveOne(c, prev, p, v);
+        vec3 dp = p - p0, dv = v - v0;
+        if (dot(dp, dp) > 0.0 || dot(dv, dv) > 0.0) {
+            vec3 n = dot(dp, dp) > 1e-20 ? dp : dv;
+            float len = length(n);
+            hit = true; hit_collider = colliders[c].source_index;
+            hit_normal = len > 1e-12 ? n / len : vec3(0.0, 1.0, 0.0);
+        }
+    }
+    if (!hit) return;
+
+    px[id] = p.x; py[id] = p.y; pz[id] = p.z;
+    vx[id] = v.x; vy[id] = v.y; vz[id] = v.z;
+    bool dies = pc.response == 1u;
+    if (pc.record_events != 0u) {
+        uint slot = atomicAdd(counter[0], 1u);
+        if (slot < pc.event_capacity) {
+            float life = lifetime[id];
+            CollisionEvent e;
+            e.position[0] = p.x; e.position[1] = p.y; e.position[2] = p.z;
+            e.collider = hit_collider;
+            e.normal[0] = hit_normal.x; e.normal[1] = hit_normal.y; e.normal[2] = hit_normal.z;
+            e.profile = profile[id];
+            e.speed = length(v_before);
+            e.age_fraction = life > 0.0 ? clamp(age[id] / life, 0.0, 1.0) : 0.0;
+            e.particle = uint(id);
+            e.flags = dies ? 1u : 0u;
+            events[slot] = e;
+        } else {
+            atomicAdd(counter[1], 1u);
+        }
+    }
+    if (dies) alive[id] = 0u;
+}

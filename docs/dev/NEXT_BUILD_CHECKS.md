@@ -1,5 +1,203 @@
 # NEXT BUILD CHECKS
 
+## Player sahne sesi (ortak ses tick'i) — 2026-11-15, Claude
+
+Ses sistemi Player'da derleniyordu ama hiç ilerletilmiyordu: tick'i (transport + sahne
+senkronu + kamerada dinleyici + hava tepkileri + akustik + gök gürültüsü) Audio panelindeydi
+(`AudioUI::updateListener`, Player derlemez). Gövde `audio::tickRuntime`
+(`Scene/AudioRuntime.cpp`, yeni) oldu; panel yalnız timeline zamanını verip çağırır. Player
+`advanceRuntime`'da aynı fonksiyonu oyun saatiyle çağırır (proje açılışından itibaren,
+oynatılıyor). IPC: `runtime.simulation.audio_time_s / audio_ticks`; Player izin listesine
+salt okunur `audio.status / list / source_runtime / mixer_get`. Ses cihazı ilk sesle tembel
+açılır (`ensureDevice`). /Zs 5/5, include audit + Player proje üreticisi PASS.
+
+**İki projeyi reload (yeni .cpp) → artımlı build** (Studio: AudioUI.cpp; header yalnız yeni
+`Audio/AudioRuntime.h`, `Core/RuntimeSceneViewer.h`).
+
+1. Studio: sesli bir sahnede timeline oynatınca ses eskisi gibi; dinleyici kamerayı izler.
+   Bozuksa: `AudioUI::updateListener` artık yalnız `audio::tickRuntime` çağırıyor.
+2. `python scripts/test/rt_player_audio_ipc.py` (Player açık; varsayılan EchoRoomsLab, 7 kaynak)
+   → PASS: `audio_ticks` artar, transport oynar ve zamanı duvar saatini izler, kaynak pozları
+   çözülür. Raporda `device` ve canlı `voices` bilgi amaçlı.
+   - ★ Sinsi: transport ilerliyor, pozlar çözülüyor ama `device` "not_initialized" ve `voices`
+     0 kalıyorsa kaynaklar oynatılmıyor demektir (kaynak ayarı ya da `ensureDevice` hatası):
+     sayaçlar sağlıklı görünür, yalnız ses yoktur — KULAKLA dinle.
+3. Regresyon: `rt_player_bootstrap_ipc.py` (metot listesi +4) ve diğer `rt_player_*`.
+
+**01:14/01:17 CANLI:** ses tick'i Player'da çalışıyor — transport oynuyor ve zamanı duvar saatini
+izliyor (3.05 s'de 3.03 s), 7 kaynağın pozu çözülüyor, `audio_ticks` 60→233. ★ Tam işaretlenen
+sinsi durum çıktı: `device: not_initialized`, `voices: 0`. **Hata DEĞİL:** EchoRoomsLab'ın 7
+kaynağı `driver: manual`, sahnede klip yok; ses cihazı yalnız klip varken ya da bir kaynak
+çalınınca açılıyor. Studio'da AYNI sahne: timeline play → `not_initialized`; `audio.play` →
+`ready`. Player'ın sesi gerçekten çıkarabildiğini kanıtlamak için Player IPC'ye
+`audio.play / play_all / stop / stop_all` eklendi (oyun kurallarının eylemleri de bunlar) ve
+test artık bir kaynağı Player'ın kendi IPC'siyle çalıp `device == ready` istiyor. /Zs PASS.
+**Yalnız Player artımlı build** (RtPlayerIpcPolicy.h). Diğer 6 Player regresyonu 01:17'de PASS;
+`rt_player_scene_ipc` / bootstrap yeni metot listesini beklediği için bu derlemeden sonra.
+Son kontrol KULAKLA: test kaynak çalarken (1 s) slime sesi duyulmalı.
+**01:23 Player: CANLI PASS** — Player IPC'siyle `audio.play` → cihaz `ready`, kaynak `playing`
+(kazanç 1.0, uzamsal, yazılmış dünya konumu); `rt_player_scene_ipc` yeni metot listesiyle PASS.
+Bootstrap Studio kapalı olduğu için koşulmadı. **Parti kapandı** (kulak kontrolü kullanıcıda).
+
+## ★ TAM DERLEME — `ParticleSimulation.h` düzeni değişti (Boyama Odası adım 2) — 2026-11-15, Claude
+
+**CANLI (00:33 Studio / 00:44 Player tam derleme):** GPU yolu PASS — `gpu_resident`, 2 collider
+cihazda, 4214 olay (zemin 4127 / küre 87), konum hatası zemin 4.5e-10 m / küre 7.3e-8 m, normaller
+≥ 0.99999987. **GPU ve CPU olay sayısı BİREBİR aynı (oran 1.0).** Bounce: 6000 canlının en alçağı
+y = 0.02 (tam yarıçap), olay 0. Player regresyonu 8/8 PASS. Tek FAIL CPU referansındaydı ve
+**benim olay normali tahminimdi, fizik değil**: CPU'nun swept küre testi partikülü yolunun
+girdiği yere koyuyor, itme yönü radyal değil (0.11). Düzeltme kaynakta (yalnız
+`ParticleSimulation.cpp`, /Zs PASS): CPU olay normali collider geometrisinden (düzlem, küre,
+kapsül, AABB/OBB yüzü; SDF/konveks/BVH itme yönü). **00:52/00:55 artımlı build: TAM PASS**
+(atlama seçeneği olmadan): CPU küre normali 0.11 → 0.99999993; GPU/CPU 4214 = 4214; Player
+partikül regresyonu PASS. **Parti kapandı.** Test temizliği de düzeltildi (`collider.*` sistem yoksa
+varsayılan sistem yaratıyor: önce collider'lar, sonra sistemler silinir).
+
+**Artımlı derleme YETMEZ:** `ParticleSimulation.h` (scene_data.h içerir → neredeyse her TU)
+yeni alan/üye aldı (`ParticlePhysicsSettings`, `ParticleResidentBuffers`,
+`ParticleSimulationStats`, `ParticleSimulationSystem`). Eski .obj kalırsa erişim ihlali
+kod hatası sanılır. **İki projeyi reload (yeni .cpp) → Rebuild (ya da Clean + Build).**
+Önceki bulut partisi (canlı PASS) commit edilmedi; bu partiyle birlikte gidecek.
+
+Ne yazıldı:
+- **GPU partikül çarpışması:** yeni kernel `sim_particle_collide` (14 bağlama, 48 B push;
+  `.spv` iki yerde, `compile_sim_shaders.bat`'a sim_particle_ballistic/spawn/collide eklendi —
+  daha önce HİÇBİR betikte yoktu). Balistikten sonra; önceki konum `p − v·dt`. CPU
+  `applyColliders` ile birebir: düzlem, küre, kapsül, AABB, OBB, pişmiş mesh SDF (+ sistem
+  zemin düzlemi). Swept testler yalnız CPU'da. Konveks/mesh BVH → CPU (`gpu_status`
+  `host_consumer_collider_mode_cpu_only`), pişmemiş SDF → `host_consumer_collider_sdf_not_cooked`.
+- ★ **Düzelen sessiz hata:** device-resident yol sistemin zemin düzlemini (`setCollisionPlane`)
+  hiç uygulamıyordu; artık uygular.
+- **Çarpışma davranışı (sistem düzeyi):** `collision_response` bounce|die,
+  `record_collision_events`, `collision_event_capacity`. Die: GPU'da yalnız cihazda öldürür;
+  host yuvayı ömrü bitene dek tutar (erken yeniden kullanmaz), kinematik indirmede ölümler
+  host'a gelir. CPU referansına da aynı davranış eklendi.
+- **Olaylar:** 48 B kayıt (konum, normal, collider, profil, hız, yaş oranı), sınırlı tampon,
+  tüketilene dek birikir, taşma sayılır. Kapasite büyümesinde KAYBOLMAZ.
+- **4 katman:** `Api/RtApiParticleCollision.h` (RtApi.h'ye dokunmadan), IPC
+  `particle.get_collision / set_collision / collision_events`, Python `rt.particle.*`, panel
+  (Partikül fizik: On Collision, Record Contact Events, Event Capacity + son adım satırı),
+  ProjectManager + SceneSerializer kaydı/yüklemesi.
+
+/Zs 12/12 PASS; descriptor üreticisi, capability audit, Player include audit + proje
+üreticisi PASS; kernel bağlama denetiminde partikül uyumsuzluğu yok.
+
+Sıra (bağımsız ve hızlı önce):
+1. Studio açılır, mevcut partikül sahnesi eskisi gibi oynar (Bounce varsayılan, olay yok).
+   Bozuksa: `applyColliders` lambda dönüşümü (CPU yolu her çarpışmalı sistemi etkiler).
+2. Panel: Partikül fiziğinde "On Collision", "Record Contact Events" görünür, değişir,
+   proje kaydedip açınca korunur.
+3. `python scripts/test/rt_particle_gpu_collision_ipc.py` (Studio açık, BOŞ sahne) → PASS:
+   auto `gpu_resident` + `collision_stage_on_device` + 2 GPU collider; olaylar yüzeyde
+   (zemin y = 0.02 ± 1e-3, normal yukarı; küre |p−c| = 0.32 ± 1e-3, normal radyal);
+   GPU/CPU olay sayısı oranı 0.8–1.25; bounce'ta zeminin altında partikül yok.
+   - auto `host_consumer_*` → uygunluk reddi (hangi collider modu, gerekçe yazıyor).
+   - `gpu_resident` ama `collision_stage_on_device` false → kernel çağrılmadı
+     (`deviceCollisionStageNeeded`) ya da `sim_particle_collide.spv` bulunamadı (log).
+   - ★ Sinsi: GPU olayları var ama konumları yüzeyde DEĞİL (dy ≈ v·dt) → önceki konum
+     yeniden kurulumu ya da paket satır/sütun düzeni (`packRows`) yanlış; görüntüde
+     partiküller "yaklaşık" doğru yerde durur, kimse fark etmez.
+   - GPU/CPU oranı < 0.8 → GPU'da tünelleme (swept test yok); hız/dt'yi raporla.
+4. Player: partikül sahnesi regresyonu `rt_player_particles_ipc.py` PASS (çarpıştırıcısız
+   sistem değişmedi), diğer `rt_player_*` regresyonları.
+5. Bilinen açık (kural 1): sistemin zemin düzlemini (`setCollisionPlane`) IPC'den açan metot yok;
+   GPU düzeltmesi bu yüzden yalnız panel/proje yüklemesiyle sınanabiliyor → Sonra listesi.
+
+## Player bulut / yerel hava gönderimi — 2026-11-14, Claude
+
+Studio Main'deki bulut bloğu (`setCloudTime` + `syncLocalWeather` + şimşek çarpma
+çözücüsü + iki Vulkan adaptörüne `setCloudState`) `AppRuntime::pushCloudState`
+(VulkanSceneSync) oldu; yayın durumu çağıranda (`CloudPushState`), hedef backend
+kümesi değişince de yeniden yayınlar (Player'ın tembel/yeniden kurulan aygıtı).
+Studio: bulut zamanı timeline karesinden, RT uyandırma Main'de kaldı. Player: bulut
+zamanı OYUN SAATİNDEN, projenin kayıtlı bulut zamanından devam eder; yalnız bir bulut
+katmanı açıkken ilerler (her yayın birikimi sıfırlar — bulutsuz sahne boşta kalabilmeli).
+Player ayrıca `g_world_dirty / g_viewport_world_dirty`'yi Studio'nun aynı
+`syncVulkanWorld` çağrısıyla servis eder. IPC `runtime.simulation.clouds_enabled /
+cloud_time_s / cloud_pushes / world_syncs`. Önceki partinin bekleyen Player değişikliği
+(ölçüm modu capture'sız çizer) de bu derlemede.
+
+**CANLI PASS (23:51 Player / 23:57 Studio):** bulutlu sahnede `cloud_time_s` 2.01→6.13 (4 s), `cloud_pushes` 25→91, gökyüzü bulutsuzdan farkı 18.5, 4 s değişimi 5.4; bulutsuz sahnede yayın artmadı. Görüntü gözle: RayFusion bulut tabakası + ufuk, kenar rüzgârla kayıyor. Regresyon 6/6 PASS (bootstrap Studio kapalı olduğu için koşulmadı). İlk capture'sız ekran ölçümü (malzeme fixture'ı): 1680x945 323 FPS / 2.29 ms; tam ekran 1920x1080 251 FPS / 3.03 ms, **upload 1.28 ms = karenin %42'si**; ölçek 0.5 ile maliyet ~3.3× düşer; 60 Hz pacing 57.8. **Parti kapandı.** /Zs 6/6 PASS (Player 3, Studio 3), include audit PASS. **İki projeyi artımlı build**
+(header: `Core/VulkanSceneSync.h`, `Core/RuntimeSceneViewer.h`; yaygın struct değişmedi).
+Studio'yu fixture için ajan açtı (yalnız test sahnesi), kapatmak güvenli.
+
+1. Studio: bulutlu bir sahnede timeline oynatınca bulutlar eskisi gibi akar; Rendered
+   (RT) modda bulut zamanı değişince render uyanır. Bozuksa: Main'deki çağrı bloğu.
+2. `python scripts/test/rt_player_clouds_ipc.py` (fixture hazır: `docs/dev/.captures/
+   player-clouds/clouds.rtp`, "broken" preset, 60 m/s rüzgâr) → PASS:
+   bulutsuz sahnede `cloud_pushes` artmaz; bulutlu sahnede `cloud_time_s` 4 s'de > 2 artar,
+   `cloud_pushes` > 10 artar, gökyüzü bulutsuzdan farklı, 4 s'de değişir.
+   - `cloud_pushes` artıyor ama gökyüzü bulutsuzla aynı → RayFusion bulut geçişi Player'ın
+     raster karesinde çalışmıyor (yayın değil çizim sorunu).
+   - ★ Sinsi: gökyüzü bulutlu ama 4 s'de DEĞİŞMİYOR → zaman yayılıyor ama shader eski
+     zamanı okuyor; görüntü "doğru" görünür, yalnız animasyon ölüdür.
+   - Bulutsuz sahnede `cloud_pushes` artıyorsa sahne hiç boşta kalmaz (sürekli çizim).
+3. Regresyon: `rt_player_display_ipc.py` (artık capture açmaz), volume/scatter/particles/
+   materials/sim_clock/scene/bootstrap PASS.
+
+## Player FPS tanımı düzeltmesi + ölçüm modu — 2026-11-14, Claude
+
+Kullanıcı (21:02 Player, iç oda `bedroom_new.rtp`, 727 mesh / 4.2 M üçgen) FPS'in
+gerçek çizim yerine uyku/boşta durumunu saydığını yakaladı. Doğru: oturmuş sahnede
+kare çizilmiyordu, "FPS" yalnız HUD yenilemesini, "kare süresi" sunum aralığını
+(1011 ms) sayıyordu. Ayrıca `continuous` modu backend'i zorlamıyordu: birikmiş raster
+karede `renderProgressive` kayıt yapmadan dönüyor (0 kare, cpu_record 0).
+
+Düzeltme (yalnız Player): maliyet YALNIZ çizilen karelerden (`frame_cost_ms` =
+render+upload, `capacity_fps`), backend ayrıntısı (frame / CPU record / submit /
+slot wait; slot wait > 1 ms → "GPU-bound"), boşta pencerede son maliyet korunur
+(`cost_age_s`); oranlar ayrı (`rendered_fps`, `presented_fps`). `continuous` artık
+`forceRedraw` (resetAccumulation) ile gerçek kare çizdirir. HUD çıktı çözünürlüğünü de
+gösterir (render 1440x757 = output 1920x1009 × 0.75; kamera değil, F2 ölçeği).
+Player IPC'ye `viewport.frame_timings` / `reset_frame_timings`.
+
+**23:26 Player CANLI:** FPS düzeltmesi tuttu. Basit sahne (12 üçgen, 1920x1009): sürekli modda 202 çizilen FPS, maliyet 4.54 ms (render 3.19 + upload 1.35 → upload karenin ~%30'u), GPU 0.85 ms. İç oda (727 mesh / 4.2 M üçgen, 1920x1009): 29.6 FPS, **GPU 24.5 ms = main pass 17.3 + gölge atlası 4.3 + depth prepass 1.2 + RT gölge 1.0**, CPU kaydı 3.2 ms. ★ DÜZELTME: aşağıdaki "~44 ms açıklanamayan" bir boşluk DEĞİLDİ — ölçümde açık olan `viewport.capture` senkron sunuma geçiriyor (`synchronous_present: True`), kare süresi GPU beklemesini içeriyordu. Ek düzeltme (yalnız Player build): sürekli mod odak dışında capture'sız çizer; `rt_player_display_ipc.py` capture açmaz.
+
+★ Canlı ölçüm (21:02 build, kamera orbit ile gerçek kareler, 1440x757): CPU komut
+kaydı medyan **3.25 ms** (ilk okumadaki 40 ms yükleme sonrası ısınmaydı), ama backend
+karesi medyan **48 ms**; kayıt+submit+geri okuma+slot bekleme ≈ 4 ms → **~44 ms
+alt kalemlerin dışında**. Sıradaki ölçüm `viewport.frame_timings` ile bu boşluğu bölmek.
+
+/Zs 3/3 PASS. **Yalnız Player artımlı build.**
+1. HUD: oturmuş sahnede "drawn 0 FPS: scene settled", maliyet "(last drawn)"; F4 ile
+   drawn FPS > 0 ve maliyet satırları dolar.
+2. `python scripts/test/rt_player_display_ipc.py --project E:/rt_k/bedroom_new.rtp`.
+3. `viewport.frame_timings` (Player IPC) ile 44 ms'lik boşluğun aşaması.
+
+## Player ekran yüzeyi + kare zamanlaması (FPS) — 2026-11-14, Claude
+
+Player'a debug ve kiosk için ölçüm ve ekran denetimi:
+- **Kare zamanlaması:** bir saniyelik pencere — sunulan FPS, saniyedeki render, kare
+  süresi ort/maks, aşama dağılımı: `advance` (sim/runtime), `render` (GPU kare + CPU
+  yüzeye geri okuma), `upload` (SDL doku yükleme), `present` (HUD + sunum). HUD'da ve
+  `agent.get_state_summary.runtime.loop` ile `player.display` içinde.
+- **Ekran:** kenarlıksız tam ekran (F11 / `--fullscreen` / IPC), pencere boyutu
+  (`--width/--height`), render ölçeği 0.25..1 (render çözünürlüğü = çıktı × ölçek; SDL
+  pencereye gerer), pacing 60 Hz ↔ sınırsız (F3 / `--pacing 0`), sürekli render (F4 /
+  `--continuous`: oturmuş sahneyi de her iterasyonda çizer, ölçüm için; arka planda
+  20 Hz uykuyu da kapatır, yoksa sonuç sessizce 20'ye takılır), HUD (F1 / `--no-hud`),
+  Esc tam ekrandan çıkar.
+- **IPC:** `player.display`, `player.set_display` (Render yetkisi; Python yok çünkü
+  Player'da Python yok; Studio'da açık hata döner). Tüm anahtarlar uygulanmadan önce
+  doğrulanır, yanlış tip `checkParams` ile dispatch öncesi reddedilir.
+- Pacing artık Player'da (`FrameCycle::waitForNextIteration` Player'da çağrılmıyor;
+  ortak AppFrame.h'ye dokunulmadı).
+
+/Zs 13/13 PASS, descriptor üreticisi + capability audit + Player proje üreticisi PASS.
+**İki projeyi artımlı build** (Studio: RtIpc/Security/descriptors + RuntimeProjectHost.h
+içerenler; davranışı değişmez, `player.*` hata döner).
+
+1. Player açılır; HUD'da FPS satırı ~1 s sonra dolar; F11 tam ekran ↔ pencere, Esc
+   çıkış, F2 ölçek 1→0.75→0.5, F3 pacing, F4 sürekli. Bozuksa: tuşlar ImGui klavye
+   odağındayken yutulur (`WantCaptureKeyboard`) — HUD'a tıklamadan dene.
+2. `python scripts/test/rt_player_display_ipc.py` (Player açık; Studio açıksa onun
+   açık hatası da sınanır) → PASS + ölçek/tam ekran tablosu.
+   ★ Tabloyu oku: `render` sütunu GPU + geri okuma. Ölçek 0.5'te render süresi ~4×
+   düşmüyorsa maliyet piksel değil sabit (sync/geri okuma bekleme) demektir — sunum
+   yolunu (swapchain) önceliklendirmenin ölçüsü bu.
+3. Regresyon: `rt_player_bootstrap_ipc.py` (metot listesi +2), volume/scatter/particles/
+   materials/sim_clock/scene PASS.
+
 ## Player volume (VDB / gaz) + `scene.import_vdb` — 2026-11-14, Claude
 
 İki iş tek partide:

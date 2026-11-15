@@ -1875,6 +1875,9 @@
     <ClCompile Include="source\src\Physics\ParticleAppearanceProfile.cpp">
       <Filter>source\src\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Physics\ParticleDeviceCollision.cpp">
+      <Filter>source\src\Physics</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Physics\ParticleDeviceResidency.cpp">
       <Filter>source\src\Physics</Filter>
     </ClCompile>
@@ -2185,6 +2188,9 @@
       <Filter>source\src\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AudioRequestValidation.cpp">
+      <Filter>source\src\Scene</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Scene\AudioRuntime.cpp">
       <Filter>source\src\Scene</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Scene\AudioService.cpp">

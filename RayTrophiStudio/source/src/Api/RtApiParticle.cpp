@@ -27,6 +27,7 @@
 */
 
 #include "RtApiInternal.h"
+#include "Api/RtApiParticleCollision.h"
 #include "Renderer.h"
 
 #include <algorithm>
@@ -1421,6 +1422,80 @@ Result stepParticleSimulation(float dt, const ParticleSystemRef& system) {
     compute.beginFrame(0);
     runtime->step(context);
     compute.endFrame();
+    return Result::success();
+}
+
+// ── Contact behaviour and events (RtApiParticleCollision.h) ─────────────────
+
+Result getParticleCollisionSettings(ParticleCollisionSettingsInfo& out,
+                                    const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    const ParticlePhysicsSettings& s = runtime->physicsSettings();
+    out.response = s.collision_response == RayTrophiSim::ParticleCollisionResponse::Die
+        ? "die" : "bounce";
+    out.record_events = s.record_collision_events;
+    out.event_capacity = s.collision_event_capacity;
+    return Result::success();
+}
+
+Result setParticleCollisionSettings(const ParticleCollisionSettingsInfo& info,
+                                    const ParticleSystemRef& system) {
+    if (!g_ctx) return notBound();
+    if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    RayTrophiSim::ParticleCollisionResponse response;
+    if (info.response == "bounce") response = RayTrophiSim::ParticleCollisionResponse::Bounce;
+    else if (info.response == "die") response = RayTrophiSim::ParticleCollisionResponse::Die;
+    else return Result::fail("unknown collision response: " + info.response + " (bounce|die)");
+    if (info.event_capacity < 1u || info.event_capacity > (1u << 24)) {
+        return Result::fail("event_capacity must be within 1..16777216");
+    }
+    ParticlePhysicsSettings& s = runtime->physicsSettings();
+    s.collision_response = response;
+    s.record_collision_events = info.record_events;
+    s.collision_event_capacity = info.event_capacity;
+    invalidateScriptSimulation();
+    return Result::success();
+}
+
+Result readParticleCollisionEvents(uint32_t max_events, bool consume,
+                                   ParticleCollisionEventsInfo& out,
+                                   const ParticleSystemRef& system) {
+    out = ParticleCollisionEventsInfo{};
+    if (!g_ctx) return notBound();
+    RayTrophiSim::ParticleSimulationSystem* runtime = nullptr;
+    if (Result r = resolveRuntime(system, runtime); !r) return r;
+    RayTrophiSim::ParticleCollisionEventReadout readout;
+    runtime->readCollisionEvents(max_events, consume, readout);
+    out.pending = readout.pending;
+    out.overflow = readout.overflow;
+    out.capacity = readout.capacity;
+    out.device = readout.device;
+    const RayTrophiSim::ParticleSimulationStats& stats = runtime->stats();
+    out.gpu_status = stats.gpu_status ? stats.gpu_status : "";
+    out.collision_stage_on_device = stats.collision_stage_on_device;
+    out.gpu_colliders = stats.gpu_colliders;
+    out.cpu_hits_last_step = stats.collision_hits;
+    out.cpu_kills_last_step = stats.collision_kills;
+    out.events.reserve(readout.events.size());
+    for (const auto& e : readout.events) {
+        ParticleCollisionEventInfo info;
+        for (int k = 0; k < 3; ++k) {
+            info.position[k] = e.position[k];
+            info.normal[k] = e.normal[k];
+        }
+        info.collider = e.collider == RayTrophiSim::kCollisionPlaneCollider
+            ? -1 : static_cast<int>(e.collider);
+        info.profile = e.profile;
+        info.speed = e.speed;
+        info.age_fraction = e.age_fraction;
+        info.particle = e.particle;
+        info.died = (e.flags & 1u) != 0u;
+        out.events.push_back(info);
+    }
     return Result::success();
 }
 

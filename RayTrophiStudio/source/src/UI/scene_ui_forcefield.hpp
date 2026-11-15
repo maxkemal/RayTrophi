@@ -702,8 +702,8 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("Where the particle step may run.\n\n"
                                   "Auto: run the whole step on the GPU when the system allows it\n"
-                                  "(no colliders, no self collision, no grid domain), otherwise the\n"
-                                  "CPU, and report why.\n"
+                                  "(colliders except convex / mesh BVH, no self collision, no grid\n"
+                                  "domain), otherwise the CPU, and report why.\n"
                                   "GPU Required: never fall back; the step is refused instead.\n"
                                   "CPU: reference implementation, used for baselines.");
             }
@@ -736,6 +736,41 @@ inline void drawForceFieldPanel(SceneUI& ui, UIContext& ui_ctx, SceneData& scene
             if (physics.self_collision_enabled) {
                 ImGui::DragInt("Solver Iterations", &physics.solver_iterations, 1.0f, 1, 32);
                 ImGui::DragInt("Max Neighbors / Part", &physics.max_neighbors_per_particle, 1.0f, 1, 256);
+            }
+
+            // Contact behaviour (same settings as particle.set_collision).
+            {
+                const char* responses[] = {"Bounce", "Die"};
+                int response = static_cast<int>(physics.collision_response);
+                if (ImGui::Combo("On Collision##PartCollisionResponse", &response, responses, 2)) {
+                    physics.collision_response =
+                        static_cast<RayTrophiSim::ParticleCollisionResponse>(response);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Bounce: restitution / friction response.\n"
+                                      "Die: the particle is removed at the contact (a paint droplet\n"
+                                      "becomes paint). Same on the CPU and on the GPU path.");
+                }
+                ImGui::Checkbox("Record Contact Events", &physics.record_collision_events);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Keep one event per contact (point, normal, collider, colour\n"
+                                      "profile) until a consumer takes them. Read with\n"
+                                      "particle.collision_events.");
+                }
+                if (physics.record_collision_events) {
+                    int capacity = static_cast<int>(physics.collision_event_capacity);
+                    if (ImGui::DragInt("Event Capacity", &capacity, 256.0f, 1, 1 << 24)) {
+                        physics.collision_event_capacity =
+                            static_cast<uint32_t>(std::max(1, capacity));
+                    }
+                }
+                const auto& contact_stats = particles->stats();
+                if (contact_stats.collision_stage_on_device) {
+                    ImGui::TextDisabled("Contacts: GPU stage, %u colliders", contact_stats.gpu_colliders);
+                } else if (contact_stats.collision_hits > 0) {
+                    ImGui::TextDisabled("Contacts last step (CPU): %u hits, %u died",
+                                        contact_stats.collision_hits, contact_stats.collision_kills);
+                }
             }
             if (physics.mode == RayTrophiSim::ParticlePhysicsMode::Fluid ||
                 physics.mode == RayTrophiSim::ParticlePhysicsMode::Granular ||

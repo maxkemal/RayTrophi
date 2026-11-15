@@ -1368,6 +1368,9 @@ private:
             // ParticleBallisticGpuConstants = 40 B, ParticleSpawnGpuConstants = 16 B.
             { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 56 },
             { "sim_particle_spawn",                  "sim_particle_spawn.spv",               12, 16 },
+            // Device collisions + contact events (ParticleDeviceCollision.cpp):
+            // 14 bindings, ParticleCollideGpuConstants = 48 B.
+            { "sim_particle_collide",                "sim_particle_collide.spv",            14, 48 },
             // GasCombustionGpuConstants = 18 x 4 = 72 (FG1 air inputs).
             { "sim_gas_combustion",                 "sim_gas_combustion.spv",               6, 72 },
             // VelocityMaxAbsGpuConstants = 4 uints = 16

@@ -1366,6 +1366,30 @@
     "summary": "Import a model file (glTF/FBX/OBJ) into the scene",
     "tags": "load|asset|mesh"
   },
+  "particle.get_collision": {
+    "summary": "Read a particle system's contact behaviour: response (bounce|die), event recording and capacity",
+    "tags": "particle|collision|contact|response|events|paint"
+  },
+  "particle.set_collision": {
+    "summary": "Set a particle system's contact behaviour: response bounce|die, record contact events, event capacity",
+    "notes": "Die removes the particle at the contact (a paint droplet becomes paint). Same on the CPU reference and on the device-resident GPU path, which now resolves plane / sphere / capsule / AABB / OBB / cooked mesh-SDF colliders and the system ground plane; convex and mesh-BVH colliders keep the system on the CPU (gpu_status says which).",
+    "tags": "particle|collision|contact|response|die|bounce|events|paint|gpu"
+  },
+  "particle.collision_events": {
+    "summary": "Read (and optionally consume) the recorded particle contacts: point, normal, collider, colour profile, speed",
+    "notes": "Events accumulate until consumed (consume=true empties the buffer); pending <= capacity, overflow counts dropped contacts. collider -1 is the system ground plane. On the device path this is a small synchronous download - a measurement / consumer call. Also reports where the last step ran (gpu_status, collision_stage_on_device).",
+    "tags": "particle|collision|contact|events|hits|paint|splat|measure"
+  },
+  "player.display": {
+    "summary": "Report the Player's display surface and a one-second frame timing window",
+    "notes": "Player only (Studio returns an error). frame: fps, frame_ms_avg/max, loop_hz, renders_per_s and per-stage averages (advance = simulation/runtime, render = GPU frame incl. readback into the CPU surface, upload = SDL texture upload, present = HUD + present). render is the actual render resolution (output x render_scale).",
+    "tags": "fps|frame|timing|display|window|fullscreen|resolution|debug|player"
+  },
+  "player.set_display": {
+    "summary": "Change the Player's window mode, render resolution scale, frame pacing or HUD",
+    "notes": "Player only. All keys optional and validated before any is applied: fullscreen (borderless desktop), width/height (windowed only, >= 320x240), render_scale 0.25..1, pacing_hz 0 = uncapped or 10..1000, continuous (render every iteration for measurement), hud. Returns the new display status.",
+    "tags": "fullscreen|resolution|scale|pacing|vsync|fps|hud|display|player"
+  },
   "scene.import_vdb": {
     "summary": "Import an OpenVDB volume file into the scene and return its placement",
     "notes": "Same import the VDB panel runs: a volume larger than 50 units is scaled to 5, centred on X/Z and sat on Y = 0; a temperature grid gets the fire shader preset, otherwise smoke. orientation 0 = auto (EmberGen axis conversion), 1 = keep file axes, 2 = Z-up to Y-up. gpu_uploaded false means CPU-only, not a failure.",

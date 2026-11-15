@@ -21,6 +21,12 @@ METHODS = CATALOG | {
     "scene.list_objects", "scene.get_world_transform",
     # Material values through the shared Renderer::updateBackendMaterial path.
     "material.list", "material.get", "material.of_object", "material.set",
+    # Display surface and frame timing.
+    "player.display", "player.set_display",
+    "viewport.frame_timings", "viewport.reset_frame_timings",
+    # Scene audio state (read-only).
+    "audio.status", "audio.list", "audio.source_runtime", "audio.mixer_get",
+    "audio.play", "audio.play_all", "audio.stop", "audio.stop_all",
 }
 
 

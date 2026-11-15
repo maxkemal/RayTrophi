@@ -1,4 +1,5 @@
 #include "UI/AudioUI.h"
+#include "Audio/AudioRuntime.h"
 #include "UI/AudioPropertyLayout.h"
 #include "Audio/AudioService.h"
 #include "Audio/AudioAuthoring.h"
@@ -405,21 +406,8 @@ void updateListener(UIContext& ctx) {
     const float fps = static_cast<float>(std::max(1, ctx.render_settings.animation_fps));
     const double time = static_cast<float>(std::max(0, ctx.scene.timeline.current_frame)) / fps;
     const bool playing = ctx.scene_ui_ptr && ctx.scene_ui_ptr->timeline.isPlaying();
-    ctx.scene.audio->syncTransport(time, playing &&
-                                  !rtapi::renderOutputPending());
-    audio::syncScene(ctx);
-    if (!ctx.scene.camera) {
-        audio::tickSceneAcoustics(ctx);
-        audio::tickCloudThunder(ctx);
-        return;
-    }
-    const auto& camera = *ctx.scene.camera;
-    const Vec3 direction = camera.lookat - camera.lookfrom;
-    ctx.scene.audio->listener(camera.lookfrom.x, camera.lookfrom.y, camera.lookfrom.z,
-        direction.x, direction.y, direction.z, camera.vup.x, camera.vup.y, camera.vup.z);
-    audio::tickWeatherReactions(ctx);
-    audio::tickSceneAcoustics(ctx);
-    audio::tickCloudThunder(ctx);
+    // Body shared with the Player (Scene/AudioRuntime.cpp).
+    audio::tickRuntime(ctx, time, playing && !rtapi::renderOutputPending());
 }
 
 void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {

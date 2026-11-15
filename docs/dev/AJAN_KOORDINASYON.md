@@ -25,9 +25,20 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 | Ajan | Dosya(lar) | Amaç | Tarih |
 |---|---|---|---|
-| Codex | Yeni `DomainVisual*` servis/ayar/binding/test modülleri; `ParticleSimulation.h/.cpp`, `ParticleRenderBridge.cpp`, `DomainSplatRenderBridge.inl`, `ParticleBillboardBuilder.cpp`, `InstanceGroup.h`, `FluidRenderProxy.*`, Vulkan sphere/raster/viewport random-ID çağrıları, `SimCache.*`, `SimFrameCacheMemory.h`, serializer/proje/API/UI kayıtları, descriptor overlay/generator çıktısı | Kalıcı örnekleri aktif splat+mesh yoluna bağlama; solver matematiği/GPU registry değişmeyecek | 2026-11-12 |
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
+
+- **2026-11-15 Claude (adım 2):** yeni kernel kayıt satırı `sim_particle_collide` (14 bağlama,
+  48 B push). `sim_particle_ballistic` ve `sim_particle_spawn`'a DOKUNULMADI. **Yaygın struct
+  düzeni değişti:** `ParticleSimulation.h` (`ParticlePhysicsSettings` +3 alan,
+  `ParticleResidentBuffers` +8, `ParticleSimulationStats` +4, sistem üyeleri) → tam derleme.
+  `applyColliders` imzası opsiyonel `ColliderHit*` aldı. Yeni IPC: `particle.get_collision`,
+  `particle.set_collision`, `particle.collision_events`.
+
+- **2026-11-15 Claude:** Codex'in 2026-11-12 partikül/DomainVisual satırı kullanıcı onayıyla kapatıldı (iş 5b3c41ca'da commit'li, Codex o dosyalarda aktif değil). Partikül çekirdeği artık Claude'da (adım 2); shader bağlama sayısı/push boyutu değişirse buraya yazacağım.
+
+- **2026-11-14 Claude:** yeni IPC namespace `player.*` (Render): `player.display`,
+  `player.set_display`. `RuntimeProjectHost.h`'ye `DisplayHost` arayüzü eklendi.
 
 - **2026-11-14 Claude:** yeni IPC `scene.import_vdb` (FilesRead|SceneWrite). VDB volume
   tablosu yayını artık `AppRuntime::publishVolumes`; `SceneUI::syncVDBVolumesToGPU` onu çağırır.
@@ -258,6 +269,21 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
   paketleniyordu). DEM gözenekli yolu da aynı tuzağa açık olabilir — Codex bakabilir.
 
 ## 3. Derleme bekleyen işler
+
+- **2026-11-15 Claude, Player sahne sesi:** DERLENDİ, canlı PASS 01:23. Yeni
+  `Scene/AudioRuntime.cpp` (`audio::tickRuntime`); `UI/AudioUI.cpp` onu çağırır; `RuntimeSceneViewer.*`,
+  `RtPlayerIpcPolicy.h`.
+
+- **2026-11-15 Claude, Boyama Odası adım 2 (GPU partikül çarpışması):** DERLENDİ, canlı PASS
+  00:55 (tam + artımlı derleme). Liste NEXT_BUILD_CHECKS başında. Bulut partisi de
+  commit bekliyor (canlı PASS).
+
+- **2026-11-14 Claude, Player bulutları:** DERLENDİ, canlı PASS 23:51/23:57. `Main.cpp` bulut bloğu
+  `AppRuntime::pushCloudState`'e (VulkanSceneSync) taşındı; `RuntimeSceneViewer.*`.
+
+- **2026-11-14 Claude, Player ekran + FPS:** iki proje artımlı build. `PlayerMain.cpp`,
+  `RuntimeSceneViewer.*`, `RuntimeProjectHost.*` (DisplayHost), `RtIpc.cpp`,
+  `RtIpcSecurity.cpp`, `RtPlayerIpcPolicy.h`, overlay + descriptor, audit aynası.
 
 - **2026-11-14 Claude, Player volume + `scene.import_vdb`:** DERLENDİ, canlı PASS 20:33/20:38.
   Yeni `Api/RtApiVdbVolume.*`; `RtIpc.cpp`, `RtIpcSecurity.cpp`, `RtPython.cpp`, overlay +
