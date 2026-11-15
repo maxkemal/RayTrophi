@@ -141,6 +141,15 @@ struct ParticleCollisionEventReadout {
     std::vector<ParticleCollisionEvent> events;  // first min(pending, max) events
 };
 
+// An on-device consumer of the contact events (GPU wet paint,
+// PLAYER_GAME_PAINT_ROOM.md step 3) binds these instead of downloading them.
+// It resets the counter itself after reading (that is the consume).
+struct ParticleDeviceEventView {
+    ComputeBufferHandle events;   // ParticleCollisionEvent[capacity]
+    ComputeBufferHandle counter;  // {count, overflow}
+    uint32_t capacity = 0;
+};
+
 // Matter is the live domain identity. Legacy values retain their serialized
 // numbers solely for migration; lane switches select the actual solvers.
 enum class SimulationDomainType {
@@ -2793,6 +2802,12 @@ public:
     // a measurement / consumer call, never part of the step).
     bool readCollisionEvents(uint32_t max_events, bool consume,
                              ParticleCollisionEventReadout& out);
+    // Device event buffers on `compute`, for a consumer on the same context
+    // (no download). False when this system is not recording there.
+    bool deviceCollisionEventView(const SimulationComputeContext& compute,
+                                  ParticleDeviceEventView& out) const;
+    // Hands over (and clears) the CPU reference's contacts; returns the count.
+    std::size_t takeHostCollisionEvents(std::vector<ParticleCollisionEvent>& out);
 
     // ── Device residency (particle roadmap Phase 1.5 Batch B) ───────────────
     // Brings device-authoritative position/velocity home: an explicit,

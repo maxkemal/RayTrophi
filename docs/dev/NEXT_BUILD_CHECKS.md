@@ -1,5 +1,138 @@
 # NEXT BUILD CHECKS
 
+## GPU ıslak boya (Boyama Odası adım 3 + 4'ün IPC yüzü) — 2026-11-15, Claude
+
+**★ CANLI PASS (Studio, 8/8):** tek damla 4 yüzey (küp 1348 / küre 271 / silindir 428 / düzlem 84
+texel); maliyet 16 aktif → 64 tick; akma küp ×1.075, düzlem ×1.0; partiküller cihazdan (`gpu_resident`,
+117 cihaz damgası, 0 host olayı, zemin 2940 texel); sıfırlama 0; **EKRAN: material modda 253 kırmızı
+piksel**. Yayın: RT render cihazına `device_copies` (GPU içi), material-preview viewport'una (ayrı
+VkDevice) host yolu + materyal başı fırça senkronu. Karışım raporu: ıslak−kuru kırmızı +0.0036
+(ürün kararı açık). Player kabulü (meshli fixture) sıradaki parti.
+
+**Altıncı canlı deneme:** akma PASS (küp 1.056, düzlem 1.0). Ekran ölçüsü material modda 0 kırmızı
+piksel; kullanıcı: backend değişince boya göründü → veri doğru, kare senkronu eksik. Kök: Studio'da
+`g_materials_dirty` yalnız TAM sahne senkronunda (`g_needs_optix_sync` ile) servis ediliyor; host yolu
+bayrağa güveniyordu. Düzeltme: `publish` bayrak + `hostPublishedMaterials()` döndürür; Studio ve Player yalnız o
+materyaller için fırçanın vuruş başı senkronunu çağırır (`updateBackendMaterial(scene, id)`: tek slot +
+kirli doku bölgesi, iki backend) — tam tablo yeniden kurulmaz (kullanıcı: maliyetli olmamalı). Karışım maddesi yalnız RAPOR: CPU modelinde tam örten ikinci boya
+alttakini ~%1 alıyor (ıslak r 0.209 / kuru 0.206) — "mor" hedefi ürün kararı. **Artımlı derleme + restart.**
+
+**Beşinci canlı deneme:** akma çalışıyor (ıslak ayarla küp 2104→2536 texel, 14 tickte) ama test
+saniyeyle ölçüyordu: boştaki Studio ~3 kare/sn tikliyor, boya zamanı neredeyse durmuştu → test artık
+TICK sayar. ★ Kullanıcı gözle: boya ne raster ne RT'de görünüyor. İki kök: (1) dört test nesnesi
+AYNI materyali (`Default_Cube_Material`) paylaşıyordu — her yüzey dokusunu aynı slota bağladı, son
+bağlanan (zemin) hepsinde görünüyordu; artık `paint.wet_add_surface` paylaşılan materyali açık hatayla
+reddediyor, test her nesneye kendi materyalini veriyor. (2) Studio'da sim compute RT render cihazında,
+material-preview viewport AYRI VkDevice (`render.volume_tables`) → host yolu tek yol, ama host yolu
+`g_materials_dirty` kaldırmıyordu, doku hiç yeniden yüklenmiyordu; düzeltildi. Test yeni madde 8:
+viewport görüntüsünde kırmızı piksel sayımı (bellekte). **Artımlı derleme + Studio restart.**
+
+**Dördüncü canlı deneme (restart sonrası):** damga güçlendi (küp 576→1480 texel). Elle koşulan
+maddeler PASS: partiküller cihazdan (`gpu_resident`, 119 cihaz damgası, 0 host olayı, zemin 2940
+texel; bağlam kendiliğinden `simulation`), sıfırlama 0. Akma hâlâ 1.0 — kök gather aramasında: kuru
+texel kendi ~0.3 px iziyle arıyordu, `round(p − 0.3) = p` → cephe hiç ilerlemiyordu. Düzeltme: sabit
+adımlı yukarı akış araması (1…⌈brush_radius_px·0.6+2⌉, ≤12). Karışım: CPU ıslak fırçasının
+`fresh_bias` / `underpaint_mix` (pickup) terimleri damgaya taşındı; yeni alan `pickup_rate`
+(IPC/Python/ayarlar). Test iddiası düzeltildi: ıslak kırmızıya mavi, kuru kırmızıya maviden daha
+çok kırmızı tutar (önceki "mor" beklentisi modelden değil benden geliyordu). Shader derlendi →
+**C++ artımlı derleme (pickup_rate) + Studio yeniden başlat.**
+
+**Üçüncü canlı deneme (11:50):** tek damla 4 yüzeyi boyuyor (küp 576 / küre 117 / silindir 184 /
+düzlem 32 texel), boya EKRANDA görünüyor (gözle doğrulandı; soluk). Maliyet PASS: 16 aktif → 64 tick
+(≤ 9×aktif), 1.84 s'de `idle`. `publish_mode: host_download` — ıslak boyanın compute bağlamı render
+VkDevice'ından farklı (açık iş). Akma FAIL çıktı ama kök damganın ZAYIF birikimi: CPU tohumu (~%53
+alfa) kullanılmış, CPU'nun eşlik eden `paintLayerAtUV` vuruşu atlanmıştı; akan boya < 0.5 alfa
+taşıdığı için kapsama ölçüsü görmüyordu (ıslak bölge kayıyordu). Düzeltme yalnız shader'da (derlendi,
+.spv iki yerde) → **Studio yeniden başlatılmalı**, C++ derlemesi gerekmez.
+
+**İkinci canlı deneme: atlas cihazda (`compute_context: own`), damla tick'e ulaşıyor ama 0 texel.**
+Kök: Vulkan `downloadBuffer`'ın anında yolu kayıtlı (gönderilmemiş) dispatch'leri göndermiyor;
+istatistikler kernel'ler koşmadan okunuyordu, kendi bağlamımızda kimse senkronlamadığı için iş hiç
+koşmadı. Düzeltme: okumadan önce `synchronize()` (yalnız `WetPaintGpu.cpp`, /Zs PASS) → **iki proje
+artımlı derleme**. Test düzeltildi: primitif küre/silindir yarıçapı `size/2` (eski boyutlarla damla
+onlara değmiyordu); küpün 6 yüzü UV'de aynı kareyi paylaşıyor, bake ilk yüzü (+Z) tutuyor → damla
+artık (0, 0, 0.5)'te. Gözle: küpün HER yüzünde aynı yerde kırmızı leke (tek doku) beklenir.
+
+**İlk canlı deneme (Studio derlendi): FAIL `no_vulkan_compute`.** Simülasyon compute bağlamı
+yalnız GPU partikülü/domain istediğinde Vulkan; `SceneData::syncSimulationWorld` her
+`getSimulationWorld()`'de onu geri CPU'ya çeviriyor, boş sahnede ıslak boya hiç koşmadı.
+Düzeltme (yalnız `WetPaintGpu.*`, /Zs PASS): dünya bağlamı Vulkan'daysa o, değilse ıslak boyanın
+aynı VkDevice'ta kendi bağlamı; `paint.wet_status.compute_context` = simulation | own. İki bağlam
+arasında geçiş atlası yeniden kurar (boya silinir). Testte `--keep` bayrağı: nesneler ve lekeler
+sahnede kalır (bayraksız betik her şeyi siler — PASS olsa da ekranda leke görünmez).
+★ Düzeltme Player derlenirken yazıldı ve `WetPaintGpu.h` sınıf düzeni değişti: o derleme bitince
+**iki projeyi bir kez daha artımlı derle** (karışık .obj kalmasın).
+Studio fırçası hâlâ CPU'da — tasarım gereği (§5.3 son madde, ayrı parti).
+
+CPU ıslak boya modeli (`noteWetDab` / `tickWetPaint`) çok yüzeyli bir GPU atlasına taşındı:
+`shaders/paint_wet.comp` (tek shader, mod anahtarlı: damga / tick / çözümle / döndür /
+tüket / kapsama / sıfırla), `Paint/WetPaintGpu.*` (bake, cihaz tamponları, kare başına
+tick, yayın), ortak sim saatinden tikliyor (Studio + Player). Partikül çarpışma olayları
+cihazda doğrudan okunuyor (indirme yok). Sonuç, yüzeyin materyal dokusuna cihaz içi kopyayla
+gidiyor. IPC `paint.wet_*` (11 metot), Python `rt.paint.wet_*`, yetki, ajan tarifi, Player
+izin listesi. Tasarım ve bilinçli farklar: `PLAYER_GAME_PAINT_ROOM.md` §5.3.
+Shader derlendi (`paint_wet.spv` iki yerde). /Zs: yeni 4 dosya + değişen 9 dosya PASS (Studio
+ve Player bayraklarıyla). IPC denetimi + Player proje üreticisi PASS.
+
+**Derleme: iki projeyi reload (yeni .cpp'ler) → artımlı build, ama UZUN.**
+`ParticleSimulation.h` yeni bir struct (`ParticleDeviceEventView`) ve iki metot bildirimi aldı;
+**mevcut struct düzeni DEĞİŞMEDİ**, yani eski .obj tehlikesi yok, ama scene_data.h'yi içeren
+her TU yeniden derlenir. `VulkanBackend.h` (+1 metot, `class Texture;`) ve
+`RuntimeSceneViewer.h` (+1 sayaç, yalnız birkaç TU) de değişti.
+
+Testler BOŞ Studio sahnesinde: `python scripts/test/rt_wet_paint_gpu_ipc.py`. Betik kendi
+nesnelerini kurup siler. Bu sıra izole edilmiş maddeler; betik de aynı sırayla durur:
+
+1. **Bake.** Dört primitif (küp, küre, silindir, 4×4 düzlem) yüzey olur; her birinde
+   `valid_texels > 0`.
+   Bozuksa: UV'ler texel'e düşmüyor (uv_set) ya da üçgen toplama boş döndü.
+2. **Tek damla, dört yüzey.** (0.5, 0, 0)'daki tek damla dört yüzeyi birden boyar;
+   `publish_mode` = `device_copy` beklenir.
+   - `host_download` çıkarsa render backend'i compute ile AYNI VkDevice'ta değil demektir.
+     Çalışır ama her kirli dikdörtgen hosttan geçer (`publish_bytes_downloaded`). Bildir.
+   - ★ Sinsi durum: dört yüzeyde de `covered > 0` ama viewport'ta boya YOK. Kapsama atlastan
+     okunuyor, ekran ise dokudan; ikisi ayrışabilir. **Gözle bak:** viewport'ta küpün +X
+     yüzünde kırmızı bir leke görünmeli. Yoksa sebep şunlardan biri: doku cihazda
+     yerleşik değil (`copyDeviceBufferToTexture` 0 dönüyor, kopya sayacı artmaz), format
+     RGBA8 değil (sıkıştırılmış doku, -1 → host yolu) ya da materyal başka bir doku
+     okuyor (bind olmadı).
+3. **Maliyet ıslak alanı izler.** Tek küçük damlada `ticked_tiles` atlasın %25'inden az.
+   Kuruyunca `status: idle` ve `active_tiles` 0 olmalı (boşta dispatch ve indirme yok).
+   Bozuksa: döşeme bayrakları dönmüyor, ya da "ıslak" eşiği hiç altına inmiyor (lifetime).
+4. **Akma.** Kuruduktan sonra küpün dikey yüzünde boyalı alan büyür (`cube_growth > 1.05`),
+   yatay düzlemde ondan az büyür.
+   Bozuksa: akış alanı boş (bake'te `computeTrianglePixelFlow` false), ya da gather
+   taşımasının hedef doğrulaması hiç tutmuyor.
+5. **Islakken karışım.** Aynı noktaya önce kırmızı, sonra mavi: ortalama renkte r ve b
+   ikisi de > 0.2, g ikisinden küçük olmalı.
+6. **Partiküller cihazdan.** `PaintRain` sistemi (auto, die, olay kaydı açık) düzleme
+   yağıyor. Beklenen: `gpu_resident`, `device_event_dispatches > 0`,
+   `host_events_applied == 0` ve düzlem boyanıyor.
+   - ★ Sinsi durum: düzlem boyanıyor ama `host_events_applied > 0`. O zaman sistem CPU
+     referansında koşuyordur: olaylar hosttan geçiyor, boya yine de doğru görünür.
+     `device_event_dispatches` sayacına bak.
+7. **Sıfırlama.** `paint.wet_reset` sonrası kapsama 0.
+
+**Ölç ve rapora yaz (geçer/kalır değil):**
+- Islakken `last_tick_ms`: tick + istatistik indirmesi, host duvar saati.
+- `viewport.frame_timings` ile boyalı kare ve boşta kare karşılaştırması. Yayın, her kopyadan
+  önce `waitIdle` yapıyor (`updateTexture2DRegion` ile aynı kural). Bu, kare boru hattını
+  boyanın aktif olduğu karelerde durdurur. Pahalıysa sıradaki iş yayının senkron olmayan bir
+  bariyere taşınması.
+
+**Bilinen sınırlar (hata değil, notta yazılı):**
+- Boya oturum durumudur: projeyle kaydedilmez.
+- Aynı hedefe yapılan bir CPU boya işlemi (Studio fırçası, `paint.fill_layer`) kendi
+  katmanlarından composite edip GPU boyasının üstüne yazar.
+- Uç birikimi (bead) ve yükseklik kanalı GPU'da yok. CPU'da da yalnız `write_height_mask`
+  açıkken çalışıyorlar.
+- Akış bake'i yalnız yerçekimini kullanıyor; kuvvet alanları statik oda için yok.
+- Bir döşemeye karede en fazla 64 kaynak düşer; fazlası `sources_dropped` sayacına yazılır.
+- Yüzey varken partikül olaylarını ıslak boya tüketir (`splat.consume_particles`). Bu
+  durumda `particle.collision_events` boş döner.
+- Player: `paint.wet_*` izin listesinde ama Player'da primitif eklenemiyor. Player kabulü,
+  meshli bir fixture ile ayrı bir test olacak (sıradaki parti).
+
 ## Player sahne sesi (ortak ses tick'i) — 2026-11-15, Claude
 
 Ses sistemi Player'da derleniyordu ama hiç ilerletilmiyordu: tick'i (transport + sahne

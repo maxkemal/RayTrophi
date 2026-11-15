@@ -28,6 +28,14 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
 
+- **2026-11-15 Claude (adım 3, GPU ıslak boya):** yeni kernel kayıt satırı `paint_wet` (17
+  bağlama, 64 B push; tek shader, mod anahtarlı). `ParticleSimulation.h`: yeni struct
+  `ParticleDeviceEventView` + iki metot (`deviceCollisionEventView`, `takeHostCollisionEvents`).
+  **Mevcut struct düzeni değişmedi.** `VulkanBackendAdapter::copyDeviceBufferToTexture` (yeni
+  metot) + `class Texture;` ileri bildirimi. Yeni IPC: `paint.wet_*` (11), Player izin listesinde.
+  ★ Bir ıslak boya yüzeyi varken partikül olaylarını ıslak boya **tüketir**
+  (`splat.consume_particles`): o sırada `particle.collision_events` boş döner.
+
 - **2026-11-15 Claude (adım 2):** yeni kernel kayıt satırı `sim_particle_collide` (14 bağlama,
   48 B push). `sim_particle_ballistic` ve `sim_particle_spawn`'a DOKUNULMADI. **Yaygın struct
   düzeni değişti:** `ParticleSimulation.h` (`ParticlePhysicsSettings` +3 alan,
@@ -269,6 +277,11 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
   paketleniyordu). DEM gözenekli yolu da aynı tuzağa açık olabilir — Codex bakabilir.
 
 ## 3. Derleme bekleyen işler
+
+- **2026-11-15 Claude, Boyama Odası adım 3–4 (GPU ıslak boya):** DERLENDİ, Studio canlı PASS 8/8; commit edildi (2026-11-15). İki proje
+  reload (yeni `Paint/WetPaintGpu.cpp`, `Api/RtApiPaintWet.cpp`, `Api/RtIpcPaintWet.cpp`,
+  Studio'ya `Api/RtPythonPaintWet.cpp`) → artımlı ama uzun (ParticleSimulation.h bildirim
+  eklemesi). Shader derlendi. Liste NEXT_BUILD_CHECKS başında.
 
 - **2026-11-15 Claude, Player sahne sesi:** DERLENDİ, canlı PASS 01:23. Yeni
   `Scene/AudioRuntime.cpp` (`audio::tickRuntime`); `UI/AudioUI.cpp` onu çağırır; `RuntimeSceneViewer.*`,

@@ -7773,5 +7773,55 @@
     "notes": "Same creation service as panel Add Domain and From Select. Empty source ignores current selection and creates the canonical 5m box with bounds [-2.5,0,-2.5] to [2.5,5,2.5]. Named source aggregates TriangleMesh/DNA SoA vertex positions across all flat parts; uses P_orig transformed by getFinal(), or P when no local transform is available. No per-face Triangle facade reads. Missing/deleted/empty/nonfinite/zero-volume source and explicit duplicate domain name reject before adding a domain. Result is ManualBox, not bound to subsequent source movement. Selects the created domain and invalidates simulation cache. Final render locks reject writes. Existing fluid.create_domain keeps explicit-coordinate semantics.",
     "related": "fluid.create_domain|fluid.list_domains|scene.set_transform",
     "tags": "matter|domain|create|placement|flat"
+  },
+  "paint.wet_add_surface": {
+    "summary": "Make an object's material a GPU wet paint surface (paint atlas page baked from its UVs)",
+    "notes": "Ensures the mesh paint target (base colour texture bound to the material, like paint.ensure) and bakes each texel's world position, normal and downhill flow once. Particle contacts and wet_dab splats land by WORLD distance, so seams need no special care. Adding a surface rebuilds the atlas and clears existing wet paint. resolution 32..4096 (default 1024). Paint is session state: it is not saved with the project.",
+    "tags": "paint|wet|gpu|surface|atlas|player|game|splat"
+  },
+  "paint.wet_remove_surface": {
+    "summary": "Stop treating an object's material as a GPU wet paint surface",
+    "tags": "paint|wet|gpu|surface"
+  },
+  "paint.wet_clear_surfaces": {
+    "summary": "Drop every GPU wet paint surface and release the device atlas",
+    "tags": "paint|wet|gpu|reset"
+  },
+  "paint.wet_status": {
+    "summary": "GPU wet paint counters: surfaces, last tick's active/ticked tiles and stamped texels, publish path",
+    "notes": "status idle = nothing wet and nothing arriving (no dispatch, no readback). publish_mode device_copy = the composite went device-to-device into the material texture; host_download = the render backend is on another VkDevice and every dirty rectangle came through the host (publish_bytes_downloaded counts it). device_event_dispatches counts stamps read straight from particle device buffers; host_events_applied counts CPU-reference contacts sent as dabs.",
+    "tags": "paint|wet|gpu|status|measure|cost|tiles"
+  },
+  "paint.wet_get_settings": {
+    "summary": "Read a wet paint surface's model parameters (the brush wet subset)",
+    "tags": "paint|wet|settings"
+  },
+  "paint.wet_set_settings": {
+    "summary": "Set a wet paint surface's model parameters: wetness, lifetime, diffusion, runoff, absorption, drip head, oil",
+    "notes": "Same names, ranges and meaning as the mesh paint brush wet fields; the device applies tickWetPaint's derived terms (oil factors, lifetime runoff factor). brush_radius (pixels at 1024) only scales the downhill transport trail. Every key optional.",
+    "tags": "paint|wet|settings|runoff|drip|diffusion|dry"
+  },
+  "paint.wet_get_splat": {
+    "summary": "Read how particle contacts become wet paint (radius, amount, source system)",
+    "tags": "paint|wet|particle|splat|settings"
+  },
+  "paint.wet_set_splat": {
+    "summary": "Set how particle contacts become wet paint: world radius, amount, minimum speed, facing, source system",
+    "notes": "A particle system must record collision events (particle.set_collision record_events=true). Device-resident systems on the simulation compute context are stamped straight from their event buffer, which is then consumed (counter reset) - no download. Colour = the particle's appearance LUT at its age. particle_system empty = every recording system. At most 64 sources reach one 32x32 tile per tick; the rest count as sources_dropped.",
+    "tags": "paint|wet|particle|splat|collision|events|settings"
+  },
+  "paint.wet_dab": {
+    "summary": "Drop one wet paint splat at a world position (radius in metres, sRGB colour, strength)",
+    "notes": "Queued and stamped on the device at the next tick. With normal given, only texels facing it are painted (default facing=true when normal is present). This is the hand/foot/game-rule entry point and the test probe for the wet model.",
+    "tags": "paint|wet|dab|splat|stamp|game|test"
+  },
+  "paint.wet_reset": {
+    "summary": "Clear all wet paint back to each surface's original base colour",
+    "tags": "paint|wet|reset|clean|session"
+  },
+  "paint.wet_coverage": {
+    "summary": "Painted fraction of the wet paint surfaces (GPU reduction), per surface and total, with mean colour",
+    "notes": "covered = layer alpha >= 0.5 on texels covered by a triangle (the 2-texel UV gutter is excluded). wet_texels = wetness > 0.001. A measurement call: one dispatch plus a small download.",
+    "tags": "paint|wet|coverage|measure|game|score"
   }
 }

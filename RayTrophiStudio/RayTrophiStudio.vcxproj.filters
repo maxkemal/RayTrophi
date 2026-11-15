@@ -1909,6 +1909,30 @@
     <ClInclude Include="source\include\Api\RtApiParticleCollision.h">
       <Filter>Üst Bilgi Dosyaları</Filter>
     </ClInclude>
+    <ClCompile Include="source\src\Paint\WetPaintGpu.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPaintWet.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPaintWet.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonPaintWet.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClInclude Include="source\include\Paint\WetPaintGpu.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\include\Api\RtApiPaintWet.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtIpcPaintWet.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
+    <ClInclude Include="source\src\Api\RtPythonPaintWet.h">
+      <Filter>Üst Bilgi Dosyaları</Filter>
+    </ClInclude>
     <ClCompile Include="source\src\MeshEdit\HalfEdgeMesh.cpp">
       <Filter>Kaynak Dosyalar\MeshEdit</Filter>
     </ClCompile>

@@ -1371,6 +1371,8 @@ private:
             // Device collisions + contact events (ParticleDeviceCollision.cpp):
             // 14 bindings, ParticleCollideGpuConstants = 48 B.
             { "sim_particle_collide",                "sim_particle_collide.spv",            14, 48 },
+            // GPU wet paint (WetPaintGpu.cpp): 17 bindings, WetPaintGpuConstants = 64 B.
+            { "paint_wet",                           "paint_wet.spv",                       17, 64 },
             // GasCombustionGpuConstants = 18 x 4 = 72 (FG1 air inputs).
             { "sim_gas_combustion",                 "sim_gas_combustion.spv",               6, 72 },
             // VelocityMaxAbsGpuConstants = 4 uints = 16

@@ -1,0 +1,122 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace rtapi {
+struct Result;
+
+// GPU wet paint (docs/dev/PLAYER_GAME_PAINT_ROOM.md step 3/4). A domain header
+// so the shared RtApi.h does not change. Values only; the atlas lives in
+// Paint::WetPaintGpu.
+
+struct WetPaintSurfaceSettingsInfo {
+    float wetness = 0.65f;
+    float lifetime_seconds = 2.5f;
+    float diffusion = 0.24f;
+    float runoff = 0.35f;
+    float absorption = 0.18f;
+    float drip_head = 0.45f;
+    float falloff = 0.65f;
+    float paint_load = 0.85f;
+    float deposit_rate = 0.65f;
+    float pickup_rate = 0.35f;
+    float brush_radius = 5.0f;   // CPU brush.radius (px at 1024): transport trail scale
+    bool oil = false;
+};
+
+struct WetPaintSurfaceRuntimeInfo {
+    std::string object;
+    int material_id = 0;
+    int resolution = 0;
+    uint32_t tiles = 0;
+    uint32_t valid_texels = 0;
+    uint32_t gutter_texels = 0;
+    uint32_t triangles = 0;
+    uint32_t active_tiles = 0;
+    uint32_t ticked_tiles = 0;
+    uint32_t stamped_texels = 0;
+    uint32_t sources_dropped = 0;
+    std::string texture;
+    WetPaintSurfaceSettingsInfo settings;
+};
+
+struct WetPaintSplatInfo {
+    bool consume_particles = true;
+    std::string particle_system;   // empty: every recording system
+    float radius = 0.12f;
+    float amount = 0.8f;
+    float min_speed = 0.0f;
+    float facing_min = 0.0f;
+    uint32_t max_events_per_tick = 4096u;
+};
+
+struct WetPaintStatusInfo {
+    bool device_ready = false;
+    std::string status;
+    uint64_t ticks = 0;
+    float last_dt = 0.0f;
+    uint32_t surfaces = 0;
+    uint32_t tiles = 0;
+    uint64_t dabs_applied = 0;
+    uint64_t device_event_dispatches = 0;
+    uint64_t host_events_applied = 0;
+    uint32_t active_tiles = 0;
+    uint32_t ticked_tiles = 0;
+    uint32_t stamped_texels = 0;
+    uint64_t sources_dropped = 0;
+    uint64_t publish_device_copies = 0;
+    uint64_t publish_host_downloads = 0;
+    uint64_t publish_bytes_downloaded = 0;
+    std::string publish_mode;
+    std::string compute_context;   // simulation | own | none
+    double last_tick_ms = 0.0;
+    std::vector<WetPaintSurfaceRuntimeInfo> surface_list;
+    WetPaintSplatInfo splat;
+};
+
+struct WetPaintDabInfo {
+    float position[3] = {0.0f, 0.0f, 0.0f};
+    float radius = 0.1f;
+    float color[3] = {1.0f, 0.2f, 0.2f};   // sRGB 0..1
+    float amount = 0.8f;
+    float normal[3] = {0.0f, 1.0f, 0.0f};
+    bool facing = false;
+};
+
+struct WetPaintCoverageInfo {
+    struct Surface {
+        std::string object;
+        int material_id = 0;
+        uint32_t covered_texels = 0;
+        uint32_t valid_texels = 0;
+        uint32_t wet_texels = 0;
+        float ratio = 0.0f;
+        float mean_color[3] = {0.0f, 0.0f, 0.0f};
+    };
+    std::vector<Surface> surfaces;
+    uint64_t covered_texels = 0;
+    uint64_t valid_texels = 0;
+    float ratio = 0.0f;
+};
+
+// material_id < 0: the object's first material. resolution 32..4096.
+Result addWetPaintSurface(const std::string& object, int material_id, int resolution,
+                          WetPaintSurfaceRuntimeInfo& out);
+Result removeWetPaintSurface(const std::string& object, int material_id);
+Result clearWetPaintSurfaces();
+Result getWetPaintStatus(WetPaintStatusInfo& out);
+Result getWetPaintSurfaceSettings(const std::string& object, int material_id,
+                                  WetPaintSurfaceSettingsInfo& out);
+Result setWetPaintSurfaceSettings(const std::string& object, int material_id,
+                                  const WetPaintSurfaceSettingsInfo& settings);
+Result getWetPaintSplat(WetPaintSplatInfo& out);
+Result setWetPaintSplat(const WetPaintSplatInfo& settings);
+// Queued; applied on the device at the next tick.
+Result wetPaintDab(const WetPaintDabInfo& dab);
+Result resetWetPaint();
+// GPU reduction + a small download: a measurement call.
+Result getWetPaintCoverage(WetPaintCoverageInfo& out);
+
+} // namespace rtapi

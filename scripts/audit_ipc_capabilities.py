@@ -244,6 +244,7 @@ def required(method, namespaces):
                   "nodes.graphs", "attr.stats", "terrain.erosion_stats",
                   "terrain.landform_stats",
                   "terrain.field_stats",
+                  "paint.wet_status", "paint.wet_coverage",
                   "forcefield.evaluate", "particle.stats",
                   "particle.emitters", "anim.characters", "anim.character",
                   "anim.clips", "anim.graph_status", "anim.state_machines",

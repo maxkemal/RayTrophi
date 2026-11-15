@@ -3,6 +3,7 @@
 
 #include "Core/VulkanSceneSync.h"
 #include "Core/RuntimeSimulationClock.h"
+#include "Paint/WetPaintGpu.h"
 #include "Backend/VulkanViewportBackend.h"
 #include "ProjectManager.h"
 #include "InstanceManager.h"
@@ -267,6 +268,7 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
     audio_ticks_ = 0;
     cloud_push_.invalidate();
     cloud_pushes_ = 0;
+    wet_paint_publishes_ = 0;
     world_syncs_ = 0;
     backend_->syncCamera(*context_.scene.camera);
     backend_->resetAccumulation();
@@ -492,6 +494,18 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         g_texture_pool_dirty = false;
         changed = true;
     }
+    // GPU wet paint: the clock ticked it above; after the material sync so a
+    // freshly bound paint texture is resident before the device copy.
+    if (const int published = Paint::wetPaintGpu().publish(nullptr, backend_)) {
+        if (published & Paint::kWetPaintPublishedHost) {
+            // The brush's per-stroke sync: the painted slot + dirty region only.
+            for (const uint16_t material_id : Paint::wetPaintGpu().hostPublishedMaterials()) {
+                context_.renderer.updateBackendMaterial(scene, material_id, backend_);
+            }
+        }
+        ++wet_paint_publishes_;
+        changed = true;
+    }
     if (g_lights_dirty) {
         backend_->setLights(scene.lights);
         g_lights_dirty = false;
@@ -644,7 +658,8 @@ nlohmann::json RuntimeSceneViewer::simulationStatus() const {
         {"clouds_enabled", context_.renderer.world.getClouds().anyEnabled()},
         {"cloud_time_s", cloud_time_s_}, {"cloud_pushes", cloud_pushes_},
         {"world_syncs", world_syncs_},
-        {"audio_time_s", audio_time_s_}, {"audio_ticks", audio_ticks_}
+        {"audio_time_s", audio_time_s_}, {"audio_ticks", audio_ticks_},
+        {"wet_paint_publishes", wet_paint_publishes_}
     };
 }
 

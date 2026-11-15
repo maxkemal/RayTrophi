@@ -82,6 +82,7 @@ private:
     double audio_time_s_ = 0.0;
     std::uint64_t audio_ticks_ = 0;
     std::uint64_t cloud_pushes_ = 0;
+    std::uint64_t wet_paint_publishes_ = 0;
     std::uint64_t world_syncs_ = 0;
     CloudPushState cloud_push_{};
     double last_upload_ms_ = 0.0;

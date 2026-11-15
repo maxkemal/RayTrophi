@@ -2,6 +2,7 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Fluid/GasInventoryGpu.h"
+#include "Paint/WetPaintGpu.h"
 #include "scene_data.h"
 
 #include <algorithm>
@@ -12,6 +13,22 @@ SimulationClock& simulationClock() {
     static SimulationClock clock;
     return clock;
 }
+
+namespace {
+
+// GPU wet paint (Paint/WetPaintGpu.h) is not a timeline simulation: it runs on
+// wall/game time whenever a surface exists, with or without a sim runtime, and
+// idles (no dispatch) when nothing is wet and nothing arrives. Returns true when
+// the paint changed this tick.
+bool tickWetPaint(SceneData& scene, float dt) {
+    Paint::WetPaintGpu& paint = Paint::wetPaintGpu();
+    if (paint.empty()) return false;
+    if (!paint.tick(scene, dt)) return false;
+    const Paint::WetPaintStats& st = paint.stats();
+    return st.stamped_texels > 0 || st.ticked_tiles > 0;
+}
+
+} // namespace
 
 SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationClockInput& input) {
     SimulationClockResult result;
@@ -28,7 +45,14 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
         ++stats_.render_updates;
         return result;
     }
-    if (input.render_owns_sim || !scene.anySimulationRuntimeEnabled()) {
+    if (input.render_owns_sim) {
+        return result;
+    }
+    if (!scene.anySimulationRuntimeEnabled()) {
+        if (tickWetPaint(scene, std::clamp(input.dt_seconds, 0.0f, 1.0f / 30.0f))) {
+            result.render_updated = true;
+            ++stats_.render_updates;
+        }
         return result;
     }
     ++stats_.ticks;
@@ -99,6 +123,10 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
     // Keep rendering only while the simulation actually changes (live mode, or a
     // baked/scrubbed frame). A frozen timeline lets the render converge and idle.
     result.render_updated = input.live_mode || scene.simulation_render_updated;
+    // After the particle step, so this frame's contact events are stamped.
+    if (tickWetPaint(scene, dt)) {
+        result.render_updated = true;
+    }
     if (result.render_updated) {
         ++stats_.render_updates;
     }

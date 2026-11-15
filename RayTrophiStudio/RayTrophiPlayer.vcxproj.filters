@@ -873,6 +873,9 @@
     <ClCompile Include="source\src\Api\RtApiPaint.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPaintWet.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiParticle.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
@@ -1048,6 +1051,9 @@
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcObjectSubstance.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPaintWet.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcPanel.cpp">
@@ -1447,6 +1453,9 @@
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\WetPaintGpu.cpp">
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp">

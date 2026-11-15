@@ -14589,6 +14589,64 @@ bool VulkanBackendAdapter::updateTexture2DRegion(int64_t textureID, const void* 
     return true;
 }
 
+int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void* vkDevice,
+                                                    void* vkBuffer, uint64_t bufferOffset,
+                                                    uint32_t bufferRowTexels,
+                                                    int32_t x, int32_t y, uint32_t w, uint32_t h) {
+    if (!m_device || !m_device->isInitialized() || !texture || !vkBuffer || w == 0 || h == 0) return 0;
+    // A buffer of another VkDevice cannot be named in this device's commands.
+    if (vkDevice != static_cast<void*>(m_device->getDevice())) return -1;
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+
+    // Same cache key the material sync uses for a base colour slot
+    // (forceLinear = false, preferSingleChannel = false).
+    const uint64_t cacheKey = static_cast<uint64_t>(texture->m_uid) << 2;
+    auto it = m_uploadedImageIDs.find(cacheKey);
+    if (it == m_uploadedImageIDs.end() || it->second <= 0) return 0;
+    VulkanRT::ImageHandle img{};
+    if (!tryGetUploadedImageHandle(it->second, img) || !img.image) return 0;
+    if (img.format != VK_FORMAT_R8G8B8A8_SRGB && img.format != VK_FORMAT_R8G8B8A8_UNORM) return -1;
+    if (x < 0 || y < 0 || static_cast<uint32_t>(x) + w > img.width ||
+        static_cast<uint32_t>(y) + h > img.height || bufferRowTexels < img.width) {
+        return -1;
+    }
+
+    // An in-flight frame may still sample this image; the layout change below
+    // must not race it (same rule as updateTexture2DRegion).
+    m_device->waitIdle();
+    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    if (cmd == VK_NULL_HANDLE) return 0;
+    // The compute queue finished writing the buffer (the simulation context
+    // synchronizes before publish); make the writes visible to the transfer.
+    VkMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toTransfer, 0, nullptr, 0, nullptr);
+    m_device->transitionImageLayout(cmd, img.image,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    VkBufferImageCopy region{};
+    region.bufferOffset = bufferOffset + (static_cast<uint64_t>(y) * bufferRowTexels + static_cast<uint64_t>(x)) * 4ull;
+    region.bufferRowLength = bufferRowTexels;
+    region.bufferImageHeight = 0;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageOffset = { x, y, 0 };
+    region.imageExtent = { w, h, 1 };
+    vkCmdCopyBufferToImage(cmd, static_cast<VkBuffer>(vkBuffer), img.image,
+                           VK_IMAGE_LAYOUT_GENERAL, 1, &region);
+    if (img.mipLevels > 1) {
+        // Same reason as updateTexture2DRegion: upper mips would keep the old fill.
+        regenerateMipChainAfterPartialUpdate(cmd, img);
+    } else {
+        m_device->transitionImageLayout(cmd, img.image,
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    }
+    m_device->endSingleTimeCommands(cmd);
+    m_interactiveViewport.dirty = true;
+    return 1;
+}
+
 void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& lights) {
     if (!m_device || !m_device->isInitialized()) {
         m_cachedLights = lights;

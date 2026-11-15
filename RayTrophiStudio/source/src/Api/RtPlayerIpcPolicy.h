@@ -41,6 +41,8 @@ inline bool supportsMethod(const std::string& method) {
            // Playback actions game rules use (a pop sound, a splash). Manual
            // emitters stay silent until played - same as in Studio.
            method == "audio.play" || method == "audio.play_all" ||
-           method == "audio.stop" || method == "audio.stop_all";
+           method == "audio.stop" || method == "audio.stop_all" ||
+           // GPU wet paint (step 3/4): surfaces, dabs, splat rules, reset, coverage.
+           method.rfind("paint.wet_", 0) == 0;
 }
 } // namespace rtipc_product

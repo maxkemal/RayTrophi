@@ -1433,6 +1433,7 @@
     <ClCompile Include="source\src\Api\RtApiObjectVisibility.cpp" />
     <ClCompile Include="source\src\Api\RtApiOptixDiagnosticsHost.cpp" />
     <ClCompile Include="source\src\Api\RtApiPaint.cpp" />
+    <ClCompile Include="source\src\Api\RtApiPaintWet.cpp" />
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiPerf.cpp" />
     <ClCompile Include="source\src\Api\RtApiPhaseGrid.cpp" />
@@ -1555,6 +1556,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcPaintWet.cpp" />
     <ClCompile Include="source\src\Api\RtIpcPanel.cpp" />
     <ClCompile Include="source\src\Api\RtIpcParamValidation.cpp" />
     <ClCompile Include="source\src\Api\RtIpcParticle.cpp" />
@@ -1763,6 +1765,7 @@
     <ClCompile Include="source\src\Paint\PaintModeState.cpp" />
     <ClCompile Include="source\src\Paint\PaintTextureSet.cpp" />
     <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp" />
+    <ClCompile Include="source\src\Paint\WetPaintGpu.cpp" />
     <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp" />
     <ClCompile Include="source\src\Physics\AshDebrisSystem.cpp" />
     <ClCompile Include="source\src\Physics\CurlNoise.cpp" />

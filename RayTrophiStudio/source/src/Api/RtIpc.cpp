@@ -55,6 +55,7 @@
 #include "RtIpcAudit.h"
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
+#include "RtIpcPaintWet.h"
 #include "RtIpcGrainGenerator.h"
 #include "RtIpcSourceSplatGeometry.h"
 #include "RtRayGpuTimingBindings.h"
@@ -3337,6 +3338,13 @@ json dispatchMethod(const std::string& method, const json& params) {
             [](RtIpcFractureQuery query) { return enqueueQuery(std::move(query)); },
             fracture_result)) {
         return fracture_result;
+    }
+    json paint_wet_result;
+    if (dispatchPaintWetIpc(
+            method, params,
+            [](RtIpcPaintWetQuery query) { return enqueueQuery(std::move(query)); },
+            paint_wet_result)) {
+        return paint_wet_result;
     }
     json particle_result;
     if (dispatchParticleIpc(

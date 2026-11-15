@@ -1,6 +1,6 @@
 # Player ilk oyun — Boyama Odası (AVM etkileşimli oyun alanı)
 
-> **Durum:** TASLAK — 2026-11-14: Player'ın ilk ürün demosu. Hedef pazar AVM'lerdeki kapalı, 6–10 yaş etkileşimli oyun alanları. Kod yazılmadı. Kullanıcı yönü: mevcut yetenekler yeniden yazılmaz, genel (özel donanımsız) kamera, gerçek zamanlı GPU partikül + çok yüzeyli ıslak boya.
+> **Durum:** AKTİF — 2026-11-15: adım 0–4 CANLI (3–4 Studio'da; Player fixture kabulü açık). İlk hali 2026-11-14: Player'ın ilk ürün demosu. Hedef pazar AVM'lerdeki kapalı, 6–10 yaş etkileşimli oyun alanları. Kod yazılmadı. Kullanıcı yönü: mevcut yetenekler yeniden yazılmaz, genel (özel donanımsız) kamera, gerçek zamanlı GPU partikül + çok yüzeyli ıslak boya.
 
 Üst plan: [RAYTROPHI_PLAYER_PLAN.md](RAYTROPHI_PLAYER_PLAN.md). Partikül olay tasarımı:
 [PARTICLE_SYSTEM_GPU_ROADMAP.md](PARTICLE_SYSTEM_GPU_ROADMAP.md) §9. İlk kare kabulü:
@@ -8,6 +8,24 @@
 
 ## Devir notu
 
+- **2026-11-15 — adım 3–4 CANLI PASS Studio 8/8 (Claude):** `rt_wet_paint_gpu_ipc.py` — ekranda boya
+  (material modda kırmızı piksel sayımı), RT render cihazına GPU içi kopya, ayrı-cihaz önizlemeye host
+  yolu + fırçanın materyal başı senkronu. Canlıda bulunan 6 kök (sırayla): sim compute bağlamı GPU
+  isteyen yoksa CPU'ya dönüyor (→ kendi Vulkan bağlamı); `downloadBuffer` kayıtlı dispatch'leri
+  göndermiyor (→ önce synchronize); damga CPU tohumunu kullanıp fırça vuruşunu atlıyordu (→ birikim +
+  `fresh_bias`/pickup, `pickup_rate` alanı); gather araması kuru texel'in kendi iziyle başlıyordu (→ sabit
+  adım); test nesneleri tek materyali paylaşıyordu (→ `wet_add_surface` reddeder); host yolu materyal
+  senkronunu tetiklemiyordu (→ `updateBackendMaterial` materyal başı). Açık: Player fixture kabulü;
+  "kırmızı+mavi=mor" hedefi (CPU modelinde pickup ~%1) ürün kararı.
+- **2026-11-15 — adım 3 YAZILDI, derlenmedi (Claude):** GPU ıslak boya, ayrıntı §5.3. Yazılanlar:
+  `shaders/paint_wet.comp` (derlendi; .spv iki yerde), `Paint/WetPaintGpu.*` (atlas, bake, tick,
+  yayın), ortak sim saatinden tick (`RuntimeSimulationClock`), Studio (`Main.cpp`) ve Player
+  (`RuntimeSceneViewer`) yayını, Vulkan `copyDeviceBufferToTexture`, partikül
+  `deviceCollisionEventView` / `takeHostCollisionEvents`. Adım 4'ün IPC yüzü de hazır: 11
+  `paint.wet_*` metodu + Python + yetki + tarif + Player izin listesi. /Zs 13/13, IPC denetimi
+  PASS. Kabul: `rt_wet_paint_gpu_ipc.py` (Studio, boş sahne). Kontrol sırası: NEXT_BUILD_CHECKS.
+  **Sıradaki:** derleme → kabul. Sonra Player fixture'ında aynı test, ardından yayının
+  `waitIdle`'sız bariyere taşınması (ölçüm pahalı derse), sonra kiosk/erişim katmanı.
 - **2026-11-15 — adım 2 CANLI PASS (Claude):** GPU/CPU olay sayısı birebir (4214), konum hatası
   < 1e-7 m, normaller ≥ 0.9999999; bounce'ta zeminin altında partikül yok. Yazılanlar: GPU partikül çarpışması
   (`sim_particle_collide`, `ParticleDeviceCollision.cpp`) + sistem düzeyi `collision_response`
@@ -198,6 +216,40 @@ Device-resident balistik yol genişletilir; CPU referansı Studio'da doğrulama 
 - **Kuruma/solma** sıfırlama için zamanla parametrelenir (oturum sonu temiz oda).
 - **Studio:** fırça da aynı GPU yoluna geçer (CLAUDE.md §5); adaptör o partide flat SoA'ya.
 
+**Uygulanan sözleşme (2026-11-15, YAZILDI derlenmedi):**
+
+| Parça | Ne | Nerede |
+|---|---|---|
+| Atlas | Yüzey = (nesne, materyal), W×H sayfa; texel ↔ uv = (px/(W−1), 1−py/(H−1)), CPU haritası | `WetPaintGpu.cpp` |
+| Bake (bir kez) | Üçgenler texel'e rasterize: dünya konumu, oct normal, piksel akışı (`computeTrianglePixelFlow`, yerçekimi); 2 texel gutter | `addSurface` |
+| Döşeme | 32×32, dünya AABB'si; bir workgroup = bir döşeme | `GpuTile` 48 B |
+| Kaynaklar | host damlaları (`paint.wet_dab`) + partikül olayları **cihazda** (aynı compute bağlamı); CPU referansındaki sistemin olayları hosttan damla olur (sayılır) | `tick` |
+| Kare | damga → tüket (sayaç sıfır) → tick (aktif + 8 komşu) → çözümle (composite + "hâlâ ıslak") → döndür → küçük istatistik indirmesi | `paint_wet.comp` modları |
+| Boşta | ıslak yok + kaynak yok → dispatch yok, indirme yok (`status: idle`) | `tick` |
+| Yayın | kirli döşeme dikdörtgeni → materyalin BaseColor VkImage'ına cihaz içi kopya; başka VkDevice → host indirmesi (sayılır) | `publish`, `VulkanBackendAdapter::copyDeviceBufferToTexture` |
+| Kapsama | GPU indirgeme: alfa ≥ 0.5 olan kaplı texel oranı, ıslak texel, ortalama renk | `paint.wet_coverage` |
+| Materyal | mevcut boya hedefi (`assignTextureToChannel(BaseColor)`), paint.ensure ile aynı doku | `addSurface` |
+
+**CPU modelinden bilinçli farklar:**
+- Aşağı akış taşıması CPU'da tarama sırasında hedef piksele **yazılıyor** (scatter); bu GPU'da
+  yarış demek. Cihazda her texel **topluyor** (gather): hedefi kendisi olacak yukarı akış texel'ini
+  kendi akış yönünde iki sabit nokta adımıyla buluyor, ve taşımayı yalnız o texel'in CPU hedefi
+  yuvarlanınca bu texel'e düşüyorsa kabul ediyor. Bu, CPU kuralının tersten okunmuş hali.
+- CPU tarama sırasında güncellenmiş komşuyu okuyor; cihaz her yerde önceki adımı okuyor.
+  Sonuç sıradan bağımsız.
+- Damga, boyanın kendisi. CPU'da `noteWetDab` bir `paintLayerAtUV` vuruşunun eşi, ve renk
+  tohumunu yalnız alfa < 0.2 olan yere atıyor. Cihazda tohum alfa-over olarak geçitsiz
+  uygulanıyor. Kırmızının üstüne mavi böylece karışıyor.
+- Renk katmanı bir boya KATMANI: alfa kapsamadır, özgün taban rengin üstüne composite edilir.
+  Sıfırlama alfayı sıfırlar.
+- Dikiş aynalaması yok: damga dünya uzayında, gutter bilineer okumayı kapatıyor.
+- Uç birikimi (bead) ve yükseklik maskesi yok. CPU'da da yalnız `write_height_mask` açıkken
+  çalışıyorlar. Kalınlık bir durum kanalı olarak taşınıyor.
+- Simülasyon frekansı kalite ayarı yok: her kare tikliyor, dt ≤ 2.5/60.
+- Bake'te kuvvet alanı yok (statik oda için yerçekimi yeterli).
+- Boya oturum durumu, projeyle kaydedilmiyor. Aynı hedefte bir CPU boya işlemi kendi
+  katmanlarını composite edip üstüne yazar.
+
 ### 5.4 Çıkış eşleme ve kalibrasyon
 
 - Sanal kamera(lar) fiziksel projektör(ler)in iç/dış parametreleriyle kurulur (oda modu).
@@ -220,8 +272,8 @@ Device-resident balistik yol genişletilir; CPU referansı Studio'da doğrulama 
 | 0 | ✔ Player ilk kare | 2026-11-14 PASS |
 | 1 | Ortak kare döngüsü: partikül + Jolt + anim tick tek yerde, sabit adım | Studio ve Player aynı tick; IPC `runtime` adım sayacı |
 | 2 | GPU partikül: statik SDF + analitik kapsül + olay buffer'ı | 50k partikül ≤1.5 ms GPU (hedef); taşma sayacı IPC'de |
-| 3 | GPU ıslak boya: atlas, döşeme listesi, damga, tick, kapsama | 4+ yüzeyde eşzamanlı leke; maliyet ıslak döşemeyle orantılı; ≤2 ms (hedef) |
-| 4 | `paint.wet_dab` + kapsama okuması (3'ün IPC yüzü) | IPC ile damla → atlas/kapsama değişimi okunur |
+| 3 | CANLI PASS 2026-11-15 (Studio) — GPU ıslak boya: atlas, döşeme listesi, damga, tick, kapsama | 4+ yüzeyde eşzamanlı leke; maliyet ıslak döşemeyle orantılı; ≤2 ms (hedef) — `rt_wet_paint_gpu_ipc.py` |
+| 4 | CANLI PASS 2026-11-15 (Studio) — `paint.wet_dab` + kapsama okuması (3'ün IPC yüzü) | IPC ile damla → atlas/kapsama değişimi okunur |
 | 5 | Kural motoru (tetik/eylem/durum) + oturum durum makinesi | balon patlat → emitter; IPC'den kural yaz/oku |
 | 6 | `input.set_body_poses` (N kişi) + `anim.set_external_pose` + vekiller + hareket tetikleri | sahte 4 çocuk koşucusu bütün oturumu oynar |
 | 7 | Demo içeriği: oda, balon türleri, final canlanması, ses | sahte oturum: kapsama eşikleri → final |

@@ -61,6 +61,7 @@
 #include "RtPythonSourceSplatGeometry.h"
 #include "RtRayGpuTimingBindings.h"
 #include "RtPythonParticle.h"
+#include "RtPythonPaintWet.h"
 #include "RtPythonKinematicCollider.h"
 #include "RtPythonPressure.h"
 #include "RtPythonDebris.h"
@@ -4951,6 +4952,8 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
     }, py::arg("name"));
 
     py::module_ paint = module.def_submodule("paint", "Deterministic mesh paint layer automation");
+    // rt.paint.wet_* (GPU wet paint) lives in RtPythonPaintWet.cpp.
+    rtpy::registerPaintWetBindings(paint);
     auto paint_layer_to_dict = [](const rtapi::PaintLayerInfo& layer) {
         py::dict d;
         d["index"] = layer.index; d["id"] = layer.id; d["name"] = layer.name;

@@ -387,6 +387,32 @@ bool ParticleSimulationSystem::readDeviceCollisionEvents(SimulationComputeContex
     return true;
 }
 
+bool ParticleSimulationSystem::deviceCollisionEventView(const SimulationComputeContext& compute,
+                                                        ParticleDeviceEventView& out) const {
+    out = ParticleDeviceEventView{};
+    // Only the context that stepped this system holds its buffers; the same
+    // backend type on another context would be a different device's handle.
+    if (resident_compute_ != &compute || !physics_settings_.record_collision_events) return false;
+    const ComputeBufferHandle& events = resident_buffers_.collision_events;
+    const ComputeBufferHandle& counter = resident_buffers_.collision_counter;
+    if (!events.valid() || !counter.valid() || events.backend != compute.backendType() ||
+        counter.backend != compute.backendType() || resident_buffers_.event_capacity == 0) {
+        return false;
+    }
+    out.events = events;
+    out.counter = counter;
+    out.capacity = static_cast<uint32_t>(resident_buffers_.event_capacity);
+    return true;
+}
+
+std::size_t ParticleSimulationSystem::takeHostCollisionEvents(std::vector<ParticleCollisionEvent>& out) {
+    const std::size_t n = host_collision_events_.size();
+    out.insert(out.end(), host_collision_events_.begin(), host_collision_events_.end());
+    host_collision_events_.clear();
+    host_collision_overflow_ = 0;
+    return n;
+}
+
 void ParticleSimulationSystem::releaseDeviceCollisionBuffers(SimulationComputeContext& compute) {
     for (ComputeBufferHandle* handle :
          {&resident_buffers_.colliders, &resident_buffers_.collider_sdf,

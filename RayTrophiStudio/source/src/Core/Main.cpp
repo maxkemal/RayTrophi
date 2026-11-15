@@ -2,6 +2,7 @@
 #include "Core/AppWindow.h"
 #include "Core/AppFrame.h"
 #include "Core/VulkanSceneSync.h"
+#include "Paint/WetPaintGpu.h"
 #include "PostProcess/PostSurface.h"
 #include "Core/FatalSignalTrace.h"
 #include "Backend/VulkanRecoveryPolicy.h"
@@ -4206,6 +4207,21 @@ int main(int argc, char* argv[]) try {
                 ray_renderer.world, scene, cloudTime,
                 scene.camera ? scene.camera->lookfrom : Vec3(0.0f), s_cloudPush,
                 g_backend.get(), g_viewport_backend.get());
+            // GPU wet paint (Paint/WetPaintGpu.h): this frame's dirty tiles into the
+            // bound base colour textures, device-to-device. The clock ticked it in ui.draw.
+            const int wetPublished = Paint::wetPaintGpu().publish(g_backend.get(), g_viewport_backend.get());
+            if (wetPublished & Paint::kWetPaintPublishedHost) {
+                // Host pixels changed (the preview viewport is another VkDevice):
+                // the brush's per-stroke sync - only the painted material's slot
+                // and the dirty texture region, on both backends.
+                for (const uint16_t material_id : Paint::wetPaintGpu().hostPublishedMaterials()) {
+                    ray_renderer.updateBackendMaterial(scene, material_id);
+                }
+            }
+            if (wetPublished) {
+                start_render = true;
+                if (g_backend) g_backend->resetAccumulation();
+            }
             // Wake RT here, before rendering, independently of the later playback-frame gate.
             if (cloudsPushed && ui.viewport_settings.shading_mode == 2) {
                 if (auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(g_backend.get());

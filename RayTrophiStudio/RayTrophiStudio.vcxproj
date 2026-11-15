@@ -2225,6 +2225,16 @@
     <ClCompile Include="source\src\Scene\AudioRuntime.cpp" />
     <ClInclude Include="source\include\Audio\AudioRuntime.h" />
     <ClInclude Include="source\include\Api\RtApiParticleCollision.h" />
+    <ClCompile Include="source\src\Paint\WetPaintGpu.cpp" />
+    <ClCompile Include="source\src\Api\RtApiPaintWet.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcPaintWet.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonPaintWet.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Paint\WetPaintGpu.h" />
+    <ClInclude Include="source\include\Api\RtApiPaintWet.h" />
+    <ClInclude Include="source\src\Api\RtIpcPaintWet.h" />
+    <ClInclude Include="source\src\Api\RtPythonPaintWet.h" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshUndoSnapshot.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshGeometryCommand.cpp" />
     <ClCompile Include="source\src\MeshEdit\FlatMeshEditService.cpp" />

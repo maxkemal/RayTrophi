@@ -1,0 +1,707 @@
+#version 450
+// GPU wet paint (docs/dev/PLAYER_GAME_PAINT_ROOM.md step 3, section 5.3).
+//
+// The CPU model is MeshPaintAdapter::noteWetDab / tickWetPaint. This kernel
+// carries the same equations to the device over a multi-surface atlas:
+//   * every paint surface is a W x H page of texels; a texel knows its world
+//     position, normal and downhill pixel-flow (baked once on the host from the
+//     surface's triangles, WetPaintGpu.cpp);
+//   * pages are cut into 32 x 32 tiles; one workgroup = one tile;
+//   * STAMP weighs the frame's sources (host dabs or particle collision events,
+//     read straight from the particle system's device buffers) by WORLD distance
+//     to the texel - no triangle search, seams come out right by construction;
+//   * TICK runs only on active tiles (plus their 8 neighbours), RESOLVE commits,
+//     ROTATE carries the "still wet" flags forward. Cost follows the wet area.
+//
+// Differences from the CPU model (all deliberate, listed in the design note):
+//   * The CPU scatters "downstream transport" into a target pixel while it
+//     scans; scatter races on the GPU. Here each texel GATHERS: it finds the
+//     upstream texel q whose CPU target would be this texel (two fixed-point
+//     steps along the local downhill direction) and accepts the transport only
+//     if q's own target rounds to this texel - the CPU's rule, read backwards.
+//   * The CPU reads live (already updated) neighbours in scan order; the device
+//     reads the previous step everywhere (order independent).
+//   * Terminal beads and the height mask are not on the device yet (the CPU
+//     runs them only with write_height_mask); thickness stays a state channel.
+//   * Seam mirroring is not needed: stamping is in world space and the bake
+//     dilates a 2-texel gutter around every UV island.
+//   * The colour layer is a paint LAYER (alpha = coverage) composited over the
+//     surface's original base colour into the output page.
+layout(local_size_x = 256) in;
+
+const uint TILE = 32u;
+const uint TEXELS_PER_THREAD = 4u;   // 32*32 / 256
+const uint MAX_TILE_SOURCES = 64u;
+
+const uint MODE_STAMP = 0u;
+const uint MODE_TICK = 1u;
+const uint MODE_RESOLVE = 2u;
+const uint MODE_ROTATE = 3u;
+const uint MODE_CONSUME = 4u;
+const uint MODE_COVERAGE = 5u;
+const uint MODE_RESET = 6u;
+
+const uint SOURCE_DABS = 0u;
+const uint SOURCE_EVENTS = 1u;
+
+const uint STATS_STRIDE = 16u;
+const uint ST_ACTIVE_TILES = 0u;
+const uint ST_DIRTY_MIN_X = 1u;
+const uint ST_DIRTY_MIN_Y = 2u;
+const uint ST_DIRTY_MAX_X = 3u;
+const uint ST_DIRTY_MAX_Y = 4u;
+const uint ST_STAMPED_TEXELS = 5u;
+const uint ST_TICKED_TILES = 6u;
+const uint ST_SOURCES_DROPPED = 7u;
+const uint ST_COVERED_TEXELS = 8u;
+const uint ST_VALID_TEXELS = 9u;
+const uint ST_SUM_R = 10u;
+const uint ST_SUM_G = 11u;
+const uint ST_SUM_B = 12u;
+const uint ST_WET_TEXELS = 13u;
+
+const uint SURFACE_OIL = 1u;
+
+struct Surface {
+    uint width; uint height; uint page_offset; uint tile_offset;
+    uint tiles_x; uint tiles_y; uint flags; uint _pad0;
+    // Already scaled by the host exactly like tickWetPaint's derived terms
+    // (oil factors, lifetime runoff factor).
+    float diffusion; float runoff; float absorption; float drip_head;
+    float lifetime; float brush_radius_px; float falloff; float paint_load;
+    float wetness; float deposit_rate; float pickup_rate; float _pad2;
+};
+
+struct Tile {
+    uint surface; uint tx; uint ty; uint valid_texels;
+    vec4 bmin;   // world AABB of the tile's texels (incl. gutter), w unused
+    vec4 bmax;
+};
+
+struct Dab {
+    vec4 pos_radius;     // world xyz, world radius
+    vec4 color_amount;   // display-referred (sRGB) 0..1 rgb, strength
+    vec4 normal_facing;  // xyz normal, w > 0.5: only texels facing the normal
+};
+
+struct CollisionEvent {
+    float position[3]; uint collider;
+    float normal[3]; uint profile;
+    float speed; float age_fraction; uint particle; uint flags;
+};
+
+layout(push_constant) uniform PC {
+    uint mode; uint surface_count; uint tile_count; uint source_kind;
+    uint source_count; uint event_capacity; uint max_events; uint lookup_count;
+    float dt; float splat_radius; float splat_amount; float splat_min_speed;
+    float facing_min; uint lut_rows; uint _p0; uint _p1;
+} pc;
+
+layout(set=0, binding=0, std430) readonly buffer Surfaces { Surface surfaces[]; };
+layout(set=0, binding=1, std430) readonly buffer Tiles { Tile tiles[]; };
+layout(set=0, binding=2) readonly buffer PosValid { vec4 pos_valid[]; };   // w: 0 none, 1 covered, 2 gutter
+layout(set=0, binding=3) readonly buffer FlowNormal { vec4 flow_normal[]; }; // flow_x, flow_y, slope, oct normal
+layout(set=0, binding=4) readonly buffer BaseColor { uint base_color[]; };
+layout(set=0, binding=5) buffer Color { uint color[]; };
+layout(set=0, binding=6) buffer State { vec4 state[]; };                   // wet, pigment, thickness, -
+layout(set=0, binding=7) buffer ColorScratch { uint color_scratch[]; };
+layout(set=0, binding=8) buffer StateScratch { vec4 state_scratch[]; };
+layout(set=0, binding=9) buffer Output { uint out_color[]; };
+layout(set=0, binding=10) buffer TileFlags { uint tile_flags[]; };         // [2t] active, [2t+1] next
+layout(set=0, binding=11) buffer Stats { uint stats[]; };
+layout(set=0, binding=12, std430) readonly buffer Dabs { Dab dabs[]; };
+layout(set=0, binding=13, std430) readonly buffer Events { CollisionEvent events[]; };
+layout(set=0, binding=14) buffer Counter { uint counter[]; };              // {count, overflow}
+layout(set=0, binding=15) readonly buffer Lut { float lut[]; };
+layout(set=0, binding=16) readonly buffer Lookup { uint lookup[]; };
+
+// ── helpers (MeshPaintAdapter.cpp equivalents) ──────────────────────────────
+
+float srgbToLinear01(float v) {
+    v = clamp(v, 0.0, 1.0);
+    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+}
+float linearToSrgb01(float v) {
+    v = clamp(v, 0.0, 1.0);
+    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+}
+// Colours are carried as byte-valued floats (0..255), like CompactVec4.
+float blendChannelLinear(float dst, float target, float alpha) {
+    float t = clamp(alpha, 0.0, 1.0);
+    float c = srgbToLinear01(dst / 255.0);
+    float g = srgbToLinear01(target / 255.0);
+    return clamp(floor(linearToSrgb01(c + (g - c) * t) * 255.0 + 0.5), 0.0, 255.0);
+}
+vec4 unpackColor(uint c) { return unpackUnorm4x8(c) * 255.0; }
+uint packColor(vec4 c) { return packUnorm4x8(clamp(c, 0.0, 255.0) / 255.0); }
+
+float brushWeight(float dist_norm, float radius_px, float falloff) {
+    if (radius_px <= 0.0) return 0.0;
+    if (radius_px <= 1.0) {
+        float scale = radius_px / (radius_px + 0.75);
+        return clamp(1.0 - dist_norm * scale, 0.0, 1.0);
+    }
+    float n = clamp(dist_norm, 0.0, 1.0);
+    float inner = clamp(1.0 - falloff, 0.0, 1.0);
+    if (n <= inner) return 1.0;
+    float t = clamp((n - inner) / max(0.001, 1.0 - inner), 0.0, 1.0);
+    return 1.0 - (t * t * (3.0 - 2.0 * t));
+}
+
+vec3 octDecode(float packed) {
+    vec2 e = unpackSnorm2x16(floatBitsToUint(packed));
+    vec3 n = vec3(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+    if (n.z < 0.0) {
+        vec2 s = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+        n.xy = (1.0 - abs(n.yx)) * s;
+    }
+    return normalize(n);
+}
+
+// liftLayerAlpha (the GPU layer always "uses layers").
+void liftLayerAlpha(inout vec4 px, float pigment_amount, float wet_amount,
+                    float incoming_alpha, float blend_alpha) {
+    float current = px.a / 255.0;
+    float pigment_alpha = clamp(pigment_amount * (0.24 + clamp(wet_amount, 0.0, 1.0) * 0.60), 0.0, 1.0);
+    float carried = clamp(incoming_alpha * blend_alpha, 0.0, 1.0);
+    float target_a = max(current, max(pigment_alpha, carried));
+    if (target_a > current) px.a = clamp(target_a * 255.0, 0.0, 255.0);
+}
+
+// ── addressing ──────────────────────────────────────────────────────────────
+
+uint texelIndex(Surface s, int x, int y) {
+    x = clamp(x, 0, int(s.width) - 1);
+    y = clamp(y, 0, int(s.height) - 1);
+    return s.page_offset + uint(y) * s.width + uint(x);
+}
+
+void tileTexel(Tile t, uint k, out int x, out int y) {
+    uint i = gl_LocalInvocationIndex + k * 256u;
+    x = int(t.tx * TILE + (i % TILE));
+    y = int(t.ty * TILE + (i / TILE));
+}
+
+bool inSurface(Surface s, int x, int y) {
+    return x >= 0 && y >= 0 && x < int(s.width) && y < int(s.height);
+}
+
+// Bilinear reads of the previous step (CPU: sampleSourceScalar / sampleSourcePixel).
+float sampleScalar(Surface s, uint channel, float gx, float gy) {
+    gx = clamp(gx, 0.0, float(s.width - 1u));
+    gy = clamp(gy, 0.0, float(s.height - 1u));
+    int x0 = int(floor(gx)); int y0 = int(floor(gy));
+    float fx = gx - float(x0); float fy = gy - float(y0);
+    float a = state[texelIndex(s, x0, y0)][channel];
+    float b = state[texelIndex(s, x0 + 1, y0)][channel];
+    float c = state[texelIndex(s, x0, y0 + 1)][channel];
+    float d = state[texelIndex(s, x0 + 1, y0 + 1)][channel];
+    return mix(mix(a, b, fx), mix(c, d, fx), fy);
+}
+vec4 sampleColor(Surface s, float gx, float gy) {
+    gx = clamp(gx, 0.0, float(s.width - 1u));
+    gy = clamp(gy, 0.0, float(s.height - 1u));
+    int x0 = int(floor(gx)); int y0 = int(floor(gy));
+    float fx = gx - float(x0); float fy = gy - float(y0);
+    vec4 a = unpackColor(color[texelIndex(s, x0, y0)]);
+    vec4 b = unpackColor(color[texelIndex(s, x0 + 1, y0)]);
+    vec4 c = unpackColor(color[texelIndex(s, x0, y0 + 1)]);
+    vec4 d = unpackColor(color[texelIndex(s, x0 + 1, y0 + 1)]);
+    return mix(mix(a, b, fx), mix(c, d, fx), fy);
+}
+
+// ── STAMP ───────────────────────────────────────────────────────────────────
+
+shared uint s_list[MAX_TILE_SOURCES];
+shared uint s_count;
+shared uint s_flag;
+shared uint s_sum[4];
+
+bool sourceAt(uint idx, out vec3 p, out float r, out vec3 n, out bool facing,
+              out vec3 srgb255, out float amount) {
+    if (pc.source_kind == SOURCE_DABS) {
+        Dab d = dabs[idx];
+        p = d.pos_radius.xyz; r = d.pos_radius.w;
+        n = d.normal_facing.xyz; facing = d.normal_facing.w > 0.5;
+        srgb255 = clamp(d.color_amount.rgb, 0.0, 1.0) * 255.0;
+        amount = d.color_amount.a;
+        return r > 0.0 && amount > 0.0;
+    }
+    CollisionEvent e = events[idx];
+    p = vec3(e.position[0], e.position[1], e.position[2]);
+    n = vec3(e.normal[0], e.normal[1], e.normal[2]);
+    facing = true;
+    r = pc.splat_radius;
+    amount = pc.splat_amount;
+    if (e.speed < pc.splat_min_speed) return false;
+    // Colour: the particle's appearance LUT at its age (linear rgb).
+    vec3 lin = vec3(1.0);
+    uint row = e.profile < pc.lookup_count ? lookup[e.profile] : 0xFFFFFFFFu;
+    if (row < pc.lut_rows) {
+        float s = clamp(e.age_fraction, 0.0, 1.0) * 63.0;
+        uint i0 = uint(floor(s)); uint i1 = min(i0 + 1u, 63u); float f = s - float(i0);
+        uint base = row * 512u;
+        vec3 c0 = vec3(lut[base + i0 * 8u], lut[base + i0 * 8u + 1u], lut[base + i0 * 8u + 2u]);
+        vec3 c1 = vec3(lut[base + i1 * 8u], lut[base + i1 * 8u + 1u], lut[base + i1 * 8u + 2u]);
+        lin = mix(c0, c1, f);
+    }
+    srgb255 = vec3(linearToSrgb01(lin.r), linearToSrgb01(lin.g), linearToSrgb01(lin.b)) * 255.0;
+    return r > 0.0 && amount > 0.0;
+}
+
+void stampTile(uint tile_index) {
+    Tile t = tiles[tile_index];
+    if (t.valid_texels == 0u) return;
+    Surface s = surfaces[t.surface];
+    uint lid = gl_LocalInvocationIndex;
+
+    uint count = pc.source_count;
+    if (pc.source_kind == SOURCE_EVENTS) {
+        count = min(min(counter[0], pc.event_capacity), pc.max_events);
+    }
+    if (lid == 0u) { s_count = 0u; s_flag = 0u; }
+    barrier();
+    for (uint base = 0u; base < count; base += 256u) {
+        uint idx = base + lid;
+        if (idx < count) {
+            vec3 p; float r; vec3 n; bool facing; vec3 c; float a;
+            if (sourceAt(idx, p, r, n, facing, c, a)) {
+                vec3 d = max(t.bmin.xyz - p, vec3(0.0)) + max(p - t.bmax.xyz, vec3(0.0));
+                if (dot(d, d) <= r * r) {
+                    uint slot = atomicAdd(s_count, 1u);
+                    if (slot < MAX_TILE_SOURCES) s_list[slot] = idx;
+                }
+            }
+        }
+    }
+    barrier();
+    uint listed = min(s_count, MAX_TILE_SOURCES);
+    if (lid == 0u && s_count > MAX_TILE_SOURCES) {
+        atomicAdd(stats[t.surface * STATS_STRIDE + ST_SOURCES_DROPPED], s_count - MAX_TILE_SOURCES);
+    }
+    if (listed == 0u) return;
+
+    // The stroke terms of the CPU Wet/Oil brush (scene_ui_modifiers.cpp) at the
+    // start of a stroke: loaded paint = the splat colour, load = paint_load.
+    const bool oil = (s.flags & SURFACE_OIL) != 0u;
+    const float load = clamp(s.paint_load, 0.0, 1.0);
+    const float wetness = clamp(s.wetness, 0.0, 1.0);
+    const float pickup = clamp(s.pickup_rate, 0.0, 1.0);
+    const float fresh_bias = clamp(clamp(s.deposit_rate, 0.0, 1.0) * (0.82 + 0.18 * wetness) *
+                                   (0.78 + 0.22 * load), 0.0, 1.0);
+    const float deposit_ratio = clamp(fresh_bias * (0.78 + 0.22 * load), 0.0, 1.0);
+    // noteWetDab, per texel, sources applied in order.
+    const float deposited = deposit_ratio * (0.25 + load * 0.75);
+    uint touched = 0u;
+    for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
+        int x, y; tileTexel(t, k, x, y);
+        if (!inSurface(s, x, y)) continue;
+        uint ti = texelIndex(s, x, y);
+        vec4 pv = pos_valid[ti];
+        if (pv.w < 0.5) continue;
+        vec3 tn = octDecode(flow_normal[ti].w);
+        vec4 st = state[ti];
+        vec4 px = unpackColor(color[ti]);
+        bool hit = false;
+        for (uint j = 0u; j < listed; ++j) {
+            vec3 p; float r; vec3 n; bool facing; vec3 c; float a;
+            sourceAt(s_list[j], p, r, n, facing, c, a);
+            float dist_norm = length(pv.xyz - p) / r;
+            if (dist_norm > 1.0) continue;
+            if (facing && dot(tn, n) < pc.facing_min) continue;
+            float activation = clamp(clamp(a, 0.0, 1.0) * clamp(s.wetness, 0.0, 1.0) *
+                                     (0.04 + deposited * 0.96), 0.0, 1.0);
+            if (activation <= 0.001) continue;
+            float weight = brushWeight(dist_norm, 2.0, clamp(s.falloff, 0.0, 1.0));
+            float wet_add = weight * activation;
+            if (wet_add <= 0.001) continue;
+            float pigment_add = wet_add * deposited;
+            st.x = clamp(st.x + wet_add * (0.18 + deposited * 0.82), 0.0, 1.0);
+            st.y = clamp(st.y + pigment_add, 0.0, 1.0);
+            // Deposit. On the CPU noteWetDab is the wet half of a stroke whose
+            // colour comes from a paintLayerAtUV dab (Normal brush: alpha =
+            // falloff weight x strength, alpha-over); noteWetDab itself only
+            // seeds ~0.5 alpha where the layer is still empty. A splat here is
+            // the whole stroke, so the brush deposit is applied (alpha-over in
+            // byte space, the CPU layer blend) and the seed is its floor.
+            float seed = max(clamp(weight * clamp(a, 0.0, 1.0), 0.0, 1.0),
+                             clamp(wet_add * (0.22 + deposited * 0.78), 0.0, 1.0));
+            // Pickup: the brush colour takes on the wet paint under it
+            // (sampleWetPickupReservoir + underpaint_mix of the CPU brush). The
+            // "sampled" colour is what the surface shows: layer over base.
+            float wet_gate = clamp((st.x - 0.04) / 0.28, 0.0, 1.0);
+            float thick_gate = clamp((st.z - 0.02) / 0.20, 0.0, 1.0);
+            float reservoir = clamp(wet_gate * (0.30 + thick_gate * 0.70), 0.0, 1.0);
+            float underpaint_mix = clamp(reservoir * wetness * (1.0 - fresh_bias * (oil ? 0.92 : 0.82)) *
+                                         ((oil ? 0.08 : 0.18) + pickup * (oil ? 0.18 : 0.34)) *
+                                         ((oil ? 0.36 : 0.55) - load * (oil ? 0.10 : 0.18)),
+                                         0.0, oil ? 0.20 : 0.42);
+            vec3 sampled = mix(unpackColor(base_color[ti]).rgb, px.rgb, px.a / 255.0);
+            c = mix(c, sampled, underpaint_mix);
+            float dst_a = px.a / 255.0;
+            float out_a = seed + dst_a * (1.0 - seed);
+            if (out_a > 1e-6) {
+                float keep = dst_a * (1.0 - seed);
+                px.rgb = clamp((c * seed + px.rgb * keep) / out_a, 0.0, 255.0);
+                px.a = clamp(out_a * 255.0, 0.0, 255.0);
+            }
+            hit = true;
+        }
+        if (hit) {
+            state[ti] = st;
+            color[ti] = packColor(px);
+            ++touched;
+        }
+    }
+    if (touched > 0u) {
+        atomicAdd(stats[t.surface * STATS_STRIDE + ST_STAMPED_TEXELS], touched);
+        tile_flags[2u * tile_index] = 1u;
+    }
+}
+
+// ── TICK ────────────────────────────────────────────────────────────────────
+
+bool tileActive(Surface s, int tx, int ty) {
+    if (tx < 0 || ty < 0 || tx >= int(s.tiles_x) || ty >= int(s.tiles_y)) return false;
+    return tile_flags[2u * (s.tile_offset + uint(ty) * s.tiles_x + uint(tx))] != 0u;
+}
+bool dilatedActive(Tile t, Surface s) {
+    for (int oy = -1; oy <= 1; ++oy)
+        for (int ox = -1; ox <= 1; ++ox)
+            if (tileActive(s, int(t.tx) + ox, int(t.ty) + oy)) return true;
+    return false;
+}
+
+// What one texel's flow does this step, from the previous step only. Used for
+// the texel itself and for the upstream texel of the transport gather.
+struct FlowEval {
+    bool has_downhill;
+    vec2 dir;
+    float wet; float pigment;
+    float flow_scale; float runoff_alpha; float drip_head_alpha;
+    float advected_wet; float advected_pigment; float advected_thickness;
+    vec2 advected_src;
+    float color_runoff_alpha; float color_drip_head_alpha;
+    float carrier_gate; float pigment_gate;
+};
+
+FlowEval evalFlow(Surface s, int px, int py, bool oil) {
+    FlowEval f;
+    uint ti = texelIndex(s, px, py);
+    vec4 st = state[ti];
+    vec4 fl = flow_normal[ti];
+    f.wet = st.x; f.pigment = st.y;
+    f.flow_scale = 0.0; f.runoff_alpha = 0.0; f.drip_head_alpha = 0.0;
+    f.advected_wet = 0.0; f.advected_pigment = 0.0; f.advected_thickness = 0.0;
+    f.advected_src = vec2(px, py);
+    f.dir = vec2(0.0);
+    float flow_len = length(fl.xy);
+    f.has_downhill = flow_len > 1e-6 && fl.z > 0.0;
+    if (f.has_downhill) {
+        float effective_slope = max(0.18, fl.z);
+        float metric = clamp(1.0 + log(1.0 + max(0.0, flow_len)) * 0.85, 1.0, 4.0);
+        f.dir = fl.xy / flow_len;
+        f.flow_scale = min(6.0, s.runoff * effective_slope * metric * max(f.wet, 0.05) * pc.dt * 60.0 * 1.65);
+        if (f.flow_scale > 0.001) {
+            f.advected_src = vec2(px, py) - f.dir * f.flow_scale;
+            f.advected_wet = sampleScalar(s, 0u, f.advected_src.x, f.advected_src.y);
+            f.advected_pigment = sampleScalar(s, 1u, f.advected_src.x, f.advected_src.y);
+            f.advected_thickness = sampleScalar(s, 2u, f.advected_src.x, f.advected_src.y);
+            f.runoff_alpha = clamp(f.flow_scale * (0.26 + (metric - 1.0) * 0.12), 0.0, 1.0);
+            float drip_bias = clamp(f.advected_wet - f.wet * 0.25, 0.0, 1.0);
+            f.drip_head_alpha = clamp(f.runoff_alpha * s.drip_head * (0.35 + drip_bias), 0.0, 1.0);
+        }
+    }
+    float pigment_presence = max(f.pigment, f.advected_pigment);
+    float wet_presence = max(f.wet, f.advected_wet);
+    f.pigment_gate = oil ? clamp((pigment_presence - 0.03) / 0.18, 0.0, 1.0)
+                         : clamp((pigment_presence - 0.008) / 0.10, 0.0, 1.0);
+    f.carrier_gate = oil ? f.pigment_gate
+                         : clamp(f.pigment_gate * 0.7 + wet_presence * 0.45, 0.0, 1.0);
+    f.color_runoff_alpha = f.runoff_alpha * f.carrier_gate;
+    f.color_drip_head_alpha = f.drip_head_alpha * f.carrier_gate;
+    return f;
+}
+
+float trailDistance(Surface s, FlowEval f) {
+    return min(s.brush_radius_px * 0.6 + 2.0,
+               max(f.flow_scale * 0.95, s.brush_radius_px * clamp(f.wet, 0.15, 1.0) * 0.22));
+}
+ivec2 transportTarget(Surface s, int px, int py, FlowEval f) {
+    vec2 t = vec2(px, py) + f.dir * trailDistance(s, f);
+    return clamp(ivec2(round(t)), ivec2(0), ivec2(int(s.width) - 1, int(s.height) - 1));
+}
+bool transports(FlowEval f) {
+    return f.has_downhill && f.flow_scale > 0.02 && f.runoff_alpha > 0.01;
+}
+
+void tickTexel(Surface s, int px, int py) {
+    bool oil = (s.flags & SURFACE_OIL) != 0u;
+    uint ti = texelIndex(s, px, py);
+    vec4 st = state[ti];
+    vec4 cur = unpackColor(color[ti]);
+    FlowEval f = evalFlow(s, px, py, oil);
+
+    vec4 dst = cur;
+    float next_pigment = st.y;
+    float next_thickness = st.z;
+    float next_wet = st.x;
+
+    if (st.x > 0.001 || f.advected_wet > 0.001) {
+        vec4 advected_pixel = f.flow_scale > 0.001 ? sampleColor(s, f.advected_src.x, f.advected_src.y) : cur;
+        float pigment_presence = max(st.y, f.advected_pigment);
+        float mix_alpha = clamp(s.diffusion * st.x *
+            (oil ? (0.10 + f.pigment_gate * 0.90) : (0.22 + f.carrier_gate * 0.78)) * pc.dt * 60.0, 0.0, 1.0);
+
+        vec3 sum = vec3(0.0); float sum_w = 0.0;
+        if (mix_alpha > 0.015) {
+            for (int oy = -1; oy <= 1; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    uint si = texelIndex(s, px + ox, py + oy);
+                    vec4 sst = state[si];
+                    float w = sst.y * (0.10 + sst.x);
+                    if (w <= 0.0005) continue;
+                    vec4 sp = unpackColor(color[si]);
+                    sum += vec3(srgbToLinear01(sp.r / 255.0), srgbToLinear01(sp.g / 255.0),
+                                srgbToLinear01(sp.b / 255.0)) * w;
+                    sum_w += w;
+                }
+            }
+        }
+
+        if (f.color_runoff_alpha > 0.001) {
+            dst.r = blendChannelLinear(dst.r, advected_pixel.r, f.color_runoff_alpha);
+            dst.g = blendChannelLinear(dst.g, advected_pixel.g, f.color_runoff_alpha);
+            dst.b = blendChannelLinear(dst.b, advected_pixel.b, f.color_runoff_alpha);
+            if (f.color_drip_head_alpha > 0.001) {
+                dst.r = blendChannelLinear(dst.r, advected_pixel.r, f.color_drip_head_alpha);
+                dst.g = blendChannelLinear(dst.g, advected_pixel.g, f.color_drip_head_alpha);
+                dst.b = blendChannelLinear(dst.b, advected_pixel.b, f.color_drip_head_alpha);
+            }
+            liftLayerAlpha(dst, max(st.y, f.advected_pigment), max(st.x, f.advected_wet),
+                           advected_pixel.a / 255.0, max(f.color_runoff_alpha, f.color_drip_head_alpha));
+        }
+        next_thickness = clamp(next_thickness * (1.0 - f.color_runoff_alpha * (oil ? 0.10 : 0.28)) +
+                               f.advected_thickness * f.color_runoff_alpha * (oil ? 0.55 : 1.0), 0.0, 1.0);
+        next_pigment = clamp(max(st.y * (oil ? 0.985 : 0.992),
+                                 f.advected_pigment * (oil ? f.color_runoff_alpha : (0.28 + f.color_runoff_alpha * 0.72))) -
+                             pc.dt * (oil ? (0.10 + s.absorption * 0.20) : (0.06 + s.absorption * 0.12)),
+                             0.0, 1.0);
+        if (sum_w > 0.0) {
+            vec3 avg = sum / sum_w;
+            vec3 avg255 = vec3(floor(linearToSrgb01(avg.r) * 255.0 + 0.5),
+                               floor(linearToSrgb01(avg.g) * 255.0 + 0.5),
+                               floor(linearToSrgb01(avg.b) * 255.0 + 0.5));
+            dst.r = blendChannelLinear(dst.r, avg255.r, mix_alpha);
+            dst.g = blendChannelLinear(dst.g, avg255.g, mix_alpha);
+            dst.b = blendChannelLinear(dst.b, avg255.b, mix_alpha);
+            liftLayerAlpha(dst, max(next_pigment, pigment_presence), max(st.x, f.advected_wet), 1.0, mix_alpha);
+            float thickness_mix_alpha = clamp(mix_alpha * 0.32, 0.0, 1.0);
+            float local_target = clamp(max(st.z, f.advected_thickness * (0.55 + f.color_runoff_alpha * 0.25)), 0.0, 1.0);
+            next_thickness = clamp(next_thickness + (local_target - next_thickness) * thickness_mix_alpha, 0.0, 1.0);
+        }
+        float absorbed = s.absorption * max(st.x, f.advected_wet) * pc.dt * 0.7;
+        next_thickness = max(0.0, next_thickness - absorbed * 0.35);
+        next_wet = max(0.0, max(st.x, f.advected_wet * f.runoff_alpha) - (pc.dt / s.lifetime) - absorbed);
+    }
+
+    // Downstream transport, gathered: find the upstream texel whose CPU target
+    // is this texel. The flow direction is piecewise constant per triangle, so
+    // the search walks back along this texel's own direction, one texel at a
+    // time up to the longest trail the CPU allows (brush_radius_px * 0.6 + 2).
+    // ★ The step length must NOT come from this texel's own trail estimate: a
+    // dry texel ahead of a stain has a ~0.3 px trail, so a search seeded by it
+    // never leaves the texel and the wet front can never advance.
+    if (f.has_downhill) {
+        ivec2 q = ivec2(px, py);
+        FlowEval fq = f;
+        bool found = false;
+        int max_back = min(int(ceil(s.brush_radius_px * 0.6 + 2.0)), 12);
+        for (int k = 1; k <= max_back && !found; ++k) {
+            ivec2 cand = clamp(ivec2(round(vec2(px, py) - f.dir * float(k))),
+                               ivec2(0), ivec2(int(s.width) - 1, int(s.height) - 1));
+            if (cand == ivec2(px, py)) continue;
+            FlowEval fc = evalFlow(s, cand.x, cand.y, oil);
+            if (transports(fc) && (fc.wet > 0.001 || fc.advected_wet > 0.001) &&
+                transportTarget(s, cand.x, cand.y, fc) == ivec2(px, py)) {
+                q = cand;
+                fq = fc;
+                found = true;
+            }
+        }
+        if (found) {
+            vec4 source_px = unpackColor(color[texelIndex(s, q.x, q.y)]);
+            float transport_alpha = clamp(fq.runoff_alpha * (oil ? 0.24 : 0.55) +
+                                          fq.drip_head_alpha * (oil ? 0.12 : 0.35), 0.0, 1.0);
+            float transported_wet = max(fq.wet * (oil ? (0.18 + transport_alpha * 0.08) : (0.55 + transport_alpha * 0.25)),
+                                        fq.advected_wet * fq.runoff_alpha * (oil ? 0.32 : 1.0));
+            float transported_pigment = clamp(max(
+                fq.pigment * (oil ? (0.58 + transport_alpha * 0.22) : (0.44 + transport_alpha * 0.28)),
+                fq.advected_pigment * (oil ? fq.color_runoff_alpha : (0.24 + fq.color_runoff_alpha * 0.76))), 0.0, 1.0);
+            float pigment_transport_alpha = clamp(oil
+                ? (transport_alpha * (0.24 + transported_pigment * 0.76) + fq.color_runoff_alpha * 0.08) *
+                      clamp((transported_pigment - 0.015) / 0.22, 0.0, 1.0)
+                : transport_alpha * (0.18 + transported_pigment * 0.82), 0.0, 1.0);
+            if (pigment_transport_alpha > 0.001) {
+                dst.r = blendChannelLinear(dst.r, source_px.r, pigment_transport_alpha);
+                dst.g = blendChannelLinear(dst.g, source_px.g, pigment_transport_alpha);
+                dst.b = blendChannelLinear(dst.b, source_px.b, pigment_transport_alpha);
+                liftLayerAlpha(dst, transported_pigment, transported_wet, source_px.a / 255.0, pigment_transport_alpha);
+            }
+            next_wet = max(next_wet, transported_wet * (0.16 + transported_pigment * 0.84));
+            next_pigment = max(next_pigment, transported_pigment * (0.70 + pigment_transport_alpha * 0.20));
+        }
+    }
+
+    color_scratch[ti] = packColor(dst);
+    state_scratch[ti] = vec4(next_wet, next_pigment, next_thickness, 0.0);
+}
+
+void tickTile(uint tile_index) {
+    Tile t = tiles[tile_index];
+    if (t.valid_texels == 0u) return;
+    Surface s = surfaces[t.surface];
+    if (!dilatedActive(t, s)) return;
+    for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
+        int x, y; tileTexel(t, k, x, y);
+        if (!inSurface(s, x, y)) continue;
+        tickTexel(s, x, y);
+    }
+    if (gl_LocalInvocationIndex == 0u) {
+        atomicAdd(stats[t.surface * STATS_STRIDE + ST_TICKED_TILES], 1u);
+    }
+}
+
+// ── RESOLVE / composite ─────────────────────────────────────────────────────
+
+uint composite(uint base_packed, vec4 paint) {
+    vec4 b = unpackColor(base_packed);
+    float a = clamp(paint.a / 255.0, 0.0, 1.0);
+    vec3 o;
+    for (int c = 0; c < 3; ++c) {
+        float bl = srgbToLinear01(b[c] / 255.0);
+        float pl = srgbToLinear01(paint[c] / 255.0);
+        o[c] = floor(linearToSrgb01(mix(bl, pl, a)) * 255.0 + 0.5);
+    }
+    return packColor(vec4(o, b.a));
+}
+
+void markDirty(Tile t) {
+    uint base = t.surface * STATS_STRIDE;
+    atomicMin(stats[base + ST_DIRTY_MIN_X], t.tx);
+    atomicMin(stats[base + ST_DIRTY_MIN_Y], t.ty);
+    atomicMax(stats[base + ST_DIRTY_MAX_X], t.tx);
+    atomicMax(stats[base + ST_DIRTY_MAX_Y], t.ty);
+}
+
+void resolveTile(uint tile_index) {
+    Tile t = tiles[tile_index];
+    if (t.valid_texels == 0u) return;
+    Surface s = surfaces[t.surface];
+    if (!dilatedActive(t, s)) return;
+    uint lid = gl_LocalInvocationIndex;
+    if (lid == 0u) s_flag = 0u;
+    barrier();
+    bool wet = false;
+    for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
+        int x, y; tileTexel(t, k, x, y);
+        if (!inSurface(s, x, y)) continue;
+        uint ti = texelIndex(s, x, y);
+        vec4 st = state_scratch[ti];
+        uint c = color_scratch[ti];
+        state[ti] = st;
+        color[ti] = c;
+        out_color[ti] = composite(base_color[ti], unpackColor(c));
+        if (st.x > 0.001) wet = true;
+    }
+    if (wet) atomicOr(s_flag, 1u);
+    barrier();
+    if (lid == 0u) {
+        if (s_flag != 0u) tile_flags[2u * tile_index + 1u] = 1u;
+        markDirty(t);
+    }
+}
+
+// ── ROTATE / CONSUME / COVERAGE / RESET ─────────────────────────────────────
+
+void rotateTile(uint tile_index) {
+    if (tile_index >= pc.tile_count) return;
+    uint next = tile_flags[2u * tile_index + 1u];
+    tile_flags[2u * tile_index] = next;
+    tile_flags[2u * tile_index + 1u] = 0u;
+    if (next != 0u) {
+        atomicAdd(stats[tiles[tile_index].surface * STATS_STRIDE + ST_ACTIVE_TILES], 1u);
+    }
+}
+
+void coverageTile(uint tile_index) {
+    Tile t = tiles[tile_index];
+    if (t.valid_texels == 0u) return;
+    Surface s = surfaces[t.surface];
+    uint lid = gl_LocalInvocationIndex;
+    if (lid < 4u) s_sum[lid] = 0u;
+    if (lid == 0u) { s_count = 0u; s_flag = 0u; }
+    barrier();
+    uint covered = 0u, valid = 0u, wet = 0u;
+    uvec3 sum = uvec3(0u);
+    for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
+        int x, y; tileTexel(t, k, x, y);
+        if (!inSurface(s, x, y)) continue;
+        uint ti = texelIndex(s, x, y);
+        if (pos_valid[ti].w < 0.5 || pos_valid[ti].w > 1.5) continue;   // covered texels only
+        ++valid;
+        vec4 c = unpackColor(color[ti]);
+        if (c.a >= 127.5) {
+            ++covered;
+            sum += uvec3(c.rgb + 0.5);
+        }
+        if (state[ti].x > 0.001) ++wet;
+    }
+    atomicAdd(s_count, covered);
+    atomicAdd(s_flag, valid);
+    atomicAdd(s_sum[0], sum.r); atomicAdd(s_sum[1], sum.g); atomicAdd(s_sum[2], sum.b);
+    atomicAdd(s_sum[3], wet);
+    barrier();
+    if (lid == 0u) {
+        uint base = t.surface * STATS_STRIDE;
+        atomicAdd(stats[base + ST_COVERED_TEXELS], s_count);
+        atomicAdd(stats[base + ST_VALID_TEXELS], s_flag);
+        atomicAdd(stats[base + ST_SUM_R], s_sum[0]);
+        atomicAdd(stats[base + ST_SUM_G], s_sum[1]);
+        atomicAdd(stats[base + ST_SUM_B], s_sum[2]);
+        atomicAdd(stats[base + ST_WET_TEXELS], s_sum[3]);
+    }
+}
+
+void resetTile(uint tile_index) {
+    Tile t = tiles[tile_index];
+    Surface s = surfaces[t.surface];
+    for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
+        int x, y; tileTexel(t, k, x, y);
+        if (!inSurface(s, x, y)) continue;
+        uint ti = texelIndex(s, x, y);
+        color[ti] = 0u;
+        state[ti] = vec4(0.0);
+        out_color[ti] = base_color[ti];
+    }
+    if (gl_LocalInvocationIndex == 0u) {
+        tile_flags[2u * tile_index] = 0u;
+        tile_flags[2u * tile_index + 1u] = 0u;
+        markDirty(t);
+    }
+}
+
+void main() {
+    uint wg = gl_WorkGroupID.x;
+    if (pc.mode == MODE_ROTATE) { rotateTile(gl_GlobalInvocationID.x); return; }
+    if (pc.mode == MODE_CONSUME) {
+        if (gl_GlobalInvocationID.x == 0u) { counter[0] = 0u; counter[1] = 0u; }
+        return;
+    }
+    if (wg >= pc.tile_count) return;
+    if (pc.mode == MODE_STAMP) stampTile(wg);
+    else if (pc.mode == MODE_TICK) tickTile(wg);
+    else if (pc.mode == MODE_RESOLVE) resolveTile(wg);
+    else if (pc.mode == MODE_COVERAGE) coverageTile(wg);
+    else if (pc.mode == MODE_RESET) resetTile(wg);
+}

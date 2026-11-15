@@ -63,6 +63,7 @@
 
 // Facade-mesh SoA database (DNA::GeometryDetail) — used by the indexed-BLAS upload path.
 class TriangleMesh;
+class Texture;
 
 #include "Viewport/RasterInstanceUpload.h"
 #include "Viewport/RasterGpuCull.h"
@@ -2268,6 +2269,16 @@ public:
                                uint32_t channels, bool sRGB,
                                int32_t offsetX, int32_t offsetY,
                                uint32_t regionW, uint32_t regionH);
+
+    // Device-to-device copy of an RGBA8 rectangle from a buffer that lives on
+    // `vkDevice` (a simulation compute buffer) into the uploaded base colour
+    // image of `texture` (GPU wet paint, Paint/WetPaintGpu.h). The buffer is a
+    // full page: texel (x, y) at bufferOffset + (y * bufferRowTexels + x) * 4.
+    // Returns 1 copied, 0 not resident here yet (retry later), -1 cannot be
+    // done on this backend (other VkDevice, format) - use the host path.
+    int copyDeviceBufferToTexture(const Texture* texture, void* vkDevice, void* vkBuffer,
+                                  uint64_t bufferOffset, uint32_t bufferRowTexels,
+                                  int32_t x, int32_t y, uint32_t w, uint32_t h);
 
 private:
     // Records mip 1..N regeneration into `cmd` for paint-style partial

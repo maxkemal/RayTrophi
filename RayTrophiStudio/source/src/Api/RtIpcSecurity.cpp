@@ -525,6 +525,11 @@ uint32_t requiredCapabilities(const std::string& method) {
         // below, so it would fall through to the gas. namespace and be
         // graded SceneWrite. It reads last step's timers and mutates nothing.
         method == "gas.step_stats" ||
+        // GPU wet paint measurements: the last tick's counters and the atlas
+        // coverage reduction. Neither writes paint; "wet_status" / "wet_coverage"
+        // match none of the substring heuristics, so without this line they
+        // would fall through to the paint. namespace as SceneWrite.
+        method == "paint.wet_status" || method == "paint.wet_coverage" ||
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||

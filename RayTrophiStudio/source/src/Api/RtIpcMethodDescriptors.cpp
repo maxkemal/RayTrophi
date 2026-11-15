@@ -5445,6 +5445,195 @@ static const MethodDescriptor desc_paint_update_layer = {
 };
 static const MethodRegistration reg_paint_update_layer(desc_paint_update_layer);
 
+static const MethodParam params_paint_wet_add_surface[] = {
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"resolution", "int", false, "", "1024", nullptr, "number", false},
+};
+static const MethodDescriptor desc_paint_wet_add_surface = {
+    "paint.wet_add_surface", "paint",
+    "Make an object's material a GPU wet paint surface (paint atlas page baked from its UVs)",
+    "Ensures the mesh paint target (base colour texture bound to the material, like paint.ensure) and bakes each texel's world position, normal and downhill flow once. Particle contacts and wet_dab splats land by WORLD distance, so seams need no special care. Adding a surface rebuilds the atlas and clears existing wet paint. resolution 32..4096 (default 1024). Paint is session state: it is not saved with the project.",
+    "write", "SceneWrite", false, "any",
+    "paint|wet|add|surface|gpu|atlas|player|game|splat",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_paint_wet_add_surface, 3,
+    true
+};
+static const MethodRegistration reg_paint_wet_add_surface(desc_paint_wet_add_surface);
+
+static const MethodDescriptor desc_paint_wet_clear_surfaces = {
+    "paint.wet_clear_surfaces", "paint",
+    "Drop every GPU wet paint surface and release the device atlas",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "paint|wet|clear|surfaces|gpu|reset",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_paint_wet_clear_surfaces(desc_paint_wet_clear_surfaces);
+
+static const MethodDescriptor desc_paint_wet_coverage = {
+    "paint.wet_coverage", "paint",
+    "Painted fraction of the wet paint surfaces (GPU reduction), per surface and total, with mean colour",
+    "covered = layer alpha >= 0.5 on texels covered by a triangle (the 2-texel UV gutter is excluded). wet_texels = wetness > 0.001. A measurement call: one dispatch plus a small download.",
+    "read", "Read", false, "any",
+    "paint|wet|coverage|measure|game|score",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_paint_wet_coverage(desc_paint_wet_coverage);
+
+static const MethodParam params_paint_wet_dab[] = {
+    {"position", "vec3", true, "", nullptr, nullptr, "vec3", false},
+    {"amount", "float", false, "", "0.8", nullptr, "number", false},
+    {"color", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"facing", "bool", false, "", nullptr, nullptr, "bool", false},
+    {"normal", "vec3", false, "", nullptr, nullptr, "vec3", false},
+    {"radius", "float", false, "", "0.1", nullptr, "number", false},
+};
+static const MethodDescriptor desc_paint_wet_dab = {
+    "paint.wet_dab", "paint",
+    "Drop one wet paint splat at a world position (radius in metres, sRGB colour, strength)",
+    "Queued and stamped on the device at the next tick. With normal given, only texels facing it are painted (default facing=true when normal is present). This is the hand/foot/game-rule entry point and the test probe for the wet model.",
+    "write", "SceneWrite", false, "any",
+    "paint|wet|dab|splat|stamp|game|test",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_paint_wet_dab, 6,
+    true
+};
+static const MethodRegistration reg_paint_wet_dab(desc_paint_wet_dab);
+
+static const MethodParam params_paint_wet_get_settings[] = {
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+};
+static const MethodDescriptor desc_paint_wet_get_settings = {
+    "paint.wet_get_settings", "paint",
+    "Read a wet paint surface's model parameters (the brush wet subset)",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "paint|wet|get|settings",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_paint_wet_get_settings, 2,
+    true
+};
+static const MethodRegistration reg_paint_wet_get_settings(desc_paint_wet_get_settings);
+
+static const MethodDescriptor desc_paint_wet_get_splat = {
+    "paint.wet_get_splat", "paint",
+    "Read how particle contacts become wet paint (radius, amount, source system)",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "paint|wet|get|splat|particle|settings",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_paint_wet_get_splat(desc_paint_wet_get_splat);
+
+static const MethodParam params_paint_wet_remove_surface[] = {
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+};
+static const MethodDescriptor desc_paint_wet_remove_surface = {
+    "paint.wet_remove_surface", "paint",
+    "Stop treating an object's material as a GPU wet paint surface",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "paint|wet|remove|surface|gpu",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_paint_wet_remove_surface, 2,
+    true
+};
+static const MethodRegistration reg_paint_wet_remove_surface(desc_paint_wet_remove_surface);
+
+static const MethodDescriptor desc_paint_wet_reset = {
+    "paint.wet_reset", "paint",
+    "Clear all wet paint back to each surface's original base colour",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "paint|wet|reset|clean|session",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_paint_wet_reset(desc_paint_wet_reset);
+
+static const MethodParam params_paint_wet_set_settings[] = {
+    {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"absorption", "float", false, "", "0.18", nullptr, "number", false},
+    {"brush_radius", "float", false, "", "5.0", nullptr, "number", false},
+    {"deposit_rate", "float", false, "", "0.65", nullptr, "number", false},
+    {"diffusion", "float", false, "", "0.24", nullptr, "number", false},
+    {"drip_head", "float", false, "", "0.45", nullptr, "number", false},
+    {"falloff", "float", false, "", "0.65", nullptr, "number", false},
+    {"lifetime_seconds", "float", false, "", "2.5", nullptr, "number", false},
+    {"material_id", "int", false, "", "-1", nullptr, "number", false},
+    {"oil", "bool", false, "", "false", nullptr, "bool", false},
+    {"paint_load", "float", false, "", "0.85", nullptr, "number", false},
+    {"pickup_rate", "float", false, "", "0.35", nullptr, "number", false},
+    {"runoff", "float", false, "", "0.35", nullptr, "number", false},
+    {"wetness", "float", false, "", "0.65", nullptr, "number", false},
+};
+static const MethodDescriptor desc_paint_wet_set_settings = {
+    "paint.wet_set_settings", "paint",
+    "Set a wet paint surface's model parameters: wetness, lifetime, diffusion, runoff, absorption, drip head, oil",
+    "Same names, ranges and meaning as the mesh paint brush wet fields; the device applies tickWetPaint's derived terms (oil factors, lifetime runoff factor). brush_radius (pixels at 1024) only scales the downhill transport trail. Every key optional.",
+    "write", "SceneWrite", false, "any",
+    "paint|wet|set|settings|runoff|drip|diffusion|dry",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_paint_wet_set_settings, 14,
+    true
+};
+static const MethodRegistration reg_paint_wet_set_settings(desc_paint_wet_set_settings);
+
+static const MethodParam params_paint_wet_set_splat[] = {
+    {"amount", "float", false, "", "0.8", nullptr, "number", false},
+    {"consume_particles", "bool", false, "", "true", nullptr, "bool", false},
+    {"facing_min", "float", false, "", "0.0", nullptr, "number", false},
+    {"max_events_per_tick", "int", false, "", "4096", nullptr, "number", false},
+    {"min_speed", "float", false, "", "0.0", nullptr, "number", false},
+    {"particle_system", "string", false, "", "", nullptr, "string", false},
+    {"radius", "float", false, "", "0.12", nullptr, "number", false},
+};
+static const MethodDescriptor desc_paint_wet_set_splat = {
+    "paint.wet_set_splat", "paint",
+    "Set how particle contacts become wet paint: world radius, amount, minimum speed, facing, source system",
+    "A particle system must record collision events (particle.set_collision record_events=true). Device-resident systems on the simulation compute context are stamped straight from their event buffer, which is then consumed (counter reset) - no download. Colour = the particle's appearance LUT at its age. particle_system empty = every recording system. At most 64 sources reach one 32x32 tile per tick; the rest count as sources_dropped.",
+    "write", "SceneWrite", false, "any",
+    "paint|wet|set|splat|particle|collision|events|settings",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_paint_wet_set_splat, 7,
+    true
+};
+static const MethodRegistration reg_paint_wet_set_splat(desc_paint_wet_set_splat);
+
+static const MethodDescriptor desc_paint_wet_status = {
+    "paint.wet_status", "paint",
+    "GPU wet paint counters: surfaces, last tick's active/ticked tiles and stamped texels, publish path",
+    "status idle = nothing wet and nothing arriving (no dispatch, no readback). publish_mode device_copy = the composite went device-to-device into the material texture; host_download = the render backend is on another VkDevice and every dirty rectangle came through the host (publish_bytes_downloaded counts it). device_event_dispatches counts stamps read straight from particle device buffers; host_events_applied counts CPU-reference contacts sent as dabs.",
+    "read", "Read", false, "any",
+    "paint|wet|status|gpu|measure|cost|tiles",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    nullptr, 0,
+    true
+};
+static const MethodRegistration reg_paint_wet_status(desc_paint_wet_status);
+
 static const MethodParam params_particle_add_appearance[] = {
     {"blend", "string", false, "", nullptr, nullptr, "string", false},
     {"color_ramp", "any", false, "", nullptr, nullptr, nullptr, false},
