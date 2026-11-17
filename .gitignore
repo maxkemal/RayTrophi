@@ -156,3 +156,10 @@ docs/dev/grain_suite/
 /docs/dev/matter_acceptance_20261011T184823Z.json
 /docs/dev/matter_acceptance_20261011T193836Z.json
 /docs/dev/matter_acceptance_20261011T194549Z.json
+
+# Third-party / unclear-licence sounds used by the balloon paint room stay local
+# (only the CC0 packs under assets/audio/cc0_* are published).
+/RayTrophiStudio/assets/audio/sfxmint-*.wav
+/RayTrophiStudio/assets/audio/surprise-sound-effect*.wav
+/RayTrophiStudio/assets/audio/tada-fanfare*.wav
+/RayTrophiStudio/assets/scenes/*/*_audio/
