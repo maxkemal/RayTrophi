@@ -1,12 +1,112 @@
 {
+  "anim.set_external_pose": {
+    "summary": "Bind an existing rig to one tracked body using shared IK, limits and flat skinning",
+    "notes": "Transient binding, at most ten rigs. character must have hierarchy and authored IK controls; person_id is a nonnegative int32 from input.set_body_poses. config anchor_bone required, anchor_joint defaults pelvis, controls maps IK control names to {joint,pole?} canonical body joint names (1..16 controls); min_confidence 0.1..1 default 0.5, blend 0..1 default 1, teleport_metres 0.1..10 default 1 resets existing proxy motion history on larger anchor jumps. No Jolt world or second proxy system. Existing authored physics.collider.proxy_set consumers read the solved rig pose. Body loss restores visible bind pose and makes that rig's domain proxies unresolved; low-confidence controls mask their descendant bones. Rig revision change requires rebind. No image input; no automatic bone naming or body yaw retarget.",
+    "params": {
+      "character": {
+        "type": "string",
+        "required": true
+      },
+      "person_id": {
+        "type": "int",
+        "required": true
+      },
+      "config": {
+        "type": "object",
+        "required": true
+      }
+    },
+    "related": "anim.external_poses|anim.clear_external_pose|input.set_body_poses|physics.collider.proxy_set.sample"
+  },
+  "anim.external_poses": {
+    "summary": "Read transient body-to-rig mappings, readiness, CPU timings and existing proxy counts",
+    "notes": "Read-only telemetry. solve_ms/skin_ms are CPU host costs, not GPU or end-to-end latency. Existing domain stamped-cell counters remain physics.collider.proxy_set.solver_stamps. No GPU readback added by this status call.",
+    "access": "read"
+  },
+  "anim.clear_external_pose": {
+    "summary": "Release one body-to-rig binding and restore canonical bind-pose geometry",
+    "notes": "Requires character. Existing authored proxy sets are preserved and resume ordinary rig sampling; disable/delete them explicitly when unwanted. Bindings do not persist across new/open project.",
+    "params": {
+      "character": {
+        "type": "string",
+        "required": true
+      }
+    }
+  },
+  "input.set_body_poses": {
+    "summary": "Submit up to ten room-space body poses to the shared transient input runtime",
+    "notes": "World metres, Y up. Strictly increasing sender seconds t; clear before restarting sender clock. Each person has unique int32 id >=0, confidence 0..1, and all 15 canonical joints with [x,y,z,confidence]. Coordinates finite within +/-10000 m. Omitted identities expire by receiver steady time after 0.5 s; retained total <=10. Gestures post to the shared game queue. Never records images.",
+    "params": {
+      "t": {
+        "type": "float",
+        "required": true
+      },
+      "persons": {
+        "type": "array",
+        "required": true
+      }
+    },
+    "related": "input.body_poses|input.clear_body_poses|game.session"
+  },
+  "input.body_poses": {
+    "summary": "Read active body joints, derived analytic proxies and input counters",
+    "notes": "Read expires identities older than 0.5 seconds. Proxies are joint spheres; contact sampling is configured by game.session contact_targets. Not a rig pose or a Jolt body.",
+    "access": "read"
+  },
+  "input.clear_body_poses": {
+    "summary": "Clear transient people and restart the sender timestamp epoch",
+    "notes": "Counters remain cumulative. Does not clear the game event queue. No scene geometry is modified."
+  },
+  "game.session": {
+    "summary": "Configure, start, stop, reset or read the shared paint-room session",
+    "notes": "operation status/configure/start/stop/reset. Configure config: duration_seconds 0.25..3600 (180), finale_seconds (8), reset_seconds (3), coverage_goal 0.001..1 (0.65), auto_start boolean (false), rules array <=128, zones array <=32, contact_targets flat mesh names <=64. Rules id/event/action, optional state/target/min_value/cooldown_seconds/min_persons/group_window_seconds. Actions paint.dab, paint.reset, balloon.burst, audio.play. States attract/playing/finale/resetting. Stop/reset enter resetting and clear paint on the next live tick. Shared main-thread live scene clock, dt capped at 0.25 s; transient configuration not project-persisted. The command endpoint requires SceneWrite even for status. Action room.reset (2026-11-16) = paint cleared AND popped balloons respawned (paint.wet_demo reset); the session's resetting state now emits room.reset instead of paint.reset. paint.reset still clears paint only.",
+    "params": {
+      "operation": {
+        "type": "string",
+        "required": false,
+        "default": "status"
+      },
+      "config": {
+        "type": "object",
+        "required": false,
+        "default": {}
+      }
+    },
+    "related": "game.rules|game.post_event|input.set_body_poses|paint.wet_coverage"
+  },
+  "game.rules": {
+    "summary": "Read normalized shared session rules and per-rule fire counters",
+    "access": "read"
+  },
+  "game.post_event": {
+    "summary": "Post a validated named game event to the shared bounded queue",
+    "notes": "event object requires canonical type; optional target <=128 bytes, person int32 >=-1, finite value within +/-1e9, position/normal finite vec3 within +/-10000. Time is assigned by the local runtime. Queue overflow is counted in session status.",
+    "params": {
+      "event": {
+        "type": "object",
+        "required": true
+      }
+    }
+  },
   "fluid.visual_samples": {
     "summary": "Read field-sample settings, publication status and an optional bounded sample page",
     "access": "read",
     "tags": "splat|density|samples|mesh|render",
     "params": {
-      "domain": {"type": "string", "required": true},
-      "offset": {"type": "integer", "required": false, "default": 0},
-      "limit": {"type": "integer", "required": false, "default": 0}
+      "domain": {
+        "type": "string",
+        "required": true
+      },
+      "offset": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      },
+      "limit": {
+        "type": "integer",
+        "required": false,
+        "default": 0
+      }
     },
     "notes": "limit 0 means metadata only; maximum 256. cpu_soa_reconstruction is an explicit host route, separate per source/substance/mechanics stream. It is not the projected solver MAC field. current=false distinguishes publication failure from a valid empty sample population. Physics, Fog and SurfaceSDF continue to use canonical physical state.",
     "related": "fluid.set_visual_samples|fluid.reset_visual_samples|fluid.state_digest"
@@ -14,15 +114,26 @@
   "fluid.set_visual_samples": {
     "summary": "Author persistent field-sample refinement without changing physical particle capacity",
     "params": {
-      "domain": {"type": "string", "required": true},
-      "settings": {"type": "object", "required": true}
+      "domain": {
+        "type": "string",
+        "required": true
+      },
+      "settings": {
+        "type": "object",
+        "required": true
+      }
     },
     "notes": "Atomic patch: enabled, target_volume (m3), max_samples (1..4000000), seed, cfl (0..1 exclusive zero), max_substeps, reseed_hysteresis (0..0.5), working_budget_mb (16..16384). CPU staging reserves 768 bytes per maximum sample plus physical render staging. Open/closed domains supported; periodic and spatial wet appearance explicitly rejected. DEM grains, frozen parcels and spray remain physical. Uses existing splat geometry/source selections. Undoable, saved in project; visual checkpoints persist in cache v21. Old caches require reset/rebake when enabled. GPU sample transport is not implemented.",
     "related": "fluid.visual_samples|fluid.set_splat_geometry"
   },
   "fluid.reset_visual_samples": {
     "summary": "Explicitly reseed the current visual population without resetting physics",
-    "params": {"domain": {"type": "string", "required": true}},
+    "params": {
+      "domain": {
+        "type": "string",
+        "required": true
+      }
+    },
     "notes": "Undoable appearance reset. Rebuilds samples from the current physical snapshot; cannot recover missing sample history in pre-v21 caches.",
     "related": "fluid.visual_samples|fluid.set_visual_samples"
   },
@@ -44,7 +155,6 @@
     "related": "fluid.grain_settings|fluid.matter_models",
     "notes": "IPC accepts domain and request object; Python fluid.dem_bodies(domain, **request). action=inspect|snapshot|bind|remove. bind selects particle_ids (positive uint64 JSON integers) or all_current_grains=true; future births stay loose. material requires young_pa, poisson, tensile_strength_pa, shear_strength_pa. reach_ratio [1,2] default 1.25; section_ratio (0,1] default .5. No automatic fracture stiffness softening. remove requires body uint64. Mutations require pause and invalidate future cache frames. Runtime graph persists in simulation caches; project configuration alone does not replay a body edit. Wet capillary bridges remain separate. Material calibration and user build/live acceptance are required. Persistent initial bodies use seed source settings.bond_body instead of runtime bind; that recipe is saved with the project and included in its simulation hash."
   },
-
   "rig.get_bone_envelope": {
     "summary": "Read the resolved tapered envelope profile for one bone segment",
     "returns": "Bone profile, override flag and rig revision",
@@ -1382,12 +1492,12 @@
   },
   "player.display": {
     "summary": "Report the Player's display surface and a one-second frame timing window",
-    "notes": "Player only (Studio returns an error). frame: fps, frame_ms_avg/max, loop_hz, renders_per_s and per-stage averages (advance = simulation/runtime, render = GPU frame incl. readback into the CPU surface, upload = SDL texture upload, present = HUD + present). render is the actual render resolution (output x render_scale).",
+    "notes": "Player only (Studio returns an error). frame: fps, frame_ms_avg/max, loop_hz, renders_per_s and per-stage averages (advance = simulation/runtime, render = GPU frame incl. readback into the CPU surface, upload = SDL texture upload, present = HUD + present). render is the actual render resolution (fixed render_base x render_scale). Window resize/fullscreen only scale presentation; render_base is captured from the initial render surface.",
     "tags": "fps|frame|timing|display|window|fullscreen|resolution|debug|player"
   },
   "player.set_display": {
     "summary": "Change the Player's window mode, render resolution scale, frame pacing or HUD",
-    "notes": "Player only. All keys optional and validated before any is applied: fullscreen (borderless desktop), width/height (windowed only, >= 320x240), render_scale 0.25..1, pacing_hz 0 = uncapped or 10..1000, continuous (render every iteration for measurement), hud. Returns the new display status.",
+    "notes": "Player only. All keys optional and validated before any is applied: fullscreen (borderless desktop), width/height (windowed only, >= 320x240; presentation size only), render_scale 0.25..1 of the fixed initial render_base (same operation as F2), pacing_hz 0 = uncapped or 10..1000, continuous (render every iteration for measurement), hud. Returns the new display status.",
     "tags": "fullscreen|resolution|scale|pacing|vsync|fps|hud|display|player"
   },
   "scene.import_vdb": {
@@ -3346,7 +3456,8 @@
     }
   },
   "anim.play": {
-    "summary": "Play an animation clip on a character layer with a blend time",
+    "summary": "Play a clip through the character controller with a blend time",
+    "notes": "Shared Studio/Python/IPC service. Base-layer play selects animated pose view, hands graph-driven characters to their existing controller and resumes it. Authored/runtime graph topology is retained; reopen the authored project to restore its saved graph selection. Graph handover seeds the first reported graph clip phase; this is not a blend from an arbitrary composite graph pose. Non-base graph handover is rejected. Invalid clip/layer/blend, active external tracking, Rig Edit/Pose or final render reject before playback changes. Blend must be finite and nonnegative. Controller-only time/speed/stop calls on graph playback return animation_graph_requires_base_layer_play_first. Speed must be finite and nonnegative; time finite and nonnegative. anim.status reports controller state; use anim.graph_status while uses_graph=true. Player supports playback of prepared project clips; FBX import/binding remain Studio authoring operations.",
     "tags": "animation|play|clip"
   },
   "anim.stop": {
@@ -7774,6 +7885,24 @@
     "related": "fluid.create_domain|fluid.list_domains|scene.set_transform",
     "tags": "matter|domain|create|placement|flat"
   },
+  "paint.wet_demo": {
+    "summary": "Prepare and run the seeded balloon paint room, or read every-frame burst cost windows",
+    "notes": "Shared core for Python rt.paint.wet_demo and IPC. operation configure takes config surfaces (four flat mesh names), resolution 32..2048, seed 0..2147483647, balloons 3..24, particles_per_balloon 32..8192 (product <=131072), interval_min/max seconds (2 <= min <= max <=30), autostart boolean. Prepares CPU/GPU atlas once before any event, reserves pools and warms collisions. Requires the four BalloonPaintRed/Blue/Yellow/Green fixture systems with four analytic colliders and no domains. status reads CPU counters without GPU wait; start/stop control automatic scheduling; burst config count integer 1..3 triggers a one-shot group of random balloons. pop bursts ONE chosen balloon: config is exactly one of balloon (id from status) or screen ([x, y] in 0..1 of the window, origin top-left; the nearest inflated balloon within 0.4 m of the camera ray through that point). The result adds popped = that balloon id, or -1 when nothing was under the point or the balloon is not inflated (not an error, no event). The Player left mouse click calls this same operation with the cursor position (the debug camera, F5, takes the left button instead). A popped balloon comes back at a new position 3.5 game seconds later, with or without autostart. stop leaves droplets and wet paint settling. Events contain following-three-game-second maxima recorded every simulation clock tick; simulation_ms excludes texture publication/render/present, frame_interval_ms is the supplied clock dt, not a GPU timer. Windows may overlap. configure without surfaces (and without resolution) paints the scene's existing wet paint surfaces with their own settings and splat rules - the form the project's game design (paint.wet_design) saves; configure with surfaces builds those surfaces itself with the room look and replaces all wet surfaces. A project saves the prepared demo under game_design; a .balloons.json sidecar is only the fallback when the project has none. Paint itself is never serialized. preparation failure stops partial configuration. All operations require SceneWrite at the command endpoint. set_collider (2026-11-16, works before configure): config {object, mode none|aabb|obb|mesh_sdf, sdf_resolution_mode 0|1|2 = 32/64/128} writes the SAME existing simulation collider (ParticleColliderDesc, source_name = object, so it follows the object) into all four droplet systems as '<object> PaintCollider'; none removes it. It is saved with the particle systems, not in the game design. mesh_sdf cooks asynchronously per system; configure refuses while any enabled collider of the droplet systems is still cooking (GPU-required pools), and a project load waits for the cook before preparing the demo (paint.wet_design status 'waiting for collider SDF: <name>'). Every result carries colliders: [{name, object, mode, enabled, sdf_resolution_mode, ready, in_all_systems, managed}] - every collider of the droplet systems, hand-made ones included. config pop_sound = an audio source id: each popped balloon plays its asset once at the balloon position through audio.play_at (independent voices, so simultaneous pops do not cut each other, slight random pitch 0.92..1.08); status reports pop_sounds_played / pop_sounds_dropped / pop_sound_error, and a missing or dropped sound never fails a pop. reset (2026-11-16): clean room - wet paint cleared, every popped balloon respawned, pools kept (no re-warm); drops still in flight land within their 2.8 s lifetime, so the paint is cleared once more 3 s later. Without a prepared demo it only clears the paint. The Player F9 attendant key and the game session's end (action room.reset) use the same reset. config size_min/size_max (0.3..2.0, default 1/1): every respawn picks a size; the balloon mesh is its geometry times size (the mesh transform's own scale is dropped, rotation kept, so sizes never compound across save/load), the pick radius scales with it, drops = particles_per_balloon * size^2 (min 32; the budget is balloons * particles_per_balloon * size_max^2 <= 131072), spawn spread scales with size and the pop sound pitch is size^-0.7 (times the 0.92..1.08 spread). Per-drop splat radius stays the global paint.wet_set_splat radius. idle_reset_seconds (0 = off, else 10..3600): reset after that long without a PLAYER pop (pop / burst operations) once something was popped; attract-mode pops paint but do not count as activity. Status adds per-balloon size, per-event drops/size, resets, dirty, idle_seconds. config colors (2026-11-17): 2..8 LINEAR [r,g,b] 0..1 (as material base_color); default 8 vivid colours (red, orange, yellow, lime, turquoise, blue, purple, hot pink) with secondary channels near 0 (linear 0.08 is 31 % on screen). Colour c drops come from droplet system kSystems[c % 4] (a system carries several profiles, named 'Paint Drops #RRGGBB' so a changed palette never reuses an old profile); the paint colour is the drop profile's colour. Status adds palette; balloon color is an index into it. Surprise balloons (2026-11-17): config surprise_chance 0..0.5 (default 0.1) - each respawn rolls; a surprise mesh balloon is gold metal (base_color [1,0.62,0.08] linear, metallic 1; every respawn sets metallic back to 0 for a normal one), a particle balloon uses the 'Balloon Surprise Gold' profile. Its pop throws 1.5x drops, each in a random palette colour (rainbow paint; a drop goes to the droplet system that holds its colour's profile), spawns 220 confetti cards in the BalloonConfetti CPU system (quads, light gravity, strong drag, NO collision events and no colliders, so confetti never paints) and plays surprise_sound (an audio source id) or, without one, pop_sound 1.25x higher. Status adds per-balloon surprise, per-event surprise, surprise_pops. Shared room goal (2026-11-17): config room_goal (0 = off, else 0.05..1, default 0.5) = the fraction of paintable texels that counts as a full room; coverage is measured twice a second (paint.wet_coverage's reduction) and room_progress = ratio / room_goal. At 25/50/75 % a show of 1/2/3 confetti bursts in the air, at 100 % confetti rain over the room, four bursts and every inflated balloon popping in a cascade (0.18 s apart); celebrate_sound (audio source id, optional) plays at the room centre, pitch rising per level. finale_reset_seconds (0 = never, else 3..120, default 10) then resets the room (paint, balloons, progress). No flashes. Each show is an event {type: milestone, level, room_progress}. Status adds room_progress, milestones (0..4), shows, finale_cascade_left. Floating (2026-11-17): float_amplitude (0..0.5 m, default 0.08) bob and drift_speed (0..1 m/s, default 0.12; divided by sqrt(size)) wander steering off the spawn volume's walls and other balloons; mesh balloons only, transforms pushed at 30 Hz (translation + size scale, never the material); status motion_ms_max / motion_pushes. Spawn volume: spawn_min/spawn_max [x,y,z] (together, >= 0.2 m per axis) or, without them, automatic from the union of the wet paint surfaces' bounds - 0.9 m in from the walls, 0.8 m above the floor, 1.0 m under the ceiling (fallback: the old fixed 8 m room box). Status spawn_min/spawn_max/spawn_auto.",
+    "params": {
+      "operation": {
+        "type": "string",
+        "required": false,
+        "default": "status"
+      },
+      "config": {
+        "type": "object",
+        "required": false,
+        "default": {}
+      }
+    },
+    "tags": "paint|wet|balloon|burst|player|game|startup|atlas|performance",
+    "related": "paint.wet_status|paint.wet_coverage|player.display|project.open"
+  },
   "paint.wet_add_surface": {
     "summary": "Make an object's material a GPU wet paint surface (paint atlas page baked from its UVs)",
     "notes": "Ensures the mesh paint target (base colour texture bound to the material, like paint.ensure) and bakes each texel's world position, normal and downhill flow once. Particle contacts and wet_dab splats land by WORLD distance, so seams need no special care. Adding a surface rebuilds the atlas and clears existing wet paint. resolution 32..4096 (default 1024). Paint is session state: it is not saved with the project.",
@@ -7781,7 +7910,8 @@
   },
   "paint.wet_remove_surface": {
     "summary": "Stop treating an object's material as a GPU wet paint surface",
-    "tags": "paint|wet|gpu|surface"
+    "tags": "paint|wet|gpu|surface",
+    "notes": "The object's material gets its original textures back: the base colour (and any roughness/height/normal channel) paint textures that paint.wet_add_surface bound are released, so the object's own base_color shows again and the paint on it is gone. Before 2026-11-16 they stayed bound, and an object that had been a surface once (a balloon mesh picked by mistake) rendered with its white paint texture while material.get reported the colour set on it."
   },
   "paint.wet_clear_surfaces": {
     "summary": "Drop every GPU wet paint surface and release the device atlas",
@@ -7789,7 +7919,7 @@
   },
   "paint.wet_status": {
     "summary": "GPU wet paint counters: surfaces, last tick's active/ticked tiles and stamped texels, publish path",
-    "notes": "status idle = nothing wet and nothing arriving (no dispatch, no readback). publish_mode device_copy = the composite went device-to-device into the material texture; host_download = the render backend is on another VkDevice and every dirty rectangle came through the host (publish_bytes_downloaded counts it). device_event_dispatches counts stamps read straight from particle device buffers; host_events_applied counts CPU-reference contacts sent as dabs.",
+    "notes": "status idle = nothing wet and nothing arriving (no dispatch, no readback). publish_mode device_copy = the composite went device-to-device into the material texture; host_download = the render backend is on another VkDevice and every dirty rectangle came through the host (publish_bytes_downloaded counts it). device_event_dispatches counts stamps read straight from particle device buffers; host_events_applied counts CPU-reference contacts sent as dabs. pbr_dispatches counts roughness/height/normal resolve passes (0 while every surface is colour-only), pbr_device_copies the channel rectangles copied device-to-device (colour copies stay in publish_device_copies), pbr_buffer_bytes the extra atlas storage and pbr_texture_bytes the bound channel texture pixels. geometry_rebakes (2026-11-17): surfaces re-baked because their object was moved, scaled or edited. Texel world positions are baked from the flat mesh geometry (which carries its transform); a geometry fingerprint (vertex count, position sum, bounds) is compared twice a second and a changed surface is re-baked and the atlas rebuilt (wet state of the atlas restarts). Before this, a raised/scaled object kept painting where it used to be - silently. status 'rebake_failed: <object>: <reason>' when a re-bake finds no UV-covered texel.",
     "tags": "paint|wet|gpu|status|measure|cost|tiles"
   },
   "paint.wet_get_settings": {
@@ -7798,7 +7928,7 @@
   },
   "paint.wet_set_settings": {
     "summary": "Set a wet paint surface's model parameters: wetness, lifetime, diffusion, runoff, absorption, drip head, oil",
-    "notes": "Same names, ranges and meaning as the mesh paint brush wet fields; the device applies tickWetPaint's derived terms (oil factors, lifetime runoff factor). brush_radius (pixels at 1024) only scales the downhill transport trail. Every key optional.",
+    "notes": "Same names, ranges and meaning as the mesh paint brush wet fields; the device applies tickWetPaint's derived terms (oil factors, lifetime runoff factor). brush_radius (pixels at 1024) only scales the downhill transport trail. Every key optional. Defaults differ from the brush in one place: lifetime_seconds is 12 (brush 2.5) so runoff is visible. Optional PBR outputs (off by default, colour-only costs nothing extra): roughness_channel moves the material roughness toward wet_roughness while wet and dry_roughness once dry, only in the BODY of the paint: the blend weight is smoothstep(0.25, 0.85, coverage), so the thin rim of a splat keeps the original roughness and the glossy area is not wider than the visible colour. height_normal_channel raises the paint thickness into the existing Paint height mask (height_contribution 0..1) and derives the normal from it with the mesh paint height->normal rule (normal_strength 0..8, default 0.5; the raised height uses the same body mask as roughness), combined with the original normal map. Turning either on binds generated Roughness / Mask / Normal paint textures to the material and bakes the scalar roughness factor and normal strength into them, so the unpainted look is unchanged; turning it on over existing paint seeds the height from that paint. The textures stay bound after the channel is turned off or the surface removed.",
     "tags": "paint|wet|settings|runoff|drip|diffusion|dry"
   },
   "paint.wet_get_splat": {
@@ -7821,7 +7951,24 @@
   },
   "paint.wet_coverage": {
     "summary": "Painted fraction of the wet paint surfaces (GPU reduction), per surface and total, with mean colour",
-    "notes": "covered = layer alpha >= 0.5 on texels covered by a triangle (the 2-texel UV gutter is excluded). wet_texels = wetness > 0.001. A measurement call: one dispatch plus a small download.",
+    "notes": "covered = layer alpha >= 0.5 on texels covered by a triangle (the 2-texel UV gutter is excluded). wet_texels = wetness > 0.001. A measurement call: one dispatch plus a small download. roughness_texels / normal_texels = texels whose published roughness / normal differs from the original channel by more than one 8-bit step; both are 0 on a colour-only surface and after paint.wet_reset.",
     "tags": "paint|wet|coverage|measure|game|score"
+  },
+  "anim.delete_character": {
+    "summary": "Delete a complete character and its flat mesh parts as one undoable operation",
+    "notes": "Removes the exact character context, owned bone names without renumbering surviving slots, character animation data, unshared graph asset and targeted kinematic proxy sets. Other characters and source FBX files remain intact. Active external pose bindings must be cleared explicitly first. Character deletion differs from scene.delete, which removes only a mesh node. Undo restores the character and mesh parts, including after save-time compaction.",
+    "params": {
+      "character": {
+        "type": "string",
+        "required": true
+      }
+    },
+    "related": "anim.characters|scene.delete|undo|redo"
+  },
+  "paint.wet_design": {
+    "summary": "The project's game design: wet paint surfaces + settings, splat rules and balloon demo exactly as the next save writes them",
+    "notes": "Read-only. design is the document saved under the project key game_design (null when the scene has no wet paint surface and no prepared demo): wet_paint.surfaces [{object, material_id, resolution, settings}], wet_paint.splat, balloon_demo (the demo config without surfaces/resolution; on load the demo paints the surfaces restored from wet_paint). There is no second copy: it is read from the live atlas and demo, so paint.wet_add_surface / wet_set_settings / wet_set_splat / wet_demo configure and the Studio Game Design panel all change it. pending = a just-opened project's document is queued and the shared simulation clock applies it on its next tick (Studio and Player); status = the last apply report ('applied: N paint surface(s)' or the objects that could not be restored, e.g. renamed). The project's game_design wins over a .balloons.json sidecar; the sidecar is only read by the Player when the project has none. Paint itself is session state and is never saved.",
+    "tags": "paint|wet|game|design|project|save|load",
+    "related": "paint.wet_demo|paint.wet_status|project.save|project.open"
   }
 }

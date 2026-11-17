@@ -73,7 +73,7 @@ json settingsJson(const rtapi::WetPaintSurfaceSettingsInfo& s) {
                 {"falloff", s.falloff}, {"paint_load", s.paint_load},
                 {"deposit_rate", s.deposit_rate}, {"pickup_rate", s.pickup_rate},
                 {"brush_radius", s.brush_radius},
-                {"oil", s.oil}};
+                {"oil", s.oil}, {"roughness_channel", s.roughness_channel}, {"height_normal_channel", s.height_normal_channel}, {"wet_roughness", s.wet_roughness}, {"dry_roughness", s.dry_roughness}, {"height_contribution", s.height_contribution}, {"normal_strength", s.normal_strength}};
 }
 
 json surfaceJson(const rtapi::WetPaintSurfaceRuntimeInfo& s) {
@@ -97,6 +97,26 @@ json splatJson(const rtapi::WetPaintSplatInfo& s) {
 
 bool dispatchPaintWetIpc(const std::string& method, const json& params,
                          const RtIpcPaintWetEnqueue& enqueue, json& out_result) {
+    if (method == "paint.wet_demo") {
+        const std::string operation = optionalString(params, "operation", "status");
+        const json config = params.value("config", json::object());
+        out_result = enqueue([=](UIContext&) {
+            std::string output;
+            const auto result = rtapi::wetPaintDemoCommand(operation, config.dump(), output);
+            return result.ok ? json::parse(output) : json{{"__error", result.error}};
+        });
+        return true;
+    }
+    if (method == "paint.wet_design") {
+        out_result = enqueue([](UIContext&) {
+            rtapi::GameDesignInfo info;
+            const rtapi::Result r = rtapi::getGameDesign(info);
+            if (!r.ok) return json{{"__error", r.error}};
+            return json{{"design", json::parse(info.design_json)}, {"pending", info.pending},
+                        {"status", info.status}};
+        });
+        return true;
+    }
     if (method == "paint.wet_add_surface") {
         const std::string object = requireString(params, "object");
         const int material_id = optionalInt(params, "material_id", -1);
@@ -137,8 +157,13 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
                         {"stamped_texels", s.stamped_texels},
                         {"sources_dropped", s.sources_dropped},
                         {"publish_device_copies", s.publish_device_copies},
+                        {"pbr_dispatches", s.pbr_dispatches},
+                        {"pbr_device_copies", s.pbr_device_copies},
+                        {"pbr_buffer_bytes", s.pbr_buffer_bytes},
+                        {"pbr_texture_bytes", s.pbr_texture_bytes},
                         {"publish_host_downloads", s.publish_host_downloads},
                         {"publish_bytes_downloaded", s.publish_bytes_downloaded},
+                        {"geometry_rebakes", s.geometry_rebakes},
                         {"publish_mode", s.publish_mode}, {"last_tick_ms", s.last_tick_ms},
                         {"compute_context", s.compute_context},
                         {"splat", splatJson(s.splat)}, {"surfaces", surfaces}};
@@ -162,7 +187,7 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
         const bool has_wetness = params.contains("wetness");
         const float wetness = optionalFloat(params, "wetness", 0.65f);
         const bool has_lifetime = params.contains("lifetime_seconds");
-        const float lifetime = optionalFloat(params, "lifetime_seconds", 2.5f);
+        const float lifetime = optionalFloat(params, "lifetime_seconds", 12.0f);
         const bool has_diffusion = params.contains("diffusion");
         const float diffusion = optionalFloat(params, "diffusion", 0.24f);
         const bool has_runoff = params.contains("runoff");
@@ -183,6 +208,18 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
         const float radius = optionalFloat(params, "brush_radius", 5.0f);
         const bool has_oil = params.contains("oil");
         const bool oil = optionalBool(params, "oil", false);
+        const bool has_roughness_channel = params.contains("roughness_channel");
+        const bool roughness_channel = optionalBool(params, "roughness_channel", false);
+        const bool has_height_normal_channel = params.contains("height_normal_channel");
+        const bool height_normal_channel = optionalBool(params, "height_normal_channel", false);
+        const bool has_wet_roughness = params.contains("wet_roughness");
+        const float wet_roughness = optionalFloat(params, "wet_roughness", 0.12f);
+        const bool has_dry_roughness = params.contains("dry_roughness");
+        const float dry_roughness = optionalFloat(params, "dry_roughness", 0.30f);
+        const bool has_height_contribution = params.contains("height_contribution");
+        const float height_contribution = optionalFloat(params, "height_contribution", 0.35f);
+        const bool has_normal_strength = params.contains("normal_strength");
+        const float normal_strength = optionalFloat(params, "normal_strength", 0.5f);
         out_result = enqueue([=](UIContext&) {
             rtapi::WetPaintSurfaceSettingsInfo s;
             const rtapi::Result read = rtapi::getWetPaintSurfaceSettings(object, material_id, s);
@@ -199,6 +236,12 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
             if (has_pickup) s.pickup_rate = pickup;
             if (has_radius) s.brush_radius = radius;
             if (has_oil) s.oil = oil;
+            if (has_roughness_channel) s.roughness_channel = roughness_channel;
+            if (has_height_normal_channel) s.height_normal_channel = height_normal_channel;
+            if (has_wet_roughness) s.wet_roughness = wet_roughness;
+            if (has_dry_roughness) s.dry_roughness = dry_roughness;
+            if (has_height_contribution) s.height_contribution = height_contribution;
+            if (has_normal_strength) s.normal_strength = normal_strength;
             return resultToJson(rtapi::setWetPaintSurfaceSettings(object, material_id, s));
         });
         return true;
@@ -278,7 +321,8 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
                 surfaces.push_back({{"object", s.object}, {"material_id", s.material_id},
                                     {"covered_texels", s.covered_texels},
                                     {"valid_texels", s.valid_texels},
-                                    {"wet_texels", s.wet_texels}, {"ratio", s.ratio},
+                                    {"wet_texels", s.wet_texels}, {"roughness_texels", s.roughness_texels},
+                                         {"normal_texels", s.normal_texels}, {"ratio", s.ratio},
                                     {"mean_color", {s.mean_color[0], s.mean_color[1], s.mean_color[2]}}});
             }
             return json{{"covered_texels", c.covered_texels}, {"valid_texels", c.valid_texels},

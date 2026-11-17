@@ -5712,8 +5712,18 @@ void resolveOBBCollision(const ParticleColliderDesc& collider,
     ParticleColliderDesc local_collider = collider;
     local_collider.bounds_min = obb.local_bounds_min;
     local_collider.bounds_max = obb.local_bounds_max;
+    const Vec3 local_position_before = local_position;
+    const Vec3 local_velocity_before = local_velocity;
     resolveAABBCollision(local_collider, local_position, local_velocity);
 
+    // Write back only a real contact: the round trip through the local frame is
+    // not exact for a translated box, and callers treat any change as a hit (a
+    // Die response then killed untouched particles; sim_particle_collide.comp).
+    if (local_position.x == local_position_before.x && local_position.y == local_position_before.y &&
+        local_position.z == local_position_before.z && local_velocity.x == local_velocity_before.x &&
+        local_velocity.y == local_velocity_before.y && local_velocity.z == local_velocity_before.z) {
+        return;
+    }
     position = obb.local_to_world.transform_point(local_position);
     velocity = obb.local_to_world.transform_vector(local_velocity);
 }

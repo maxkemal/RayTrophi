@@ -1,0 +1,99 @@
+{
+  "date": "2026-11-16",
+  "status": "PASS",
+  "scope": "synthetic arms-up to random balloon / GPU paint",
+  "camera_acceptance": false,
+  "spatial_hand_hit_acceptance": false,
+  "visual_pixel_acceptance": false,
+  "raw_report": "tools\\perception_bridge\\out\\balloon-input-live-2026-11-16.json",
+  "raw_sha256": "76bd0441899047510883e583d907b9fd081919315e282f2e6be440fc8968d3da",
+  "trials": [
+    {
+      "index": 0,
+      "gesture_edges": 1,
+      "balloons_popped": 1,
+      "drops_spawned": 1800,
+      "covered_texels": 154008,
+      "painted_surfaces": 4,
+      "demo_event_delta": 1,
+      "game_arms_up_delta": 1,
+      "game_balloon_pop_delta": 1,
+      "gpu_stamp_dispatch_delta": 1028,
+      "gpu_publish_copy_delta": 356,
+      "host_download_delta": 0,
+      "host_bytes_delta": 0,
+      "sources_dropped_delta": 0,
+      "particles_after": 12,
+      "last_tick_stamped_texels": 0,
+      "device_lost": false
+    },
+    {
+      "index": 1,
+      "gesture_edges": 1,
+      "balloons_popped": 1,
+      "drops_spawned": 1800,
+      "covered_texels": 208696,
+      "painted_surfaces": 4,
+      "demo_event_delta": 1,
+      "game_arms_up_delta": 1,
+      "game_balloon_pop_delta": 1,
+      "gpu_stamp_dispatch_delta": 1012,
+      "gpu_publish_copy_delta": 402,
+      "host_download_delta": 0,
+      "host_bytes_delta": 0,
+      "sources_dropped_delta": 0,
+      "particles_after": 12,
+      "last_tick_stamped_texels": 0,
+      "device_lost": false
+    },
+    {
+      "index": 2,
+      "gesture_edges": 1,
+      "balloons_popped": 1,
+      "drops_spawned": 1800,
+      "covered_texels": 221366,
+      "painted_surfaces": 4,
+      "demo_event_delta": 1,
+      "game_arms_up_delta": 1,
+      "game_balloon_pop_delta": 1,
+      "gpu_stamp_dispatch_delta": 836,
+      "gpu_publish_copy_delta": 405,
+      "host_download_delta": 0,
+      "host_bytes_delta": 0,
+      "sources_dropped_delta": 0,
+      "particles_after": 12,
+      "last_tick_stamped_texels": 0,
+      "device_lost": false
+    }
+  ],
+  "rpc_roundtrip": {
+    "count": 675,
+    "p50_ms": 15.014100001280895,
+    "p95_ms": 31.83510000053502,
+    "max_ms": 57.11620000147377
+  },
+  "direct_burst_or_dab_or_post_event_rpc": false,
+  "cleanup_at_probe_end": {
+    "state": "attract",
+    "configured": true,
+    "people": 0,
+    "demo_running": false
+  },
+  "later_read": {
+    "project": "E:\\rt_k\\oyuncak.rtp",
+    "state": "attract",
+    "people": 0,
+    "demo_prepared": false,
+    "device_lost": false
+  },
+  "camera_next_step": "deferred_by_user; hardware-neutral pose-source adapters required",
+  "product_code_changed": false,
+  "shader_changed": false,
+  "app_launched": false,
+  "project_saved": false,
+  "offline_checks": {
+    "probe_negative_controls": 6,
+    "perception_core_tests": 23,
+    "body_game_contract_audit": "PASS"
+  }
+}

@@ -985,6 +985,7 @@
     <ClCompile Include="source\src\Api\RtPythonGrainGenerator.cpp" />
     <ClInclude Include="source\src\Api\RtPythonGrainGenerator.h" />
     <ClCompile Include="source\src\UI\GrainGeneratorUI.cpp" />
+    <ClCompile Include="source\src\UI\GameDesignUI.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="raytracing_render_code.rc" />
@@ -1840,6 +1841,7 @@
     <ClCompile Include="source\src\Backend\VulkanRTPipelineBuild.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanBufferAddressLedger.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Spheres.cpp" />
     <ClCompile Include="source\src\Backend\VulkanBackend_Pose.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
@@ -2081,6 +2083,7 @@
     <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
     <ClCompile Include="source\src\Api\RtApiParticle.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
+    <ClCompile Include="source\src\Api\RtApiCharacter.cpp" />
     <ClCompile Include="source\src\Api\RtApiCameraNav.cpp" />
     <ClCompile Include="source\src\Api\RtApiTerrain.cpp" />
     <ClCompile Include="source\src\Api\RtApiPerf.cpp" />
@@ -2226,6 +2229,34 @@
     <ClInclude Include="source\include\Audio\AudioRuntime.h" />
     <ClInclude Include="source\include\Api\RtApiParticleCollision.h" />
     <ClCompile Include="source\src\Paint\WetPaintGpu.cpp" />
+    <ClCompile Include="source\src\Input\BodyPoseRuntime.cpp" />
+    <ClCompile Include="source\src\Input\ExternalBodyRigMath.cpp" />
+    <ClCompile Include="source\src\Input\ExternalBodyRig.cpp" />
+    <ClCompile Include="source\src\Api\RtApiExternalBody.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonExternalBody.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClInclude Include="source\include\Input\ExternalBodyRigMath.h" />
+    <ClInclude Include="source\include\Input\ExternalBodyRig.h" />
+    <ClInclude Include="source\include\Api\RtApiExternalBody.h" />
+    <ClInclude Include="source\include\Api\RtApiCharacter.h" />
+    <ClInclude Include="source\include\UI\CharacterLifecycleUI.h" />
+    <ClInclude Include="source\src\Api\RtPythonExternalBody.h" />
+    <ClCompile Include="source\src\Game\GameRules.cpp" />
+    <ClCompile Include="source\src\Game\GameSession.cpp" />
+    <ClCompile Include="source\src\Game\GameRuntime.cpp" />
+    <ClCompile Include="source\src\Api\RtApiBodyPose.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcBodyPose.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGame.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcGame.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonBodyPose.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtPythonGame.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp" />
+    <ClCompile Include="source\src\Paint\GameDesign.cpp" />
     <ClCompile Include="source\src\Api\RtApiPaintWet.cpp" />
     <ClCompile Include="source\src\Api\RtIpcPaintWet.cpp" />
     <ClCompile Include="source\src\Api\RtPythonPaintWet.cpp">

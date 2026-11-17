@@ -1,11 +1,16 @@
 #include "Core/RuntimeSimulationClock.h"
+#include <sstream>
 
 #include "Backend/VulkanBackend.h"
 #include "Fluid/GasInventoryGpu.h"
 #include "Paint/WetPaintGpu.h"
+#include "Paint/BalloonPaintDemo.h"
+#include "Paint/GameDesign.h"
+#include "Game/GameRuntime.h"
 #include "scene_data.h"
 
 #include <algorithm>
+#include <chrono>
 
 namespace AppRuntime {
 
@@ -32,6 +37,12 @@ bool tickWetPaint(SceneData& scene, float dt) {
 
 SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationClockInput& input) {
     SimulationClockResult result;
+    if (Paint::gameDesignPending() && !input.render_owns_sim) {
+        // A just-opened project's game design (paint surfaces, demo). Applied
+        // here, not in the loader, so it lands on a ready scene in both apps.
+        Paint::tickGameDesign(scene);
+        result.render_updated = true;
+    }
 
     if (scene.isSimulationBaking()) {
         // A cooperative disk bake owns the sim timeline while it runs. Advance it a
@@ -47,6 +58,13 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
     }
     if (input.render_owns_sim) {
         return result;
+    }
+    const auto demo_frame_start = std::chrono::steady_clock::now();
+    if (input.live_mode && !input.ui_editing) {
+        Game::tickRuntime(scene, input.dt_seconds);
+    }
+    if (input.live_mode && !input.ui_editing) {
+        Paint::tickBalloonPaintDemo(scene, input.dt_seconds);
     }
     if (!scene.anySimulationRuntimeEnabled()) {
         if (tickWetPaint(scene, std::clamp(input.dt_seconds, 0.0f, 1.0f / 30.0f))) {
@@ -130,6 +148,8 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
     if (result.render_updated) {
         ++stats_.render_updates;
     }
+    Paint::observeBalloonPaintFrame(std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - demo_frame_start).count(), input.dt_seconds);
     return result;
 }
 

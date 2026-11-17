@@ -19,6 +19,7 @@
 #include "Core/AppFrame.h"
 #include "Core/RuntimeSceneViewer.h"
 #include "Core/RuntimeProjectHost.h"
+#include "Core/PlayerRenderExtent.h"
 
 #include "globals.h"
 #include "scene_data.h"
@@ -28,7 +29,10 @@
 #include "SceneSelection.h"
 #include "SceneHistory.h"
 #include "UIContext.h"
+#include <cmath>
 #include "Api/RtApi.h"
+#include "Api/RtApiPaintWet.h"
+#include "json.hpp"
 #include "Api/RtIpc.h"
 
 #include <SDL.h>
@@ -113,11 +117,15 @@ double millisecondsBetween(Clock::time_point from, Clock::time_point to) {
 class PlayerDisplay final : public AppRuntime::DisplayHost {
 public:
     bool fullscreen = false;
-    float render_scale = 1.0f;     // render resolution / window output resolution
+    float render_scale = 1.0f;     // fraction of the fixed initial render resolution
     int pacing_hz = 60;            // 0 = uncapped (measure the real frame cost)
     bool continuous = false;       // render every iteration, even a settled scene
     bool hud = true;
     bool targets_dirty = true;     // presentation targets must be rebuilt
+
+    AppRuntime::PlayerRenderExtent render_extent{
+        original_surface ? original_surface->w : image_width,
+        original_surface ? original_surface->h : image_height};
 
     PlayerDisplay() { AppRuntime::bindDisplayHost(*this); }
     ~PlayerDisplay() override { AppRuntime::unbindDisplayHost(*this); }
@@ -216,6 +224,7 @@ public:
             {"fullscreen", fullscreen}, {"render_scale", render_scale},
             {"pacing_hz", pacing_hz}, {"continuous", continuous}, {"hud", hud},
             {"window", {window_w, window_h}}, {"output", {output_w, output_h}},
+            {"render_base", {render_extent.base().first, render_extent.base().second}},
             {"render", {original_surface ? original_surface->w : 0,
                         original_surface ? original_surface->h : 0}},
             {"frame", snapshot_},
@@ -275,7 +284,6 @@ public:
         }
         if (width != 0.0 && height != 0.0) {
             SDL_SetWindowSize(window, static_cast<int>(width), static_cast<int>(height));
-            targets_dirty = true;
         }
         return rtapi::Result::success();
     }
@@ -286,31 +294,26 @@ public:
         // reset; the window simply covers its monitor.
         if (SDL_SetWindowFullscreen(window, enable ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) == 0) {
             fullscreen = enable;
-            targets_dirty = true;
         } else {
             SCENE_LOG_WARN(std::string("[Player] Fullscreen switch failed: ") + SDL_GetError());
         }
     }
 
-    // Rebuilds the CPU surface + streaming texture at output * render_scale.
-    // SDL_RenderCopy stretches the texture to the window, so a lower scale
-    // renders fewer pixels without changing the window.
+    // Only an explicit render-scale change rebuilds the render surface.
+    // SDL_RenderCopy scales that fixed texture to the current window output.
     bool applyTargets(UIContext& context, AppRuntime::RuntimeSceneViewer& viewer) {
         if (!targets_dirty || !renderer) return false;
-        int output_w = 0, output_h = 0;
-        if (SDL_GetRendererOutputSize(renderer, &output_w, &output_h) != 0 ||
-            output_w <= 0 || output_h <= 0) {
-            return false;
-        }
-        const int w = std::max(16, static_cast<int>(output_w * render_scale + 0.5f));
-        const int h = std::max(16, static_cast<int>(output_h * render_scale + 0.5f));
-        targets_dirty = false;
+        const auto extent = render_extent.scaled(render_scale);
+        const int w = extent.first;
+        const int h = extent.second;
         if (original_surface && original_surface->w == w && original_surface->h == h) {
+            targets_dirty = false;
             return false;
         }
         if (!AppRuntime::recreatePresentationTargets(w, h)) {
             return false;
         }
+        targets_dirty = false;
         context.ray_texture = raytrace_texture;
         viewer.requestFrame();
         return true;
@@ -332,6 +335,17 @@ public:
                 return true;
             case SDLK_F3: pacing_hz = pacing_hz == 0 ? 60 : 0; return true;
             case SDLK_F4: continuous = !continuous; return true;
+            case SDLK_F9: {
+                // Attendant: clean room now (paint cleared, popped balloons back).
+                // Same core as paint.wet_demo reset and the session's room.reset.
+                // A kiosk key gate should limit this to the attendant role.
+                std::string output;
+                const auto result = rtapi::wetPaintDemoCommand("reset", "{}", output);
+                if (!result.ok) {
+                    SCENE_LOG_WARN("[Player] room reset: " + result.error);
+                }
+                return true;
+            }
             default: return false;
         }
     }
@@ -403,11 +417,10 @@ void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
         }
         const int render_w = original_surface ? original_surface->w : 0;
         const int render_h = original_surface ? original_surface->h : 0;
-        // Render resolution = window output x render scale (F2). Showing only the
-        // render size read as a wrong resolution (1440x757 on a 1920x1009 window).
+        // Report render and output separately: resizing only scales presentation.
         int output_w = 0, output_h = 0;
         if (renderer) SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
-        ImGui::Text("render %dx%d = output %dx%d x %.2f  %s", render_w, render_h, output_w,
+        ImGui::Text("render %dx%d -> output %dx%d  scale %.2f  %s", render_w, render_h, output_w,
                     output_h, display.render_scale,
                     display.fullscreen ? "fullscreen" : "windowed");
         ImGui::Text("pacing %s%s", display.pacing_hz ? (std::to_string(display.pacing_hz) + " Hz").c_str()
@@ -513,6 +526,10 @@ int main(int argc, char* argv[]) {
     }
 
     bool running = true;
+    bool debug_camera = false;
+    float debug_orbit_x = 0.0f, debug_orbit_y = 0.0f;
+    float debug_pan_x = 0.0f, debug_pan_y = 0.0f;
+    int debug_wheel = 0;
     Uint64 previous_tick = SDL_GetPerformanceCounter();
     AppRuntime::FrameCycle frame_cycle;
     SDL_Event event;
@@ -535,15 +552,78 @@ int main(int argc, char* argv[]) {
             }
             if (event.type == SDL_WINDOWEVENT &&
                 event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                display.targets_dirty = true;
+                frame_cycle.requestRedraw();
             }
             if (event.type == SDL_KEYDOWN && !ImGui::GetIO().WantCaptureKeyboard &&
                 display.handleKey(event.key)) {
                 frame_cycle.requestRedraw();
             }
+            // Debug camera (F5, off at launch). A diagnostic aid, not gameplay
+            // input: it drives the same rtapi camera calls camera.orbit /
+            // camera.dolly expose over IPC. Left drag orbits, right or middle
+            // drag pans, the wheel dollies. A kiosk key gate must keep F5 out.
+            if (event.type == SDL_KEYDOWN && !event.key.repeat &&
+                event.key.keysym.sym == SDLK_F5 && !ImGui::GetIO().WantCaptureKeyboard) {
+                debug_camera = !debug_camera;
+                SCENE_LOG_INFO(std::string("[Player] Debug camera ") +
+                               (debug_camera ? "on" : "off"));
+            }
+            // Balloon paint demo: a left click pops the balloon under the cursor.
+            // Game input, so it goes through the same core call as IPC
+            // paint.wet_demo pop (screen point in 0..1 from the top-left). With
+            // the debug camera on, the left button orbits instead. No demo
+            // prepared, or nothing under the cursor: the call does nothing.
+            if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT &&
+                !debug_camera && !ImGui::GetIO().WantCaptureMouse) {
+                int window_w = 0, window_h = 0;
+                SDL_GetWindowSize(window, &window_w, &window_h);
+                if (window_w > 0 && window_h > 0) {
+                    const float px = std::clamp(static_cast<float>(event.button.x) /
+                                                static_cast<float>(window_w), 0.0f, 1.0f);
+                    const float py = std::clamp(static_cast<float>(event.button.y) /
+                                                static_cast<float>(window_h), 0.0f, 1.0f);
+                    std::string popped;
+                    // json, not std::to_string: a Turkish locale writes "0,5".
+                    (void)rtapi::wetPaintDemoCommand(
+                        "pop", nlohmann::json{{"screen", {px, py}}}.dump(), popped);
+                    frame_cycle.requestRedraw();
+                }
+            }
+            // Only ACCUMULATED here. A mouse reports far more often than the
+            // loop iterates; applying each event as its own camera update made
+            // hand-driven motion stutter while one IPC orbit per iteration was
+            // smooth. The sum is applied once, after the queue is empty.
+            if (debug_camera && !ImGui::GetIO().WantCaptureMouse) {
+                if (event.type == SDL_MOUSEMOTION) {
+                    const float dx = static_cast<float>(event.motion.xrel);
+                    const float dy = static_cast<float>(event.motion.yrel);
+                    if (event.motion.state & SDL_BUTTON_LMASK) {
+                        debug_orbit_x += dx; debug_orbit_y += dy;
+                    } else if (event.motion.state & (SDL_BUTTON_RMASK | SDL_BUTTON_MMASK)) {
+                        debug_pan_x += dx; debug_pan_y += dy;
+                    }
+                } else if (event.type == SDL_MOUSEWHEEL) {
+                    debug_wheel += event.wheel.y;
+                }
+            }
         }
-        // Window size, fullscreen and render scale all land here: the render
-        // surface is output size * render_scale.
+        if (debug_orbit_x != 0.0f || debug_orbit_y != 0.0f) {
+            rtapi::orbitCamera(-debug_orbit_x * 0.25f, -debug_orbit_y * 0.25f);
+            debug_orbit_x = debug_orbit_y = 0.0f;
+            frame_cycle.requestRedraw();
+        }
+        if (debug_pan_x != 0.0f || debug_pan_y != 0.0f) {
+            rtapi::panCamera(-debug_pan_x * 0.01f, debug_pan_y * 0.01f);
+            debug_pan_x = debug_pan_y = 0.0f;
+            frame_cycle.requestRedraw();
+        }
+        if (debug_wheel != 0) {
+            rtapi::dollyCamera(std::pow(0.9f, static_cast<float>(debug_wheel)));
+            debug_wheel = 0;
+            frame_cycle.requestRedraw();
+        }
+        // Window/fullscreen changes affect presentation only. F2 and explicit
+        // render_scale changes resize targets against the fixed render base.
         if (display.applyTargets(state->ctx, *viewer)) {
             frame_cycle.requestRedraw();
         }

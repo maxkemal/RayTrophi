@@ -69,7 +69,12 @@ struct AnimationBlendState {
     
     BlendMode mode = BlendMode::Replace;
     
-    bool isBlending() const { return blendWeight > 0.0f && blendWeight < 1.0f; }
+    bool isBlending() const {
+        // play()/processQueue() schedule a target with an initial weight of zero.
+        // That pending target must enter updateLayer() to advance the crossfade.
+        return clipA != nullptr && clipB != nullptr &&
+               blendWeight >= 0.0f && blendWeight < 1.0f;
+    }
 };
 
 struct AnimationQueueItem {

@@ -1,0 +1,398 @@
+{
+  "date": "2026-11-15",
+  "transport": "external scripts/test/rt_ipc.py named pipe RayTrophiPlayer",
+  "cold_observed": [
+    {
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\paintroom.rtp"
+      },
+      "rpc_ms": 532.1231999841984,
+      "result": true
+    },
+    {
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintFloor",
+        "resolution": 1024
+      },
+      "rpc_ms": 63.78709999262355,
+      "result": {
+        "active_tiles": 0,
+        "gutter_texels": 0,
+        "material_id": 26,
+        "object": "PaintFloor",
+        "resolution": 1024,
+        "settings": {
+          "absorption": 0.18000000715255737,
+          "brush_radius": 5.0,
+          "deposit_rate": 0.6499999761581421,
+          "diffusion": 0.23999999463558197,
+          "drip_head": 0.44999998807907104,
+          "falloff": 0.6499999761581421,
+          "lifetime_seconds": 2.5,
+          "oil": false,
+          "paint_load": 0.8500000238418579,
+          "pickup_rate": 0.3499999940395355,
+          "runoff": 0.3499999940395355,
+          "wetness": 0.6499999761581421
+        },
+        "sources_dropped": 0,
+        "stamped_texels": 0,
+        "texture": "generated/PaintFloor_PaintFloorMat_2_Base_Color.png",
+        "ticked_tiles": 0,
+        "tiles": 1024,
+        "triangles": 2,
+        "valid_texels": 1048576
+      }
+    },
+    {
+      "method": "paint.wet_status",
+      "rpc_ms": 32.22439999808557,
+      "last_tick_ms": 20.2766
+    },
+    {
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintBack",
+        "resolution": 1024
+      },
+      "rpc_ms": 64.1217999800574,
+      "result": {
+        "active_tiles": 0,
+        "gutter_texels": 0,
+        "material_id": 27,
+        "object": "PaintBack",
+        "resolution": 1024,
+        "settings": {
+          "absorption": 0.18000000715255737,
+          "brush_radius": 5.0,
+          "deposit_rate": 0.6499999761581421,
+          "diffusion": 0.23999999463558197,
+          "drip_head": 0.44999998807907104,
+          "falloff": 0.6499999761581421,
+          "lifetime_seconds": 2.5,
+          "oil": false,
+          "paint_load": 0.8500000238418579,
+          "pickup_rate": 0.3499999940395355,
+          "runoff": 0.3499999940395355,
+          "wetness": 0.6499999761581421
+        },
+        "sources_dropped": 0,
+        "stamped_texels": 0,
+        "texture": "generated/PaintBack_PaintBackMat_2_Base_Color.png",
+        "ticked_tiles": 0,
+        "tiles": 1024,
+        "triangles": 2,
+        "valid_texels": 1048576
+      }
+    },
+    {
+      "method": "paint.wet_status",
+      "rpc_ms": 52.123400004347786,
+      "last_tick_ms": 39.7456
+    },
+    {
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintLeft",
+        "resolution": 1024
+      },
+      "rpc_ms": 64.20990001061,
+      "result": {
+        "active_tiles": 0,
+        "gutter_texels": 0,
+        "material_id": 28,
+        "object": "PaintLeft",
+        "resolution": 1024,
+        "settings": {
+          "absorption": 0.18000000715255737,
+          "brush_radius": 5.0,
+          "deposit_rate": 0.6499999761581421,
+          "diffusion": 0.23999999463558197,
+          "drip_head": 0.44999998807907104,
+          "falloff": 0.6499999761581421,
+          "lifetime_seconds": 2.5,
+          "oil": false,
+          "paint_load": 0.8500000238418579,
+          "pickup_rate": 0.3499999940395355,
+          "runoff": 0.3499999940395355,
+          "wetness": 0.6499999761581421
+        },
+        "sources_dropped": 0,
+        "stamped_texels": 0,
+        "texture": "generated/PaintLeft_PaintLeftMat_2_Base_Color.png",
+        "ticked_tiles": 0,
+        "tiles": 1024,
+        "triangles": 2,
+        "valid_texels": 1048576
+      }
+    },
+    {
+      "method": "paint.wet_status",
+      "rpc_ms": 74.11549999960698,
+      "last_tick_ms": 61.5445
+    },
+    {
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintRight",
+        "resolution": 1024
+      },
+      "rpc_ms": 64.47039998602122,
+      "result": {
+        "active_tiles": 0,
+        "gutter_texels": 0,
+        "material_id": 29,
+        "object": "PaintRight",
+        "resolution": 1024,
+        "settings": {
+          "absorption": 0.18000000715255737,
+          "brush_radius": 5.0,
+          "deposit_rate": 0.6499999761581421,
+          "diffusion": 0.23999999463558197,
+          "drip_head": 0.44999998807907104,
+          "falloff": 0.6499999761581421,
+          "lifetime_seconds": 2.5,
+          "oil": false,
+          "paint_load": 0.8500000238418579,
+          "pickup_rate": 0.3499999940395355,
+          "runoff": 0.3499999940395355,
+          "wetness": 0.6499999761581421
+        },
+        "sources_dropped": 0,
+        "stamped_texels": 0,
+        "texture": "generated/PaintRight_PaintRightMat_2_Base_Color.png",
+        "ticked_tiles": 0,
+        "tiles": 1024,
+        "triangles": 2,
+        "valid_texels": 1048576
+      }
+    },
+    {
+      "method": "paint.wet_status",
+      "rpc_ms": 85.57919997838326,
+      "last_tick_ms": 73.0724
+    }
+  ],
+  "isolation": [
+    {
+      "label": "empty_a",
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\startup_no_particles.rtp"
+      },
+      "rpc_ms": 296.84809999889694,
+      "result": true
+    },
+    {
+      "label": "particles_a",
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\paintroom.rtp"
+      },
+      "rpc_ms": 340.56919999420643,
+      "result": true
+    },
+    {
+      "label": "empty_b",
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\startup_no_particles.rtp"
+      },
+      "rpc_ms": 280.1112000015564,
+      "result": true
+    },
+    {
+      "label": "particles_b",
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\paintroom.rtp"
+      },
+      "rpc_ms": 336.7070000094827,
+      "result": true
+    },
+    {
+      "label": "paint_512",
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\paintroom.rtp"
+      },
+      "rpc_ms": 358.1333999754861,
+      "result": true
+    },
+    {
+      "label": "paint_512",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintFloor",
+        "resolution": 512
+      },
+      "rpc_ms": 16.03990001603961,
+      "valid_texels": 262144,
+      "tiles": 256
+    },
+    {
+      "label": "paint_512_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 16.165300010470673,
+      "last_tick_ms": 7.592,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_512",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintBack",
+        "resolution": 512
+      },
+      "rpc_ms": 19.454299996141344,
+      "valid_texels": 262144,
+      "tiles": 256
+    },
+    {
+      "label": "paint_512_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 22.53210000344552,
+      "last_tick_ms": 13.9495,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_512",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintLeft",
+        "resolution": 512
+      },
+      "rpc_ms": 20.131600002059713,
+      "valid_texels": 262144,
+      "tiles": 256
+    },
+    {
+      "label": "paint_512_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 27.474199974676594,
+      "last_tick_ms": 18.8566,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_512",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintRight",
+        "resolution": 512
+      },
+      "rpc_ms": 20.041299983859062,
+      "valid_texels": 262144,
+      "tiles": 256
+    },
+    {
+      "label": "paint_512_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 31.99399998993613,
+      "last_tick_ms": 22.5342,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_512_steady",
+      "method": "paint.wet_status",
+      "rpc_ms": 2.680599980521947,
+      "last_tick_ms": 0.5965,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_1024",
+      "method": "project.open",
+      "params": {
+        "path": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\.captures\\player-paintroom\\paintroom.rtp"
+      },
+      "rpc_ms": 364.3408000061754,
+      "result": true
+    },
+    {
+      "label": "paint_1024",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintFloor",
+        "resolution": 1024
+      },
+      "rpc_ms": 60.57279999367893,
+      "valid_texels": 1048576,
+      "tiles": 1024
+    },
+    {
+      "label": "paint_1024_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 30.131999985314906,
+      "last_tick_ms": 19.062,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_1024",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintBack",
+        "resolution": 1024
+      },
+      "rpc_ms": 63.30629999865778,
+      "valid_texels": 1048576,
+      "tiles": 1024
+    },
+    {
+      "label": "paint_1024_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 51.32110000704415,
+      "last_tick_ms": 39.1418,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_1024",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintLeft",
+        "resolution": 1024
+      },
+      "rpc_ms": 63.958900020224974,
+      "valid_texels": 1048576,
+      "tiles": 1024
+    },
+    {
+      "label": "paint_1024_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 72.99859999329783,
+      "last_tick_ms": 60.8601,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_1024",
+      "method": "paint.wet_add_surface",
+      "params": {
+        "object": "PaintRight",
+        "resolution": 1024
+      },
+      "rpc_ms": 62.699000001885,
+      "valid_texels": 1048576,
+      "tiles": 1024
+    },
+    {
+      "label": "paint_1024_first_tick",
+      "method": "paint.wet_status",
+      "rpc_ms": 84.0574000030756,
+      "last_tick_ms": 72.1151,
+      "publish_host_downloads": 0
+    },
+    {
+      "label": "paint_1024_steady",
+      "method": "paint.wet_status",
+      "rpc_ms": 4.39590000314638,
+      "last_tick_ms": 1.4131,
+      "publish_host_downloads": 0
+    }
+  ],
+  "limitations": [
+    "RPC latency includes main-thread queue time; not isolated CPU stage duration.",
+    "Initial display window includes idle time before scene load; 1105 ms present interval does not prove a 1105 ms processing stall.",
+    "No process restart or internal pipeline timer; driver pipeline contribution remains unquantified.",
+    "No explosion fixture was exercised: this fixture contains continuous sprays."
+  ]
+}

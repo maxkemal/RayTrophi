@@ -1,6 +1,21 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <ClCompile Include="source\src\Input\BodyPoseRuntime.cpp" />
+    <ClCompile Include="source\src\Input\ExternalBodyRigMath.cpp" />
+    <ClCompile Include="source\src\Input\ExternalBodyRig.cpp" />
+    <ClCompile Include="source\src\Api\RtApiExternalBody.cpp" />
+    <ClCompile Include="source\src\Api\RtApiCharacter.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonExternalBody.cpp" />
+    <ClCompile Include="source\src\Game\GameRules.cpp" />
+    <ClCompile Include="source\src\Game\GameSession.cpp" />
+    <ClCompile Include="source\src\Game\GameRuntime.cpp" />
+    <ClCompile Include="source\src\Api\RtApiBodyPose.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcBodyPose.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonBodyPose.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGame.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcGame.cpp" />
+    <ClCompile Include="source\src\Api\RtPythonGame.cpp" />
     <None Include="source\src\Physics\Fluid\APICFluidStep.inl" />
     <None Include="source\shaders\acoustic_diffuse.glsl" />
     <Filter Include="Kaynak Dosyalar">
@@ -2787,6 +2802,9 @@
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Raster.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBufferAddressLedger.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Spheres.cpp">

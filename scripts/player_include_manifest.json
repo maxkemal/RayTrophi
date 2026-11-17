@@ -1,6 +1,8 @@
 {
   "_comment": "Candidate source set for RayTrophiPlayer.exe. Paths are relative to RayTrophiStudio/source. Read by scripts/audit_player_includes.py. 'baseline' is a ratchet: --check fails when a count rises. ImGui, SDL, audio and Jolt are allowed shared runtime dependencies; UI-free MeshEdit/Paint/UV/Template/Import data+service code is shared (decision 2026-11-13); only editor UI (panels, overlays, gizmos, SceneUI-bound sessions) remains Studio-only. Legacy WaterManager/RiverManager and CUDA FFT ocean are Studio-only; Player keeps baked flat geometry and shared material rendering. Fluid simulation is a separate system.",
   "include": [
+    "src/Input/*",
+    "src/Game/*",
     "src/Core/*",
     "src/Scene/*",
     "src/Physics/*",

@@ -1,0 +1,3 @@
+# Optional webcam tools only; core tests and fake runner use the standard library.
+mediapipe>=0.10.14,<0.11
+opencv-contrib-python>=4.8,<5

@@ -23,6 +23,12 @@ py::dict settingsDict(const rtapi::WetPaintSurfaceSettingsInfo& s) {
     d["drip_head"] = s.drip_head; d["falloff"] = s.falloff; d["paint_load"] = s.paint_load;
     d["deposit_rate"] = s.deposit_rate; d["pickup_rate"] = s.pickup_rate;
     d["brush_radius"] = s.brush_radius; d["oil"] = s.oil;
+    d["roughness_channel"] = s.roughness_channel;
+    d["height_normal_channel"] = s.height_normal_channel;
+    d["wet_roughness"] = s.wet_roughness;
+    d["dry_roughness"] = s.dry_roughness;
+    d["height_contribution"] = s.height_contribution;
+    d["normal_strength"] = s.normal_strength;
     return d;
 }
 
@@ -55,6 +61,24 @@ void take(const py::kwargs& kw, const char* key, T& value) {
 namespace rtpy {
 
 void registerPaintWetBindings(py::module_& paint) {
+    paint.def("wet_demo", [](const std::string& operation, const py::dict& config) {
+        const auto json = py::module_::import("json");
+        std::string output;
+        requireResult(rtapi::wetPaintDemoCommand(
+            operation, py::cast<std::string>(json.attr("dumps")(config)), output));
+        return json.attr("loads")(output);
+    }, py::arg("operation") = "status", py::arg("config") = py::dict());
+    paint.def("wet_design", [] {
+        // What the next project save writes under "game_design" + apply state.
+        const auto json = py::module_::import("json");
+        rtapi::GameDesignInfo info;
+        requireResult(rtapi::getGameDesign(info));
+        py::dict d;
+        d["design"] = json.attr("loads")(info.design_json);
+        d["pending"] = info.pending;
+        d["status"] = info.status;
+        return d;
+    });
     paint.def("wet_add_surface", [](const std::string& object, int material_id, int resolution) {
         rtapi::WetPaintSurfaceRuntimeInfo info;
         requireResult(rtapi::addWetPaintSurface(object, material_id, resolution, info));
@@ -75,8 +99,13 @@ void registerPaintWetBindings(py::module_& paint) {
         d["ticked_tiles"] = s.ticked_tiles; d["stamped_texels"] = s.stamped_texels;
         d["sources_dropped"] = s.sources_dropped;
         d["publish_device_copies"] = s.publish_device_copies;
+        d["pbr_dispatches"] = s.pbr_dispatches;
+        d["pbr_device_copies"] = s.pbr_device_copies;
+        d["pbr_buffer_bytes"] = s.pbr_buffer_bytes;
+        d["pbr_texture_bytes"] = s.pbr_texture_bytes;
         d["publish_host_downloads"] = s.publish_host_downloads;
         d["publish_bytes_downloaded"] = s.publish_bytes_downloaded;
+        d["geometry_rebakes"] = s.geometry_rebakes;
         d["publish_mode"] = s.publish_mode; d["last_tick_ms"] = s.last_tick_ms;
         d["compute_context"] = s.compute_context;
         d["splat"] = splatDict(s.splat);
@@ -100,6 +129,12 @@ void registerPaintWetBindings(py::module_& paint) {
         take(kw, "deposit_rate", s.deposit_rate); take(kw, "pickup_rate", s.pickup_rate);
         take(kw, "brush_radius", s.brush_radius);
         take(kw, "oil", s.oil);
+        take(kw, "roughness_channel", s.roughness_channel);
+        take(kw, "height_normal_channel", s.height_normal_channel);
+        take(kw, "wet_roughness", s.wet_roughness);
+        take(kw, "dry_roughness", s.dry_roughness);
+        take(kw, "height_contribution", s.height_contribution);
+        take(kw, "normal_strength", s.normal_strength);
         requireResult(rtapi::setWetPaintSurfaceSettings(object, material_id, s));
     }, py::arg("object"), py::arg("material_id") = -1);
     paint.def("wet_get_splat", [] {
@@ -147,6 +182,8 @@ void registerPaintWetBindings(py::module_& paint) {
             e["object"] = s.object; e["material_id"] = s.material_id;
             e["covered_texels"] = s.covered_texels; e["valid_texels"] = s.valid_texels;
             e["wet_texels"] = s.wet_texels; e["ratio"] = s.ratio;
+            e["roughness_texels"] = s.roughness_texels;
+            e["normal_texels"] = s.normal_texels;
             e["mean_color"] = py::make_tuple(s.mean_color[0], s.mean_color[1], s.mean_color[2]);
             surfaces.append(std::move(e));
         }

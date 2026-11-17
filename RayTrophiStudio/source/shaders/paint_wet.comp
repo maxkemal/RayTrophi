@@ -1,4 +1,5 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // GPU wet paint (docs/dev/PLAYER_GAME_PAINT_ROOM.md step 3, section 5.3).
 //
 // The CPU model is MeshPaintAdapter::noteWetDab / tickWetPaint. This kernel
@@ -21,8 +22,8 @@
 //     if q's own target rounds to this texel - the CPU's rule, read backwards.
 //   * The CPU reads live (already updated) neighbours in scan order; the device
 //     reads the previous step everywhere (order independent).
-//   * Terminal beads and the height mask are not on the device yet (the CPU
-//     runs them only with write_height_mask); thickness stays a state channel.
+//   * Terminal beads remain CPU-only; optional height deposition now uses the
+//     existing write_height_mask equation and channel/height-normal resolve.
 //   * Seam mirroring is not needed: stamping is in world space and the bake
 //     dilates a 2-texel gutter around every UV island.
 //   * The colour layer is a paint LAYER (alpha = coverage) composited over the
@@ -40,6 +41,8 @@ const uint MODE_ROTATE = 3u;
 const uint MODE_CONSUME = 4u;
 const uint MODE_COVERAGE = 5u;
 const uint MODE_RESET = 6u;
+const uint MODE_CHANNELS = 7u;
+const uint MODE_SEED_HEIGHT = 8u;
 
 const uint SOURCE_DABS = 0u;
 const uint SOURCE_EVENTS = 1u;
@@ -59,17 +62,21 @@ const uint ST_SUM_R = 10u;
 const uint ST_SUM_G = 11u;
 const uint ST_SUM_B = 12u;
 const uint ST_WET_TEXELS = 13u;
+const uint ST_ROUGHNESS_TEXELS = 14u;
+const uint ST_NORMAL_TEXELS = 15u;
 
 const uint SURFACE_OIL = 1u;
+const uint SURFACE_ROUGHNESS = 2u;
+const uint SURFACE_HEIGHT_NORMAL = 4u;
 
 struct Surface {
     uint width; uint height; uint page_offset; uint tile_offset;
-    uint tiles_x; uint tiles_y; uint flags; uint _pad0;
+    uint tiles_x; uint tiles_y; uint flags; uint pbr_params;
     // Already scaled by the host exactly like tickWetPaint's derived terms
     // (oil factors, lifetime runoff factor).
     float diffusion; float runoff; float absorption; float drip_head;
     float lifetime; float brush_radius_px; float falloff; float paint_load;
-    float wetness; float deposit_rate; float pickup_rate; float _pad2;
+    float wetness; float deposit_rate; float pickup_rate; float normal_strength;
 };
 
 struct Tile {
@@ -318,6 +325,12 @@ void stampTile(uint tile_index) {
             float pigment_add = wet_add * deposited;
             st.x = clamp(st.x + wet_add * (0.18 + deposited * 0.82), 0.0, 1.0);
             st.y = clamp(st.y + pigment_add, 0.0, 1.0);
+            if ((s.flags & SURFACE_HEIGHT_NORMAL) != 0u && pc._p0 != 0u) {
+                float original_h = float(base_color[2u * pc._p0 + ti] & 255u);
+                st.z = max(st.z, clamp((original_h - 128.0) / 127.0, 0.0, 1.0));
+                float contribution = float(s.pbr_params >> 16u) / 65535.0;
+                st.z = clamp(st.z + pigment_add * clamp(contribution * 1.6, 0.0, 1.0),0.0,1.0);
+            }
             // Deposit. On the CPU noteWetDab is the wet half of a stroke whose
             // colour comes from a paintLayerAtUV dab (Normal brush: alpha =
             // falloff weight x strength, alpha-over); noteWetDab itself only
@@ -624,6 +637,8 @@ void resolveTile(uint tile_index) {
 
 // ── ROTATE / CONSUME / COVERAGE / RESET ─────────────────────────────────────
 
+#include "paint_wet_channels.glsl"
+
 void rotateTile(uint tile_index) {
     if (tile_index >= pc.tile_count) return;
     uint next = tile_flags[2u * tile_index + 1u];
@@ -643,6 +658,7 @@ void coverageTile(uint tile_index) {
     if (lid == 0u) { s_count = 0u; s_flag = 0u; }
     barrier();
     uint covered = 0u, valid = 0u, wet = 0u;
+    uint roughness_changed = 0u, normal_changed = 0u;
     uvec3 sum = uvec3(0u);
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x, y; tileTexel(t, k, x, y);
@@ -656,7 +672,17 @@ void coverageTile(uint tile_index) {
             sum += uvec3(c.rgb + 0.5);
         }
         if (state[ti].x > 0.001) ++wet;
+        if (pc._p0 != 0u) {
+            vec3 r = abs(unpackColor(out_color[pc._p0+ti]).rgb -
+                         unpackColor(sourceChannel(1u,ti)).rgb);
+            vec3 n = abs(unpackColor(out_color[3u*pc._p0+ti]).rgb -
+                         unpackColor(sourceChannel(3u,ti)).rgb);
+            if (max(max(r.x,r.y),r.z)>1.0) ++roughness_changed;
+            if (max(max(n.x,n.y),n.z)>1.0) ++normal_changed;
+        }
     }
+    atomicAdd(stats[t.surface*STATS_STRIDE+ST_ROUGHNESS_TEXELS],roughness_changed);
+    atomicAdd(stats[t.surface*STATS_STRIDE+ST_NORMAL_TEXELS],normal_changed);
     atomicAdd(s_count, covered);
     atomicAdd(s_flag, valid);
     atomicAdd(s_sum[0], sum.r); atomicAdd(s_sum[1], sum.g); atomicAdd(s_sum[2], sum.b);
@@ -683,6 +709,10 @@ void resetTile(uint tile_index) {
         color[ti] = 0u;
         state[ti] = vec4(0.0);
         out_color[ti] = base_color[ti];
+        if (pc._p0 != 0u) {
+            for (uint channel=1u;channel<=3u;++channel)
+                out_color[channel*pc._p0+ti] = sourceChannel(channel,ti);
+        }
     }
     if (gl_LocalInvocationIndex == 0u) {
         tile_flags[2u * tile_index] = 0u;
@@ -704,4 +734,6 @@ void main() {
     else if (pc.mode == MODE_RESOLVE) resolveTile(wg);
     else if (pc.mode == MODE_COVERAGE) coverageTile(wg);
     else if (pc.mode == MODE_RESET) resetTile(wg);
+    else if (pc.mode == MODE_CHANNELS) channelTile(wg);
+    else if (pc.mode == MODE_SEED_HEIGHT) seedHeightTile(wg);
 }

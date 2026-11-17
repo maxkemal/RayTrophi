@@ -1,4 +1,5 @@
 #include "UI/AudioUI.h"
+#include "UI/AudioSourceLabel.h"
 #include "Audio/AudioRuntime.h"
 #include "UI/AudioPropertyLayout.h"
 #include "Audio/AudioService.h"
@@ -145,8 +146,7 @@ void drawHierarchy(UIContext& ctx) {
     filter.Draw("Search sources##audio_hierarchy");
     std::vector<const json*> visible;
     for (const auto& e : data.at("emitters")) {
-        const auto search = e.at("name").get<std::string>() + " " +
-            e.at("id").get<std::string>();
+        const auto search = sourceLabel(e, data);
         if (filter.PassFilter(search.c_str())) {
             visible.push_back(&e);
         }
@@ -163,7 +163,7 @@ void drawHierarchy(UIContext& ctx) {
             const std::string id = e.at("id");
             const bool active = ctx.selection.selected.type == SelectableType::AudioSource &&
                 ctx.selection.selected.audio_source_id == id;
-            const auto label = e.at("name").get<std::string>() + "##audio_tree_" + id;
+            const auto label = sourceLabel(e, data) + "##audio_tree_" + id;
             if (ImGui::Selectable(label.c_str(), active)) {
                 select(ctx, id);
             }
@@ -493,7 +493,7 @@ void drawViewport(UIContext& ctx, bool ortho, bool showGizmos, bool& hit) {
         }
         if (alpha > 0 && screen.x >= 0 && screen.x <= size.x &&
             screen.y >= 0 && screen.y <= size.y) {
-            labels.draw(draw, screen, size, sourceName.empty() ? id : sourceName,
+            labels.draw(draw, screen, size, id + " - " + sourceName,
                         IM_COL32(80, 205, 255, opacity));
         }
         const auto mouse = ImGui::GetIO().MousePos;

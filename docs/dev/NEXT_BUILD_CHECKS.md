@@ -1,5 +1,832 @@
 # NEXT BUILD CHECKS
 
+## KÖK BULUNDU: TLAS tanıtıcısı yeniden kullanılıyor + kayıptan sonra kilitlenme (2026-11-17 11:00, Claude)
+
+**Durum:** CANLI KABUL (kullanıcı, 2026-11-17): derlendi, çökme yok, gölgeler doğru yerde, RT gölge + yansıma açıkken FPS maliyeti görülmedi. Madde 3–4 (Player uzun oyun, kayıpta kilitlenmeme) açık kalan gözlem.
+**Ölçüm (10:48, defter):** hata `read_invalid 0x6770000`, offset 0 → **DESTROYED** 12544 B tampon,
+oluşturan `rebuildRayFusionTLAS → createTLAS` (TLAS deposu). Bir önceki TLAS da AYNI adresteydi
+(#2501 ve #2505 = 0x6770000). Sürücü yeni TLAS'a aynı handle değerini ve aynı VA'yı veriyor;
+"descriptor'ı yeniden yazayım mı" kararını handle hash'iyle veren tüketiciler (RT gölge, yansıma)
+silinmiş TLAS'ı izlemeye devam etti.
+**Düzeltme:** `include/Backend/VulkanTlasGeneration.h` (yeni) — TLAS NESNESİ her oluşturulup
+yok edildiğinde artan nesil. `MaterialPreviewRtShadow.cpp`, `MaterialPreviewReflection.cpp` ve RT
+descriptor drenaj hash'i (`VulkanBackend.cpp`) bunu imzaya katar.
+**Kilitlenme (11:00, cdb):** kayıptan sonra ana iş parçacığı `RasterViewportFrameRing::destroy` →
+`vkWaitForFences(UINT64_MAX)` içinde NVIDIA sürücüsünde SONSUZA dek dönüyordu (CPU'ya düşemedi,
+kapanamadı). `VulkanFailureReporting.h::waitFenceBounded` — kayıp cihazda beklemez, 100 ms
+parçalarla en çok 10 s; 12 süresiz bekleme buna çevrildi (FrameRing 3, VulkanBackend 5, Clouds 2,
+SimulationComputeVulkan 3).
+
+1. Derle (Studio + Player). Demo sahnesini RayFusion'da aç, objeleri taşı, Solid↔RayFusion geç.
+   Görmen gereken: çökme YOK. Bozuksa: SceneLog `[DeviceFault]` + `owner:` satırlarını getir —
+   aynı `rebuildRayFusionTLAS` sahibi çıkarsa başka bir handle-hash tüketicisi kalmış demektir.
+2. RT gölgeler ve RayFusion yansımaları obje taşındıktan sonra DOĞRU yerde mi (eski konumda gölge
+   kalmamalı). Bu düzeltme o descriptor'ları daha sık yeniden yazıyor.
+3. Player: balon demosu uzun oyna, patlat, odak değiştir. Çökme yok mu.
+4. Kayıp olursa (başka sebeple): uygulama artık KİLİTLENMEMELİ — CPU'ya düşmeli ya da kapanmalı.
+   Günlükte `fence unsignalled after 10 s` görürsen o yerin adı yazılı; bana getir.
+5. ★ Sinsi olan: kare hızı. waitFenceBounded normal karede tek çağrı; FPS düştüyse söyle.
+
+## Hata adresinin SAHİBİ — GPU tampon adres defteri (2026-11-17 10:40, Claude)
+
+**Durum:** YENİ `Backend/VulkanBufferAddressLedger.cpp/.h` (Studio vcxproj + filters'a eklendi,
+Player vcxproj yeniden üretildi, `--check` PASS); `VulkanBackend.cpp` createBuffer/destroyBuffer +
+BLAS toplu silme yolu deftere yazar. /Zs PASS. Shader yok. Struct düzeni değişmedi.
+**İLK ÖLÇÜM (10:37, Studio, demo sahnesi yüklenirken):** `[DeviceFault]` → SAYFA HATASI, zaman aşımı
+DEĞİL: `read_invalid 0x2fced0000` (4 KB sayfa başı) + `ip_fault 0x20339a480`. Sıra: havuzlar raster'a
+eklendi (gen=7, 38 mesh, 135201 yuva) → RayFusion AS yeniden (38 BLAS, 5 flat) → sonraki tek seferlik
+gönderimde kayıp. Probe trace + bounce tabloları statik olarak tazeleniyor görünüyor (elenmedi, kanıt yok).
+
+1. Derle, aynı şeyi yap (demo sahnesi RayFusion'da açılış / obje taşıma). Kayıpta SceneLog'da
+   `address[1] owner:` satırları:
+   - `DESTROYED buffer ... created by: <fonksiyon>` → serbest bırakılmış tamponu kullanan var; o
+     fonksiyonun tamponu hangi tablo/descriptor'da yaşıyor, oradan düzeltilir. KÖK.
+   - `LIVE buffer ... fault_offset=<büyük>` → canlı tamponun dışına taşan indeks.
+   - `no live or recently destroyed buffer` → görüntü (image) ya da defter dışı ayırma.
+2. Normal çalışmada fark olmamalı (her tampon oluşturmada birkaç µs yığın kaydı). Açılış/FPS aynı mı.
+3. `VulkanDeviceFault_0.bin` NVIDIA dökümü x64/Release'de; sakla.
+
+## Cihaz kaybı artık KÖKÜNÜ yazar — VK_EXT_device_fault (2026-11-17, Claude)
+
+**Durum:** `Backend/VulkanBackend.cpp` + `include/Backend/VulkanFailureReporting.h` (4 .cpp yeniden
+derlenir, struct düzeni DEĞİŞMEDİ), /Zs PASS (Player). Shader yok.
+Neden: WAR düzeltmesinden sonra Player yine düştü (açılıştan ~7 s, patlama yok, Studio KAPALI) ve
+Studio RayFusion'da obje taşırken düştü. Windows günlüğü her ikisinde nvlddmkm 153 çifti verir — bu
+NVIDIA'da hem GPU sayfa hatasını hem zaman aşımını kapsar, yani "TDR" tek başına ayırt etmez. İki
+günlükte de kayıp `[RayFusion] scene AS built` satırından hemen sonra, `endSingleTimeCommands`'da
+GÖZLENİYOR (gözlenen yer, sebep değil).
+
+1. Studio ya da Player'da bir sonraki cihaz kaybında SceneLog'da `[DeviceFault]` satırlarını ara.
+   - `address[...] read_invalid/write_invalid 0x...` → GPU geçersiz adres okudu/yazdı (bayat tampon,
+     yanlış instance tablosu, yok edilmiş AS). Adres + açıklamayı bana ver.
+   - adres yok, açıklama/vendor "timeout/hang" benzeri → gerçek zaman aşımı (sonsuz döngü / çok uzun iş).
+   - `vendor binary written to VulkanDeviceFault_N.bin` → NVIDIA çökme dökümü (x64/Release'de), sakla.
+   - `[DeviceFault] no device was created with VK_EXT_device_fault` → uzantı açılmadı; bozuk demek.
+2. ★ 10:30'da TAM OLARAK bu oldu (Studio, RayFusion'da obje taşıma): kaybı raster kare edinme yolu
+   gördü, `[DeviceFault]` yazılmadı. Düzeltildi: `VulkanViewportBackend.cpp` (edinme + gönderim) ve
+   `VulkanBackend.cpp` (submitTraceTonemapAsync) da sorguyu çağırır; /Zs PASS. Hâlâ satır yoksa
+   dördüncü bir algılama yolu var — söyle.
+   Gözlem (iki Studio çökmesi): kayıp, balon demosunun 5 havuz mesh'i (damla/konfeti, 135 bin örnek
+   yuvası, BLAS'ları "5 flat") raster'a eklenip RayFusion AS yeniden kurulduktan HEMEN sonra.
+3. Normal açılışta etkisi olmamalı: yalnız kayıpta sorgu yapar. Player/Studio açılışı aynı mı.
+4. TDR sonrası uygulama kapanmıyorsa ÖLDÜRME — ajan `cdb -pv` ile yığını alacak.
+
+## Aralıklı Player device lost — sim compute WAR yarışı düzeltildi (2026-11-17, Claude)
+
+**Durum:** `Device/SimulationComputeVulkan.cpp` (artımlı, Studio+Player), /Zs PASS. Shader yok.
+Senkronizasyon doğrulaması (Player, 3 dk) 3900× "kopya, hâlâ okunan tampona" (dispatch → kayıtlı
+yükleme kopyası, arada yalnız compute→compute bariyeri) buldu; düzeltildi. Kalan kare içi
+tehlikeler ve TDR hipotezi `BUG_VIEWPORT_DEVICE_LOST_ON_PROJECT_OPEN.md`'de.
+
+1. Studio + Player derle. Player'ı NORMAL başlat (doğrulamasız), uzun oyna, odak değiştir, projeyi
+   sürükle-bırakla yeniden aç. Çökme sıklığı düştü mü (tek gözlem kanıt değil; "her zaman olmuyor").
+2. Hâlâ çöküyorsa: Studio RayFusion'da AÇIKKEN mi? O an Studio `viewport.device_recovery_status`
+   sayacı artıyorsa TDR (iki süreç aynı GPU) — farklı düzeltme sınıfı.
+3. Doğrulama koşusunu tekrarlamak için: `$env:RAYTROPHI_VK_VALIDATION="1";
+   $env:VK_LAYER_ENABLES="VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT"` ile Player,
+   SceneLog'da `vkCmdCopyBuffer` WAR satırı 0 olmalı.
+
+## Player çökmesi — IPC ile YENİDEN ÜRETİLEMEDİ (2026-11-17 02:40–02:55, Claude)
+
+Yeni exe (02:36, büzme + oda içi alan) ile kullanıcıda duvar dibindeki patlamada yine device lost; bu sefer log'da patlamada `topology_change` YOK (yalnız açılışta) → TLAS gizle/göster yolu elendi. Ajan Player'ı açıp ~60 patlama denedi, HİÇ çökme yok: arka/sol duvar dibi (40–60 cm, değen), sürpriz + konfeti + üçlü patlama (5252 damla, 17k kaynak düştü), yakalamalı senkron çizim, continuous asenkron çizim, 6 tur "arka planda boşta → çizimi aç + patlat". Kalan farklar: GERÇEK pencere odak olayı ve fare tıklaması yolu (SDL olay döngüsü). Kullanıcıdan: odaktayken tıklama mı, odağı geri getiren tıklama mı çöküyor; çöktüğü an log.
+
+## Vulkan cihaz kaybı (odak dönünce) + balon alanı oda İÇİ (2026-11-17 gece, Claude)
+
+**Durum:** `BalloonPaintDemo.cpp` değişti (artımlı), /Zs PASS. Shader yok.
+
+**Cihaz kaybı — Player SceneLog:** art arda `createTLAS/topology_change` (biri 193 ms), sonra
+`Device lost observed at endSingleTimeCommands/vkQueueSubmit`. Mekanizma hafızadaki dersin
+aynısı: örnek SAYISI değişince `VulkanDevice::createTLAS` yok et/yeniden yarat dalına girer ve
+uçuştaki RT işi (RT gölge, RayFusion) için BEKLEMEZ. Balon patlayınca mesh GİZLENİYORDU
+(`setObjectVisible(false)`) → her patlama/doğuşta sayı değişiyordu. Düzeltme: patlayan balon
+yerinde 1e-4'e BÜZÜLÜR, gizlenmez (yalnız hazırlıktan sonraki ilk gösterim sayıyı değiştirir).
+Status `visual_visible` = mesh görünür VE balon şişik.
+**AÇIK (motor geneli, dokunulmadı):** `createTLAS` yok etme dalı drenajsız. Sayıyı değiştiren
+başka her şey (parçacık RT örnekleri, scatter, konfeti?) aynı riski taşır. Doğru düzeltme:
+YALNIZ yok etme dalında koşullu drenaj (bkz. hafıza: koşulsuz kare drenajı perf'i öldürür).
+
+**Balon alanı:** otomatik alan dış sınırı (tavan levhası z ±6,57) aldığı için balonlar yan
+duvardan çıkıyordu (status z ±5,67). Artık oda İÇİ: levha gibi yüzeyler (bir eksende <0,3 m,
+diğerlerinde >1 m) duvar sayılır, merkeze en yakın duvar sınırdır; açık taraf dikey duvarların
+bittiği yer. Workshop'ta hesap: oda x −4..4, y 0,03..4,57, z −4..4 → alan ±3,1, y 0,83..3,57.
+
+1. Player: uzun süre oyna, başka pencereye geç ve geri dön — cihaz kaybı yok. SceneLog'da
+   patlamalarda `createTLAS/topology_change` ARTIK yok (yalnız açılışta). Hâlâ varsa ve konfeti/
+   damlayla aynı anda geliyorsa: parçacık örnekleri sayıyı değiştiriyor (motor geneli açık).
+2. `paint.wet_demo` status `spawn_min/max` ≈ [−3,1, 0,83, −3,1] / [3,1, 3,57, 3,1]; balonlar
+   duvar içinde kalır.
+3. Patlayan balon görünmez (büzülmüş), tıklanamaz (pick yalnız şişikleri tarar).
+
+## Süzülen balonlar + odadan doğum alanı (2026-11-17, Claude) — aynı derlemeye girer
+
+**Durum:** KAYNAK HAZIR, derlenmedi, /Zs PASS (`BalloonPaintDemo.cpp` iki hedef,
+`GameDesignUI.cpp`). Header yok. Bu derlemede ayrıca: CPU `resolveOBBCollision` düzeltmesi
+ve yaygın struct değişikliği (en üstteki uyarıya bak) — tam Rebuild önerilir.
+
+Ne: balon doğum alanı artık boya yüzeylerinin sınırlarından (duvardan 0,9 m içeri, yerden
+0,8 m, tavandan 1 m aşağı) — yükseltilmiş tavanla balonlar ~3,5 m'ye çıkar; ya da panelden
+elle. Mesh balonlar süzülür: `float_amplitude` salınım (vars. 8 cm), `drift_speed` dolaşma
+(vars. 0,12 m/s, büyük balon daha yavaş), duvar/tavan ve birbirinden kaçınma; dönüşüm 30 Hz.
+
+1. Player'da balonlar yavaşça salınıp dolaşıyor, üst üste binmiyor, duvardan çıkmıyor; bazıları
+   eskisinden yüksekte. Hiç kıpırdamıyorsa `drift_speed`/`float_amplitude` 0 ya da parçacık modu.
+2. Tıklama hareket halindeki balonu yakalar (pick anlık konumu okur).
+3. `python scripts/test/rt_balloon_motion_ipc.py` (Player) → 4/4; çıktıdaki `motion_ms_max`
+   ÖLÇÜM: her 30 Hz'de 12 balonun dönüşümü — gizmo sürükleme yolu (obje dönüşümü + arka uçlara örnek dönüşümü, CPU köşe pişirmesi YOK, log YOK); CPU köşeleri yeniden doğuşta bir kez pişer. Demo artık TransformCommand kullanmıyor ("Redo: Transform" logu kalktı). ★ Sinsi olan: FPS
+   hareket açılınca düşüyorsa sebep bu sayı — sessizce "oyun ağırlaştı" görünür.
+4. Panel → Floating: Bob/Drift kaydırıcıları, "Balloon area from the room" kapalıyken alan elle.
+
+## ★ OBB collider dokunmadığı damlayı öldürüyordu (2026-11-17, Claude) — ASIL KÖK
+
+**Durum:** `sim_particle_collide.spv` DERLENDİ, iki yerde (bağlama/push AYNI; uygulamayı yeniden
+başlatmak yeter). CPU referansı `ParticleSimulation.cpp` `resolveOBBCollision` DERLENMEDİ
+(/Zs PASS). Kayıt yeri yeniden pişirme partisi düzeltildikten SONRA da sorun sürdü (kullanıcı).
+
+**Ölçüm (Studio canlı, boya tüketmesi geçici kapalı, bir patlama):** 1800 olayın **1719'u
+collider 9 = tavan `Cube_2` obb**, konumları y 0,9–2,1 (balonun etrafı), tavan 4,57–4,78'de.
+Tavan aabb yapılınca: 1248 olay zeminde (`Cube_1`), duvarlar 258+, tavan 5 → kök obb yolu.
+**Kök:** obb dalı temas OLMASA da konumu yerel çerçeveye çevirip geri yazıyordu; ötelenmiş
+çerçevede (tavan y=4,67) gidiş-dönüş ~1e-7 fark bırakır, çağıran "değişti = temas" sayar,
+Die yanıtı damlayı İLK adımda öldürür. Zemin `Cube_1` merkezde (öteleme 0) olduğu için hata
+görünmüyordu. Belirtiler: "yarım küre patlama", duvar altı/zemin boyanmıyor.
+**Düzeltme:** yalnız gerçek temasta geri yaz (şader + CPU). SDF yolları zaten erken dönüyor.
+
+1. Player'ı YENİDEN BAŞLAT (yeni .spv): patlama küresel, zemin ve duvar altı boyanır.
+   Bozuksa: `.spv` zaman damgası 01:28 değil → eski şader.
+2. `python scripts/test/rt_collider_event_locality_ipc.py` (Studio) → 3/3: her olay kendi
+   collider kutusuna ≤25 cm; zemine düşen olay ≥%10.
+3. Tavanı (`Cube_2`) obb bırakabilirsin; aabb gerekmez.
+★ Sinsi olan: bu hata merkezdeki/ötelenmemiş kutularda HİÇ görünmez; obb'li her yeni objede
+(taşınmış bir oyuncak) damla sessizce havada ölür.
+
+## ⚠ YAYGIN STRUCT DÜZENİ DEĞİŞTİ — `WetPaintStats` (+`geometry_rebakes`), `WetPaintGpu` (+üye), `rtapi::WetPaintStatusInfo` (+alan)
+
+Artımlı derleme eski `.obj` bırakırsa erişim ihlali kod hatası gibi görünür: bu dosyaları
+içeren TU'lar (9) yeniden derlenmeli; şüphede Player+Studio için Rebuild.
+
+## Boya yüzeyi objeyi izler: taşı/ölçekle → yeniden pişir (2026-11-17, Claude)
+
+**Kök (kullanıcı sahnesinde canlı ölçüldü):** yüzeyin texel dünya konumları `wet_add_surface`
+anında BİR KEZ pişiriliyordu. Duvarlar 3,4 → 4,68 m uzatıldıktan sonra: duvara y=0,5/1,5/3,0'da
+konan test lekesi tuttu (~862 texel), **y=4,3'te 0**; zemin `Cube_1`'e y=0,03/1/−1'de 0.
+Görülen üç belirti tek kök: (a) duvarın üstü/zemin boyanmıyor, (b) patlama izi "yukarı yarım
+küre" — Y'ye çarpan damla eski haritada Y'yi boyar, o texel artık 1,38×Y'de görünür, iz yukarı
+kayar ve uzar, (c) akan boya texel uzayında olduğu için yine aşağı iner. Collider'lar doğru
+çözülüyordu (`collider.list` resolved kutular uyuyor).
+**Düzeltme:** geometri parmak izi (köşe sayısı, konum toplamı, sınırlar) saniyede 2 kez;
+değişen yüzey yeniden pişer, atlas yeniden kurulur (o yüzeyin ıslak durumu sıfırlanır).
+`paint.wet_status` → `geometry_rebakes`. **Derlemeden önceki geçici çözüm:** projeyi kaydet
+ve yeniden aç (yükleme yüzeyleri güncel geometriyle yeniden pişirir).
+
+1. Derleme sonrası workshop: duvarın en üstüne ve zemine balon boyası düşer; patlama izi
+   balonun etrafında küresel. `geometry_rebakes` açılışta 0 olabilir (yükleme zaten taze pişirir).
+2. `python scripts/test/rt_wet_paint_rebake_ipc.py` (Studio) → 3/3: duvarı 1,5 m kaldırır,
+   ESKİ tepenin üstüne leke tutar, geri koyar.
+3. Gizmo ile duvarı sürüklerken takılma: her 0,5 sn'de bir pişirme (512² yüzey ~25 ms
+   tahmini, ölçülmedi). Rahatsız ederse sürükleme bitince pişirme (debounce) eklenir.
+   ★ Sinsi olan: pişirme başarısızsa `status` "rebake_failed: …" der ve yüzey eski haritayla
+   SESSİZCE devam eder.
+
+## Ortak oda hedefi şovu (2026-11-17, Claude) — aynı derlemeye girer
+
+**Durum:** KAYNAK HAZIR, derlenmedi, /Zs PASS (`BalloonPaintDemo.cpp` iki hedef,
+`GameDesignUI.cpp`). Header/struct/shader yok.
+
+Ne: `room_goal` (0 = kapalı, vars. **0,5**: boyanabilir texel'lerin yarısı "dolu oda").
+Boyanma saniyede 2 kez ölçülür; %25/%50/%75'te 1/2/3 konfeti patlaması, %100'de konfeti
+yağmuru + 4 patlama + kalan balonların art arda patladığı final; `finale_reset_seconds`
+(vars. 10) sonra oda kendini temizler, yeni tur başlar. `celebrate_sound` isteğe bağlı.
+Parlama/yanıp sönme YOK. Panel: Shared room goal bölümü + ilerleme çubuğu.
+
+1. Game Design → Room goal 0,10 (kolay ulaşılsın) → Reconfigure → birkaç balon patlat:
+   ilerleme çubuğu artar, %25/%50/%75'te havada konfeti.
+2. %100: konfeti yağmuru + balonlar sırayla patlar + ~10 sn sonra oda temiz, çubuk 0.
+   ★ Sinsi olan: çubuk hiç artmıyorsa kaplama ölçümü düşüyor (`coverage` false) — hata
+   vermez, şov sessizce hiç gelmez. `paint.wet_demo` status `room_progress`'e bak.
+3. `python scripts/test/rt_room_goal_show_ipc.py` (Studio ya da `--player`) → 6/6.
+
+**Zemin (kullanıcı sahnesi, 2026-11-17 ölçüldü):** `PaintFloor` sahnede yok; zemin
+`LeftWallBox_1` (LeftWallBox kopyası, hafif eğik: y −0,08..0,22). `LeftWallBox` ile AYNI
+materyali (`Warm Ivory Trim`) paylaştığı için boya yüzeyi yapılamıyor (çekirdek reddeder).
+Yol: Paint Mode → Binding Mode "Make Unique For Paint" → Make Unique Now, sonra Game Design'da
+yüzey ekle; collider'ı aabb yerine **obb** yap (eğik zeminde aabb üstü 22 cm'e kadar havada
+kalır, leke yarıçapı 12 cm → boya düşmez). Açık iş: "Make Unique For Paint" yalnız panelde,
+IPC'de yok (CLAUDE.md §1 ihlali).
+
+## Sürpriz balon (2026-11-17, Claude) — aynı derlemeye girer
+
+**Durum:** KAYNAK HAZIR, derlenmedi, /Zs PASS (`BalloonPaintDemo.cpp` iki hedef,
+`GameDesignUI.cpp`). Header/struct/shader yok. Sahneye yeni CPU parçacık sistemi
+`BalloonConfetti` eklenir (demo hazırlanırken, projeyle kaydedilir).
+
+Ne: `surprise_chance` (0..0,5, varsayılan **0,1** — mevcut projelerde de açık) ile her
+yeniden doğuş zar atar. Sürpriz = ALTIN metal balon; patlayınca 1,5× damla, her damla rastgele
+palet renginde (gökkuşağı boya), 220 dönen konfeti kartı (boya BIRAKMAZ: çarpışma olayı
+kaydetmez), `surprise_sound` ya da yoksa patlama sesi 1,25× tiz. Panel: Surprise chance,
+Surprise sound.
+
+1. Studio Game Design → Surprise chance 0,5 → Reconfigure: balonların yarısı altın ve metalik.
+   Altın görünmüyor ama status `surprise:true` diyorsa malzeme `metallic` yazılmıyor.
+2. Altın balonu patlat: duvarda ÇOK renkli boya + havada süzülen renkli kartlar + daha tiz ses.
+   ★ Sinsi olan: gökkuşağı damlalarının bir kısmı BEYAZ boyuyorsa profil yanlış sisteme
+   gidiyor (renk c → `kSystems[c % 4]`).
+3. Konfeti duvara/zemine boya bırakmamalı; bırakıyorsa `BalloonConfetti` olay kaydediyor.
+4. `python scripts/test/rt_surprise_balloon_ipc.py` (Studio) → 6/6; `--player` → 4/4.
+5. Sürpriz 0'a çek → hiç altın balon yok, normal balonların metalliği 0.
+
+## Oda sıfırlama (elle / boşta / oturum sonu / F9) + balon boyu (2026-11-17, Claude)
+
+**Durum:** KAYNAK HAZIR, derlenmedi, /Zs 7/7 PASS (Studio + Player). Header yok, struct
+düzeni yok, shader yok. `tests/body_pose_game_test.cpp` beklentisi `room.reset` oldu.
+
+Ne değişti:
+- `paint.wet_demo reset`: boya temizlenir, patlamış balonlar geri gelir; havuzlar korunur
+  (yeniden ısınma yok). Uçuştaki damlalar ≤2,8 sn içinde konar → boya 3 sn sonra bir kez
+  daha temizlenir. Player **F9** (görevli) aynı çekirdeği çağırır. Oturum sonu artık
+  `room.reset` eylemi yayar (boya + balonlar; `paint.reset` yalnız boya olarak kaldı).
+- `idle_reset_seconds` (0 = kapalı, 10..3600): son OYUNCU patlatmasından bu kadar sonra
+  oda kendiliğinden temizlenir. Otomatik (attract) patlamalar boyar ama etkinlik sayılmaz.
+- `size_min/size_max` (0.3..2.0): her doğuşta boy; mesh = geometri × boy (dönüşümün kendi
+  ölçeği atılır — kayıt/yükle ile katlanmaz), tıklama yarıçapı boyla, damla = taban × boy²,
+  saçılma boyla, ses perdesi boy^-0.7. Damla başına LEKE boyu hâlâ tek global ayar (shader
+  değişikliği gerektirir; ayrı iş).
+- Panel: Balloon size aralığı, Idle reset, "Reset room" düğmesi.
+
+Sıra:
+1. Studio Game Design → Balloon size 0.6–1.4 → Reconfigure: balonlar gözle farklı boyda,
+   büyükler daha pes patlar ve daha çok boyar. Hepsi aynıysa `size` status'ta bak.
+2. **Player F9:** duvarlar 3 sn içinde tamamen temiz, bütün balonlar yerinde.
+   ★ Sinsi olan: F9 sonrası birkaç leke "geri gelirse" ikinci temizlik (3 sn) çalışmıyor.
+3. `python scripts/test/rt_balloon_reset_size_ipc.py` (Studio; `--player` ile Player) → 9/9.
+4. Idle reset 30 sn ver, kaydet, Player'da aç, bir balon patlat, 30 sn dokunma → oda temiz.
+5. Kaydet → aç → kaydet → aç: balon boyları aralıkta kalır, büyümez (katlanma yok).
+6. **Canlı palet (aynı parti, derleme öncesi eklendi):** varsayılan artık 8 renk (kırmızı, turuncu, sarı, yeşil, turkuaz, mavi, mor, pembe), ikincil kanallar ~0 (eski kırmızının doğrusal 0,08 yeşili ekranda %31 = pastel). Game Design → Colours: renk kutuları, + ekle, sağ tık çıkar (2..8). Balon ve duvardaki boya AYNI renkte olmalı; farklıysa boya profil rengini değil başka bir şeyi okuyor. ★ Çok renk üst üste binince ıslak boya karışır — duvar kahverengiye dönüyorsa paleti daralt ya da karışım oranına bakılacak (ayrı iş). Eski `rt_workshop_balloons_ipc.py` renkleri artık status `palette`ından okur.
+
+## Damla collider'ı Game Design'dan (SDF dahil) + balon başına patlama sesi (2026-11-16 gece 3, Claude)
+
+**Durum:** KAYNAK HAZIR, derlenmedi, /Zs 8/8 PASS (Studio + Player). Header: yalnız
+`BalloonPaintDemo.h` (+3 fonksiyon). Struct düzeni değişmedi. Shader yok.
+
+Ne değişti:
+- **Collider = mevcut atama.** Yeni bir collider sistemi YOK: Game Design'daki seçim, mevcut
+  `ParticleColliderDesc`'i (kaynak obje + mod, objeyi izler) dört damla sistemine
+  `<obje> PaintCollider` adıyla yazar. Parçacık sistemiyle birlikte kaydedilir; game_design'a
+  ayrıca girmez. Modlar none / aabb / obb / mesh_sdf (32/64/128). IPC:
+  `paint.wet_demo operation=set_collider`; her sonuç `colliders` listesini taşır (elle
+  kurulmuş `BackWallBoxCollider` vb. dahil).
+- **SDF pişerken demo hazırlanmaz** (havuzlar GPU-zorunlu): configure açık hata verir; proje
+  yüklemesi pişmeyi bekler (`paint.wet_design` status `waiting for collider SDF: <ad>`,
+  ~1 dk sonra vazgeçip söyler).
+- **Ses:** yeni `audio.play_at {id, position, gain, pitch}` — bir kaynağın dosyasını verilen
+  konumda BAĞIMSIZ tek-atışlık ses olarak çalar (gök gürültüsünün geçici ses yolu; en fazla
+  16 tek-atış / 32 toplam, bütçe dolunca hata değil `played:false`). Demo config `pop_sound`
+  (ses kaynağı id): her patlayan balon kendi konumunda bir kez, ±%8 perde farkıyla. Spatial
+  kaynakta asset MONO olmalı (gök gürültüsüyle aynı kural).
+- Panel: "Droplet colliders" bölümü (liste + seçili obje için şekil/SDF çözünürlüğü),
+  Balloon demo'da "Pop sound" seçimi.
+
+Sıra:
+1. **Game Design → Droplet colliders** listesinde atölyenin 4 elle kurulmuş collider'ı görünür
+   (`BackWallBox [aabb]`, `Floor... [plane]` …). Boşsa demo sistemleri yok/yanlış adda.
+2. Bir oyuncak objesi seç, Shape = mesh_sdf → listede `[mesh_sdf, cooking]`, sonra `cooking`
+   kalkar. Damlalar o objede boya bırakmaz (yüzey değilse) ama SEKER/ÖLÜR, içinden geçmez.
+3. `python scripts/test/rt_balloon_collider_sound_ipc.py` (Studio; `--player` ile Player)
+   → 4/4 (sessiz). Mono bir ses kaynağı varsa `--sound <id>` → 7/7.
+4. **Kulakla:** üç balonu aynı anda patlat (`burst count 3` ya da hızlı tıklama) → üç ayrı
+   patlama, her biri kendi yönünden; biri diğerini kesmez.
+   ★ Sinsi olan: stereo asset → `pop_sound_error` "mono asset" der ama patlama sessizce
+   sürer. Ses yoksa önce `paint.wet_demo` status `pop_sound_error`.
+5. Kaydet → yeniden aç: SDF collider pişerken status `waiting for collider SDF`, sonra
+   `applied: … balloon demo prepared`. Demo hiç hazırlanmıyorsa 1 dk sonra sebebi yazar.
+
+**Ek (ilk canlı tur):** kullanıcının `sfxmint-balloon-pop-03.wav` dosyası STEREO 44.1 kHz (0,40 sn) → mono kopya `assets/audio/sfxmint-balloon-pop-03-mono.wav` üretildi (L/R tepe 26421/26418, karışım 26420: faz iptali yok). Studio `audio.status`: `device: not_initialized`, transport `paused` — `play_at` duraklatılmış zaman çizelgesinde `transport_paused` döndürüp ÇALMIYORDU (Studio'da düzenleme hep böyle). Düzeltildi: tek-atışlar oyun saatinde çalar, `holdTransport` onları tutmaz (`AudioService.cpp`, /Zs PASS, derlenmedi). "Audio device is not active yet" yazısı hata değil: aygıt ilk seste açılır.
+
+**Ek 2:** beyaz top geri geldi: `PaintBall_08` materyalindeki eski boya dokusu proje DOSYASINDA kalmıştı (canlı temizlik kaydedilmemişti; derleme sonrası açılış geri getirdi). Studio'da yeniden temizlendi — **kullanıcı kaydetmeli.** Kalıcı önlem: demo artık temel renk dokusu taşıyan balon materyalini sebebiyle REDDEDER (`validateMeshVisuals`, /Zs PASS, derlenmedi); sessiz beyaz top yerine açık hata.
+
+Bilinen maliyet (ölçülmedi): SDF her damla sisteminde ayrı pişer (aynı mesh 4 kez). GPU
+pişirme hızlı olduğu için şimdilik kabul; karmaşık sahnede ölç.
+
+## Game Design ayrı sekme, kaldırılan yüzey dokusunu bırakır, kaydırmalı listeler (2026-11-16 gece 2, Claude)
+
+**Durum:** KAYNAK HAZIR, derlenmedi, /Zs 5/5 PASS. Header: `WetPaintGpu.h` (`removeSurface`
+varsayılan argümanlı parametre; düzen aynı, 9 includer). `scene_ui.cpp` değişti.
+
+Canlı ölçülen (Player + Studio, IPC): kaydedilen boya ayarları geri GELİYOR — 4 yüzeyin
+`lifetime/roughness_channel/height_normal_channel/wetness` değerleri dosya = Studio canlı =
+Player canlı; `pbr_texture_bytes` 15.7 MB her ikisinde. Panelde görünmemesinin nedeni:
+ayarlar yalnız yüzey SEÇİLİYKEN açılıyordu ve Paint sekmesi seçimi kilitliyordu.
+"Varsayılan materyalli küre": `PaintBall_08` (CPU mavi) ekranda beyazdı — bir ara boya
+yüzeyi yapılıp kaldırılmış, beyaz boya dokusu `base_color` slotunda bağlı kalmıştı
+(`material.get` rengi doğru raporluyordu: panel-yalan sınıfı). Studio'da kalıntı doku IPC ile
+temizlendi (yalnız bu topta vardı); **kullanıcı projeyi kaydetmeli.**
+
+1. **Sol şeritte "Game Design" sekmesi** (Paint Mode'un altında). Paint sekmesine gitmeden
+   bir duvar seçince boya ayarları altında açılır; seçim kilitlenmez.
+2. **Listeler en fazla 5 satır**, fazlası kutu içinde kayar; panel uzamaz.
+3. **Bir topu yüzey yap → kaldır → top kendi renginde** (beyaz kalmaz),
+   `material.textures` o topun materyalinde `generated/...` göstermez. Kalıyorsa
+   `WetPaintGpu::removeSurface` scene'siz çağrılmış.
+4. Player'da kaydedilmiş workshop: 12 top da renkli (beyaz yok).
+
+## İlk canlı tur bulguları + kanal boyutu düzeltmesi (2026-11-16 gece, Claude)
+
+**Durum:** `WetPaintGpu.cpp` + `GameDesignUI.cpp` değişti (artımlı, header yok), /Zs PASS.
+
+Kullanıcı derledi: Player'da patlatma çalışmadı. Kök (canlı IPC ile okundu):
+Studio'da yalnız `PaintLeft` boya yüzeyi yapılmış, kanallar (roughness + kabartma) açılmış,
+"Prepare demo" `could not prepare wet paint GPU atlas` ile düşmüş (`paint.wet_status`:
+`channel_resolution_mismatch: PaintLeft`). Proje bu haliyle kaydedildi → `game_design`
+VAR ama `balloon_demo` YOK → Player yan dosyayı (doğru olarak) okumadı → balon yok.
+Kanal hatasının kökü: yüzey bir boyutta eklenip kaldırılıp başka boyutta yeniden eklenince
+taban doku eski boyutta kalıyor, set'in `resolution`'ı yeni istenene dönüyor, kanal dokuları
+o yanlış boyutta yaratılıyor. Düzeltme: kanal dokuları taban dokunun GERÇEK boyutunda
+yaratılır, yanlış boyutlu kalıntı kanal dokusu yeniden yaratılır; yüzeyin raporlanan
+(ve kaydedilen) `resolution`'ı istenen değil gerçek boyuttur. Panel yeni yüzey için
+varsayılan olarak mevcut yüzeylerin boyutunu önerir.
+
+0. **Game Design paneli isim yazdırmıyor:** yüzeyler ve balon meshleri listede `x` ile çıkar, "Add selected" seçili objeyi ekler, yanındaki "Pick from scene..." açılır listesi sahnedeki objeleri (filtreli) gösterir. Yüzey olan obje balon listesinde, balon olan obje yüzey listesinde çıkmaz (çekirdek ikisini birden reddeder). Balon meshi verilince balon sayısı listenin boyudur (3..24). Yüzeyin boya ayarları, o yüzey sahnede SEÇİLİYKEN görünür.
+1. **Studio, workshop açık:** `paint.wet_status` → `status` artık `channel_resolution_mismatch`
+   değil; Game Design'da "Prepare demo" başarılı ("Prepared, stopped | flat_mesh").
+   Hâlâ düşüyorsa hata metni panelin altında yazar.
+2. Dört duvarı da (Floor/Back/Left/Right) yüzey yap, demoyu hazırla, KAYDET → Player'da aç →
+   tıkla-patlat boyar. ★ Sinsi olan: demo hazırlanmadan kaydedilen proje Player'da hatasız
+   açılır ama balon yoktur.
+3. Sonra alttaki bölümün 3. maddesi (`rt_game_design_roundtrip_ipc.py --open`).
+
+Ayrı açık (bu partide DOKUNULMADI): HDRI altında balonlarda köşeli koyu dilimler ve sağ
+duvarda simsiyah elipsler. Ölçülen: RT gölge kapalı/açık ve RayFusion yansıma açık/kapalı
+görüntüyü değiştirmiyor (yansıma açıkken 238k ışından yalnız 1.3k vuruş gölgelendi: "bounce
+yalnız nokta/yönlü ışık"). Sahnede tek nokta ışık (yarıçap 0.01, sert gölge). Duvar
+roughness 0.72 olduğu halde siyah elipsin içinde parlama var — gölgede çevre ışığı da
+sönüyor olabilir. Kök bulunmadı.
+
+## Oyun tasarımı projeyle kaydedilir + Studio "Game Design" bölümü (2026-11-16 gece, Claude)
+
+**Durum:** KAYNAK HAZIR, C++ DERLENMEDİ. Shader yok. **İki yeni .cpp** (`Paint/GameDesign.cpp`
+iki hedefte, `UI/GameDesignUI.cpp` yalnız Studio; vcxproj'lara eklendi, Player üretici
+`--check` PASS). Header değişikliği: `BalloonPaintDemo.h` (+1 fonksiyon), `RtApiPaintWet.h`
+(+1 struct, +1 fonksiyon) — yaygın struct düzeni değişmedi, artımlı derleme yeter.
+Alttaki "tıkla-patlat" partisi de hâlâ derlenmedi; ikisi aynı derlemede gelir.
+
+Ne değişti: proje artık `game_design` anahtarı taşır — ıslak boya yüzeyleri + ayarları,
+splat kuralları, balon demosu (yüzey listesi olmadan). Kopya yok: kayıt canlı atlas/demodan
+okunur. Yüklemede belge kuyruğa girer, **ortak sim saati ilk tikte** uygular (Studio ve
+Player aynı yol). Player'da `.balloons.json` yalnız proje `game_design` taşımıyorsa okunur.
+Demo `surfaces` OLMADAN yapılandırılınca sahnedeki yüzeyleri kendi ayarlarıyla boyar (kendi
+"atölye görünümünü" yalnız `surfaces` verilirse uygular). Studio'da proje değişince ıslak
+boya + demo artık sıfırlanır (önceden eski sahnenin yüzeyleri yeni projeye taşınıyordu).
+Yeni IPC: `paint.wet_design` (Read) → `{design, pending, status}`; Python `rt.paint.wet_design()`.
+
+Sıra (bağımsız ve hızlı önce):
+
+1. **Studio açılıyor, Paint panelinin altında "Game Design" bölümü var.** Bir mesh seçili
+   değilken "Select a mesh…" yazar. Yoksa: eski exe (zaman damgası) ya da
+   `scene_ui_modifiers.cpp` derlenmemiş.
+2. **Boş sahnede proje aç/yeni proje: hata yok, bölüm "Not prepared".** Önceki projeden
+   yüzey listesi görünüyorsa `newProject` sıfırlaması çalışmıyor.
+3. **Otomatik gidiş-dönüş (Studio, workshop açık):**
+   `python scripts/test/rt_game_design_roundtrip_ipc.py --open` → **9/9 PASS**. Orijinal
+   `workshop.rtp`'ye yazmaz, kopyayı temp'e kaydeder ve yolunu basar.
+   - 1 FAIL: demo yüzeysiz yapılandırılamıyor → `validatedConfig`/`prepare` dalı.
+   - 2 FAIL (lifetime 12 görünüyor): demo hâlâ kendi görünümünü basıyor → `builds_surfaces`.
+   - 4/5 FAIL: `saveProjectImpl`'daki `game_design` bloğu çalışmadı.
+   - 6–8 FAIL: `openProject` belgeyi kuyruğa koymadı ya da saat tikinde uygulanmadı
+     (`status` hangi nesneyi bulamadığını yazar).
+   - ★ **Sinsi olan 7:** design "neredeyse aynı" — örn. ayarlar varsayılana dönmüş ama yüzey
+     sayısı doğru. Gözle bakan biri boyayı yine görür; test sayıları karşılaştırır.
+4. **Player'da kopya (3. adımın bastığı yol) `project.open`:** `paint.wet_design` →
+   `pending=false`, `status="applied: 4 paint surface(s)"`, `paint.wet_demo` prepared,
+   12 mesh balon görünür; tıkla-patlat boya bırakır. `.balloons.json` kopyada YOK — yani demo
+   tamamen projeden geldi. Demo prepared değilse: viewer yan dosyaya düştü ve bulamadı.
+5. **Orijinal `workshop.rtp` (hâlâ yan dosyalı) Player'da eskisi gibi açılır** (yan dosya
+   yedeği). Bozuksa `RuntimeSceneViewer.cpp` `sidecar_ok` dalı.
+6. **Panelden düzenleme = IPC:** panelde bir yüzeyin "Open time"ını değiştir, sonra
+   `paint.wet_get_settings` aynı değeri okur; panelde "Prepare demo" sonrası
+   `paint.wet_demo` status'taki config panel formuyla aynı. Farklıysa panel durum tutuyor
+   (CLAUDE.md §1 ihlali).
+
+Karar bekleyen (kullanıcı): `workshop.rtp`'nin kendisi Studio'dan kaydedilip `game_design`
+taşısın ve `.balloons.json` + `workshop.paint-profile.json` emekliye mi ayrılsın? Kaydedilen
+ayarlar o zaman demonun eski sabit "görünümü" değil, panelde ayarlanan değerler olur.
+
+## Balon demosu: tıkla-patlat, kanal maskesi, 12 sn kuruma, beyaz küre (2026-11-16 akşam, Claude)
+
+**Durum:** kaynak hazır, shader derlendi (`paint_wet.spv` iki yerde), C++ DERLENMEDİ. Player
+(ve Studio) artımlı ama GENİŞ: `WetPaintGpu.h` + `RtApiPaintWet.h` varsayılan değer değişti.
+Struct düzeni, bağlama, push boyutu, yeni .cpp YOK.
+
+**Kullanıcı canlı (aynı akşam, Player yeniden derlendi):** beyaz küre YOK, fareyle patlatma
+İYİ. İki yeni bulgu ve düzeltmesi (shader yeniden derlendi; `BalloonPaintDemo.cpp` DERLENMEDİ):
+
+- **Kabartma duvarda ters aydınlanıyordu ("boya yukarı kayıyor").** Kök: height→normal yeşil
+  kanal işareti. Texel y aşağı büyür, ama raster/RT bitangent'i +v = görüntü-YUKARI
+  (`material_preview_frag` `applyNormalMap` B'yi bunun için çevirir). Doğru detay normali
+  `(-gh, +gv, 1)`; shader `-gv` yazıyordu. `paint_wet_channels.glsl` düzeltildi.
+  ★ CPU Paint (`MeshPaintAdapter.cpp:947, 1019`) aynı `-dy` işaretini taşıyor: aynı hata
+  büyük olasılıkla orada da var, DOKUNULMADI ve doğrulanmadı. Yeni `.spv` Player yeniden
+  başlayınca yüklenir. Kontrol: duvardaki bir damlanın ÜST kenarı (ışık yukarıdaysa) aydınlık.
+- **Boya hâlâ hızlı kuruyordu.** `lifetime_seconds` 12 tek başına yetmez: ıslaklık ayrıca
+  `absorption × ıslaklık × 0,7 / sn` ile düşer (varsayılan 0,18), ve bir damlanın başlangıç
+  ıslaklığı 1 değil. Demo artık hazırlanırken atölyenin akan profilini kendisi uygular
+  (wetness .95, lifetime 12, diffusion .1, runoff .7, absorption .06, drip_head .8, load .95,
+  deposit .9, pickup .2, radius 6) ve iki kanalı da AÇAR (`prepare`, ilk coverage'dan önce:
+  kanal dokuları yüklemede bağlanır). Açık Player'a aynı değerler IPC ile canlı uygulandı.
+  Sonuç: `apply_workshop_paint_profile.py` bu demo için gereksizleşti; `prepare_ms` /
+  `atlas_ms` kanal hazırlığı kadar artar (ölçülmedi, 7,2 sn takılma adayı buraya taşındı).
+
+Ne değişti:
+- `paint.wet_demo operation=pop` (yeni işlem, yeni metot değil): `balloon` (id) ya da `screen`
+  ([x, y] 0..1, sol üst). Player sol tık aynı çekirdek çağrıyı yapar (`PlayerMain.cpp`).
+  Yeniden doğma zaten vardı (3,5 oyun saniyesi), dokunulmadı.
+- Kanal maskesi (`paint_wet_channels.glsl`): roughness ve kabartma artık kaplamaya doğrusal
+  değil `smoothstep(0.25, 0.85)` ile bağlı, yani lekenin ince kenarı parlamaz/kabarmaz.
+  Varsayılan `normal_strength` 1.0 -> 0.5.
+- Varsayılan `lifetime_seconds` 2.5 -> 12 (yalnız GPU ıslak boya; fırça 2.5 kalır).
+- Isınma parçacıkları `size_scale` 0.001 (merkezdeki beyaz küre adayı).
+
+Sıra, pastel atölye Player'da açık, otomatik demo kapalı:
+
+1. **Tıkla** — bir balona sol tık: o balon patlar, boya sıçrar, ~3,5 sn sonra başka yerde yeni
+   balon. Boşluğa tık: hiçbir şey. Patlamıyorsa önce F5 (debug kamera) açık mı bak; açıkken
+   sol tuş kamerayı döndürür. Yanlış balon patlıyorsa pencere-görüntü eşlemesi kayık
+   (pencere en-boyu render en-boyundan farklıysa beklenir, bakılmadı).
+2. **Otomatik** — `python scripts/test/rt_player_balloon_pop_ipc.py` -> PASS (ret edilen 7 kötü
+   istek, id ile, aynı id tekrar = -1, ekran noktasıyla, yeniden doğma).
+3. **Beyaz küre** — taze açılışta, ilk patlamadan ÖNCE oda ortasına (0, 2, 0) bak: küre
+   olmamalı. ★ Bu düzeltme DOĞRULANMAMIŞ bir teşhise dayanıyor (ısınmanın son parçacığı son
+   adımdan sonra öldürülüyor, cihaz kopyası ilk gerçek doğuma kadar yaşıyor). Küre hâlâ
+   duruyorsa teşhis yanlış: aday `PreallocatedBurstPool` emitter'ı ya da görsel sistem.
+   Küre artık görünmüyor ama 1 mm'lik bir nokta olarak orada duruyor olabilir; asıl kök
+   (öldürmenin cihaza gitmemesi) çözülmedi, yalnız görünmez yapıldı.
+4. **Kuruma** — hiçbir profil uygulamadan patlat: boya ~12 sn ıslak kalmalı ve duvarda aksın.
+   Hâlâ 2,5 sn'de kuruyorsa eski binary ya da sahneye bir profil 2,5 yazıyor.
+5. **Kanal görünümü** — dört yüzeyde iki kanalı aç, patlat: parlak/kabarık alan renkli lekeden
+   GENİŞ olmamalı; kabartma öncekinden yumuşak. Fazla zayıfsa `normal_strength` yükselt
+   (0..8), eşikler shader'da sabit (0.25 / 0.85).
+6. `rt_player_wet_paint_channels_ipc.py` yine PASS olmalı (roughness texel sayısı düşer; adım 2
+   "> 0" bekler). 0 çıkarsa maske tek dab'i tamamen eliyor: dab kaplaması 0.25'i geçmiyor.
+
+★ En sinsi: tık "çalışıyor" görünür ama yanlış balonu patlatır (komşu balon, ya da arkadaki).
+Seçim merkezden 0,4 m yarıçaplı küreye göre ve en YAKIN olanı alır; balon mesh'i daha büyük ya
+da küçükse kenar tıklamaları sessizce kaçar/taşar.
+
+## GPU ıslak boya — roughness / height / normal kanalları (2026-11-16, Claude; Codex'in yarım partisi)
+
+**Durum:** kaynak hazır, shader derlendi (`paint_wet.spv`, iki yerde), C++ DERLENMEDİ, canlı test YOK.
+Derleme artımlı ama geniş (`WetPaintGpu.h`, `RtApiPaintWet.h` alan ekledi; `VulkanBackend.cpp`,
+`MeshPaintAdapter.cpp` değişti). Studio + Player. Yaygın struct düzeni değişmedi.
+
+Ne yapıldı: Codex çözüm shader'ını, atlas hazırlığını ve IPC/Python alanlarını yazmıştı; kanal
+düzlemleri GPU'da üretiliyor ama **dokulara hiç kopyalanmıyordu**. Yayın adımı eklendi.
+Kanallar varsayılan KAPALI; `paint.wet_set_settings roughness_channel / height_normal_channel` açar.
+
+**Player ön ölçümü (2026-11-16 19:35, 18:32 tarihli Player = yayın adımından ÖNCEKİ binary,
+yeni `.spv` ile, pastel atölye, PaintFloor 512):** `rt_player_wet_paint_channels_ipc.py` adım 1-3
+PASS, adım 4 beklendiği gibi FAIL. Renk-only: kanal dispatch 0. Roughness: 532 kaplı texelde
+1044 roughness texeli (262144 geçerli), normal 0, diğer üç yüzey 0. Height: mevcut lekeden 1144
+normal texeli. Yeni dab: 2102 / 2138. `pbr_device_copies` 0 (renk kopyası 42, host bayt 0):
+hesap doğru, dokuya ulaşmıyor. `last_tick_ms` 0,70 -> 2,08. Ek atlas 32 MiB, kanal dokusu 3 MiB.
+Yani **Player'ı yeniden derle**, aynı betik adım 4-5'i de geçmeli.
+
+**Player CANLI PASS 5/5 (2026-11-16 19:38 derlemesi, iki ardışık koşu):** kanal düzlemleri artık
+dokulara ulaşıyor: `pbr_device_copies` +61/+62 (renk +42/+44), host bayt 0 (`device_copy`).
+Reset sonrası kaplı/roughness/normal 0. `last_tick_ms` renk-only 0,85, kanallar açık 0,6-1,3
+(tek koşu, gürültülü; maliyet karşılaştırması sayılmaz). Kanal atlası bir kez ayrılınca kanallar
+kapansa da durur (32 MiB) ve her reset'te bir tam yenileme dispatch'i koşar (ikinci koşuda
+`colour_only.pbr_dispatches_delta` = 1 bundan). AÇIK: gözle görünüm (parlaklık/kabarıklık,
+boyasız alan aynı mı), kopya maliyeti, balon patlamasında dört yüzey, Studio (ikinci VkDevice
+host yolu) hiç koşmadı.
+
+**Player maliyet ölçümü (2026-11-16, `rt_player_wet_paint_channel_cost_ipc.py`, pastel atölye,
+4 yüzey x 512, üçlü patlama 5400 damla, 60 Hz tempolu, capture kapalı, 2 tur dönüşümlü):**
+
+| Yapı | boya adımı ms (ort, 2 tur) | en kötü kare aralığı ms | kopya/s renk + kanal |
+|---|---|---|---|
+| renk | 1,17 / 0,86 | 18,9 / 22,3 | 85-124 + 0 |
+| +roughness | 1,18 / 0,98 | (7211) / 21,4 | 103-121 + 103-121 |
+| +roughness+normal | 1,09 / 1,01 | 22,2 / 21,0 | 125 + 376-378 |
+
+`frame_cost_ms` üç yapıda da 2,2 ms (turlar arası fark yapılar arası farktan büyük). Host bayt 0,
+düşen kaynak 0, device-lost yok. Sonuç: bu ölçekte kanalların kare başı maliyeti ölçüm gürültüsünün
+içinde (boya adımında en çok ~+0,1 ms), kare aralığı değişmiyor. SINIR: 60 Hz tempolu koşu kare
+altı maliyeti gizler; kapasite (uncapped) ölçülmedi, `frame_cost_ms`'in yayın kopyalarını içerip
+içermediği doğrulanmadı.
+★ AÇIK: kanalın üç yüzeyde İLK açıldığı turda bir kez 7,2 s'lik sunum boşluğu görüldü (ikinci
+turda yok, height/normal ilk açılışında da yok). Kök doğrulanmadı; aday: ilk kanal dokusu ataması
+(katman yığını + UV pişirme + tam materyal yüklemesi). Oyun sırasında değil yüklemede açılmalı;
+taze süreçte tekrar ölçülmeli.
+
+Açık sahnede (Player, hiçbir şey yaratmaz, boyayı sıfırlar, ayarları geri koyar):
+`python scripts/test/rt_player_wet_paint_channels_ipc.py` (`--target studio`, `--keep` var).
+
+Sıra (bağımsız ve hızlı önce). Boş Studio sahnesi:
+
+1. **Eski test bozulmadı mı** — `python scripts/test/rt_wet_paint_gpu_ipc.py` → PASS 8/8.
+   Bozuksa: renk-only yol etkilenmiş (shader `_p0 = 0` dalı ya da `publish` yeniden yazımı).
+   Diğer her şeyi maskeler, önce bu.
+2. **Kanal testi** — `python scripts/test/rt_wet_paint_channels_ipc.py` → PASS. Adım adım:
+   - `colour_only`: `pbr_dispatches = 0`, `pbr_buffer_bytes = 0`, roughness/normal texel 0.
+     Değilse kanallar kapalıyken maliyet var.
+   - `roughness`: `roughness_texels > 0` ve yüzeyin yarısından az; `normal_texels = 0`;
+     kontrol yüzeyi 0. `roughness_texels` yüzeyin tamamına yakınsa orijinal roughness
+     korunmuyor (skaler faktörün dokuya pişirilmesi yanlış).
+   - `height_normal`: mevcut lekeden `normal_texels > 0`. 0 ise yükseklik tohumu
+     (mod 8) çalışmıyor.
+   - `new_dab`: `pbr_device_copies > 0` (Studio'da viewport ikinci VkDevice olduğundan
+     `host_downloads` da artar, normal). İkisi de 0 ise kanal dokusu backend'de yerleşik
+     değil ya da RGBA8 değil (`paint.wet_status.status` içindeki `channel_*` metnine bak).
+   - `reset`: üç sayaç 0.
+3. **Gözle** — `--keep` ile koş, Rendered/RT ve raster'da bak: leke çevresinden **daha parlak**
+   (düşük roughness) ve kenarında **kabarıklık** görünmeli; boyasız zemin öncekiyle AYNI olmalı.
+4. **Player** — pastel atölyede dört yüzeye `roughness_channel=true height_normal_channel=true`
+   ver, tekli/üçlü patlama. `wet_status`: `publish_bytes_downloaded` 0 kalmalı (tek VkDevice),
+   `pbr_device_copies` artmalı. Kare süresini renk-only ile karşılaştır.
+
+★ **En sinsi başarısızlık — boyasız yüzey sessizce değişir.** Kanal açılınca materyalin skaler
+roughness faktörü ve normal gücü üretilen dokuya pişirilir, materyalde 1'e çekilir. Pişirme
+yanlışsa (roughness dokusunun kanal seçimi, yoğunluk çarpanı) BOYASIZ alan biraz daha parlak
+ya da mat olur; test bunu yakalamaz çünkü "orijinal" diye pişirilmiş değeri sayar. Kanalı
+açmadan ve açtıktan sonra boyasız bir bölgeye aynı ışıkta bak.
+
+Bilinen sınırlar / bakılmadı:
+- Her kanal ayrı bir `copyDeviceBufferToTexture` (her biri `waitIdle` + tek seferlik komut):
+  iki kanal açıkken kare başına yüzey başına 1 yerine 4 kopya. Maliyet ölçülmedi;
+  `pbr_device_copies` / `last_tick_ms` ile renk / +roughness / +height-normal ayrılabilir.
+- Boya kuruduğu karede karo pasifleşiyorsa roughness `dry_roughness`'a tam varmadan kalabilir
+  (son ıslaklık değeriyle). Kuru lekede roughness'e bak.
+- Kanal kapatılınca / yüzey kaldırılınca üretilen dokular ve 1'e çekilmiş faktörler materyalde
+  KALIR (geri alma yok). Proje kaydedilirse materyal bu haliyle kaydolur.
+- Materyalde önceden CPU Paint ile oluşturulmuş bir kanal dokusu varsa (farklı çözünürlük)
+  `channel_resolution_mismatch` ile reddedilir; sıkıştırılmış/R8 olarak yüklenmişse host yoluna düşer.
+- Panel yok: ıslak boya yüzey ayarları yalnız script/IPC'den (kanallardan önce de böyleydi).
+- Pastel atölye profili ve balon demosu kanalları AÇMIYOR.
+
+## Pastel atölye — kullanıcı build + Player canlı kabul PASS (2026-11-16, Codex)
+
+`rt_workshop_balloons_ipc.py` PASS: mesh poz/renk/gizleme/respawn, 3 negatif
+config, tekli/üçlü 1800/5400 damla, dört yüzey boyası, taşma/host byte/device-loss0.
+Görsel ek kontrolde 12 top birlikte gizlendi, gölgeleri de kayboldu; 21.600 damlada
+bu senaryoda taşma0. Kaynak proje açık, boya görünür, auto demo kapalı, capture
+ve display geri alındı. `PLAYER_WORKSHOP_ACCEPTANCE_2026_11_16.json`.
+
+Asset roughness çarpımı .09→.18 düzeltildi; kaynak asset yeniden açıldı, C++/shader
+build gerekmedi. Asset audit etkin scalar'ı test eder. Bu tur C++/shader değişmedi.
+Kullanıcının isteğiyle wet12s/runoff.7 profili mevcut API'den uygulandı; 8.saniyede
+üç duvar da ıslak. Kalıcı preset JSON + apply_workshop_paint_profile.py mevcut;
+reopen/configure sonrası yeniden uygulama gerekir, startup'a bağlanmadı.
+
+AÇIK: mevcut Paint height/normal/roughness kanallarını GPU wet output'a bağlamak
+(A'nın aktif dosyaları; pano §4 devir isteği), maliyeti sonra ölçmek. Yeni port
+bu kabulde PASS sayılmaz; Studio canlı yolu da ayrıca sınanmadı. Genel 64-source
+sınırı/paint publication beklemeleri ve kamera/çocuk algısı hâlâ ayrı işler.
+
+## Yeni kaynak paketi — görünmeyen ızgara yeniden kurulmaz (2026-11-16, Claude)
+
+Tek satırlık kapı: `Backend/VulkanViewportBackend.cpp` (ızgara yeniden kurma koşulu
+`grid_opacity > 0` ile kapılandı). Artımlı; Studio+Player. Derlenmedi.
+
+**Belirti (kullanıcı):** Player'da kamera sahneye YAKINKEN hareket takılıyor, uzakta akıcı.
+**Ölçüm (IPC orbit, 81 kare):** `overlay` aşaması CPU ortalama 1,4–2,2 ms ama p95 15,5 ms
+(uzak) / 28,7 ms (yakın) ≈ bir tam GPU karesi; çağrı süresi p50 33 / p95 64 ms (yakın). Yani
+karelerin ~%6'sı bir tam kare duruyor. **Kök:** editör ızgarası, kamera 10×-aralıklı kaba
+hücreyi her geçtiğinde `drainInteractiveViewportInFlight()` + iki tampon yeniden yaratımıyla
+kuruluyor; aralık kamera zemine yaklaştıkça küçüldüğü için yakında sık tetikleniyor. Player'da
+ızgara opaklığı 0 — görünmeyen çizgiler için duruyordu. Önceki paketteki karo önbelleği ayrıca
+doğrulandı: yakın/uzak orbit'te `shadow_atlas.frames_ran` 0/81, kamera maliyeti çizimde yok.
+
+1. **Player, yakın kamera, F5 + sürükleme:** takılma gitmeli. IPC orbit'te `overlay` CPU p95
+   ~2 ms'ye, çağrı p95 ≈ p50'ye inmeli. İnmediyse kök başka (aday: aynı penceredeki parçacık
+   billboard'ları / RayFusion probe overlay).
+2. **Studio:** ızgara görünürken davranış AYNI kalmalı (ızgara kamerayı izler, kaybolmaz).
+   Izgara opaklığı 0 → sonra yeniden açınca ızgara doğru yerde yeniden kurulmalı.
+3. ★ Studio'da ızgara açıkken aynı duraklama HÂLÂ var (bu paket yalnız görünmeyen ızgarayı
+   kapsar); orada akıcı görünmesi karenin kısa olmasından. Kalıcı çözüm: ızgara tamponunu
+   drain'siz emekliye ayırmak — yapılmadı.
+
+AÇIKLANMADI: kullanıcının "yakında bazı ışıkların etkisi değişiyor" gözlemi. Ölçümde yakında
+transmission GPU 4,5 → 13,4 ms, ana geçiş 8,8 → 11,8 ms (ekran kaplaması); ışık etkisinin
+neden değiştiği aranmadı (aday: RayFusion probe ambient'i, ışık bütçesi).
+
+## Yeni kaynak paketi — gölge önbelleği KARO başına + kameradan bağımsız yerel ışık (2026-11-16, Claude)
+
+Önceki üç paket (ayıklama, statik önbellek, RT gölge beklemesi) kullanıcı testinde PASS
+(gölgeler doğru; ışık/obje/kamera hareketi sorunsuz). Kalan şikâyet: **kamera hareket edince
+atlas her kare yeniden çiziliyor** (+11 ms GPU, 34 → ~19 kare/s). Bu paket onu hedefler.
+Tek dosya: `Viewport/MaterialPreviewShadow.cpp`; header/shader/IPC yok → artımlı, Studio+Player.
+Derlenmedi, ölçülmedi.
+
+Üç değişiklik:
+- **Yerel ışık (nokta/spot/alan) uzak düzlemi** artık kameraya değil sahne sınır kutusunun
+  ışığa en uzak köşesine göre (×1,05, [10, 2000] kelepçe). Görüş matrisi kamerayla değişmez.
+- **Scatter olmayan mesh'ler gölgeye kameradan ayıklanmış listeden DEĞİL, tam global instance
+  tamponundan çizilir.** Yan etki (düzeltme): kamera dışındaki nesneler artık gölge atıyor.
+- **Önbellek karo başına:** render pass `LOAD`, yalnız imzası değişen görüş kendi karosunu
+  `vkCmdClearAttachments` ile temizleyip yeniden çizer.
+Scatter havuzu olan sahnede kamera hâlâ içeriğin parçasıdır (eski davranış, kazanç yok).
+
+1. **Açılış (hızlı).** Gölgeler var, atlas karolarında çöp/eski gölge yok. Rastgele gölge
+   lekeleri = karo temizlenmeden çizilmiş (LOAD + clear sırası).
+2. **Ölçüm, kamera hareketi.** IPC `camera.orbit` döngüsü: `shadow_atlas.frames_ran` ≈ 0 ve
+   GPU ~28 ms kalmalı (önce 80/81 kare, 39,4 ms). Directional ışık RT gölgeye devredilmemişse
+   pan/dolly'de yalnız onun kaskadları çizilir (orbit'te o da sabit).
+3. **★ En sinsi: uzak düzlem kırpması.** Yerel ışıktan ÇOK uzaktaki nesnelerin gölgesi
+   kaybolmuş ya da ışığa yakın yüzeylerde gölge "akne"si / havada duran gölge (peter-panning)
+   artmış mı? Uzak düzlem büyüdü, derinlik hassasiyeti değişti; sapma ve PCF sabitleri aynı.
+   Büyük sahnede (>2000 birim) ışığa uzak köşe kelepçeye takılır — eski davranışla aynı sınır.
+4. **★ Kamera dışı gölge.** Kameranın arkasındaki bir nesnenin görünen zemine gölgesi artık
+   VAR olmalı (önceden yoktu). Yoksa direct-draw yolu boş çiziyor (`instanceCount`/`firstInstance`).
+5. **Bayat gölge turu yeniden** (obje/ışık taşı, opaklık, gizle-göster, skin, balon): imza
+   yeniden yazıldı, önceki PASS bu sürümü kapsamaz. Dışlama anahtarı aynı: `RT_SHADOW_ATLAS_CACHE=0`.
+6. **Scatter'lı sahne** (bitki örtüsü): davranış ve maliyet eskisiyle aynı olmalı.
+
+**Aynı derlemede — Player debug kamerası (`Core/PlayerMain.cpp`, yalnız Player):** F5 açar/kapar
+(açılışta KAPALI, Scene Log'a "Debug camera on/off"). Açıkken sol sürükleme = orbit, sağ/orta
+sürükleme = pan, tekerlek = yaklaş/uzaklaş; mevcut `rtapi::orbitCamera/panCamera/dollyCamera`
+çekirdeğini çağırır (orbit/dolly zaten IPC'de). Kontrol: F5 basmadan fare hiçbir şey yapmamalı;
+F5 sonrası üç hareket çalışmalı. Yön ters gelirse işaret tek satır. Kiosk tuş kapısı (Claude D)
+geldiğinde F5 kapının arkasında kalmalı — şu an kapı yok, F5 herkese açık.
+
+AÇIK (bu pakette aranmadı): kamera hareketinde kare CPU ≈ GPU görünüyordu; atlas artık
+çizilmeyince bekleme sürüyorsa kökü ayrı — IPC temposu etkisini dışlamak için uygulama içi
+kamera hareketi gerekir (Player debug kamera önerisi).
+
+## Yeni kaynak paketi — RT gölge hazırlığındaki her-kare GPU beklemesi (2026-11-16, Claude)
+
+Tek dosya: `Viewport/MaterialPreviewRtShadow.cpp` (header/shader/IPC yok → artımlı, Studio+Player).
+
+**CANLI ÖLÇÜM (2026-11-16, Player derlendi; Studio derlemesi sürüyordu, Studio'da ÖLÇÜLMEDİ):**
+duran kamera 173 kare/5 s: `shadow_atlas` CPU 24,4 → **3,3 ms**, kare CPU 27,8 → **11,2 ms**,
+GPU 28,6 ms, **34,4 kare/s** (GPU sınırı 1/28,6 = 35). IPC `camera.orbit` ile 80 adım (40×+0,5°,
+40×−0,5°): atlas 80/81 karede çizildi (önbellek kamera hareketinde doğru biçimde düşüyor),
+durunca yeniden 0/104. Madde 2 PASS. ★ AÇIK: orbit sırasında aşama CPU'su 29,5 ms ve kare
+CPU ≈ GPU (38,6 / 39,4) — kamera hareketinde başka bir bekleme hâlâ var, kökü aranmadı
+(ölçüm IPC temposuyla sürüldü, 18,8 kare/s sürdürülebilir hız kanıtı değil). Madde 1, 3, 4
+(görsel) ajan tarafından BAKILMADI; Player'da fare/ışık düzenleme yok, ışık testi Studio'da.
+
+**Kök:** `prepareRtShadowFrame` RT gölge açıkken HER KARE koşulsuz
+`drainInteractiveViewportInFlight()` çağırıyordu (ışık/hit/materyal tablolarını yeniden
+yükleyip 8 descriptor'ı yeniden yazmak için). Yani CPU her kare önceki karenin GPU'dan
+çıkmasını bekliyordu — `shadow_atlas` damgasında görünen ~24 ms buydu (atlas hiç çizilmezken
+bile). Artık tablolar + descriptor girdileri imzalanıyor; imza aynıysa yükleme, yazma ve
+bekleme atlanır, değiştiyse eskisi gibi drain + yeniden yazım.
+
+1. **Açılış + RT gölge var mı (hızlı).** `viewport.rt_shadow` ready/prepared, güneş gölgesi
+   ekranda. Yoksa: imza ilk karede geçerli sayılmış (olmamalı) ya da tablo yüklemesi atlanmış.
+2. **Ölçüm, duran kamera, sürekli çizim, capture kapalı.** `shadow_atlas` CPU 24,4 ms →
+   ~1 ms altı; kare CPU'su GPU'dan (27 ms) belirgin küçük; kare hızı ~32 → ~37/s (kare artık
+   CPU+GPU değil, yalnız GPU ile sınırlı). CPU hâlâ ~24 ms ise imza her kare değişiyor
+   (aday: `getRayFusionHitInstances` çıktısında dolgu baytları) — kazanç yok ama hata da yok.
+3. **★ En sinsi: gizli yarışın açığa çıkması.** Bu drain, karenin geri kalanındaki başka
+   her-kare yüklemeleri de farkında olmadan koruyor olabilirdi. Kamera/nesne/ışık hareket
+   ederken titreme, bir kare geride kalan gölge/ışık, validation hatası ya da device-lost
+   ara. Karşı kanıt: RT gölge KAPALIYKEN bu drain zaten hiç çalışmıyordu ve o yol sorunsuz.
+   Görülürse: suç bu değişiklikte değil, o yüklemenin kendi drain'inin eksikliğinde — ama
+   önce burayı geri alıp doğrula.
+4. **Değişimde güncelleme.** Işık taşı / materyal opaklığı değiştir / nesne ekle-sil: RT
+   gölge aynı karede izlemeli (imza değişir → tablolar yeniden yazılır).
+
+## Yeni kaynak paketi — statik gölge atlası önbelleği (2026-11-16, Claude)
+
+İki dosya, ikisi de `.cpp`: `Viewport/MaterialPreviewShadow.cpp` (imza + erken dönüş) ve
+`Backend/VulkanViewportBackend.cpp` (4 satır: aşama damgası). Header/struct/shader/IPC alanı
+değişmedi → artımlı derleme, Studio **ve** Player.
+
+**CANLI ÖLÇÜM (2026-11-16, kullanıcı derledi, Player, `oyuncak.rtp`, duran kamera, sürekli
+çizim, capture kapalı, 161 kare / 5 s):** `shadow_atlas.frames_ran` **0/161**, atlas GPU 0;
+toplam GPU 37,3 → **27,1 ms**; ~32 kare/s (başlangıç 11,4). Kalan GPU: ana geçiş 11,6 ·
+transmission 8,3 · RT gölge 5,6 · prepass 1,1. Madde 2 PASS. Madde 3 (bayat gölge) ajan
+tarafından BAKILMADI. ★ Atlas hiç çizilmediği halde `shadow_atlas` CPU damgası hâlâ 24,4 ms
+ve kare CPU'su (27,8) GPU'yu (27,1) izliyor: bu süre gölge kaydı DEĞİL; damga aralığındaki
+`prepareRtShadowFrame` / yansıma hazırlığı / bulut geçişinden birinde GPU beklemesi var.
+Kök bulunmadı — sıradaki inceleme adayı (CPU ile GPU'nun üst üste binmesini engelliyor olabilir).
+
+Atlas artık yalnız imzası değişince yeniden çizilir. İmza her kare CPU'da yeniden hesaplanır:
+gölge görüşleri (matris+karo), geometri/skin üretim sayaçları, her mesh'in tampon tutamaçları
+ve sayıları, **bütün** instance transform+mask'leri, materyal kayıtları, frustum revizyonu ve
+(GPU culling açıksa) kamera. Kameraya bağlı olduğu için kazanç **duran kamerada** gelir;
+kamera dönerken atlas eskisi gibi her kare çizilir (9,3 ms).
+
+1. **Açılış (hızlı).** Sahne açılır, gölgeler var. Tamamen gölgesiz = ilk kare de atlanmış
+   (imza geçerlilik bayrağı hatası).
+2. **Ölçüm, duran kamera.** Capture kapalı, sürekli çizim açık, `viewport.frame_timings`:
+   `shadow_atlas.frames_ran` ≪ `frames` ve o aşamanın GPU süresi ~0 olmalı; toplam GPU
+   37,3 → ~28 ms. `frames_ran == frames` ise imzada her kare değişen bir girdi var (aday:
+   frustum revizyonu ya da scatter bütçesi) — önbellek hiç vurmuyor, hata değil ama kazanç yok.
+3. **★ En sinsi: BAYAT gölge.** Kamera dururken (a) bir nesneyi taşı/animasyon oynat,
+   (b) bir ışığı taşı, (c) bir materyalin opaklığını değiştir, (d) nesne gizle/göster.
+   Her birinde gölge **aynı karede** izlemeli. Gölge eski yerinde kalıyorsa o değişiklik
+   imzaya girmiyor. Bilinen kör noktalar (RayFusion AS kapısıyla ortak): skin'siz vertex
+   tamponunun üretim sayacı artmadan yerinde yeniden yazılması (sculpt/sim deformu), zamanla
+   canlanan materyal programı opaklığı, opaklık dokusunun İÇERİĞİ. Balon patlaması ve avatar
+   (skin) hareketini özellikle dene.
+4. **Dışlama anahtarı.** Şüphede uygulamayı `RT_SHADOW_ATLAS_CACHE=0` ortam değişkeniyle aç:
+   gölge düzeliyorsa suç önbellekte, düzelmiyorsa başka yerde.
+5. **Studio'da aynı sahne** — orbit sırasında davranış eskisiyle aynı, durunca atlas atlanır.
+
+## Yeni kaynak paketi — gölge atlasında görüş başına ayıklama (2026-11-16, Claude)
+
+Tek dosya: `Viewport/MaterialPreviewShadow.cpp` (header/struct/shader/IPC değişmedi →
+artımlı derleme yeter; Studio **ve** Player aynı ortak yolu kullanır, ikisi de derlenmeli).
+Önceden her mesh her gölge görüşüne çiziliyordu (nokta ışık = 6 tam sahne geçişi). Artık
+mesh'in instance dünya kutularının birleşimi görüşün 5 kırpma düzlemine karşı sınanıyor.
+Skinned, scatter havuzu/proxy, kutusu geçersiz veya >4096 instance'lı mesh'ler **her zaman
+çizilir**.
+
+**CANLI ÖLÇÜM (2026-11-16, kullanıcı derledi, Player, `oyuncak.rtp`, capture kapalı, 27 kare):**
+gölge atlası GPU 33,1 → **9,3 ms**; toplam GPU ~60 → **37,3 ms**; sunulan 11,4 → **22,0 FPS**.
+Kalan GPU: ana geçiş 12,1 · gölge atlası 9,3 · transmission 8,7 · RT gölge 5,7 · prepass 1,0.
+`shadow_atlas` CPU 38,8 ms okunuyor ama bu aşama damgası `prepareRtShadowFrame` + yansıma
+hazırlığı + bulut geçişini de kapsıyor ve kare CPU'su (41 ms) GPU karesini (37 ms) izliyor:
+GPU beklemesi adayı, kayıt maliyeti kanıtı değil. Destek: aynı binary Studio'da tek tek
+sürülen 10 karede aynı aşama CPU 24,3 → **7,3 ms** (GPU baskısı yokken). O Studio turunun
+GPU süreleri (toplam 75,7 ms) Player aynı anda çizdiği için ÇEKİŞMELİ, kıyas değeri yok —
+iki uygulama aynı GPU'yu paylaşırken ölçülen süre A/B'ye girmez. Madde 3 ölçümü PASS;
+madde 1–2 (gölgelerin görsel doğruluğu) ajan tarafından BAKILMADI, kullanıcı gözü bekliyor.
+
+Referans (aynı gün, `oyuncak.rtp`, 1680×945, 8 gölgeli ışık, eşleşmiş kamera):
+gölge atlası GPU 33,1 ms, gölge kaydı CPU 24,3 ms, toplam GPU ~60 ms
+(`PLAYER_HEAVY_SCENE_PROFILE_2026_11_16.md`).
+
+1. **Açılış + görüntü (hızlı, bağımsız).** Player'da `oyuncak.rtp` aç. Gölgeler eskisi
+   gibi görünmeli. Bozuksa: tamamen gölgesiz kare = düzlem işareti ters (her şey reddediliyor).
+2. **★ En sinsi: tek tek eksik gölge.** Işığın görüş konisinin KENARINDAKİ büyük nesnelerin
+   (zemin, duvar, uzun masa) gölgesi yerinde mi; kamerayı döndürünce gölge yanıp sönüyor mu?
+   Eksikse: o mesh'in `worldBBox`'ı bayat (transform GPU'ya gidip kutu güncellenmemiş) —
+   kare makul göründüğü için kimse hata diye bildirmez. Hareketli nesneyi (balon) ışık
+   konisine sokup çıkararak da bak.
+3. **Ölçüm.** Capture KAPALI, `viewport.frame_timings`: gölge atlası GPU ve gölge kaydı CPU
+   33,1 / 24,3 ms'nin belirgin altına inmeli (nokta ışıklarda ~4–6×, spot'ta koni kadar).
+   Hiç inmediyse: ışıklar directional/geniş spot ya da mesh'ler ayıklanamayan sınıfta
+   (scatter/skinned) — o durumda sıradaki kaldıraç statik atlas önbelleği (aşağıda).
+4. **Studio'da aynı sahne** — aynı sayılar; yalnız Player düştüyse eski Studio binary'si.
+
+Bu partide YAPILMAYAN, sıradaki kaldıraç: **statik gölge atlası önbelleği** (ışık+caster
+değişmediyse atlası yeniden çizme; sabit kameralı kiosk için 33 ms → ~0). Güvenli olması
+için raster içeriğine (instance/vertex/materyal opaklığı/GPU-cull çıktısı) tek bir revizyon
+sayacı gerekir; yazan yerler sayılmadan önbellek sessiz bayat gölge üretir. Ayrıca not:
+GPU culling açıkken gölge geçişi KAMERA ayıklamalı instance listesini çiziyor (mevcut
+davranış, bu partide dokunulmadı) — kamera dışındaki caster gölge atmıyor olabilir.
+
+## Yeni kaynak paketi — C2 dış rig/IK ve mevcut domain vekilleri (2026-11-15, Codex)
+
+Kullanıcı yönlendirmesi: mevcut rig→proxy→domain yolu yeniden kullanıldı; ayrı Jolt
+iskeleti/dünyası eklenmedi. `anim.set_external_pose/external_poses/clear_external_pose`
+script/IPC ortak çekirdekte; canonical flat skin + mevcut IK/joint limits. Kayıpta ve
+düşük güvende domain proxy çözümü kesilir; bind/teleport vb. hareket geçmişini sıfırlar.
+Yeni 3 ortak C++ ve Studio'ya 1 Python binding birimi; projeleri reload + artımlı build.
+Mevcut yaygın struct/layout veya shader değişikliği yok; eski TAM build ihtiyacını kaldırmaz.
+Sayaçlar CPU solve/skin, proxy sayıları; domain tarafında mevcut solver_stamps/perf.list.
+Maliyet ölçümü doğruluk kabulü sonrasında; GPU realtime partikül proxy tüketimi/Jolt açık.
+Sözleşme/komut/kabul: `PLAYER_EXTERNAL_BODY_RIG.md`; native test kaynağı çalıştırılmadı.
+Bu paket henüz kullanıcı tarafından derlenmedi ve açık uygulamalarda C2 testi yapılmadı.
+
+## Güncel kabul — C/B ilk paket: Studio/Player kullanıcı build + IPC PASS (2026-11-15)
+
+İki uygulama kullanıcı tarafından derlendi. Player'da 36 s / 4 ve 10 çocuk tam
+oturum PASS: 29/71 eylem, sıfır eylem hatası/olay kaybı; boya %16,43/%32,48.
+Player 28 ve Studio 21 hedefli IPC kontrolü; Studio Python binding smoke 9 kontrol PASS.
+Native bağımsız assert testi hâlâ çalıştırılmadı; canlı IPC aynı kapsanan çekirdek
+davranışlarını gerçek uygulamada doğruladı. Kamera/rig/görsel final ve performans kabulü değil.
+RPC/takvim gecikme sıçramaları kaydedildi; A optimizasyonu açık.
+Kanıt: `PLAYER_BODY_GAME_ACCEPTANCE_2026_11_15.json`, sözleşme `PLAYER_BODY_GAME_RUNTIME.md`.
+Player test odasında attract/pozlar boş/boya sıfır/demo takvimi kapalı; ekran ayarları
+geri alındı. Studio boş bırakıldı. Bu kabul turunda C++/shader değişmedi, yeni build gerekmez.
+
+## Önceki kaynak devri — Poz + kural/oturum çekirdeği (2026-11-15, Codex)
+
+KAYNAK HAZIR, kullanıcı build/canlı kabul bekliyor. Yeni Input/Game ve API/IPC
+birimleri iki projeye, Python yalnız Studio'ya kayıtlı; projeleri reload edin.
+Bu paketten yaygın struct/layout değişikliği veya shader değişikliği yok; kendi
+başına artımlı build yeterli, önceki TAM build gereksinimlerini iptal etmez.
+`input.set_body_poses/body_poses/clear_body_poses`, `game.session/rules/post_event`
+ortak çekirdeğe bağlı. Native test kaynağı `tests/body_pose_game_test.cpp`; assert
+kapalı olmadan kullanıcı derleyip çalıştırmalı. Ardından hazır balon fixture'ında
+`tools/perception_bridge/session_plan.json` ile 36 s / 4 ve 10 çocuk kabulü alın.
+Tam komutlar ve sınırlar: `PLAYER_BODY_GAME_RUNTIME.md`.
+Rig/IK, fiziksel kinematik gövdeler, Studio kural paneli, özel balon/final görselleri,
+A GPU optimizasyonu ve D kiosk henüz tamamlanmadı. Build/uygulama açma/commit yok.
+
+## Güncel devir — Balon boya demosu: Player build / IPC CANLI PASS (2026-11-15, Codex)
+
+Kullanıcı Player'ı derledi; `rt_player_balloon_paint_ipc.py` kabulü tamamlandı.
+Dört gerçek 1024² yüzeyin yüklemede hazırlanması, 12 balon, tekli/üçlü 1800/5400
+damla, ömür sonunda bitiş, geçersiz count reddi, rastgele patlamalar/kapsama ve
+GPU içi yayın PASS. Yükleme 959.71 ms (demo 352.04 / atlas 317.21 ms); kontrollü
+olay giriş dt maks 10–11 ms. Aktif ek ölçüm ~168 fps; idle dahil uzun kayıtta
+64–72 ms sıçrama da var. Sıçramasızlık veya <=2 ms boya hedefi kapatılmadı.
+
+**Bu kabul turundan yeni derleme beklenmiyor.** Shader/ABI değişmedi. Studio'da
+balon demosunun yeni canlı kabulü ayrıca yapılmadı. Alt bölümlerdeki eski
+"Player kabulü sıradaki / yeniden derle" kayıtları tarihsel geliştirme günlüğüdür;
+balon fixture'ı için güncel durum bu bölümdür.
+
+Devir, sonraki işler ve tekrar komutu:
+[PLAYER_BALLOON_PAINT_DEMO.md](PLAYER_BALLOON_PAINT_DEMO.md),
+[PLAYER_GAME_PAINT_ROOM.md](PLAYER_GAME_PAINT_ROOM.md),
+[ham kabul](PLAYER_BALLOON_PAINT_ACCEPTANCE_2026_11_15.json).
+GPU istatistik/yayın beklemeleri, 64-kaynak/tile sınırı ve ayrı OBB/spread hataları açık.
+
+
 ## GPU ıslak boya (Boyama Odası adım 3 + 4'ün IPC yüzü) — 2026-11-15, Claude
 
 **★ CANLI PASS (Studio, 8/8):** tek damla 4 yüzey (küp 1348 / küre 271 / silindir 428 / düzlem 84

@@ -1,4 +1,5 @@
 // Same-frame per-light shadow service. Flat TLAS hit data, shared raster UV policy.
+#include "Backend/VulkanTlasGeneration.h"
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "RayFusion/ProbeBounce.h"
@@ -6,6 +7,7 @@
 #include "Light.h"
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <vector>
 
@@ -36,6 +38,26 @@ void bufferBarrier(VkCommandBuffer cmd, VkBuffer buffer, VkAccessFlags src,
     b.buffer=buffer; b.size=VK_WHOLE_SIZE;
     vkCmdPipelineBarrier(cmd,from,to,0,0,nullptr,1,&b,0,nullptr);
 }
+uint64_t rtShadowHashMix(uint64_t seed, const void* data, size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    size_t offset = 0;
+    for (; offset + 8 <= size; offset += 8) {
+        uint64_t word;
+        std::memcpy(&word, bytes + offset, sizeof(word));
+        seed = (seed ^ word) * 1099511628211ull;
+        seed ^= seed >> 29;
+    }
+    if (offset < size) {
+        uint64_t tail = 0;
+        std::memcpy(&tail, bytes + offset, size - offset);
+        seed = (seed ^ tail ^ (size - offset)) * 1099511628211ull;
+        seed ^= seed >> 29;
+    }
+    return seed;
+}
+uint64_t rtShadowHashMix(uint64_t seed, uint64_t value) {
+    return rtShadowHashMix(seed, &value, sizeof(value));
+}
 }
 class MaterialPreviewRtShadowResources {
 public:
@@ -51,6 +73,9 @@ public:
     VulkanBackendAdapter::RtShadowCoverage coverage{};
     bool prepared=false, recorded=false;
     std::string reason="not prepared";
+    // Content of the uploaded tables and the descriptor set as last written.
+    uint64_t tableSignature=0;
+    bool tableSignatureValid=false;
 };
 
 bool VulkanBackendAdapter::ensureRtShadowResources(uint32_t width, uint32_t height) {
@@ -248,7 +273,11 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
         s.reason=!m_rtShadowAllowed?"disabled":"requires scene lighting, HDR and depth prepass";
         bindConsumer();clearHeader();return false;
     }
-    drainInteractiveViewportInFlight(); // shared compute descriptors and CPU upload tables
+    // No unconditional drain here: it made every frame wait for the previous
+    // one to leave the GPU (measured as ~24 ms of CPU inside the shadow_atlas
+    // stage window with the atlas itself skipped). The tables and descriptors
+    // below are rewritten, and the ring drained, only when their content
+    // changed; see the table signature.
     const auto& caps=m_device->getCapabilities();
     if(!caps.supportsRayQuery || !caps.supportsDescriptorIndexing) {
         s.reason="ray query and descriptor indexing are required";
@@ -312,6 +341,42 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
         record.toLight[1] = -light->direction.y;
         record.toLight[2] = -light->direction.z;
     }
+    // Everything the uploads and the eight descriptor writes below depend on.
+    // In-flight frames read these buffers and this set, so rewriting them
+    // needs the ring drained -- but only when something actually differs.
+    const VkBuffer signatureVolumeBuffer = m_device->m_volumeBuffer.buffer
+        ? m_device->m_volumeBuffer.buffer : s.mask.buffer;
+    uint64_t tableSignature = 1469598103934665603ull;
+    tableSignature = rtShadowHashMix(tableSignature, shadowLights, sizeof(shadowLights));
+    tableSignature = rtShadowHashMix(tableSignature, uint64_t(hits.size()));
+    tableSignature = rtShadowHashMix(tableSignature, hits.data(), hits.size()*sizeof(hits[0]));
+    tableSignature = rtShadowHashMix(tableSignature, uint64_t(materials.size()));
+    tableSignature = rtShadowHashMix(tableSignature, materials.data(),
+                                     materials.size()*sizeof(materials[0]));
+    tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(tlas));
+    // Handle values are reused by the driver: the object generation is the identity.
+    tableSignature = rtShadowHashMix(tableSignature, VulkanRT::tlasObjectGeneration());
+    tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(s.set));
+    tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(s.mask.buffer));
+    tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(signatureVolumeBuffer));
+    tableSignature = rtShadowHashMix(tableSignature,
+        reinterpret_cast<uint64_t>(m_interactiveViewport.depthImage.view));
+    tableSignature = rtShadowHashMix(tableSignature,
+        reinterpret_cast<uint64_t>(m_interactiveViewport.postSampler));
+    tableSignature = rtShadowHashMix(tableSignature, uint64_t(s.textureCount));
+    for(const auto& entry:m_uploadedImages) {
+        tableSignature = rtShadowHashMix(tableSignature, uint64_t(entry.first));
+        tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(entry.second.view));
+        tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(entry.second.sampler));
+    }
+    if(s.tableSignatureValid && s.tableSignature==tableSignature &&
+       s.hits.buffer && s.materials.buffer && s.lights.buffer) {
+        s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
+        prepareScreenGiFrame();
+        return true;
+    }
+    s.tableSignatureValid=false;
+    drainInteractiveViewportInFlight(); // shared compute descriptors and CPU upload tables
     if (!upload(s.lights, shadowLights, sizeof(shadowLights))) {
         s.reason = "shadow light upload allocation failed";
         return false;
@@ -355,6 +420,7 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     VkDescriptorBufferInfo lightInfo{s.lights.buffer, 0, VK_WHOLE_SIZE};
     writes[7].pBufferInfo = &lightInfo;
     vkUpdateDescriptorSets(m_device->getDevice(),8,writes,0,nullptr);
+    s.tableSignature=tableSignature;s.tableSignatureValid=true;
     s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
     prepareScreenGiFrame();
     return true;

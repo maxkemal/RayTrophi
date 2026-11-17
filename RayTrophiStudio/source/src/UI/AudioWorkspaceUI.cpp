@@ -2,6 +2,7 @@
 #define NOMINMAX
 #endif
 #include "UI/AudioWorkspaceUI.h"
+#include "UI/AudioSourceLabel.h"
 #include "UI/AudioVisualLanguage.h"
 #include "UI/AudioAcousticSettingsUI.h"
 #include "UI/AudioSoundDesignerUI.h"
@@ -493,7 +494,7 @@ void drawWorkspace(UIContext& ctx) {
                 ImVec2(0, std::max(180.0f, ImGui::GetContentRegionAvail().y -
                     ImGui::GetTextLineHeightWithSpacing() * 4)), true);
             for (const auto& source : data.at("emitters")) {
-                const auto name = source.at("name").get<std::string>();
+                const auto name = sourceLabel(source, data);
                 const auto id = source.at("id").get<std::string>();
                 if (!sourceFilter.PassFilter(name.c_str())) {
                     continue;

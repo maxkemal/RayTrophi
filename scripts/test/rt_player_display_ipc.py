@@ -34,6 +34,7 @@ def measure(ipc, seconds, **settings):
         last = ipc.call("player.display")
     frame = last["frame"]
     return {"settings": settings, "render": last["render"], "output": last["output"],
+            "render_base": last.get("render_base"),
             "fullscreen": last["fullscreen"],
             "idle": frame.get("idle"),
             **{k: round(float(frame.get(k, 0.0)), 2) for k in (
@@ -90,17 +91,26 @@ def run(project, seconds):
         for scale in (1.0, 0.75, 0.5):
             row = measure(ipc, seconds, fullscreen=False, render_scale=scale,
                           pacing_hz=0.0, continuous=True)
-            out_w, out_h = row["output"]
+            assert row["render_base"], "new fixed render-base binary required"
+            base_w, base_h = row["render_base"]
             ren_w, ren_h = row["render"]
-            assert abs(ren_w - out_w * scale) <= 1 and abs(ren_h - out_h * scale) <= 1, row
+            assert abs(ren_w - base_w * scale) <= 1 and abs(ren_h - base_h * scale) <= 1, row
             # Cost is measured from DRAWN frames only (never sleep or idle);
             # presented_fps needs a foreground window, rendered_fps does not.
             assert not row["idle"] and row["rendered_fps"] > 0, row
             assert row["frame_cost_ms"] > 0 and row["capacity_fps"] > 0, row
             rows.append(row)
+        # Window presentation changes must preserve the selected render target.
+        for width, height in ((960, 540), (1200, 800)):
+            row = measure(ipc, seconds, fullscreen=False, width=width, height=height,
+                          render_scale=1.0, pacing_hz=0.0, continuous=True)
+            assert row["render"] == rows[0]["render"], row
+            assert row["render_base"] == rows[0]["render_base"], row
+            rows.append(row)
         row = measure(ipc, seconds, fullscreen=True, render_scale=1.0, pacing_hz=0.0,
                       continuous=True)
         assert row["fullscreen"], row
+        assert row["render"] == rows[0]["render"], row
         rows.append(row)
         row = measure(ipc, seconds, fullscreen=False, render_scale=1.0, pacing_hz=60.0,
                       continuous=True)
@@ -124,6 +134,8 @@ def run(project, seconds):
         restore = {k: original[k] for k in ("fullscreen", "render_scale", "pacing_hz",
                                             "continuous", "hud")}
         try:
+            ipc.call("player.set_display", fullscreen=False,
+                     width=original["window"][0], height=original["window"][1])
             ipc.call("player.set_display", **restore)
             ipc.call("viewport.capture", enabled=capture_before)
         finally:

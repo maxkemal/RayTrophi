@@ -213,10 +213,17 @@ void resolveOne(uint c, vec3 prev, inout vec3 p, inout vec3 v) {
     } else if (g.type == 4u) {     // OBB: AABB in the local frame
         vec3 lp = xformPoint(g.w2l, p);
         vec3 lv = xformVector(g.w2l, v);
+        vec3 lp0 = lp, lv0 = lv;
         resolveAABB(vec3(g.a[0], g.a[1], g.a[2]), vec3(g.b[0], g.b[1], g.b[2]), g.thickness,
                     g.restitution, g.friction, lp, lv);
-        p = xformPoint(g.l2w, lp);
-        v = xformVector(g.l2w, lv);
+        // Write back ONLY a real contact. The local round trip of an untouched
+        // particle is not exact (~1e-7 with a translated frame), and the caller
+        // counts any change as a hit: with response Die every drop died on its
+        // first step near a ceiling OBB at y 4.7 (box at the origin hid it).
+        if (lp != lp0 || lv != lv0) {
+            p = xformPoint(g.l2w, lp);
+            v = xformVector(g.l2w, lv);
+        }
     } else if (g.type == 5u) {     // cooked mesh SDF
         resolveSDF(c, p, v);
     }

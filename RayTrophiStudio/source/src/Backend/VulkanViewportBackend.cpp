@@ -1,4 +1,5 @@
 ﻿#include "Backend/VulkanViewportBackend.h"
+#include "Backend/VulkanFailureReporting.h"
 #include "Viewport/RasterBackground.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "Viewport/RasterInstanceUpload.h"
@@ -35,6 +36,9 @@ extern bool g_vulkan_device_lost;
 extern std::string g_vulkan_device_lost_msg;
 
 namespace Backend {
+// Defined in Viewport/MaterialPreviewShadow.cpp. Declared here instead of in
+// VulkanBackend.h so one instrumentation bit does not rebuild everything.
+bool materialPreviewShadowAtlasDrawnLastRecord();
 namespace {
 
 // ===========================================================================
@@ -3877,6 +3881,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             g_vulkan_device_lost = true;
             g_vulkan_device_lost_msg =
                 "Raster frame acquisition returned VK_ERROR_DEVICE_LOST";
+            VulkanRT::logVulkanDeviceFaultInfo();
             render_settings.backend_changed = true;
             // ★★ dirty YENIDEN KURULMAZ ve log BIR KEZ basilir. Eskisi ikisini de
             //   her karede yapiyordu: kaybedilmis bir cihaza kare istemek
@@ -4048,6 +4053,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     uint32_t shadowAtlasLights = 0;
     materialPreviewShadowAtlasState(shadowAtlasRan, shadowAtlasLights);
     recordMaterialPreviewShadowPass(cmd);
+    // A cached atlas was not rasterised this frame; report it as not run so
+    // frames_ran counts real atlas draws (defined in MaterialPreviewShadow.cpp).
+    shadowAtlasRan = shadowAtlasRan && materialPreviewShadowAtlasDrawnLastRecord();
     // Clouds (Faz 3c): compute, so before the render pass; the sky pass
     // composites the result.
     recordCloudRasterPass(cmd, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
@@ -4631,12 +4639,19 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         requiredHalf > m_interactiveViewport.gridBuiltHalf ||
         requiredHalf < m_interactiveViewport.gridBuiltHalf * 0.4f;
 
-    if (!m_interactiveViewport.gridVertexBuffer.buffer ||
+    // A grid nobody can see is not rebuilt. The rebuild drains every in-flight
+    // frame and recreates two buffers, and it re-triggers each time the camera
+    // crosses a coarse lattice cell -- cells that shrink as the camera nears
+    // the floor. In the Player (grid_opacity is 0 there) that was a full-frame
+    // stall every few frames of close-up camera motion, for invisible lines.
+    const bool gridVisible = ::render_settings.grid_opacity > 0.0f;
+    if (gridVisible &&
+        (!m_interactiveViewport.gridVertexBuffer.buffer ||
         m_interactiveViewport.gridBuiltPlane != activeGridPlane ||
         m_interactiveViewport.gridBuiltSpacing != gridSpacing ||
         m_interactiveViewport.gridBuiltCenterU != fineCenterU ||
         m_interactiveViewport.gridBuiltCenterV != fineCenterV ||
-        extentStale) {
+        extentStale)) {
         drainInteractiveViewportInFlight();
         if (m_interactiveViewport.gridVertexBuffer.buffer) {
             m_device->destroyBuffer(m_interactiveViewport.gridVertexBuffer);
@@ -5060,6 +5075,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 g_vulkan_device_lost = true;
                 g_vulkan_device_lost_msg =
                     "Raster frame submission returned VK_ERROR_DEVICE_LOST";
+                VulkanRT::logVulkanDeviceFaultInfo();
                 render_settings.backend_changed = true;
                 if (!m_loggedRasterDeviceLost) {
                     m_loggedRasterDeviceLost = true;

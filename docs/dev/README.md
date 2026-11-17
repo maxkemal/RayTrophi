@@ -1,5 +1,9 @@
 | [AJAN_KOORDINASYON.md](AJAN_KOORDINASYON.md) | **CANLI 2026-11-10:** aynı ağaçta çalışan Claude ve Codex'in ortak panosu — çalışılan dosyalar, derlemeyi bozabilecek arayüz değişiklikleri, derleme bekleyen partiler, fikir/iş bölümü. Ortak dosyaya dokunmadan önce okunur. |
 # RayTrophi — engineering notes index
+- [Karakter silme ve Player klip oynatma — Player yürüyüş/ölçek canlı PASS, silme kabulü bekliyor](PLAYER_CHARACTER_LIFECYCLE.md)
+- [Dış beden pozu → rig/IK → mevcut domain vekilleri — C2 kaynak hazır, build/kabul bekliyor](PLAYER_EXTERNAL_BODY_RIG.md)
+- [Boyama Odası poz/kural/oturum çekirdeği — kullanıcı build + 4/10 çocuk canlı IPC PASS](PLAYER_BODY_GAME_RUNTIME.md)
+- [Player algı köprüsü ve sahte çocuk koşucusu — uygulamasız PASS, canlı kabul bekliyor](PLAYER_PERCEPTION_BRIDGE.md)
 
 - [General DEM integration and time-cost roadmap](DEM_CORE_INTEGRATION_ROADMAP.md)
 

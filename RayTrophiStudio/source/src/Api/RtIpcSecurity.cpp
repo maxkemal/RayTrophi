@@ -529,7 +529,10 @@ uint32_t requiredCapabilities(const std::string& method) {
         // coverage reduction. Neither writes paint; "wet_status" / "wet_coverage"
         // match none of the substring heuristics, so without this line they
         // would fall through to the paint. namespace as SceneWrite.
+        method == "input.body_poses" || method == "game.rules" ||
+        method == "anim.external_poses" ||
         method == "paint.wet_status" || method == "paint.wet_coverage" ||
+        method == "paint.wet_design" ||
         method == "forcefield.evaluate" || method == "particle.stats" ||
         method == "particle.emitters" || method == "anim.characters" ||
         method == "anim.character" || method == "anim.clips" ||
@@ -571,6 +574,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // which cost 14 write methods; scripts/audit_ipc_capabilities.py now diffs
     // the two files so the pair cannot drift apart again.
     static const char* namespaces[] = {
+        "input.", "game.",
         "uv.",
         "scene.", "select.", "material.", "lights.", "timeline.", "camera.", "spline.", "geometry_cache.", "mesh.profile.",
         "world.", "post.", "anim.", "rig.", "nodes.", "modifiers.",

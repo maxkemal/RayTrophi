@@ -24,6 +24,7 @@
 #include "PerfProfile.h"
 #include "UI/UvEditorUI.h"
 #include "UI/AudioUI.h"
+#include "UI/GameDesignUI.h"
 #include "Audio/AcousticRenderDebug.h"
 #include "UI/AudioWorkspaceUI.h"
 #include "UI/AudioHistoryUI.h"
@@ -1936,6 +1937,16 @@ static bool isPoppablePropertyTab(int tab)
     return (tab >= 0 && tab <= 13) || tab == 15;
 }
 
+// Name of the selected mesh for the Game Design tab, empty when none.
+static std::string gameDesignSelectedObject(UIContext& ctx)
+{
+    const auto& item = ctx.selection.selected;
+    if (item.type != SelectableType::Object) return {};
+    if (item.mesh_object) return item.mesh_object->nodeName;
+    if (item.object) return item.object->getNodeName();
+    return {};
+}
+
 static const char* poppablePropertyTabName(int tab)
 {
     switch (tab) {
@@ -2372,6 +2383,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (tab_to_focus == "World")      { active_properties_tab = 6; tab_to_focus = ""; }
         if (tab_to_focus == "Modifiers" || tab_to_focus == "Modeling")  { active_properties_tab = 7; tab_to_focus = ""; }
         if (tab_to_focus == "Paint")      { active_properties_tab = 10; tab_to_focus = ""; }
+        if (tab_to_focus == "Game Design") { active_properties_tab = 16; tab_to_focus = ""; }
         if (tab_to_focus == "System")     { active_properties_tab = 9; tab_to_focus = ""; }
         if (tab_to_focus == "Audio")      { active_properties_tab = 15; tab_to_focus = ""; }
 
@@ -2621,6 +2633,7 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         drawTabButton(14, UIWidgets::IconType::Bone, "Edit Bone");
         drawTabButton(13, UIWidgets::IconType::Sculpt, "Sculpting");
         if (show_paint_tab)      drawTabButton(10, UIWidgets::IconType::PaintTool,  "Paint Mode");
+        drawTabButton(16, UIWidgets::IconType::Play, "Game Design");
         if (show_hair_tab)       drawTabButton(8, UIWidgets::IconType::Hair,       "Hair & Fur");
         
         ImGui::Dummy(ImVec2(0.0f, 4.0f));
@@ -2724,6 +2737,9 @@ void SceneUI::drawRenderSettingsPanel(UIContext& ctx, float screen_y)
         if (!tab_is_popped)
         switch (active_properties_tab) {
             case 15: AudioUI::drawWorkspace(ctx); break;
+            // Own tab (not inside Paint Mode, which pins its target): the game
+            // design follows the plain selection. Not poppable (popped array is 16).
+            case 16: GameDesignUI::drawSection(gameDesignSelectedObject(ctx)); break;
             case 0: drawSceneHierarchy(ctx); break;
             case 1:
                 {

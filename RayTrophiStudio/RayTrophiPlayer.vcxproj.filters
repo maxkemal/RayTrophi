@@ -46,8 +46,10 @@
     <Filter Include="source\src\Backend" />
     <Filter Include="source\src\Core" />
     <Filter Include="source\src\Device" />
+    <Filter Include="source\src\Game" />
     <Filter Include="source\src\Hair" />
     <Filter Include="source\src\Import" />
+    <Filter Include="source\src\Input" />
     <Filter Include="source\src\Math" />
     <Filter Include="source\src\MeshEdit" />
     <Filter Include="source\src\Paint" />
@@ -753,7 +755,13 @@
     <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiBodyPose.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiCameraNav.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiCharacter.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiClipBinding.cpp">
@@ -780,6 +788,9 @@
     <ClCompile Include="source\src\Api\RtApiDomainWalls.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiExternalBody.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFluid.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
@@ -793,6 +804,9 @@
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiFracture.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiGame.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtApiGasFieldStats.cpp">
@@ -1005,6 +1019,9 @@
     <ClCompile Include="source\src\Api\RtIpcAudit.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcBodyPose.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcClipBinding.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
@@ -1015,6 +1032,9 @@
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcFracture.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Api\RtIpcGame.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Api\RtIpcGrainGenerator.cpp">
@@ -1200,6 +1220,9 @@
     <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp">
       <Filter>source\src\Backend</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanBufferAddressLedger.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp">
       <Filter>source\src\Backend</Filter>
     </ClCompile>
@@ -1317,6 +1340,15 @@
     <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp">
       <Filter>source\src\Device</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Game\GameRules.cpp">
+      <Filter>source\src\Game</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Game\GameRuntime.cpp">
+      <Filter>source\src\Game</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Game\GameSession.cpp">
+      <Filter>source\src\Game</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Hair\HairBSDF.cpp">
       <Filter>source\src\Hair</Filter>
     </ClCompile>
@@ -1352,6 +1384,15 @@
     </ClCompile>
     <ClCompile Include="source\src\Import\UfbxVendor.cpp">
       <Filter>source\src\Import</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Input\BodyPoseRuntime.cpp">
+      <Filter>source\src\Input</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Input\ExternalBodyRig.cpp">
+      <Filter>source\src\Input</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Input\ExternalBodyRigMath.cpp">
+      <Filter>source\src\Input</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Math\Matrix4x4.cpp">
       <Filter>source\src\Math</Filter>
@@ -1439,6 +1480,12 @@
     </ClCompile>
     <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp">
       <Filter>source\src\MeshEdit</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\GameDesign.cpp">
+      <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp">
       <Filter>source\src\Paint</Filter>

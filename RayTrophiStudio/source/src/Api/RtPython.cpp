@@ -62,6 +62,9 @@
 #include "RtRayGpuTimingBindings.h"
 #include "RtPythonParticle.h"
 #include "RtPythonPaintWet.h"
+#include "RtPythonBodyPose.h"
+#include "RtPythonExternalBody.h"
+#include "RtPythonGame.h"
 #include "RtPythonKinematicCollider.h"
 #include "RtPythonPressure.h"
 #include "RtPythonDebris.h"
@@ -272,6 +275,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     rtpy::registerTemplateBindings(module);
     rtpy::registerAudioBindings(module);
+    rtpy::registerBodyPoseBindings(module);
+    rtpy::registerExternalBodyBindings(module);
+    rtpy::registerGameBindings(module);
     rtpy::registerRayFusionBindings(module);
     rtpy::registerAgentBindings(module);
 

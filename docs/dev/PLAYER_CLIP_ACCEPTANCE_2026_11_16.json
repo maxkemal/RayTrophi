@@ -1,0 +1,51 @@
+{
+  "date": "2026-11-16",
+  "preparation": "PASS: import, same-rig binding, source deletion, save/reopen",
+  "project": "tools/perception_bridge/out/wiezzorek-two-clips.rtp",
+  "character": "1",
+  "bone_count": 79,
+  "player_crossfade": {
+    "status": "FAIL",
+    "character": "1",
+    "transitions": [],
+    "clips": [
+      {
+        "duration_seconds": 1.4166666269302368,
+        "end_frame": 34,
+        "loop": true,
+        "name": "1_mixamo.com",
+        "start_frame": 0,
+        "ticks_per_second": 1.0
+      },
+      {
+        "duration_seconds": 1.6333333253860474,
+        "end_frame": 39,
+        "loop": true,
+        "name": "1_mixamo.com_2",
+        "start_frame": 0,
+        "ticks_per_second": 1.0
+      }
+    ],
+    "error": "clip did not settle: {'blending': False, 'clip': '1_mixamo.com', 'layer': 0, 'normalized_time': 0.45852750539779663, 'paused': False, 'playing': True, 'time': 0.6495805978775024}",
+    "authored_project_reopened": true
+  },
+  "player_immediate_cuts": {
+    "status": "PASS: immediate cuts, both clips move, pause/resume, stop",
+    "crossfade": "FAIL: initial zero weight excluded; source fix awaits rebuild",
+    "cuts": [
+      {
+        "clip": "1_mixamo.com_2",
+        "joint_excursion_m": 1.088790450267802
+      },
+      {
+        "clip": "1_mixamo.com",
+        "joint_excursion_m": 1.6669474579609125
+      }
+    ],
+    "pause_excursion_m": 0.0,
+    "resume_excursion_m": 1.6601654056731767,
+    "device_lost": false,
+    "authored_project_reopened": true
+  },
+  "source_fix": "AnimationBlendState::isBlending includes weight zero with both clips present; awaits user rebuild and live rerun"
+}

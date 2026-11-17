@@ -1,4 +1,5 @@
-﻿#include "Backend/VulkanBackend.h"
+﻿#include "Backend/VulkanTlasGeneration.h"
+#include "Backend/VulkanBackend.h"
 #include "globals.h"
 #include <algorithm>
 #include <cstring>
@@ -499,6 +500,7 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
         signature *= 1099511628211ull;
     };
     mix(uint64_t(tlas));
+    mix(VulkanRT::tlasObjectGeneration());   // handle values are reused
     mix(uint64_t(envView));
     mix(uint64_t(envSampler));
     mix(uint64_t(m_interactiveViewport.depthImage.view));

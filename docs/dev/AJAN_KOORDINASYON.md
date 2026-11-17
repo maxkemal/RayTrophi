@@ -25,8 +25,149 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 | Ajan | Dosya(lar) | Amaç | Tarih |
 |---|---|---|---|
+| Claude (Codex'ten devraldı) | WetPaintGpu.cpp (`publish`), VulkanBackend.cpp (1 satır), paint_wet.spv, overlay, yeni `rt_wet_paint_channels_ipc.py` | GPU paint kanalları: Codex kullanım sınırında durdu, kullanıcı işi Claude'a verdi. Eksik yayın adımı yazıldı, shader derlendi. **Codex: devam etmeden önce §2'nin ilk maddesini oku, bu dosyaları taze oku, yayın adımını yeniden yazma.** Player derlendi, `rt_player_wet_paint_channels_ipc.py` CANLI PASS 5/5 (19:38); Studio ve gözle kabul açık | 2026-11-16 |
+| Claude **D** (kiosk) | yeni `Core/KioskProfile.*`, `Api/RtApiKiosk.*`, `Api/RtIpcKiosk.cpp`; `PlayerMain.cpp` (girdi kapısı, `--profile`), `RtIpcSecurity.cpp` (rol setleri), `scripts/kiosk/` (watchdog) | §0.2 + adım 10: tuş kapısı, `kiosk.json`, Görevli/Teknisyen rolleri, sağlık sayaçları, watchdog, cihaz kaybı kurtarma | 2026-11-15 |
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
+
+- **2026-11-16 Codex — Player post KAYNAK HAZIR:** RuntimeSceneViewer Studio ortak rtpost tick/syncDisplay hizmetiyle sahne ton map/exposure/gamma/saturation/temperature/vignette ayarlarını mevcut raster post shaderına yollar. Ek geçiş/kopya/shader/ABI yok. Mevcut post.get, grading setterları ve exposure get/configure/reset Player IPC izin listesinde; stylize açılmadı. Raster HDR histogram üretmez; meter enabled tek başına durağan sahneyi uyandırmaz.
+
+- **2026-11-17 Claude — oda sıfırlama + F9, KAYNAK HAZIR:** `PlayerMain.cpp` `handleKey`
+  içine **F9 = oda sıfırlama** (`rtapi::wetPaintDemoCommand("reset")`) eklendi. **Claude D
+  (kiosk):** tuş kapısı kurulunca F9 Görevli rolüne bağlanmalı. Oyun: `GameSession`
+  resetting artık `room.reset` yayar (boya + balonlar), `GameRules` bunu kabul eder.
+
+- **2026-11-16 gece Claude — `audio.play_at` + damla collider'ı, KAYNAK HAZIR:**
+  `AudioService.cpp`: yeni işlem `play_at` (bağımsız konumlu tek-atış); `thunderVoices`
+  vektörü artık tek-atışları da taşır (olay `source_id` içerir), gök gürültüsü 8 sınırı
+  yalnız gök gürültüsünü sayar. `RtPlayerIpcPolicy.h` +`audio.play_at`.
+  `BalloonPaintDemo`: `set_collider` işlemi, `pop_sound` config alanı, sonuçta `colliders`.
+
+- **2026-11-16 gece Claude — proje `game_design` anahtarı + `paint.wet_design`, KAYNAK HAZIR:**
+  `ProjectManager` kaydederken `Paint::saveGameDesign()` yazar, açarken kuyruğa koyar;
+  `SimulationClock::tick` başında uygulanır. `newProject` artık `resetBalloonPaintDemo()`
+  (ıslak boya atlası + demo) ve `resetGameDesign()` çağırır. `RuntimeSceneViewer`
+  `.balloons.json`'u yalnız proje `game_design` taşımıyorsa okur. `paint.wet_demo configure`
+  `surfaces` olmadan sahnedeki yüzeyleri KENDİ ayarlarıyla boyar (görünüm/splat basmaz);
+  `surfaces` verilirse davranış eskisi gibi. Yeni Read metodu `paint.wet_design`.
+
+- **2026-11-16 akşam Claude — balon tıkla-patlat + kanal maskesi, KAYNAK HAZIR / derlenmedi:**
+  `BalloonPaintDemo.cpp`: yeni `paint.wet_demo operation=pop` (`balloon` id ya da `screen`
+  [x,y] 0..1); `burst` içi `popBalloons`'a ayrıldı, davranışı aynı. **Claude D (kiosk):
+  `PlayerMain.cpp` olay döngüsüne F5 bloğunun hemen altına sol tık bloğu eklendi** (debug
+  kamera kapalıyken `rtapi::wetPaintDemoCommand("pop", ...)`); bu OYUN girdisi, tuş kapın
+  fareyi kesiyorsa bunu geçirmeli. Yeni include `Api/RtApiPaintWet.h`. `paint_wet.spv`
+  yeniden derlendi (kanal maskesi; kayıt satırı/bağlama/push aynı, çalışan exe ile uyumlu).
+  Varsayılanlar: wet `lifetime_seconds` 2.5 -> 12, `normal_strength` 1.0 -> 0.5 (iki header).
+  Isınma parçacıkları `size_scale` 0.001. Player + Studio artımlı ama geniş derleme.
+
+- **2026-11-16 Claude — GPU paint kanalları TAMAMLANDI (Codex'in yarım partisi), KAYNAK HAZIR:**
+  Codex'in yazdığı (çözüm shader'ı `paint_wet_channels.glsl`, `prepareChannels`, ayar/sayaç
+  alanları, `WetPaintTexturePolicy.h`, `PaintHeightNormalMath.h`) korundu. Eksik olan
+  yayın adımıydı: kanal düzlemleri GPU'da üretiliyor ama dokulara hiç kopyalanmıyordu
+  (`channel_pending` doluyor, okuyan yoktu; `pbr_device_copies` hep 0). `publish` artık
+  dört düzlemi de aynı yoldan yollar (düzlem p ofseti = `(p*texel_count + page_offset)*4`).
+  `paint_wet`: kayıt satırı AYNI (17 bağlama / 64 B push); iki yeni mod (7 kanal, 8 yükseklik
+  tohumu), push `_p0` = düzlem adımı (0 = kanal yok), `_p1` = tam yenileme. Kanal açılınca
+  `base` 6 düzlem, `output` 4 düzlem olur. `Surface._pad0` → `pbr_params`, `_pad2` →
+  `normal_strength` (boyut 80 B aynı). Renk-only yolda `_p0` = 0 kalır.
+  `paint.wet_set_settings` +6 isteğe bağlı alan, `wet_status` +4 sayaç, `wet_coverage`
+  +2 alan; yeni metot yok. `uploadMaterials`'taki tek-kanal kararına da
+  `allowCompactPaintTexture` kapısı eklendi (Codex diğer dört yere koymuştu). Pastel atölye
+  profili ve BalloonPaintDemo'ya DOKUNULMADI: kanallar varsayılan kapalı, IPC ile açılır.
+
+- **2026-11-16 Codex — pastel atölye / flat mesh top KAYNAK HAZIR:** yalnız
+  `Paint/BalloonPaintDemo.cpp` ürün kaynağı. wet_demo config opsiyonel
+  `visual_nodes`: balloons kadar tekil rigid flat node, her biri tek/paylaşılmayan
+  materyal. Ortak TransformCommand (undo kaydı yok), material API ve visibility
+  hizmeti; görsel anchor particle emitter_only, damlalar mevcut GPU yolu. Status
+  `visual_mode` ve top başına `visual_node/visual_resolved/visual_visible` ekler;
+  bunlar CPU sahne durumu, backend görünürlüğü PASS sayılmaz. Public header/struct/
+  shader/yeni TU yok; iki hedef /Zs ve 665 clean include audit PASS. Eski config
+  particle görsel modunu korur. `assets/scenes/pastel-paint-workshop/README.md`.
+
+
+- **2026-11-16 Codex — ortak readback starvation KAYNAK HAZIR:** yalnız
+  RasterViewportFrameRing.cpp, slot reuse öncesi tamamlanan okunmamış görüntüyü
+  tek CPU tamponunda korur. Public API/ABI/shader değişmedi. Player canlı eski
+  binary: async 114 submit/0 consume; sync 87/87; 10 Hz 31/31. Kamera ve bayraklar
+  korundu. İki hedef /Zs PASS; kullanıcı yeni build sonrası yoğun alandaki
+  kamera takılmasının çözüldüğünü onayladı. Yeni otomatik delivery probe sonucu
+  ayrıca alınmadı; sonraki boya matrisinde submit/consume ilerledi.
+
+
+- **2026-11-16 Codex — display boyut semantiği KAYNAK HAZIR:** Player resize/
+  fullscreen/IPC width-height yalnız sunumu ölçekler. F2 ve mevcut render_scale,
+  başlangıç yüzeyinden alınan sabit render_base'i ölçekler; yeni read-only
+  player.display.render_base. PlayerMain yalnız display extent/status + resize
+  redraw; kiosk/tuş kapısına dokunulmadı. Shader/ortak ABI/yeni IPC metodu yok.
+  Descriptor notları ve display acceptance güncel; canlı doğrulama build bekler.
+
+
+- **2026-11-16 Codex — Fire/Push + skin palette KAYNAK PAKETİ:** UI Fire artık
+  mevcut rtapi::triggerAnimGraphParam (Python/IPC ile aynı); editör asset'ine ikinci
+  trigger yazmaz. Push klonundaki transient trigger'lar temizlenir; trigger API
+  çizimi uyandırır. Renderer graph/controller palet yayını yeni ortak
+  CharacterSkinPalette.h üzerinden canonical global slot + model inverse + bind
+  offset ile. Controller cache kopyası bu sınırdan çıkarıldı; gerçek eski raster
+  palet farkı henüz ölçülmedi, kaynak ortaklaştırma canlı skin PASS DEĞİLDİR.
+  Shader/struct/IPC şeması değişmedi. Native palette fixture + tekrarlı tek-trigger
+  dış IPC fixture teslim. İki sorunun canlı doğrulaması yeni build bekliyor.
+
+
+- **2026-11-16 Codex — klip canlı kabul / crossfade fix:** Studio Block With Rifle
+  same-rig bind + save/reopen PASS; ayrı `wiezzorek-two-clips.rtp`, karakter1/79
+  kemik/2klip. Player doğrudan kesme/kemik hareketi/pause/resume/stop PASS, GPU
+  kaybı yok. Crossfade FAIL: isBlending weight0'ı dışlayıp updateLayer ilerlemesini
+  kilitliyordu. `AnimationController.h` predicate iki klip varken weight0'ı kabul
+  eder; queued geçiş de ortak fix'i kullanır. Struct layout/shader değişmedi.
+  Canlı crossfade tekrar build bekler. `PLAYER_CLIP_ACCEPTANCE_2026_11_16.json`.
+
+
+- **2026-11-16 Codex — Player klip IPC KAYNAK HAZIR:** Player mevcut ortak
+  anim.clips/play/stop/status/set_paused/set_time/set_speed ve graph durum/param/
+  trigger/state komutlarını açar. anim.play base layer artık mevcut controller +
+  Animated görünümünü seçip resume eder; graph nesneleri korunur, kaydedilmiş
+  graph seçimine dönüş proje reopen ile. Graph sürerken time/speed/stop ve
+  non-base handover açık hata verir. Dış poz/Edit/Pose/render sahipliği play'i
+  reddeder. Shader/ABI/rol capability değişikliği yok. FBX import/bind Studio'da;
+  Player authoring izni genişletilmedi. `PLAYER_CLIP_TRANSITIONS.md`.
+
+
+- **2026-11-15 Codex — karakter silme/Player klip KAYNAK HAZIR:** Yeni Studio
+  `anim.delete_character(character)` / Python `rt.anim.delete_character` / Hierarchy
+  düğmesi aynı undoable rtapi hizmeti. Mesh + context + kemikler + klipler + tekil
+  graph + hedef collider setleri kaldırılır; diğer karakter kemik slotları sabit.
+  `scene.delete` mesh anlamı korundu; dış poz varsa önce clear gerekir. anim namespace
+  mevcut SceneWrite sınıflamasını kullanır; kiosk Player silme izni genişletilmedi.
+  Player ortak Renderer animasyon/flat skin yolunu fizik öncesi çalıştırıp raster
+  refit yapar; runtime status animation_playback=true, ticks/updates sayaçları.
+  RuntimeSceneViewer özel boyutu değişti; shader/GPU/yaygın struct ABI aynı.
+  Ayrıntı: `PLAYER_CHARACTER_LIFECYCLE.md`.
+
+- **2026-11-15 Codex — C2 dış rig/domain KAYNAK HAZIR:** Yeni
+  `anim.set_external_pose(character, person_id, config)`, `anim.external_poses`,
+  `anim.clear_external_pose(character)`; Python `rt.anim` ile aynı rtapi/çekirdek.
+  Mevcut IK/joint-limit ve flat skin yolu, mevcut authored proxy setlerine kaynak
+  verir. Kişi/güven kaybında domain örnekleri unresolved; bind/clear/teleport/rig-edit
+  geçişlerinde ilgili mevcut motion history reset. Kalıcı rig/proxy şeması ve ortak
+  struct boyutu değişmedi. Player'da bu metotlar, rig.list_bones, mevcut proxy CRUD/
+  sample/stamp ve salt okunur perf.list açıldı. Shader/Jolt/partikül çekirdeği aynı.
+  Sözleşme/ölçüm sınırları: `PLAYER_EXTERNAL_BODY_RIG.md`.
+
+- **2026-11-15 Codex — C/B ilk paket, KULLANICI BUILD + IPC PASS:** Yeni
+  `input.set_body_poses`, `input.body_poses`, `input.clear_body_poses` ve
+  `game.session` (operation status/configure/start/stop/reset), `game.rules`,
+  `game.post_event`; aynı rtapi çekirdeği Python `rt.input`/`rt.game` ile ortak.
+  Poz şeması değişmedi; sonlu koordinatlar ±10000 m, tutulmuş ID toplamı <=10,
+  kesin artan gönderen zamanı, kişi kaybı yerel steady-clock 0,5 s. session
+  durumları attract/playing/finale/resetting; yeni IPC namespace'leri sınıflandı,
+  Player izin listesi/descriptor/projeler güncel. Shader/struct ABI değişmedi.
+  `game.session` status dahil komut endpoint'i SceneWrite ister; D'nin dar rolü
+  işlem düzeyinde ayrıca tasarlanmalı. Ayrıntı `PLAYER_BODY_GAME_RUNTIME.md`.
+
+- **2026-11-15 Codex, balon boya demosu KAYNAK HAZIR:** Yeni ortak `Paint/BalloonPaintDemo.cpp` iki hedefte kayıtlı (Player generator güncel). Yeni IPC `paint.wet_demo` ve script `rt.paint.wet_demo`: configure/status/start/stop/burst aynı API/çekirdek; endpoint SceneWrite. Player proje açılışı isteğe bağlı `<project.rtp>.balloons.json` yan dosyasından atlası tek GPU layout ile hazırlayıp 12 balonun tekli/ikili/üçlü patlamasını başlatır. Son 128 olayda her-tick sim/boya maksimumu ve düşen kaynak sayacı. Şema/dt kapsamı `PLAYER_BALLOON_PAINT_DEMO.md`. `SurfaceFlowField::computePixelFlow` yeni overload; WetPaint UV bake doğrudan flat DNA okur, yüz facade koleksiyonu kaldırıldı (tek materyal adapter facade kalır). Shader registry/binding/push/struct layout değişmedi. Önceki atlas proje parser backend değiştirmeden temizlenir.
+
 
 - **2026-11-15 Claude (adım 3, GPU ıslak boya):** yeni kernel kayıt satırı `paint_wet` (17
   bağlama, 64 B push; tek shader, mod anahtarlı). `ParticleSimulation.h`: yeni struct
@@ -278,6 +419,170 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
+- **2026-11-17 11:00, Claude:** TLAS descriptor'ı bağlayan YENİ kod `VulkanRT::tlasObjectGeneration()` (Backend/VulkanTlasGeneration.h) imzaya katmalı — handle değeri yeniden kullanılıyor (ölçüldü, device lost). Süresiz `vkWaitForFences(UINT64_MAX)` YASAK: `VulkanRT::waitFenceBounded` (NVIDIA kayıp cihazda sonsuz döndü).
+
+- **2026-11-17 10:40, Claude:** YENİ `Backend/VulkanBufferAddressLedger.cpp` (vcxproj+filters, Player yeniden üretildi). `VulkanDevice::createBuffer/destroyBuffer` deftere yazar; tampon silen yeni kod `destroyBuffer` kullanmalı (doğrudan vkDestroyBuffer defteri kör eder).
+
+- **2026-11-17, Claude:** `VulkanBackend.cpp` cihaz oluşturma `VK_EXT_device_fault` açar (destekliyse) ve kayıtlı cihazları tutar; `VulkanFailureReporting.h` ilk kayıpta `logVulkanDeviceFaultInfo()` çağırır (tanımı VulkanBackend.cpp). /Zs PASS, derleme bekliyor.
+
+- **2026-11-17 Codex — audio source etiketleri:** Studio artımlı build bekler. Yeni header UI/AudioSourceLabel.h, AudioUI.cpp, AudioWorkspaceUI.cpp, GameDesignUI.cpp: ortak görünür etiket ad + bağlı asset adı + [kalıcı ID]; hierarchy/Audio listesi ve Pop/Surprise picker kullanır. Viewport kısa etiketinde ID başa alındı. Kaydedilmiş adlar ve API/IPC ID sözleşmesi değişmedi; yeni operasyon yok. diff check PASS, C++ build/app launch yapılmadı. Kabul: aynı adlı iki kaynağa ayrı mono dosyalar bağla; hierarchy/Audio/Surprise listelerinde ayrıldığını, seçilen ID'nin save/reopen sonrası korunduğunu doğrula.
+
+- **2026-11-16 Codex — Player post:** artımlı Player C++ build + canlı kabul bekler. Shader değişmedi. IPC audit PASS, Player include 666/666 clean, diff check PASS. check_post_v2.mjs mevcut OptixWrapper launchOptixDisplayPost beklentisinde FAIL (satır 59); renk matematiği/adaptation önceki kontrolleri geçti. Ayrıntı: docs/dev/PLAYER_POSTPROCESS.md.
+
+- **2026-11-16 gece Claude — oyun tasarımı projeyle kaydedilir: ARTIMLI, 2 yeni .cpp:**
+  `Paint/GameDesign.cpp` (Studio+Player), `UI/GameDesignUI.cpp` (Studio); vcxproj'lar
+  güncel (`gen_player_vcxproj.py --check` PASS). 13 TU /Zs PASS. Sonra Studio'da
+  `rt_game_design_roundtrip_ipc.py --open`. Liste `NEXT_BUILD_CHECKS.md` başında.
+
+- **2026-11-16 Claude — GPU paint kanalları: Studio + Player ARTIMLI ama GENİŞ:**
+  `WetPaintGpu.h` ve `RtApiPaintWet.h` alan ekledi (Codex), `MeshPaintAdapter.cpp`,
+  `VulkanBackend.cpp` değişti; yeni .cpp yok. Shader derlendi/spirv-val PASS, iki yerde.
+  Sonra boş Studio sahnesinde `python scripts/test/rt_wet_paint_channels_ipc.py`.
+  Liste `NEXT_BUILD_CHECKS.md` başında. Canlı kabul YOK.
+
+- **2026-11-16 Codex pastel atölye — build beklemesi KAPANDI:** Kullanıcı
+  build aldı; Player mesh pose/color/hide/respawn + tekli/üçlü boya PASS. Bu tur
+  C++/shader değişmedi. Scalar roughness asset .18×1 düzeltildi, reload uygulandı.
+  Wet12s mevcut IPC profili canlı, reopen sonrası apply aracı gerekir. GPU PBR
+  paint kanalları A'ya §4 devir isteği; henüz uygulanmış/kabul edilmiş değil.
+  `PLAYER_WORKSHOP_ACCEPTANCE_2026_11_16.json`, paket README güncel.
+
+
+- **2026-11-16 Codex readback — Player build beklemesi KAPANDI:** Kullanıcı
+  derledi ve yoğun alanda kamera takılmasının çözüldüğünü onayladı. Codex build
+  çalıştırmadı. Ortak tek .cpp; Studio sonraki buildde alır. Otomatik özel delivery
+  assertion ayrıca çalıştırılmadı. `PLAYER_READBACK_STARVATION_2026_11_16.md`.
+
+
+- **2026-11-16 (Claude) — gölge atlası görüş başına ayıklama:** yalnız
+  `Viewport/MaterialPreviewShadow.cpp` (`recordMaterialPreviewShadowPass` + dosya başında
+  `ShadowFrustum`). Header/struct/shader/bağlama/IPC değişmedi; artımlı build, Studio+Player.
+  Kontroller `NEXT_BUILD_CHECKS.md` başında. Bu dosyaya dokunacaksan taze oku.
+  Ayıklama kullanıcı build'i + canlı ölçümle PASS (atlas GPU 33,1 → 9,3 ms). **Üstüne
+  derleme bekleyen:** statik atlas önbelleği — aynı dosya + `VulkanViewportBackend.cpp`'de
+  `recordMaterialPreviewShadowPass` çağrısının hemen altında 4 satır. Raster içeriğini
+  yerinde değiştiren YENİ bir yol eklersen (tutamaç/sayı/transform/üretim sayacı değişmeden)
+  önbellek imzasına girmesi gerekir; bkz. dosyadaki "Static atlas cache" yorumu.
+  Önbellek canlı PASS (atlas 0/161 kare, GPU 37,3 → 27,1 ms). **Derleme bekleyen:**
+  `Viewport/MaterialPreviewRtShadow.cpp` — `prepareRtShadowFrame` içindeki her-kare koşulsuz
+  `drainInteractiveViewportInFlight()` içerik imzasına bağlandı. ⚠ Raster karesinde her kare
+  CPU_TO_GPU tampon yükleyen/descriptor yazan bir yol ekliyorsan kendi drain'ini koy; bu
+  fonksiyondaki drain artık her kare çalışmıyor, ona yaslanma.
+  Yukarıdakiler kullanıcı testinde PASS. **Derleme bekleyen (yalnız `MaterialPreviewShadow.cpp`):**
+  gölge önbelleği karo başına; atlas render pass'i `LOAD`; yerel ışık uzak düzlemi sahne
+  kutusundan; scatter olmayan mesh'ler gölgede tam global instance tamponundan çizilir
+  (kamera dışı nesne artık gölge atar). Shader/bağlama/struct yok.
+  **Claude D (kiosk) için:** `PlayerMain.cpp` olay döngüsüne `display.handleKey` çağrısının
+  hemen ALTINA F5 debug kamera bloğu eklendi (yerel `debug_camera` bayrağı, fare orbit/pan/dolly).
+  `handleKey` ve DisplayState'e dokunulmadı. Tuş kapın F5'i ve bu fare bloğunu da kapsamalı.
+
+- **2026-11-16 SON DURUM / DEVİR:** Kullanıcı son render çözünürlüğü davranışını
+  test edip PASS bildirdi. Display için önceki artımlı build bekleme satırı artık
+  tarihsel; aynı paket için tekrar build istenmez. Otomatik display betiği NOT_RUN.
+  Studio Fire ve doğru kayıtlı graph'ın Player'da iki klip+mesh görünümü kullanıcı
+  PASS. Direct controller/Space/crossfade, kamera/IK-domain ayrı açık kalır.
+  Güncel başlangıç: PLAYER_HANDOFF_2026_11_16.md. Kullanıcı seçimiyle devir hedefi
+  mevcut Codex sohbeti "Player IPC ve çalışma zamanı planı"; bu Codex dosya
+  sahipliklerini bıraktı. Yeni build/commit/app launch yapılmadı.
+
+
+- **2026-11-16 Codex — EN YENİ Player ARTIMLI:** PlayerRenderExtent.h + PlayerMain
+  display wiring, descriptor açıklama güncellemesi. Studio'nun yeniden derlenmesi
+  davranış için gerekmez. Include boundary 665/665 clean, descriptor/capability,
+  Python parse/CLI ve diff-check PASS; C++ build/app launch yok, shader yok.
+  Kullanıcı build sonrası pencere resize + F2 + fullscreen kabulü:
+  rt_player_display_ipc.py --project E:/rt_k/oyuncak.rtp --seconds 3.
+
+- **2026-11-16 Codex — yoğun sahne ölçümü TAMAM:** oyuncak.rtp 1627draw/3.72M tri,
+  11 ışık/8 gölgeli. Player1680x945 uncapped11.38fps,85.71ms; yarım çözünürlük
+  13.90fps,70.45ms. GPU60ms, bunun33ms gölge atlası. Studio aynıkamera/target/ayar
+  41 redraw-frame GPU60.49ms,CPU27.20ms (SÜRDÜRÜLEBİLİR FPS değil). Player10Hz
+  kontrolünde CPU26.91ms,shadowCPU24.38ms; Studio24.32ms ile eşit. Uncapped77.73ms
+  shadowCPU tek başına Player'a özel hesap yükü kanıtı değil; driver/backpressure
+  olası, kök kesinleşmedi. Kamera/display/capture geri alındı; sahne kaydı yok.
+  PLAYER_HEAVY_SCENE_PROFILE_2026_11_16.md/json. Performans optimizasyonu yapılmadı.
+
+
+- **2026-11-16 Codex — EN YENİ: Studio + Player ARTIMLI:** Renderer ortak palet
+  wiring'i, iki yeni header-only yardımcı, UI Fire/Push wiring'i, RtApiAnim trigger
+  wake + önceki AnimationController.h crossfade predicate. Yeni .cpp/project
+  kaydı/shader yok. Descriptor/capability ve external-body/flat contract PASS;
+  Python acceptance parse/CLI PASS. C++ native palette fixture teslim, DERLENMEDİ.
+  Sıra: Studio Fire (Push olmadan 3 tur) + Push trigger replay yok; Player özgün
+  klip controller görünür skin; sonra crossfade ve Space testi. Tam checklist:
+  PLAYER_CLIP_TRANSITIONS.md son bölüm. Görünür bozulma giderildi diye raporlanmadı.
+
+
+- **2026-11-16 Codex — CANLI SKIN ENGELİ, klip kabulü AÇIK:** Space harici IPC
+  istemcisi hazır; kullanıcı gözle controller modunda özgün ilk klipte ağır mesh
+  uzaması gördü. Tuş istemcisi durduruldu (0 Space olayı). Aynı iki klipli projeyi
+  reopen -> graph yürüyüşü görünür düzgün; anim.play -> controller ilk klipte de
+  bozuk. Ağırlık/FBX/scene save yapılmadı. Yaklaşık aynı fazda joint matrisleri
+  max~0.00042 fark; bu ölçüm skin matrislerini doğrulamaz. Controller skin üretim/
+  raster aktarımı henüz ayrıştırılmadı; retarget diye işaretlenmedi. Player düzgün
+  graph oynatmasına geri döndürüldü. Önceki sayaç/kemik PASS görünür mesh kabulü
+  DEĞİLDİR. `player-controller-graph-comparison.json` ve `player-clip-keys.json`
+  tools/perception_bridge/out altında. Yeni skin kaynak düzeltmesi henüz yok.
+
+
+- **2026-11-16 Codex — SONRAKİ BUILD: Player + Studio ARTIMLI**, ortak
+  `AnimationController.h` inline crossfade başlangıç koşulu. Header bağımlıları
+  yeniden derlenir; clean/full rebuild veya shader derleme gerekmiyor. Önceki
+  klip IPC paketi kullanıcı build aldı; yalnız bu yeni düzeltme bekliyor.
+  Player yeniden açıldıktan sonra iki klipli proje + transition IPC testi tekrar.
+
+
+- **2026-11-16 Codex — YENİ Studio + Player ARTIMLI:** `RtApiAnim.cpp`, Player
+  allowlist ve anim.play descriptor notu. Önceki "yeni build yok" gün sonu notunu
+  bu yeni kaynak paketi için geçersiz kılar. Descriptor/capability audit PASS,
+  Python parse/CLI ve route/exclusion kontrolleri PASS; C++ build/app launch yok.
+  Kullanıcı build sonrası açık Studio'da `rt_prepare_player_clips_ipc.py` ile
+  Block With Rifle FBX -> ayrı iki klipli .rtp; sonra açık Player'da
+  `rt_player_clip_transitions_ipc.py`. Canlı kabul NOT_RUN; tam komutlar
+  `PLAYER_CLIP_TRANSITIONS.md`. Shader derleme gerekmiyor.
+
+
+- **2026-11-16 Codex — güncel durum:** Player klip/rest/skin düzeltmeleri kullanıcı
+  build aldı, görünür ölçek+yürüyüş ve harici IPC PASS. Aşağıdaki önceki Player
+  animasyon build bekleme notları tamamlandı; karakter silme/undo canlı kabulü
+  ayrı bekliyor. Bugünkü kabul turu yalnız rapor/belge, yeni build gerekmiyor.
+
+- **2026-11-16 Codex — Player ARTIMLI / görünür skin ölçeği:** RuntimeSceneViewer,
+  animasyon mesh'lerini P_orig okuyan statik refit'e göndermek yerine mevcut
+  syncRasterSkinnedVertices hizmetini çağırır. Özel sayaç animation_skin_sync_calls
+  eklendi; shader/GPU struct değişmedi. /Zs ve proje/Python denetimi PASS; görünür
+  yürüyüş/boyut kabulü yeni kullanıcı Player build bekliyor.
+
+- **2026-11-16 Codex — Player ARTIMLI / Rest başlangıç düzeltmesi:** prepareScene, klipli karakterleri ortak setPoseView(animated) ile başlatır; Studio rest varsayılanı Player kliplerini engellemeyecek. /Zs PASS; canlı kabul yeni Player build bekliyor.
+
+- **2026-11-15 Codex — LNK2001 düzeltmesi / ARTIMLI:** RtApiCharacter özel görünürlük yardımcıları yerine iki hedefte kayıtlı `rtapi::setObjectVisible` kullanıyor. Studio/Player sırası bağımsız; kullanıcı link kabulü bekliyor. C++ build çalıştırılmadı.
+
+- **2026-11-15 Codex — Studio + Player ARTIMLI build:** Yeni `RtApiCharacter.cpp`
+  kayıtlı; projeleri reload edin. Karakter silme ve Player klip döngüsü henüz canlı
+  kabul almadı. /Zs ortak API, IPC, Python, hierarchy ve RuntimeSceneViewer geçti;
+  descriptor/security/include ve proje denetimleri PASS. Yeni live testler
+  `rt_character_lifecycle_ipc.py` ve `rt_player_character_animation_ipc.py` hazır.
+  Codex C++ build/uygulama başlatmadı; kullanıcı sahnesi değiştirilmedi.
+
+- **2026-11-15 Codex — C2 kullanıcı build bekliyor:** 3 ortak yeni C++ birimi,
+  1 Studio-only Python binding; projeleri reload + artımlı build. Mevcut yaygın
+  struct/layout/shader ABI değişmedi (önceki TAM build ihtiyaçlarını iptal etmez).
+  Yeni birimler, rig/örnekleyici hook'ları, Renderer ve native test kaynağı `/Zs`
+  PASS; native assert çalıştırılmadı. IPC/Player include/proje/sözleşme audit PASS,
+  mevcut 23 Python test PASS. Ardından mevcut rig+proxy+canlı domain sahnesinde
+  `tools/perception_bridge/external_rig_probe.py --require-stamps` kabulü. C2 canlı
+  ölçümü henüz yok; CPU sayaçları hazır, asıl maliyet doğruluk kabulünden sonra.
+
+- **2026-11-15 Codex — C/B ilk paket, STUDIO/PLAYER KULLANICI DERLEDİ / CANLI PASS:**
+  4/10 çocuk tam oturum, 29/71 hatasız eylem; Player 28 / Studio 21 hedefli IPC ve
+  Python binding smoke 9 kontrol PASS. Native bağımsız assert testi çalıştırılmadı.
+  `PLAYER_BODY_GAME_ACCEPTANCE_2026_11_15.json` + `PLAYER_BODY_GAME_RUNTIME.md` kanıt.
+  Bu kabul turunda ürün C++/shader değişmedi, yeni build gerekmez. Rig/IK/fiziksel
+  vekil/Studio paneli/özel balon/görsel final/A/D kalan işleri açık.
+
+- **2026-11-15 Codex, balon boya demosu — PLAYER DERLENDİ / IPC CANLI PASS:** Kullanıcı build sonrası kabul JSON oluştu. Açılış 959.71 ms (demo 352.04 / atlas 317.21 ms); tekli/üçlü 1800/5400 damla, bitiş, 12 balon, validation, gerçek 1024 ve GPU içi yayın PASS. Kontrollü patlama dt maks 10.81 ms; son aktif uncapped takip ~168 fps / dt maks 9.18 ms. Uzun idle aralıkları kapsayan koşuda dt 64–72 ms / sim maks 48.15 ms görüldü, koşullar karışık, sıçramasızlık iddiası yok. 170.82 oyun saniyesinde 46 olay, device loss/hata/düşen kaynak/host boya baytı 0, kapasite sabit. Rapor `PLAYER_BALLOON_PAINT_DEMO.md` ve `PLAYER_BALLOON_PAINT_ACCEPTANCE_2026_11_15.json`. Bu tur ürün kodu değişmedi; yeni build gerekmiyor. Studio live kabulü ayrıca yapılmadı.
+
+
 - **2026-11-15 Claude, Boyama Odası adım 3–4 (GPU ıslak boya):** DERLENDİ, Studio canlı PASS 8/8; commit edildi (2026-11-15). İki proje
   reload (yeni `Paint/WetPaintGpu.cpp`, `Api/RtApiPaintWet.cpp`, `Api/RtIpcPaintWet.cpp`,
   Studio'ya `Api/RtPythonPaintWet.cpp`) → artımlı ama uzun (ParticleSimulation.h bildirim
@@ -521,6 +826,235 @@ GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
 
 ## 4. Fikir / soru / iş bölümü
 
+- **2026-11-16 Codex → Player test ajanı:** Kullanıcının ton map isteği tamamlandı; test dosyalarınıza dokunulmadı. Yeni build sonrası PLAYER_POSTPROCESS.md listesini kabul matrisine alın: ilk kare/reopen sahne ayarı, sabit kamerada post IPC piksel değişimi, fiziksel exposure, geçersiz değer hataları, settled idle. C++ build/app launch yapılmadı.
+
+- **2026-11-16 KULLANICI DEVİR TEYİDİ:** Diğer ajan pasif/çalışmıyor. Codex
+  WetPaintGpu + paint_wet shader kanal bağlantısını devraldı; eski A aktif satırı
+  kaldırıldı. Diğer A simülasyon/çarpışma işlerine bu devrin kapsamında dokunulmuyor.
+
+
+- **2026-11-16 Codex — atölye CANLI kabul ve wet profil:** Kullanıcı derledi,
+  3 negatif config + mesh poz/renk/gizleme/respawn + dört yüzey boya PASS.
+  Tekli/üçlü 1800/5400 damla, kapsama57059/246777, taşma/host byte/device-loss0.
+  Ek 12-top/21600 damla: gölgeler kaybolur, respawn doğru, bu koşuda taşma0.
+  Sim tick max tekli3.22/üçlü3.69ms CPU duvar süresi; GPU/frame benchmark değil.
+  Kullanıcı ışığı kendi ayarlayacak. Wetness.95/lifetime12s/absorption.06/runoff.7
+  mevcut API'den uygulandı; 8s sonra üç duvar ıslak. Preset/apply aracı asset'te,
+  reopen'da tekrar gerekir. Mevcut Paint PBR kanalları portu alttaki A sorusunda;
+  WetPaintGpu/shader'a dokunulmadı. Kaynak proje açık, boya görünür, takvim kapalı,
+  capture/display geri; C++/shader/build/save yok. Kalıcı JSON rapor hazır.
+
+
+- **2026-11-16 Codex → Claude A — kullanıcıdan GPU paint kanal entegrasyonu:**
+  Kullanıcı mevcut Paint height/normal/roughness kanal boyamasının kullanılmasını
+  istedi; yeni boya modeli istemiyor. Renk dışındaki roughness yalnız boyalı alanda
+  düşmeli; mevcut height→normal/PD normal birleştirme anlamı korunmalı. GPU wet yolun
+  şu an yalnız Base Color publish ettiği, thickness'in stamp sırasında yazılmadığı
+  kaynakta teyit edildi. WetPaintGpu.* / paint_wet.comp senin §1 alanında: bunlara
+  dokunmuyorum. **Lütfen bu bağlantıyı sen üstlen veya dosya devrini bu maddenin
+  altına yanıtla.** Mevcut paint kanalları/target/material hizmetleri yeniden
+  yazılmamalı; aynı GPU mask/state'den dirty-tile çıktı, normal için 1px halo,
+  orijinal roughness/normal korunması ve sıfır host download hedefi. State pigment
+  kurudukça azaldığı için kalıcı boya coverage maskesi ile ıslaklık ayrılmalı.
+  Maliyet kullanıcıyla sonra karşılaştırılacak: renk / +roughness / +height-normal,
+  GPU süre, ek bellek, kopya/dirty tile ve host byte sayaçları; shader değişirse
+  derleme/deploy sende. Ben mevcut IPC wet ayarlarıyla lifetime/runoff profilini
+  ayarlayıp atölye kabulünü belgeliyorum; çekirdek dosyalarında çakışma yok.
+
+
+- **2026-11-16 KULLANICI YETKİSİ:** Kullanıcı Codex'in gerektiğinde Player ve
+  Studio'yu açıp kapatabileceğini, proje oluşturabileceğini açıkça belirtti.
+  Bu, eski “Player yalnız A” işletim kısıtının bu kullanıcı yetkisi kapsamındaki
+  istisnasıdır; eşzamanlı aynı oturumu yönetmemek için pano kullanılmaya devam
+  eder. C++ build yetkisi verilmedi; build hâlâ kullanıcıda. Bu tur uygulama
+  başlatılmadı/kapatılmadı; açık Player'da statik atölye önizlemesi açıldı.
+
+- **2026-11-16 Codex — kullanıcı pastel atölye seçti:** 8x8m açık/boş merkez,
+  3 ayrı boya duvarı+zemin; 32 flat mesh/17200 üçgen, dört tam 0–1 UV hedef,
+  12 smooth gerçek mesh boya topu, roughness .18/clearcoat .5, iki ışık.
+  Yoğun sahneden geometri alınmadı; oda ayrı ince AABB slab + plane ile doğru
+  temsil edilir, SDF bu ilk paket için gerekmez. Mevcut Player'da sidecarsız
+  geometri/PBR görüntüsü kontrol edildi (~475ms reload), yeni runtime davranışı
+  build bekler. 64 kaynak/tile/paint publication A'da; çekirdek dosyalarına
+  dokunulmadı. Native binary/UV/normal/index/collider audit PASS.
+
+
+- **2026-11-16 Codex → Claude A — yoğun sahne boya ölçümü TAMAM:** Kullanıcı
+  mevcut/default materyallerle balon testini istedi; yalnız açık Player, özel
+  oyuncak.rtp kopyaları, A/D çekirdek dosyalarına dokunulmadı. Aynı kamera ve
+  3,73M üçgen/1627 draw: OBB iki materyalde 0 kapsama; mevcut SDF yolu
+  14469/9400 texel. Doğrudan dab kontrolü dört atlasta PASS. Ana oda tek OBB ile
+  iç boşluğu doldurabilir; 131 mesh grubunun UV aralığı sabit. Üçlü patlama
+  tile kaynak taşması OBB 248/122, SDF 224/190; benzersiz damla sayısı değil.
+  GPU raster mevcut ~26,7 / default ~17,8 ms; baseline advance da GPU bekliyor,
+  paint_ms_max tamamı ek boya işi sayılmamalı. Host download/bytes ve device loss0.
+  Genel üretim PASS değil: yalnız 4 gerçek yüzey/collider, demo yerleşimi hâlâ
+  fixture sınırlarında. Özgün dosya hashleri aynı, proje geri açık, geçici
+  paint/demo temiz, display/capture geri alındı. Rapor:
+  `PLAYER_HEAVY_BALLOON_PAINT_2026_11_16.md/.json`; dış tekrar betiği
+  `scripts/test/rt_heavy_balloon_paint_ipc.py`. Yeni build/shader gerekmiyor.
+
+
+- **2026-11-16 Codex — devir sonrası input→balon→boya CANLI PASS:** Kullanıcı
+  Player'ı bu kabul için açıkça ayırdı. Nötr ve held-high kontrolleriyle 3/3 tek
+  arms-up → tek gerçek pop/1800 damla → dört yüzey GPU boya; kayıp/host download/
+  device-loss 0. Doğrudan burst/start/post_event/dab RPC'si yok; ürün C++/shader
+  değişmedi, yeni build gerekmiyor. Probe bitişi attract/0 kişi/demo kapalı/atlas
+  reset; transient test config attract'ta kaldı. Sonraki salt okumada Player
+  oyuncak.rtp'ye dönmüş, session unconfigured/kişi 0/demo yok; yeniden dokunulmadı.
+  Canlı test tahsisi tamamlandı; A/D kaynak sahiplikleri korunur. Rapor:
+  PLAYER_BALLOON_INPUT_ACCEPTANCE_2026_11_16.md/.json. Kamera kullanıcı isteğiyle
+  beklemede. Donanım bağımsız §5.1 yönü teyit edildi; marka/SDK/kalibrasyon motor
+  dışında adaptörde kalacak. Kamera açılmadı, ML/model kurulmadı. Gerçek kamera,
+  belirli balona uzaysal el teması, controller/IK ve görsel piksel kabulü yapılmadı.
+
+
+- **2026-11-16 Codex devir / Claude A canlı Player koordinasyonu:** Kullanıcı
+  balon oyununu bu sohbete devretti. Salt okunur IPC: Player oyuncak.rtp, demo
+  prepared=false, session configured=false, kişi yok; Studio kapalı. Sentetik
+  input→balon→boya dış kabulü hazırlıyorum. §1'de Player canlı kullanımı A'ya
+  ayrılmış: balon fixture'ına geçiş ve ardından eski proje/kamera/display geri
+  yükleme için Player serbest mi? Kaynaklarına dokunmayacağım, uygulama açmayacağım.
+  **Kullanıcı yanıtı (2026-11-16):** "Player’ı balon testine ayırabilirsin".
+  Bu kabul boyunca mevcut Player Codex testine ayrıldı; balon fixture açılacak,
+  sentetik poz/oturum ve boya resetlenecek; proje kaydedilmeyecek.
+
+
+- **2026-11-16 Codex → Claude D:** Kullanıcı pencere resize'ın render çözünürlüğünü
+  değiştirmemesini açıkça istedi. PlayerMain display hedef boyutu/status/resize
+  wiring alanıyla sınırlı düzeltme yapıyorum; handleKey/kiosk/PIN/rol işine
+  dokunmayacağım. Display alanında eşzamanlı editin varsa bu başlık altında bildir;
+  yeni mantık bağımsız PlayerRenderExtent.h içinde tutulacak.
+  - **Codex tamamlandı:** yalnız listelenen display alanları değişti; kiosk tuş
+    işleyicisi değişmedi. Yeni read-only render_base ve sabit hedef semantiği §2’de.
+
+
+- **2026-11-15 Codex — silinemeyen karakter ve Player rest pozu:** Mesh lifecycle
+  karakter metadata'sını temizlemiyordu; ayrı karakter silme komutu eklendi.
+  Açık Player'da kullanıcının özgün balloons.rtp dosyasındaki 79 kemik/1 klip
+  görüldü, oynatma teşhisi metotları Player'da izinli değildi. Kaynakta
+  advanceRuntime'ın Renderer animasyonunu hiç çağırmadığı ve status'ta playback=false
+  olduğu doğrulandı; ortak çağrı/flat refit eklendi. Sonraki probe'da Player pipe
+  error 2 (kapalı); açılmadı. Önceki '1' test kaydı veya kullanıcının '2' kaydı bu
+  partide silinmedi. Yeni build sonrası backup'lı delete/undo/reopen ve yürüyüş/refit
+  kabulü yapılacak; imported rig owned-IK engeli ayrı ve hâlâ açık.
+
+- **2026-11-15 Codex — C2 kaynak teslimi:** Kullanıcı isteğiyle ayrı Jolt yerine
+  mevcut rig→kinematik proxy→domain yolu kullanıldı. Proxy seti her kare yeniden
+  üretilmiyor; aynı IK çözümü render ve domain için ortak. Kayıpta/güven düşüşünde
+  hayalet collider engeli, teleport/motion-history reset ve host solve/skin sayaçları
+  eklendi. Proje/descriptor kayıtları güncel; `PLAYER_EXTERNAL_BODY_RIG.md` devir.
+  C2 build/canlı kabul §3'te; native test exe'si çalıştırılmadı. Açık uygulamalara
+  dokunulmadı, C++ build/uygulama başlatma/shader/commit yok. §1 satırı kaldırıldı.
+
+- **2026-11-15 Codex — C2, kullanıcı yönlendirmesiyle mevcut domain yolu:** Dış rig
+  pozu mevcut IK/joint-limit + flat skinning yoluna bağlanacak; mevcut authored
+  kinematik proxy setleri aynı çözülen joint globals'ı domain için okuyacak.
+  Ayrı Jolt iskeleti/ikinci proxy sistemi kurulmayacak. Kişi kaybında bu karakterin
+  proxy çözümü unresolved olacak; eski poz hayalet collider olarak kalmayacak.
+  API/IPC sayaçlarıyla host solve/skin süreleri ve proxy sayıları şimdiden görünür;
+  sayısal maliyet karşılaştırması kullanıcı build'i ve doğruluk kabulü sonrası.
+  Shader/partikül/Jolt çekirdeği bu pakette değişmeyecek. A/D hâlâ bekliyor.
+
+- **2026-11-15 Codex — C/B ilk paket CANLI KABUL TAMAMLANDI:** Kullanıcı iki
+  uygulamayı derleyip açtı; yeni uygulama başlatmadan harici IPC ile kabul alındı.
+  4/10 çocuk 36 s / 1080'er poz, tam durum sırası, jest/bölge olayları ve boya
+  %16,43/%32,48; 29/71 eylem, sıfır hata/olay kaybı. Gerçek PaintFloor analitik
+  temas/grup, cooldown/atomiklik, yerel timeout, timer ve kapsama finali PASS.
+  Python binding smoke sonlu/beklemesiz, dışarıdan script.run_file ile; canlı döngü
+  probları yalnız dış süreçte. Native exe testi çalıştırılmadı. RPC/takvim jitter
+  açık (maks 182–190 ms RPC, 209–819 ms takvim); performans kabulü değil.
+  **Son durum:** Player mevcut test odasında attract, pozlar/boya temiz, otomatik
+  balon takvimi kapalı, ekran ayarları geri alındı. Studio boş ve oturum kurulmamış.
+  Device-loss/düşen boya kaynağı/host boya indirmesi 0. C++/shader/commit yok;
+  yalnız test araçları/belge/JSON kanıt eklendi. §1 satırı kaldırıldı. Devam rig/IK
+  ve fiziksel vekiller → içerik/Studio paneli → A → D.
+
+- **2026-11-15 Codex — C/B ilk kaynak paketi teslim:** Poz/jest alımı,
+  analitik küre × adlandırılmış flat mesh AABB temas örneklemesi, bölge/grup
+  kuralları, boya/balon/ses eylemleri ve attract→playing→finale→resetting oturumu
+  ortak çekirdek + script/IPC ile yazıldı. 10 yeni C++ birimi + ortak saat + native
+  test kaynağı `/Zs` PASS; native assert çalıştırılmadı. IPC/Player include/proje
+  üretimi/sözleşme audit PASS, 23 Python test PASS, gerçek planla 4 ve 10 çocuk
+  1080'er poz dry-run PASS. Kullanıcı build/canlı kabul §3 ve NEXT_BUILD_CHECKS'te.
+  **Tam C/B bitti değil:** rig/IK ve fiziksel kinematik gövdeler, Studio paneli,
+  hedefli/özel balonlar ve görsel final sonraki paket. A/D henüz yazılmadı.
+  Build/uygulama başlatma/commit yok; çalışma satırı kaldırıldı.
+
+- **2026-11-15 kullanıcı → Codex devralma:** A/B/C/D kullanım sınırında durdu.
+  Kaynak incelemesinde B/C/D ana modülleri yok; `GameEvents.h` var. Kullanıcı önerilen
+  C poz/jest → B kural/oturum → rig/vekil/özel balon → A → D sırasını onayladı.
+  Önce C/B tamamlanacak; derleme, uygulama başlatma ve commit yapılmayacak.
+  A/D'nin eski §1 satırları aktif çalışma kanıtı değildir; bu işler sırada bekliyor.
+
+- **2026-11-15 Codex, harici algı köprüsü KAYNAK HAZIR / UYGULAMASIZ PASS:**
+  `tools/perception_bridge/`: tohumlu 1..10 çocuk, 30 Hz poz/JSONL/kabul raporu;
+  çoklu MediaPipe Tasks webcam köprüsü, zemin homografisi, geçici kayıpta kalıcı ID,
+  görüntü kaydı yok. 23 test PASS; N=1/720 ve N=10/1080 CLI dry-run PASS.
+  Devir: `PLAYER_PERCEPTION_BRIDGE.md` (kurulum, kalibrasyon, ölçüm ve sınırlar).
+  **B'ye:** `game.session` yaşam döngüsü kaynakta henüz yoktu; canlı koşucu
+  `--session-plan` ile gerçek setup/start/cleanup, `state_path`, `expected_states`,
+  `display_fps_path` (mevcut `frame.presented_fps`) ister. Tam durum sırası + kapsama
+  artışı + pozitif ekran FPS'i denetlenir. Nihai plan ve kullanıcı build'i sonrası canlı kabul
+  açık; dry-run motor kabulü değildir. C++/shader/ABI değişikliği, build, uygulama açma,
+  commit yok; bu teslim kendi başına derleme gerektirmez. §1 satırı kaldırıldı.
+
+- **2026-11-15 Claude (koordinatör), Boyama Odası kalan işler — DÖRT PARALEL CLAUDE + CODEX.**
+  Kullanıcı isteği: kalan ana işler dağıtılsın. Dosya sahipliği §1 tablosunda. Hepsi AYNI ağaçta,
+  dal yok. Ortak kurallar (bu parti için, hepsi bağlayıcı):
+  1. **Kimse derlemez** (`msbuild` yok), **kimse commit etmez**, `git add -A` yok. Doğrulama: MSVC
+     `/Zs`, denetim betikleri, kendi shader'ını `glslc` ile derleme. Tek bütünleşik derlemeyi iş
+     bitince kullanıcı alır; canlı kabul ondan sonra.
+  2. **Uygulamayı yalnız A çalıştırır** (mevcut Player exe'si, profil için; tek pipe). B/C/D
+     Studio/Player başlatmaz.
+  3. **Yaygın başlığa alan ekleme** (`ParticleSimulation.h`, `scene_data.h`, `RtApi.h`, `scene_ui.h`,
+     `Renderer.h`): tam derleme demek. Yeni API kendi küçük başlığında (`RtApiXxx.h` deseni).
+  4. **Ortak kayıt dosyaları** — `RtIpc.cpp`, `RtIpcSecurity.cpp`, `RtPlayerIpcPolicy.h`,
+     `scripts/ipc_descriptor_overlay.json`, `RayTrophiStudio.vcxproj(.filters)`,
+     `scripts/player_include_manifest.json`, `RuntimeSimulationClock.cpp`, `RuntimeSceneViewer.cpp`,
+     `PlayerMain.cpp`, `SceneUIStateHost.cpp`: düzenlemeden HEMEN önce taze oku, yalnız kendi
+     satırlarını Edit ile EKLE (Write ile yeniden yazma, biçimlendirme yok). Üretilmiş dosyalar
+     (`RtIpcMethodDescriptors.cpp`, `RayTrophiPlayer.vcxproj`) elle değil üreticiyle; son çalıştıran
+     kazanır, deterministik.
+  5. `NEXT_BUILD_CHECKS.md`: bu partide üzerine YAZMA; en üste kendi başlıklı bölümünü Edit ile ekle.
+     Kendi tasarım notun ayrı dosyada (`docs/dev/`, durum etiketi + README satırı).
+  6. İşin bitince §1 satırını sil, §2/§3'e arayüz + derleme notunu düş.
+
+  **Ortak dikişler (şimdiden sabit, koordinatör yazdı):**
+  - `include/Game/GameEvents.h` (header-only, YAZILDI): `Game::Event {type, target, person,
+    position[3], normal[3], value, time_s}`, `Game::postEvent`, `Game::drainEvents`,
+    `postedEvents/droppedEvents`. Üreticiler (C'nin hareketleri/vekil temasları, A'nın partikül
+    olayları gerekirse, IPC `game.post_event`) yalnız `postEvent` çağırır; **yalnız B** drain eder
+    (sim tick'inde). Bu başlığın alanlarını değiştirmek = §2 notu.
+  - Olay adları: `gesture.stomp`, `gesture.arms_up`, `gesture.reach` (C); `contact` (vekil × nesne,
+    `target` = nesne adı, C); `zone.enter/exit` (B bölgeleri pozdan hesaplar ya da C verir — B karar,
+    buraya yazar); `balloon.pop`, `coverage.threshold`, `timer`, `session.state` (B).
+  - `input.set_body_poses` sözleşmesi (C uygular, Codex köprüsü gönderir):
+    `{ "t": <gönderen saniyesi>, "persons": [ { "id": <kalıcı int>, "confidence": 0..1,
+    "joints": { "<ad>": [x, y, z, güven] } } ] }` — dünya uzayı, metre, Y yukarı, oda çerçevesi
+    (kalibrasyon köprünün işi). Eklem adları: `head, neck, pelvis, l_/r_ shoulder, elbow, wrist,
+    hip, knee, ankle` (15). Mesajda olmayan kişi 0.5 s sonra düşer. Okuma `input.body_poses`,
+    temizleme `input.clear_body_poses`. Player pipe `\\.\pipe\RayTrophiPlayer`.
+
+  **Codex görevi (harici, C++'a dokunmadan):** `tools/perception_bridge/` altında
+  (a) **sahte çocuk koşucusu** `fake_children.py`: tohumlu, N=1..10 betikli çocuk (yürü, uzan, zıpla,
+  bas, kollar yukarı, alandan çık/gir, örtüşmede kimlik kaybı) yukarıdaki sözleşmeyle 30 Hz poz
+  gönderir, oturumu baştan sona sürer, `game.*`/`paint.wet_coverage`/`player.display` okuyup JSON
+  kabul raporu yazar; C'nin IPC'si daha yokken `--dry-run` ile mesajları dosyaya döker ve şemayı
+  doğrular; (b) **webcam köprüsü** `bridge.py`: herhangi bir kamera + MediaPipe Pose (çok kişi),
+  D'siz konum için kalibre zemin düzlemi + ayak pikseli → X/Z, kareler arası kalıcı kişi kimliği,
+  görüntü asla diske yazılmaz; (c) uygulamasız birim testleri (kalibrasyon, kimlik takibi, şema);
+  (d) `docs/dev/PLAYER_PERCEPTION_BRIDGE.md` (durum etiketi + README satırı). Ayna modu görüntü
+  kanalı (paylaşımlı bellek, adım 8) bu görevde YOK — motor tarafı sonraki dalga. Derleme istemez.
+
+  **Sonraki dalga (bu parti bitmeden başlamaz):** adım 8 ayna modu (paylaşımlı bellek + video kartı
+  + gizlilik), adım 9 oda modu (warp/blend; demo için şart değil), Studio balon demosu canlı kabulü.
+
+- **2026-11-15 Codex, devir kayıtları tamamlandı:** Balon demo Player build + IPC PASS ve ölçüm sınırları ana `RAYTROPHI_PLAYER_PLAN.md`, `PLAYER_GAME_PAINT_ROOM.md` devir/durum/sıra tablosu, `PARTICLE_SYSTEM_GPU_ROADMAP.md` ve `NEXT_BUILD_CHECKS.md` başına işlendi. `PLAYER_BALLOON_PAINT_DEMO.md` + kabul JSON kanıt bağlantıları eklendi. Genel kural/oturum, kamera, final/ses, kiosk, OBB/spread ve GPU bekleme işleri açık bırakıldı; eski build/kabul notları tarihsel olarak etiketlendi. Yalnız belge değişikliği, yeni build yok.
+
+
+- **2026-11-15 Codex, Player ilk boya takılması (inceleme bitti):** Bu oda SDF kullanmıyor (AABB/PlaneY). Temiz 1024 ekleme RPC ~61–64 ms/yüzey; art arda ilk tick 19/39/61/72 ms, bütün atlas her eklemede yeniden kurulup mevcut boya sıfırlanıyor. Backend init 273 compute pipeline oluşturmayı deniyor; soğuk katkı ayrı ölçülmedi. clear_surfaces sonrası resolution metadata gerçek doku boyutuyla ayrışabiliyor; testler valid_texels doğrulasın. Rapor `PLAYER_PAINT_STARTUP_PROBE_2026_11_15.md` + JSON, tekrar betiği `scripts/test/rt_player_paint_startup_probe.py`. Ürün kodu/ABI değişmedi, build gerekmiyor. Player özgün odada dört gerçek 1024 yüzeyle çalışıyor.
+
 - **Claude → Codex (2026-11-14), Player partikül kabulü — iş bölümü:** Senin §1
   dosyalarına (`ParticleSimulation.*`, `ParticleRenderBridge.cpp`,
   `ParticleBillboardBuilder.cpp`, `InstanceGroup.h`, `FluidRenderProxy.*`, Vulkan
@@ -745,3 +1279,26 @@ GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
   semantiğini owner başına taşımamız gerekiyor. Bu test partinde dokunmuyorum;
   ilk ayrı adım için hacim/face ownership ve karşılıklı impulse sözleşmesini
   birlikte netleştirelim. Bağ graph'ı ikinci hacim/taşıyıcı yaratmıyor.
+
+- **2026-11-15 Codex — C2 / Mixamo ön kabul:** Kullanıcının açık Studio uygulamasında balon fixture açıldı, `E:/3d model_arsiv/mixamo_arsiv/wiezzorek/wiezzorek.fbx` içe aktarıldı. Motor: character `1`, 79 kemik, ağırlıklı kemikler, 1.4167 s `1_mixamo.com` klibi. Özgün fixture/FBX değiştirilmedi; ayrı test projesi `tools/perception_bridge/out/wiezzorek-balloon.rtp`, rapor `wiezzorek-inspection.json`. `rig.get_controls` imported rig için `rig_pose_requires_owned_rig` döndürüyor; dış poz/IK ve görünür deformasyon kabulü henüz yapılmadı. Sonraki iş: imported skinned rig için güvenli authoring/IK devralma yolunu değerlendirmek; ownership bayrağı elle zorlanmadı. Build/uygulama başlatma yok.
+
+- **2026-11-15 Codex — LNK2001:** İki özel SceneCommand yardımcı sembolüne başvurular kaldırıldı; ortak görünürlük API tanımı ve proje kayıtları iki hedefte statik olarak doğrulandı.
+
+- **2026-11-16 Codex — Player klip canlı teşhisi:** Kullanıcı build sonrası balloons.rtp: 79 kemik,1klip; animation_playback=true,ticks=1232,updates=0,refits=0. Ortak yükleyici Rest varsayılanı Renderer klibini atlatıyordu. RuntimeSceneViewer açılışında klipli karakter animated görünümüne geçirildi; IPC komutu gerekmiyor. Canlı probe refit sayacının simulation altında okunması da düzeltildi. C++ build/uygulama başlatma yok.
+
+- **2026-11-16 Codex — Player dev/sabit mesh teşhisi:** Canlı graph kemikleri metre
+  ölçeğinde (baş ~1,84m), updates2518/refits2517; görünür mesh buna rağmen sabit/dev.
+  Statik SoA refit P_orig/N_orig (ham FBX cm bind) yükleyerek pozu eziyordu. Player,
+  Renderer ile CPU skin kapalı değerlendirme + Studio'nun ortak raster skin hizmetine
+  geçirildi; yeni hizmet çağrı sayacı sonuç/dispatch başarı kanıtı sayılmıyor.
+  Sahne/karakter dönüşümleri değiştirilmedi; C++ build veya app launch yok.
+
+- **2026-11-16 Codex — GÜN SONU Player PASS:** Kullanıcı görünür doğru ölçek/yürüyüş
+  onayı; IPC graph61 update/skin, kısa capture22 submit/consume/update/skin, görüntü
+  imzası değişti, device_lost=false, sim error yok. Capture eski false'a döndü,
+  scene revision aynı; balloon56 olay ve GPU-resident havuzlar. Kalıcı rapor
+  PLAYER_CHARACTER_ACCEPTANCE_2026_11_16.json. Performans kabulü değil.
+  Kullanıcının mimari kuralı tekrar teyit: mevcut Studio hizmetleri ortak;
+  yalnız unsupported CPU/OptiX/OIDN bağımlılıkları ve host entegrasyonu hedefe özel.
+  Delete/undo, imported-owned IK/domain, Player IPC transitions ve shutdown ölçümü
+  henüz NOT_RUN/açık. Yeni build/commit/app launch yok.

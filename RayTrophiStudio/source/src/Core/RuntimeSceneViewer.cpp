@@ -1,9 +1,13 @@
+#include <sstream>
 #include "Core/RuntimeSceneViewer.h"
 #include "Audio/AudioRuntime.h"
+#include "Animation/RigPoseView.h"
 
 #include "Core/VulkanSceneSync.h"
 #include "Core/RuntimeSimulationClock.h"
+#include "PostProcess/PostService.h"
 #include "Paint/WetPaintGpu.h"
+#include "Paint/GameDesign.h"
 #include "Backend/VulkanViewportBackend.h"
 #include "ProjectManager.h"
 #include "InstanceManager.h"
@@ -29,6 +33,7 @@
 #include <exception>
 #include <algorithm>
 #include <chrono>
+#include "Paint/BalloonPaintDemo.h"
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
 extern bool g_camera_dirty;
@@ -180,6 +185,17 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
 }
 
 rtapi::Result RuntimeSceneViewer::prepareScene() {
+    // The shared loader defaults weighted rigs to Studio's transient Rest view.
+    // Runtime characters with clips must instead evaluate their saved graph/controller.
+    for (const auto &model : context_.scene.importedModelContexts) {
+        if (!model.hasAnimation) {
+            continue;
+        }
+        std::string error;
+        if (!RigAuthoring::setPoseView(context_.scene, model.importName, "animated", error)) {
+            return rtapi::Result::fail("Player character playback: " + error);
+        }
+    }
     flat_meshes_ = 0;
     triangles_ = 0;
     auto& materials = MaterialManager::getInstance();
@@ -265,6 +281,10 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
     // project always gets a fresh push.
     cloud_time_s_ = context_.renderer.world.getCloudTime();
     audio_time_s_ = 0.0;
+    animation_time_s_ = 0.0;
+    animation_ticks_ = 0;
+    animation_updates_ = 0;
+    animation_skin_sync_calls_ = 0;
     audio_ticks_ = 0;
     cloud_push_.invalidate();
     cloud_pushes_ = 0;
@@ -328,13 +348,20 @@ rtapi::Result RuntimeSceneViewer::openProject(const std::string& path) {
         context_.selection.clearSelection();
         // Same canonical parser/flat data loader used by Studio and rt.project.open.
         g_dense_mesh_as_hittable = true;
+        Paint::resetBalloonPaintDemo();
         if (!ProjectManager::getInstance().openProject(path, context_.scene,
                 context_.render_settings, context_.renderer, backend_)) {
             error_ = "project open failed: " + path;
         } else {
-            const auto preparation = prepareScene();
-            if (!preparation.ok) {
-                error_ = preparation.error;
+            // The project's own game design wins; the .balloons.json sidecar is
+            // the older self-contained form, read only when there is none.
+            const bool sidecar_ok = Paint::gameDesignPending() ||
+                Paint::loadBalloonPaintProject(context_.scene, path, error_);
+            if (sidecar_ok) {
+                const auto preparation = prepareScene();
+                if (!preparation.ok) {
+                    error_ = preparation.error;
+                }
             }
         }
         if (!error_.empty()) {
@@ -375,7 +402,24 @@ void RuntimeSceneViewer::requestFrame() {
 }
 
 void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
-    if (!scene_ready_ || !backend_ || g_vulkan_device_lost || simulation_stopped_) {
+    if (!scene_ready_ || !backend_ || g_vulkan_device_lost) {
+        return;
+    }
+    // Publish the same scene grading/exposure state as Studio. The existing
+    // raster post pass consumes it directly; no CPU pixel processing is needed.
+    const bool post_requested = context_.apply_tonemap;
+    const float previous_exposure = g_display_post.exposure;
+    const float previous_camera_exposure = g_display_post.camera_exposure;
+    rtpost::tick(context_);
+    // Studio's tick also requests frames merely while the HDR meter is enabled.
+    // Raster does not produce that meter: only an actual gain change or an API
+    // edit should wake an otherwise settled Player scene.
+    if (post_requested || previous_exposure != g_display_post.exposure ||
+        previous_camera_exposure != g_display_post.camera_exposure) {
+        refresh_requested_ = true;
+    }
+    context_.apply_tonemap = false;
+    if (simulation_stopped_) {
         return;
     }
     auto& scene = context_.scene;
@@ -395,6 +439,17 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
     // clock ticked 184 times while a dropped box stayed at y=3).
     input.playing = false;
     input.live_mode = true;
+    // Evaluate before physics consumes character collider poses. Raster skinning
+    // uses the shared viewport service below, not the static SoA sculpt refit.
+    animation_time_s_ += dt_seconds > 0.0f
+        ? (std::min)(static_cast<double>(dt_seconds), 0.25) : 0.0;
+    const bool animated = context_.renderer.updateAnimationState(
+        scene, static_cast<float>(animation_time_s_), false, false);
+    ++animation_ticks_;
+    if (animated) {
+        ++animation_updates_;
+        g_gpu_refit_pending = true;
+    }
     const SimulationClockResult clock = simulationClock().tick(scene, input);
     if (clock.pause_requested) {
         simulation_stopped_ = true;
@@ -402,7 +457,7 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         SCENE_LOG_WARN("[Player] Simulation stopped: " + simulation_error_);
     }
 
-    bool changed = clock.render_updated;
+    bool changed = clock.render_updated || animated;
     // Same write-back servicing as Studio's frame tail, raster branch only.
     if (g_geometry_deform_pending) {
         g_geometry_deform_pending = false;
@@ -425,6 +480,14 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         backend_->syncRasterInstanceTransforms(scene.world.objects);
         g_gpu_refit_pending = false;
         changed = true;
+    }
+    // Run after generic deform/instance servicing: that path reads P_orig and
+    // cannot substitute for skinning (FBX bind vertices may still be centimetres).
+    // This is the same bind buffers + bone matrices service Studio uses.
+    if (animated) {
+        backend_->syncRasterSkinnedVertices(
+            scene.world.objects, context_.renderer.finalBoneMatrices);
+        ++animation_skin_sync_calls_;
     }
     // Particles: re-upload every iteration while any system exists. Billboards
     // face the camera, so even a frozen system needs a new list when it moves.
@@ -566,6 +629,8 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
         }
         // Two measured halves: the backend frame (GPU work + its readback into
         // the CPU surface) and the SDL texture upload that presents it.
+        // Also cover the first frame after project.open, before the next tick.
+        rtpost::syncDisplay(context_.color_processor, context_.scene.camera.get(), false);
         const auto render_start = std::chrono::steady_clock::now();
         backend_->renderProgressive(surface, nullptr, nullptr, width_, height_,
                                      &framebuffer_, nullptr);
@@ -670,7 +735,9 @@ nlohmann::json RuntimeSceneViewer::status() const {
     return {
         {"host_active", true}, {"host", "player"},
         {"stage", "static_scene_viewer"}, {"scene_loading_supported", true},
-        {"rendering_supported", true}, {"animation_playback", false},
+        {"rendering_supported", true}, {"animation_playback", true},
+        {"animation_ticks", animation_ticks_}, {"animation_updates", animation_updates_},
+        {"animation_skin_sync_calls", animation_skin_sync_calls_},
         {"scene_ready", scene_ready_}, {"frame_available", frame_available_},
         {"render_pending", needsFrame()},
         {"project_path", project_path_}, {"scene_revision", scene_revision_},

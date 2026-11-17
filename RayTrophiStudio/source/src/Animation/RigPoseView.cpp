@@ -1,4 +1,5 @@
 #include "Animation/RigPoseView.h"
+#include "Input/ExternalBodyRig.h"
 #include "Animation/RigPoseAuthoring.h"
 #include "Animation/RigPosePreview.h"
 #include "Animation/RigBindingScope.h"
@@ -67,6 +68,9 @@ void initializeRestPoseDefaults(SceneData& scene) {
     }
 }
 bool needsFileAnimationEvaluation(const SceneData& scene) {
+    if (Input::hasExternalBodyRigs(scene)) {
+        return true;
+    }
     const auto& pose=scene.rigView.pose;
     if(pose.needsEvaluation(scene.timeline.current_frame))return true;
     if(needsIKPlacementEvaluation(scene))return true;
@@ -103,6 +107,9 @@ bool setPoseView(SceneData& scene,const std::string& character,const std::string
     error="unknown_character";return false;
 }
 bool applyRestPoseView(SceneData& scene,SceneData::ImportedModelContext& model,std::vector<Matrix4x4>& skin,bool cpu,bool& changed) {
+    if (Input::copyExternalBodyRigPose(scene, model.importName, skin, changed)) {
+        return true;
+    }
     if(applyAuthoringPose(scene,model,skin,cpu,changed))return true;
     changed=false;if(!isRestPoseView(scene,model.importName))return false;
     const bool cached=!scene.rigView.pose_view_dirty.count(model.importName) && model.rigPoseSource=="rest_view" && (!cpu || model.rigPoseViewCpuApplied);

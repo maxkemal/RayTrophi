@@ -120,7 +120,10 @@ struct AudioService::Impl {
         double bytes = 0;
         bool held = false;
     };
+    // Transient positional voices: thunder strikes and play_at one-shots (an
+    // event carrying "source_id"). Each plays once at its own position.
     std::vector<ThunderVoice> thunderVoices;
+    std::uint64_t oneShotSerial = 0;
     std::string thunderError;
 
     json capturedVoice(const std::string& key, const json& source, ma_sound& sound,
@@ -232,6 +235,9 @@ struct AudioService::Impl {
             }
         }
         for (auto& voice : thunderVoices) {
+            if (voice.event.contains("source_id")) {
+                continue;   // play_at one-shots run on game time (see play_at)
+            }
             if (transport.paused() && ma_sound_is_playing(voice.sound.get())) {
                 ma_sound_stop(voice.sound.get());
                 voice.held = true;
@@ -495,7 +501,7 @@ const std::vector<std::string>& AudioService::operations() {
         "physical_catalogue", "physical_configure",
         "preview_mute", "preview_file", "append", "signal_set", "signals_clear",
         "environment_setup", "resume_automatic", "domains", "acoustics_boundary", "acoustics_debug", "acoustics_trace", "acoustics_preview", "acoustics_preview_status", "thunder_setup", "thunder_update",
-        "thunder_event", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
+        "thunder_event", "play_at", "playback_update", "mixer_get", "mixer_update", "mixer_reset_peaks",
         "analysis_get",
         "arrange_preview", "arrange_stop", "arrange_status",
         "track_list", "track_create", "track_update", "track_remove", "track_reorder",
@@ -724,6 +730,9 @@ std::vector<std::string> AudioService::parameters(const std::string& op) {
     }
     if (op == "thunder_event") {
         return {"key", "position", "intensity", "age_seconds"};
+    }
+    if (op == "play_at") {
+        return {"id", "position", "gain", "pitch"};
     }
     if (op == "list" || op == "status" || op == "stop_all" || op == "preview_stop" ||
         op == "signals_clear" || op == "domains" || op == "resume_automatic" ||
@@ -1241,6 +1250,67 @@ json AudioService::invoke(const std::string& op, const json& p) {
         s.data["thunder"] = config;
         s.thunderError.clear();
         return config;
+    }
+    if (op == "play_at") {
+        // One-shot of a source's sound at a world position, independent of the
+        // source's own voice: several at once (balloons popping together) each
+        // play whole at their own place instead of restarting one voice. Same
+        // transient-voice path as positional thunder; reclaimed when it ends.
+        require(p.at("id").is_string(), "play_at id must be a string");
+        const auto& e = s.find("emitters", p.at("id").get<std::string>());
+        require(!isPhysicalAudioSource(e) && !e.at("asset_id").get<std::string>().empty(),
+                "play_at needs a source with an imported audio asset");
+        const json position = validateAudioVector(p, "position", json::array({0, 0, 0}));
+        // Type-checked before get<>: a wrong JSON type must be an error, not an abort.
+        const json gainValue = p.value("gain", json(1.0));
+        const json pitchValue = p.value("pitch", json(1.0));
+        require(gainValue.is_number() && pitchValue.is_number(), "play_at gain and pitch must be numbers");
+        const float gain = gainValue.get<float>();
+        const float pitch = pitchValue.get<float>();
+        require(std::isfinite(gain) && gain >= 0.0f && gain <= 4.0f, "play_at gain must be within 0..4");
+        require(std::isfinite(pitch) && pitch >= 0.25f && pitch <= 4.0f, "play_at pitch must be within 0.25..4");
+        if (s.preview || s.designer.playing()) {
+            return {{"played", false}, {"reason", "asset_preview_active"}};
+        }
+        const auto oneShots = std::count_if(s.thunderVoices.begin(), s.thunderVoices.end(),
+            [](const auto& voice) { return voice.event.contains("source_id"); });
+        if (oneShots >= 16 || s.sounds.size() + s.thunderVoices.size() + s.clips.voices() >= 32) {
+            // A dropped one-shot is reported, never an error: a game burst must not fail.
+            return {{"played", false}, {"reason", "voice_budget (16 one-shots / 32 total)"}};
+        }
+        const auto& asset = s.find("assets", e.at("asset_id"));
+        const bool spatial = e.at("spatial").get<bool>();
+        require(!spatial || asset.at("channels") == 1,
+                "Positional one-shots need a mono asset; convert stereo before binding");
+        s.ensureDevice();
+        const std::string bus = e.at("bus");
+        auto sound = s.load(asset, bus);
+        const auto runtime = s.sourceRuntime(e);
+        const float direct = bus == "Master" ? AudioMixer::directMasterGain(s.data.at("mixer")) : 1;
+        const float volume = e.at("gain").get<float>() * gain * direct;
+        const float effectivePitch = runtime.at("effective_pitch").get<float>() * pitch;
+        ma_sound_set_looping(sound.get(), false);
+        ma_sound_set_volume(sound.get(), volume);
+        ma_sound_set_pitch(sound.get(), effectivePitch);
+        ma_sound_set_spatialization_enabled(sound.get(), spatial);
+        ma_sound_set_position(sound.get(), position[0], position[1], position[2]);
+        ma_sound_set_min_distance(sound.get(), e.at("min_distance"));
+        ma_sound_set_max_distance(sound.get(), e.at("max_distance"));
+        ma_sound_set_rolloff(sound.get(), e.at("rolloff"));
+        // Game time, not timeline time: a one-shot plays whether or not the
+        // timeline transport runs (Studio edits with it paused while the live
+        // simulation, and the game, keep going).
+        if (ma_sound_start(sound.get()) != MA_SUCCESS) {
+            ma_sound_uninit(sound.get());
+            throw std::runtime_error("Could not start one-shot sound");
+        }
+        const double bytes = asset.at("duration").get<double>() * 48000 * 4;
+        const auto serial = ++s.oneShotSerial;
+        json event = {{"key", "one_shot/" + e.at("id").get<std::string>() + "/" + std::to_string(serial)},
+                      {"source_id", e.at("id")}, {"position", position},
+                      {"gain", volume}, {"pitch", effectivePitch}};
+        s.thunderVoices.push_back({std::move(sound), event, bytes});
+        return {{"played", true}, {"key", event.at("key")}, {"one_shots", oneShots + 1}};
     }
     if (op == "thunder_event") {
         if (s.preview || s.designer.playing()) {
@@ -1904,7 +1974,8 @@ void AudioService::tickThunder() {
     for (const auto& event : s.thunder.due()) {
         try {
             require(!s.preview && !s.designer.playing() && !s.arrangement.playing(), "Thunder skipped during asset audition");
-            require(s.thunderVoices.size() < 8 &&
+            require(std::count_if(s.thunderVoices.begin(), s.thunderVoices.end(),
+                        [](const auto& voice) { return !voice.event.contains("source_id"); }) < 8 &&
                     s.sounds.size() + s.thunderVoices.size() + s.clips.voices() < 32,
                     "Thunder voice budget reached (8 thunder / 32 total)");
             const auto asset = s.find("assets", event.at("asset_id"));

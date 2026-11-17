@@ -1,0 +1,30 @@
+{
+  "setup": [
+    {"method": "paint.wet_demo", "params": {"operation": "stop"}},
+    {"method": "paint.wet_reset", "params": {}},
+    {"method": "game.session", "params": {
+      "operation": "configure",
+      "config": {
+        "duration_seconds": 26,
+        "finale_seconds": 3,
+        "reset_seconds": 2,
+        "coverage_goal": 1.0,
+        "auto_start": false,
+        "zones": [{"name": "play_area", "min": [-3, -0.2, -3], "max": [3, 3, 3]}],
+        "rules": [
+          {"id": "foot_paint", "event": "gesture.stomp", "state": "playing",
+           "cooldown_seconds": 0.05,
+           "action": {"type": "paint.dab", "radius": 0.3, "amount": 1.0}},
+          {"id": "hands_balloons", "event": "gesture.arms_up", "state": "playing",
+           "cooldown_seconds": 0.5, "action": {"type": "balloon.burst", "count": 1}}
+        ]
+      }
+    }}
+  ],
+  "start": [{"method": "game.session", "params": {"operation": "start"}}],
+  "cleanup": [{"method": "game.session", "params": {"operation": "reset"}}],
+  "state_path": "state",
+  "display_fps_path": "frame.presented_fps",
+  "expected_states": ["attract", "playing", "finale", "resetting", "attract"],
+  "required_events": ["gesture.reach", "gesture.arms_up", "gesture.stomp", "zone.enter", "zone.exit"]
+}

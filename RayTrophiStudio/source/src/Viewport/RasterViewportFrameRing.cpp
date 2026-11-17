@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <limits>
+#include <vector>
 
 namespace Backend {
 
@@ -33,6 +34,11 @@ struct RasterViewportFrameRing::Impl {
     std::uint32_t activeSlot = kNoSlot;
     std::uint64_t nextSerial = 1;
     std::uint64_t consumedSerial = 0;
+    // A GPU-bound producer may wait for a slot only AFTER the caller's
+    // opportunistic consume. Preserve that completed image before reusing its
+    // fence/readback buffer; otherwise every pass can discard its only ready frame.
+    std::vector<std::uint8_t> readyPixels;
+    std::uint64_t readySerial = 0;
     VkResult lastResult = VK_SUCCESS;
     Stats stats{};
 
@@ -41,13 +47,46 @@ struct RasterViewportFrameRing::Impl {
                static_cast<std::size_t>(height) * 4u;
     }
 
+    void copyReadback(const Slot& slot, void* destination) const {
+        // GPU_TO_CPU is HOST_CACHED, not necessarily HOST_COHERENT.
+        VkMappedMemoryRange range{};
+        range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
+        range.memory = slot.readback.memory;
+        range.offset = 0;
+        range.size = VK_WHOLE_SIZE;
+        vkInvalidateMappedMemoryRanges(device->getDevice(), 1, &range);
+        std::memcpy(destination, slot.mapped, byteSize());
+    }
+
+    void preserveCompletedImage(const Slot& slot) {
+        if (!slot.mapped || slot.serial <= consumedSerial || slot.serial <= readySerial) {
+            return;
+        }
+        readyPixels.resize(byteSize());
+        copyReadback(slot, readyPixels.data());
+        readySerial = slot.serial;
+    }
+
     void destroy() {
         if (!device) return;
 
         VkDevice vkDevice = device->getDevice();
         for (Slot& slot : slots) {
-            if (slot.inFlight && slot.fence != VK_NULL_HANDLE) {
-                vkWaitForFences(vkDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            if (slot.inFlight && slot.fence != VK_NULL_HANDLE && !g_vulkan_device_lost) {
+                // ★★★ Never UINT64_MAX here. MEASURED 2026-11-17 (cdb on a hung
+                //   Studio after a device loss): the NVIDIA driver spun forever
+                //   in this wait (SwitchToThread loop) instead of returning
+                //   VK_ERROR_DEVICE_LOST, so the app could neither recover to CPU
+                //   nor close. A lost device skips the wait (nothing will signal);
+                //   a live one gets a bounded wait.
+                const VkResult waited =
+                    vkWaitForFences(vkDevice, 1, &slot.fence, VK_TRUE, 2000000000ull);
+                if (waited != VK_SUCCESS) {
+                    VulkanRT::reportVulkanDeviceFailure(waited, "RasterViewportFrameRing::destroy/vkWaitForFences");
+                    SCENE_LOG_WARN("[Viewport] frame ring teardown: fence wait returned " +
+                                   std::to_string(static_cast<int>(waited)) +
+                                   "; releasing the slot without completion");
+                }
             }
             if (slot.mapped && slot.readback.buffer) {
                 device->unmapBuffer(slot.readback);
@@ -79,6 +118,8 @@ struct RasterViewportFrameRing::Impl {
         activeSlot = kNoSlot;
         nextSerial = 1;
         consumedSerial = 0;
+        readySerial = 0;
+        readyPixels.clear();
         lastResult = VK_SUCCESS;
         stats = Stats{};
     }
@@ -190,7 +231,7 @@ VkCommandBuffer RasterViewportFrameRing::beginFrame(double* slotWaitMs) {
             vkGetFenceStatus(vkDevice, slot.fence) == VK_SUCCESS;
         const auto waitStart = std::chrono::steady_clock::now();
         const VkResult waitResult =
-            vkWaitForFences(vkDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            VulkanRT::waitFenceBounded(vkDevice, slot.fence, "RasterViewportFrameRing.cpp:234");
         const auto waitEnd = std::chrono::steady_clock::now();
         if (slotWaitMs) {
             *slotWaitMs = std::chrono::duration<double, std::milli>(
@@ -201,6 +242,9 @@ VkCommandBuffer RasterViewportFrameRing::beginFrame(double* slotWaitMs) {
             impl_->lastResult = waitResult;
             return VK_NULL_HANDLE;
         }
+        // The fence is now complete. Do not reset it and submit over this
+        // staging image until a CPU-owned copy can survive the slot reuse.
+        impl_->preserveCompletedImage(slot);
         slot.inFlight = false;
     }
 
@@ -393,27 +437,27 @@ bool RasterViewportFrameRing::consumeNewestReady(void* dst,
         if (vkGetFenceStatus(vkDevice, slot.fence) != VK_SUCCESS) continue;
         if (!newest || slot.serial > newest->serial) newest = &slot;
     }
-    if (!newest || !newest->mapped) return false;
-
-    // GPU_TO_CPU is HOST_CACHED and is not guaranteed HOST_COHERENT; without
-    // this the memcpy can read a stale cache line and the viewport would show a
-    // frame that was never rendered.
-    VkMappedMemoryRange range{};
-    range.sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE;
-    range.memory = newest->readback.memory;
-    range.offset = 0;
-    range.size = VK_WHOLE_SIZE;
-    vkInvalidateMappedMemoryRanges(vkDevice, 1, &range);
-    std::memcpy(dst, newest->mapped, impl_->byteSize());
-
-    impl_->consumedSerial = newest->serial;
+    const bool savedReady = impl_->readySerial > impl_->consumedSerial;
+    if (savedReady && (!newest || impl_->readySerial > newest->serial)) {
+        std::memcpy(dst, impl_->readyPixels.data(), impl_->byteSize());
+        impl_->consumedSerial = impl_->readySerial;
+    } else if (newest && newest->mapped) {
+        impl_->copyReadback(*newest, dst);
+        impl_->consumedSerial = newest->serial;
+    } else {
+        return false;
+    }
+    // Keep the allocation for reuse, but never publish an older saved image.
+    if (impl_->readySerial <= impl_->consumedSerial) {
+        impl_->readySerial = 0;
+    }
     const std::uint64_t newestSubmitted = impl_->nextSerial - 1u;
     impl_->stats.lastPresentLatencyFrames =
-        (newestSubmitted > newest->serial)
-            ? static_cast<std::uint32_t>(newestSubmitted - newest->serial)
+        (newestSubmitted > impl_->consumedSerial)
+            ? static_cast<std::uint32_t>(newestSubmitted - impl_->consumedSerial)
             : 0u;
     ++impl_->stats.framesConsumed;
-    if (consumedSerial) *consumedSerial = newest->serial;
+    if (consumedSerial) *consumedSerial = impl_->consumedSerial;
     return true;
 }
 
@@ -423,6 +467,7 @@ void RasterViewportFrameRing::noteStalePresent() {
 
 bool RasterViewportFrameRing::hasPendingFrame() const {
     if (!impl_->device) return false;
+    if (impl_->readySerial > impl_->consumedSerial) return true;
     for (const Impl::Slot& slot : impl_->slots) {
         if (slot.inFlight && slot.serial > impl_->consumedSerial) return true;
     }
@@ -441,7 +486,7 @@ void RasterViewportFrameRing::waitAll(bool countAsResourceDrain) {
     for (Impl::Slot& slot : impl_->slots) {
         if (slot.inFlight && slot.fence != VK_NULL_HANDLE) {
             if (vkGetFenceStatus(vkDevice, slot.fence) == VK_SUCCESS) continue;
-            vkWaitForFences(vkDevice, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            VulkanRT::waitFenceBounded(vkDevice, slot.fence, "RasterViewportFrameRing.cpp:489");
             waited = true;
         }
     }

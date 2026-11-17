@@ -26,6 +26,9 @@
 
 #include "RtApiInternal.h"
 #include "Animation/RootMotionUnroll.h"
+#include "Animation/RigPoseView.h"
+#include "Input/ExternalBodyRig.h"
+#include <cmath>
 #include "ProjectManager.h"
 
 #include <algorithm>
@@ -255,12 +258,48 @@ Result playAnimClip(const std::string& character, const std::string& clip,
     SceneData::ImportedModelContext* ctx = nullptr;
     if (Result r = requireCharacter(character, ctx); !r) return r;
     if (Result r = requireLayer(layer); !r) return r;
-    if (blend_seconds < 0.0f) return Result::fail("blend_seconds must not be negative");
+    if (!std::isfinite(blend_seconds) || blend_seconds < 0.0f) {
+        return Result::fail("blend_seconds must be finite and not negative");
+    }
     // play() on an unknown clip is a silent no-op in the controller, which from
     // a script reads as "it worked but nothing moved".
     if (!ctx->animator->getClip(clip))
         return Result::fail("animation clip not found on " + character + ": " + clip);
+    if (renderJobActive()) {
+        return Result::fail("scene_locked");
+    }
+    if (Input::externalBodyRigOwns(g_ctx->scene, character)) {
+        return Result::fail("character_external_pose_active_clear_first");
+    }
+    // A layer cannot replace a whole graph pose without a controller base.
+    if (ctx->useAnimGraph && layer != 0) {
+        return Result::fail("animation_graph_requires_base_layer_play_first");
+    }
+    if (g_ctx->scene.rigView.edit_mode &&
+        g_ctx->scene.rigView.edit_character == character) {
+        return Result::fail("rig_edit_mode_active");
+    }
+    std::string error;
+    if (!RigAuthoring::setPoseView(g_ctx->scene, character, "animated", error)) {
+        return Result::fail(error);
+    }
+    // Explicit clip playback selects the existing per-character controller.
+    // Keep the authored/runtime graphs intact. Seed a simple graph's clip phase
+    // before handing over, so the controller can use its normal crossfade.
+    if (ctx->useAnimGraph) {
+        if (auto graph = activeGraphOf(*ctx)) {
+            const auto status = graph->getPlaybackStatus();
+            if (const auto* previous = ctx->animator->getClip(status.clipName)) {
+                const float seconds = previous->getDurationInSeconds();
+                ctx->animator->play(status.clipName, 0.0f, 0);
+                ctx->animator->setTime(status.normalizedTime * seconds, 0);
+            }
+        }
+        ctx->useAnimGraph = false;
+    }
     ctx->animator->play(clip, blend_seconds, layer);
+    ctx->animator->setPaused(false);
+    ctx->restPoseApplied = false;
     return Result::success();
 }
 
@@ -268,8 +307,12 @@ Result stopAnimation(const std::string& character, float blend_out_seconds, int 
     SceneData::ImportedModelContext* ctx = nullptr;
     if (Result r = requireCharacter(character, ctx); !r) return r;
     if (Result r = requireLayer(layer); !r) return r;
-    if (blend_out_seconds < 0.0f)
-        return Result::fail("blend_out_seconds must not be negative");
+    if (!std::isfinite(blend_out_seconds) || blend_out_seconds < 0.0f) {
+        return Result::fail("blend_out_seconds must be finite and not negative");
+    }
+    if (ctx->useAnimGraph) {
+        return Result::fail("animation_graph_requires_base_layer_play_first");
+    }
     ctx->animator->stop(layer, blend_out_seconds);
     return Result::success();
 }
@@ -288,7 +331,12 @@ Result setAnimTime(const std::string& character, float seconds, int layer) {
     SceneData::ImportedModelContext* ctx = nullptr;
     if (Result r = requireCharacter(character, ctx); !r) return r;
     if (Result r = requireLayer(layer); !r) return r;
-    if (seconds < 0.0f) return Result::fail("time must not be negative");
+    if (!std::isfinite(seconds) || seconds < 0.0f) {
+        return Result::fail("time must be finite and not negative");
+    }
+    if (ctx->useAnimGraph) {
+        return Result::fail("animation_graph_requires_base_layer_play_first");
+    }
     ctx->animator->setTime(seconds, layer);
     return Result::success();
 }
@@ -297,6 +345,12 @@ Result setAnimSpeed(const std::string& character, float speed, int layer) {
     SceneData::ImportedModelContext* ctx = nullptr;
     if (Result r = requireCharacter(character, ctx); !r) return r;
     if (Result r = requireLayer(layer); !r) return r;
+    if (!std::isfinite(speed) || speed < 0.0f) {
+        return Result::fail("speed must be finite and not negative");
+    }
+    if (ctx->useAnimGraph) {
+        return Result::fail("animation_graph_requires_base_layer_play_first");
+    }
     ctx->animator->setSpeed(speed, layer);
     return Result::success();
 }
@@ -362,6 +416,7 @@ Result triggerAnimGraphParam(const std::string& character, const std::string& na
     std::shared_ptr<AnimationGraph::AnimationNodeGraph> graph;
     if (Result r = requireGraph(character, graph); !r) return r;
     graph->triggerParam(name);
+    g_ctx->start_render = true;
     return Result::success();
 }
 

@@ -1,4 +1,5 @@
 #include "Animation/RigView.h"
+#include "Input/ExternalBodyRig.h"
 #include "Animation/RigSelection.h"
 #include "Animation/RigPoseView.h"
 #include "Animation/RigPoseAuthoring.h"
@@ -85,7 +86,8 @@ bool listBones(const SceneData& scene, const std::string& character, std::vector
                 b.in_ozz_skeleton = std::find(names.begin(), names.end(), node.name) != names.end();
             }
             const auto it = evaluated.find(node.name);
-            const bool rest = isRestPoseView(scene, ctx.importName);
+            const bool rest = isRestPoseView(scene, ctx.importName) &&
+                              !Input::externalBodyRigOwns(scene, ctx.importName);
             b.pose_source = posing ? "pose"
                             : rest ? "rest"
                                    : (it == evaluated.end() ? "bind" : ctx.rigPoseSource);

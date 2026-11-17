@@ -80,6 +80,10 @@ private:
     float cloud_time_s_ = 0.0f;
     // Scene audio transport runs on the game clock from project open.
     double audio_time_s_ = 0.0;
+    double animation_time_s_ = 0.0;
+    std::uint64_t animation_ticks_ = 0;
+    std::uint64_t animation_updates_ = 0;
+    std::uint64_t animation_skin_sync_calls_ = 0;
     std::uint64_t audio_ticks_ = 0;
     std::uint64_t cloud_pushes_ = 0;
     std::uint64_t wet_paint_publishes_ = 0;

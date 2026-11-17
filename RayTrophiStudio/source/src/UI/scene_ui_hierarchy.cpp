@@ -1,3 +1,4 @@
+#include <sstream>
 #include "UI/LensWeatherUI.h"
 // ═══════════════════════════════════════════════════════════════════════════════
 // SCENE UI - HIERARCHY PANEL
@@ -8,6 +9,7 @@
 #include "scene_ui.h"
 #include "UI/AudioUI.h"
 #include "UI/RigViewUI.h"
+#include "UI/CharacterLifecycleUI.h"
 #include "renderer.h"
 #include "OptixWrapper.h"
 #include "ColorProcessingParams.h"
@@ -500,8 +502,13 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     g_animGraphUI.activeCharacter = mctx.importName;
                 }
 
+                if (CharacterUI::deleteButton(mctx.importName)) {
+                    ImGui::PopID();
+                    break;
+                }
                 ImGui::PopID();
             }
+            CharacterUI::showError();
             ImGui::TreePop();
         }
         ImGui::Separator();

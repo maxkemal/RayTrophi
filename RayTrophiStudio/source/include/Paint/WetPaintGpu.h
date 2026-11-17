@@ -23,6 +23,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <array>
 #include <string>
 #include <vector>
 
@@ -36,9 +37,11 @@ namespace Paint {
 
 // The BrushSettings wet subset (IPaintSurfaceAdapter.h), same names and
 // defaults; tickWetPaint's derived terms are formed from these on upload.
+// Exception: lifetime is 12 s here (2.5 s on the brush) so splats stay wet long
+// enough for the runoff to be seen.
 struct WetPaintSurfaceSettings {
     float wetness = 0.65f;
-    float lifetime_seconds = 2.5f;
+    float lifetime_seconds = 12.0f;
     float diffusion = 0.24f;
     float runoff = 0.35f;
     float absorption = 0.18f;
@@ -51,6 +54,13 @@ struct WetPaintSurfaceSettings {
     // scales the transport trail length exactly like tickWetPaint does.
     float brush_radius = 5.0f;
     bool oil = false;
+    // Optional outputs reuse PaintTextureSet Roughness / Mask(height) / Normal.
+    bool roughness_channel = false;
+    bool height_normal_channel = false;
+    float wet_roughness = 0.12f;
+    float dry_roughness = 0.30f;
+    float height_contribution = 0.35f;
+    float normal_strength = 0.5f;
 };
 
 // How particle contacts become paint.
@@ -104,9 +114,14 @@ struct WetPaintStats {
     uint32_t ticked_tiles = 0;
     uint32_t stamped_texels = 0;
     uint64_t sources_dropped = 0;
+    uint64_t pbr_dispatches = 0;
+    uint64_t pbr_device_copies = 0;
+    uint64_t pbr_buffer_bytes = 0;     // additional GPU atlas storage, not total VRAM
+    uint64_t pbr_texture_bytes = 0;    // allocated channel texture pixels (RGBA8)
     uint64_t publish_device_copies = 0;     // dirty rectangles copied device-to-device
     uint64_t publish_host_downloads = 0;    // dirty rectangles that went through the host
     uint64_t publish_bytes_downloaded = 0;
+    uint64_t geometry_rebakes = 0;          // surfaces re-baked after their object moved/scaled
     std::string publish_mode = "none";      // device_copy | host_download | none
     // simulation: the simulation context (a GPU particle system keeps it on
     // Vulkan; contacts stamped from its device buffers). own: wet paint's own
@@ -122,6 +137,8 @@ struct WetPaintCoverage {
         uint32_t covered_texels = 0;
         uint32_t valid_texels = 0;
         uint32_t wet_texels = 0;
+        uint32_t roughness_texels = 0; // output differs from original channel
+        uint32_t normal_texels = 0;
         float ratio = 0.0f;
         float mean_color[3] = {0.0f, 0.0f, 0.0f};   // sRGB 0..1 of covered texels
     };
@@ -143,7 +160,10 @@ public:
     // and bakes the surface's texels once. material_id < 0: the object's first.
     bool addSurface(SceneData& scene, const std::string& object, int material_id,
                     int resolution, std::string& error);
-    bool removeSurface(const std::string& object, int material_id);
+    // With a scene, the object's material gets its original textures back
+    // (the paint textures addSurface bound are released). Without one the
+    // paint textures stay bound - only for callers that rebuild the scene.
+    bool removeSurface(const std::string& object, int material_id, SceneData* scene = nullptr);
     // Drops every surface and releases the device atlas (project change).
     void clear();
 
@@ -183,6 +203,11 @@ private:
     bool rebuildDevice(SceneData& scene);
     void uploadSurfaceTable();
     bool ensureCompute(SceneData& scene);
+    bool prepareChannels(SceneData& scene);
+    bool bakeGeometry(SceneData& scene, Surface& s, std::string& error);
+    static std::array<double, 8> geometryKey(SceneData& scene, const std::string& object);
+    bool channels_dirty_ = false;
+    float geometry_check_clock_ = 0.0f;
 
     std::vector<std::unique_ptr<Surface>> surfaces_;
     std::unique_ptr<Device> device_;

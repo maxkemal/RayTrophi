@@ -1,6 +1,42 @@
 # Proje açılışında raster viewport'ta VK_ERROR_DEVICE_LOST
 
 > **Durum:** AKTİF — AÇIK. Kök neden BULUNMADI. Üç statik hipotez kuruldu, **üçü de kullanıcı gözlemiyle öldü**. Çökme artık **kural yüzünden ulaşılamaz**, o yüzden ölçüm için kural KAPATILABİLİR yapıldı. Sıradaki adım tahmin değil, `Probe-DeviceLostOnProjectOpen.ps1`. (2026-09-07)
+
+## 2026-11-17 — Player'da da görülüyor; doğrulama katmanı koşusu (Claude)
+
+Kullanıcı (pastel atölye, Player, süzülen balonlar): "çok farklı zamanlarda" device lost —
+patlamada, odak dönüşünde, aynı projeyi sürükle-bırakla yeniden açınca. Log hep aynı biter:
+`[RayFusion] scene AS built …` → `Device lost observed at endSingleTimeCommands/vkQueueSubmit`
+(gözlem yeri; hata daha önce gönderilmiş bir işte). IPC ile ~60 patlama (duvar dibi, sürpriz,
+üçlü, senkron/asenkron çizim, odak taklidi) ve 4 yeniden açma ÇÖKERTMEDİ → zamanlamaya bağlı
+yarış / birikme sınıfı (kullanıcı da öyle tarif ediyor).
+
+`RAYTROPHI_VK_VALIDATION=1` ile Player + 4 yeniden açma (çökme yok, katman zamanlamayı yavaşlatır):
+| adet | VUID | yorum |
+|---|---|---|
+| 1721 | vkMapMemory-memory-00682 | `VulkanDevice::uploadBuffer` önce DEVICE_LOCAL belleği map'liyor, başarısızlıkta staging'e düşüyor — kural dışı ama zararsız |
+| 1687 | VkImageMemoryBarrier-oldLayout-01197 | derinlik görüntüsü READ_ONLY'deyken ATTACHMENT eski düzeniyle bariyer — düzen takibi hatası |
+| 20 | DrawState-InvalidImageLayout | kopya TRANSFER_DST bekliyor, görüntü GENERAL — aday: ıslak boya yayını (cihazdan cihaza doku kopyası) |
+| 15 | DrawState-InvalidImageAspect | D32 derinliğe COLOR aspect bariyeri |
+| 5 / 4 | pipeline push-constant GEOMETRY / query reset | küçük |
+
+Hiçbiri tek başına "kök" diye adlandırılamaz; kuyruklar arası / uçuştaki yarışları bu mod
+GÖRMEZ. **Sıradaki ölçüm:** senkronizasyon doğrulaması
+(`VK_LAYER_ENABLES=VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT` +
+`RAYTROPHI_VK_VALIDATION=1`), Player'da oynayarak/yeniden açarak. Aday yarış: sim compute
+
+### Senkronizasyon doğrulaması koşusu (Studio KAPALI, 3 dk, 44 patlama + 2 yeniden açma, çökme yok)
+
+| adet | tehlike | komutlar | durum |
+|---|---|---|---|
+| **3900** | **WAR: kopya, hâlâ okunan tampona** | `vkCmdDispatch` (compute read) → `vkCmdCopyBuffer` (transfer write) | **DÜZELTİLDİ** — `SimulationComputeVulkan` kayıtlı yükleme yolu: dispatch'ten sonraki ilk kopyadan önce COMPUTE→TRANSFER bariyeri (`m_dispatchSinceUploadBarrier`). Damla doğumu + ıslak boya tabloları buradan yüklenir; yarı yazılmış sayaç/indeks okuyan çekirdek tampon dışına → aralıklı device lost adayı #1 |
+| 21483 | RAW: temizlenen depolama görüntüsü bariyersiz okunuyor | `vkCmdClearColorImage` → `vkCmdDrawIndexedIndirect` (frag storage read) | açık (viewport kare içi) |
+| 17348+17204 | WAW: doku yüklemesi ↔ düzen geçişi bariyersiz | `vkCmdCopyBufferToImage` ↔ `vkCmdPipelineBarrier` | açık (doku yükleme) |
+| 2604 / 1302 / 651 / 650 | derinlik temizleme/okuma, render pass sonu → compute örnekleme | çeşitli | açık |
+
+Kullanıcı gözlemi: çökmelerde Studio çoğunlukla RayFusion'da AÇIKTI (Studio çökmüyordu). İkinci hipotez: aynı GPU'da iki süreç → TDR; Studio cihaz kurtarmasıyla sessizce toparlanır, Player düşer. Düzeltilmiş exe ile Studio RayFusion açıkken tekrar dene; Studio'nun `viewport.device_recovery_status` sayacı çökme anında artıyorsa TDR.
+kuyruğundaki ıslak boya yayını malzeme dokusuna kopyalarken viewport aynı dokuyu örnekliyor.
+
 > **2026-09-09 EKİ:** dördüncü bir hipotez var ve bu sefer **ölçülmüş bir kardeş arızası** ile geliyor — yüklemeyi BAŞLATAN kare sökmeyle yarışıyor (aşağıda "YENİ ADAY"). Sınaması kalkanın kapatılmasını gerektirir.
 
 ## Belirti

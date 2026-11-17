@@ -30,6 +30,7 @@
  *   Kernels that need atomics return false (CPU fallback) when unavailable.
  */
 
+#include "Backend/VulkanFailureReporting.h"
 #include "SimulationCompute.h"
 #include "SimulationComputeVulkanContext.h"
 
@@ -422,6 +423,23 @@ public:
                 stagingReserve(m_stagingUp, m_stagingUpCursor, size_bytes, /*for_download=*/false);
             if (off == SIZE_MAX || !ensureRecording()) return false;
             std::memcpy(static_cast<uint8_t*>(m_stagingUp.mapped) + off, data, size_bytes);
+            // WAR: a dispatch recorded earlier in THIS command buffer may still
+            // be reading the destination. The barrier after each dispatch is
+            // compute->compute only and does not order a TRANSFER write, so
+            // the copy could land mid-read (sync validation: 3900 hazards in
+            // 3 min of balloon pops; a kernel reading a half-written count or
+            // index walks off its buffer = an intermittent device loss).
+            if (m_dispatchSinceUploadBarrier) {
+                VkMemoryBarrier mb{};
+                mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+                mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+                vkCmdPipelineBarrier(m_cmdBuf,
+                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                     0, 1, &mb, 0, nullptr, 0, nullptr);
+                m_dispatchSinceUploadBarrier = false;
+            }
             VkBufferCopy region{ off, dst_offset, static_cast<VkDeviceSize>(size_bytes) };
             vkCmdCopyBuffer(m_cmdBuf, m_stagingUp.buf, it->second.buffer, 1, &region);
             if (m_batchActive) m_batchHasUploads = true; // one barrier at endTransferBatch
@@ -546,7 +564,7 @@ public:
             // The earlier slot was submitted first on the same queue; waiting
             // for it releases its pool and command buffer.
             waitInFlight();
-            vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
+            VulkanRT::waitFenceBounded(m_device, m_fence, "SimulationComputeVulkan.cpp:566");
             vkResetFences(m_device, 1, &m_fence);
 
             // Read the timestamps BEFORE the command buffer is reset: resetting it
@@ -749,6 +767,7 @@ public:
         uint32_t gy = cmd.groups.groups_y > 0 ? cmd.groups.groups_y : 1;
         uint32_t gz = cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1;
         vkCmdDispatch(m_cmdBuf, gx, gy, gz);
+        m_dispatchSinceUploadBarrier = true;   // see the recorded upload path
 
         // Pipeline barrier: SHADER_WRITE → SHADER_READ so the next kernel
         // sees the updated data.
@@ -879,6 +898,7 @@ private:
     // Transfer batch state (beginTransferBatch/endTransferBatch).
     bool m_batchActive          = false;
     bool m_batchHasUploads      = false; // batch records copies; one barrier at end
+    bool m_dispatchSinceUploadBarrier = false; // a recorded upload must wait for it (WAR)
     bool m_batchDownBarrierDone = false; // COMPUTE→TRANSFER barrier once per batch
     // Staging cursors persist across batches until synchronize(): recorded
     // copies reference their staging regions until the fence. Reset in
@@ -1718,7 +1738,7 @@ private:
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &m_copyCmdBuf;
         vkQueueSubmit(m_queue, 1, &si, m_fence);
-        vkWaitForFences(m_device, 1, &m_fence, VK_TRUE, UINT64_MAX);
+        VulkanRT::waitFenceBounded(m_device, m_fence, "SimulationComputeVulkan.cpp:1740");
         vkResetFences(m_device, 1, &m_fence);
     }
 
@@ -1806,7 +1826,7 @@ private:
     void waitInFlight() {
         if (!m_inFlight) return;
         const int slot = m_inFlightSlot;
-        vkWaitForFences(m_device, 1, &m_fences[slot], VK_TRUE, UINT64_MAX);
+        VulkanRT::waitFenceBounded(m_device, m_fences[slot], "SimulationComputeVulkan.cpp:1828");
         vkResetFences(m_device, 1, &m_fences[slot]);
         vkResetCommandBuffer(m_cmdBufs[slot], 0);
         vkResetDescriptorPool(m_device, m_descPools[slot], 0);

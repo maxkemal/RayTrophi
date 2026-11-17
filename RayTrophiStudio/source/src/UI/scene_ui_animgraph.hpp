@@ -23,6 +23,7 @@
 #include "AnimationController.h"
 #include "Animation/AnimationData.h"   // AnimationData (was reached through AnimatedObject.h)
 #include "Animation/RigClipRuntimeSync.h"
+#include "UI/AnimGraphTriggerActions.h"
 #include "NodeSystem/NodeEditorChrome.h"
 
 #include <cstdio>
@@ -159,6 +160,7 @@ inline void syncRuntimeGraphFromAsset(SceneData& scene, const std::string& chara
     if (it == g_animGraphUI.graphs.end() || !it->second) return;
 
     mctx->runtimeGraph = it->second->clone();
+    mctx->runtimeGraph->evalContext.triggerParams.clear();
     mctx->graph = mctx->runtimeGraph;
     g_animGraphUI.runtimeStaleAssetKeys.erase(assetKey);
 }
@@ -573,9 +575,7 @@ inline void drawAnimationParametersPanel(UIContext& ctx,
     if (UIWidgets::CollapsingHeader("Triggers", ImGuiTreeNodeFlags_DefaultOpen)) {
         static char triggerName[64] = "";
         ImGui::InputText("Trigger Name", triggerName, sizeof(triggerName));
-        if (ImGui::Button("Fire Trigger") && strlen(triggerName) > 0) {
-            evalCtx.triggerParams[triggerName] = triggerName;
-        }
+        AnimGraphTriggerActions::drawFireButton(characterName, triggerName);
         ImGui::SameLine();
         if (ImGui::Button("Clear Triggers")) {
             evalCtx.triggerParams.clear();
@@ -811,12 +811,8 @@ inline void drawNodePropertiesPanel(UIContext& ctx,
                         
                         if (trans.conditionType == AnimationGraph::StateMachineNode::Transition::ConditionType::Trigger && !trans.parameterName.empty()) {
                             ImGui::SameLine();
-                            if (ImGui::Button("Fire Trigger")) {
-                                graph->evalContext.triggerParams[trans.parameterName] = trans.parameterName;
-                                if (auto* runtimeGraph = getRuntimeGraphForCharacter(ctx.scene, g_animGraphUI.activeCharacter)) {
-                                    runtimeGraph->evalContext.triggerParams[trans.parameterName] = trans.parameterName;
-                                }
-                            }
+                            AnimGraphTriggerActions::drawFireButton(
+                                g_animGraphUI.activeCharacter, trans.parameterName);
                         }
 
                         if (ImGui::Button("Delete Transition")) {

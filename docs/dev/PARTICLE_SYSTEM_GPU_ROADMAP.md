@@ -4,13 +4,40 @@
 > particle system, high-quality low-cost effects, GPU-first physics, CPU
 > fallback, multi-geometry rendering, and optional domain coupling.
 >
-> **Last updated:** 2026-09-25 (Phase 0 measured: GPU path was unreachable
-> under Auto, fixed; Phase 1 first batch + frozen contract).
+> **Last updated:** 2026-11-15 (Player balloon-paint vertical slice IPC accepted;
+> scope and remaining event/performance work recorded below).
+> Previous implementation baseline: 2026-09-25 (Auto GPU path and Phase 1).
 > Previous: 2026-09-24 (review pass: vertical slice after Phase 1,
 > load-only legacy migration, Surface State Deposit output, field-masked
 > surface sources, kinematic collider proxies moved to their own note,
 > deterministic event ordering, RT instance budget, mud/snow and volcanic
 > scenario boundaries)
+
+## Latest verified slice — 2026-11-15 Player balloon paint handoff
+
+User-built Player passed external IPC acceptance with twelve single-colour
+balloons, one/two/three simultaneous ballistic paint bursts (1800 drops each),
+GPU collision-event consumption, four 1024² wet surfaces and startup atlas/pool
+preparation. No continuous spray is used in this fixture. One/triple manual
+spawn cost: 0.51/3.47 ms; controlled event input-dt maxima: 10–11 ms. Longer
+idle-inclusive observations also contain 64–72 ms dt outliers, so a universal
+frame-time bound or the <=2 ms paint target is not accepted. At 46 events the
+pool capacity stayed fixed, with zero reported dropped paint sources, host paint
+bytes or device loss. Existing per-tile 64-source overflow handling remains open;
+this fixture reporting zero does not close the general correctness issue.
+
+The demo uses analytic AABB/PlaneY colliders and explicit uniform-sphere initial
+velocities; existing OBB-transform and spread-unit findings remain unresolved.
+`Paint/BalloonPaintDemo` is shared by project startup, `rt.paint.wet_demo` and
+`paint.wet_demo`. This bounded game scheduler does not complete the general
+rule/event/sub-emitter graph, deterministic GPU event ordering or session engine.
+Next performance work: per-tick stats readback/synchronization and per-surface
+GPU publication waits, with active/idle conditions measured separately.
+
+Reproduction and evidence: [PLAYER_BALLOON_PAINT_DEMO.md](PLAYER_BALLOON_PAINT_DEMO.md),
+[acceptance JSON](PLAYER_BALLOON_PAINT_ACCEPTANCE_2026_11_15.json).
+Run `python scripts/test/rt_player_balloon_paint_ipc.py --seconds 30` externally
+with the updated Player open. No additional build is pending from acceptance.
 
 ## 1. Purpose
 

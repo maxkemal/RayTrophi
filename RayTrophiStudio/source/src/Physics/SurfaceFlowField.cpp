@@ -26,9 +26,21 @@ bool SurfaceFlowField::computeTrianglePixelFlow(const Triangle& tri,
         std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
     }
 
-    const Vec3 p0 = tri.getVertexPosition(0);
-    const Vec3 e1 = tri.getVertexPosition(1) - p0;
-    const Vec3 e2 = tri.getVertexPosition(2) - p0;
+    return computePixelFlow(tri.getVertexPosition(0), tri.getVertexPosition(1),
+                             tri.getVertexPosition(2), uv0, uv1, uv2, width, height,
+                             out_sample, driving_acceleration);
+}
+
+bool SurfaceFlowField::computePixelFlow(const Vec3& p0, const Vec3& p1, const Vec3& p2,
+                                        const Vec2& uv0, const Vec2& uv1, const Vec2& uv2,
+                                        int width, int height, SurfaceFlowSample& out_sample,
+                                        const Vec3& driving_acceleration) {
+    out_sample = SurfaceFlowSample{};
+    if (width <= 1 || height <= 1) {
+        return false;
+    }
+    const Vec3 e1 = p1 - p0;
+    const Vec3 e2 = p2 - p0;
     const Vec3 raw_normal = e1.cross(e2);
     const float raw_len_sq = raw_normal.length_squared();
     if (raw_len_sq <= 1e-20f) {

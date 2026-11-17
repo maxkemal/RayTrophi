@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +51,61 @@ void matrixToGL(const Matrix4x4& matrix, float out[16]) {
     const Matrix4x4 transposed = matrix.transpose();
     std::memcpy(out, transposed.m, sizeof(float) * 16u);
 }
+
+// Clip planes of a shadow view, taken from the rows of its view-projection
+// (clip = M * p, column vectors). The near plane is left out on purpose: a
+// caster between the light and the near plane is rare, and dropping the test
+// keeps the reject strictly conservative. A box is rejected only when it lies
+// entirely outside one plane, so a kept box may still draw nothing.
+struct ShadowFrustum {
+    float planes[5][4];
+    explicit ShadowFrustum(const Matrix4x4& m) {
+        for (int c = 0; c < 4; ++c) {
+            planes[0][c] = m.m[3][c] + m.m[0][c];
+            planes[1][c] = m.m[3][c] - m.m[0][c];
+            planes[2][c] = m.m[3][c] + m.m[1][c];
+            planes[3][c] = m.m[3][c] - m.m[1][c];
+            planes[4][c] = m.m[3][c] - m.m[2][c];
+        }
+    }
+    bool rejects(const AABB& box) const {
+        for (const auto& p : planes) {
+            const float x = p[0] >= 0.0f ? box.max.x : box.min.x;
+            const float y = p[1] >= 0.0f ? box.max.y : box.min.y;
+            const float z = p[2] >= 0.0f ? box.max.z : box.min.z;
+            if (p[0] * x + p[1] * y + p[2] * z + p[3] < 0.0f) return true;
+        }
+        return false;
+    }
+};
+
+// Same mixer as the RayFusion scene AS gate (RayFusionSceneAS.cpp::hashMix).
+// It must stay byte-identical: both gates share RasterMeshBuffer::matIdsHash.
+uint64_t shadowHashMix(uint64_t seed, const void* data, size_t size) {
+    const auto* bytes = static_cast<const unsigned char*>(data);
+    size_t offset = 0;
+    for (; offset + 8 <= size; offset += 8) {
+        uint64_t word;
+        std::memcpy(&word, bytes + offset, sizeof(word));
+        seed = (seed ^ word) * 1099511628211ull;
+        seed ^= seed >> 29;
+    }
+    if (offset < size) {
+        uint64_t tail = 0;
+        std::memcpy(&tail, bytes + offset, size - offset);
+        seed = (seed ^ tail ^ (size - offset)) * 1099511628211ull;
+        seed ^= seed >> 29;
+    }
+    return seed;
+}
+uint64_t shadowHashMix(uint64_t seed, uint64_t value) {
+    return shadowHashMix(seed, &value, sizeof(value));
+}
+
+// False when the last recordMaterialPreviewShadowPass reused the cached atlas
+// (or drew nothing). Read by the frame recorder so viewport.frame_timings
+// reports shadow_atlas frames_ran as frames that actually rasterised it.
+bool g_shadowAtlasDrawnLastRecord = false;
 
 Vec3 safeDirection(const Vec3& value, const Vec3& fallback) {
     return value.length() > 1e-5f ? value.normalize() : fallback;
@@ -115,6 +171,12 @@ VkShaderModule makeModule(VkDevice device, const std::vector<uint32_t>& words) {
 
 } // namespace
 
+// Declared by hand in VulkanViewportBackend.cpp: adding it to VulkanBackend.h
+// would rebuild every translation unit for one instrumentation bit.
+bool materialPreviewShadowAtlasDrawnLastRecord() {
+    return g_shadowAtlasDrawnLastRecord;
+}
+
 void VulkanBackendAdapter::updateMaterialPreviewProgramBinding() {
     if (!m_device) return;
     const VkDescriptorSet set = m_interactiveViewport.materialPreviewDescSet;
@@ -173,6 +235,9 @@ public:
     VkDeviceSize recordsCapacity = 0;
     uint32_t deepSide = 0, deepLayers = 0, deepSteps = 0;
     bool deepEnabled = false;
+    // What each atlas tile currently holds (0 = nothing drawn); see the cache
+    // gate in recordMaterialPreviewShadowPass.
+    std::vector<uint64_t> tileSignatures;
 };
 
 bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::string& shaderDir) {
@@ -244,7 +309,9 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
     VkAttachmentDescription attachment{};
     attachment.format = VK_FORMAT_D32_SFLOAT;
     attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    // LOAD, not CLEAR: only the tiles whose view changed are redrawn, each
+    // cleared on its own with vkCmdClearAttachments.
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -667,6 +734,33 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
     };
 
 
+    // Far plane of point/spot/area shadow views. It used to follow the camera
+    // (distance to the look-at point plus the cascade radius), which changed
+    // every local light's matrix on any camera move and forced the whole atlas
+    // to be redrawn although nothing a local light sees depends on the camera.
+    // It now reaches the far corner of the scene bounds instead, so a local
+    // view only changes when the light or the scene does.
+    Vec3 sceneLo(1e18f, 1e18f, 1e18f), sceneHi(-1e18f, -1e18f, -1e18f);
+    bool sceneBoundsValid = false;
+    for (const auto& instance : m_rasterInstances) {
+        if (instance.mask == 0 || !instance.worldBBox.is_valid()) continue;
+        const AABB& box = instance.worldBBox;
+        sceneLo.x = std::min(sceneLo.x, box.min.x); sceneHi.x = std::max(sceneHi.x, box.max.x);
+        sceneLo.y = std::min(sceneLo.y, box.min.y); sceneHi.y = std::max(sceneHi.y, box.max.y);
+        sceneLo.z = std::min(sceneLo.z, box.min.z); sceneHi.z = std::max(sceneHi.z, box.max.z);
+        sceneBoundsValid = true;
+    }
+    auto localLightFarZ = [&](const Vec3& position) {
+        if (!sceneBoundsValid) {
+            return std::clamp((position - cascadeCenter).length() + cascadeRadius,
+                              10.0f, 2000.0f);
+        }
+        const float dx = std::max(std::abs(position.x - sceneLo.x), std::abs(position.x - sceneHi.x));
+        const float dy = std::max(std::abs(position.y - sceneLo.y), std::abs(position.y - sceneHi.y));
+        const float dz = std::max(std::abs(position.z - sceneLo.z), std::abs(position.z - sceneHi.z));
+        return std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz) * 1.05f, 10.0f, 2000.0f);
+    };
+
     for (const auto& light : m_cachedLights) {
         if (!light || !light->visible) continue;
         if (gpuLightIndex >= kMaxLights) break;
@@ -711,8 +805,7 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
             static const Vec3 ups[6] = {
                 Vec3(0,-1,0), Vec3(0,-1,0), Vec3(0,0,1),
                 Vec3(0,0,-1), Vec3(0,-1,0), Vec3(0,-1,0)};
-            const float farZ = std::clamp((light->position - cascadeCenter).length() + cascadeRadius,
-                                          10.0f, 2000.0f);
+            const float farZ = localLightFarZ(light->position);
             Matrix4x4 proj = makePerspective(90.0f, 1.0f, 0.05f, farZ);
             for (uint32_t face = 0; face < 6u; ++face)
                 addView(record, face, proj * makeView(light->position,
@@ -728,8 +821,7 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
                     direction = safeDirection(Vec3::cross(area->getU(), area->getV()),
                                               Vec3(0.0f, -1.0f, 0.0f));
             }
-            const float farZ = std::clamp((light->position - cascadeCenter).length() + cascadeRadius,
-                                          10.0f, 2000.0f);
+            const float farZ = localLightFarZ(light->position);
             addView(record, 0u,
                     makePerspective(fov, 1.0f, 0.05f, farZ) *
                     makeView(light->position, light->position + direction, Vec3(0,1,0)));
@@ -938,6 +1030,7 @@ void VulkanBackendAdapter::recordMaterialPreviewSkyPass(
 
 void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) {
     auto state = m_materialPreviewShadows;
+    g_shadowAtlasDrawnLastRecord = false;
     if (!state || !state->ready || state->views.empty() || cmd == VK_NULL_HANDLE) return;
 
     VkBufferMemoryBarrier recordsBarrier{};
@@ -977,6 +1070,110 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
                              0, nullptr, 1, &recordsBarrier, 0, nullptr);
     }
 
+    // Static atlas cache. The atlas is a pure function of the shadow views and
+    // of what the casters draw; when neither changed since the atlas was last
+    // rendered, the depth already in it is the depth this frame would produce.
+    // The signature is recomputed every frame from the CPU-side state the draw
+    // loop below actually reads -- a gate that can miss a change is worth
+    // nothing. Known blind spots, all shared with the RayFusion scene AS gate:
+    // a non-skinned vertex buffer rewritten in place without a geometry
+    // generation bump, and opacity driven by a time-animated material program
+    // or by texture CONTENT (handles and material records are hashed, texels
+    // are not). RT_SHADOW_ATLAS_CACHE=0 disables the cache to rule it out.
+    //
+    // The cache is PER TILE: a view is redrawn only when its own matrix or the
+    // caster content changed. Local-light views do not depend on the camera
+    // (see localLightFarZ), and non-scatter meshes are drawn from the full
+    // global instance buffer rather than the camera-culled compaction, so a
+    // camera move redraws nothing but the directional cascades that follow it.
+    // Scatter pools still draw the camera-culled lists; while any exists the
+    // camera is part of the content and every tile follows it, as before.
+    const bool gpuCull = m_rasterGpuCullActive && m_rasterGpuCull;
+    const bool globalInstances = m_rasterUseGlobalInstBuffer && m_rasterGlobalInstBuf;
+    // True when this mesh's shadow draw reads the camera-culled instance list.
+    auto usesCameraCull = [&](const RasterMeshBuffer& mesh) {
+        if (!gpuCull || mesh.cullDrawSlot == UINT32_MAX) return false;
+        return !(globalInstances && !mesh.isScatterGroup && !mesh.isScatterProxy &&
+                 mesh.instanceCount > 0u);
+    };
+    std::vector<const ShadowView*> dirtyViews;
+    {
+        static const bool cacheEnabled = [] {
+            const char* value = std::getenv("RT_SHADOW_ATLAS_CACHE");
+            return !(value && value[0] == '0');
+        }();
+        uint64_t signature = 1469598103934665603ull;
+        signature = shadowHashMix(signature, state->frameTileSize);
+        signature = shadowHashMix(signature, state->frameTilesPerRow);
+        signature = shadowHashMix(signature, m_rasterBuiltGeometryGeneration);
+        signature = shadowHashMix(signature, m_rasterSkinGeneration);
+        signature = shadowHashMix(signature, gpuCull ? 1u : 0u);
+        signature = shadowHashMix(signature, globalInstances ? 1u : 0u);
+        bool cameraDependent = !globalInstances; // CPU visible sets follow the frustum
+        for (const auto& [meshKey, mesh] : m_rasterMeshes) {
+            if (usesCameraCull(mesh)) {
+                cameraDependent = true;
+                signature = shadowHashMix(signature, mesh.cullDrawSlot);
+                signature = shadowHashMix(signature, mesh.cullOutBase);
+                signature = shadowHashMix(signature, mesh.lastScatterTriangleTarget);
+            }
+            signature = shadowHashMix(signature, meshKey.data(), meshKey.size());
+            signature = shadowHashMix(signature, reinterpret_cast<uint64_t>(mesh.vertexBuffer.buffer));
+            signature = shadowHashMix(signature, reinterpret_cast<uint64_t>(mesh.indexBuffer.buffer));
+            signature = shadowHashMix(signature, reinterpret_cast<uint64_t>(mesh.instanceBuffer.buffer));
+            signature = shadowHashMix(signature, reinterpret_cast<uint64_t>(mesh.matIdBuffer.buffer));
+            signature = shadowHashMix(signature, reinterpret_cast<uint64_t>(mesh.uvBuffer.buffer));
+            signature = shadowHashMix(signature, mesh.vertexCount);
+            signature = shadowHashMix(signature, mesh.indexCount);
+            signature = shadowHashMix(signature, mesh.instanceCount);
+            signature = shadowHashMix(signature, mesh.firstInstance);
+            if (!mesh.matIdsHashValid) {
+                mesh.matIdsHash = shadowHashMix(1469598103934665603ull, mesh.cpuMatIds.data(),
+                                                mesh.cpuMatIds.size() * sizeof(uint32_t));
+                mesh.matIdsHashValid = true;
+            }
+            signature = shadowHashMix(signature, mesh.matIdsHash);
+        }
+        for (const auto& instance : m_rasterInstances) {
+            signature = shadowHashMix(signature, instance.meshKey.data(), instance.meshKey.size());
+            signature = shadowHashMix(signature, &instance.transform, sizeof(instance.transform));
+            signature = shadowHashMix(signature, uint64_t(instance.mask));
+        }
+        // Opacity (scalar and textured) decides what the alpha pipeline discards.
+        signature = shadowHashMix(signature, m_cachedGpuMaterials.data(),
+                                  m_cachedGpuMaterials.size() * sizeof(m_cachedGpuMaterials[0]));
+        signature = shadowHashMix(signature, m_interactiveViewport.materialPreviewBoundMaterialCount);
+        signature = shadowHashMix(signature, m_interactiveViewport.materialPreviewTextureArrayLen);
+        signature = shadowHashMix(signature,
+            reinterpret_cast<uint64_t>(m_interactiveViewport.materialPreviewDescSet));
+
+        if (cameraDependent) {
+            signature = shadowHashMix(signature, m_rasterFrustumRevision);
+            signature = shadowHashMix(signature, &m_camera.origin, sizeof(m_camera.origin));
+            signature = shadowHashMix(signature, &m_camera.lookAt, sizeof(m_camera.lookAt));
+        }
+
+        // A fresh atlas image holds nothing: forget every tile.
+        if (state->atlasLayout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL ||
+            state->tileSignatures.size() != state->frameTileCapacity) {
+            state->tileSignatures.assign(state->frameTileCapacity, 0ull);
+        }
+        for (const ShadowView& view : state->views) {
+            if (view.tile >= state->tileSignatures.size()) continue;
+            uint64_t tileSignature = shadowHashMix(signature, &view.viewProj, sizeof(view.viewProj));
+            tileSignature = shadowHashMix(tileSignature, view.tile);
+            if (tileSignature == 0ull) tileSignature = 1ull; // 0 means "nothing drawn"
+            if (cacheEnabled && state->tileSignatures[view.tile] == tileSignature) continue;
+            state->tileSignatures[view.tile] = tileSignature;
+            dirtyViews.push_back(&view);
+        }
+        if (dirtyViews.empty()) {
+            g_shadowAtlasDrawnLastRecord = false;
+            return;
+        }
+        g_shadowAtlasDrawnLastRecord = true;
+    }
+
     VkImageMemoryBarrier toDepth{};
     toDepth.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     toDepth.oldLayout = state->atlasLayout;
@@ -997,6 +1194,46 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
                          VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0,
                          0, nullptr, 0, nullptr, 1, &toDepth);
 
+    // Per-view caster culling. Every mesh used to be drawn into every shadow
+    // view, so a point light cost six full scene passes although each face
+    // sees roughly a sixth of it. The union of the instances' world boxes is
+    // built once per frame and tested against each view's clip planes.
+    // Meshes whose box cannot be trusted are always drawn: skinned meshes
+    // (the box is the bind pose), scatter pools/proxies (instances are owned
+    // elsewhere) and anything with a missing or invalid box.
+    struct ShadowCaster {
+        const RasterMeshBuffer* mesh = nullptr;
+        AABB bounds;
+        bool cullable = false;
+    };
+    static constexpr size_t kMaxInstancesForBounds = 4096u;
+    std::vector<ShadowCaster> casters;
+    casters.reserve(m_rasterMeshes.size());
+    for (const auto& [meshKey, mesh] : m_rasterMeshes) {
+        if (!mesh.vertexBuffer.buffer || mesh.vertexCount == 0u) continue;
+        ShadowCaster caster;
+        caster.mesh = &mesh;
+        if (!mesh.hasSkinning && !mesh.isScatterGroup && !mesh.isScatterProxy &&
+            !mesh.instanceIndices.empty() &&
+            mesh.instanceIndices.size() <= kMaxInstancesForBounds) {
+            Vec3 lo(1e18f, 1e18f, 1e18f), hi(-1e18f, -1e18f, -1e18f);
+            bool trusted = true;
+            for (uint32_t instanceIndex : mesh.instanceIndices) {
+                if (instanceIndex >= m_rasterInstances.size()) { trusted = false; break; }
+                const AABB& box = m_rasterInstances[instanceIndex].worldBBox;
+                if (!box.is_valid()) { trusted = false; break; }
+                lo.x = std::min(lo.x, box.min.x); hi.x = std::max(hi.x, box.max.x);
+                lo.y = std::min(lo.y, box.min.y); hi.y = std::max(hi.y, box.max.y);
+                lo.z = std::min(lo.z, box.min.z); hi.z = std::max(hi.z, box.max.z);
+            }
+            if (trusted) {
+                caster.bounds = AABB(lo, hi);
+                caster.cullable = true;
+            }
+        }
+        casters.push_back(caster);
+    }
+
     VkClearValue clear{};
     clear.depthStencil = {1.0f, 0u};
     VkRenderPassBeginInfo begin{};
@@ -1012,7 +1249,8 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
     PreviewPush push{};
     push.materialMeta[0] = m_interactiveViewport.materialPreviewBoundMaterialCount;
     push.materialMeta[3] = m_interactiveViewport.materialPreviewTextureArrayLen;
-    for (const ShadowView& shadowView : state->views) {
+    for (const ShadowView* dirtyView : dirtyViews) {
+        const ShadowView& shadowView = *dirtyView;
         const uint32_t tileX = shadowView.tile % state->frameTilesPerRow;
         const uint32_t tileY = shadowView.tile / state->frameTilesPerRow;
         VkViewport viewport{};
@@ -1026,14 +1264,23 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
                          {state->frameTileSize, state->frameTileSize}};
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &scissor);
+        VkClearAttachment clearTile{};
+        clearTile.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        clearTile.clearValue.depthStencil = {1.0f, 0u};
+        VkClearRect clearRect{};
+        clearRect.rect = scissor;
+        clearRect.layerCount = 1;
+        vkCmdClearAttachments(cmd, 1, &clearTile, 1, &clearRect);
         matrixToGL(shadowView.viewProj, push.viewProj);
         vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
 
-        for (const auto& [meshKey, mesh] : m_rasterMeshes) {
-            const bool cullDriven = m_rasterGpuCullActive && m_rasterGpuCull &&
-                                    mesh.cullDrawSlot != UINT32_MAX;
+        const ShadowFrustum frustum(shadowView.viewProj);
+        for (const ShadowCaster& caster : casters) {
+            if (caster.cullable && frustum.rejects(caster.bounds)) continue;
+            const RasterMeshBuffer& mesh = *caster.mesh;
+            const bool cullDriven = usesCameraCull(mesh);
             VkBuffer instanceBuffer = cullDriven
                 ? static_cast<VkBuffer>(m_rasterGpuCull->compactedInstanceBuffer())
                 : ((m_rasterUseGlobalInstBuffer && m_rasterGlobalInstBuf)

@@ -1,4 +1,7 @@
 #include "OfflineDeviceHooks.h"
+#include "Game/GameRuntime.h"
+#include "Paint/BalloonPaintDemo.h"
+#include "Paint/GameDesign.h"
 #include "Fluid/LiquidEmissionAuthoring.h"
 #include "Fluid/MatterFogStreams.h"
 #include "Fluid/MatterSeedSources.h"
@@ -1143,6 +1146,10 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
 // ============================================================================
 
 void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer_backend_reset) {
+    Game::resetRuntime();
+    // The game design is project state: a queued document and the live paint
+    // surfaces/demo of the previous project never survive into the next one.
+    Paint::resetGameDesign();
     // 1. Ensure GPU and active backends are completely idle before clearing resources
     extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
     extern std::unique_ptr<Backend::IBackend> g_backend;
@@ -1155,6 +1162,8 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
     if (render_settings.use_optix) {
         try { OfflineDeviceHooks::synchronize(); } catch (...) {}
     }
+    // Releases the wet paint atlas while the compute backend is idle and alive.
+    Paint::resetBalloonPaintDemo();
 
     g_project.clear();
     m_package_files.clear();
@@ -1718,6 +1727,14 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
         // Water System
         if (progress_callback) progress_callback(83, "Saving water surfaces...");
         root["water"] = WaterManager::getInstance().serialize();
+
+        // Game design: paint surfaces + their settings, splat rules, balloon demo.
+        {
+            json game_design = Paint::saveGameDesign();
+            if (!game_design.is_null()) {
+                root["game_design"] = std::move(game_design);
+            }
+        }
         SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(WaterManager::getInstance().getWaterSurfaces().size()) + " water surfaces.");
 
         // Terrain System
@@ -2390,6 +2407,13 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             simdjson::dom::element water_el;
             if (!root["water"].get(water_el)) {
                 WaterManager::getInstance().deserialize(sjsonToNlohmann(water_el), scene);
+            }
+
+            // Game design: applied by the shared simulation clock on its next
+            // tick, once the scene (and its GPU) is ready, in Studio and Player.
+            simdjson::dom::element game_design_el;
+            if (!root["game_design"].get(game_design_el)) {
+                Paint::queueGameDesign(sjsonToNlohmann(game_design_el));
             }
 
             // Terrain System

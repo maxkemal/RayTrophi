@@ -227,7 +227,9 @@ struct RegisterAudioMethods {
             MethodDescriptor descriptor{};
             descriptor.name = names[i].c_str();
             descriptor.domain = "audio";
-            descriptor.summary = op == "physical_catalogue" ?
+            descriptor.summary = op == "play_at" ?
+                "One-shot of a source's asset at a world position: independent voice, up to 16 at once" :
+                op == "physical_catalogue" ?
                 "Procedural source versions, models, controls and artistic/measured scope" :
                 op == "physical_configure" ? "Atomically configure a procedural source without changing its ID" :
                 op == "analysis_get" ?

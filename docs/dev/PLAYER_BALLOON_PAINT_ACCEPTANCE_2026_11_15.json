@@ -1,0 +1,382 @@
+{
+  "date": "2026-11-15",
+  "result": "PASS: external IPC fixture acceptance; visual review not independently performed",
+  "resolution": [
+    1024,
+    1024
+  ],
+  "surfaces": 4,
+  "open_rpc_ms": 959.7064999979921,
+  "prepare_ms": 352.0416,
+  "atlas_ms": 317.2142,
+  "single": {
+    "balloons": [
+      {
+        "balloon": 8,
+        "color": 2,
+        "position": [
+          -1.7709846496582031,
+          2.0546364784240723,
+          2.7125496864318848
+        ]
+      }
+    ],
+    "frame_interval_ms_max": 10.812100023031235,
+    "frames": 489,
+    "id": 1,
+    "paint_ms_max": 3.462,
+    "simulation_ms_max": 4.8546,
+    "simultaneous": 1,
+    "sources_dropped": 0,
+    "sources_dropped_start": 0,
+    "spawn_ms": 0.5143,
+    "spawned": 1800,
+    "time_s": 1.9115102062933147
+  },
+  "triple": {
+    "balloons": [
+      {
+        "balloon": 10,
+        "color": 3,
+        "position": [
+          0.7107245922088623,
+          2.5373008251190186,
+          -1.4767972230911255
+        ]
+      },
+      {
+        "balloon": 11,
+        "color": 3,
+        "position": [
+          0.37918758392333984,
+          2.6492230892181396,
+          2.5601606369018555
+        ]
+      },
+      {
+        "balloon": 6,
+        "color": 3,
+        "position": [
+          -1.3307561874389648,
+          1.992650032043457,
+          1.651616096496582
+        ]
+      }
+    ],
+    "frame_interval_ms_max": 10.266900062561035,
+    "frames": 481,
+    "id": 2,
+    "paint_ms_max": 3.919,
+    "simulation_ms_max": 4.1355,
+    "simultaneous": 3,
+    "sources_dropped": 0,
+    "sources_dropped_start": 0,
+    "spawn_ms": 3.4698,
+    "spawned": 5400,
+    "time_s": 5.98103720555082
+  },
+  "first_acceptance": {
+    "events_total": 10,
+    "coverage_ratio": 0.4118685722351074,
+    "rendered_fps": 159.56940196878725,
+    "sources_dropped": 0,
+    "host_bytes": 0
+  },
+  "long_uncontrolled_snapshot": {
+    "game_time_s": 170.8197729960084,
+    "events_total": 46,
+    "error": "",
+    "groups": {
+      "1": {
+        "completed_windows": 28,
+        "spawn_ms": 1.4107,
+        "simulation_ms_max": 33.4792,
+        "paint_ms_max": 24.4201,
+        "frame_interval_ms_max": 72.1706971526146,
+        "sources_dropped": 0
+      },
+      "2": {
+        "completed_windows": 12,
+        "spawn_ms": 3.2198,
+        "simulation_ms_max": 30.4787,
+        "paint_ms_max": 29.3179,
+        "frame_interval_ms_max": 68.25140118598938,
+        "sources_dropped": 0
+      },
+      "3": {
+        "completed_windows": 5,
+        "spawn_ms": 3.8183,
+        "simulation_ms_max": 48.1483,
+        "paint_ms_max": 46.2551,
+        "frame_interval_ms_max": 64.13400173187256,
+        "sources_dropped": 0
+      }
+    },
+    "pools": [
+      {
+        "alive": 0,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintRed"
+      },
+      {
+        "alive": 1800,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintBlue"
+      },
+      {
+        "alive": 0,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintYellow"
+      },
+      {
+        "alive": 1800,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintGreen"
+      }
+    ],
+    "paint": {
+      "sources_dropped": 0,
+      "publish_host_downloads": 0,
+      "publish_bytes_downloaded": 0,
+      "last_tick_ms": 7.3069
+    },
+    "display": {
+      "continuous": false,
+      "frame": {
+        "advance_ms_avg": 18.90017894736842,
+        "backend_frame_ms_avg": 1.3018545454545454,
+        "capacity_fps": 428.4323271665044,
+        "cost_age_s": 11.3256695,
+        "cost_frames": 11,
+        "cpu_record_ms_avg": 0.16772727272727272,
+        "draw_calls": 7,
+        "frame_cost_ms": 2.334090909090909,
+        "idle": true,
+        "loop_hz": 18.174409283870883,
+        "present_interval_ms_avg": 0.0,
+        "present_interval_ms_max": 0.0,
+        "present_ms_avg": 0.0,
+        "presented_fps": 0.0,
+        "render_ms_avg": 1.3038818181818184,
+        "rendered_fps": 0.0,
+        "slot_wait_ms_avg": 0.0007272727272727273,
+        "submit_ms_avg": 0.021299999999999996,
+        "upload_ms_avg": 1.0302090909090909,
+        "visible_triangles": 44,
+        "window_ms": 1045.426
+      },
+      "fullscreen": false,
+      "hud": true,
+      "output": [
+        1680,
+        945
+      ],
+      "pacing_hz": 60,
+      "render": [
+        1680,
+        945
+      ],
+      "render_scale": 1.0,
+      "window": [
+        1680,
+        945
+      ]
+    },
+    "device_lost": false,
+    "scene_ready": true
+  },
+  "active_uncapped_followup": {
+    "begin_game_time_s": 208.1854507070966,
+    "end_game_time_s": 226.1911146901548,
+    "events": [
+      {
+        "balloons": [
+          {
+            "balloon": 1,
+            "color": 3,
+            "position": [
+              -2.209015130996704,
+              1.387911081314087,
+              -1.725503921508789
+            ]
+          },
+          {
+            "balloon": 11,
+            "color": 1,
+            "position": [
+              -2.38102388381958,
+              1.6833117008209229,
+              -0.9328553676605225
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 9.175100363790989,
+        "frames": 485,
+        "id": 58,
+        "paint_ms_max": 3.1145,
+        "simulation_ms_max": 4.5184,
+        "simultaneous": 2,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 0.9344,
+        "spawned": 3600,
+        "time_s": 209.6631840057671
+      },
+      {
+        "balloons": [
+          {
+            "balloon": 11,
+            "color": 3,
+            "position": [
+              1.4501147270202637,
+              1.7814245223999023,
+              0.21242833137512207
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 8.807200007140636,
+        "frames": 492,
+        "id": 59,
+        "paint_ms_max": 3.3955,
+        "simulation_ms_max": 4.4965,
+        "simultaneous": 1,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 0.4549,
+        "spawned": 1800,
+        "time_s": 213.36351680289954
+      },
+      {
+        "balloons": [
+          {
+            "balloon": 9,
+            "color": 0,
+            "position": [
+              -2.9264698028564453,
+              1.3355298042297363,
+              -0.4366762638092041
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 8.985299617052078,
+        "frames": 494,
+        "id": 60,
+        "paint_ms_max": 3.2571,
+        "simulation_ms_max": 4.6336,
+        "simultaneous": 1,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 0.4488,
+        "spawned": 1800,
+        "time_s": 216.88403740199283
+      },
+      {
+        "balloons": [
+          {
+            "balloon": 1,
+            "color": 1,
+            "position": [
+              1.88374662399292,
+              1.3219568729400635,
+              0.7620365619659424
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 8.84919986128807,
+        "frames": 491,
+        "id": 61,
+        "paint_ms_max": 2.8007,
+        "simulation_ms_max": 4.5951,
+        "simultaneous": 1,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 0.4497,
+        "spawned": 1800,
+        "time_s": 219.54752209736034
+      },
+      {
+        "balloons": [
+          {
+            "balloon": 9,
+            "color": 0,
+            "position": [
+              2.566483974456787,
+              0.8982425332069397,
+              -1.5687901973724365
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 8.751199580729008,
+        "frames": 493,
+        "id": 62,
+        "paint_ms_max": 2.6757,
+        "simulation_ms_max": 4.0069,
+        "simultaneous": 1,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 0.4516,
+        "spawned": 1800,
+        "time_s": 222.19620709354058
+      }
+    ],
+    "display": {
+      "continuous": false,
+      "frame": {
+        "advance_ms_avg": 2.9925285714285716,
+        "backend_frame_ms_avg": 1.2061511904761908,
+        "capacity_fps": 459.3817651142755,
+        "cost_age_s": 0.0,
+        "cost_frames": 168,
+        "cpu_record_ms_avg": 0.12868035714285714,
+        "draw_calls": 7,
+        "frame_cost_ms": 2.1768386904761896,
+        "idle": false,
+        "loop_hz": 167.97999358276428,
+        "present_interval_ms_avg": 5.953089880952383,
+        "present_interval_ms_max": 7.9981,
+        "present_ms_avg": 0.7751047619047621,
+        "presented_fps": 167.97999358276428,
+        "render_ms_avg": 1.207241666666666,
+        "rendered_fps": 167.97999358276428,
+        "slot_wait_ms_avg": 0.0007863095238095244,
+        "submit_ms_avg": 0.021861309523809533,
+        "upload_ms_avg": 0.9695970238095235,
+        "visible_triangles": 44,
+        "window_ms": 1000.1191
+      },
+      "fullscreen": false,
+      "hud": true,
+      "output": [
+        1680,
+        945
+      ],
+      "pacing_hz": 0,
+      "render": [
+        1680,
+        945
+      ],
+      "render_scale": 1.0,
+      "window": [
+        1680,
+        945
+      ]
+    },
+    "error": "",
+    "sources_dropped": 0
+  },
+  "limits": [
+    "Simulation ms excludes later texture publication/render/present.",
+    "Frame interval field is clock input dt, not precise GPU duration.",
+    "Uncontrolled long snapshot was idle with stale rendering counters; do not compare as sustained rendering FPS.",
+    "Active followup requested continuous true, but captured display reports continuous false; applied pacing_hz is 0 and idle is false.",
+    "Startup overall max dt includes project loading; separate from per-event windows."
+  ]
+}

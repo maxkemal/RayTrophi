@@ -1,4 +1,5 @@
 #include "Paint/MeshPaintAdapter.h"
+#include "Paint/PaintHeightNormalMath.h"
 
 #include "scene_data.h"
 #include "Triangle.h"
@@ -1003,40 +1004,11 @@ Vec3 buildNormalFromHeightGeometryAware(const std::shared_ptr<Texture>& height_t
     } else {
         std::tie(uv0, uv1, uv2) = tri.getUVCoordinates();
     }
-    const Vec3 p0 = tri.getVertexPosition(0);
-    const Vec3 e1 = tri.getVertexPosition(1) - p0;
-    const Vec3 e2 = tri.getVertexPosition(2) - p0;
-    const float du1 = uv1.u - uv0.u;
-    const float dv1 = uv1.v - uv0.v;
-    const float du2 = uv2.u - uv0.u;
-    const float dv2 = uv2.v - uv0.v;
-    const float det = du1 * dv2 - du2 * dv1;
-
-    // Default to "1 texel = 1 world unit" if the UV→world map is degenerate;
-    // matches the pre-Jacobian fallback in buildNormalFromHeight.
-    float distH = 1.0f;
-    float distV = 1.0f;
-    if (std::abs(det) >= 1e-10f) {
-        const float inv = 1.0f / det;
-        const Vec3 dPdU = (e1 * dv2 - e2 * dv1) * inv;
-        const Vec3 dPdV = (e2 * du1 - e1 * du2) * inv;
-        // 2-texel offset in pixel space → UV delta = 2 / (texDim - 1).
-        // World distance for that span is |dPdU| * uv_step (note sign flip
-        // for V because pixel y axis runs opposite to UV v axis — only the
-        // magnitude matters here).
-        const float du_step = (width  > 1) ? (2.0f / static_cast<float>(width  - 1)) : 0.0f;
-        const float dv_step = (height > 1) ? (2.0f / static_cast<float>(height - 1)) : 0.0f;
-        distH = dPdU.length() * du_step;
-        distV = dPdV.length() * dv_step;
-    }
-
-    // Anti-divergence floor: clamp the world distance to a small fraction of
-    // the triangle's average edge length. This stops scaled-down meshes (or
-    // tiny UV islands) from making `gH / distH` explode.
-    const float edge_avg = (e1.length() + e2.length() + (e1 - e2).length()) * (1.0f / 3.0f);
-    const float min_dist = std::max(1e-5f, edge_avg * 1e-4f);
-    if (distH < min_dist) distH = min_dist;
-    if (distV < min_dist) distV = min_dist;
+    const Vec2 span = HeightNormalMath::twoTexelWorldSpan(
+        tri.getVertexPosition(0), tri.getVertexPosition(1), tri.getVertexPosition(2),
+        uv0, uv1, uv2, width, height);
+    const float distH = span.u;
+    const float distV = span.v;
 
     // Sensitivity Dampening: Geometry aware gradients can be extreme on high-poly meshes.
     // 0.15 scaler so that 1.0 strength still feels usable on default meshes.
@@ -1048,14 +1020,7 @@ Vec3 buildNormalFromHeightGeometryAware(const std::shared_ptr<Texture>& height_t
 }
 
 Vec3 combineNormalsPD(const Vec3& base_normal, const Vec3& detail_normal) {
-    const Vec3 base = base_normal.normalize();
-    const Vec3 detail = detail_normal.normalize();
-    const float base_z = std::max(0.15f, base.z);
-    const float detail_z = std::max(0.15f, detail.z);
-    return Vec3(
-        (base.x / base_z) + (detail.x / detail_z),
-        (base.y / base_z) + (detail.y / detail_z),
-        1.0f).normalize();
+    return HeightNormalMath::combinePD(base_normal, detail_normal);
 }
 
 void resizeTexturePixels(Texture& texture, int resolution) {

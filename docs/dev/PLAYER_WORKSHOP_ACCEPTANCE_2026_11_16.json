@@ -1,0 +1,254 @@
+{
+  "date": "2026-11-16",
+  "pipeline_pass": true,
+  "build": "user performed",
+  "negative_config_cases_pass": [
+    "wrong node count",
+    "duplicate node",
+    "missing node"
+  ],
+  "trials": [
+    {
+      "count": 1,
+      "spawned": 1800,
+      "simulation_ms_max": 3.2229,
+      "paint_ms_max": 2.7951,
+      "sources_dropped": 0,
+      "coverage": {
+        "covered_texels": 57059,
+        "ratio": 0.05441570281982422,
+        "surfaces": [
+          {
+            "covered_texels": 27010,
+            "material_id": 0,
+            "mean_color": [
+              0.9764705896377563,
+              0.929411768913269,
+              0.2508944272994995
+            ],
+            "object": "PaintFloor",
+            "ratio": 0.10303497314453125,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          },
+          {
+            "covered_texels": 1710,
+            "material_id": 1,
+            "mean_color": [
+              0.9764705896377563,
+              0.929411768913269,
+              0.2509620487689972
+            ],
+            "object": "PaintBack",
+            "ratio": 0.00652313232421875,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          },
+          {
+            "covered_texels": 25019,
+            "material_id": 2,
+            "mean_color": [
+              0.9764705896377563,
+              0.929411768913269,
+              0.25084009766578674
+            ],
+            "object": "PaintLeft",
+            "ratio": 0.09543991088867188,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          },
+          {
+            "covered_texels": 3320,
+            "material_id": 3,
+            "mean_color": [
+              0.9764705896377563,
+              0.929411768913269,
+              0.250929594039917
+            ],
+            "object": "PaintRight",
+            "ratio": 0.012664794921875,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          }
+        ],
+        "valid_texels": 1048576
+      },
+      "publish_host_downloads": 0,
+      "publish_bytes_downloaded": 0,
+      "device_lost": false,
+      "all_meshes_respawned": true
+    },
+    {
+      "count": 3,
+      "spawned": 5400,
+      "simulation_ms_max": 3.6875,
+      "paint_ms_max": 3.244,
+      "sources_dropped": 0,
+      "coverage": {
+        "covered_texels": 246777,
+        "ratio": 0.23534488677978516,
+        "surfaces": [
+          {
+            "covered_texels": 104963,
+            "material_id": 0,
+            "mean_color": [
+              0.4622378647327423,
+              0.9294118285179138,
+              0.3946663439273834
+            ],
+            "object": "PaintFloor",
+            "ratio": 0.4004020690917969,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          },
+          {
+            "covered_texels": 34712,
+            "material_id": 1,
+            "mean_color": [
+              0.3797469735145569,
+              0.929411768913269,
+              0.41885995864868164
+            ],
+            "object": "PaintBack",
+            "ratio": 0.132415771484375,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          },
+          {
+            "covered_texels": 62816,
+            "material_id": 2,
+            "mean_color": [
+              0.5417758226394653,
+              0.929411768913269,
+              0.3727828860282898
+            ],
+            "object": "PaintLeft",
+            "ratio": 0.2396240234375,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          },
+          {
+            "covered_texels": 44286,
+            "material_id": 3,
+            "mean_color": [
+              0.3926818072795868,
+              0.929411768913269,
+              0.4152259826660156
+            ],
+            "object": "PaintRight",
+            "ratio": 0.16893768310546875,
+            "valid_texels": 262144,
+            "wet_texels": 0
+          }
+        ],
+        "valid_texels": 1048576
+      },
+      "publish_host_downloads": 0,
+      "publish_bytes_downloaded": 0,
+      "device_lost": false,
+      "all_meshes_respawned": true
+    }
+  ],
+  "raw_reports": {
+    "workshop-mesh-acceptance.json": {
+      "path": "tools\\perception_bridge\\out\\workshop-mesh-acceptance.json",
+      "sha256": "946c2ca356f673b27907315c6e1c44f2cde3d8254897230359b4e13c3d5a29b5"
+    },
+    "workshop-visual-acceptance.json": {
+      "path": "tools\\perception_bridge\\out\\workshop-visual-acceptance.json",
+      "sha256": "7b2791c6f7d26efab5ef7cf45d735be4204f3d44e42053affdcaa4a095abfba4"
+    },
+    "workshop-shadow-diagnostic.json": {
+      "path": "tools\\perception_bridge\\out\\workshop-shadow-diagnostic.json",
+      "sha256": "76b1f8af0098cdd326274ed2ea5aced05dc41c729c4fa78c43e9435937c178ea"
+    },
+    "workshop-wet-retention.json": {
+      "path": "tools\\perception_bridge\\out\\workshop-wet-retention.json",
+      "sha256": "7386f9a28b73361b683f6774a38251aabb005517b204c92707e2b57d41c3b36e"
+    }
+  },
+  "visual": {
+    "pop_respawn_reviewed": true,
+    "double_billboard_observed": false,
+    "all_12_hidden_reviewed": true,
+    "ghost_shadow_reproduced": false,
+    "capture_forced_sync_not_benchmark": true,
+    "all_12_stress_droplets": 21600,
+    "stress_sources_dropped": 0,
+    "stress_host_downloads": 0
+  },
+  "roughness_asset_fix": {
+    "before_scalar": 0.09,
+    "after_scalar": 0.18,
+    "encoding": "roughnessProperty color=.18 intensity=1; previously color=.5 intensity=.18",
+    "cpp_or_shader_change": false
+  },
+  "wet_retention": {
+    "profile": {
+      "schema": 1,
+      "description": "Longer-open flowing paint; existing wet settings only. PBR channel publication is separate.",
+      "surfaces": [
+        "PaintFloor",
+        "PaintBack",
+        "PaintLeft",
+        "PaintRight"
+      ],
+      "settings": {
+        "wetness": 0.95,
+        "lifetime_seconds": 12.0,
+        "diffusion": 0.1,
+        "runoff": 0.7,
+        "absorption": 0.06,
+        "drip_head": 0.8,
+        "paint_load": 0.95,
+        "deposit_rate": 0.9,
+        "pickup_rate": 0.2,
+        "brush_radius": 6.0,
+        "oil": false
+      }
+    },
+    "samples": [
+      {
+        "wall_s": 0.5159999999996217,
+        "wet_by_surface": {
+          "PaintFloor": 14894,
+          "PaintBack": 0,
+          "PaintLeft": 0,
+          "PaintRight": 0
+        }
+      },
+      {
+        "wall_s": 2.0780000000013388,
+        "wet_by_surface": {
+          "PaintFloor": 56704,
+          "PaintBack": 20490,
+          "PaintLeft": 83348,
+          "PaintRight": 32966
+        }
+      },
+      {
+        "wall_s": 5.063000000001921,
+        "wet_by_surface": {
+          "PaintFloor": 30869,
+          "PaintBack": 24978,
+          "PaintLeft": 93770,
+          "PaintRight": 39590
+        }
+      },
+      {
+        "wall_s": 8.06300000000192,
+        "wet_by_surface": {
+          "PaintFloor": 4998,
+          "PaintBack": 3046,
+          "PaintLeft": 30071,
+          "PaintRight": 3015
+        }
+      }
+    ],
+    "sources_dropped": 0,
+    "host_downloads": 0,
+    "scope": "wet persistence; flow magnitude and performance not benchmarked"
+  },
+  "pbr_channel_status": "CPU paint channel services exist; GPU wet output currently BaseColor only; integration requested from active owner Claude A, not implemented here",
+  "final": "source workshop remains open; paint visible; auto demo stopped; 12 mesh balls respawned; display/capture restored; no project.save"
+}

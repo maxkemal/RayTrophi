@@ -1,3 +1,4 @@
+#include "Backend/WetPaintTexturePolicy.h"
 #include "Backend/VulkanFsrLoader.h"
 #include "PostProcess/Exposure.h"
 #include "Viewport/AutomaticCutout.h"
@@ -14,6 +15,8 @@
 #include "Backend/VulkanVolumePipelineProbe.h"
 #include "Backend/VulkanVolumeStageSplit.h"
 #include "Backend/VulkanFailureReporting.h"
+#include "Backend/VulkanBufferAddressLedger.h"
+#include "Backend/VulkanTlasGeneration.h"
 #include "Backend/VulkanTransitionDiagnostics.h"
 #include "Fluid/FluidRenderProxy.h"
 #include <atomic>
@@ -768,6 +771,129 @@ namespace {
 namespace VulkanRT {
 
 // ============================================================================
+// VK_EXT_device_fault registry
+//
+// A TDR on NVIDIA/Windows (nvlddmkm event 153) covers BOTH a GPU page fault
+// and a GPU timeout, and the app only sees VK_ERROR_DEVICE_LOST at whatever
+// call happens to notice it next. The driver knows which: the faulting VA and
+// access kind, or a vendor timeout record. Devices register here when the
+// extension was enabled; the first loss queries all of them.
+// ============================================================================
+namespace {
+std::mutex g_faultDevicesMutex;
+std::vector<VkDevice> g_faultDevices;
+std::atomic<bool> g_faultInfoLogged{false};
+
+const char* deviceFaultAddressTypeName(VkDeviceFaultAddressTypeEXT type) {
+    switch (type) {
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_NONE_EXT: return "none";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_READ_INVALID_EXT: return "read_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_WRITE_INVALID_EXT: return "write_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_EXECUTE_INVALID_EXT: return "execute_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_UNKNOWN_EXT: return "ip_unknown";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_INVALID_EXT: return "ip_invalid";
+        case VK_DEVICE_FAULT_ADDRESS_TYPE_INSTRUCTION_POINTER_FAULT_EXT: return "ip_fault";
+        default: return "unknown";
+    }
+}
+
+std::string hex64(uint64_t value) {
+    char buf[32];
+    std::snprintf(buf, sizeof(buf), "0x%016llx", static_cast<unsigned long long>(value));
+    return buf;
+}
+
+void registerFaultDevice(VkDevice device) {
+    std::lock_guard<std::mutex> lock(g_faultDevicesMutex);
+    g_faultDevices.push_back(device);
+}
+
+void unregisterFaultDevice(VkDevice device) {
+    std::lock_guard<std::mutex> lock(g_faultDevicesMutex);
+    g_faultDevices.erase(std::remove(g_faultDevices.begin(), g_faultDevices.end(), device),
+                         g_faultDevices.end());
+}
+} // namespace
+
+void logVulkanDeviceFaultInfo() {
+    if (g_faultInfoLogged.exchange(true)) return;
+    std::vector<VkDevice> devices;
+    {
+        std::lock_guard<std::mutex> lock(g_faultDevicesMutex);
+        devices = g_faultDevices;
+    }
+    if (devices.empty()) {
+        SCENE_LOG_WARN("[DeviceFault] no device was created with VK_EXT_device_fault; "
+                       "the cause of this loss is not recorded");
+        return;
+    }
+    for (size_t d = 0; d < devices.size(); ++d) {
+        const VkDevice device = devices[d];
+        auto fpGetFaultInfo = reinterpret_cast<PFN_vkGetDeviceFaultInfoEXT>(
+            vkGetDeviceProcAddr(device, "vkGetDeviceFaultInfoEXT"));
+        const std::string tag = "[DeviceFault] device " + std::to_string(d) + " (" +
+            std::to_string(reinterpret_cast<uintptr_t>(device)) + ")";
+        if (!fpGetFaultInfo) {
+            SCENE_LOG_WARN(tag + ": vkGetDeviceFaultInfoEXT unavailable");
+            continue;
+        }
+        VkDeviceFaultCountsEXT counts{};
+        counts.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_COUNTS_EXT;
+        VkResult r = fpGetFaultInfo(device, &counts, nullptr);
+        if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+            // A device that did not fault answers with an error or empty counts.
+            SCENE_LOG_INFO(tag + ": no fault record (VkResult " + std::to_string(r) + ")");
+            continue;
+        }
+        std::vector<VkDeviceFaultAddressInfoEXT> addresses(counts.addressInfoCount);
+        std::vector<VkDeviceFaultVendorInfoEXT> vendors(counts.vendorInfoCount);
+        std::vector<uint8_t> binary(static_cast<size_t>(counts.vendorBinarySize));
+        VkDeviceFaultInfoEXT info{};
+        info.sType = VK_STRUCTURE_TYPE_DEVICE_FAULT_INFO_EXT;
+        info.pAddressInfos = addresses.empty() ? nullptr : addresses.data();
+        info.pVendorInfos = vendors.empty() ? nullptr : vendors.data();
+        info.pVendorBinaryData = binary.empty() ? nullptr : binary.data();
+        r = fpGetFaultInfo(device, &counts, &info);
+        if (r != VK_SUCCESS && r != VK_INCOMPLETE) {
+            SCENE_LOG_WARN(tag + ": fault info query failed (VkResult " + std::to_string(r) + ")");
+            continue;
+        }
+        SCENE_LOG_ERROR(tag + ": \"" + std::string(info.description) + "\" addresses=" +
+                        std::to_string(counts.addressInfoCount) + " vendor_records=" +
+                        std::to_string(counts.vendorInfoCount) + " vendor_binary_bytes=" +
+                        std::to_string(counts.vendorBinarySize));
+        for (uint32_t i = 0; i < counts.addressInfoCount && i < addresses.size(); ++i) {
+            const auto& a = addresses[i];
+            const uint64_t precision = a.addressPrecision ? a.addressPrecision : 1ull;
+            const uint64_t lo = a.reportedAddress & ~(precision - 1ull);
+            SCENE_LOG_ERROR(tag + "   address[" + std::to_string(i) + "] " +
+                            deviceFaultAddressTypeName(a.addressType) + " " +
+                            hex64(a.reportedAddress) + " range " + hex64(lo) + ".." +
+                            hex64(lo + precision));
+            // Name the owner. 64 KB of slack catches a read just past the end.
+            SCENE_LOG_ERROR(tag + "   address[" + std::to_string(i) + "] owner:" +
+                            BufferLedger::describe(device, a.reportedAddress, 65536ull));
+        }
+        for (uint32_t i = 0; i < counts.vendorInfoCount && i < vendors.size(); ++i) {
+            const auto& v = vendors[i];
+            SCENE_LOG_ERROR(tag + "   vendor[" + std::to_string(i) + "] \"" +
+                            std::string(v.description) + "\" code=" +
+                            hex64(v.vendorFaultCode) + " data=" + hex64(v.vendorFaultData));
+        }
+        if (!binary.empty()) {
+            // NVIDIA's binary is an Aftermath-format GPU crash dump; keep it.
+            const std::string path = "VulkanDeviceFault_" + std::to_string(d) + ".bin";
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            if (out) {
+                out.write(reinterpret_cast<const char*>(binary.data()),
+                          static_cast<std::streamsize>(binary.size()));
+                SCENE_LOG_ERROR(tag + "   vendor binary written to " + path);
+            }
+        }
+    }
+}
+
+// ============================================================================
 // VulkanDevice Implementation
 // ============================================================================
 
@@ -898,7 +1024,7 @@ void VulkanDevice::shutdown() {
         // and descriptor pool (the descriptor set is referenced by in-flight submissions).
         for (uint32_t i = 0; i < kFrameSlotCount; ++i) {
             if (m_frameSlots[i].fence && m_frameSlots[i].everSubmitted) {
-                vkWaitForFences(m_device, 1, &m_frameSlots[i].fence, VK_TRUE, UINT64_MAX);
+                VulkanRT::waitFenceBounded(m_device, m_frameSlots[i].fence, "VulkanBackend.cpp:1026");
             }
         }
         m_exposureMeter.shutdown();
@@ -1090,6 +1216,8 @@ void VulkanDevice::shutdown() {
         }
         m_pendingCompactions.clear();
         if (m_rayGpuTiming) m_rayGpuTiming->destroy();
+        unregisterFaultDevice(m_device);
+        BufferLedger::forgetDevice(m_device);
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
         // Whatever was still tracked went with the device.
@@ -1384,6 +1512,26 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         m_capabilities.supportsMemoryBudget = true;
     }
 
+    // Device fault reporting: read-only post-mortem of a device loss (faulting
+    // address / timeout). Costs nothing until the device is lost.
+    VkPhysicalDeviceFaultFeaturesEXT faultFeatures{};
+    faultFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+    bool canUseDeviceFault = false;
+    if (hasExtension(VK_EXT_DEVICE_FAULT_EXTENSION_NAME)) {
+        VkPhysicalDeviceFaultFeaturesEXT supportedFault{};
+        supportedFault.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT;
+        VkPhysicalDeviceFeatures2 faultQuery{};
+        faultQuery.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+        faultQuery.pNext = &supportedFault;
+        vkGetPhysicalDeviceFeatures2(m_physicalDevice, &faultQuery);
+        if (supportedFault.deviceFault) {
+            canUseDeviceFault = true;
+            faultFeatures.deviceFault = VK_TRUE;
+            faultFeatures.deviceFaultVendorBinary = supportedFault.deviceFaultVendorBinary;
+            deviceExtensions.push_back(VK_EXT_DEVICE_FAULT_EXTENSION_NAME);
+        }
+    }
+
     // Ray tracing extensions
     bool hasAccelStruct = hasExtension(VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME);
     bool hasRTPipeline = hasExtension(VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME);
@@ -1628,6 +1776,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         *nextLink = &scalarFeatures;
         nextLink = &scalarFeatures.pNext;
     }
+    if (canUseDeviceFault) {
+        *nextLink = &faultFeatures;
+        nextLink = &faultFeatures.pNext;
+    }
     FsrDeviceFeatures fsrFeatures;
     fsrFeatures.append(m_physicalDevice, nextLink, vulkanLegacyMode());
     *nextLink = nullptr;
@@ -1641,6 +1793,8 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions.data();
 
     VkResult result = vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr, &m_device);
+    // The fallback create below passes no extensions, so only this one registers.
+    if (result == VK_SUCCESS && canUseDeviceFault) registerFaultDevice(m_device);
     // Track which features were actually enabled on the created device.
     // detectCapabilities() runs later and only queries the PHYSICAL device —
     // that returns the device's "what it could do" not "what we enabled on it",
@@ -2298,6 +2452,7 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
         addrInfo.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
         addrInfo.buffer = handle.buffer;
         handle.deviceAddress = fpGetBufferDeviceAddressKHR(m_device, &addrInfo);
+        BufferLedger::noteCreated(m_device, handle.buffer, handle.deviceAddress, info.size);
     }
 
     // Upload initial data if provided
@@ -2316,7 +2471,10 @@ void VulkanDevice::destroyBuffer(BufferHandle& buffer) {
         buffer = {};
         return;
     }
-    if (buffer.buffer) vkDestroyBuffer(m_device, buffer.buffer, nullptr);
+    if (buffer.buffer) {
+        BufferLedger::noteDestroyed(m_device, buffer.buffer);
+        vkDestroyBuffer(m_device, buffer.buffer, nullptr);
+    }
     if (buffer.memory) freeTrackedMemory(buffer.memory);
     buffer = {};
 }
@@ -2619,7 +2777,7 @@ void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmdBuf) {
     }
     const uint64_t timingWait = m_rayGpuTiming ? m_rayGpuTiming->beginHostWait() : 0;
     reportVulkanDeviceFailure(
-        vkWaitForFences(m_device, 1, &submitFence, VK_TRUE, UINT64_MAX),
+        VulkanRT::waitFenceBounded(m_device, submitFence, "VulkanBackend.cpp:2779"),
         "endSingleTimeCommands/vkWaitForFences");
     if (m_rayGpuTiming) m_rayGpuTiming->endHostWait(timingWait);
     vkDestroyFence(m_device, submitFence, nullptr);
@@ -3439,6 +3597,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
             fpDestroyAccelerationStructureKHR(m_device, m_tlas.accel, nullptr);
             destroyBuffer(m_tlas.buffer);
             m_tlas = {};
+            bumpTlasObjectGeneration();
         }
     }
 
@@ -3615,6 +3774,7 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         asCreateInfo.size = sizeInfo.accelerationStructureSize;
         asCreateInfo.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
         fpCreateAccelerationStructureKHR(m_device, &asCreateInfo, nullptr, &m_tlas.accel);
+        bumpTlasObjectGeneration();
 
         // Get device address
         VkAccelerationStructureDeviceAddressInfoKHR addrInfo{};
@@ -3820,7 +3980,7 @@ bool VulkanDevice::createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sourc
     build.geometryCount=1; build.pGeometries=&geom;
     VkAccelerationStructureBuildSizesInfoKHR sizes{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_SIZES_INFO_KHR};
     fpGetAccelerationStructureBuildSizesKHR(m_device,VK_ACCELERATION_STRUCTURE_BUILD_TYPE_DEVICE_KHR,&build,&count,&sizes);
-    if(m_tlas.accel){fpDestroyAccelerationStructureKHR(m_device,m_tlas.accel,nullptr);destroyBuffer(m_tlas.buffer);m_tlas={};}
+    if(m_tlas.accel){fpDestroyAccelerationStructureKHR(m_device,m_tlas.accel,nullptr);destroyBuffer(m_tlas.buffer);m_tlas={};bumpTlasObjectGeneration();}
     BufferCreateInfo aci{};aci.size=sizes.accelerationStructureSize;aci.usage=BufferUsage::ACCELERATION|BufferUsage::STORAGE;aci.location=MemoryLocation::GPU_ONLY;
     aci.category=VramCategory::AccelStruct;m_tlas.buffer=createBuffer(aci); if(!m_tlas.buffer.buffer)return false;
     VkAccelerationStructureCreateInfoKHR ci{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_CREATE_INFO_KHR};ci.buffer=m_tlas.buffer.buffer;ci.size=sizes.accelerationStructureSize;ci.type=VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
@@ -3828,6 +3988,7 @@ bool VulkanDevice::createGpuTLAS(const std::vector<GpuTLASInstanceSource>& sourc
         destroyBuffer(m_tlas.buffer);
         return false;
     }
+    bumpTlasObjectGeneration();
     VkAccelerationStructureDeviceAddressInfoKHR ai{VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_DEVICE_ADDRESS_INFO_KHR};ai.accelerationStructure=m_tlas.accel;
     m_tlas.deviceAddress=fpGetAccelerationStructureDeviceAddressKHR(m_device,&ai);
     const uint64_t align=m_capabilities.minScratchAlignment?m_capabilities.minScratchAlignment:128;
@@ -4624,6 +4785,7 @@ void VulkanDevice::bindRTDescriptors(const ImageHandle& outputImage,
                 const auto* as = static_cast<const VkWriteDescriptorSetAccelerationStructureKHR*>(w.pNext);
                 for (uint32_t i = 0; i < as->accelerationStructureCount; ++i)
                     mix(reinterpret_cast<uint64_t>(as->pAccelerationStructures[i]));
+                mix(tlasObjectGeneration());   // a reused handle value is a new object
             }
         }
         if (batchHash != m_rtDescWriteHash) {
@@ -7096,7 +7258,7 @@ bool VulkanDevice::waitDenoiserCopy(uint64_t timeoutNs) {
 void VulkanDevice::drainDenoiserCopy() {
     if (m_denoiserCopySlot.fence == VK_NULL_HANDLE) return;
     if (!m_denoiserCopySlot.everSubmitted) return;
-    vkWaitForFences(m_device, 1, &m_denoiserCopySlot.fence, VK_TRUE, UINT64_MAX);
+    VulkanRT::waitFenceBounded(m_device, m_denoiserCopySlot.fence, "VulkanBackend.cpp:7256");
     // Reset everSubmitted so the next getDenoiserFrameGPU call treats the
     // pipeline as empty and re-seeds. This matters after resize/teardown of
     // the staging buffers — the old fence is signaled but the staging it
@@ -7115,7 +7277,7 @@ bool VulkanDevice::submitDenoiserCopyAsync(const ImageHandle* srcs, const Buffer
     // buffer/fence. At steady state the fence is already signaled because the
     // CUDA prep + OIDN + D2H pipeline took longer than the GPU copy.
     if (slot.everSubmitted) {
-        if (vkWaitForFences(m_device, 1, &slot.fence, VK_TRUE, UINT64_MAX) != VK_SUCCESS) return false;
+        if (VulkanRT::waitFenceBounded(m_device, slot.fence, "VulkanBackend.cpp:7275") != VK_SUCCESS) return false;
     }
     vkResetFences(m_device, 1, &slot.fence);
 
@@ -7218,7 +7380,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
     if (fs.everSubmitted) {
         const uint64_t timingWait = m_rayGpuTiming ? m_rayGpuTiming->beginHostWait() : 0;
         VkResult wr = reportVulkanDeviceFailure(
-            vkWaitForFences(m_device, 1, &fs.fence, VK_TRUE, UINT64_MAX),
+            VulkanRT::waitFenceBounded(m_device, fs.fence, "VulkanBackend.cpp:7378"),
             "submitTraceTonemapAsync/vkWaitForFences");
         if (m_rayGpuTiming) m_rayGpuTiming->endHostWait(timingWait, true);
         if (wr != VK_SUCCESS) return false;
@@ -7391,6 +7553,7 @@ bool VulkanDevice::submitTraceTonemapAsync(uint32_t slot, uint32_t w, uint32_t h
         if (submitResult == VK_ERROR_DEVICE_LOST) {
             g_vulkan_device_lost = true;
             g_vulkan_device_lost_msg = "submitTraceTonemapAsync: vkQueueSubmit returned VK_ERROR_DEVICE_LOST";
+            VulkanRT::logVulkanDeviceFaultInfo();
         } else {
             signalVulkanMemoryPressure(submitResult, "submitTraceTonemapAsync/vkQueueSubmit");
         }
@@ -7725,10 +7888,11 @@ static Backend::TextureHandle registerSceneTexture(Backend::SceneTextureManager*
     }
 
     const bool useSrgb = forceLinear ? false : tex->is_srgb;
-    const TextureCompressionPlan plan = buildTextureCompressionPlan(tex, textureType);
+    const TextureCompressionPlan plan = Backend::paintTextureCompressionPlan(tex, textureType);
     const bool canUseSingleChannel =
         (preferSingleChannel || plan.preferSingleChannelFallback) &&
-        !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+        !useSrgb && tex->is_gray_scale && !tex->has_alpha &&
+        Backend::allowCompactPaintTexture(tex);
 
     return manager->registerTextureKey(
         buildSceneTextureKey(tex, textureType, forceLinear, preferSingleChannel),
@@ -10262,6 +10426,7 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         std::set<VkDeviceMemory> freedBlasMemories;
         auto destroyOwnedBlasBuffer = [&](VulkanRT::BufferHandle& buffer) {
             if (buffer.buffer && destroyedBlasBuffers.insert(buffer.buffer).second) {
+                VulkanRT::BufferLedger::noteDestroyed(m_device->m_device, buffer.buffer);
                 vkDestroyBuffer(m_device->m_device, buffer.buffer, nullptr);
             }
             if (buffer.memory && freedBlasMemories.insert(buffer.memory).second) {
@@ -10334,6 +10499,7 @@ void VulkanBackendAdapter::rebuildAccelerationStructure() {
         if (m_device->m_tlas.accel && m_device->fpDestroyAccelerationStructureKHR) {
              m_device->fpDestroyAccelerationStructureKHR(m_device->m_device, m_device->m_tlas.accel, nullptr);
              m_device->m_tlas.accel = VK_NULL_HANDLE;
+             VulkanRT::bumpTlasObjectGeneration();
         }
         m_device->destroyBuffer(m_device->m_tlas.buffer);
 
@@ -12154,11 +12320,13 @@ uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureType
                     const std::vector<CompactVec4>& dpx = texCheck->pixels;
                     if (existingId > 0 && !dpx.empty()) {
                         const bool dUseSrgb = forceLinear ? false : texCheck->is_srgb;
-                        const TextureCompressionPlan dPlan = buildTextureCompressionPlan(texCheck, textureType);
+                        const TextureCompressionPlan dPlan = Backend::paintTextureCompressionPlan(texCheck, textureType);
                         const bool dCanUseSingleChannel =
                             (preferSingleChannel || dPlan.preferSingleChannelFallback) &&
-                            !dUseSrgb && texCheck->is_gray_scale && !texCheck->has_alpha;
-                        const bool dCanUseTwoChannels = (textureType == TextureType::Normal) && !texCheck->is_hdr;
+                            !dUseSrgb && texCheck->is_gray_scale && !texCheck->has_alpha &&
+                            Backend::allowCompactPaintTexture(texCheck);
+                        const bool dCanUseTwoChannels = (textureType == TextureType::Normal) && !texCheck->is_hdr &&
+                            Backend::allowCompactPaintTexture(texCheck);
                         const uint32_t dUploadChannels = dCanUseSingleChannel ? 1u : (dCanUseTwoChannels ? 2u : 4u);
 
                         // Try the partial-region fast path when a rect is known.
@@ -12260,7 +12428,7 @@ uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureType
             Texture* tex = texCheck;
             if (!tex || !tex->is_loaded()) return 0;
             const bool useSrgb = forceLinear ? false : tex->is_srgb;
-            const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
+            const TextureCompressionPlan compressionPlan = Backend::paintTextureCompressionPlan(tex, textureType);
             const bool limitThisTextureForPreview = isViewportTextureOwner(sceneTextureOwnerScope());
             uint32_t uploadWidth = static_cast<uint32_t>(std::max(0, tex->width));
             uint32_t uploadHeight = static_cast<uint32_t>(std::max(0, tex->height));
@@ -12337,8 +12505,10 @@ uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureType
 
                 const bool canUseSingleChannel =
                     (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
-                    !useSrgb && tex->is_gray_scale && !tex->has_alpha;
-                const bool canUseTwoChannels = (textureType == TextureType::Normal) && !tex->is_hdr;
+                    !useSrgb && tex->is_gray_scale && !tex->has_alpha &&
+        Backend::allowCompactPaintTexture(tex);
+                const bool canUseTwoChannels = (textureType == TextureType::Normal) && !tex->is_hdr &&
+            Backend::allowCompactPaintTexture(tex);
                 std::vector<uint8_t> tmp;
                 const uint32_t uploadChannels = canUseSingleChannel ? 1u : (canUseTwoChannels ? 2u : 4u);
                 tmp.resize((size_t)tex->width * tex->height * uploadChannels);
@@ -12369,7 +12539,8 @@ uint32_t VulkanBackendAdapter::resolveTextureHandle(int64_t key, int textureType
 
             const bool canUseSingleChannel =
                 (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
-                !useSrgb && tex->is_gray_scale && !tex->has_alpha;
+                !useSrgb && tex->is_gray_scale && !tex->has_alpha &&
+        Backend::allowCompactPaintTexture(tex);
             const uint32_t estimatedUploadChannels = tex->is_hdr ? 4u : (canUseSingleChannel ? 1u : 4u);
             int64_t id = 0;
             bool resolvedThroughPool = false;
@@ -12600,9 +12771,10 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                     return;
                 }
 
-                const TextureCompressionPlan plan = buildTextureCompressionPlan(tex, req.texType);
+                const TextureCompressionPlan plan = Backend::paintTextureCompressionPlan(tex, req.texType);
                 const bool canSingle = (req.preferSingleChannel || plan.preferSingleChannelFallback)
-                    && !s.useSrgb && tex->is_gray_scale && !tex->has_alpha;
+                    && !s.useSrgb && tex->is_gray_scale && !tex->has_alpha
+                    && Backend::allowCompactPaintTexture(tex);
                 s.uploadChannels = canSingle ? 1u : 4u;
                 const auto& px   = tex->pixels;
                 s.bytes.resize((size_t)tex->width * tex->height * s.uploadChannels);
@@ -12647,7 +12819,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
                 }
 
                 const Texture* texPtr = freshUploads[i].tex;
-                const TextureCompressionPlan plan = buildTextureCompressionPlan(texPtr, s.texType);
+                const TextureCompressionPlan plan = Backend::paintTextureCompressionPlan(texPtr, s.texType);
                 const bool supportsComp =
                     (plan.preferredTarget == TextureCompressionTarget::BC4 && caps.supportsBC4) ||
                     (plan.preferredTarget == TextureCompressionTarget::BC5 && caps.supportsBC5) ||
@@ -13154,11 +13326,13 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
         }
 
         const bool useSrgb = forceLinear ? false : tex->is_srgb;
-        const TextureCompressionPlan compressionPlan = buildTextureCompressionPlan(tex, textureType);
+        const TextureCompressionPlan compressionPlan = Backend::paintTextureCompressionPlan(tex, textureType);
         const bool canUseSingleChannel =
             (preferSingleChannel || compressionPlan.preferSingleChannelFallback) &&
-            !useSrgb && tex->is_gray_scale && !tex->has_alpha;
-        const bool canUseTwoChannels = (textureType == TextureType::Normal) && !tex->is_hdr;
+            !useSrgb && tex->is_gray_scale && !tex->has_alpha &&
+        Backend::allowCompactPaintTexture(tex);
+        const bool canUseTwoChannels = (textureType == TextureType::Normal) && !tex->is_hdr &&
+            Backend::allowCompactPaintTexture(tex);
         const uint32_t uploadChannels = canUseSingleChannel ? 1u : (canUseTwoChannels ? 2u : 4u);
 
         int rx = 0, ry = 0, rw = 0, rh = 0;
@@ -14598,10 +14772,8 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
     if (vkDevice != static_cast<void*>(m_device->getDevice())) return -1;
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
 
-    // Same cache key the material sync uses for a base colour slot
-    // (forceLinear = false, preferSingleChannel = false).
-    const uint64_t cacheKey = static_cast<uint64_t>(texture->m_uid) << 2;
-    auto it = m_uploadedImageIDs.find(cacheKey);
+    // Resolve the same linear/scalar view keys the material sync uploaded.
+    auto it = Backend::findPaintTextureImage(m_uploadedImageIDs, texture);
     if (it == m_uploadedImageIDs.end() || it->second <= 0) return 0;
     VulkanRT::ImageHandle img{};
     if (!tryGetUploadedImageHandle(it->second, img) || !img.image) return 0;

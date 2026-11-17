@@ -33,16 +33,39 @@ inline bool supportsMethod(const std::string& method) {
            method == "material.of_object" || method == "material.set" ||
            // Display surface and frame timing (window, render scale, pacing, FPS).
            method == "player.display" || method == "player.set_display" ||
+           // Shared scene grading, consumed by the existing raster post pass.
+           method == "post.get" || method == "post.set_exposure" ||
+           method == "post.set_gamma" || method == "post.set_saturation" ||
+           method == "post.set_color_temperature" || method == "post.set_tone_mapping" ||
+           method == "post.set_vignette_enabled" || method == "post.set_vignette_strength" ||
+           method == "post.get_exposure" || method == "post.configure_exposure" ||
+           method == "post.reset_exposure" ||
            // Per-stage host timings of the shared raster frame (read + reset).
            method == "viewport.frame_timings" || method == "viewport.reset_frame_timings" ||
+           method == "perf.list" ||
            // Scene audio state (read-only): the Player ticks audio on its game clock.
            method == "audio.status" || method == "audio.list" ||
            method == "audio.source_runtime" || method == "audio.mixer_get" ||
            // Playback actions game rules use (a pop sound, a splash). Manual
            // emitters stay silent until played - same as in Studio.
-           method == "audio.play" || method == "audio.play_all" ||
+           method == "audio.play" || method == "audio.play_all" || method == "audio.play_at" ||
            method == "audio.stop" || method == "audio.stop_all" ||
            // GPU wet paint (step 3/4): surfaces, dabs, splat rules, reset, coverage.
-           method.rfind("paint.wet_", 0) == 0;
+           method.rfind("paint.wet_", 0) == 0 ||
+           method == "input.set_body_poses" || method == "input.body_poses" ||
+           method == "input.clear_body_poses" || method == "game.session" ||
+           method == "game.rules" || method == "game.post_event" ||
+           method == "anim.set_external_pose" || method == "anim.external_poses" ||
+           method == "anim.clear_external_pose" || method == "anim.characters" ||
+           method == "anim.character" || method == "rig.list_bones" ||
+           // Existing Studio playback services; authoring/import remains in Studio.
+           method == "anim.clips" || method == "anim.play" || method == "anim.stop" ||
+           method == "anim.status" || method == "anim.set_paused" ||
+           method == "anim.set_time" || method == "anim.set_speed" ||
+           method == "anim.graph_status" ||
+           method == "anim.set_graph_param" || method == "anim.trigger_graph_param" ||
+           method == "anim.state_machines" || method == "anim.force_state" ||
+           method.rfind("physics.collider.proxy_set.", 0) == 0 ||
+           method == "physics.collider.proxy.set" || method == "physics.collider.proxy.delete";
 }
 } // namespace rtipc_product

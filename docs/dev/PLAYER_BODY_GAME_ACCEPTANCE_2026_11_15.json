@@ -1,0 +1,738 @@
+{
+  "date": "2026-11-15",
+  "status": "PASS",
+  "build": "Studio and Player built by user; no Codex C++ build",
+  "scope": "C/B first package: input/gestures, rules, analytic flat-AABB contacts, sessions and paint; not rig, physical proxies, camera, visual finale or performance acceptance",
+  "native_asserts": "NOT_RUN; live IPC covers the exercised runtime contracts",
+  "runs": {
+    "4": {
+      "status": "PASS",
+      "checks": {
+        "session_cycle": true,
+        "paint_increased": true,
+        "display_active": true,
+        "pose_events_observed": true,
+        "actions_succeeded": true
+      },
+      "frames": 1080,
+      "seconds": 36.0,
+      "observed_hz": 29.9312326603769,
+      "observed_states": [
+        "attract",
+        "playing",
+        "finale",
+        "resetting",
+        "attract"
+      ],
+      "pose_rpc": {
+        "count": 1080,
+        "p50_ms": 17.334100004518405,
+        "p95_ms": 29.12110000033863,
+        "max_ms": 182.21140000969172
+      },
+      "schedule_lateness": {
+        "count": 1080,
+        "p50_ms": 25.672533330119762,
+        "p95_ms": 549.9539333356846,
+        "max_ms": 818.7808666766311
+      },
+      "max_coverage": 0.1643238067626953,
+      "final_session": {
+        "state": "attract",
+        "completed_sessions": 1,
+        "actions_ok": 29,
+        "actions_failed": 0,
+        "events": {
+          "balloon.pop": 4,
+          "gesture.arms_up": 4,
+          "gesture.reach": 8,
+          "gesture.stomp": 48,
+          "session.state": 4,
+          "timer": 1,
+          "zone.enter": 12,
+          "zone.exit": 8
+        },
+        "dropped_events": 0,
+        "rules": [
+          {
+            "action": {
+              "amount": 1.0,
+              "radius": 0.3,
+              "type": "paint.dab"
+            },
+            "cooldown_seconds": 0.05,
+            "dropped": 0,
+            "event": "gesture.stomp",
+            "fires": 24,
+            "group_window_seconds": 0.5,
+            "id": "foot_paint",
+            "min_persons": 1,
+            "min_value": 0.0,
+            "state": "playing"
+          },
+          {
+            "action": {
+              "count": 1,
+              "type": "balloon.burst"
+            },
+            "cooldown_seconds": 0.5,
+            "dropped": 0,
+            "event": "gesture.arms_up",
+            "fires": 4,
+            "group_window_seconds": 0.5,
+            "id": "hands_balloons",
+            "min_persons": 1,
+            "min_value": 0.0,
+            "state": "playing"
+          }
+        ],
+        "last_error": ""
+      },
+      "display_fps": {
+        "minimum": 0.0,
+        "median": 56.31830632475329,
+        "maximum": 57.06062799943372
+      },
+      "raw_report": "tools\\perception_bridge\\out\\live-build-2026-11-15\\live4\\acceptance.json"
+    },
+    "10": {
+      "status": "PASS",
+      "checks": {
+        "session_cycle": true,
+        "paint_increased": true,
+        "display_active": true,
+        "pose_events_observed": true,
+        "actions_succeeded": true
+      },
+      "frames": 1080,
+      "seconds": 36.0,
+      "observed_hz": 29.926016320576334,
+      "observed_states": [
+        "attract",
+        "playing",
+        "finale",
+        "resetting",
+        "attract"
+      ],
+      "pose_rpc": {
+        "count": 1080,
+        "p50_ms": 16.400199994677678,
+        "p95_ms": 17.997699993429706,
+        "max_ms": 189.72460000077263
+      },
+      "schedule_lateness": {
+        "count": 1080,
+        "p50_ms": 12.09773331259667,
+        "p95_ms": 45.37346666717568,
+        "max_ms": 208.45953333385603
+      },
+      "max_coverage": 0.3248467445373535,
+      "final_session": {
+        "state": "attract",
+        "completed_sessions": 1,
+        "actions_ok": 71,
+        "actions_failed": 0,
+        "events": {
+          "balloon.pop": 10,
+          "gesture.arms_up": 10,
+          "gesture.reach": 20,
+          "gesture.stomp": 120,
+          "session.state": 4,
+          "timer": 1,
+          "zone.enter": 30,
+          "zone.exit": 20
+        },
+        "dropped_events": 0,
+        "rules": [
+          {
+            "action": {
+              "amount": 1.0,
+              "radius": 0.3,
+              "type": "paint.dab"
+            },
+            "cooldown_seconds": 0.05,
+            "dropped": 0,
+            "event": "gesture.stomp",
+            "fires": 60,
+            "group_window_seconds": 0.5,
+            "id": "foot_paint",
+            "min_persons": 1,
+            "min_value": 0.0,
+            "state": "playing"
+          },
+          {
+            "action": {
+              "count": 1,
+              "type": "balloon.burst"
+            },
+            "cooldown_seconds": 0.5,
+            "dropped": 0,
+            "event": "gesture.arms_up",
+            "fires": 10,
+            "group_window_seconds": 0.5,
+            "id": "hands_balloons",
+            "min_persons": 1,
+            "min_value": 0.0,
+            "state": "playing"
+          }
+        ],
+        "last_error": ""
+      },
+      "display_fps": {
+        "minimum": 48.99333940172846,
+        "median": 56.72139584787441,
+        "maximum": 57.57583308011548
+      },
+      "raw_report": "tools\\perception_bridge\\out\\live-build-2026-11-15\\live10\\acceptance.json"
+    }
+  },
+  "player-contracts": {
+    "status": "PASS",
+    "pipe": "\\\\.\\pipe\\RayTrophiPlayer",
+    "checks": {
+      "no_existing_people": {
+        "pass": true,
+        "evidence": null
+      },
+      "body_accepted": {
+        "pass": true,
+        "evidence": null
+      },
+      "boolean_time": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_packet: finite t >= 0 and persons[0..10] required"
+      },
+      "duplicate_ids": {
+        "pass": true,
+        "evidence": "input.set_body_poses: duplicate_body_person_id"
+      },
+      "boolean_id": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "overflow_id": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "bad_confidence": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "missing_joint": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "coordinate_limit": {
+        "pass": true,
+        "evidence": "input.set_body_poses: body_joint_out_of_range"
+      },
+      "replayed_time": {
+        "pass": true,
+        "evidence": "input.set_body_poses: body_timestamp_not_increasing: clear before restarting sender clock"
+      },
+      "invalid_packets_atomic": {
+        "pass": true,
+        "evidence": null
+      },
+      "three_gestures_with_arms_edge": {
+        "pass": true,
+        "evidence": 3
+      },
+      "sender_jump_preserves_grace": {
+        "pass": true,
+        "evidence": null
+      },
+      "receiver_timeout": {
+        "pass": true,
+        "evidence": {
+          "observed_seconds": 0.5160000000032596
+        }
+      },
+      "clear_restarts_sender_epoch": {
+        "pass": true,
+        "evidence": null
+      },
+      "unknown_config_field": {
+        "pass": true,
+        "evidence": "game.session: unknown_session_config_field: typo"
+      },
+      "negative_duration": {
+        "pass": true,
+        "evidence": "game.session: invalid_session_duration_seconds"
+      },
+      "bad_rule_action": {
+        "pass": true,
+        "evidence": "game.session: unsupported_rule_action: not_supported"
+      },
+      "invalid_session_config_atomic": {
+        "pass": true,
+        "evidence": null
+      },
+      "invalid_event_type": {
+        "pass": true,
+        "evidence": "game.post_event: invalid_game_event_type"
+      },
+      "invalid_event_vector": {
+        "pass": true,
+        "evidence": "game.post_event: invalid_game_event_vec3"
+      },
+      "start_requires_attract": {
+        "pass": true,
+        "evidence": "game.session: session_start_requires_configured_attract"
+      },
+      "same_person_and_distinct_target_not_group": {
+        "pass": true,
+        "evidence": null
+      },
+      "independent_target_groups": {
+        "pass": true,
+        "evidence": {
+          "actions_failed": 0,
+          "actions_ok": 2,
+          "completed_sessions": 0,
+          "config": {
+            "auto_start": false,
+            "contact_targets": [],
+            "coverage_goal": 1,
+            "duration_seconds": 20,
+            "finale_seconds": 8.0,
+            "reset_seconds": 3.0,
+            "rules": [
+              {
+                "action": {
+                  "position": [
+                    0,
+                    0,
+                    1.5
+                  ],
+                  "type": "paint.dab"
+                },
+                "cooldown_seconds": 1,
+                "event": "contact",
+                "group_window_seconds": 0.75,
+                "id": "group",
+                "min_persons": 2,
+                "state": "playing"
+              }
+            ],
+            "zones": []
+          },
+          "configured": true,
+          "coverage": 0.0,
+          "dropped_events": 0,
+          "events": {
+            "contact": 5,
+            "session.state": 1
+          },
+          "last_error": "",
+          "person_count": 0,
+          "posted_events": 232,
+          "rules": [
+            {
+              "action": {
+                "amount": 0.8,
+                "position": [
+                  0,
+                  0,
+                  1.5
+                ],
+                "radius": 0.15,
+                "type": "paint.dab"
+              },
+              "cooldown_seconds": 1,
+              "dropped": 0,
+              "event": "contact",
+              "fires": 2,
+              "group_window_seconds": 0.75,
+              "id": "group",
+              "min_persons": 2,
+              "min_value": 0.0,
+              "state": "playing"
+            }
+          ],
+          "state": "playing",
+          "state_time_s": 0.1600291021168232,
+          "time_s": 0.17758780159056187
+        }
+      },
+      "group_cooldown": {
+        "pass": true,
+        "evidence": null
+      },
+      "real_flat_floor_proxy_group": {
+        "pass": true,
+        "evidence": {
+          "actions_failed": 0,
+          "actions_ok": 1,
+          "completed_sessions": 0,
+          "config": {
+            "auto_start": false,
+            "contact_targets": [
+              "PaintFloor"
+            ],
+            "coverage_goal": 1,
+            "duration_seconds": 10,
+            "finale_seconds": 8.0,
+            "reset_seconds": 3.0,
+            "rules": [
+              {
+                "action": {
+                  "position": [
+                    0,
+                    0,
+                    1.5
+                  ],
+                  "type": "paint.dab"
+                },
+                "cooldown_seconds": 1,
+                "event": "contact",
+                "id": "floor_contact",
+                "min_persons": 2,
+                "state": "playing"
+              }
+            ],
+            "zones": []
+          },
+          "configured": true,
+          "coverage": 0.0,
+          "dropped_events": 0,
+          "events": {
+            "contact": 2,
+            "session.state": 1
+          },
+          "last_error": "",
+          "person_count": 2,
+          "posted_events": 236,
+          "rules": [
+            {
+              "action": {
+                "amount": 0.8,
+                "position": [
+                  0,
+                  0,
+                  1.5
+                ],
+                "radius": 0.15,
+                "type": "paint.dab"
+              },
+              "cooldown_seconds": 1,
+              "dropped": 0,
+              "event": "contact",
+              "fires": 1,
+              "group_window_seconds": 0.5,
+              "id": "floor_contact",
+              "min_persons": 2,
+              "min_value": 0.0,
+              "state": "playing"
+            }
+          ],
+          "state": "playing",
+          "state_time_s": 0.12464719824492931,
+          "time_s": 0.1430944986641407
+        }
+      },
+      "timer_cycle": {
+        "pass": true,
+        "evidence": [
+          "attract",
+          "playing",
+          "finale",
+          "resetting",
+          "attract"
+        ]
+      },
+      "coverage_triggers_early_final": {
+        "pass": true,
+        "evidence": {
+          "actions_failed": 0,
+          "actions_ok": 0,
+          "completed_sessions": 0,
+          "config": {
+            "auto_start": false,
+            "contact_targets": [],
+            "coverage_goal": 0.001,
+            "duration_seconds": 30,
+            "finale_seconds": 1,
+            "reset_seconds": 0.5,
+            "rules": [],
+            "zones": []
+          },
+          "configured": true,
+          "coverage": 0.005579948425292969,
+          "dropped_events": 0,
+          "events": {
+            "coverage.threshold": 1,
+            "session.state": 2
+          },
+          "last_error": "",
+          "person_count": 0,
+          "posted_events": 236,
+          "rules": [],
+          "state": "finale",
+          "state_time_s": 0.017634699121117592,
+          "time_s": 0.5275148972868919
+        }
+      }
+    },
+    "errors": [],
+    "scope": "Player live contracts",
+    "final_body": {
+      "expired": 15,
+      "gestures": 213,
+      "packets": 2173,
+      "persons": [],
+      "t": -1.0,
+      "time_s": 217.18024798948318
+    },
+    "final_session": {
+      "actions_failed": 0,
+      "actions_ok": 0,
+      "completed_sessions": 0,
+      "config": {
+        "auto_start": false,
+        "contact_targets": [],
+        "coverage_goal": 1.0,
+        "duration_seconds": 26,
+        "finale_seconds": 3,
+        "reset_seconds": 2,
+        "rules": [
+          {
+            "action": {
+              "amount": 1.0,
+              "radius": 0.3,
+              "type": "paint.dab"
+            },
+            "cooldown_seconds": 0.05,
+            "event": "gesture.stomp",
+            "id": "foot_paint",
+            "state": "playing"
+          },
+          {
+            "action": {
+              "count": 1,
+              "type": "balloon.burst"
+            },
+            "cooldown_seconds": 0.5,
+            "event": "gesture.arms_up",
+            "id": "hands_balloons",
+            "state": "playing"
+          }
+        ],
+        "zones": [
+          {
+            "max": [
+              3,
+              3,
+              3
+            ],
+            "min": [
+              -3,
+              -0.2,
+              -3
+            ],
+            "name": "play_area"
+          }
+        ]
+      },
+      "configured": true,
+      "coverage": 0.0,
+      "dropped_events": 0,
+      "events": {},
+      "last_error": "",
+      "person_count": 0,
+      "posted_events": 236,
+      "rules": [
+        {
+          "action": {
+            "amount": 1.0,
+            "radius": 0.3,
+            "type": "paint.dab"
+          },
+          "cooldown_seconds": 0.05,
+          "dropped": 0,
+          "event": "gesture.stomp",
+          "fires": 0,
+          "group_window_seconds": 0.5,
+          "id": "foot_paint",
+          "min_persons": 1,
+          "min_value": 0.0,
+          "state": "playing"
+        },
+        {
+          "action": {
+            "count": 1,
+            "type": "balloon.burst"
+          },
+          "cooldown_seconds": 0.5,
+          "dropped": 0,
+          "event": "gesture.arms_up",
+          "fires": 0,
+          "group_window_seconds": 0.5,
+          "id": "hands_balloons",
+          "min_persons": 1,
+          "min_value": 0.0,
+          "state": "playing"
+        }
+      ],
+      "state": "attract",
+      "state_time_s": 0.05322040058672428,
+      "time_s": 0.05322040058672428
+    }
+  },
+  "studio-contracts": {
+    "status": "PASS",
+    "pipe": "\\\\.\\pipe\\RayTrophiStudio",
+    "checks": {
+      "no_existing_people": {
+        "pass": true,
+        "evidence": null
+      },
+      "body_accepted": {
+        "pass": true,
+        "evidence": null
+      },
+      "boolean_time": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_packet: finite t >= 0 and persons[0..10] required"
+      },
+      "duplicate_ids": {
+        "pass": true,
+        "evidence": "input.set_body_poses: duplicate_body_person_id"
+      },
+      "boolean_id": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "overflow_id": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "bad_confidence": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "missing_joint": {
+        "pass": true,
+        "evidence": "input.set_body_poses: invalid_body_person: id, confidence[0,1], 15 joints required"
+      },
+      "coordinate_limit": {
+        "pass": true,
+        "evidence": "input.set_body_poses: body_joint_out_of_range"
+      },
+      "replayed_time": {
+        "pass": true,
+        "evidence": "input.set_body_poses: body_timestamp_not_increasing: clear before restarting sender clock"
+      },
+      "invalid_packets_atomic": {
+        "pass": true,
+        "evidence": null
+      },
+      "three_gestures_with_arms_edge": {
+        "pass": true,
+        "evidence": 3
+      },
+      "sender_jump_preserves_grace": {
+        "pass": true,
+        "evidence": null
+      },
+      "receiver_timeout": {
+        "pass": true,
+        "evidence": {
+          "observed_seconds": 0.5
+        }
+      },
+      "clear_restarts_sender_epoch": {
+        "pass": true,
+        "evidence": null
+      },
+      "unknown_config_field": {
+        "pass": true,
+        "evidence": "game.session: unknown_session_config_field: typo"
+      },
+      "negative_duration": {
+        "pass": true,
+        "evidence": "game.session: invalid_session_duration_seconds"
+      },
+      "bad_rule_action": {
+        "pass": true,
+        "evidence": "game.session: unsupported_rule_action: not_supported"
+      },
+      "invalid_session_config_atomic": {
+        "pass": true,
+        "evidence": null
+      },
+      "invalid_event_type": {
+        "pass": true,
+        "evidence": "game.post_event: invalid_game_event_type"
+      },
+      "invalid_event_vector": {
+        "pass": true,
+        "evidence": "game.post_event: invalid_game_event_vec3"
+      }
+    },
+    "errors": [],
+    "scope": "body and validation",
+    "final_body": {
+      "expired": 1,
+      "gestures": 3,
+      "packets": 10,
+      "persons": [],
+      "t": -1.0,
+      "time_s": 0.0
+    },
+    "final_session": {
+      "actions_failed": 0,
+      "actions_ok": 0,
+      "completed_sessions": 0,
+      "config": null,
+      "configured": false,
+      "coverage": 0.0,
+      "dropped_events": 0,
+      "events": {},
+      "last_error": "",
+      "person_count": 0,
+      "posted_events": 3,
+      "rules": [],
+      "state": "attract",
+      "state_time_s": 0.0,
+      "time_s": 0.0
+    }
+  },
+  "studio-bindings": {
+    "status": "PASS",
+    "checks": {
+      "no_existing_people": true,
+      "python_pose_round_trip": true,
+      "python_boolean_time_rejected": "invalid_body_packet: finite t >= 0 and persons[0..10] required",
+      "python_replay_rejected": "body_timestamp_not_increasing: clear before restarting sender clock",
+      "python_invalid_config_rejected": "unknown_session_config_field: typo",
+      "python_invalid_event_rejected": "invalid_game_event_type",
+      "python_rules_read": true,
+      "python_invalid_config_atomic": true,
+      "python_clear": true
+    },
+    "errors": []
+  },
+  "cleanup": {
+    "player_project": "E:\\RayTrophi_projesi\\raytracing_Proje_Moduler\\docs\\dev\\fixtures\\balloon-paint-room\\balloons.rtp",
+    "player_state": "attract",
+    "people": 0,
+    "coverage": 0.0,
+    "device_lost": false,
+    "demo": {
+      "prepared": true,
+      "running": false,
+      "error": "",
+      "events_total": 14
+    },
+    "display_restored": true,
+    "studio_scene": "empty, no project, no people, session unconfigured",
+    "wet_counters": {
+      "sources_dropped": 0,
+      "publish_host_downloads": 0,
+      "publish_bytes_downloaded": 0,
+      "dabs_applied": 88,
+      "device_event_dispatches": 75216
+    }
+  }
+}

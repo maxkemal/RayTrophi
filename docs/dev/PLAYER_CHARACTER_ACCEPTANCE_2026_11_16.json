@@ -1,0 +1,167 @@
+{
+  "date": "2026-11-16",
+  "player_clip_acceptance": "PASS",
+  "visual_scale_and_walk": "PASS: user observed correct result",
+  "character": "1",
+  "pose_sources": [
+    "graph"
+  ],
+  "max_joint_excursion_m": 1.6463875656715359,
+  "walk_animation_updates_delta": 61,
+  "walk_skin_service_calls_delta": 61,
+  "frame_probe": {
+    "status": "PASS",
+    "frames_submitted_delta": 22,
+    "frames_consumed_delta": 22,
+    "animation_updates_delta": 22,
+    "skin_calls_delta": 22,
+    "pixel_signature_changed": true,
+    "device_lost": false,
+    "simulation_error": "",
+    "scene_revision_unchanged": true,
+    "balloon_running": true,
+    "balloon_events_total": 56,
+    "particle_pools": [
+      {
+        "alive": 3600,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintRed"
+      },
+      {
+        "alive": 1800,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintBlue"
+      },
+      {
+        "alive": 0,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintYellow"
+      },
+      {
+        "alive": 1800,
+        "capacity": 21601,
+        "gpu_status": "gpu_resident",
+        "resident_capacity": 32768,
+        "system": "BalloonPaintGreen"
+      }
+    ],
+    "recent_event_samples": [
+      {
+        "balloons": [
+          {
+            "balloon": 6,
+            "color": 1,
+            "position": [
+              0.816425085067749,
+              2.094902276992798,
+              -1.4213931560516357
+            ]
+          },
+          {
+            "balloon": 9,
+            "color": 2,
+            "position": [
+              2.723541259765625,
+              1.5518271923065186,
+              2.509446620941162
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 69.7299987077713,
+        "frames": 54,
+        "id": 54,
+        "paint_ms_max": 38.2058,
+        "simulation_ms_max": 40.2594,
+        "simultaneous": 2,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 1.7597,
+        "spawned": 3600,
+        "time_s": 202.1578669846058
+      },
+      {
+        "balloons": [
+          {
+            "balloon": 3,
+            "color": 3,
+            "position": [
+              -0.1564643383026123,
+              1.280437707901001,
+              -1.1194419860839844
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 64.10560011863708,
+        "frames": 54,
+        "id": 55,
+        "paint_ms_max": 25.7865,
+        "simulation_ms_max": 26.8594,
+        "simultaneous": 1,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 0.4552,
+        "spawned": 1800,
+        "time_s": 205.14629759266973
+      },
+      {
+        "balloons": [
+          {
+            "balloon": 5,
+            "color": 0,
+            "position": [
+              -0.8433947563171387,
+              2.549612283706665,
+              -0.9663290977478027
+            ]
+          },
+          {
+            "balloon": 6,
+            "color": 1,
+            "position": [
+              -1.9551447629928589,
+              2.7613465785980225,
+              -0.8317222595214844
+            ]
+          },
+          {
+            "balloon": 0,
+            "color": 0,
+            "position": [
+              1.8884844779968262,
+              1.498857021331787,
+              -0.2091233730316162
+            ]
+          }
+        ],
+        "frame_interval_ms_max": 67.58339703083038,
+        "frames": 12,
+        "id": 56,
+        "paint_ms_max": 1.7185,
+        "simulation_ms_max": 3.7376,
+        "simultaneous": 3,
+        "sources_dropped": 0,
+        "sources_dropped_start": 0,
+        "spawn_ms": 2.1859,
+        "spawned": 5400,
+        "time_s": 208.8479076884687
+      }
+    ],
+    "capture_restored": true
+  },
+  "limits": [
+    "Skin service call count is not a GPU dispatch success metric; user visual result confirms visible scale/walk.",
+    "Pixel changes include balloons and are not isolated character pixel evidence.",
+    "Temporary capture changes frame pacing; no isolated performance acceptance.",
+    "Character delete/undo/reopen NOT_RUN.",
+    "External body IK/domain acceptance NOT_RUN; imported owned-rig gate remains open.",
+    "Player IPC clip selection/transitions not enabled.",
+    "Shutdown stage timings not measured."
+  ],
+  "shared_service_rule": "Use existing Studio core/services; target-specific configuration only for unsupported dependencies or Player host integration."
+}

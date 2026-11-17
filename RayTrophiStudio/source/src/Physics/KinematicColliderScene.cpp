@@ -1,4 +1,5 @@
 #include "KinematicColliderScene.h"
+#include "Input/ExternalBodyRig.h"
 
 #include "Animation/RigBindingScope.h"
 #include "Animation/RigView.h"
@@ -21,6 +22,9 @@ bool buildJointMap(const SceneData& scene,
                    const std::string& character,
                    JointMap& joints,
                    std::string& error) {
+    if (!Input::externalBodyRigColliderAvailable(scene, character, error)) {
+        return false;
+    }
     std::vector<RigAuthoring::BoneView> views;
     if (!RigAuthoring::listBones(scene, character, views, error)) {
         return false;
@@ -28,7 +32,9 @@ bool buildJointMap(const SceneData& scene,
     joints.clear();
     joints.reserve(views.size());
     for (const RigAuthoring::BoneView& view : views) {
-        joints.emplace(view.name, view.world);
+        if (Input::externalBodyRigColliderBoneAvailable(scene, character, view.name)) {
+            joints.emplace(view.name, view.world);
+        }
     }
     return true;
 }

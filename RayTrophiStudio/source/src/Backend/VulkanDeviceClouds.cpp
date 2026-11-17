@@ -434,7 +434,7 @@ bool VulkanDevice::createCloudVolumePipeline(const std::vector<uint32_t>& spv) {
 void VulkanDevice::destroyCloudUploadRing() {
     for (CloudUploadSlot& slot : m_cloudUploadSlots) {
         if (slot.fence) {
-            vkWaitForFences(m_device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+            VulkanRT::waitFenceBounded(m_device, slot.fence, "VulkanDeviceClouds.cpp:437");
             vkDestroyFence(m_device, slot.fence, nullptr);
         }
         if (slot.cmd) vkFreeCommandBuffers(m_device, m_commandPool, 1, &slot.cmd);
@@ -505,7 +505,7 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
             return;
         }
     }
-    vkWaitForFences(m_device, 1, &slot.fence, VK_TRUE, UINT64_MAX);
+    VulkanRT::waitFenceBounded(m_device, slot.fence, "VulkanDeviceClouds.cpp:508");
     vkResetFences(m_device, 1, &slot.fence);
     void* mapped = nullptr;
     if (vkMapMemory(m_device, slot.staging.memory, 0, kStagingBytes, 0, &mapped) != VK_SUCCESS) return;

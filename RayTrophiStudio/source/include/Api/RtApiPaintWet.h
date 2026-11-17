@@ -13,7 +13,7 @@ struct Result;
 
 struct WetPaintSurfaceSettingsInfo {
     float wetness = 0.65f;
-    float lifetime_seconds = 2.5f;
+    float lifetime_seconds = 12.0f;
     float diffusion = 0.24f;
     float runoff = 0.35f;
     float absorption = 0.18f;
@@ -24,7 +24,16 @@ struct WetPaintSurfaceSettingsInfo {
     float pickup_rate = 0.35f;
     float brush_radius = 5.0f;   // CPU brush.radius (px at 1024): transport trail scale
     bool oil = false;
+    // Optional outputs reuse PaintTextureSet Roughness / Mask(height) / Normal.
+    bool roughness_channel = false;
+    bool height_normal_channel = false;
+    float wet_roughness = 0.12f;
+    float dry_roughness = 0.30f;
+    float height_contribution = 0.35f;
+    float normal_strength = 0.5f;
 };
+
+Result validateWetPaintSurfaceSettings(const WetPaintSurfaceSettingsInfo& settings);
 
 struct WetPaintSurfaceRuntimeInfo {
     std::string object;
@@ -66,9 +75,14 @@ struct WetPaintStatusInfo {
     uint32_t ticked_tiles = 0;
     uint32_t stamped_texels = 0;
     uint64_t sources_dropped = 0;
+    uint64_t pbr_dispatches = 0;
+    uint64_t pbr_device_copies = 0;
+    uint64_t pbr_buffer_bytes = 0;     // additional GPU atlas storage, not total VRAM
+    uint64_t pbr_texture_bytes = 0;    // allocated channel texture pixels (RGBA8)
     uint64_t publish_device_copies = 0;
     uint64_t publish_host_downloads = 0;
     uint64_t publish_bytes_downloaded = 0;
+    uint64_t geometry_rebakes = 0;
     std::string publish_mode;
     std::string compute_context;   // simulation | own | none
     double last_tick_ms = 0.0;
@@ -92,6 +106,8 @@ struct WetPaintCoverageInfo {
         uint32_t covered_texels = 0;
         uint32_t valid_texels = 0;
         uint32_t wet_texels = 0;
+        uint32_t roughness_texels = 0; // output differs from original channel
+        uint32_t normal_texels = 0;
         float ratio = 0.0f;
         float mean_color[3] = {0.0f, 0.0f, 0.0f};
     };
@@ -118,5 +134,20 @@ Result wetPaintDab(const WetPaintDabInfo& dab);
 Result resetWetPaint();
 // GPU reduction + a small download: a measurement call.
 Result getWetPaintCoverage(WetPaintCoverageInfo& out);
+
+// JSON values are owned by the shared demo core; both bindings use this entry.
+Result wetPaintDemoCommand(const std::string& operation, const std::string& config_json,
+                           std::string& output_json);
+
+// The project's game design (Paint/GameDesign.h): design_json is exactly what
+// the next project save writes under "game_design" ("null" when the scene has
+// no paint surface and no demo). pending: a just-opened project's document
+// waits for the next simulation clock tick. status: last apply report.
+struct GameDesignInfo {
+    std::string design_json;
+    bool pending = false;
+    std::string status;
+};
+Result getGameDesign(GameDesignInfo& out);
 
 } // namespace rtapi

@@ -1,8 +1,56 @@
 # RayTrophi Player — oyun çalışma zamanı ayrımı
 
-> **Durum:** AKTİF — 2026-11-13: Studio ile aynı kaynak ağacından, OptiX/CUDA/Embree/OIDN/Python içermeyen ikinci bir exe (`RayTrophiPlayer`). Faz 1k'ye kadar başlık/backend ayrımı yazıldı; CUDA/OptiX, Embree, OIDN ve Python include sınırları sıfırlandı; eski su sistemi Player kapsamından çıkarıldı; kullanıcı tam Studio build/link kontrolünü sorunsuz tamamladı; kısmi canlı smoke geçti; Faz 2a Studio launch ayrımı ve Faz 2b ortak pencere/SDL yaşam döngüsü (`AppRuntime`) derlendi, Studio açılışı PASS; Faz 3a–3d: Player VS projesi (üretilmiş), ortak runtime state, Host'lar ve SceneUI durum host'u ile **ilk Player linki GEÇTİ** (2026-11-13; exe yasaklı DLL'lere bağlı değil, pencere + HUD açılıyor). Statik .rtp yükleme ve ortak Vulkan raster sunumu kaynakta hazır; yeni link/canlı kabul bekler. Tam ortak sim/animasyon kare döngüsü hedefi açık.
+> **Durum:** AKTİF — 2026-11-16: bağımsız Player build/link, flat .rtp + ortak Vulkan raster, ortak sim saati ve materyal/partikül/scatter/volume yolları canlı kabul edildi. Yüklemede UV atlası hazırlayan tekli/çoklu balon boya demosu kullanıcı build’i sonrası Player IPC PASS. OptiX/CUDA/Embree/OIDN/Python include sınırları korunur; genel animasyon/oyun girdisi, oturum kuralları ve kiosk kapsamı açık. Güncel kabul ve sınırlar aşağıdaki devir kaydında; eski aşama notları tarihseldir.
 
 ## Devir notu (her partide güncellenir)
+
+### 2026-11-16 — Güncel devir: graph + sabit çözünürlük kullanıcı PASS
+
+İlk okunacak güncel özet: [PLAYER_HANDOFF_2026_11_16.md](PLAYER_HANDOFF_2026_11_16.md).
+Kullanıcı Studio'da Fire ve iki yönlü Exit Time döngüsünü, doğru kaydedilmiş
+projeyi Player'da açarak iki klip geçişini ve düzgün mesh'i doğruladı. Bu kabul
+**graph/state machine** yoludur; anim.play controller ve Space/crossfade kabulü
+ayrı açık kalır. Yanlış eski tek klipli dosya açılması ayrıca ayırt edildi.
+
+Kullanıcı pencere resize/F2 çözünürlük ayrımını test edip doğru çalıştığını
+onayladı. render_base sabit, pencere/fullscreen yalnız sunumu ölçekler; F2/IPC
+render_scale render hedefini değiştirir. Display otomatik kabul betiği çalışmadı.
+
+Yoğun oyuncak.rtp ölçümü: 1680×945 Player uncapped11.38FPS /85.71ms; GPU~60ms,
+shadow atlas~33ms. Studio aynıkamera/ayar ile GPU60.49ms. Player10Hz kontrolünde
+CPU26.91ms, Studio27.20ms: uncapped shadowCPU77.73ms statik Player ek hesap yükü
+kanıtı değil. GPU/driver backpressure olası, kesin kök değil. Studio sürdürülebilir
+FPS A/B ölçülmedi. [Rapor](PLAYER_HEAVY_SCENE_PROFILE_2026_11_16.md).
+
+Balon oyunu için sıradaki kabul: sentetik poz/jest -> balon patlama -> boya;
+sonra tek kişi gerçek kamera, sonra çoklu kişi/oturum-final/reset. Avatar IK/domain
+canlı kabulü, controller skin/crossfade, kiosk ve uzun koşu ayrı açık işlerdir.
+
+
+### 2026-11-15 — Balon boyama demosu: Player build + IPC kabulü PASS (Codex)
+
+Kanonik oyun planı [PLAYER_GAME_PAINT_ROOM.md](PLAYER_GAME_PAINT_ROOM.md) güncellendi.
+12 rastgele tek renkli balon, tekli/ikili/üçlü fiziksel damla patlaması; sabit odanın
+4×1024² UV atlası ve GPU havuzları proje yüklemesinde hazırlanır. Yeni ortak
+`Paint/BalloonPaintDemo` servisi, `paint.wet_demo` / `rt.paint.wet_demo` yüzleri;
+proje yan dosyası `<project.rtp>.balloons.json` isteğe bağlı otomatik başlatır.
+Yeni modül iki hedefte kayıtlı; shader/struct ABI değişmedi.
+
+Kullanıcı Player build'i ve dış IPC kabulü PASS: yükleme 959.71 ms; demo hazırlığı
+352.04 ms (atlas 317.21 ms); tekli/üçlü doğum 0.51/3.47 ms; kontrollü olayların
+maksimum giriş dt'si 10–11 ms. Aktif ek pencerede ~168 fps; uzun idle dönemleri
+kapsayan kayıtta 64–72 ms dt sıçramaları görüldü. Her koşulda sıçramasızlık ve
+≤2 ms boya hedefi kabul edilmiş değildir. 46 olaya kadar kapasite sabit;
+device loss, kaynak kaybı ve host boya trafiği 0. Studio'da bu yeni demo ayrıca
+canlı doğrulanmadı. Bu bir özel demo takvimidir; genel kural/oturum motoru değildir.
+
+Fixture, test, ham sonuçlar ve kalan işler:
+[PLAYER_BALLOON_PAINT_DEMO.md](PLAYER_BALLOON_PAINT_DEMO.md),
+[PLAYER_BALLOON_PAINT_ACCEPTANCE_2026_11_15.json](PLAYER_BALLOON_PAINT_ACCEPTANCE_2026_11_15.json).
+Sonraki teknik iş: istatistik ve GPU yayın beklemelerini ölçüp kaldırmak;
+64-kaynak/tile doğruluğu, OBB ve spread hataları açık. Kamera/poz, ses/final ve
+kiosk aşamaları kapanmadı. Yeni build bekleyen kaynak değişikliği yok.
+
 
 ### İlk oyun hedefi — Boyama Odası (2026-11-14, Claude)
 
@@ -10,7 +58,8 @@ Kullanıcı ilk Player projesini belirledi: boyama odası, uçan balonlar, genel
 (özel donanım yok) ile çocukların konumu/hareketi ve maskeli görüntüsü, patlayan
 balondan renkli boya partikülleri, çarpışmalar GPU partikülden, boya mevcut ıslak
 boya modelinden (GPU'ya ve çok yüzeye taşınarak). Tasarım ve sıra:
-[PLAYER_GAME_PAINT_ROOM.md](PLAYER_GAME_PAINT_ROOM.md) (TASLAK). Kod yazılmadı.
+[PLAYER_GAME_PAINT_ROOM.md](PLAYER_GAME_PAINT_ROOM.md). İlk tarihli hedef notu;
+2026-11-15 balon demo uygulaması ve kabulü yukarıdadır.
 Sıra yine buradaki 0 (ilk kare kabulü) ve 1 (ortak kare döngüsü) ile başlar.
 Hedef pazar: AVM'lerde 6–10 yaş kapalı etkileşimli oyun alanları (çok çocuk, oturum,
 gözetimsiz kiosk, yansıtma/ekran). **2026-11-14 akşam: ilk kare canlı PASS**

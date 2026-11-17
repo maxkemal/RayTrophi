@@ -1,5 +1,12 @@
 # Kinematic Collider Sources — characters and animated bodies as solver input
 
+> **C2 kaynak eklentisi, 2026-11-15:** `input.set_body_poses` → mevcut IK/rig → bu
+> sistemin aynı authored proxy setleri. Ayrı Jolt veya ikinci domain collider üreticisi
+> yok. Kişi/güven kaybında ilgili proxy'ler unresolved; teleport/bind'de mevcut hareket
+> geçmişi resetlenir. Kullanıcı build/canlı kabul ve maliyet ölçümü bekliyor:
+> [PLAYER_EXTERNAL_BODY_RIG.md](PLAYER_EXTERNAL_BODY_RIG.md). Aşağıdaki eski K2 kabulü,
+> yeni C2 yolunun canlı kabulü değildir.
+
 > **Durum:** AKTİF — 2026-09-26. K0 IPC CRUD/validation smoke testi canlıda
 > geçti. K1 panel/overlay ve body-first auto-fit canlı rig üzerinde 22/22 proxy
 > çözümledi; iki ayağı korudu ve detay kemiklerini dışarıda bıraktı. Dünya/metre

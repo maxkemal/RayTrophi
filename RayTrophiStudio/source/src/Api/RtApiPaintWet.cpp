@@ -4,6 +4,8 @@
 #include "Api/RtApiPaintWet.h"
 
 #include "Paint/WetPaintGpu.h"
+#include "Paint/BalloonPaintDemo.h"
+#include "Paint/GameDesign.h"
 #include "globals.h"
 #include "scene_data.h"
 
@@ -27,6 +29,12 @@ Paint::WetPaintSurfaceSettings toCore(const WetPaintSurfaceSettingsInfo& in) {
     s.pickup_rate = in.pickup_rate;
     s.brush_radius = in.brush_radius;
     s.oil = in.oil;
+    s.roughness_channel = in.roughness_channel;
+    s.height_normal_channel = in.height_normal_channel;
+    s.wet_roughness = in.wet_roughness;
+    s.dry_roughness = in.dry_roughness;
+    s.height_contribution = in.height_contribution;
+    s.normal_strength = in.normal_strength;
     return s;
 }
 
@@ -44,6 +52,12 @@ WetPaintSurfaceSettingsInfo fromCore(const Paint::WetPaintSurfaceSettings& s) {
     o.pickup_rate = s.pickup_rate;
     o.brush_radius = s.brush_radius;
     o.oil = s.oil;
+    o.roughness_channel = s.roughness_channel;
+    o.height_normal_channel = s.height_normal_channel;
+    o.wet_roughness = s.wet_roughness;
+    o.dry_roughness = s.dry_roughness;
+    o.height_contribution = s.height_contribution;
+    o.normal_strength = s.normal_strength;
     return o;
 }
 
@@ -81,10 +95,22 @@ Result validateSettings(const WetPaintSurfaceSettingsInfo& s) {
         return Result::fail("drip_head must be in [0, 1.5]");
     if (!std::isfinite(s.brush_radius) || s.brush_radius <= 0.0f)
         return Result::fail("brush_radius must be > 0");
+    if (!finite01(s.wet_roughness) || !finite01(s.dry_roughness) ||
+        !finite01(s.height_contribution)) {
+        return Result::fail("wet_roughness, dry_roughness, height_contribution must be in [0, 1]");
+    }
+    if (!std::isfinite(s.normal_strength) || s.normal_strength < 0.0f ||
+        s.normal_strength > 8.0f) {
+        return Result::fail("normal_strength must be in [0, 8]");
+    }
     return Result::success();
 }
 
 } // namespace
+
+Result validateWetPaintSurfaceSettings(const WetPaintSurfaceSettingsInfo& settings) {
+    return validateSettings(settings);
+}
 
 Result addWetPaintSurface(const std::string& object, int material_id, int resolution,
                           WetPaintSurfaceRuntimeInfo& out) {
@@ -105,7 +131,7 @@ Result addWetPaintSurface(const std::string& object, int material_id, int resolu
 
 Result removeWetPaintSurface(const std::string& object, int material_id) {
     if (!g_ctx) return notBound();
-    if (!Paint::wetPaintGpu().removeSurface(object, material_id))
+    if (!Paint::wetPaintGpu().removeSurface(object, material_id, &g_ctx->scene))
         return Result::fail("not a wet paint surface: " + object);
     return Result::success();
 }
@@ -134,9 +160,14 @@ Result getWetPaintStatus(WetPaintStatusInfo& out) {
     out.ticked_tiles = s.ticked_tiles;
     out.stamped_texels = s.stamped_texels;
     out.sources_dropped = s.sources_dropped;
+    out.pbr_dispatches = s.pbr_dispatches;
+    out.pbr_device_copies = s.pbr_device_copies;
+    out.pbr_buffer_bytes = s.pbr_buffer_bytes;
+    out.pbr_texture_bytes = s.pbr_texture_bytes;
     out.publish_device_copies = s.publish_device_copies;
     out.publish_host_downloads = s.publish_host_downloads;
     out.publish_bytes_downloaded = s.publish_bytes_downloaded;
+    out.geometry_rebakes = s.geometry_rebakes;
     out.publish_mode = s.publish_mode;
     out.compute_context = s.compute_context;
     out.last_tick_ms = s.last_tick_ms;
@@ -249,10 +280,41 @@ Result getWetPaintCoverage(WetPaintCoverageInfo& out) {
         o.covered_texels = s.covered_texels;
         o.valid_texels = s.valid_texels;
         o.wet_texels = s.wet_texels;
+        o.roughness_texels = s.roughness_texels;
+        o.normal_texels = s.normal_texels;
         o.ratio = s.ratio;
         for (int i = 0; i < 3; ++i) o.mean_color[i] = s.mean_color[i];
         out.surfaces.push_back(o);
     }
+    return Result::success();
+}
+
+Result wetPaintDemoCommand(const std::string& operation, const std::string& config_json,
+                           std::string& output_json) {
+    if (!g_ctx) {
+        return notBound();
+    }
+    try {
+        nlohmann::json output;
+        std::string error;
+        if (!Paint::balloonPaintCommand(g_ctx->scene, operation,
+                                        nlohmann::json::parse(config_json), output, error)) {
+            return Result::fail(error);
+        }
+        output_json = output.dump();
+        return Result::success();
+    } catch (const std::exception& e) {
+        return Result::fail(e.what());
+    }
+}
+
+Result getGameDesign(GameDesignInfo& out) {
+    if (!g_ctx) {
+        return notBound();
+    }
+    out.design_json = Paint::saveGameDesign().dump();
+    out.pending = Paint::gameDesignPending();
+    out.status = Paint::gameDesignStatus();
     return Result::success();
 }
 

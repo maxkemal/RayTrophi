@@ -92,7 +92,10 @@ void validateAudioRequest(const std::string& operation, const json& params) {
         "synth_generate", "physical_bake_start", "export_start"})) {
         required(params, "path");
     }
-    if (operation == "physical_impact") {
+    if (operation == "play_at") {
+        required(params, "id");
+        required(params, "position");
+    } else if (operation == "physical_impact") {
         required(params, "sequence");
         required(params, "energy_j");
     } else if (operation == "physical_bake_start") {

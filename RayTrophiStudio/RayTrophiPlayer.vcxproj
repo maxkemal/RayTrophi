@@ -1390,7 +1390,9 @@
     <ClCompile Include="source\src\Api\RtApi.cpp" />
     <ClCompile Include="source\src\Api\RtApiAnim.cpp" />
     <ClCompile Include="source\src\Api\RtApiAtmosphere.cpp" />
+    <ClCompile Include="source\src\Api\RtApiBodyPose.cpp" />
     <ClCompile Include="source\src\Api\RtApiCameraNav.cpp" />
+    <ClCompile Include="source\src\Api\RtApiCharacter.cpp" />
     <ClCompile Include="source\src\Api\RtApiClipBinding.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -1402,11 +1404,13 @@
     <ClCompile Include="source\src\Api\RtApiDomainCreation.cpp" />
     <ClCompile Include="source\src\Api\RtApiDomainVisual.cpp" />
     <ClCompile Include="source\src\Api\RtApiDomainWalls.cpp" />
+    <ClCompile Include="source\src\Api\RtApiExternalBody.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluid.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluidParticles.cpp" />
     <ClCompile Include="source\src\Api\RtApiFluidSurface.cpp" />
     <ClCompile Include="source\src\Api\RtApiForceField.cpp" />
     <ClCompile Include="source\src\Api\RtApiFracture.cpp" />
+    <ClCompile Include="source\src\Api\RtApiGame.cpp" />
     <ClCompile Include="source\src\Api\RtApiGasFieldStats.cpp" />
     <ClCompile Include="source\src\Api\RtApiGeometryCache.cpp" />
     <ClCompile Include="source\src\Api\RtApiGpuMemory.cpp" />
@@ -1531,6 +1535,7 @@
     <ClCompile Include="source\src\Api\RtIpc.cpp" />
     <ClCompile Include="source\src\Api\RtIpcAgentDiscovery.cpp" />
     <ClCompile Include="source\src\Api\RtIpcAudit.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcBodyPose.cpp" />
     <ClCompile Include="source\src\Api\RtIpcClipBinding.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -1538,6 +1543,7 @@
     <ClCompile Include="source\src\Api\RtIpcDomainVisual.cpp" />
     <ClCompile Include="source\src\Api\RtIpcDomainWalls.cpp" />
     <ClCompile Include="source\src\Api\RtIpcFracture.cpp" />
+    <ClCompile Include="source\src\Api\RtIpcGame.cpp" />
     <ClCompile Include="source\src\Api\RtIpcGrainGenerator.cpp" />
     <ClCompile Include="source\src\Api\RtIpcKinematicCollider.cpp" />
     <ClCompile Include="source\src\Api\RtIpcLensWeather.cpp">
@@ -1654,6 +1660,7 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanBackend_Volumes.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanBufferAddressLedger.cpp" />
     <ClCompile Include="source\src\Backend\VulkanCloudScenePass.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDenoiserHost.cpp" />
     <ClCompile Include="source\src\Backend\VulkanDeviceClouds.cpp" />
@@ -1699,6 +1706,9 @@
     <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\src\Core\VulkanSceneSync.cpp" />
     <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp" />
+    <ClCompile Include="source\src\Game\GameRules.cpp" />
+    <ClCompile Include="source\src\Game\GameRuntime.cpp" />
+    <ClCompile Include="source\src\Game\GameSession.cpp" />
     <ClCompile Include="source\src\Hair\HairBSDF.cpp" />
     <ClCompile Include="source\src\Hair\HairQueryHost.cpp" />
     <ClCompile Include="source\src\Hair\HairStrand.cpp" />
@@ -1728,6 +1738,9 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Input\BodyPoseRuntime.cpp" />
+    <ClCompile Include="source\src\Input\ExternalBodyRig.cpp" />
+    <ClCompile Include="source\src\Input\ExternalBodyRigMath.cpp" />
     <ClCompile Include="source\src\Math\Matrix4x4.cpp" />
     <ClCompile Include="source\src\Math\Vec2.cpp" />
     <ClCompile Include="source\src\Math\Vec3.cpp" />
@@ -1760,6 +1773,8 @@
     <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp" />
+    <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp" />
+    <ClCompile Include="source\src\Paint\GameDesign.cpp" />
     <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Paint\PaintModeState.cpp" />

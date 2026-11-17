@@ -56,6 +56,8 @@
 #include "RtIpcTransport.h"
 #include "RtIpcFracture.h"
 #include "RtIpcPaintWet.h"
+#include "RtIpcBodyPose.h"
+#include "RtIpcGame.h"
 #include "RtIpcGrainGenerator.h"
 #include "RtIpcSourceSplatGeometry.h"
 #include "RtRayGpuTimingBindings.h"
@@ -3340,6 +3342,13 @@ json dispatchMethod(const std::string& method, const json& params) {
         return fracture_result;
     }
     json paint_wet_result;
+    json body_game_result;
+    const RtIpcPaintWetEnqueue body_game_enqueue =
+        [](RtIpcPaintWetQuery query) { return enqueueQuery(std::move(query)); };
+    if (dispatchBodyPoseIpc(method, params, body_game_enqueue, body_game_result) ||
+        dispatchGameIpc(method, params, body_game_enqueue, body_game_result)) {
+        return body_game_result;
+    }
     if (dispatchPaintWetIpc(
             method, params,
             [](RtIpcPaintWetQuery query) { return enqueueQuery(std::move(query)); },

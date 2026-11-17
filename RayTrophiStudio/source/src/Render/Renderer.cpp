@@ -1,8 +1,11 @@
+#include <sstream>
 #include "Backend/LensWeatherGpu.h"
 #include "VolumeTemperatureMapping.h"
 #include "VolumeEmissionTransport.h"
 #include "renderer.h"
 #include "Animation/RigPoseView.h"
+#include "Animation/CharacterSkinPalette.h"
+#include "Input/ExternalBodyRig.h"
 #include <SDL_image.h>
 #include <filesystem>
 #include <chrono>      // For wall-clock deltaTime in animation fallback
@@ -938,32 +941,10 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     modelChanged = true;
                     anyChanged = true; 
                 }
-                modelBoneMatrices = pose.boneTransforms;
-
-                // ===========================================================================
-                // CRITICAL FIX: Direct bone-to-index merging for AnimGraph
-                // Graph pose.boneTransforms order matches the order in boneData.boneIndexToName
-                // but we must ONLY update the indices that belong to THIS model.
-                // CRITICAL FIX: Always copy the matrix.
-                // If it's identity, it means the bone IS at origin/bind pose.
-                // Skipping identity used to cause "stuck" bones from previous poses.
-                // ===========================================================================
-                for (size_t localIdx = 0; localIdx < modelBoneMatrices.size(); ++localIdx) {
-                    const std::string& boneName = scene.boneData.getBoneNameByIndex(localIdx);
-                    
-                    // Only update if this bone belongs to this model prefix
-                    if (boneName.find(ctx.importName + "_") == 0) {
-                        // Find the global index for this bone (it should match localIdx here 
-                        // IF scene.boneData was built in the same order, but let's be safe)
-                        auto it = scene.boneData.boneNameToIndex.find(boneName);
-                        if (it != scene.boneData.boneNameToIndex.end()) {
-                            unsigned int globalIdx = it->second;
-                            if (globalIdx < this->finalBoneMatrices.size()) {
-                                this->finalBoneMatrices[globalIdx] = modelBoneMatrices[localIdx];
-                            }
-                        }
-                    }
-                }
+                Animation::publishCharacterSkinPalette(
+                    scene.boneData, ctx.importName, pose.jointGlobalTransforms,
+                    this->finalBoneMatrices);
+                modelBoneMatrices = this->finalBoneMatrices;
             }
         }
         else if (ctx.animator) {
@@ -1118,33 +1099,12 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                     ctx.loggedOzzRuntimeUsage = true;
                 }
                 // Get this model's bone matrices (current state)
-                modelBoneMatrices = ctx.animator->getFinalBoneMatrices();
                 RigAuthoring::captureGlobals(scene, ctx.importName, ctx.animator->getJointGlobalTransforms(), "controller");
 
-                // ===========================================================================
-                // CRITICAL FIX: Map Animator Local Indices to Global Indices
-                // The animator's matrices are per-model. We must map them to global slots.
-                // ===========================================================================
-                if (!allClips.empty()) {
-                    // We can use the bone mapping from the first clip as a reference for node names
-                    const auto& source = allClips[0].sourceData;
-                    if (source) {
-                        // This is more complex because Animator doesn't easily expose local-to-global mapping
-                        // But we can iterate over ALL bones in the scene and see which ones belong to this model
-                        // MODEL ISOLATION FIX:
-                        // In the AnimationController, cachedFinalBoneMatrices is already sized for the global bone count.
-                        // However, it only contains valid data for bones that belong to the model it's controlling.
-                        // We need to copy ONLY the bones that this model 'owns' to avoid overwriting
-                        // other models' poses with the fallback Identity pose from this animator's cache.
-                        for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
-                            if (boneName.find(ctx.importName + "_") == 0) {
-                                if (globalIdx < this->finalBoneMatrices.size() && globalIdx < modelBoneMatrices.size()) {
-                                    this->finalBoneMatrices[globalIdx] = modelBoneMatrices[globalIdx];
-                                }
-                            }
-                        }
-                    }
-                }
+                Animation::publishCharacterSkinPalette(
+                    scene.boneData, ctx.importName, ctx.animator->getJointGlobalTransforms(),
+                    this->finalBoneMatrices);
+                modelBoneMatrices = this->finalBoneMatrices;
             }
 
             // usedOzzRuntime=true simply means Ozz filled bone matrices this frame.
@@ -1336,6 +1296,8 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
                 }
             }
         }
+        geometry_changed = Input::copyExternalBodyRigFrame(scene, this->finalBoneMatrices) ||
+                           geometry_changed;
         return geometry_changed;
     } else {
         if (was_in_bind_pose) {
@@ -1354,7 +1316,8 @@ bool Renderer::updateAnimationState(SceneData& scene, float current_time, bool a
     lastAnimationUpdateTime = current_time;
 
     // Unified Animation Check: If we have clips and bones, use the Controller
-    bool useAnimationController = !scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty();
+    bool useAnimationController = (!scene.animationDataList.empty() &&
+        !scene.boneData.boneNameToIndex.empty()) || Input::hasExternalBodyRigs(scene);
 
     if (useAnimationController) {
         static float last_sim_time = -1.0f;
