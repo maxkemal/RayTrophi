@@ -43,6 +43,13 @@ inline bool supportsMethod(const std::string& method) {
            // Per-stage host timings of the shared raster frame (read + reset).
            method == "viewport.frame_timings" || method == "viewport.reset_frame_timings" ||
            method == "perf.list" ||
+           // RT shadow request/readiness: the shared raster pass falls back to
+           // cascades without ray query; a test must reach that path on RT GPUs.
+           method == "viewport.rt_shadow" || method == "viewport.set_rt_shadow" ||
+           // Depth prepass request/effect: a GPU without ray query depends on it
+           // (workshop measured 13.4 ms without, 6.3 ms with).
+           method == "viewport.raster_depth_prepass" ||
+           method == "viewport.set_raster_depth_prepass" ||
            // Scene audio state (read-only): the Player ticks audio on its game clock.
            method == "audio.status" || method == "audio.list" ||
            method == "audio.source_runtime" || method == "audio.mixer_get" ||

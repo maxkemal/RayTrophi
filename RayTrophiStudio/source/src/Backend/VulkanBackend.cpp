@@ -7923,6 +7923,13 @@ VulkanBackendAdapter::VulkanBackendAdapter()
     : m_device(std::make_unique<VulkanRT::VulkanDevice>()),
       m_sceneTextureManager(getSharedSceneTextureManager()) {
     m_targetSamples = 1000; // Default
+    // Depth prepass on by default. It used to run only when RT shadows forced it,
+    // so a GPU without ray query drew every overlapping surface through the full
+    // material shader: workshop 1680x945 measured 13.4 ms GPU without the prepass,
+    // 7.3 ms with it (RT shadows on: 6.9 ms, prepass forced either way).
+    // Overrides the header's `= false` initializer; move it there the next time
+    // VulkanBackend.h changes anyway (95 includers, not worth a rebuild alone).
+    m_rasterDepthPrepassAllowed = true;
 }
 
 VulkanBackendAdapter::~VulkanBackendAdapter() {

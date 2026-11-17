@@ -1,5 +1,48 @@
 # NEXT BUILD CHECKS
 
+## Player paketi: iki sahne, ilk sahne açılışta, F6 seçici (2026-11-17, Claude)
+
+**Durum:** YAZILDI, /Zs PASS (`Core/PlayerMain.cpp` yalnız; header/struct/shader yok → Player'da
+tek .cpp derlenir). Paketleme betiği `scripts/package_player.ps1` eski exe ile denendi: 100 MB,
+11 DLL (dumpbin ile transitif), VC++ runtime app-local + `redist/vc_redist.x64.exe`, shaders/, iki sahne.
+**Yeni:** exe yanındaki `player_scenes.json` (betik yazar) → ilk girdi açılışta açılır (komut satırı
+projesi önceliklidir); F6 liste, 1–9 veya tık ile açar. Geçiş = `rtapi::openProject` (IPC
+`project.open` ile aynı), yani test dosyadaki yolu `project.open`'a verir; yeni IPC metodu yok.
+
+1. Player'ı derle (sağ tık → Build). `.\scripts\package_player.ps1` → "stale exe" uyarısı ÇIKMAMALI.
+2. `dist\RayTrophiPlayer\RayTrophiPlayer.exe` çift tık → workshop doğrudan açılmalı. Açılmıyor ve HUD
+   "Drop an .rtp" diyorsa: log'da `[Player] Scene list:` satırına bak (yoksa json okunmadı).
+3. F6 → iki satır, açık olan "(open)"; 2'ye bas → oyun odası. Tekrar F6 → 1 → workshop. Balon tıkla
+   patlat: boya ikinci açılışta da çalışmalı (demo yeniden hazırlanıyor mu).
+4. ★ Sessiz başarısızlık: sahne açılır ama SESSİZ ya da boyasız — `*_audio` / `.balloons.json`
+   kopyalanmamış demektir; paket klasöründe sahne yanında olduklarına bak.
+5. Temiz makine (Studio/SDK kurulu OLMAYAN): klasörü kopyala, çalıştır. "DLL bulunamadı" = betiğin
+   kaynak aldığı x64\Release dışında PATH'ten gelen bir DLL var; adını betiğin listesine ekle.
+6. RT gölge A/B artık Player'da: `Api/RtPlayerIpcPolicy.h`'ye `viewport.rt_shadow` /
+   `viewport.set_rt_shadow` eklendi (eski exe "unsupported_in_player" döndürüyordu). Derleme sonrası
+   `set_rt_shadow enabled=false` → `rt_shadow.enabled=false`, `frame_timings` içinde `rt_shadow` ran 0,
+   `shadow_atlas` her karede koşmalı. Görüntü: gölge hâlâ VAR (cascade). Gölge tamamen kayboluyorsa
+   ray query'siz kartlarda da kaybolacak demektir — en önemli madde bu.
+   Önce (eski exe, RT açık, workshop 1680×945): GPU 6.87 ms; rt_shadow 1.35, shadow_atlas 0.13
+   (102/256 kare), `rt_cascades_replaced` 0 → bu sahnede RT gölge atlasın YERİNE değil ÜSTÜNE koşuyor.
+   **CANLI 16:04 build:** RT kapalı = GPU **13.15 ms** (açık 6.88/6.86, iki kez). Cascade gölgeleri
+   görüntüde VAR, boya ikisinde de var (ilk çekimdeki boyasız oda oyunun sıfırlamasıydı, sıralı 4
+   çekimle ayrıldı). Kapalıyken `depth_prepass` aşaması YOK: prepass varsayılanı kapalı
+   (`m_rasterDepthPrepassAllowed=false`), yalnız RT gölge zorluyor → ray query'siz kart prepass'sız
+   çizer. ★ main_pass 0.00 ms raporlanıyor ama 256 kare koştu: ~10.7 ms aşamalara dağılmamış — ölçü
+   aleti prepass'sız kareyi yanlış bölüyor.
+7. A/B #2 CANLI (16:10 build, her satır 256 kare, iki tekrar): RT açık 6.87/6.91; RT kapalı prepass
+   kapalı 13.53/13.40; RT kapalı prepass AÇIK **7.32/7.29**. Kök = overdraw. Düzeltme **CANLI PASS
+   (16:17 build, gönderilen paket)**: açılışta prepass `enabled: true`; RT açık 6.32/6.04, RT kapalı
+   6.28/6.37 ms GPU — RT'siz yol artık RT'li kadar ucuz. Studio tarafı gözle kontrol edilmedi.
+   Düzeltme: `VulkanBackendAdapter` kurucusunda `m_rasterDepthPrepassAllowed = true`
+   (`Backend/VulkanBackend.cpp`; header 95 dosyaya giriyor, initializer bir sonraki header partisinde
+   taşınacak). Derleme sonrası: Player açılışında `viewport.raster_depth_prepass` → `enabled: true`;
+   `set_rt_shadow false` ile GPU ~7.3 ms olmalı. Görüntü değişmemeli (RT'li kartta prepass zaten
+   zorlanıyordu). Studio da etkilenir: Studio'da bir sahne aç, viewport'ta fark OLMAMALI.
+   ★ Ayrı ölçü aleti hatası: RT gölge KAPALIYKEN `main_pass` 0.00 raporlanıyor (prepass açık da olsa),
+   ~4–10 ms hiçbir aşamaya yazılmıyor. Sessiz yanlış tablo — düzeltilmedi.
+
 ## KÖK BULUNDU: TLAS tanıtıcısı yeniden kullanılıyor + kayıptan sonra kilitlenme (2026-11-17 11:00, Claude)
 
 **Durum:** CANLI KABUL (kullanıcı, 2026-11-17): derlendi, çökme yok, gölgeler doğru yerde, RT gölge + yansıma açıkken FPS maliyeti görülmedi. Madde 3–4 (Player uzun oyun, kayıpta kilitlenmeme) açık kalan gözlem.

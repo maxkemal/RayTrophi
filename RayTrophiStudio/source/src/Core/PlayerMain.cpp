@@ -43,9 +43,12 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -103,6 +106,91 @@ void setWorkingDirectoryToExe(char* argv0) {
         std::filesystem::current_path(std::filesystem::path(argv0).parent_path());
     }
 #endif
+}
+
+// Packaged scene list: player_scenes.json next to the exe.
+//   { "scenes": [ { "name": "...", "path": "scenes/a/a.rtp" }, ... ] }
+// The first entry opens at launch when no project is given on the command
+// line; F6 shows the list to switch. The list is a file, not Player state, and
+// switching is the same rtapi::openProject that IPC project.open and drag/drop
+// use, so a test reads this file and calls project.open with its path.
+struct PlayerSceneEntry {
+    std::string name;
+    std::string path_utf8;  // absolute
+};
+
+std::vector<PlayerSceneEntry> loadPackagedSceneList() {
+    std::vector<PlayerSceneEntry> scenes;
+    const std::filesystem::path list_path = std::filesystem::absolute("player_scenes.json");
+    std::ifstream in(list_path, std::ios::binary);
+    if (!in) {
+        return scenes;  // not a packaged build: drag/drop and --project only
+    }
+    const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    // No exceptions: this build aborts on a json throw.
+    const auto doc = nlohmann::json::parse(text, nullptr, false);
+    if (doc.is_discarded() || !doc.is_object()) {
+        SCENE_LOG_WARN("[Player] player_scenes.json is not a JSON object; scene list ignored");
+        return scenes;
+    }
+    const auto list = doc.find("scenes");
+    if (list == doc.end() || !list->is_array()) {
+        SCENE_LOG_WARN("[Player] player_scenes.json has no \"scenes\" array; scene list ignored");
+        return scenes;
+    }
+    for (const auto& entry : *list) {
+        const auto path = entry.is_object() ? entry.find("path") : entry.end();
+        if (!entry.is_object() || path == entry.end() || !path->is_string()) {
+            SCENE_LOG_WARN("[Player] player_scenes.json: entry without a string \"path\" skipped");
+            continue;
+        }
+        const auto resolved = std::filesystem::absolute(
+            AppRuntime::projectPathFromUtf8(path->get<std::string>()));
+        std::string name;
+        if (const auto n = entry.find("name"); n != entry.end() && n->is_string()) {
+            name = n->get<std::string>();
+        }
+        if (name.empty()) {
+            name = AppRuntime::projectPathToUtf8(resolved.stem());
+        }
+        if (!std::filesystem::exists(resolved)) {
+            SCENE_LOG_WARN("[Player] player_scenes.json: missing scene " +
+                           AppRuntime::projectPathToUtf8(resolved));
+        }
+        scenes.push_back({name, AppRuntime::projectPathToUtf8(resolved)});
+    }
+    SCENE_LOG_INFO("[Player] Scene list: " + std::to_string(scenes.size()) + " scene(s)");
+    return scenes;
+}
+
+// Scene picker (F6). Returns the clicked entry, or -1.
+int drawSceneMenu(const std::vector<PlayerSceneEntry>& scenes, const std::string& current_utf8) {
+    int chosen = -1;
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
+                                   vp->WorkPos.y + vp->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoSavedSettings;
+    if (ImGui::Begin("##player_scene_menu", nullptr, flags)) {
+        ImGui::TextUnformatted("Scenes");
+        ImGui::Separator();
+        const auto current = AppRuntime::projectPathFromUtf8(current_utf8);
+        for (int i = 0; i < static_cast<int>(scenes.size()); ++i) {
+            const bool active = !current_utf8.empty() &&
+                                AppRuntime::projectPathFromUtf8(scenes[i].path_utf8) == current;
+            const std::string label = std::to_string(i + 1) + "  " + scenes[i].name +
+                                      (active ? "  (open)" : "");
+            if (ImGui::Button(label.c_str(), ImVec2(360.0f, 0.0f))) {
+                chosen = i;
+            }
+        }
+        ImGui::Separator();
+        ImGui::TextDisabled("1-9 or click to open, F6 to close");
+    }
+    ImGui::End();
+    return chosen;
 }
 
 using Clock = std::chrono::steady_clock;
@@ -426,7 +514,7 @@ void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
         ImGui::Text("pacing %s%s", display.pacing_hz ? (std::to_string(display.pacing_hz) + " Hz").c_str()
                                                      : "uncapped",
                     display.continuous ? ", continuous" : "");
-        ImGui::TextDisabled("F11 fullscreen  F1 HUD  F2 scale  F3 pacing  F4 continuous");
+        ImGui::TextDisabled("F11 fullscreen  F1 HUD  F2 scale  F3 pacing  F4 continuous  F6 scenes");
     }
     ImGui::End();
 }
@@ -472,6 +560,13 @@ int main(int argc, char* argv[]) {
     g_main_thread_id = std::this_thread::get_id();
     setWorkingDirectoryToExe(argc > 0 ? argv[0] : nullptr);
     g_sceneLog.initLogLocation();
+
+    // Packaged build: the scene list is relative to the exe (the working
+    // directory now). A command-line project still wins over its first entry.
+    const std::vector<PlayerSceneEntry> packaged_scenes = loadPackagedSceneList();
+    if (launch_project.empty() && !packaged_scenes.empty()) {
+        launch_project = packaged_scenes.front().path_utf8;
+    }
 
     if (!AppRuntime::initPlatform(nullptr)) {
         return 1;
@@ -526,6 +621,8 @@ int main(int argc, char* argv[]) {
     }
 
     bool running = true;
+    bool scene_menu = false;
+    int scene_request = -1;  // index into packaged_scenes, opened between events
     bool debug_camera = false;
     float debug_orbit_x = 0.0f, debug_orbit_y = 0.0f;
     float debug_pan_x = 0.0f, debug_pan_y = 0.0f;
@@ -557,6 +654,21 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_KEYDOWN && !ImGui::GetIO().WantCaptureKeyboard &&
                 display.handleKey(event.key)) {
                 frame_cycle.requestRedraw();
+            }
+            // Scene picker (packaged builds). A kiosk key gate must keep F6 out
+            // of the children's reach, like F5 and F9.
+            if (event.type == SDL_KEYDOWN && !event.key.repeat && !packaged_scenes.empty()) {
+                const SDL_Keycode key = event.key.keysym.sym;
+                if (key == SDLK_F6) {
+                    scene_menu = !scene_menu;
+                    frame_cycle.requestRedraw();
+                } else if (scene_menu && key >= SDLK_1 && key <= SDLK_9 &&
+                           static_cast<size_t>(key - SDLK_1) < packaged_scenes.size()) {
+                    scene_request = static_cast<int>(key - SDLK_1);
+                } else if (scene_menu && key == SDLK_ESCAPE) {
+                    scene_menu = false;
+                    frame_cycle.requestRedraw();
+                }
             }
             // Debug camera (F5, off at launch). A diagnostic aid, not gameplay
             // input: it drives the same rtapi camera calls camera.orbit /
@@ -622,6 +734,17 @@ int main(int argc, char* argv[]) {
             debug_wheel = 0;
             frame_cycle.requestRedraw();
         }
+        if (scene_request >= 0 && scene_request < static_cast<int>(packaged_scenes.size())) {
+            const auto& entry = packaged_scenes[static_cast<size_t>(scene_request)];
+            SCENE_LOG_INFO("[Player] Opening scene '" + entry.name + "'");
+            const auto loaded = rtapi::openProject(entry.path_utf8);
+            if (!loaded.ok) {
+                SCENE_LOG_WARN("[Player] " + loaded.error);
+            }
+            scene_menu = false;
+            frame_cycle.requestRedraw();
+        }
+        scene_request = -1;
         // Window/fullscreen changes affect presentation only. F2 and explicit
         // render_scale changes resize targets against the fixed render base.
         if (display.applyTargets(state->ctx, *viewer)) {
@@ -669,6 +792,14 @@ int main(int argc, char* argv[]) {
             frame_cycle.beginUiFrame();
             if (display.hud) {
                 drawHud(rtipc::isRunning(), *viewer, display);
+            }
+            if (scene_menu) {
+                const int clicked = drawSceneMenu(
+                    packaged_scenes, viewer->status().value("project_path", ""));
+                if (clicked >= 0) {
+                    scene_request = clicked;  // opened next iteration, outside the UI frame
+                    frame_cycle.requestRedraw();
+                }
             }
             frame_cycle.endUiFrame();
 

@@ -163,3 +163,6 @@ docs/dev/grain_suite/
 /RayTrophiStudio/assets/audio/surprise-sound-effect*.wav
 /RayTrophiStudio/assets/audio/tada-fanfare*.wav
 /RayTrophiStudio/assets/scenes/*/*_audio/
+
+# Player packages (scripts/package_player.ps1)
+/dist/
