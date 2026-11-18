@@ -25,6 +25,7 @@
 #include <memory>
 #include <array>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "SimulationCompute.h"
@@ -128,6 +129,12 @@ struct WetPaintStats {
     // Vulkan context on the same device (no device particle events there).
     std::string compute_context = "none";
     double last_tick_ms = 0.0;              // host wall time of tick() incl. stats readback
+    uint64_t idle_ticks = 0;                // ticks that dispatched nothing (nothing wet or arriving)
+    uint64_t coverage_cached = 0;           // coverage() answered from cache (paint unchanged)
+    uint32_t event_sources = 0;             // last tick: particle systems whose contacts were stamped
+    uint64_t coverage_in_tick = 0;          // coverage measured inside tick()'s own readback
+    uint64_t stats_delayed = 0;             // dispatching ticks whose stats were read one tick later
+    uint64_t stats_readbacks_lost = 0;      // delayed stats that never arrived (dirty rectangles lost)
 };
 
 struct WetPaintCoverage {
@@ -189,7 +196,13 @@ public:
     int publish(Backend::IBackend* render_backend, Backend::IBackend* viewport_backend);
     const std::vector<uint16_t>& hostPublishedMaterials() const { return host_materials_; }
 
-    bool coverage(SceneData& scene, WetPaintCoverage& out);
+    // Painted share of every surface. Exact by default: a dispatch + synchronize
+    // + download (the device queue is shared with rendering, so that wait
+    // includes the frame in flight). allow_stale (periodic readers: room goal,
+    // game session): while the paint is changing, answer the last measurement
+    // and let the next tick() measure inside its own readback - no extra wait.
+    // Unchanged paint is answered from cache either way.
+    bool coverage(SceneData& scene, WetPaintCoverage& out, bool allow_stale = false);
 
     bool empty() const { return surfaces_.empty(); }
     std::vector<WetPaintSurfaceInfo> surfaces() const;
@@ -220,6 +233,15 @@ private:
     bool reset_requested_ = false;
     bool layout_dirty_ = true;
     bool settings_dirty_ = true;
+    // Contact sources alive at the last tick (key: the particle system). A
+    // system with no live particle now or then has no contact pending.
+    std::unordered_map<const void*, bool> source_alive_;
+    uint64_t paint_serial_ = 0;          // ticks that dispatched: the paint may have changed
+    uint64_t coverage_serial_ = ~0ull;   // paint_serial_ of coverage_cache_
+    WetPaintCoverage coverage_cache_;
+    bool coverage_requested_ = false;    // a stale answer was given: tick() measures
+    void readCoverage(const std::vector<uint32_t>& st, WetPaintCoverage& out) const;
+    void applyStats(const std::vector<uint32_t>& st, bool force, bool measured_coverage, uint64_t serial);
 };
 
 inline constexpr int kWetPaintPublishedDevice = 1;   // device-to-device copy done

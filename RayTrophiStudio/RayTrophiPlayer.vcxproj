@@ -1773,6 +1773,7 @@
     <ClCompile Include="source\src\MeshEdit\SplinePrimitive.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineSerialization.cpp" />
     <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp" />
+    <ClCompile Include="source\src\Paint\BalloonEffects.cpp" />
     <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp" />
     <ClCompile Include="source\src\Paint\GameDesign.cpp" />
     <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp" />

@@ -242,8 +242,16 @@ struct WetPaintGpu::Device {
     uint32_t texel_count = 0, tile_count = 0;
     bool channels_allocated = false;
     bool channels_force = false;
+    // The stats of the last dispatching tick, read one tick later
+    // (SimulationComputeContext::submitWithReadback), with what that tick knew.
+    uint64_t stats_ticket = 0;
+    uint32_t stats_surfaces = 0;
+    bool stats_force = false;      // channels_force at that dispatch
+    bool stats_coverage = false;   // that tick measured coverage
+    uint64_t stats_serial = 0;     // paint_serial_ of that tick
 
     void release() {
+        stats_ticket = 0;   // a dropped ticket's slot is reused by the backend
         if (compute) {
             for (ComputeBufferHandle* h : {&surfaces, &tiles, &pos_valid, &flow_normal, &base, &color,
                                            &state, &color_scratch, &state_scratch, &output,
@@ -1063,7 +1071,6 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     stats_.tiles = d.tile_count;
 
     dt = dt > 0.0f ? std::min(dt, 2.5f / 60.0f) : (1.0f / 60.0f);
-    const uint32_t n = static_cast<uint32_t>(surfaces_.size());
 
     WetPaintGpuConstants k;
     k.surface_count = n;
@@ -1071,6 +1078,22 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     k._p0 = d.channels_allocated ? d.texel_count : 0u;
     k._p1 = d.channels_force ? 1u : 0u;
     k.dt = dt;
+    const uint32_t n = static_cast<uint32_t>(surfaces_.size());
+
+    // The previous dispatching tick's stats (dirty rectangles, active tiles,
+    // coverage). One frame later its submission has long finished, so this
+    // wait is ~free; before 2026-11-18 the tick synchronized at its end, and on
+    // the single queue that waited for the render frame queued ahead of it.
+    if (d.stats_ticket != 0) {
+        std::vector<uint32_t> prev(static_cast<std::size_t>(d.stats_surfaces) * kStatsStride, 0u);
+        const bool got = c.collectReadback(d.stats_ticket, prev.data(), prev.size() * 4, /*wait=*/true);
+        d.stats_ticket = 0;
+        if (got && d.stats_surfaces == n) {
+            applyStats(prev, d.stats_force, d.stats_coverage, d.stats_serial);
+        } else {
+            ++stats_.stats_readbacks_lost;
+        }
+    }
     k.splat_radius = std::max(0.0f, splat_.radius);
     k.splat_amount = std::clamp(splat_.amount, 0.0f, 1.0f);
     k.splat_min_speed = std::max(0.0f, splat_.min_speed);
@@ -1134,7 +1157,15 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             if (!splat_.particle_system.empty() && system.name != splat_.particle_system) continue;
             RayTrophiSim::ParticleDeviceEventView view;
             if (system.runtime->deviceCollisionEventView(c, view)) {
-                device_sources.push_back(system.runtime.get());
+                // A system with no live particle now and none at the last tick
+                // cannot have a contact pending. Before 2026-11-18 every
+                // recording system counted as "arriving", so the idle exit below
+                // never fired: a full tick (7.5..13 ms, Player) every frame with
+                // nothing wet. The tick after the last particle died still stamps.
+                const bool alive = system.runtime->aliveCount() > 0;
+                bool& was_alive = source_alive_[system.runtime.get()];
+                if (alive || was_alive) device_sources.push_back(system.runtime.get());
+                was_alive = alive;
             }
             host_events.clear();
             if (system.runtime->takeHostCollisionEvents(host_events) == 0) continue;
@@ -1179,10 +1210,14 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         stats_init[si * kStatsStride + kStDirtyMinX] = 0xFFFFFFFFu;
         stats_init[si * kStatsStride + kStDirtyMinY] = 0xFFFFFFFFu;
     }
+        ++stats_.idle_ticks;
+        stats_.event_sources = 0;
     c.uploadBuffer(d.stats, stats_init.data(), stats_init.size() * 4);
     if (reset_requested_) {
         run(kModeReset, d.tile_count);
         reset_requested_ = false;
+    ++paint_serial_;   // this tick dispatches: coverage() must measure again
+    stats_.event_sources = static_cast<uint32_t>(device_sources.size());
     }
 
     if (!dabs.empty() && ensure(d.dabs, d.dab_capacity, dabs.size(), sizeof(GpuDab), "WetPaintDabs") &&
@@ -1244,16 +1279,20 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         }
     }
     run(kModeRotate, (d.tile_count + 255u) / 256u);
+    // A periodic reader got a stale coverage: measure it here, after this
+    // tick's final state, inside the readback this tick pays anyway (the
+    // stats_init upload above zeroed the coverage slots too).
+    const bool measure_coverage = coverage_requested_;
+    if (measure_coverage) run(kModeCoverage, d.tile_count);
 
-    std::vector<uint32_t> st(static_cast<std::size_t>(n) * kStatsStride, 0u);
-    // ★ downloadBuffer's immediate path drains IN-FLIGHT work only; dispatches
-    // still being recorded are not submitted by it. Without this the stats are
-    // read before the kernels ran (all zero), publish sees nothing dirty and -
-    // on wet paint's own context, which nobody else synchronizes - the recorded
-    // work never executes at all.
-    if (ok) c.synchronize();
-    if (!ok || !c.downloadBuffer(d.stats, st.data(), st.size() * 4)) {
-        stats_.status = ok ? "stats_download_failed" : "dispatch_failed";
+    const bool force = d.channels_force;
+    d.channels_force = false;   // consumed by the dispatches above
+    if (!ok) {
+        // ★ Still hand the recorded work over: on wet paint's own context
+        // nobody else submits it, and a recording left open forever is the
+        // "kernels never ran" failure.
+        c.submitAsync();
+        stats_.status = "dispatch_failed";
         stats_.last_tick_ms = msSince(t0);
         return false;
     }
@@ -1267,6 +1306,47 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         s.last.sources_dropped = v[kStSourcesDropped];
         stats_.active_tiles += v[kStActiveTiles];
         stats_.ticked_tiles += v[kStTickedTiles];
+    const std::size_t stats_bytes = static_cast<std::size_t>(n) * kStatsStride * 4;
+    const uint64_t ticket = c.submitWithReadback(d.stats, stats_bytes, 0);
+    if (ticket != 0) {
+        d.stats_ticket = ticket;
+        d.stats_surfaces = n;
+        d.stats_force = force;
+        d.stats_coverage = measure_coverage;
+        d.stats_serial = paint_serial_;
+        if (measure_coverage) coverage_requested_ = false;   // its answer is on the way
+        ++stats_.stats_delayed;
+    } else {
+        // No delayed readback on this backend: the old synchronous read.
+        // ★ downloadBuffer's immediate path drains IN-FLIGHT work only; the
+        // recorded dispatches must be submitted first.
+        std::vector<uint32_t> st(static_cast<std::size_t>(n) * kStatsStride, 0u);
+        c.synchronize();
+        if (!c.downloadBuffer(d.stats, st.data(), stats_bytes)) {
+            stats_.status = "stats_download_failed";
+            stats_.last_tick_ms = msSince(t0);
+            return false;
+        }
+        applyStats(st, force, measure_coverage, paint_serial_);
+    }
+    ++stats_.ticks;
+    stats_.last_dt = dt;
+    stats_.status = "running";
+    stats_.last_tick_ms = msSince(t0);
+    return true;
+}
+
+// The stats of one dispatching tick: per-surface counters, dirty rectangles
+// into the publish queues, and the coverage that tick measured.
+void WetPaintGpu::applyStats(const std::vector<uint32_t>& st, bool force, bool measured_coverage,
+                             uint64_t serial) {
+    const uint32_t n = static_cast<uint32_t>(surfaces_.size());
+    if (st.size() < static_cast<std::size_t>(n) * kStatsStride) return;
+    if (measured_coverage) {
+        readCoverage(st, coverage_cache_);
+        coverage_serial_ = serial;
+        ++stats_.coverage_in_tick;
+    }
         stats_.stamped_texels += v[kStStampedTexels];
         stats_.sources_dropped += v[kStSourcesDropped];
         if (v[kStDirtyMaxX] >= v[kStDirtyMinX] && v[kStDirtyMinX] != 0xFFFFFFFFu) {
@@ -1283,7 +1363,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             for (int channel = 0; channel < 3; ++channel) {
                 const bool enabled = channel == 0 ? s.settings.roughness_channel
                                                   : s.settings.height_normal_channel;
-                if ((enabled || s.channels_refresh || d.channels_force) &&
+                if ((enabled || s.channels_refresh || force) &&
                     !s.channel_textures[channel].expired()) {
                     for (auto& pending : s.channel_pending) merge(pending[channel]);
                 }
@@ -1291,12 +1371,6 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             s.channels_refresh = false;
         }
     }
-    d.channels_force = false;
-    ++stats_.ticks;
-    stats_.last_dt = dt;
-    stats_.status = "running";
-    stats_.last_tick_ms = msSince(t0);
-    return true;
 }
 
 // ── publish ─────────────────────────────────────────────────────────────────
@@ -1320,8 +1394,21 @@ int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* v
     }
     if (!any_pending) return 0;
     int changed = 0;
-    // The device copy reads what this frame's dispatches wrote.
-    c.synchronize();
+    // The device copy reads what the dispatches wrote. Submitted, not waited
+    // for: the copy batch is queued after them on the same queue and orders
+    // itself with a barrier (VulkanBackendAdapter::beginDeviceTextureCopies).
+    // The rectangles come from the previous tick's stats; the buffer already
+    // holds this tick's paint too, so a copy is never older than its rectangle.
+    c.submitAsync();
+    Backend::VulkanBackendAdapter* batches[2] = {};
+    for (int b = 0; b < 2; ++b) {
+        batches[b] = dynamic_cast<Backend::VulkanBackendAdapter*>(targets[b]);
+        if (batches[b]) batches[b]->beginDeviceTextureCopies();
+    }
+    struct EndBatches {
+        Backend::VulkanBackendAdapter** list;
+        ~EndBatches() { for (int b = 0; b < 2; ++b) if (list[b]) list[b]->endDeviceTextureCopies(); }
+    } end_batches{batches};
 
     // One plane of the output atlas (0 colour, 1 roughness, 2 height mask,
     // 3 normal) into the texture bound to that material slot. Planes above 0
@@ -1414,41 +1501,9 @@ int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* v
 
 // ── coverage ────────────────────────────────────────────────────────────────
 
-bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out) {
+void WetPaintGpu::readCoverage(const std::vector<uint32_t>& st, WetPaintCoverage& out) const {
     out = WetPaintCoverage{};
-    if (surfaces_.empty() || !ensureCompute(scene)) return false;
-    if (layout_dirty_ && !rebuildDevice(scene)) return false;
-    if (!prepareChannels(scene)) return false;
-    if (settings_dirty_) uploadSurfaceTable();
-    Device& d = *device_;
-    SimulationComputeContext& c = *d.compute;
     const uint32_t n = static_cast<uint32_t>(surfaces_.size());
-    std::vector<uint32_t> st(static_cast<std::size_t>(n) * kStatsStride, 0u);
-    // Only the coverage slots are cleared; the tick slots keep their values.
-    for (uint32_t si = 0; si < n; ++si) {
-        c.uploadBuffer(d.stats, st.data(), (kStatsStride - kStCoveredTexels) * 4,
-                       (static_cast<std::size_t>(si) * kStatsStride + kStCoveredTexels) * 4);
-    }
-    ComputeBufferHandle bindings[kBindingCount] = {
-        d.surfaces, d.tiles, d.pos_valid, d.flow_normal, d.base, d.color, d.state,
-        d.color_scratch, d.state_scratch, d.output, d.tile_flags, d.stats,
-        d.dummy_events, d.dummy_events, d.dummy_counter, d.dummy_events, d.dummy_counter,
-    };
-    WetPaintGpuConstants k;
-    k.mode = kModeCoverage;
-    k.surface_count = n;
-    k.tile_count = d.tile_count;
-    k._p0 = d.channels_allocated ? d.texel_count : 0u;
-    ComputeDispatch cmd;
-    cmd.kernel = "paint_wet";
-    cmd.buffers = bindings;
-    cmd.buffer_count = kBindingCount;
-    cmd.constants = &k;
-    cmd.constants_size = sizeof(k);
-    cmd.groups.groups_x = std::max<uint32_t>(1u, d.tile_count);
-    if (!c.dispatch(cmd)) return false;
-    c.synchronize();   // see tick(): the download does not submit recorded work
-    if (!c.downloadBuffer(d.stats, st.data(), st.size() * 4)) return false;
     for (uint32_t si = 0; si < n; ++si) {
         const uint32_t* v = st.data() + si * kStatsStride;
         WetPaintCoverage::Surface s;
@@ -1471,6 +1526,60 @@ bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out) {
     }
     out.ratio = out.valid_texels ? static_cast<float>(static_cast<double>(out.covered_texels) /
                                                       static_cast<double>(out.valid_texels)) : 0.0f;
+}
+
+bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out, bool allow_stale) {
+    out = WetPaintCoverage{};
+    if (surfaces_.empty() || !ensureCompute(scene)) return false;
+    if (layout_dirty_ && !rebuildDevice(scene)) return false;
+    if (!prepareChannels(scene)) return false;
+    if (settings_dirty_) uploadSurfaceTable();
+    Device& d = *device_;
+    SimulationComputeContext& c = *d.compute;
+    const uint32_t n = static_cast<uint32_t>(surfaces_.size());
+    std::vector<uint32_t> st(static_cast<std::size_t>(n) * kStatsStride, 0u);
+    // Only the coverage slots are cleared; the tick slots keep their values.
+    for (uint32_t si = 0; si < n; ++si) {
+        c.uploadBuffer(d.stats, st.data(), (kStatsStride - kStCoveredTexels) * 4,
+    // Unchanged paint (every tick since the last measurement was idle, no
+    // layout or settings change): the answer is the same. The room goal asks
+    // twice a second; each measurement is a dispatch + synchronize + download.
+    if (!layout_dirty_ && !settings_dirty_ && coverage_serial_ == paint_serial_) {
+        out = coverage_cache_;
+        ++stats_.coverage_cached;
+        return true;
+    }
+    if (allow_stale && !layout_dirty_ && !settings_dirty_ && coverage_serial_ != ~0ull) {
+        out = coverage_cache_;   // at most one request old
+        coverage_requested_ = true;
+        ++stats_.coverage_cached;
+        return true;
+    }
+                       (static_cast<std::size_t>(si) * kStatsStride + kStCoveredTexels) * 4);
+    }
+    ComputeBufferHandle bindings[kBindingCount] = {
+        d.surfaces, d.tiles, d.pos_valid, d.flow_normal, d.base, d.color, d.state,
+        d.color_scratch, d.state_scratch, d.output, d.tile_flags, d.stats,
+        d.dummy_events, d.dummy_events, d.dummy_counter, d.dummy_events, d.dummy_counter,
+    };
+    WetPaintGpuConstants k;
+    k.mode = kModeCoverage;
+    k.surface_count = n;
+    k.tile_count = d.tile_count;
+    k._p0 = d.channels_allocated ? d.texel_count : 0u;
+    ComputeDispatch cmd;
+    cmd.kernel = "paint_wet";
+    cmd.buffers = bindings;
+    cmd.buffer_count = kBindingCount;
+    cmd.constants = &k;
+    cmd.constants_size = sizeof(k);
+    cmd.groups.groups_x = std::max<uint32_t>(1u, d.tile_count);
+    if (!c.dispatch(cmd)) return false;
+    c.synchronize();   // see tick(): the download does not submit recorded work
+    if (!c.downloadBuffer(d.stats, st.data(), st.size() * 4)) return false;
+    readCoverage(st, out);
+    coverage_cache_ = out;
+    coverage_serial_ = paint_serial_;
     return true;
 }
 

@@ -28,7 +28,53 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 | Claude (Codex'ten devraldı) | WetPaintGpu.cpp (`publish`), VulkanBackend.cpp (1 satır), paint_wet.spv, overlay, yeni `rt_wet_paint_channels_ipc.py` | GPU paint kanalları: Codex kullanım sınırında durdu, kullanıcı işi Claude'a verdi. Eksik yayın adımı yazıldı, shader derlendi. **Codex: devam etmeden önce §2'nin ilk maddesini oku, bu dosyaları taze oku, yayın adımını yeniden yazma.** Player derlendi, `rt_player_wet_paint_channels_ipc.py` CANLI PASS 5/5 (19:38); Studio ve gözle kabul açık | 2026-11-16 |
 | Claude **D** (kiosk) | yeni `Core/KioskProfile.*`, `Api/RtApiKiosk.*`, `Api/RtIpcKiosk.cpp`; `PlayerMain.cpp` (girdi kapısı, `--profile`), `RtIpcSecurity.cpp` (rol setleri), `scripts/kiosk/` (watchdog) | §0.2 + adım 10: tuş kapısı, `kiosk.json`, Görevli/Teknisyen rolleri, sağlık sayaçları, watchdog, cihaz kaybı kurtarma | 2026-11-15 |
 
+
+
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
+
+- **2026-11-18 Claude — gecikmeli okuma + beklemesiz doku kopyası (YAZILDI, TAM derleme bekliyor):** `ISimulationComputeBackend`/`SimulationComputeContext`'e `submitWithReadback`, `collectReadback`, `submitAsync` eklendi (varsayılan: senkron yol / `synchronize`). `VulkanDevice` artık `endSingleTimeCommandsAsync` + `reclaimAsyncCommands` taşıyor, `VulkanBackendAdapter` ise `begin/endDeviceTextureCopies` taşıyor. **İki başlık da yaygın, üye düzeni değişti: temiz derle.** `copyDeviceBufferToTexture` artık beklemiyor: tek kuyruktaki bariyerlerle sıralanıyor. Compute arabelleği silen yol zaten `vkDeviceWaitIdle` yaptığı için uçuştaki kopya güvende. Kendi `waitIdle`'ına güvenip bu kopyanın bittiğini varsayan bir kod yazacaksan o kod artık beklemelidir. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- **2026-11-18 Codex — Player depth + paket TAMAMLANDI:** kullanıcı build ve açık workshop üzerinde sentetik +/-2m yarılarla balon örtmesi; balon 5 mor damlaları yakın yarıda gizli, uzak yarı önünde görünür: görsel PASS. Paketli MP4 doğal 437/12, erken stop 129/8 kare/poz; yayın kaybı0, kişi temizliği0, device_lost=false. 35 Python testi PASS. dist/Player-depth-2026-11-18 (377.5MB; 11DLL; 2sahne; NoSceneAudio), runtime/model dahil. Yeni C++ build beklemiyor. Saha: kamera/oda/gecikme; alpha/capture sınırları PLAYER_DEPTH_PACKAGE_ACCEPTANCE_2026_11_18.md. Personel paneli yok, görüntü bellekte; ayarlar geri alındı.
+
+- **2026-11-18 Codex — Player derinlik kartı / CANLI PASS (kullanıcı build):** Yeni Viewport/PlayerDepthCard.h, iki player_depth_card shaderı; mevcut video_card IPC/script kontrolü kullanılır. Ayrı Local\RayTrophiDepthCard.v1 eşlemesi: 40 B başlık + RGBA8/float derinlik ofseti (8 B/piksel), 640x640 sınır. Parçacık öncesi gerçek raster depth; maske kenarı Bayer spatial coverage (tam alpha kompozisyon referansıyla piksel eşitliği iddiası yok). Shaderlar derlendi/spirv-val PASS, source/runtime kopyaları hazır; bulk script uzantı taraması otomatik kaydeder. Partikül ABI/binding değiştirilmedi. **Derleme düzeltmesi:** yeni header windows.h sızıntısı MaterialProgram/std::min/max ve namespace zincirleme hatalarına yol açıyordu; NOMINMAX + undef min/max eklendi. C++ build çalıştırılmadı.
+
+- **2026-11-18 Claude — ıslak boya boşta gerçekten boşta, CANLI PASS:** `WetPaintGpu` olay kaydeden
+  parçacık sistemini yalnız şimdi/önceki tick canlı parçacığı varken kaynak sayar; `coverage()` boya
+  değişmediyse önbellekten döner. `paint.wet_status` +`idle_ticks`, `coverage_cached`, `event_sources`
+  (`WetPaintGpu.h`/`RtApiPaintWet.h` alanları — iki hedef yeniden derlendi). Player kuru odada
+  19.4 → 57.5 fps. UV anahtarı farkına (commit'siz) dokunulmadı.
+  **Ek (aynı gün, KAYNAK HAZIR):** `WetPaintGpu::coverage(scene, out, allow_stale=false)` — periyodik
+  okurlar (`BalloonPaintDemo` oda hedefi, **`Game/GameRuntime.cpp` oturum kapsaması: tek satır değişti**)
+  ıslakken bir önceki ölçümü alır, ölçüm sonraki tick'in kendi indirmesinde yapılır. Sebep: aygıt TEK
+  kuyruk (grafik+hesaplama), her simülasyon `synchronize`'ı uçuştaki render karesini de bekler.
+
+- **2026-11-17 Codex — video kartı:** `player.set_display` opsiyonel bool `video_card`, `player.display` aynı durumu döndürür. Varsayılan kapalı. Windows `Local\RayTrophiVideoCard.v1` eşlemesi, 40 bayt başlık + RGBA8, bir yayıncı. Kart Player SDL/ImGui sunumunda. Partikül, Vulkan sahne ve shader arayüzüne dokunulmadı.
+
+- **2026-11-18 Claude — balon efektleri ayrı modül (`Paint/BalloonEffects.cpp/.h`), KAYNAK HAZIR:**
+  Damla izi ve damla temas kıvılcımı GPU'dan HİÇBİR ŞEY okumuyor ve ıslak boyanın olay tamponuna
+  YAZMIYOR (ilk sürüm okuyordu + işaret yazıyordu; söküldü). Her 8. damlanın görünmez CPU ikizi
+  (`BalloonDropGhosts`) iz ve temas kaynağı. **Herkese ölçüm dersi:** simülasyon bağlamında
+  eşzamanlı aktarım (download/upload + endTransferBatch) Player'da kare işini bekliyor: ilk seferde
+  31 ms, sonra her karede ~5 ms ölçüldü. Islak boyanın kare başı `synchronize`+stats indirmesi (5–8 ms
+  `paint_ms`) büyük olasılıkla aynı bekleme.
+- **2026-11-17 Claude — balon havai fişeği, KAYNAK HAZIR / derlenmedi:** `BalloonPaintDemo.cpp`
+  (+`GameDesignUI.cpp` panel): `paint.wet_demo` config `sparkles` (0..400, 90), `sparkle_trails`
+  (true); yeni CPU sistemleri `BalloonSparkles` / `BalloonSparkleTrails`; konfeti ve parıltı
+  artık damla sistemlerinin collider'larının KOPYASIYLA sekiyor (Bounce, olay yok → boyamaz),
+  `set_collider` kopyayı da günceller; status yeni `effects`. Final konfeti yağmuru
+  `spawn_max.y` üstünden başlar. Header/shader/ABI yok. ★ Dosya 2009 satır: efektler `state`'e
+  bağlı olduğu için bölünmedi; parti 2 (GPU temas kıvılcımı) `sim_particle_collide.comp`'a
+  dokunacak — başlamadan §1'e yazılır.
+
+- **2026-11-17 Codex — Player iskelet:** `player.set_display` opsiyonel bool `body_overlay`, `player.display` aynı durumu bildirir. Varsayılan kapalı. Mevcut body pose paket şeması ve shader arayüzü değişmedi. Kiosk çalışmasındaki `PlayerMain.cpp` dosyasına dokunulmadı.
+
+- **2026-11-17 Codex — SDF ayrıntı kalıcılığı:** ProjectManager.cpp collider save/load'a eksik opsiyonel sdf_resolution_mode integer alanı eklendi (0..4, eski dosya varsayılanı korunur). SceneSerializer bunu zaten taşıyordu; RTP yolu düşürüyordu. Yalnız alan entegrasyonu; temel header/ABI/shader değişmedi.
+
+- **2026-11-17 Codex — açık duvar SDF / KAYNAK HAZIR:** ColliderGpuQuery.cpp + yeni yerel Fluid/ColliderMeshClosure.h: signed GPU cook yalnız kapalı, sıfır olmayan hacimde; açık mesh mevcut unsigned shader modu ile yüzey olur. 3414 üçgenli duvar 1890 boundary edge; Player'da yalnız duvar collider kapatılınca hayalet engelin kaybolduğunu kullanıcı doğruladı. Shader/binding/layout/temel header değişmedi. Per-frame unsigned sorgular closure kontrolüne girmez. GPU bake yolu düzeltildi; eski CPU fallback açık-mesh davranışı doğrulanmadı/değişmedi. Collider kaynak mod adı aynı, açık GPU mesh artık hayalet iç hacim üretmemeli.
+
+- **2026-11-17 Codex — oda/SDF/materyal:** scene_data.h SDF publish koşuluna mevcut serial-token kimliği eklendi; aynı objenin iki collider'ında bake yanlış ilk kayda gitmesin. Layout/shader değişmedi. material.create opsiyonel clone_from; material.assign opsiyonel source_material_name (yalnız o slotu remap). C++ rtapi/Python/IPC aynı hizmet, descriptor üretildi; eski varsayılanlar korunur. Ortak RtApi.h imzaları genişledi: iki hedef yeniden derlenmeli. Overlay dosyasına dokunulmadı.
+
+- **2026-11-17 Codex — silinen oyun yüzeyi temizliği KAYNAK HAZIR:** Ortak Paint::reconcileGameDesign flat node yok/pending-delete boya kayıtlarını ve bağlı oyun colliderlarını temizler; clock + mevcut wet status/demo/design API yolları çağırır. UI eski missing-surface hata metnini bırakmaz. Yeni metot/alan/ABI/shader yok; Player/Studio aynı hizmet. Yeni duvar otomatik eşlenmez. Mesh undo tek başına eski boya kaydını geri getirmez; yeniden Add selected gerekir.
 
 - **2026-11-16 Codex — Player post KAYNAK HAZIR:** RuntimeSceneViewer Studio ortak rtpost tick/syncDisplay hizmetiyle sahne ton map/exposure/gamma/saturation/temperature/vignette ayarlarını mevcut raster post shaderına yollar. Ek geçiş/kopya/shader/ABI yok. Mevcut post.get, grading setterları ve exposure get/configure/reset Player IPC izin listesinde; stylize açılmadı. Raster HDR histogram üretmez; meter enabled tek başına durağan sahneyi uyandırmaz.
 
@@ -418,6 +464,21 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
   paketleniyordu). DEM gözenekli yolu da aynı tuzağa açık olabilir — Codex bakabilir.
 
 ## 3. Derleme bekleyen işler
+
+
+- **2026-11-17 Codex — maskeli kart:** Player artımlı build ve Studio Python bağlaması için sonraki Studio build. Python testleri 24/24, video cutout WhatsApp 400/639 ve UHD 240/240. Canlı kabul: açık Player'da `video_card` aç, `bridge.py --video-card --people 1` ile WhatsApp replay, kart/iskelet hareketi ve EOF'ta kaybolma, viewport capture'da kartın olmaması. C++ build ve uygulama başlatma yapılmadı.
+
+- **2026-11-17 Codex — iskelet overlay:** Player ve ortak Python bağlaması için Studio artımlı C++ build bekliyor. Player kabulü: `body_overlay` aç/kapa IPC, yanlış türde atomik ret, gerçek klipte iki kol hareketinin görünmesi, poz bitiminde çizimin kalkması. Bkz. `PLAYER_PERCEPTION_BRIDGE.md` ve `rt_player_display_ipc.py`. C++ build/uygulama başlatma yapılmadı.
+
+- **2026-11-17 Codex — sürpriz metal balon:** Yalnız BalloonPaintDemo.cpp: surprise metallic1 + transmission0; normalde config transmission ya da prepare'da alınan ordinary değeri geri gelir. Reconfigure sırasında gold'un sıfırlanmış değeri authored diye alınmaz; aynı scene/name için önceki gold baseline korunur. State özel vektör; temel header/ortak ABI/shader/IPC şeması değişmedi. Diff check PASS; kullanıcı şu an build alıyor, değişiklik o TU derlendikten sonra geldiyse artımlı tekrar gerekir. Player pipe error2 (kapalı), canlı kabul henüz yapılmadı. Kabul: gold=>metal1/trans0; normal/global translucent korunsun; gold=>normal respawn/reconfigure restore.
+
+- **2026-11-17 Codex — kıvrım PASS / kalıcılık kaynak hazır:** Player duvar64³→128³ tek değişkenli karşılaştırma: dört sistem ready, kullanıcı kıvrımlara boya ulaştığını doğruladı. Splat.09/facing0/damla sayısı korundu. ProjectManager.cpp save/load alanı için Studio/Player artımlı build bekler; sonra Studio'da128seç/save + Player reopen mode2 kabulü. Diff check PASS, C++ build/app launch yok. PLAYER_CURVED_PAINT_2026_11_17.md.
+
+- **2026-11-17 Codex — son boya/duvar:** Yalnız Player artımlı C++: ColliderGpuQuery.cpp + BalloonPaintDemo.cpp (implicit çoklu-materyal surfaceNames tekilleştirme). Temel header/shader değişmedi; yeni yerel helper yalnız query CPP tarafından include edilir. Closure native fixture teslim ama derlenmedi. Diff/syntax PASS; 6 canlı sol/sağ wall/floor/ceiling dab PASS. Player şu an pastel-play-room-simple.rtp, 35 nötr paint prop,24balon; duvar collider test için geçici kaldırıldı ve KAYDEDİLMEDİ. Build sonrası simple sahneyi reopen edip duvar ready + iki taraf paint + ghost yok kabulü gerekli. PLAYER_PAINT_SIDES_2026_11_17.md. Studio aynı source fix'i daha sonra build edebilir.
+
+- **2026-11-17 Codex — tüm oda boyası/SDF:** GENİŞ Studio/Player build, shared scene_data.h + RtApi.h değişiklikleri. IPC audit/descriptor ve 5 Python syntax/diff check PASS. Yeni rt_room_authoring_regression.py disposable sahnede test; scripts/scenes/prepare_paint_room.py --apply yeni build + UV onay/onarım sonrası. 69 obje/85 ek materyal yüzeyi/55 shared slot; henüz canlı uygulanmadı. Kullanıcının eski canlı binary'sinde 24 balon + 128³ duvar PASS (disabled duplicate collider kaldırıldı); bu kalıcı code fix kabulü değil. GAME_SCENE_AUDIT_2026_11_17.md ayrıntıları.
+
+- **2026-11-17 Codex — silinen oyun yüzeyi:** Studio/Player artımlı build + canlı test bekler. Player include audit 667/667 clean, diff check ve yeni IPC fixture syntax PASS. scripts/test/rt_game_deleted_surface_ipc.py yeni build sonrası disposable 4 BalloonPaint sistemli sahnede dış terminalden çalıştırılmalı. docs/dev/GAME_DELETED_SURFACES.md. C++ build/app launch yapılmadı.
 
 - **2026-11-17 11:00, Claude:** TLAS descriptor'ı bağlayan YENİ kod `VulkanRT::tlasObjectGeneration()` (Backend/VulkanTlasGeneration.h) imzaya katmalı — handle değeri yeniden kullanılıyor (ölçüldü, device lost). Süresiz `vkWaitForFences(UINT64_MAX)` YASAK: `VulkanRT::waitFenceBounded` (NVIDIA kayıp cihazda sonsuz döndü).
 
@@ -825,6 +886,25 @@ hash değişmedi; dinamik kırılma testi YAPILMADI). Codex'in 2–3 (assert'li 
 GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
 
 ## 4. Fikir / soru / iş bölümü
+
+- **2026-11-18 Claude (balon efektleri) → karakter kartı / GPU derinlik konumlandırma ajanına:**
+  Parçacıkların karakterin önünde/arkasında doğru maskelenmesi ek maliyetsiz olabilir, şu koşulla:
+  raster parçacık billboard'ları (`Backend/VulkanViewportParticles.cpp`) sahne derinliğine karşı
+  **derinlik testi yapar (LESS_OR_EQUAL), derinlik YAZMAZ** (yalnız küre girdisi yazar). Yani kart/
+  karakter derinliği **aynı derinlik ekine, parçacık geçişinden ÖNCE** yazılırsa maskeleme kendiliğinden
+  olur. Bugünkü `PlayerBodyOverlay.h` ImGui arka plan listesine çizer: derinliği yok, parçacıklar
+  hep üstünde/altında kalır. Dikkat: (1) balon efektleri (`BalloonSparkles`, `BalloonSparkleTrails`,
+  konfeti billboard'u) yalnız raster billboard'dur (`render_in_raytrace=false`), RT tarafı onları
+  görmez; (2) boya DAMLALARI ise billboard + RT küre örneği olarak da çizilir — RT yolunda maskeleme
+  için kartın TLAS'ta ya da RT'nin okuduğu derinlikte olması gerekir; (3) kart yarı saydam kenarlıysa
+  derinliği yalnız opak kısım için yaz, yoksa kenarda parçacıklar kesik görünür.
+
+- **2026-11-18 Codex — RGB-D kart / partikül sırası:** Python sentetik reprojection ve alpha/additive örtme referansı hazır. Player GPU adımı mevcut `recordParticleBillboards` çağrısında karakter derinliğine göre ön/arka ayrımı gerektiriyor. Partikül hattında paralel çalışma olduğu için bu adım henüz bağlanmadı. Öneri: partikül geçiş sırası netleşince özel pencere kompozisyonunu birlikte bağlayalım. Video sahne yakalama ve render çıktısına girmemeli.
+
+- **2026-11-17 Codex — oda sadeleştirme teslim:** Kullanıcı duplicate gizleme, ardından nötr default/tek materyal ve cleanup seçti. Studio'da 44 duplicate ayrı kopyada kaldırıldı;35prop/35paint,24balloon,lamba işlevi korundu. Sibling UV'ler tile pack yapıldı. Ayrı pastel-play-room-paint-ready.rtp (47slot) ve pastel-play-room-simple.rtp (35slot) kaydedildi, Player simple'a geçirildi. Temel headerlere bu tur dokunulmadı. Geçici agent capture PNG/GLB silindi; kullanıcı ekleri korunuyor. Balon damla/splat ayarları yalnız açıklandı, değiştirilmedi.
+
+- **2026-11-17 Codex — UV ONAYI ALINDI / ONARILDI:** Tam ortam UV audit 93 alt mesh; ikinci importta 34 objede 46 tamamen çökmüş UV. Kullanıcı lambalar hariç hepsini boyanabilir istiyor. UV unwrap scripti yedekli hazır ama auto-review broad live rewrite gerekçesiyle reddetti; çalışmadı. Açık kullanıcı onayı async soruldu. Onay gelmeden repair_room_uvs.py çalıştırılmamalı. Tüm yüzeyleri açmak için materyal slot servisi de yeni build bekliyor. 24 balon canlı bağlandı, proje kaydedilmedi.
+  - **Kullanıcı onayı + sonuç (2026-11-17):** Kullanıcı 46 mesh yeniden unwrap işlemini açıkça onayladı. 46/46 canlı PASS; orijinal UV layout yedeği GAME_ROOM_UV_REPAIR_2026_11_17.json. Tekrarlı tüm-ortam audit 93 mesh: degenerate/nonfinite/outside=0, 256² overlap samples=0; 113 flat geometry valid. Oyun tekrar hazırlandı: prepared=true,24/24 resolved,error boş; duvar128³/all4 ready. GAME_ROOM_AFTER_UV_2026_11_17.json. İlave boya kayıtları hâlâ yeni build sonrası prepare_paint_room.py --apply bekler. Proje kaydedilmedi.
 
 - **2026-11-16 Codex → Player test ajanı:** Kullanıcının ton map isteği tamamlandı; test dosyalarınıza dokunulmadı. Yeni build sonrası PLAYER_POSTPROCESS.md listesini kabul matrisine alın: ilk kare/reopen sahne ayarı, sabit kamerada post IPC piksel değişimi, fiziksel exposure, geçersiz değer hataları, settled idle. C++ build/app launch yapılmadı.
 

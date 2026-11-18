@@ -9,6 +9,7 @@
 #include "Material.h"
 #include "MaterialManager.h"
 #include "Ray.h"
+#include "Paint/BalloonEffects.h"
 #include "Paint/WetPaintGpu.h"
 #include "ParticleAppearanceProfile.h"
 #include "ParticleSimulation.h"
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <random>
 #include <stdexcept>
 
@@ -49,10 +51,9 @@ constexpr float kPickRadius = 0.4f;
 constexpr std::array<const char*, 4> kSystems = {
     "BalloonPaintRed", "BalloonPaintBlue", "BalloonPaintYellow", "BalloonPaintGreen"
 };
-// Surprise balloon: gold metal, rainbow paint, confetti. The confetti system
-// records no collision events, so it never paints (the splat only consumes
-// recording systems).
-constexpr const char* kConfettiSystem = "BalloonConfetti";
+// Surprise balloon: gold metal, rainbow paint, confetti and firework sparkles.
+// Effects (confetti, sparkles, trails, glitter, contact sparks) live in
+// Paint/BalloonEffects; this file decides when they fire.
 const Vec3 kGold(1.0f, 0.62f, 0.08f);
 constexpr int kConfettiPerSurprise = 220;
 
@@ -96,7 +97,7 @@ struct State {
     std::vector<uint32_t> visual_profiles;   // per palette colour, in the visual system
     std::vector<uint32_t> drop_profiles;     // per palette colour, in kSystems[c % 4]
     uint32_t gold_visual_profile = 0;        // particle-mode surprise balloon
-    std::vector<uint32_t> confetti_profiles; // palette + gold, in kConfettiSystem
+    std::vector<float> visual_transmission; // ordinary balloon's authored value
     uint64_t surprise_pops = 0;
     // Shared room goal: the children fill the room together. room_progress is
     // painted coverage / room_goal, milestones 1..4 = 25/50/75/100 %.
@@ -121,6 +122,7 @@ struct State {
     double atlas_ms = 0.0;
     uint64_t event_serial = 0;
     uint64_t observed_frames = 0;
+    double last_tick_ms = 0.0;     // tickBalloonPaintDemo, effects included
     double max_simulation_ms = 0.0;
     double max_frame_interval_ms = 0.0;
     json events = json::array();
@@ -150,7 +152,9 @@ std::vector<std::string> surfaceNames(const json& config) {
         }
     } else {
         for (const auto& surface : wetPaintGpu().surfaces()) {
-            names.push_back(surface.object);
+            if (std::find(names.begin(), names.end(), surface.object) == names.end()) {
+                names.push_back(surface.object);
+            }
         }
     }
     return names;
@@ -306,6 +310,20 @@ void updateMeshVisual(SceneData& scene, size_t index, const Balloon& balloon, bo
         if (!metal.ok) {
             throw std::runtime_error(metal.error);
         }
+        {
+            const float authored = state.visual_transmission.at(index);
+            const float wanted = balloon.surprise ? 0.0f :
+                state.config.value("transmission", authored);
+            rtapi::MaterialParamValue current;
+            // Written only when it differs: every write is an undo record.
+            if (!rtapi::getMaterialParam(name, "transmission", current).ok ||
+                std::abs(current.scalar - wanted) > 1e-4f) {
+                const auto clear = rtapi::setMaterialParam(name, "transmission", wanted);
+                if (!clear.ok) {
+                    throw std::runtime_error(clear.error);
+                }
+            }
+        }
         if (!mesh->visible) {
             // Only the first show after prepare changes the instance set.
             const auto result = rtapi::setObjectVisible(name, true);
@@ -407,12 +425,13 @@ json validatedConfig(const json& input, SceneData& scene) {
     if (!input.is_object()) {
         throw std::runtime_error("config must be an object");
     }
-    const std::array<const char*, 23> allowed = {
+    const std::array<const char*, 28> allowed = {
         "surfaces", "resolution", "seed", "balloons", "particles_per_balloon",
         "interval_min", "interval_max", "autostart", "visual_nodes", "pop_sound",
         "size_min", "size_max", "idle_reset_seconds", "colors",
         "surprise_chance", "surprise_sound", "room_goal", "celebrate_sound",
-        "finale_reset_seconds", "spawn_min", "spawn_max", "float_amplitude", "drift_speed"
+        "finale_reset_seconds", "spawn_min", "spawn_max", "float_amplitude", "drift_speed",
+        "transmission", "sparkles", "sparkle_trails", "drop_sparks", "drop_trails"
     };
     for (auto it = input.begin(); it != input.end(); ++it) {
         if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end()) {
@@ -424,7 +443,8 @@ json validatedConfig(const json& input, SceneData& scene) {
               {"interval_max", 5.0}, {"autostart", true},
               {"size_min", 1.0}, {"size_max", 1.0}, {"idle_reset_seconds", 0.0},
               {"surprise_chance", 0.1}, {"room_goal", 0.5}, {"finale_reset_seconds", 10.0},
-              {"float_amplitude", 0.08}, {"drift_speed", 0.12}};
+              {"float_amplitude", 0.08}, {"drift_speed", 0.12},
+              {"sparkles", 90}, {"sparkle_trails", true}, {"drop_sparks", 0.25}, {"drop_trails", true}};
     c.update(input);
     for (const char* key : {"resolution", "seed", "balloons", "particles_per_balloon"}) {
         if (!c[key].is_number_integer()) {
@@ -465,9 +485,30 @@ json validatedConfig(const json& input, SceneData& scene) {
     if (!std::isfinite(idle_reset) || (idle_reset != 0.0 && (idle_reset < 10.0 || idle_reset > 3600.0))) {
         throw std::runtime_error("idle_reset_seconds: 0 (off) or 10..3600");
     }
+    // One translucency for every balloon. Each balloon owns its material (the
+    // colours differ), so editing twelve materials by hand drifted: popped
+    // balloons are shrunk to nothing and cannot be selected, and measured
+    // 2026-11-17 the twelve held 0..1 (one opaque, one fully clear). Absent =
+    // the materials are left as authored.
+    if (c.contains("transmission") &&
+        (!c["transmission"].is_number() || !(c["transmission"].get<double>() >= 0.0) ||
+         c["transmission"].get<double>() > 1.0)) {
+        throw std::runtime_error("transmission must be a number in 0..1");
+    }
     const double surprise = c["surprise_chance"].get<double>();
     if (!(surprise >= 0.0 && surprise <= 0.5)) {
         throw std::runtime_error("surprise_chance must be 0..0.5");
+    }
+    if (!c["sparkles"].is_number_integer() || c["sparkles"].get<int64_t>() < 0 ||
+        c["sparkles"].get<int64_t>() > 400) {
+        throw std::runtime_error("sparkles must be an integer 0..400 (0 = off)");
+    }
+    if (!c["sparkle_trails"].is_boolean() || !c["drop_trails"].is_boolean()) {
+        throw std::runtime_error("sparkle_trails and drop_trails must be booleans");
+    }
+    if (!c["drop_sparks"].is_number() || !(c["drop_sparks"].get<double>() >= 0.0) ||
+        c["drop_sparks"].get<double>() > 1.0) {
+        throw std::runtime_error("drop_sparks must be a number in 0..1 (0 = off)");
     }
     const double goal = c["room_goal"].get<double>();
     if (!(goal == 0.0 || (goal >= 0.05 && goal <= 1.0))) {
@@ -860,65 +901,6 @@ void playPopSound(SceneData& scene, const Vec3& position, float size, bool surpr
     }
 }
 
-// Spinning paper cards that float down; they never paint (no collision events).
-void spawnConfetti(SceneData& scene, const Balloon& balloon) {
-    auto* confetti = system(scene, kConfettiSystem);
-    if (!confetti || state.confetti_profiles.empty()) {
-        return;
-    }
-    for (int i = 0; i < kConfettiPerSurprise; ++i) {
-        const float z = randomRange(-0.3f, 1.0f);   // mostly upward and outward
-        const float angle = randomRange(0.0f, 6.28318530718f);
-        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
-        const Vec3 direction(r * std::cos(angle), z, r * std::sin(angle));
-        ParticleSpawnDesc card;
-        card.position = balloon.position + direction * (0.3f * balloon.size);
-        card.velocity = direction * randomRange(1.5f, 3.5f);
-        card.lifetime_seconds = randomRange(2.5f, 4.0f);
-        card.mass = 0.0005f;
-        card.appearance_profile_id = state.confetti_profiles[
-            std::uniform_int_distribution<size_t>(0, state.confetti_profiles.size() - 1)(state.random)];
-        card.size_scale = randomRange(0.7f, 1.3f);
-        card.rotation = randomRange(0.0f, 6.28318530718f);
-        card.angular_velocity = randomRange(-9.0f, 9.0f);
-        confetti->spawn(card);
-    }
-}
-
-// Confetti from a point in the air (a milestone burst), or falling from the
-// ceiling over the whole room (the finale rain). Never paints.
-void confettiAt(SceneData& scene, const Vec3& centre, int cards, bool rain) {
-    auto* confetti = system(scene, kConfettiSystem);
-    if (!confetti || state.confetti_profiles.empty()) {
-        return;
-    }
-    for (int i = 0; i < cards; ++i) {
-        ParticleSpawnDesc card;
-        if (rain) {
-            card.position = Vec3(randomRange(-3.5f, 3.5f), randomRange(3.0f, 3.3f),
-                                 randomRange(-3.5f, 3.5f));
-            card.velocity = Vec3(randomRange(-0.3f, 0.3f), randomRange(-0.6f, 0.0f),
-                                 randomRange(-0.3f, 0.3f));
-            card.lifetime_seconds = randomRange(4.0f, 6.0f);
-        } else {
-            const float z = randomRange(-0.3f, 1.0f);
-            const float angle = randomRange(0.0f, 6.28318530718f);
-            const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
-            const Vec3 direction(r * std::cos(angle), z, r * std::sin(angle));
-            card.position = centre + direction * 0.2f;
-            card.velocity = direction * randomRange(2.0f, 4.5f);
-            card.lifetime_seconds = randomRange(2.5f, 4.0f);
-        }
-        card.mass = 0.0005f;
-        card.appearance_profile_id = state.confetti_profiles[
-            std::uniform_int_distribution<size_t>(0, state.confetti_profiles.size() - 1)(state.random)];
-        card.size_scale = randomRange(0.7f, 1.3f);
-        card.rotation = randomRange(0.0f, 6.28318530718f);
-        card.angular_velocity = randomRange(-9.0f, 9.0f);
-        confetti->spawn(card);
-    }
-}
-
 void playCelebrateSound(SceneData& scene, int level) {
     if (!state.config.contains("celebrate_sound") || !scene.audio) {
         return;
@@ -937,13 +919,16 @@ void playCelebrateSound(SceneData& scene, int level) {
 // Milestone show: level 1..3 = that many confetti bursts in the air; level 4
 // (goal reached) = confetti rain, four bursts and every balloon popping in a
 // cascade, then (finale_reset_seconds) a clean room for the next children.
-// No flashes: the show is paper, paint and sound.
+// No flashes: the show is paper, paint, sound and slowly fading sparkles (their
+// emission only decays - nothing strobes, nothing lights the whole screen).
 void celebrate(SceneData& scene, int level) {
     ++state.shows;
     const int bursts = std::min(level, 4);
     for (int i = 0; i < bursts; ++i) {
-        confettiAt(scene, Vec3(randomRange(-2.5f, 2.5f), randomRange(1.6f, 2.6f),
-                               randomRange(-2.5f, 2.0f)), kConfettiPerSurprise, false);
+        const Vec3 centre(randomRange(-2.5f, 2.5f), randomRange(1.6f, 2.6f),
+                          randomRange(-2.5f, 2.0f));
+        balloonConfettiBurst(scene, centre, 0.2f, kConfettiPerSurprise, 2.0f, 4.5f);
+        balloonSparkles(scene, centre, 0.15f);
     }
     playCelebrateSound(scene, level);
     state.events.push_back({{"id", ++state.event_serial}, {"time_s", state.seconds},
@@ -954,7 +939,7 @@ void celebrate(SceneData& scene, int level) {
                             {"sources_dropped_start", wetPaintGpu().stats().sources_dropped},
                             {"sources_dropped", 0}});
     if (level >= 4) {
-        confettiAt(scene, Vec3(0.0f), kConfettiPerSurprise * 3, true);
+        balloonConfettiRain(scene, state.spawn_min, state.spawn_max, kConfettiPerSurprise * 3);
         state.cascade.clear();
         for (size_t i = 0; i < state.balloons.size(); ++i) {
             if (state.balloons[i].inflated) state.cascade.push_back(i);
@@ -981,7 +966,9 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         auto* runtime = system(scene, kSystems[balloon.color % kSystems.size()]);
         if (balloon.surprise) {
             ++state.surprise_pops;
-            spawnConfetti(scene, balloon);
+            balloonConfettiBurst(scene, balloon.position, 0.3f * balloon.size, kConfettiPerSurprise,
+                                 1.5f, 3.5f);
+            balloonSparkles(scene, balloon.position, 0.25f * balloon.size);
         }
         updateMeshVisual(scene, available[b], balloon, false);
         system(scene, kVisualSystem)->kill(balloon.visual_slot);
@@ -1013,6 +1000,8 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
             auto* target = color == balloon.color ? runtime
                                                   : system(scene, kSystems[color % kSystems.size()]);
             target->spawn(drop);
+            balloonDropLaunched(scene, drop.position, drop.velocity, color, drop.size_scale,
+                                drop.lifetime_seconds);
         }
         playPopSound(scene, balloon.position, balloon.size, balloon.surprise);
         popped.push_back({{"balloon", available[b]}, {"color", balloon.color},
@@ -1150,12 +1139,24 @@ json status() {
             {"pop_sounds_played", state.pop_sounds_played},
             {"pop_sounds_dropped", state.pop_sounds_dropped},
             {"pop_sound_error", state.pop_sound_error},
+            {"effects", balloonEffectsStatus(state.prepared ? state.scene : nullptr)},
             {"config", state.config}, {"balloons", balloons}, {"pools", pools},
             {"events", state.events}};
 }
 
 void prepare(SceneData& scene, const json& config) {
     const auto start = Clock::now();
+    std::map<std::string, float> previous_gold_transmission;
+    if (state.scene == &scene && state.config.contains("visual_nodes")) {
+        const auto& nodes = state.config["visual_nodes"];
+        for (size_t i = 0; i < state.balloons.size() &&
+             i < state.visual_transmission.size() && i < nodes.size(); ++i) {
+            if (state.balloons[i].surprise) {
+                previous_gold_transmission[nodes[i].get<std::string>()] =
+                    state.visual_transmission[i];
+            }
+        }
+    }
     hideMeshVisuals();
     state = State{};
     state.scene = &scene;
@@ -1231,38 +1232,18 @@ void prepare(SceneData& scene, const json& config) {
     state.gold_visual_profile = visuals->findOrAddAppearanceProfile(
         profile("Balloon Surprise Gold", kGold, 0.65f));
 
-    // Confetti: CPU, light gravity, strong drag (paper flutters down), no
-    // collision events and no colliders - it falls through the floor by the
-    // time its life ends, and it can never paint.
-    if (!system(scene, kConfettiSystem)) {
-        scene.addParticleSystemObject(kConfettiSystem);
+    {
+        BalloonEffectsSetup fx;
+        fx.palette = state.palette;
+        fx.gold = kGold;
+        fx.droplet_systems.assign(kSystems.begin(), kSystems.end());
+        fx.seed = config["seed"].get<uint32_t>();
+        fx.sparkles = config["sparkles"].get<int>();
+        fx.sparkle_trails = config["sparkle_trails"].get<bool>();
+        fx.drop_sparks = config["drop_sparks"].get<float>();
+        fx.drop_trails = config["drop_trails"].get<bool>();
+        prepareBalloonEffects(scene, fx);
     }
-    auto* confetti = system(scene, kConfettiSystem);
-    confetti->clear();
-    confetti->clearEmitters();
-    confetti->setGravity(Vec3(0.0f, -2.5f, 0.0f));
-    confetti->setLinearDrag(2.2f);
-    confetti->physicsSettings().execution_policy = RayTrophiSim::ParticleExecutionPolicy::CPU;
-    confetti->physicsSettings().record_collision_events = false;
-    confetti->reserve(static_cast<size_t>(kConfettiPerSurprise) * 12);
-    for (auto& entry : scene.particle_systems) {
-        if (entry.name == kConfettiSystem) {
-            entry.enabled = true;
-            entry.visible = true;
-            entry.render.emitter_only = false;
-            entry.render.shape = SceneData::ParticleRenderShape::Quad;
-            entry.render.emissive = false;
-            entry.render.roughness = 0.5f;
-            SceneData::applyParticleSystemEnabledState(entry);
-        }
-    }
-    state.confetti_profiles.clear();
-    for (size_t c = 0; c < state.palette.size(); ++c) {
-        state.confetti_profiles.push_back(confetti->findOrAddAppearanceProfile(
-            profile("Confetti " + colorKey(state.palette[c]), state.palette[c], 0.05f)));
-    }
-    state.confetti_profiles.push_back(confetti->findOrAddAppearanceProfile(
-        profile("Confetti Gold", kGold, 0.05f)));
 
     // Build all four CPU atlases in this one main-thread operation. No frame can
     // rebuild the partial 1-, 2- or 3-surface layout between additions.
@@ -1351,7 +1332,8 @@ void prepare(SceneData& scene, const json& config) {
     state.visual_base.clear();
     if (config.contains("visual_nodes")) {
         for (const auto& node : config["visual_nodes"]) {
-            auto* mesh = scene.getFlatNodeMesh(node.get<std::string>());
+            const std::string name = node.get<std::string>();
+            auto* mesh = scene.getFlatNodeMesh(name);
             Matrix4x4 base = mesh && mesh->transform ? mesh->transform->base : Matrix4x4();
             // Keep the rotation, drop the scale: a balloon's size is its mesh
             // geometry times `size`. A project saved after play holds the last
@@ -1366,6 +1348,14 @@ void prepare(SceneData& scene, const json& config) {
                 }
             }
             state.visual_base.push_back(base);
+            rtapi::MaterialParamValue transmission;
+            const auto read = rtapi::getMaterialParam(name, "transmission", transmission);
+            if (!read.ok) {
+                throw std::runtime_error(read.error);
+            }
+            const auto previous = previous_gold_transmission.find(name);
+            state.visual_transmission.push_back(previous != previous_gold_transmission.end()
+                ? previous->second : transmission.scalar);
         }
     }
     for (auto& balloon : state.balloons) {
@@ -1612,6 +1602,7 @@ bool setBalloonPaintCollider(SceneData& scene, const std::string& object, const 
         // droplet system holds its own cooked grid.
         scene.rebuildSDFColliderAsync(created, runtime);
     }
+    mirrorBalloonEffectColliders(scene);   // no-op until configure prepared the effects
     scene.clearSimFrameCache();
     return true;
 }
@@ -1651,6 +1642,7 @@ bool loadBalloonPaintProject(SceneData& scene, const std::string& project_path,
 void resetBalloonPaintDemo() {
     // Called after project replacement too: never look old names up in a new scene.
     state = State{};
+    resetBalloonEffects();
     wetPaintGpu().clear();
 }
 
@@ -1658,6 +1650,11 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
     if (!state.prepared || state.scene != &scene || !std::isfinite(dt) || dt <= 0.0f) {
         return;
     }
+    // This tick's own cost, for the per-event breakdown (observeBalloonPaintFrame).
+    struct TickTimer {
+        Clock::time_point start = Clock::now();
+        ~TickTimer() { state.last_tick_ms = elapsedMs(start); }
+    } tick_timer;
     for (const char* name : kSystems) {
         if (!system(scene, name)) {
             state.running = false;
@@ -1678,6 +1675,7 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
             }
         }
         tickMotion(scene, std::min(dt, 0.25f));
+        tickBalloonEffects(scene, std::min(dt, 0.25f));
         if (state.clean_again_at >= 0.0 && state.seconds >= state.clean_again_at) {
             state.clean_again_at = -1.0;
             if (!wetPaintGpu().empty()) wetPaintGpu().resetPaint();
@@ -1690,7 +1688,7 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
             if (state.coverage_clock >= 0.5) {
                 state.coverage_clock = 0.0;
                 WetPaintCoverage coverage;
-                if (wetPaintGpu().coverage(scene, coverage)) {
+                if (wetPaintGpu().coverage(scene, coverage, /*allow_stale=*/true)) {
                     state.room_progress = std::clamp(coverage.ratio / goal, 0.0, 1.0);
                     while (state.milestones < 4 &&
                            state.room_progress >= 0.25 * (state.milestones + 1) - 1e-9) {
@@ -1738,6 +1736,14 @@ void observeBalloonPaintFrame(double simulation_ms, float frame_interval_seconds
     state.max_simulation_ms = std::max(state.max_simulation_ms, simulation_ms);
     const double interval = static_cast<double>(frame_interval_seconds) * 1000.0;
     state.max_frame_interval_ms = std::max(state.max_frame_interval_ms, interval);
+    BalloonEffectsTimings fx_t;
+    double droplet_step_ms = 0.0;
+    if (state.scene) {
+        fx_t = balloonEffectsTimings(*state.scene);
+        for (const char* name : kSystems) {
+            if (auto* runtime = system(*state.scene, name)) droplet_step_ms += runtime->stats().total_ms;
+        }
+    }
     for (auto it = state.events.rbegin(); it != state.events.rend(); ++it) {
         auto& event = *it;
         // Windows may overlap: every event records its following three seconds.
@@ -1751,6 +1757,19 @@ void observeBalloonPaintFrame(double simulation_ms, float frame_interval_seconds
                                           wetPaintGpu().stats().last_tick_ms);
         event["frame_interval_ms_max"] = std::max(
             event["frame_interval_ms_max"].get<double>(), interval);
+        // Where a slow frame went (2026-11-18: a one-off ~30 ms spike after
+        // configure, source unknown). demo_tick = this file's tick incl. the
+        // effects (contacts / drop_trails / sparkles); droplet_step / effects_step =
+        // the particle systems' own step (stats total_ms); paint = wet paint.
+        const auto bump = [&event](const char* key, double value) {
+            event[key] = std::max(event.value(key, 0.0), value);
+        };
+        bump("demo_tick_ms_max", state.last_tick_ms);
+        bump("fx_contacts_ms_max", fx_t.contacts_ms);
+        bump("fx_drop_trails_ms_max", fx_t.drop_trails_ms);
+        bump("fx_sparkles_ms_max", fx_t.sparkles_ms);
+        bump("effects_step_ms_max", fx_t.step_ms);
+        bump("droplet_step_ms_max", droplet_step_ms);
         const uint64_t dropped = wetPaintGpu().stats().sources_dropped;
         const uint64_t initial = event["sources_dropped_start"].get<uint64_t>();
         event["sources_dropped"] = dropped >= initial ? dropped - initial : 0;

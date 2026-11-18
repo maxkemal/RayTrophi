@@ -123,6 +123,7 @@ public:
         destroyStaging(m_stagingUp);
         destroyStaging(m_stagingDown);
         for (auto& s : m_retiredStaging) destroyStaging(s);
+        for (auto& r : m_readbacks) destroyStaging(r.staging);
         if (m_copyCmdBuf) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
         for (VkCommandBuffer cb : m_cmdBufs)
             if (cb) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cb);
@@ -510,6 +511,93 @@ public:
     // containing downloads ends with one submit+fence covering uploads,
     // dispatches AND downloads; the downloaded host pointers are valid when
     // endTransferBatch() returns.
+    // ── Delayed readback ──────────────────────────────────────────────────────
+
+    uint64_t submitWithReadback(ComputeBufferHandle h, std::size_t size_bytes,
+                                std::size_t src_offset) override {
+        auto it = m_buffers.find(h.id);
+        if (it == m_buffers.end() || size_bytes == 0 || m_batchActive) return 0;
+        if (src_offset + size_bytes > it->second.size) return 0;
+        ReadbackSlot* slot = nullptr;
+        for (auto& r : m_readbacks) {
+            if (r.ticket == 0) { slot = &r; break; }
+        }
+        // A consumer that dropped its ticket (layout rebuilt, context changed)
+        // never collects it: reuse the oldest slot whose copy has completed.
+        if (!slot) {
+            for (auto& r : m_readbacks) {
+                if (r.serial <= m_completedSerial && (!slot || r.ticket < slot->ticket)) slot = &r;
+            }
+        }
+        if (!slot) return 0;   // every slot still queued: the caller synchronizes
+        slot->ticket = 0;
+        if (slot->staging.cap < size_bytes) {
+            // Free slot = its last copy was collected (fence passed), so the
+            // old buffer is not referenced by anything queued.
+            destroyStaging(slot->staging);
+            const std::size_t cap = std::max<std::size_t>(size_bytes, 4096);
+            Staging s;
+            if (!createStagingBuffer(cap, /*for_download=*/true, s.buf, s.mem)) return 0;
+            if (vkMapMemory(m_device, s.mem, 0, cap, 0, &s.mapped) != VK_SUCCESS) {
+                vkDestroyBuffer(m_device, s.buf, nullptr);
+                vkFreeMemory(m_device, s.mem, nullptr);
+                return 0;
+            }
+            s.cap = cap;
+            slot->staging = s;
+        }
+        if (!ensureRecording()) return 0;
+        recordDownloadBarrier();
+        VkBufferCopy region{ src_offset, 0, static_cast<VkDeviceSize>(size_bytes) };
+        vkCmdCopyBuffer(m_cmdBuf, it->second.buffer, slot->staging.buf, 1, &region);
+        // Make the transfer write visible to the host read after the fence.
+        VkMemoryBarrier mb{};
+        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+        vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
+                             0, 1, &mb, 0, nullptr, 0, nullptr);
+        // Timestamps read their one query pool after the fence (synchronize);
+        // with them on, this is the old synchronous readback.
+        if (m_timestampsEnabled) {
+            synchronize();
+            slot->serial = m_submitSerial;
+        } else {
+            submitRecordingAsync();
+            slot->serial = m_inFlightSerial;
+        }
+        slot->size = size_bytes;
+        slot->ticket = ++m_nextReadbackTicket;
+        return slot->ticket;
+    }
+
+    bool collectReadback(uint64_t ticket, void* data, std::size_t size_bytes, bool wait) override {
+        if (ticket == 0 || !data) return false;
+        ReadbackSlot* slot = nullptr;
+        for (auto& r : m_readbacks) {
+            if (r.ticket == ticket) { slot = &r; break; }
+        }
+        if (!slot) return false;
+        if (slot->serial > m_completedSerial) {
+            // Only one submission is ever in flight, and this serial was
+            // submitted: it is that one.
+            if (!m_inFlight) return false;
+            if (!wait && vkGetFenceStatus(m_device, m_fences[m_inFlightSlot]) != VK_SUCCESS) return false;
+            waitInFlight();
+            releaseStagingIfIdle();
+            if (slot->serial > m_completedSerial) return false;
+        }
+        std::memcpy(data, slot->staging.mapped, std::min(size_bytes, slot->size));
+        slot->ticket = 0;
+        return true;
+    }
+
+    void submitAsync() override {
+        if (!m_recording || m_batchActive) return;
+        if (m_timestampsEnabled) synchronize();
+        else submitRecordingAsync();
+    }
+
     void beginTransferBatch() override {
         m_batchActive = true;
         m_batchHasUploads = false;
@@ -561,11 +649,13 @@ public:
             si.commandBufferCount   = 1;
             si.pCommandBuffers      = &m_cmdBuf;
             vkQueueSubmit(m_queue, 1, &si, m_fence);
+            const uint64_t serial = ++m_submitSerial;
             // The earlier slot was submitted first on the same queue; waiting
             // for it releases its pool and command buffer.
             waitInFlight();
             VulkanRT::waitFenceBounded(m_device, m_fence, "SimulationComputeVulkan.cpp:566");
             vkResetFences(m_device, 1, &m_fence);
+            m_completedSerial = std::max(m_completedSerial, serial);
 
             // Read the timestamps BEFORE the command buffer is reset: resetting it
             // does not clear the pool, but collecting here keeps the pool's lifetime
@@ -894,6 +984,24 @@ private:
     Staging         m_stagingUp;
     Staging         m_stagingDown;
     VkCommandBuffer m_copyCmdBuf    = VK_NULL_HANDLE;
+
+    // Submission serials: every vkQueueSubmit takes the next one; a fence wait
+    // marks its serial (and all earlier, same queue) completed.
+    uint64_t m_submitSerial    = 0;
+    uint64_t m_completedSerial = 0;
+    uint64_t m_inFlightSerial  = 0;
+    // Delayed readback slots (submitWithReadback / collectReadback). Their own
+    // host-cached buffers, NOT the download staging: those cursors rewind on a
+    // full synchronize(), which the delayed path exists to avoid.
+    struct ReadbackSlot {
+        Staging     staging;
+        uint64_t    ticket = 0;   // 0 = free
+        uint64_t    serial = 0;   // submission that carries the copy
+        std::size_t size   = 0;
+    };
+    static constexpr std::size_t kReadbackSlots = 4;
+    std::array<ReadbackSlot, kReadbackSlots> m_readbacks{};
+    uint64_t m_nextReadbackTicket = 0;
 
     // Transfer batch state (beginTransferBatch/endTransferBatch).
     bool m_batchActive          = false;
@@ -1738,8 +1846,10 @@ private:
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &m_copyCmdBuf;
         vkQueueSubmit(m_queue, 1, &si, m_fence);
+        const uint64_t serial = ++m_submitSerial;
         VulkanRT::waitFenceBounded(m_device, m_fence, "SimulationComputeVulkan.cpp:1740");
         vkResetFences(m_device, 1, &m_fence);
+        m_completedSerial = std::max(m_completedSerial, serial);
     }
 
     // Returns true when a pair was actually opened (so the caller knows to
@@ -1811,6 +1921,7 @@ private:
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &m_cmdBuf;
         vkQueueSubmit(m_queue, 1, &si, m_fence);
+        m_inFlightSerial = ++m_submitSerial;
         m_inFlight = true;
         m_inFlightSlot = m_slot;
         m_slot = 1 - m_slot;
@@ -1831,6 +1942,20 @@ private:
         vkResetCommandBuffer(m_cmdBufs[slot], 0);
         vkResetDescriptorPool(m_device, m_descPools[slot], 0);
         m_inFlight = false;
+        m_completedSerial = std::max(m_completedSerial, m_inFlightSerial);
+    }
+
+    // Nothing recorded, nothing in flight: every staging region the recorded
+    // copies used has been consumed. The delayed-readback path never runs the
+    // full synchronize(), so without this the upload cursor only ever grew.
+    void releaseStagingIfIdle() {
+        if (m_recording || m_inFlight || m_batchActive) return;
+        for (const auto& pd : m_pendingDownloads) std::memcpy(pd.host, pd.src, pd.size);
+        m_pendingDownloads.clear();
+        for (auto& s : m_retiredStaging) destroyStaging(s);
+        m_retiredStaging.clear();
+        m_stagingUpCursor = 0;
+        m_stagingDownCursor = 0;
     }
 
     bool ensureRecording() {

@@ -1,5 +1,307 @@
 # NEXT BUILD CHECKS
 
+## Islak boya: gecikmeli istatistik + beklemesiz yayın (2026-11-18, Claude)
+
+> **CANLI 2026-11-18 (Player):** `rt_wet_paint_idle_ipc.py --player` **6/6** (`stats_delayed` +144,
+> `lost` +0, aygıt kopyası 35 → 1416, mod `device_copy`). Maliyet ölçümünde (ısınma sonrası) `paint` tepesi
+> **9.6 → 0.8–2.5 ms**, `sim_ms_max` **14.4–14.9 → 7.9–8.3 ms**. Efektler kapalıyken 5.0 ms. Artık en büyük
+> kalem `effects_step`: hepsi açıkken 5.5–5.7 ms, kapalıyken 1.9 ms (CPU efekt partikülleri, ~2.9k iz).
+> Gözle kontrol (madde 1, 4, 5) açık.
+
+**Durum:** YAZILDI, /Zs PASS (`WetPaintGpu.cpp`, `SimulationCompute.cpp`, `SimulationComputeVulkan.cpp`,
+`VulkanBackend.cpp`, 3 API .cpp), derlenmedi.
+★★ **TAM DERLEME:** iki yaygın başlık değişti. `SimulationCompute.h` arayüze 3 sanal metot ekledi (vtable),
+`Backend/VulkanBackend.h` ise `VulkanDevice` ve `VulkanBackendAdapter` üye düzenini değiştirdi. Artımlı
+derleme eski .obj bırakırsa çıkan erişim ihlali kod hatası DEĞİLDİR, önce temiz derle. Ayrıca
+`Paint/WetPaintGpu.h` ve `Api/RtApiPaintWet.h` değişti (ikişer alan).
+
+**Ne değişti:**
+- Tick artık sonunda `synchronize` YAPMIYOR. İşini istatistik kopyasıyla birlikte kuyruğa verip bir bilet
+  alıyor (`submitWithReadback`), istatistiği bir SONRAKİ tick'te okuyor (`collectReadback`).
+- Publish'te `c.synchronize()` yerine yalnız gönderim var (`submitAsync`).
+- `copyDeviceBufferToTexture` artık her kopyada `waitIdle` + fence beklemesi yapmıyor. Bir publish'in
+  kopyaları arka uç başına TEK komut arabelleğinde toplanıyor ve beklenmeden gönderiliyor. Sıralamayı tek
+  kuyruktaki bariyerler sağlıyor: önce gönderilen compute işinden sonra, sonraki karelerden önce.
+- Yan düzeltme (bekleme maskeliyordu): eski geçişler kopyayı (TRANSFER) değil COMPUTE aşamasını bekliyordu;
+  artık aşamalar açık yazılı.
+- Yeni sayaçlar: `stats_delayed`, `stats_readbacks_lost` (`paint.wet_status`, Python, overlay).
+
+1. Uygulama açılıyor, balon patlatınca boya duvarda görünüyor ve **kurudukça değişmeye devam ediyor**.
+   - Görünmüyorsa veya ilk lekeden sonra donuyorsa yayın kopyası ya hiç çalışmıyor ya da eski veriyi okuyor.
+2. `python scripts/test/rt_wet_paint_idle_ipc.py --player` (sonra Studio'da da) → **6/6**.
+   - Yeni 6. kontrol: ıslakken `stats_delayed` artar, `stats_readbacks_lost` +0, `publish_device_copies`
+     artar.
+   - `lost` > 0 ise kirli dikdörtgenler kayboluyor: boya bazı yerlerde ekrana hiç gelmez.
+3. `python scripts/test/rt_balloon_effects_cost_ipc.py --player` → patlamalı turlarda `paint` tepesi
+   (önce 9.6 ms) ve kare süresi düşmeli.
+   - Düşmediyse kalan bekleme simülasyonun kendi `endFrame` senkronu (`droplet_step`); bu iş ona dokunmadı.
+   - Ölçümü Player'da yap. Studio'da `SimulationClock::tick`, sim runtime varken her canlı karede
+     `waitForCompletion()` ile render'ı bekliyor (RuntimeSimulationClock.cpp ~96; Player saate render arka
+     ucu vermediği için orada bu bekleme yok). Studio'daki kazanç bu yüzden daha küçük görünebilir.
+4. ★ **Sinsi olan:** boyanın bir kare geç görünmesi normaldir, yani tamamı ~16 ms gecikir.
+   - Normal DEĞİL: kenarlarda kalıcı eski renk şeritleri, ya da mip'li dokularda uzaktan bakınca beyaz/eski
+     görünüm. Bunlar dikdörtgen kaybı ya da mip zinciri sırası demektir. Yakından ve uzaktan bak.
+5. 5–10 dk boyunca art arda patlat, proje değiştir ve geri dön.
+   - Device lost, `[DeviceFault]` logu ya da validation `SYNC-HAZARD` görürsen bariyer eksik demektir.
+   - Bu depoda device-lost geçmişi var; log yolu `RayTrophiStudiod\Release\Player\`.
+
+## Islak boya ıslakken: kapsama tick içine katlandı (2026-11-18, Claude)
+
+> **CANLI 2026-11-18 (Player):** `rt_wet_paint_idle_ipc.py` 5/5 (`coverage_in_tick` 0→5, IPC kapsaması
+> 140 675 texel). Patlamalı turlarda `demo_tick` **~11 → 0.1–1.2 ms**, sim_ms_max **21 → 14.4–14.9 ms**;
+> efektler açık/kapalı farkı artık ölçüm gürültüsü içinde (14.9 / 14.4). Kalan en büyük kalem `paint`
+> tepe 9.6 ms (ıslakken her kare senkron indirme, tek kuyruk) → 4. madde kararı.
+
+**Durum:** YAZILDI, /Zs PASS (6 .cpp), derlenmedi. ★ **Header yine değişti:** `Paint/WetPaintGpu.h`
+(`coverage(..., allow_stale)`, 2 özel üye, 1 istatistik) ve `Api/RtApiPaintWet.h` (1 alan); `Game/GameRuntime.cpp`
+tek satır (oyun oturumunun kapsama okuması `allow_stale`).
+**Kök (kod okuması):** Vulkan aygıtı TEK kuyruk açıyor (grafik+hesaplama ailesi, `queueCount = 1`,
+`VulkanDevice::createLogicalDevice`). Simülasyon bağlamındaki her `synchronize`/indirme, o an kuyrukta
+duran render karesini de bekler. Islakken iki bekleme vardı: ıslak boya tick'i (her kare, ~7 ms) ve
+oda hedefi kapsaması (saniyede 2, `demo_tick` ~11 ms). Kapsama artık periyodik okurlar için bir önceki
+ölçümü döndürür, ölçümü ise sonraki ıslak boya tick'i KENDİ indirmesi içinde yapar (ek bekleme yok).
+IPC `paint.wet_coverage` her zaman tam ölçüm.
+
+1. `python scripts/test/rt_wet_paint_idle_ipc.py --player` → **5/5** (5: ıslakken `coverage_in_tick` artar,
+   IPC kapsaması > 0).
+2. `python scripts/test/rt_balloon_effects_cost_ipc.py` → patlamalı satırlarda `demo_tick` ~11 ms'den
+   belirgin düşük (kalan: hareket + diğer).
+3. ★ Oda hedefi: boya yaptıkça `room_progress` artıyor ve kutlamalar geliyor; en fazla ~0.5 s gecikme
+   normal (bir önceki ölçüm). Hiç artmıyorsa tick içi ölçüm tetiklenmiyor (`coverage_in_tick` sabit).
+4. Kalan: ıslakken ıslak boya (~7–9.6 ms/kare). **Eşzamansız okuma TEK BAŞINA YETMEZ (kod okuması,
+   yazılmadı):** `WetPaintGpu::publish` kopyadan önce `c.synchronize()` çağırır ve
+   `VulkanBackendAdapter::copyDeviceBufferToTexture` HER kopyadan önce `m_device->waitIdle()` + tek
+   seferlik gönderim + fence bekler (VulkanBackend.cpp ~14795) — ıslakken her kare, kirli her yüzey ×
+   kanal. Bu bekleme `paint_ms`'ye GİRMEZ (render tarafında). Ayrıca: `SimulationWorld::executeStep`
+   sonundaki `endFrame()` bir şey kaydedilmişse eşitler; damlalar boştayken kaydedilmez, o yüzden
+   karenin ilk gerçek beklemesi ıslak boyanınki olur ve uçuştaki render karesini bekler (boşta
+   düzeltmesinden önceki 7–13 ms'nin kökü: shader geçişleri aktif olmayan karolarda hemen çıkıyor).
+   Doğru çözüm İKİ parça birlikte: (a) publish kopyaları render karesinin komut akışına bariyerle
+   kaydedilir, `waitIdle`/ayrı gönderim yok; (b) tick istatistiği bir kare geç okunur
+   (`SimulationCompute.h`: requestReadback/pollReadback; Vulkan arka ucunda `submitRecordingAsync` zaten
+   var) → TAM derleme. Render koduna dokunduğu için ayrı, planlı iş.
+
+
+## Islak boya boşta gerçekten boşta + kapsama önbelleği (2026-11-18, Claude)
+
+> **CANLI 2026-11-18 (Player):** kuru odada boşta tick **0.0–0.29 ms** (önce 7.4–13.1), kare hızı
+> **19.4 → 57.5 fps**; `event_sources` 0, kapsama önbelleği çalışıyor. İlk patlama sıçraması da GİTTİ
+> (ilk tur sim_ms 21.2 = kararlı durum; önce 57.6). Test 1'in ilk FAIL'i test hatasıydı (`ticks`
+> yalnız dispatch eden tick'leri sayar), düzeltildi. Islak boya varken hâlâ: `paint` 6–7.7 ms,
+> `demo_tick` ~11 ms (ıslakken kapsama önbelleklenemez) → 5. madde adayları geçerli.
+
+**Durum:** YAZILDI, /Zs PASS (5 .cpp), derlenmedi. ★ **Header değişti:** `Paint/WetPaintGpu.h` (3 özel üye
++ 3 istatistik alanı, ~9 TU) ve `Api/RtApiPaintWet.h` (3 alan) → iki hedefte artımlı ama geniş derleme;
+erişim ihlali görürsen önce bayat .obj (tam derleme). UV anahtarı farkı (`geometryKey`, başkasının
+commit'siz işi) dokunulmadı.
+**Ölçülen (taze Player, IPC):** hiçbir şey ıslak değilken (`active_tiles` 0) `last_tick_ms` 7.4–13.1 ms,
+kare hızı 19.4; tick başına 4 damga dispatch'i (16 556 / 4 140). **Kök:** olay kaydeden her damla
+sistemi parçacıksızken de "temas geliyor" sayılıyordu → boşta erken çıkış hiç tetiklenmiyordu: her karede
+stats yüklemesi + 4×LUT yüklemesi + 21 248 karo tick/resolve/kanal + synchronize + indirme.
+Düzeltme: sistem yalnız şimdi ya da önceki tick'te canlı parçacığı varsa kaynak. Kapsama ölçümü
+(oda hedefi saniyede 2 kez) boya değişmediyse önbellekten.
+
+1. Player: `python scripts/test/rt_wet_paint_idle_ipc.py --player` → **4/4** (kuru oda: tick'lerin
+   ≥ %90'ı boşta, boşta tick < 1 ms, `event_sources` 0, kapsama önbellekte).
+2. `python scripts/test/rt_balloon_effects_cost_ipc.py` → "all effects off" satırında `paint` ve
+   `demo_tick` düşmüş olmalı (önce 7.4 / 11.1 ms). Kare hızı (boşta) belirgin artmalı.
+3. ★ Boya hâlâ doğru: balon patlat → boya duvara geliyor, son damlalar da (parçacıklar öldükten sonraki
+   tick hâlâ damgalar). Kenarlarda eksik son damla lekesi = "önceki tick canlı" kuralı tutmuyor.
+4. ★ Oda hedefi: boya yaparken `room_progress` artıyor, kutlamalar geliyor (önbellek boya değişince
+   bozulur: her dispatch eden tick sayacı artırır). Kutlama hiç gelmiyorsa önbellek bayat dönüyor.
+5. Kalan bilinen: boya ISLAKKEN (patlamadan sonra ~12 s) tick yine tam maliyet (~7 ms). Sıradaki
+   adaylar: her tick 4 sistemin LUT/lookup yeniden yüklemesi (değişmiyorsa önbellek), stats sıfırlama
+   yüklemesi, ve `geometryKey` (35 yüzeyin bütün köşe+UV toplamı, saniyede 2 kez, CPU).
+
+
+## Balon efektleri: GPU okuması tamamen söküldü (2026-11-18, Claude)
+
+> **CANLI 2026-11-18 (taze Player, 36 collider'lı sahne):** sparkle testi 8/8 (+2 SKIP), `fx_contacts`
+> 0.0 ms. Kararlı durum sim_ms_max: hepsi açık 23.3 / damla izi kapalı 23.5 / damla izi+kıvılcımı kapalı
+> 21.3 / efektsiz 20.7 → **efektlerin toplamı ≈ 2.6 ms.** İlk tur sıçraması (57.6 ms) HÂLÂ VAR ama
+> artık efektlerde değil: `paint` **49.2 ms**, `demo_tick` 32.5 ms (ilk kapsama ölçümü). Önceden bu ilk
+> bekleme `fx_tap`'in eşzamanlı okumasında görünüyordu; okuma kalkınca sıradaki eşitleyici (ıslak boya)
+> üstlendi. Kararlı durumda da efektlerden bağımsız: `demo_tick` ~11 ms, `paint` ~7.5 ms → sıradaki iş
+> ıslak boya + kapsama ölçümünün kuyruk beklemesi (WetPaintGpu, §1'de başka Claude satırı var).
+
+**Durum:** YAZILDI, /Zs PASS, derlenmedi (`Paint/BalloonEffects.cpp/.h`, `BalloonPaintDemo.cpp`).
+**Teşhis CANLI (taze Player, aşama dökümüyle):** ilk tur `fx_tap` **31.2 ms** (= ilk patlama sıçramasının
+TAMAMI); ısındıktan sonra da `fx_tap` her karede **~5 ms**. Damla olay tamponunun eşzamanlı okuması
+render ile paylaşılan kuyrukta kare işini bekliyordu. Söküldü: damla kıvılcımı artık gölge ikizlerin
+ömürsüz ölümünden (collider'da Die) çıkıyor; ıslak boyanın olay tamponuna işaret yazımı da yok.
+Aynı ölçümde dikkat çeken, BENİM OLMAYAN maliyetler: efektler kapalıyken bile `demo_tick` 9–11 ms ve
+`paint` 5–8 ms (aday: iki kez/sn kapsama ölçümü + ıslak boyanın kare başı `synchronize`+indirme —
+aynı kuyruk beklemesi).
+
+1. Taze Player: `python scripts/test/rt_balloon_effects_cost_ipc.py` → "(FIRST ...)" satırında
+   `contacts` < 1 ms ve sim_ms sıçraması YOK (önceden 42 ms / tap 31). "ALL ON" ile
+   "no drop trails/sparks" farkı ≤ ~2 ms.
+2. `python scripts/test/rt_balloon_sparkle_ipc.py --player` → 9: `drop_contacts_seen` > 0 (ikiz ölümü).
+3. Gözle: boya duvara değince kıvılcım hâlâ çıkıyor mu, doğru yerde mi (ikiz damlayla aynı yolu uçar;
+   kıvılcımlar boyanın biraz önünde/yanında çıkıyorsa yol sapması — söyle).
+4. ★ Sessiz: `drop_contacts_seen` hep 0 → ikizler collider'a çarpmıyor (ömür sonunda ölüyor):
+   `effects.systems.BalloonDropGhosts.colliders` damla collider sayısına eşit olmalı.
+
+## Balon efektleri: ilk patlama sıçraması teşhisi (2026-11-18, Claude)
+
+**Durum:** YAZILDI (yalnız ölçüm), /Zs PASS, derlenmedi (`Paint/BalloonEffects.cpp/.h`, `BalloonPaintDemo.cpp`).
+Her olay penceresi artık aşama tepelerini taşıyor: `demo_tick_ms_max`, `fx_tap_ms_max`,
+`fx_drop_trails_ms_max`, `fx_sparkles_ms_max`, `effects_step_ms_max` (efekt sistemlerinin adımı),
+`droplet_step_ms_max` (damla sistemlerinin adımı), `paint_ms_max` (ıslak boya, zaten vardı).
+Bilinen: sıçrama YENİ SÜREÇTE ilk configure + patlamalarda (~30 ms, 65–70 ms tepe); aynı süreçte
+sonraki turlarda yok — "no drop trails" önce koşunca da çıkmadı (süreç zaten ısınmıştı).
+
+1. Derle, Player'ı TAZE başlat (sahne açılsın), hiçbir şey patlatmadan:
+   `python scripts/test/rt_balloon_effects_cost_ipc.py` → ilk satır "(FIRST ...)" ve altındaki `stages`.
+2. Yorumu: sıçrama hangi aşamada ≈ 30 ms ise kök odur:
+   - `droplet_step` → damla GPU havuzunun ilk gerçek kullanımı (ısınma yeterli değil; pipeline/tampon).
+   - `paint` → ıslak boyanın ilk damga/LUT tamponu ayırması.
+   - `fx_tap` → ilk olay indirmesi (aktarım hazırlık tamponu ayırma).
+   - `effects_step` → aynalanan collider'ların CPU tarafı ilk kurulumu (SDF/BVH).
+   - hiçbiri ama `sim_ms` yüksek → saat içindeki diğer işler (Game::tickRuntime, diğer simler).
+3. ★ İlk satır da sıçramasızsa: sıçrama yalnız probe'un configure'u ile ilgili değil, uygulama
+   açılışından sonraki ilk patlamaya bağlı — 1'i Player açıldıktan sonra elle bir balon patlatıp tekrarla.
+
+## Balon efektleri: ölçüm düzeltmesi (2026-11-18, Claude) — ÖNCE BUNU OKU
+
+6. tur derlendi, Player'da ölçüldü (36 damla collider'lı sahne). **"Damla izi ~36 ms" bulgusu bir
+ÖLÇÜM ARTEFAKTIYDI:** probe'da "ALL ON" hep İLK koşuyordu ve configure sonrası ilk patlamalar ayara
+bakmaksızın ~30 ms tek seferlik sıçrama taşıyor. Sıra değiştirilince (aynı oturum, sim_ms_max):
+damla izi kapalı 34.2 / 32.9; hepsi açık 35.6 / 35.7 / 35.1; damla izi+kıvılcımı kapalı 33.1;
+efektsiz 26.8. Yani **damla izi (ikizlerle) ≈ +2 ms, damla kıvılcımı ≈ 0, kıvılcım+iz ≈ +6 ms**,
+efektler toplam ≈ +9 ms (tepe değer, ortalama değil). Eski `syncHostState` yolunun da gerçekte bu kadar
+pahalı olup olmadığı artık bilinmiyor (kod değişti); ikiz yolu yine de GPU okumasız ve doğru tercih.
+Probe artık önce bir ısınma turu koşup atıyor.
+
+Açık: configure sonrası ilk patlamadaki ~30 ms sıçramanın kaynağı ölçülmedi (aday: aynalanan
+collider'lar, profil güncellemesi, havuz büyümesi). Oyunda yükleme sonrası ilk patlamada takılma olarak
+görünür.
+
+## Balon efektleri 6. tur: damla izi GPU okumasız (gölge parçacık) (2026-11-18, Claude)
+
+**Durum:** YAZILDI, /Zs PASS, derlenmedi (`Paint/BalloonEffects.cpp/.h`, `BalloonPaintDemo.cpp`).
+**5. tur canlı ölçüm (Player, 3 balon, `rt_balloon_effects_cost_ipc.py`):** iz tavanı tuttu (tepe 2 653),
+sparkle testi 8/8; ama sim_ms_max hepsi açık **70.6** / damla izi kapalı 34.4 / damla izi+kıvılcımı
+kapalı 33.0 / efektsiz 26.6. **Kök: damla izi tek başına ~36 ms** — `syncHostState` her karede dört
+damla sisteminin GPU kinematiğini hosta aynalatıyordu. Söküldü. Yerine: her 8. damlaya görünmez CPU
+ikizi (`BalloonDropGhosts`, damlanın yerçekimi/sürtünmesi, aynalanan collider'da Die, `emitter_only`
+→ simüle olur, çizilmez; en fazla 600). İz ikizi izler. GPU'dan hiçbir şey okunmuyor.
+Not: 5. tur ölçümü AYRI bir sahnede (36 damla collider'lı) alındı, 4. turdaki 12 collider'lı sahne
+değil — turlar arası mutlak sayılar karşılaştırılamaz. Tur İÇİ A/B aynı sahnede, o yüzden "damla izi
+~36 ms" geçerli. O sahnede kalan ~6 ms (efektsiz 26.6 → 33.0) CPU collider testinin 36 collider'a karşı
+koşmasından olabilir; ölçümü hangi sahnede koştuğunu yaz.
+
+1. `python scripts/test/rt_balloon_effects_cost_ipc.py` → "ALL ON" ≈ "no drop trails" (fark ≤ 2 ms).
+2. `python scripts/test/rt_balloon_sparkle_ipc.py --player` → 8/8 + 10 (ikizler).
+3. Gözle: damla izleri damlaların ÜSTÜNDE mi? İkiz aynı fiziği uçar ama GPU ve CPU entegrasyonu
+   küçük fark yaratabilir; iz damladan ayrılıp yanında ayrı bir çizgi gibi gidiyorsa söyle.
+4. ★ Sessiz başarısızlık: iz duvarın içinden geçip devam ediyorsa ikizler collider'a çarpmıyor
+   (aynalama ikize gitmemiş: `effects.systems.BalloonDropGhosts.colliders` 36 olmalı).
+
+## Balon efektleri 5. tur: maliyet kesildi (2026-11-18, Claude)
+
+**Durum:** YAZILDI, /Zs PASS, derlenmedi (yalnız `Paint/BalloonEffects.cpp`).
+Kullanıcı: kare hızı yarıya indi, izler uzun kalıp sahneyi boğuyor. **Ölçüldü (Player, 3 balon birden,
+`scripts/test/rt_balloon_effects_cost_ipc.py`):** iz sistemi tepe **12 753** canlı parçacık; sim_ms_max
+hepsi açık 35.8 / damla izi kapalı 33.0 / damla izi+kıvılcımı kapalı 28.8 / bütün efektler kapalı 24.2 ms.
+Bunun üstüne her canlı parçacık her karede yeniden kurulan bir CPU billboard (bu sayılarda yok).
+Kesinti: kıvılcım izi 0.45→0.2 s (çarpma 0.25→0.12), damla izi 0.3→0.15 s ve 1024→256 nokta/tik,
+ışıltı %12→%5 ve 2.2–3.2→1.2–1.8 s (★ 4 parlama 3.3 Hz'e çıkardı → 2 parlamaya indi), çarpma 6→4,
+damla kıvılcımı 96→48/kare, iz sistemine **3000 canlı TAVAN**.
+
+1. `python scripts/test/rt_balloon_effects_cost_ipc.py` (Player açık) → "ALL ON" satırında
+   `BalloonSparkleTrails` tepe ≤ 3000; sim_ms_max "all effects off"a göre ≤ ~4 ms fazla.
+   Hâlâ büyük fark = maliyet iz sayısında değil, damla kıvılcımı/çarpma CPU collider testindedir
+   (kıvılcım sayısı `BalloonSparkles` tepesine bak).
+2. Gözle: kare hızı efektsiz hale yakın; izler kısa kuyruk, sahneyi örtmüyor; renkler 4b'deki gibi.
+3. `python scripts/test/rt_balloon_sparkle_ipc.py --player` → 10/10 (7: çarpma başına 4 kıvılcım).
+4. ★ Tavan sessizdir: yoğun finalde izler aniden "kesilirse" 3000 tavanına çarpıyordur — kusur değil,
+   bütçe; görsel olarak rahatsız ediyorsa söyle, dağıtım (örnekleme) ile çözülür.
+
+## Balon efektleri 4. tur: tam boya rengi + damla izi + konfeti solması (2026-11-18, Claude)
+
+> **4b (aynı gün):** emisyon 1 parıltıyı öldürdü (kullanıcı). Shader `rgb × emisyon` verir ve palet yan
+> kanalları ~0, yani Alpha karışımda emisyon tonu korur. Şimdi: baş/çarpma/damla kıvılcımı 3, kıvılcım
+> izi 2, damla izi 1.6 (yaşla 0.3×'e iner), ışıltı 1↔4 atımlı. Beyaz geri gelirse sorun karışım değil
+> emisyon kırpmasıdır: sarı (1, 0.7, 0)×3 kanal kırpınca limona kayar — o renkte düşür.
+
+**Durum:** YAZILDI, /Zs PASS, derlenmedi. `Paint/BalloonEffects.cpp`, `BalloonEffects.h` (yalnız bu
+modül + demo + panel include eder, yaygın header değil), `BalloonPaintDemo.cpp`, `GameDesignUI.cpp`.
+Kullanıcı: kıvılcımlar (damla kıvılcımları dahil) hep BEYAZ. **Kök:** Additive karışım + beyaz çekirdek +
+emisyon 3–5; aydınlık odada duvarın üstüne ışık eklenince her kanal doyuyor. Artık bütün kıvılcım/iz/
+ışıltı profilleri damlaların kendisi gibi: Alpha, emisyon 1, tam palet rengi (ışıltı opaklıkla parlar).
+
+1. Player: `python scripts/test/rt_balloon_sparkle_ipc.py --player` → **10/10** (10 = damla izi).
+2. Gözle (sahne aydınlık): kıvılcım, iz, damla kıvılcımı ve ışıltı damlayla AYNI renkte — beyaz yok.
+   Hâlâ beyazsa: proje eski profili taşıyordur ve `upsertProfile` güncellememiştir.
+3. Normal balon: damlaların arkasında kendi renginde kısa iz (her damlada değil, sabit bir alt küme;
+   `drop_trail_stride`). İzin kesik kesik görünmesi = dot aralığı; titremesi = alt küme değişiyor (hata).
+4. Konfeti: yere düşüp sekiyor, ömrünün son %20'sinde küçülerek kayboluyor (eskiden aniden yok oluyordu).
+   Konfetinin kıvılcımlardan yavaş düşmesi bilinçli (kağıt: düşük yerçekimi, yüksek sürtünme).
+5. ★ Maliyet: damla izi her karede damla sistemlerinden host durumu istiyor (`syncHostState`) — adım
+   konumları kendi fence'i içinde aynalar. Final kaskadında `events[*].simulation_ms_max`'ı
+   `drop_trails=false` ile karşılaştır. >2 ms fark = doğru çözüm hız yönünde uzayan GPU billboard
+   (`particle_viewport_pull.vert` + hız akışı; ParticleResidentDrawBuffers değişir → TAM derleme).
+6. ★ Sessiz başarısızlık: `drop_trail_spawned` artıyor ama iz görünmüyor → host konumları bayat
+   (aynalama tutmuyor); izler damlanın patlama noktasında birikir. Bunu gözle ayır.
+
+## Balon efektleri 3. tur: boya damlası kıvılcımı + efektler ayrı modülde (2026-11-18, Claude)
+
+**Durum:** YAZILDI, /Zs PASS (3 dosya), derlenmedi. ★ **YENİ .cpp:** `Paint/BalloonEffects.cpp`
+(+`include/Paint/BalloonEffects.h`) Studio vcxproj'a eklendi, Player vcxproj `gen_player_vcxproj.py` ile
+yeniden üretildi (fark yalnız bu dosya). LNK2001 `balloonSparkles`/`tickBalloonEffects` görürsen proje
+yeniden yüklenmemiştir. Konfeti/parıltı/iz/ışıltı/çarpma kodu demo dosyasından TAŞINDI (2140 → 1749 satır),
+davranış aynı olmalı. Shader/header-struct/ABI yok.
+
+**Damla kıvılcımı nasıl:** ıslak boya her karede damla olaylarını işleyip SAYACI sıfırlıyor, VERİ kalıyor.
+Demo her karenin başında (adımdan önce) her damla sisteminin ilk 64 olay yuvasını tek aktarım partisiyle
+indiriyor, okunanların üzerine işaret (flags 0xFFFFFFFF) yazıyor; sonraki adımın temasları yeni ön ek olur.
+Yalnız damla yaşarken. Örnek alma: patlamada kare başına yüzlerce temas olur, en fazla 96 kıvılcım/kare.
+**SDF:** aynalanan collider'lar damla collider'ının pişmiş ızgarasını PAYLAŞIR (önceki partide her kopya
+yeniden pişiriliyordu: 12 collider × 2 sistem gereksiz GPU pişirmesi).
+
+1. Player: `python scripts/test/rt_balloon_sparkle_ipc.py --player` → **9/9** (8 madde + 9 damla kıvılcımı).
+   9 FAIL ve `tap_status` "no device events" = damla sistemleri ıslak boyanın simülasyon bağlamında
+   değil (Player'da kendi bağlamı açıldıysa); `tap_unconsumed` artıyorsa ıslak boya sayacı sıfırlamıyor.
+2. Gözle: normal balon patlat → boyanın duvara değdiği yerlerde, damla renginde, yüzeyden dışarı sıçrayan
+   kısa kıvılcımlar (iz yok). Altın balonda önceki turun her şeyi de.
+3. ★ Boya hâlâ doğru mu: işaret yazımı ıslak boyanın işini bozmamalı. Patlamadan sonra boya lekesi
+   eskisi kadar dolu ve yerinde olmalı; `status.events[*].sources_dropped` artmamalı. Boyada eksik leke
+   ya da (0,0,0)'da garip leke = işaret yuvaları ıslak boyaya okunuyor (sayaç sıfırlanmadan yazılmış).
+4. Maliyet: damla yaşarken kare başına +2 küçük GPU aktarımı (≈12 KB) + bir `synchronize`. Final
+   kaskadında `events[*].simulation_ms_max`'ı `drop_sparks=0` ile karşılaştır; fark >1 ms ise rapor et.
+   Ayrı maliyet: efektlerin collider testi CPU'da (kıvılcım/konfeti ~6k parçacık × 12 collider) —
+   aynı A/B'de `sparkles=0` ile görünür.
+5. ★ Flaş: kaskad sırasında yüzlerce damla kıvılcımı aynı anda — ekran beyaza çalıyorsa `drop_sparks`
+   düşür (bütçe 96/kare sabit).
+
+### Önceki tur (2. tur) maddeleri hâlâ geçerli
+
+**Durum:** YAZILDI, /Zs PASS, derlenmedi. Yalnız `Paint/BalloonPaintDemo.cpp` (artımlı, Studio + Player).
+1. turda gözle: kıvılcım yalnız "zayıf beyaz kuyruk", çarpmada kıvılcım yok. **Kök:** efekt sistemleri
+billboard'un yanında RT örnek küresi olarak da çiziliyordu; köprü sisteme TEK malzeme verir (emitter yok
+→ varsayılan turuncu ×4 emisyon → beyaz) ve opak küre renkli billboard'u örtüyordu. Ayrıca baş 4.5 cm idi.
+Çarpma kıvılcımı 1. turda YOKTU (parti 2 diye ayrılmıştı).
+
+1. Derle, Player'da `python scripts/test/rt_balloon_sparkle_ipc.py --player` → **8/8**. Studio'da canlı
+   mod kapalıysa 3/4/7 SKIP yazar (1. turdaki Studio 5/6'nın sebebi buydu: demo saati yalnız canlı
+   modda ilerliyor, konfeti hiç düşmemişti → 4 boşuna geçmişti).
+   8 FAIL = `render_in_raytrace` hâlâ true (eski profil/kurulum), gözde yine beyaz küre görürsün.
+2. Gözle: altın balon → 11 cm'lik, beyazımsı çekirdekten **kendi rengine** soğuyan kıvılcımlar;
+   arkalarında aynı renkte 0.45 s iz; duvara/yere çarpanlardan 6'lık küçük kıvılcım yelpazesi;
+   havada yavaşça süzülüp dört kez parlayıp sönen ışıltı noktaları.
+3. Eski projede (1. turda kaydedilmiş) de yeni görünüm gelmeli: configure profilleri GÜNCELLER
+   (`upsertProfile`). Eski 4.5 cm kıvılcım görüyorsan güncelleme tutmamıştır.
+4. ★ Flaş güvenliği: ışıltı ~1.3–1.8 Hz, her nokta kendi fazında, birkaç piksel. Final sırasında
+   ekranda senkron "yanıp sönme" hissi varsa `glitterProfile` tepe değerlerini (5/4/3/2) düşür.
+5. ★ Sessiz başarısızlık: `effects.impacts` 0 kalıyor ama kıvılcımlar duvarlara çarpıyorsa tespit eşiği
+   (1.5 m/s) bu sahnede tutmuyor; sekme sonrası hız değişimi küçük demektir (sekme 0.35). Tersine
+   `impacts` havadaki kıvılcımlarda da artıyorsa (kıvılcım başına en fazla 2) eşik çok düşük.
+6. Maliyet: final sırasında `events[*].simulation_ms_max`. Kötü durum ~10k CPU parçacığı (iz + ışıltı).
+
+**Kalan:** boya DAMLALARININ çarpmasında kıvılcım hâlâ yok. Damlalar GPU'da ölüyor, olaylarını ıslak
+boya cihazda tüketiyor; kıvılcım için GPU alt-yayıcı gerekir (`sim_particle_collide.comp`, Codex panosu).
+
 ## Player paketi: iki sahne, ilk sahne açılışta, F6 seçici (2026-11-17, Claude)
 
 **Durum:** YAZILDI, /Zs PASS (`Core/PlayerMain.cpp` yalnız; header/struct/shader yok → Player'da
@@ -42,6 +344,44 @@ projesi önceliklidir); F6 liste, 1–9 veya tık ile açar. Geçiş = `rtapi::o
    zorlanıyordu). Studio da etkilenir: Studio'da bir sahne aç, viewport'ta fark OLMAMALI.
    ★ Ayrı ölçü aleti hatası: RT gölge KAPALIYKEN `main_pass` 0.00 raporlanıyor (prepass açık da olsa),
    ~4–10 ms hiçbir aşamaya yazılmıyor. Sessiz yanlış tablo — düzeltilmedi.
+
+## Balon geçirgenliği tek ayardan (2026-11-17 12:10, Claude)
+
+**Durum:** YAZILDI, /Zs PASS (`Paint/BalloonPaintDemo.cpp`, `UI/GameDesignUI.cpp`), derlenmedi.
+**Ölçüm (Studio):** 12 balon malzemesinin transmission'ı 0..1 dağınıktı (09 = 0 opak, 07 = 1 tam
+saydam). Kod sıfırlamıyor: 8 normal doğuşta değer korundu. Patlamış balon yerinde küçültüldüğü için
+düzenleme sırasında seçilemiyordu. Studio'da hepsi IPC ile 0.6'ya çekildi (KAYDETMEK kullanıcıda).
+**Yeni:** demo ayarı `transmission` (0..1, yoksa malzemelere dokunulmaz). Balon her doğduğunda
+renkle birlikte yazılır; yalnızca farklıysa (her yazım bir geri-al kaydı). Panel: Balloon demo →
+"Same translucency for all balloons" + "Transmission".
+
+1. Derle; Game Design → kutuyu işaretle, değeri ver, Save to project. Birkaç patlatmadan sonra 12
+   balonun hepsi aynı geçirgenlikte doğmalı (`material.get object_name=PaintBall_NN param=transmission`).
+2. Sürpriz (altın) balon metal olduğu için geçirgen GÖRÜNMEZ — beklenen, hata değil.
+
+## Zemin/tavan pikselli: uzatılmış küpün UV'si (2026-11-17 11:40, Claude)
+
+**Durum:** sahne düzeltmesi CANLI uygulandı (Studio, IPC; KAYDETMEK kullanıcıda); kod düzeltmesi
+YAZILDI, /Zs PASS, derlenmedi. Shader yok, header değişmedi.
+**Ölçüm:** zemin `Cube_1` 8.4×8.0 m, tavan `Cube_2` 9.9×13.1 m = ölçeklenmiş 2 m küp, 512 boya. Islak
+boya atlası = mesh'in kendi UV'si; küp haçında her yüz UV'nin 0.25×0.33'ü → üst yüz ~128×170 texel
+(~6 cm/texel), dokunun yarısı boş. Normal "yok" görünmesi de bu: yükseklik eğimi 2 texel (~12 cm)
+üzerinden alınıyor, boya damlası ondan küçük.
+**Yapılan (Studio'da):** iki yüzey ıslak boyadan çıkarıldı → `uv.unwrap` (2048, pad 8) → 2048'de geri
+eklendi, ayarlar geri yazıldı. Üst yüz şimdi ~670×670 texel (~1.25 cm/texel). ★ Ama unwrap ölçeksiz
+küpü açtı (her yüz eşit 0.106) — o da kod hatası:
+- `UV/UvService.cpp`: `uv.unwrap`/`uv.pack` xatlas'a artık DÜNYA konumlarını verir (project_view gibi);
+  sonuçta `atlas_world_scale: true`. Derlenince zemin/tavan unwrap'i tekrar edilirse üst yüz dokunun
+  ~yarısını alır (~1000+ texel).
+- `Paint/WetPaintGpu.cpp`: `geometryKey` UV'yi de içerir → UV değişince atlas kendiliğinden yeniden
+  pişirilir (önceden yalnız konum değişince).
+
+1. ŞİMDİ (derlemeden): Studio'da sahneyi KAYDET, Player'da aç. Zemin/tavan keskin mi, boya kabartısı
+   (normal) görünüyor mu. Bozuksa: zeminin taban dokusu desenliyse UV değişimi onu karıştırmış olabilir.
+2. Derledikten sonra: Studio'da Cube_1 seçili → UV Editor → Unwrap (ya da `uv.unwrap`). Sonuçta
+   `atlas_world_scale: true`, üst yüz UV alanı yan yüzlerden ÇOK büyük olmalı. Islak boya kendiliğinden
+   yeniden pişmeli (`paint.wet_status` → `geometry_rebakes` artar). ★ Sinsi: rebake olur ama boya
+   bulanık kalırsa yüzey çözünürlüğü 512'de kalmış demektir.
 
 ## KÖK BULUNDU: TLAS tanıtıcısı yeniden kullanılıyor + kayıptan sonra kilitlenme (2026-11-17 11:00, Claude)
 

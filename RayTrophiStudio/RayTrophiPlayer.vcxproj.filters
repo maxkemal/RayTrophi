@@ -1481,6 +1481,9 @@
     <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp">
       <Filter>source\src\MeshEdit</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonEffects.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp">
       <Filter>source\src\Paint</Filter>
     </ClCompile>

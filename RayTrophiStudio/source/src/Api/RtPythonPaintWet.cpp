@@ -108,6 +108,9 @@ void registerPaintWetBindings(py::module_& paint) {
         d["geometry_rebakes"] = s.geometry_rebakes;
         d["publish_mode"] = s.publish_mode; d["last_tick_ms"] = s.last_tick_ms;
         d["compute_context"] = s.compute_context;
+        d["idle_ticks"] = s.idle_ticks; d["coverage_cached"] = s.coverage_cached;
+        d["event_sources"] = s.event_sources; d["coverage_in_tick"] = s.coverage_in_tick;
+        d["stats_delayed"] = s.stats_delayed; d["stats_readbacks_lost"] = s.stats_readbacks_lost;
         d["splat"] = splatDict(s.splat);
         py::list surfaces;
         for (const auto& surface : s.surface_list) surfaces.append(surfaceDict(surface));

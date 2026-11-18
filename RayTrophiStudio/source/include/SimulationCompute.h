@@ -147,6 +147,28 @@ public:
     virtual void beginTransferBatch() {}
     virtual bool endTransferBatch() { return true; }
 
+    // Delayed readback (2026-11-18). submitWithReadback records a copy of
+    // [offset, offset + size) of `handle` after everything recorded so far,
+    // hands the work to the queue WITHOUT waiting and returns a ticket.
+    // collectReadback copies those bytes out once that submission completed:
+    // false while it still runs (wait = false) or for an unknown ticket; a
+    // ticket is collected once. Ticket 0 = unsupported or failed: the caller
+    // takes synchronize() + downloadBuffer() instead (the CPU/CUDA default).
+    // Why: on a single-queue device a synchronize() waits for the RENDER frame
+    // queued ahead of it; read one frame later the result is already there.
+    virtual uint64_t submitWithReadback(ComputeBufferHandle handle, std::size_t size_bytes,
+                                        std::size_t src_offset_bytes) {
+        (void)handle; (void)size_bytes; (void)src_offset_bytes;
+        return 0;
+    }
+    virtual bool collectReadback(uint64_t ticket, void* data, std::size_t size_bytes, bool wait) {
+        (void)ticket; (void)data; (void)size_bytes; (void)wait;
+        return false;
+    }
+    // Hands the recorded work to the queue without waiting for it (a consumer
+    // on the same queue orders itself with a barrier). Default: synchronize().
+    virtual void submitAsync() { synchronize(); }
+
     // Returns the raw backend pointer for a buffer (CUDA device pointer, etc.) or
     // nullptr if unsupported. Lets a backend-aware caller interop directly.
     virtual void* nativeBufferPtr(ComputeBufferHandle handle) const {
@@ -260,6 +282,11 @@ public:
     void synchronize();
     void beginTransferBatch();
     bool endTransferBatch();
+    // See ISimulationComputeBackend::submitWithReadback.
+    uint64_t submitWithReadback(ComputeBufferHandle handle, std::size_t size_bytes,
+                                std::size_t src_offset_bytes = 0);
+    bool collectReadback(uint64_t ticket, void* data, std::size_t size_bytes, bool wait);
+    void submitAsync();
 
     void* nativeBufferPtr(ComputeBufferHandle handle) const;
     void* nativeDevice() const;

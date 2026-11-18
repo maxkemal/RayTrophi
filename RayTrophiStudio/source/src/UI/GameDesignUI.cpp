@@ -45,11 +45,17 @@ struct DemoDraft {
     std::string pop_sound;   // audio source id; empty = silent pops
     std::string surprise_sound;   // empty: the pop sound, brighter
     float surprise_chance = 0.1f;
+    int sparkles = 90;            // firework sparks per surprise pop / milestone burst, 0 = off
+    bool sparkle_trails = true;
+    float drop_sparks = 0.25f;
+    bool drop_trails = true;      // paint drops leave trails in their colour    // chance a sampled paint drop contact sparks, 0 = off
     float room_goal = 0.5f;              // 0 = no shared goal
     float finale_reset_seconds = 10.0f;  // 0 = no auto reset after the finale
     std::string celebrate_sound;
     float float_amplitude = 0.08f;   // m, 0 = still
     float drift_speed = 0.12f;       // m/s, 0 = no wandering
+    bool set_transmission = false;   // off = the balloon materials keep their own value
+    float transmission = 0.6f;
     bool spawn_auto = true;          // from the paint surfaces
     float spawn_min[3] = {-3.0f, 0.8f, -3.0f};
     float spawn_max[3] = {3.0f, 2.8f, 2.8f};
@@ -105,11 +111,17 @@ void syncDraft(const json& config) {
     draft.pop_sound = config.value("pop_sound", std::string());
     draft.surprise_sound = config.value("surprise_sound", std::string());
     draft.surprise_chance = config.value("surprise_chance", 0.1f);
+    draft.sparkles = config.value("sparkles", 90);
+    draft.sparkle_trails = config.value("sparkle_trails", true);
+    draft.drop_sparks = config.value("drop_sparks", 0.25f);
+    draft.drop_trails = config.value("drop_trails", true);
     draft.room_goal = config.value("room_goal", 0.5f);
     draft.finale_reset_seconds = config.value("finale_reset_seconds", 10.0f);
     draft.celebrate_sound = config.value("celebrate_sound", std::string());
     draft.float_amplitude = config.value("float_amplitude", 0.08f);
     draft.drift_speed = config.value("drift_speed", 0.12f);
+    draft.set_transmission = config.contains("transmission");
+    draft.transmission = config.value("transmission", 0.6f);
     draft.spawn_auto = !config.contains("spawn_min");
     if (!draft.spawn_auto && config["spawn_min"].is_array() && config["spawn_max"].is_array()) {
         for (int k = 0; k < 3; ++k) {
@@ -144,6 +156,10 @@ json draftConfig() {
         config["surprise_sound"] = draft.surprise_sound;
     }
     config["surprise_chance"] = draft.surprise_chance;
+    config["sparkles"] = std::clamp(draft.sparkles, 0, 400);
+    config["sparkle_trails"] = draft.sparkle_trails;
+    config["drop_sparks"] = std::clamp(draft.drop_sparks, 0.0f, 1.0f);
+    config["drop_trails"] = draft.drop_trails;
     // Below the valid minimum means off, never an out-of-range config.
     config["room_goal"] = draft.room_goal < 0.05f ? 0.0f : draft.room_goal;
     config["finale_reset_seconds"] =
@@ -153,6 +169,9 @@ json draftConfig() {
     }
     config["float_amplitude"] = draft.float_amplitude;
     config["drift_speed"] = draft.drift_speed;
+    if (draft.set_transmission) {
+        config["transmission"] = draft.transmission;
+    }
     if (!draft.spawn_auto) {
         // Keep at least the 0.2 m the core requires on every axis.
         json mn = json::array(), mx = json::array();
@@ -363,6 +382,15 @@ void drawPalette(const json& demo_status) {
         if (!draft.colors.empty()) ImGui::SameLine();
         if (ImGui::Button("+##add_colour")) draft.colors.push_back({1.0f, 0.05f, 0.4f});
     }
+    ImGui::Checkbox("Same translucency for all balloons", &draft.set_transmission);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Every balloon has its own material (its colour changes), so a\n"
+                          "hand-edited value drifts between them. On: the demo writes this\n"
+                          "transmission on each balloon when it appears.");
+    }
+    if (draft.set_transmission) {
+        ImGui::SliderFloat("Transmission", &draft.transmission, 0.0f, 1.0f, "%.2f");
+    }
     if (ImGui::IsItemHovered() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Linear colour (as material base colour). Right-click a colour to remove it.\n"
                           "Keep other channels near 0 for vivid paint; overlapping splats blend.");
@@ -489,6 +517,20 @@ void drawDemo(const std::string& selected_object, const std::vector<std::string>
     if (draft.surprise_chance > 0.0f) {
         drawSoundPicker("Surprise sound", draft.surprise_sound, "Pop sound, brighter");
     }
+    ImGui::SliderInt("Sparkles", &draft.sparkles, 0, 400);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Firework sparks per surprise pop and per milestone burst (0 = off).\n"
+                          "They fade slowly (never flash) and bounce off the room like the confetti.");
+    }
+    if (draft.sparkles > 0) {
+        ImGui::Checkbox("Sparkle trails", &draft.sparkle_trails);
+    }
+    ImGui::Checkbox("Paint drop trails", &draft.drop_trails);
+    ImGui::SliderFloat("Paint drop sparks", &draft.drop_sparks, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Sparks where paint drops land (0 = off): chance per sampled contact.\n"
+                          "Up to 64 contacts per droplet system are sampled each frame.");
+    }
     ImGui::SeparatorText("Floating");
     ImGui::SliderFloat("Bob height (m)", &draft.float_amplitude, 0.0f, 0.5f, "%.2f");
     ImGui::SliderFloat("Drift speed (m/s)", &draft.drift_speed, 0.0f, 1.0f, "%.2f");
@@ -578,6 +620,16 @@ void drawSection(const std::string& selected_object) {
     }
     rtapi::GameDesignInfo design;
     if (rtapi::getGameDesign(design).ok) {
+        const std::string missing_surface = "flat paint surface not found: ";
+        if (last_error.rfind(missing_surface, 0) == 0) {
+            const auto object = last_error.substr(missing_surface.size());
+            auto* context = rtapi::boundContext();
+            if (context && (context->scene.isEditorPendingDeleteObjectName(object) ||
+                            !context->scene.getFlatNodeMesh(object))) {
+                // The shared service has removed this obsolete registration.
+                last_error.clear();
+            }
+        }
         if (design.pending) {
             ImGui::TextDisabled("Loading the project's game design...");
         } else if (!design.status.empty()) {

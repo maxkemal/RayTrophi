@@ -86,6 +86,12 @@ struct WetPaintStatusInfo {
     std::string publish_mode;
     std::string compute_context;   // simulation | own | none
     double last_tick_ms = 0.0;
+    uint64_t idle_ticks = 0;
+    uint64_t coverage_cached = 0;
+    uint32_t event_sources = 0;
+    uint64_t coverage_in_tick = 0;
+    uint64_t stats_delayed = 0;
+    uint64_t stats_readbacks_lost = 0;
     std::vector<WetPaintSurfaceRuntimeInfo> surface_list;
     WetPaintSplatInfo splat;
 };

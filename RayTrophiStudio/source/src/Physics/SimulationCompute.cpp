@@ -262,6 +262,27 @@ void SimulationComputeContext::synchronize() {
     }
 }
 
+uint64_t SimulationComputeContext::submitWithReadback(ComputeBufferHandle handle,
+                                                      std::size_t size_bytes,
+                                                      std::size_t src_offset_bytes) {
+    return backend_->submitWithReadback(handle, size_bytes, src_offset_bytes);
+}
+
+bool SimulationComputeContext::collectReadback(uint64_t ticket, void* data,
+                                               std::size_t size_bytes, bool wait) {
+    if (!transfer_probe_ || !wait) return backend_->collectReadback(ticket, data, size_bytes, wait);
+    const auto start = std::chrono::steady_clock::now();
+    const bool ok = backend_->collectReadback(ticket, data, size_bytes, wait);
+    ++transfer_probe_->synchronize_calls;
+    transfer_probe_->synchronize_ms +=
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    return ok;
+}
+
+void SimulationComputeContext::submitAsync() {
+    backend_->submitAsync();
+}
+
 void SimulationComputeContext::beginTransferBatch() {
     backend_->beginTransferBatch();
 }

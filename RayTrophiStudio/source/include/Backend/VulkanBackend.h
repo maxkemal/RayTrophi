@@ -1061,7 +1061,16 @@ public:
      * @brief End recording and submit commands  
      */
     void endSingleTimeCommands(VkCommandBuffer cmdBuf);
-    
+
+    /**
+     * @brief Submit without waiting. The command buffer and its fence are
+     * freed by a later call once the fence signalled (or by waitIdle/shutdown).
+     * Only for work that orders itself with barriers against the single queue
+     * (GPU wet paint publish, 2026-11-18): nothing here waits for it.
+     */
+    bool endSingleTimeCommandsAsync(VkCommandBuffer cmdBuf);
+    void reclaimAsyncCommands(bool wait);
+
     /**
      * @brief Dispatch compute shader
      */
@@ -1718,6 +1727,11 @@ private:
     bool m_simAtomicFloatEnabled = false;
     bool m_simFloat64Enabled = false;
     VkCommandPool m_commandPool = VK_NULL_HANDLE;
+    struct AsyncCommandSubmit {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+    };
+    std::vector<AsyncCommandSubmit> m_asyncSubmits;   // endSingleTimeCommandsAsync
     VkDescriptorPool m_descriptorPool = VK_NULL_HANDLE;
     
     // Debug
@@ -2279,6 +2293,15 @@ public:
     int copyDeviceBufferToTexture(const Texture* texture, void* vkDevice, void* vkBuffer,
                                   uint64_t bufferOffset, uint32_t bufferRowTexels,
                                   int32_t x, int32_t y, uint32_t w, uint32_t h);
+    // Copies between begin/end go into ONE command buffer, submitted without
+    // waiting: barriers order it after the compute work queued before it and
+    // before the frames queued after it (single queue). Before 2026-11-18 every
+    // copy did waitIdle + submit + fence wait, i.e. waited for the frame in
+    // flight once per surface and plane. The compute writer must have
+    // SUBMITTED its work before endDeviceTextureCopies (SimulationComputeContext
+    // ::submitAsync). A copy outside a batch is a batch of one.
+    void beginDeviceTextureCopies();
+    void endDeviceTextureCopies();
 
 private:
     // Records mip 1..N regeneration into `cmd` for paint-style partial
@@ -2290,6 +2313,10 @@ private:
     // for color-aspect 2D images created with TRANSFER_SRC + TRANSFER_DST +
     // SAMPLED usage flags (uploadTexture2D's mip-chain path).
     void regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd, const VulkanRT::ImageHandle& img);
+    // Open device texture copy batch (begin/endDeviceTextureCopies); the
+    // command buffer is begun at its first copy.
+    bool m_textureCopyBatchOpen = false;
+    VkCommandBuffer m_textureCopyCmd = VK_NULL_HANDLE;
 
 public:
     // Material State Field bridge: the scene layer installs a resolver that maps

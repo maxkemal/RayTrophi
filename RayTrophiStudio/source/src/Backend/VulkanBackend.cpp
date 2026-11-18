@@ -1188,6 +1188,7 @@ void VulkanDevice::shutdown() {
         m_activeDescriptorSets.clear();
 
         if (m_descriptorPool) vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr);
+        reclaimAsyncCommands(true);   // the device is idle: all signalled
         if (m_commandPool) vkDestroyCommandPool(m_device, m_commandPool, nullptr);
 
         // The process-wide shared mesh compute backend (subdivision, CC device-resident)
@@ -2782,6 +2783,55 @@ void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmdBuf) {
     if (m_rayGpuTiming) m_rayGpuTiming->endHostWait(timingWait);
     vkDestroyFence(m_device, submitFence, nullptr);
     vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
+}
+
+bool VulkanDevice::endSingleTimeCommandsAsync(VkCommandBuffer cmdBuf) {
+    if (cmdBuf == VK_NULL_HANDLE || !m_device || !m_computeQueue) return false;
+    reclaimAsyncCommands(false);
+    vkEndCommandBuffer(cmdBuf);
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &cmdBuf;
+    VkFence fence = VK_NULL_HANDLE;
+    if (vkCreateFence(m_device, &fenceInfo, nullptr, &fence) != VK_SUCCESS) {
+        // No fence to reclaim it by: the old synchronous path.
+        vkQueueSubmit(m_computeQueue, 1, &submitInfo, VK_NULL_HANDLE);
+        vkQueueWaitIdle(m_computeQueue);
+        vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
+        return true;
+    }
+    if (reportVulkanDeviceFailure(vkQueueSubmit(m_computeQueue, 1, &submitInfo, fence),
+                                  "endSingleTimeCommandsAsync/vkQueueSubmit") != VK_SUCCESS) {
+        vkDestroyFence(m_device, fence, nullptr);
+        vkFreeCommandBuffers(m_device, m_commandPool, 1, &cmdBuf);
+        return false;
+    }
+    m_asyncSubmits.push_back({cmdBuf, fence});
+    return true;
+}
+
+void VulkanDevice::reclaimAsyncCommands(bool wait) {
+    if (!m_device) { m_asyncSubmits.clear(); return; }
+    // A stalled queue must not grow this list without bound: past a handful
+    // the oldest is waited for (one frame's worth of copies per entry).
+    constexpr std::size_t kMaxPending = 8;
+    std::size_t kept = 0;
+    for (std::size_t i = 0; i < m_asyncSubmits.size(); ++i) {
+        AsyncCommandSubmit& s = m_asyncSubmits[i];
+        const bool must_wait = wait || (m_asyncSubmits.size() - i) > kMaxPending;
+        if (must_wait) {
+            VulkanRT::waitFenceBounded(m_device, s.fence, "VulkanBackend.cpp:reclaimAsyncCommands");
+        } else if (vkGetFenceStatus(m_device, s.fence) != VK_SUCCESS) {
+            m_asyncSubmits[kept++] = s;
+            continue;
+        }
+        vkDestroyFence(m_device, s.fence, nullptr);
+        vkFreeCommandBuffers(m_device, m_commandPool, 1, &s.cmd);
+    }
+    m_asyncSubmits.resize(kept);
 }
 
 // ========================================================================
@@ -14790,20 +14840,42 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
         return -1;
     }
 
-    // An in-flight frame may still sample this image; the layout change below
-    // must not race it (same rule as updateTexture2DRegion).
-    m_device->waitIdle();
-    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
-    if (cmd == VK_NULL_HANDLE) return 0;
-    // The compute queue finished writing the buffer (the simulation context
-    // synchronizes before publish); make the writes visible to the transfer.
-    VkMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toTransfer, 0, nullptr, 0, nullptr);
-    m_device->transitionImageLayout(cmd, img.image,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+    const bool own_batch = !m_textureCopyBatchOpen;
+    if (own_batch) beginDeviceTextureCopies();
+    if (m_textureCopyCmd == VK_NULL_HANDLE) {
+        m_textureCopyCmd = m_device->beginSingleTimeCommands();
+        if (m_textureCopyCmd == VK_NULL_HANDLE) {
+            if (own_batch) endDeviceTextureCopies();
+            return 0;
+        }
+        // The compute work that wrote the buffer was submitted earlier on this
+        // same queue: a barrier's first scope is every command submitted before
+        // it, so no fence wait is needed - only visibility for the transfer.
+        // ALL_COMMANDS also covers the mip chain's blits: their own barrier
+        // waits for fragment + ray tracing reads of the upper mips only.
+        VkMemoryBarrier toTransfer{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        toTransfer.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(m_textureCopyCmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &toTransfer, 0, nullptr, 0, nullptr);
+    }
+    VkCommandBuffer cmd = m_textureCopyCmd;
+    // Frames queued earlier may still sample this image. Before 2026-11-18 a
+    // waitIdle covered that; the barrier's first scope (ALL_COMMANDS, every
+    // earlier submission on the single queue) does the same on the GPU. Its
+    // second scope must name TRANSFER: transitionImageLayout(..., GENERAL)
+    // waits for COMPUTE only, and the copy below could have raced it.
+    VkImageMemoryBarrier toGeneral{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toGeneral.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    toGeneral.srcAccessMask = 0;   // write-after-read: an execution dependency is enough
+    toGeneral.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toGeneral.image = img.image;
+    toGeneral.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &toGeneral);
     VkBufferImageCopy region{};
     region.bufferOffset = bufferOffset + (static_cast<uint64_t>(y) * bufferRowTexels + static_cast<uint64_t>(x)) * 4ull;
     region.bufferRowLength = bufferRowTexels;
@@ -14818,12 +14890,44 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
         // Same reason as updateTexture2DRegion: upper mips would keep the old fill.
         regenerateMipChainAfterPartialUpdate(cmd, img);
     } else {
-        m_device->transitionImageLayout(cmd, img.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        // Explicit stages: transitionImageLayout(GENERAL -> ...) assumes a
+        // COMPUTE writer, and this one is the TRANSFER above.
+        VkImageMemoryBarrier toRead = toGeneral;
+        toRead.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             0, 0, nullptr, 0, nullptr, 1, &toRead);
     }
-    m_device->endSingleTimeCommands(cmd);
+    if (own_batch) endDeviceTextureCopies();
     m_interactiveViewport.dirty = true;
     return 1;
+}
+
+void VulkanBackendAdapter::beginDeviceTextureCopies() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (m_textureCopyBatchOpen) return;
+    m_textureCopyBatchOpen = true;
+    m_textureCopyCmd = VK_NULL_HANDLE;   // begun at the first copy
+}
+
+void VulkanBackendAdapter::endDeviceTextureCopies() {
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+    if (!m_textureCopyBatchOpen) return;
+    m_textureCopyBatchOpen = false;
+    VkCommandBuffer cmd = m_textureCopyCmd;
+    m_textureCopyCmd = VK_NULL_HANDLE;
+    if (cmd == VK_NULL_HANDLE || !m_device) return;
+    // Every later frame, in any stage (raster fragment, ray tracing, compute),
+    // reads the new texels and mips: one global dependency for the batch (the
+    // mip chain's own closing barrier names fragment + ray tracing only).
+    VkMemoryBarrier toFrames{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+    toFrames.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toFrames.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                         0, 1, &toFrames, 0, nullptr, 0, nullptr);
+    m_device->endSingleTimeCommandsAsync(cmd);
 }
 
 void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& lights) {

@@ -144,6 +144,7 @@ Result clearWetPaintSurfaces() {
 
 Result getWetPaintStatus(WetPaintStatusInfo& out) {
     if (!g_ctx) return notBound();
+    if (!renderJobActive()) Paint::reconcileGameDesign(g_ctx->scene);
     const Paint::WetPaintGpu& paint = Paint::wetPaintGpu();
     const Paint::WetPaintStats& s = paint.stats();
     out = WetPaintStatusInfo{};
@@ -171,6 +172,12 @@ Result getWetPaintStatus(WetPaintStatusInfo& out) {
     out.publish_mode = s.publish_mode;
     out.compute_context = s.compute_context;
     out.last_tick_ms = s.last_tick_ms;
+    out.idle_ticks = s.idle_ticks;
+    out.coverage_cached = s.coverage_cached;
+    out.event_sources = s.event_sources;
+    out.coverage_in_tick = s.coverage_in_tick;
+    out.stats_delayed = s.stats_delayed;
+    out.stats_readbacks_lost = s.stats_readbacks_lost;
     for (const auto& surface : paint.surfaces()) out.surface_list.push_back(fromCore(surface));
     const Paint::WetPaintSplatSettings& sp = paint.splatSettings();
     out.splat.consume_particles = sp.consume_particles;
@@ -297,6 +304,7 @@ Result wetPaintDemoCommand(const std::string& operation, const std::string& conf
     try {
         nlohmann::json output;
         std::string error;
+        if (!renderJobActive()) Paint::reconcileGameDesign(g_ctx->scene);
         if (!Paint::balloonPaintCommand(g_ctx->scene, operation,
                                         nlohmann::json::parse(config_json), output, error)) {
             return Result::fail(error);
@@ -312,6 +320,7 @@ Result getGameDesign(GameDesignInfo& out) {
     if (!g_ctx) {
         return notBound();
     }
+    if (!renderJobActive()) Paint::reconcileGameDesign(g_ctx->scene);
     out.design_json = Paint::saveGameDesign().dump();
     out.pending = Paint::gameDesignPending();
     out.status = Paint::gameDesignStatus();

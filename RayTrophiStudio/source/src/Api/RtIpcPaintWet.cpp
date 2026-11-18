@@ -166,6 +166,9 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
                         {"geometry_rebakes", s.geometry_rebakes},
                         {"publish_mode", s.publish_mode}, {"last_tick_ms", s.last_tick_ms},
                         {"compute_context", s.compute_context},
+                        {"idle_ticks", s.idle_ticks}, {"coverage_cached", s.coverage_cached},
+                        {"event_sources", s.event_sources}, {"coverage_in_tick", s.coverage_in_tick},
+                        {"stats_delayed", s.stats_delayed}, {"stats_readbacks_lost", s.stats_readbacks_lost},
                         {"splat", splatJson(s.splat)}, {"surfaces", surfaces}};
         });
         return true;

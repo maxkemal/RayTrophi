@@ -201,7 +201,7 @@ void tickRuntime(SceneData &scene, double dt) {
     if (coverage_time >= 0.5 && !Paint::wetPaintGpu().empty()) {
         coverage_time = 0.0;
         Paint::WetPaintCoverage coverage;
-        if (Paint::wetPaintGpu().coverage(scene, coverage)) {
+        if (Paint::wetPaintGpu().coverage(scene, coverage, /*allow_stale=*/true)) {
             last_coverage = coverage.ratio;
         }
     }

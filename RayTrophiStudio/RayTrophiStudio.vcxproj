@@ -2255,6 +2255,7 @@
     <ClCompile Include="source\src\Api\RtPythonGame.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonEffects.cpp" />
     <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp" />
     <ClCompile Include="source\src\Paint\GameDesign.cpp" />
     <ClCompile Include="source\src\Api\RtApiPaintWet.cpp" />
