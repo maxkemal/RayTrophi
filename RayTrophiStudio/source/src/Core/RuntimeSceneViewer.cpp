@@ -1,5 +1,8 @@
 #include <sstream>
 #include "Core/RuntimeSceneViewer.h"
+#ifdef RT_PLAYER
+#include "Core/RuntimeProjectHost.h"
+#endif
 #include "Audio/AudioRuntime.h"
 #include "Animation/RigPoseView.h"
 
@@ -388,6 +391,9 @@ rtapi::Result RuntimeSceneViewer::openProject(const std::string& path) {
 bool RuntimeSceneViewer::needsFrame() const {
     return scene_ready_ && backend_ &&
            (refresh_requested_ || backend_->needsViewportRender() || g_camera_dirty ||
+#ifdef RT_PLAYER
+            AppRuntime::playerVideoCardEnabled() ||
+#endif
             (rtapi::viewportCaptureEnabled() && !rtapi::viewportStatus().frame_available));
 }
 

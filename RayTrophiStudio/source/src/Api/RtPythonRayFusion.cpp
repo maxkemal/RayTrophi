@@ -1,3 +1,4 @@
+#include "Backend/PreviewBakeCounters.h"
 #include "RtPythonRayFusion.h"
 #include "RtPythonScreenGi.h"
 #include "RtPythonReflection.h"
@@ -42,6 +43,24 @@ void registerRayFusionBindings(pybind11::module_& root) {
         out["planned_rays_per_probe"] = s.planned_rays_per_probe;
         out["planned_probes_per_update"] = s.planned_probes_per_update;
         out["planned_rays_per_update"] = s.planned_rays_per_update;
+        return out;
+    });
+    module.def("bake_counters", [] {
+        auto& c = Backend::previewBakeCounters();
+        py::dict out;
+        out["sky_captures"] = c.sky_captures.load();
+        out["ibl_regenerations"] = c.ibl_regenerations.load();
+        out["probe_source_changes"] = c.probe_source_changes.load();
+        out["probe_invalidations"] = c.probe_invalidations.load();
+        out["probe_reconfigures"] = c.probe_reconfigures.load();
+        out["probe_soft_refreshes"] = c.probe_soft_refreshes.load();
+        out["trace_deferred"] = c.trace_deferred.load();
+        out["cause_sky"] = c.cause_sky.load();
+        out["cause_geometry"] = c.cause_geometry.load();
+        out["cause_instances"] = c.cause_instances.load();
+        out["cause_bounce"] = c.cause_bounce.load();
+        out["cause_producer_switch"] = c.cause_producer_switch.load();
+        out["last_traced"] = c.last_traced.load();
         return out;
     });
     module.def("scene_as", [] {

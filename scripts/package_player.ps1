@@ -35,11 +35,15 @@ param(
     ),
     # Display names for the F6 list, same order as -Scenes. Empty = file name.
     [string[]]$SceneNames = @('Boyama Atolyesi', 'Oyun Odasi'),
+    # Canonical shared output. Use other destinations only for explicit diagnostics.
     [string]$OutDir = 'dist\RayTrophiPlayer',
     [switch]$Zip,
     # Leave the scenes' embedded audio out (third-party clips without a
     # confirmed licence live there; see commit d1c1709a).
-    [switch]$NoSceneAudio
+    [switch]$NoSceneAudio,
+    [switch]$NoPerception,
+    [string]$BridgePython = 'tools\perception_bridge\.venv\Scripts\python.exe',
+    [string]$PoseModel = 'tools\perception_bridge\models\pose_landmarker.task'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +51,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $release = Join-Path $repo 'x64\Release'
 $exe = Join-Path $release 'RayTrophiPlayer.exe'
 $out = if ([System.IO.Path]::IsPathRooted($OutDir)) { $OutDir } else { Join-Path $repo $OutDir }
+$packageTarget = [IO.Path]::GetFullPath($out)
 $marker = '.raytrophi_player_package'
 $warnings = New-Object System.Collections.Generic.List[string]
 function Warn([string]$m) { $warnings.Add($m); Write-Warning $m }
@@ -60,13 +65,13 @@ if ((Test-Path $playerMain) -and (Get-Item $playerMain).LastWriteTime -gt $exeTi
 }
 if ($Scenes.Count -lt 1) { throw 'At least one scene is required.' }
 
-# Fresh output folder. Only a folder this script made earlier is removed.
-if (Test-Path $out) {
-    if (-not (Test-Path (Join-Path $out $marker))) {
-        throw "Output folder exists and is not a Player package: $out"
+# Assemble away from the active package. Preserve its runtime settings/tokens/logs.
+if (Test-Path -LiteralPath $packageTarget) {
+    if (-not (Test-Path -LiteralPath (Join-Path $packageTarget $marker))) {
+        throw "Output folder exists and is not a Player package: $packageTarget"
     }
-    Remove-Item -Recurse -Force $out
 }
+$out = $packageTarget + '.staging-' + [Guid]::NewGuid().ToString('N')
 New-Item -ItemType Directory -Force $out | Out-Null
 Set-Content -Path (Join-Path $out $marker) -Value "made by scripts/package_player.ps1 $(Get-Date -Format s)" -Encoding ascii
 
@@ -126,11 +131,20 @@ if ($redistRoot) {
 
 # --- 3. Shaders ------------------------------------------------------------------
 Copy-Item (Join-Path $release 'shaders') (Join-Path $out 'shaders') -Recurse
+# Shared locale catalogs are product resources; local language preferences are preserved.
+$localeSource = Join-Path $repo 'RayTrophiStudio/assets/i18n'
+if (-not (Test-Path -LiteralPath (Join-Path $localeSource 'locales.json'))) {
+    throw 'Missing interface language catalogs.'
+}
+New-Item -ItemType Directory -Force (Join-Path $out 'assets') | Out-Null
+Copy-Item -LiteralPath $localeSource -Destination (Join-Path $out 'assets/i18n') -Recurse -Force
+
 
 # --- 4. Scenes -------------------------------------------------------------------
 $sceneDir = Join-Path $out 'scenes'
 New-Item -ItemType Directory -Force $sceneDir | Out-Null
 $listEntries = @()
+$audioEntries = @()
 for ($i = 0; $i -lt $Scenes.Count; $i++) {
     $rtp = if ([System.IO.Path]::IsPathRooted($Scenes[$i])) { $Scenes[$i] } else { Join-Path $repo $Scenes[$i] }
     if (-not (Test-Path $rtp)) { throw "Scene not found: $rtp" }
@@ -150,10 +164,38 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
         if (Test-Path $p) { Copy-Item $p $dst }
         elseif ($suffix -in @('', '.bin')) { throw "Scene part missing: $p" }
     }
+    # World HDRI / sky overlay images saved next to the project (ProjectManager).
+    $envDir = Join-Path $src "${stem}_environment"
+    if (Test-Path $envDir) { Copy-Item $envDir (Join-Path $dst "${stem}_environment") -Recurse }
     $audio = Join-Path $src "${stem}_audio"
     if ((Test-Path $audio) -and -not $NoSceneAudio) {
         Copy-Item $audio (Join-Path $dst "${stem}_audio") -Recurse
         Warn "$file embeds audio from ${stem}_audio: check the clips' licence before giving this package to a customer."
+    }
+    if (-not $NoSceneAudio) {
+        $scene = Get-Content -LiteralPath $rtp -Raw | ConvertFrom-Json
+        foreach ($asset in $scene.audio.assets) {
+            if (-not $asset.path) { continue }
+            if ([IO.Path]::IsPathRooted($asset.path)) {
+                throw "Audio asset must be scene-relative before packaging: $file / $($asset.id)"
+            }
+            $audioFile = [IO.Path]::GetFullPath((Join-Path $dst $asset.path))
+            $sceneRoot = [IO.Path]::GetFullPath($dst).TrimEnd('\') + '\'
+            if (-not $audioFile.StartsWith($sceneRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Audio asset escapes its packaged scene: $file / $($asset.id)"
+            }
+            if (-not (Test-Path -LiteralPath $audioFile -PathType Leaf)) {
+                throw "Packaged audio asset missing: $file / $($asset.id) / $($asset.path)"
+            }
+            $sourceAudio = Join-Path $src $asset.path
+            $hash = (Get-FileHash -LiteralPath $audioFile -Algorithm SHA256).Hash
+            if ($hash -ne (Get-FileHash -LiteralPath $sourceAudio -Algorithm SHA256).Hash) {
+                throw "Packaged audio differs from source: $file / $($asset.id)"
+            }
+            $audioEntries += [ordered]@{
+                scene = $file; id = $asset.id; path = $asset.path; sha256 = $hash
+            }
+        }
     }
     $name = if ($i -lt $SceneNames.Count -and $SceneNames[$i]) { $SceneNames[$i] } else { $stem }
     $listEntries += [ordered]@{ name = $name; path = "scenes/$(Split-Path -Leaf $src)/$file" }
@@ -188,13 +230,76 @@ Requirements
 "@
 Set-Content -Path (Join-Path $out 'README.txt') -Value $readme -Encoding utf8
 
-# --- 6. Zip + report -----------------------------------------------------------
+# --- 6. External perception runtime (no Python link in Player) ------------------
+if (-not $NoPerception) {
+    $bridgeExe = if ([IO.Path]::IsPathRooted($BridgePython)) { $BridgePython } else { Join-Path $repo $BridgePython }
+    $modelFile = if ([IO.Path]::IsPathRooted($PoseModel)) { $PoseModel } else { Join-Path $repo $PoseModel }
+    if (-not (Test-Path -LiteralPath $bridgeExe)) { throw "Bridge Python missing: $bridgeExe" }
+    if (-not (Test-Path -LiteralPath $modelFile)) { throw "Pose model missing: $modelFile" }
+    & $bridgeExe (Join-Path $repo 'tools\perception_bridge\package_runtime.py') `
+        --output (Join-Path $out 'perception') --model $modelFile
+    if ($LASTEXITCODE -ne 0) { throw 'Perception runtime packaging/portable import validation failed.' }
+    Add-Content -LiteralPath (Join-Path $out 'README.txt') -Encoding utf8 -Value @"
+
+Perception runtime
+  perception\python\python.exe is a separate portable Python runtime.
+  Game scripts use perception\bridge\game_bridge.py (BridgeProcess context manager).
+  The worker requires --model and --calibration; --video replays an existing MP4.
+  Frames stay in memory. No recording or personnel panel is installed.
+  See perception\manifest.json for dependency versions and the model SHA-256.
+"@
+}
+
+# --- 7. Publish the complete package without deleting runtime-owned files ------
+$manifest = [ordered]@{
+    schema = 1
+    generated_at = (Get-Date -Format o)
+    canonical_output = 'dist/RayTrophiPlayer'
+    scene_audio = (-not $NoSceneAudio)
+    perception = (-not $NoPerception)
+    audio_assets = @($audioEntries)
+}
+$manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out 'package_manifest.json') -Encoding utf8
+if ($Zip) {
+    # Archive generated payload only, never the active package's local IPC tokens/logs.
+    $zipPath = "$packageTarget.zip"
+    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+    Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zipPath -CompressionLevel Optimal
+}
+New-Item -ItemType Directory -Force $packageTarget | Out-Null
+# Explicit lean-package switches must also work when refreshing an existing package.
+$excludedTargets = @()
+if ($NoPerception) { $excludedTargets += (Join-Path $packageTarget 'perception') }
+if ($NoSceneAudio) {
+    foreach ($entry in $listEntries) {
+        $scenePath = Join-Path $packageTarget $entry.path
+        $audioName = [IO.Path]::GetFileNameWithoutExtension($scenePath) + '_audio'
+        $excludedTargets += (Join-Path (Split-Path -Parent $scenePath) $audioName)
+    }
+}
+foreach ($excludedTarget in $excludedTargets) {
+    $resolved = [IO.Path]::GetFullPath($excludedTarget)
+    if (-not $resolved.StartsWith($packageTarget.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Excluded generated content is outside the package.'
+    }
+    if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
+}
+foreach ($item in Get-ChildItem -LiteralPath $out -Force) {
+    Copy-Item -LiteralPath $item.FullName -Destination $packageTarget -Recurse -Force
+}
+# The only recursive removal is this invocation's verified, generated staging tree.
+$stagePath = [IO.Path]::GetFullPath($out)
+if (-not $stagePath.StartsWith($packageTarget + '.staging-', [StringComparison]::OrdinalIgnoreCase) -or
+    -not (Test-Path -LiteralPath (Join-Path $stagePath $marker))) {
+    throw 'Refusing to remove an unverified package staging directory.'
+}
+Remove-Item -LiteralPath $stagePath -Recurse -Force
+$out = $packageTarget
+
+# --- 8. Zip + report -----------------------------------------------------------
 $size = (Get-ChildItem $out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB
 Write-Host ("Package: {0}  ({1:N1} MB, {2} DLLs, {3} scenes)" -f $out, $size, $localDlls.Count, $Scenes.Count)
 if ($Zip) {
-    $zipPath = "$out.zip"
-    if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
-    Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host ("Zip: {0}  ({1:N1} MB)" -f $zipPath, ((Get-Item $zipPath).Length / 1MB))
 }
 if ($warnings.Count -gt 0) {

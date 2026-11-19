@@ -54,6 +54,20 @@ layout(set=0,binding=10,std430) readonly buffer Colliders {GpuCollider colliders
 layout(set=0,binding=11) readonly buffer Sdf {float sdf[];};
 layout(set=0,binding=12,std430) buffer Events {CollisionEvent events[];};
 layout(set=0,binding=13) buffer Counter {uint counter[];};  // {count, overflow}
+layout(set=0,binding=14) readonly buffer SizeScale {float size_scale[];};
+
+// Event flags: bit 0 died here; bits 8..15 the drop's size_scale * 64
+// (0 = unknown, the CPU path); bits 16..31 the impact direction (unit
+// v_before, octahedral 8+8 bits). paint_wet.comp shapes the splat from these.
+uint packImpact(float size, vec3 v) {
+    uint q = uint(clamp(size * 64.0 + 0.5, 1.0, 255.0));
+    float l = length(v);
+    vec3 d = l > 1e-6 ? v / l : vec3(0.0, -1.0, 0.0);
+    d /= (abs(d.x) + abs(d.y) + abs(d.z));
+    vec2 o = d.z >= 0.0 ? d.xy : (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+    uvec2 b = uvec2(clamp(floor((o * 0.5 + 0.5) * 255.0 + 0.5), 0.0, 255.0));
+    return (q << 8u) | (b.x << 16u) | (b.y << 24u);
+}
 
 const uint PLANE_COLLIDER = 0xFFFFFFFEu;
 
@@ -286,7 +300,7 @@ void main() {
             e.speed = length(v_before);
             e.age_fraction = life > 0.0 ? clamp(age[id] / life, 0.0, 1.0) : 0.0;
             e.particle = uint(id);
-            e.flags = dies ? 1u : 0u;
+            e.flags = (dies ? 1u : 0u) | packImpact(size_scale[id], v_before);
             events[slot] = e;
         } else {
             atomicAdd(counter[1], 1u);

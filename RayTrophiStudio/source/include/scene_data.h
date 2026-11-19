@@ -10138,7 +10138,8 @@ public:
             if (p_sys) {
                 for (auto& coll : p_sys->colliders()) {
                     if (coll.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
-                        coll.source_name == bake.node_name) {
+                        coll.source_name == bake.node_name &&
+                        coll.sdf_bake_serial == bake.serial) {
                         coll.sdf_grid_data = std::move(bake.grid);
                         coll.sdf_origin = bake.origin;
                         coll.sdf_extents = bake.extents;

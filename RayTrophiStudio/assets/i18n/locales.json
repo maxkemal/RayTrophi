@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "locales": [
+    {
+      "code": "en",
+      "name": "English"
+    },
+    {
+      "code": "tr",
+      "name": "Türkçe"
+    }
+  ]
+}

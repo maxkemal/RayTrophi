@@ -166,3 +166,46 @@ docs/dev/grain_suite/
 
 # Player packages (scripts/package_player.ps1)
 /dist/
+
+# Demo scenes and the scripts tied to them stay LOCAL (user decision 2026-11-20):
+# the repository carries the Studio and Player code and the notes, not the
+# demo rooms. Only the application's default scene is published. Removed from
+# the index with `git rm --cached`; the files themselves stay on disk.
+/RayTrophiStudio/assets/scenes/*
+!/RayTrophiStudio/assets/scenes/default/
+/docs/dev/fixtures/balloon-paint-room/
+/scripts/scenes/
+# Measurement captures of the demo rooms (notes .md next to them are published).
+/docs/dev/GAME_*_2026_*.json
+/docs/dev/PLAYER_*_2026_*.json
+/docs/dev/GHOST_*_2026_*.json
+# Tests that open a demo scene or depend on its object names.
+/scripts/test/analyze_collider_meshes.py
+/scripts/test/check_pastel_workshop_asset.py
+/scripts/test/rt_balloon_birth_ipc.py
+/scripts/test/rt_balloon_collider_sound_ipc.py
+/scripts/test/rt_balloon_reset_size_ipc.py
+/scripts/test/rt_balloon_sparkle_ipc.py
+/scripts/test/rt_game_design_roundtrip_ipc.py
+/scripts/test/rt_game_paint_resolution_ipc.py
+/scripts/test/rt_game_scene_audit.py
+/scripts/test/rt_heavy_balloon_paint_ipc.py
+/scripts/test/rt_material_edit_cost_ipc.py
+/scripts/test/rt_player_balloon_paint_ipc.py
+/scripts/test/rt_player_balloon_pop_ipc.py
+/scripts/test/rt_player_game_settings_ipc.py
+/scripts/test/rt_player_operator_ipc.py
+/scripts/test/rt_player_paint_sides.py
+/scripts/test/rt_player_paint_startup_probe.py
+/scripts/test/rt_player_room_paint_probe.py
+/scripts/test/rt_player_wet_paint_channel_cost_ipc.py
+/scripts/test/rt_player_wet_paint_channels_ipc.py
+/scripts/test/rt_player_wet_paint_room_ipc.py
+/scripts/test/rt_room_authoring_regression.py
+/scripts/test/rt_room_expand_balloons.py
+/scripts/test/rt_room_goal_show_ipc.py
+/scripts/test/rt_studio_playtest_ipc.py
+/scripts/test/rt_surprise_balloon_ipc.py
+/scripts/test/rt_wet_paint_multislot_ipc.py
+/scripts/test/rt_wet_paint_rebake_ipc.py
+/scripts/test/rt_workshop_balloons_ipc.py

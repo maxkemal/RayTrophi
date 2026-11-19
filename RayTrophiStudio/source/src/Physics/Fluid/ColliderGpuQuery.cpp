@@ -1,4 +1,5 @@
 #include "Fluid/ColliderGpuQuery.h"
+#include "Fluid/ColliderMeshClosure.h"
 
 #include "Fluid/MatterGrainColliderBvh.h"
 #include "SurfaceMeshCache.h"
@@ -148,7 +149,9 @@ bool ColliderGpuQuery::query(SimulationComputeContext& compute, const void* key,
         constants.dims[r] = lattice.dims[r];
         constants.base[r] = lattice.base[r];
     }
-    constants.dims[3] = lattice.signed_distance ? 1 : 0;
+    // Open walls have no well-defined inside. Ray-parity signs on such a mesh
+    // can fill the room with a phantom solid. Keep its actual surface distance.
+    constants.dims[3] = lattice.signed_distance && colliderMeshHasClosedVolume(triangles) ? 1 : 0;
     constants.base[3] = static_cast<int32_t>(count);
     const ComputeBufferHandle buffers[] = {mesh->nodes, mesh->vertices, output_};
     ComputeDispatch cmd;

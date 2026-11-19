@@ -21,6 +21,9 @@
 #include "HittableInstance.h"
 #include "TriangleMesh.h"  // Flat/proxy: direct-mesh selection dereferences HitRecord.tri_mesh
 #include "Api/RtApi.h"   // GPU obje secimi (rtapi::pickObjectGpu)
+#include "Api/RtApiPaintWet.h"
+#include "Game/GameRuntime.h"
+#include <algorithm>
 #include "InstanceManager.h"
 #include "imgui.h"
 #include "ImGuizmo.h"
@@ -451,6 +454,25 @@ void SceneUI::handleMouseSelection(UIContext& ctx) {
                 hud_captured_mouse = false;
                 return;
             }
+        }
+
+        // Studio play test: a viewport click is game input, as in the Player -
+        // the balloon under the cursor pops (the same core call as the Player's
+        // left click and IPC paint.wet_demo pop; screen point 0..1 from the
+        // top-left of the window, the frame the selection ray below uses too).
+        // Nothing is selected while the game runs.
+        if (Game::playtestActive()) {
+            const ImGuiIO& io = ImGui::GetIO();
+            if (io.DisplaySize.x > 0.0f && io.DisplaySize.y > 0.0f) {
+                const float px = std::clamp(io.MousePos.x / io.DisplaySize.x, 0.0f, 1.0f);
+                const float py = std::clamp(io.MousePos.y / io.DisplaySize.y, 0.0f, 1.0f);
+                std::string popped;
+                // json, not std::to_string: a Turkish locale writes "0,5".
+                (void)rtapi::wetPaintDemoCommand(
+                    "pop", nlohmann::json{{"screen", {px, py}}}.dump(), popped);
+                ctx.start_render = true;
+            }
+            return;
         }
 
         // ===========================================================================

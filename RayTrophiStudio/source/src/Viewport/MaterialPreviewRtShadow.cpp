@@ -74,7 +74,8 @@ public:
     bool prepared=false, recorded=false;
     std::string reason="not prepared";
     // Content of the uploaded tables and the descriptor set as last written.
-    uint64_t tableSignature=0;
+    uint64_t tableSignature=0;     // buffers, descriptors, sizes: a change needs a drain
+    uint64_t contentSignature=0;   // light/hit/material bytes: rewritten in place
     bool tableSignatureValid=false;
 };
 
@@ -346,13 +347,26 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     // needs the ring drained -- but only when something actually differs.
     const VkBuffer signatureVolumeBuffer = m_device->m_volumeBuffer.buffer
         ? m_device->m_volumeBuffer.buffer : s.mask.buffer;
+    // ★★★★ Two signatures (2026-11-19). The table CONTENTS used to be part of
+    //   the one signature, so every material colour edit (the material table
+    //   carries albedo, which a shadow never reads) drained the in-flight
+    //   viewport frame and rewrote the descriptor set: measured ~1 resource
+    //   drain per edit after the RayFusion bounce drain was removed. Contents
+    //   now go into the host-visible tables in place; only what the buffers and
+    //   the descriptor writes depend on still drains. In-place rewrite cannot
+    //   fault (reads stay in the buffer, the in-flight frame keeps its own
+    //   counts in push constants); at worst that one frame mixes old/new values
+    //   of the edited entry, and the edit has already marked the next frame dirty.
+    const VkDeviceSize lightBytes = sizeof(shadowLights);
+    const VkDeviceSize hitBytes = hits.size()*sizeof(hits[0]);
+    const VkDeviceSize materialBytes = materials.size()*sizeof(materials[0]);
+    uint64_t contentSignature = 1469598103934665603ull;
+    contentSignature = rtShadowHashMix(contentSignature, shadowLights, sizeof(shadowLights));
+    contentSignature = rtShadowHashMix(contentSignature, hits.data(), hitBytes);
+    contentSignature = rtShadowHashMix(contentSignature, materials.data(), materialBytes);
     uint64_t tableSignature = 1469598103934665603ull;
-    tableSignature = rtShadowHashMix(tableSignature, shadowLights, sizeof(shadowLights));
     tableSignature = rtShadowHashMix(tableSignature, uint64_t(hits.size()));
-    tableSignature = rtShadowHashMix(tableSignature, hits.data(), hits.size()*sizeof(hits[0]));
     tableSignature = rtShadowHashMix(tableSignature, uint64_t(materials.size()));
-    tableSignature = rtShadowHashMix(tableSignature, materials.data(),
-                                     materials.size()*sizeof(materials[0]));
     tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(tlas));
     // Handle values are reused by the driver: the object generation is the identity.
     tableSignature = rtShadowHashMix(tableSignature, VulkanRT::tlasObjectGeneration());
@@ -370,7 +384,15 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
         tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(entry.second.sampler));
     }
     if(s.tableSignatureValid && s.tableSignature==tableSignature &&
-       s.hits.buffer && s.materials.buffer && s.lights.buffer) {
+       s.hits.buffer && s.materials.buffer && s.lights.buffer &&
+       s.lights.size>=lightBytes && s.hits.size>=hitBytes && s.materials.size>=materialBytes) {
+        if(s.contentSignature!=contentSignature) {
+            m_device->uploadBuffer(s.lights,shadowLights,lightBytes);
+            m_device->uploadBuffer(s.hits,hits.data(),hitBytes);
+            m_device->uploadBuffer(s.materials,materials.data(),materialBytes);
+            s.instanceCount=static_cast<uint32_t>(hits.size());
+            s.contentSignature=contentSignature;
+        }
         s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
         prepareScreenGiFrame();
         return true;
@@ -420,7 +442,7 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     VkDescriptorBufferInfo lightInfo{s.lights.buffer, 0, VK_WHOLE_SIZE};
     writes[7].pBufferInfo = &lightInfo;
     vkUpdateDescriptorSets(m_device->getDevice(),8,writes,0,nullptr);
-    s.tableSignature=tableSignature;s.tableSignatureValid=true;
+    s.tableSignature=tableSignature;s.contentSignature=contentSignature;s.tableSignatureValid=true;
     s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
     prepareScreenGiFrame();
     return true;

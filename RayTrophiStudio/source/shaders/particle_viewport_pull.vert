@@ -12,6 +12,13 @@
 
 layout(location = 0) out vec2 vUV;
 layout(location = 1) out vec4 vColor;
+layout(location = 2) flat out vec4 vShade;   // roughness, lit
+layout(location = 3) flat out vec3 vL1;      // strongest light, billboard frame
+layout(location = 4) flat out vec3 vC1;      // its relative radiance
+layout(location = 5) flat out vec3 vL2;      // second light
+layout(location = 6) flat out vec3 vC2;
+layout(location = 7) flat out vec3 vAmb;     // the other lights + bounce
+layout(location = 8) flat out vec3 vUp;      // world up, billboard frame
 
 layout(set = 0, binding = 0, std430) readonly buffer AppearanceLut {
     vec4 lut[];
@@ -42,6 +49,10 @@ void collapse() {
     gl_Position = vec4(0.0, 0.0, 2.0, 1.0);
     vUV = vec2(0.0);
     vColor = vec4(0.0);
+    vShade = vec4(0.0);
+    vL1 = vec3(0.0, 0.0, 1.0); vL2 = vL1;
+    vC1 = vec3(0.0); vC2 = vec3(0.0); vAmb = vec3(0.0);
+    vUp = vec3(0.0, 1.0, 0.0);
 }
 
 void main() {
@@ -66,7 +77,9 @@ void main() {
     float life = lifetime[p];
     float normalizedAge = life > 1e-6 ? age[p] / life : 0.0;
     float halfSize;
-    vColor = particleLook(int(entry & 0x7fffffffu), normalizedAge, sizeScale[p], halfSize);
+    int row = int(entry & 0x7fffffffu);
+    vColor = particleLook(row, normalizedAge, sizeScale[p], halfSize);
+    particleLighting(row, center, vShade, vL1, vC1, vL2, vC2, vAmb, vUp);
     gl_Position = particleClip(center, corner, halfSize);
     vUV = corner;
 }

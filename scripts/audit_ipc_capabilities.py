@@ -58,6 +58,8 @@ def namespace_table(source):
 
 def required(method, namespaces):
     """Mirror of RtIpcSecurity.cpp::requiredCapabilities (name-level only)."""
+    if method == "player.operator":
+        return "Admin|SceneWrite|FilesRead|FilesWrite"
     if method in {"uv.capabilities", "uv.targets", "uv.info", "uv.layout"}:
         return "Read"
     if method == "camera.sample_lens_weather":
@@ -102,6 +104,8 @@ def required(method, namespaces):
         return "Scripts|FilesRead"
     if method in ("addons.enable", "addons.disable", "addons.reload"):
         return "Addons"
+    if method == "project.new":
+        return "SceneWrite"
     if method in ("project.open", "scene.import_model", "scene.import_vdb",
                   "terrain.import_heightmap", "paint.import_channel"):
         return "FilesRead|SceneWrite"
@@ -173,7 +177,7 @@ def required(method, namespaces):
     if method == "geometry_cache.self_test":
         return "Read"
     if method in ("rayfusion.core_status", "rayfusion.validate_core",
-                  "rayfusion.probe_field", "rayfusion.scene_as", "rayfusion.screen_gi",
+                  "rayfusion.probe_field", "rayfusion.scene_as", "rayfusion.bake_counters", "rayfusion.screen_gi",
                   "rayfusion.reflections"):
         return "Read"
     # Selecting the probe producer changes what the viewport renders.

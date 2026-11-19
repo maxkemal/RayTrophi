@@ -2,6 +2,9 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterViewportFrameRing.h"
+#ifdef RT_PLAYER
+#include "Viewport/PlayerDepthCard.h"
+#endif
 
 namespace Backend {
 
@@ -23,6 +26,9 @@ public:
     bool getInteractiveViewportFrameTelemetry(RasterFrameTelemetry& out) const override;
 
 private:
+#ifdef RT_PLAYER
+    PlayerDepthCard m_playerDepthCard;
+#endif
     bool serviceAcousticGpuRasterIdle();
     std::shared_ptr<RayFusion::ProbeOverlay> m_probeOverlay;
     void recordRayFusionProbeOverlay(VkCommandBuffer cmd, const Matrix4x4& viewProj);

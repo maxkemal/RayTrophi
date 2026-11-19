@@ -1,4 +1,4 @@
-"""Click four measured floor markers on live preview. Saves coordinates only."""
+"""Click four floor markers on a live preview or a video's first frame."""
 import argparse
 import json
 from pathlib import Path
@@ -11,7 +11,9 @@ except ImportError:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--camera", type=int, default=0)
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--camera", type=int, default=0)
+    source.add_argument("--video", type=Path, help="Use a fixed-camera video's first frame")
     parser.add_argument("--size", type=int, nargs=2, default=[1280, 720])
     parser.add_argument("--room-xz", type=float, nargs=8, required=True,
                         help="X Z of four floor markers, in click order, metres")
@@ -21,7 +23,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     import cv2
-    capture = cv2.VideoCapture(args.camera)
+    capture = cv2.VideoCapture(str(args.video) if args.video else args.camera)
     pixels = []
     title = "Floor calibration: click 4 markers; Enter saves; R resets; Esc cancels"
 
@@ -30,16 +32,24 @@ def main():
             pixels.append([x, y])
 
     try:
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.size[0])
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.size[1])
         if not capture.isOpened():
-            raise RuntimeError("camera could not be opened")
+            raise RuntimeError("input could not be opened")
+        if not args.video:
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, args.size[0])
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, args.size[1])
         cv2.namedWindow(title)
         cv2.setMouseCallback(title, click)
+        reference = None
         while True:
-            ok, frame = capture.read()
-            if not ok:
-                raise RuntimeError("camera frame unavailable")
+            if reference is None:
+                ok, frame = capture.read()
+                if not ok:
+                    raise RuntimeError("input frame unavailable")
+                if args.video:
+                    reference = frame.copy()
+                    capture.release()
+            else:
+                frame = reference.copy()
             size = [frame.shape[1], frame.shape[0]]
             for i, (x, y) in enumerate(pixels):
                 cv2.circle(frame, (x, y), 6, (0, 255, 0), 2)

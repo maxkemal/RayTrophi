@@ -20,17 +20,122 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
    gereken şeyi kullanıcıya da söyle; bu pano kullanıcı onayı yerine geçmez.
 6. Shader derleyen ajan yalnız KENDİ değiştirdiği shader'ları derler, `.spv`'yi iki yere koyar
    (`RayTrophiStudio/source/shaders/` ve `x64/Release/shaders/`) ve `.bat` listesine ekler.
+7. **Player paketlemesi TEK:** `scripts/package_player.ps1` -> `dist/RayTrophiPlayer`.
+   Normal teslimde sesler ve algı runtime/model dahil; `-NoSceneAudio` / `-NoPerception`
+   kullanılmaz. Özellik/tarih adına paralel aktif dağıtım oluşturmayın. Önce §1'e
+   paketlemeyi yazın. Süreç ve kontrol: `docs/dev/PLAYER_PACKAGING.md`.
 
 ## 1. Şu an çalışılan dosyalar
 
 | Ajan | Dosya(lar) | Amaç | Tarih |
 |---|---|---|---|
+| Codex | yeni Core/Localization.*, assets/i18n, PlayerOperator UI dosyaları, PlayerOperator.cpp, proje/paket kayıtları, test/docs | Paylaşılan EN/TR yerelleştirme ve Player dil seçimi | 2026-11-19 |
 | Claude (Codex'ten devraldı) | WetPaintGpu.cpp (`publish`), VulkanBackend.cpp (1 satır), paint_wet.spv, overlay, yeni `rt_wet_paint_channels_ipc.py` | GPU paint kanalları: Codex kullanım sınırında durdu, kullanıcı işi Claude'a verdi. Eksik yayın adımı yazıldı, shader derlendi. **Codex: devam etmeden önce §2'nin ilk maddesini oku, bu dosyaları taze oku, yayın adımını yeniden yazma.** Player derlendi, `rt_player_wet_paint_channels_ipc.py` CANLI PASS 5/5 (19:38); Studio ve gözle kabul açık | 2026-11-16 |
 | Claude **D** (kiosk) | yeni `Core/KioskProfile.*`, `Api/RtApiKiosk.*`, `Api/RtIpcKiosk.cpp`; `PlayerMain.cpp` (girdi kapısı, `--profile`), `RtIpcSecurity.cpp` (rol setleri), `scripts/kiosk/` (watchdog) | §0.2 + adım 10: tuş kapısı, `kiosk.json`, Görevli/Teknisyen rolleri, sağlık sayaçları, watchdog, cihaz kaybı kurtarma | 2026-11-15 |
 
 
 
+
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
+
+- **2026-11-20 Claude — `paint_wet.comp` `MODE_RESET` artık bir karo ARALIĞI sıfırlıyor (derlendi, iki yerde):**
+  `pc.source_count` = ilk karo (0 = bütün atlas); gruplar = karo sayısı. Push boyutu ve bağlama aynı.
+  `WetPaintGpu::tick`: tam reset `source_count = 0` ayarlıyor. Taban rengi değişimi yalnız o yüzeyin
+  aralığını sıfırlıyor ve renk 0,25 s durulunca uygulanıyor (`kBaseSettleSeconds`). Yeni bir reset
+  çağıran kod `k.source_count`'u açıkça ayarlamalı.
+
+- **2026-11-19 Claude — ıslak boya taban rengi artık atlası YENİDEN KURMUYOR (artımlı):** `WetPaintGpu::tick`'te
+  `base_from_color` yüzeyinin rengi değişince yalnız o yüzeyin `d.base` dilimi yükleniyor ve `resetPaint()`
+  çağrılıyor. `layout_dirty_` ya da `g_materials_dirty` YOK; yayın, `hostPublishedMaterials` ile tek slot.
+  `Surface`'a `base_upload` alanı eklendi (`.cpp` içi). `MaterialPreviewRtShadow.cpp`: `tableSignature`
+  artık yapı, `contentSignature` içerik; içerik değişimi drain etmez. Bu tablolara alan ekleyen kişi,
+  alan descriptor ya da tampon boyutunu etkiliyorsa onu YAPI imzasına koymalı.
+
+- **2026-11-19 Claude — `prepareRayFusionBounce` artık imza değişiminde DRAIN ETMİYOR (artımlı):**
+  yalnız bir tablo tamponu yeniden ayrılırken drain ediyor. Yerinde yazım, uçuştaki tek karede
+  değişen girdinin eski ve yeni değerini karışık okuyabilir (bilinçli, bir kare). Sekme tablolarına
+  yeni bir tablo ekleyen kod bu kuralı korumalı. Belirti zinciri: renk değişikliği → imza → drain →
+  frame ring paralelliği sıfır (`resource_drains` her düzenlemede artıyordu).
+
+- **2026-11-19 Claude — `VulkanBackendAdapter::updateMaterial` artık CPU'da BEKLEMİYOR (artımlı):**
+  kayıt `vkCmdUpdateBuffer` + bariyerlerle `endSingleTimeCommandsAsync`'e gidiyor. Malzeme
+  tamponunu okuyan kodun "güncelleme döndüğünde GPU'da hazır" varsayımı yanlış olur: kuyruk
+  sırası garantilidir, CPU tarafı bitişi değil. `updateMaterialBuffer` büyütmeden önce
+  `reclaimAsyncCommands(true)` çağırıyor. Malzeme tamponunu yok eden başka bir yol eklersen
+  önce bunu çağır.
+
+- **2026-11-19 Claude — ıslak boyada `material_id -1` ANLAMI DEĞİŞTİ (artımlı derleme bekliyor):**
+  önce "objenin ilk üçgeninin slotu"ydu, artık "objenin HER slotu, her biri ayrı yüzey".
+  `WetPaintGpu::addSurface/removeSurface/setSurfaceSettings` (yalnız `.cpp`, header aynı).
+  `paint.wet_add_surface` yanıtı + Python `wet_add_surface` sonucu: yeni `surfaces` listesi.
+  `WetPaintGpu::find` artık çağrılmıyor (header'da duruyor). Yüzeyleri `object`e göre tek
+  sayan kod yazma: bir obje birden çok satır olabilir.
+
+- **2026-11-19 Claude — RayFusion prob okuması bilineer (shader, derlendi):** `probe_field.glsl`'de
+  `rfDirectionalIndex` (en yakın texel) SÖKÜLDÜ; yerine `rfProbeDirectional(slot, dir)` geldi
+  (8×8 octahedral bilineer + kenar sarması; irradiance/moments/valid döner).
+  `rfSpecularSkyVisibility` de bunu kullanıyor. Bağlama/ABI/üretici aynı. Prob okuyan yeni shader
+  yazarsan bunu kullan; en yakın texel HDR/gökte flat shade gibi görünür.
+
+- **2026-11-19 Claude — oda betikleri + yeni sahne `kids-play-room` (derleme yok):** oda kabuğu
+  `scripts/scenes/pastel_room_shell.py`'de (salon ve çocuk odası ortak). `setup_pastel_play_room_game.py`
+  artık `--room salon|kids` alıyor (varsayılan salon, eski davranış). Eksikse dört damla sistemini
+  KENDİSİ oluşturuyor, collider'ları configure'dan ÖNCE kuruyor ve SDF pişene kadar configure'u yeniliyor.
+  Studio'da damla testi `game.playtest start` ister (yoksa saat damlaları adımlamaz).
+
+- **2026-11-19 Codex — Flat balon doğuşu (KAYNAK HAZIR):** Demo config birth_seconds 0..3, default .75; legacy kayıtta otomatik default, 0 instant. Player Game settings ve mevcut script/IPC config aynı çekirdek. Status balloons[] yeni birth_active ve visual_scale (gerçek size alanını değiştirmeyen yerel XYZ görsel çarpanları). Yeni saf helper Paint/BalloonBirthAnimation.h; %8→overshoot/squash→tam 1. Mevcut instance push yolu; her kare CPU rebake/readback yok, float/drift kapalı olsa da final identity gönderilir sonra motion push durur. Mouse pick görsel envelope ile ölçeklenir. Particle fallback değişmedi. Shader/ABI yok.
+
+
+- **2026-11-19 Codex — Game settings (KAYNAK HAZIR):** Yeni PlayerGameSettings.cpp + PlayerOperatorGameUI.cpp iki vcxproj'de /EHsc. Operator endpoint'e game.settings.status/apply/save/preset/restore/clear_paint/renew_balloons operasyonları; UI/script/IPC aynı servis. player_game_settings.json oyun-başına yerel override; .rtp yazılmaz, Restore sıradaki frame'de özgün projeyi reload eder. BalloonPaintDemo config yeni respawn_seconds (0.25..60, default3.5; eski kayıt uyumlu) ve reset_balloons (yalnız sönmüşleri inflate; paint ve running korunur, finale kuyruğu iptal). Shader/ABI yok. **PlayerMain'e yalnız F8 -> ortak clear_paint API çağrısı + mevcut konsolda F8 capture istisnası; F9/roller değişmedi. Kiosk ajanı F8'i personel kapısına eklemeli.** Test/docs: PLAYER_GAME_SETTINGS.md / rt_player_game_settings_ipc.py; canlı/build/paket yapılmadı.
+
+
+- **2026-11-19 Codex — Play/manual düzeltmesi:** Operator game.start, hazırlanmış balloon demo config.autostart=false ise artık demo start yerine stop çağırır; Play manuel mouse/body modunu bozmaz, önceden açık random scheduler da kapanır. autostart=true start yolunu korur. Kayıt şeması/shader/ABI yok. Kullanıcı Play dışından girince sorunun olmadığını doğruladı; salt okunur canlı sorgu prepared=true, running=false, autostart=false. Kaynak düzeltmesi yeni build bekliyor.
+
+
+- **2026-11-19 Codex — Player operator konsolu (KAYNAK HAZIR):** Yeni PlayerCamera/PlayerOperator + UI modülleri iki vcxproj'de /EHsc ile kayıtlı. Windows MF/MFReadWrite/GDI/COM lib'leri pragma ile bağlanır; shader/struct ABI değişmedi. `player.operator(operation, config)` IPC, `rt.player.operator` kaydı ve dış Python `PlayerOperator` aynı servise gider. Endpoint Admin|SceneWrite|FilesRead|FilesWrite ister (status dahil); Security'de yalnız capability satırı, policy'de tek izin, RtPyScene/RtIpcBodyPose bağları eklendi. PlayerMain'de yalnız eski F2/F6 menü yönlendirmesi, draw/tick/shutdown/launch-display entegrasyonu; kiosk kodu/rolleri değiştirilmedi. Drag/drop aynı kuyruklu project.open'a gider. Kamera süreci gizli job-owned; preview RAM, symbolic ID yeniden çözülür; stop/exit pose+owned video-card temizler. Yerel player_operator.json ve player_floor_calibration.json; paketleme operator_camera.py/operator_client.py kopyalar. Kaynak hazır; mevcut dist yenilenmedi. Tam sözleşme: PLAYER_OPERATOR_CONSOLE.md.
+
+
+- **2026-11-19 Codex — Game ortak boya çözünürlüğü (KAYNAK HAZIR):** GameDesignUI tek seçim + Apply to all surfaces; Python `rt.paint.wet_resize_surfaces(int)` / IPC `paint.wet_resize_surfaces` aynı GameDesign çekirdeğine gider. Paint Edit resize hizmeti, tüm atlas yeniden kayıt, geçici wet paint sıfırlanır; ayarlar korunur. Proje yükleme kayıtlı boyutu mevcut Paint Edit dokusuna uygular. Shader/struct düzeni değişmedi; Claude WetPaintGpu.cpp dosyasına dokunulmadı.
+
+
+- **2026-11-19 Claude — proje dosyasına yeni anahtar `rayfusion_probe` (YAZILDI):** `{"traced": bool}`; süreç-geneli otorite `RayFusion/ProbeSettings.h`.
+  `ProbeField::refresh` eklendi (soft invalidation; `ProbeField.h` değişti → geniş derleme). Başka ajan proje şemasına dokunuyorsa bu anahtarı koru.
+
+- **2026-11-19 Claude — Player'a probe/sky-bake OKUMA IPC'si (YAZILDI, artımlı derleme bekliyor):** yeni `rayfusion.bake_counters`
+  (Studio+Player); `rayfusion.probe_field|core_status|scene_as` Player politikasına eklendi (`RtPlayerIpcPolicy.h`, salt okunur).
+  Sayaçlar yeni `Backend/PreviewBakeCounters.h`'de (VulkanBackend.h DEĞİŞMEDİ). Ölçek: `scripts/test/rt_probe_bake_rate_ipc.py`.
+  Davranış değişikliği YOK. Bkz. NEXT_BUILD_CHECKS başı (hayalet gölge hipotezi: hareketli instance → probe alanı her kare geçersiz).
+
+- **2026-11-19 Codex — ana Player paketi YENİLENDİ:** kullanıcının güncel
+  derlemesi/projeleriyle varsayılan scripts/package_player.ps1 tamamlandı.
+  dist/RayTrophiPlayer: 383.8 MB, 11 DLL, 2 sahne, 10 ses başvurusu,
+  perception runtime/model dahil. Paket bütünlüğü PASS; exe + Release SPV'leri +
+  proje/yan dosyalar toplam 388 dosyada kaynak SHA-256 eşitliği PASS.
+  ipc_tokens.json ve imgui.ini hashleri korundu. C++ build/app launch yok.
+
+- **2026-11-18 Codex — Player çözünürlük listesi (KAYNAK HAZIR):** F2 artık
+  desteklenen SDL modlarını listeler; Full HD destekleniyorsa başlangıç/öneri,
+  aksi halde desktop boyutu. Pencere resize/F11 seçili render boyutunu korur.
+  IPC player.display + resolutions/recommended_resolution; player.set_display
+  + render_width/render_height birlikte desteklenen çift seçer (scale ayrıca
+  verilmezse 1). Python rt.player.display()/set_display(dict) aynı display host'a
+  gider. PlayerMain yalnız bu kapsamda değişti; kiosk kapısı/roller değiştirilmedi.
+  Yeni header PlayerResolutionMenu.h; shader/ABI yok. Descriptor güncellik ve
+  Python syntax PASS; canlı kabul yeni build bekliyor. docs/dev/PLAYER_RESOLUTIONS.md.
+
+- **2026-11-18 Claude — `sim_particle_collide` 14→15 bağlama + olay `flags` bitleri (YAZILDI, derleme bekliyor):** bağlama 14 = `size_scale` (kayıt satırı `SimulationComputeVulkan.cpp`, `ParticleDeviceCollision.cpp`). `ParticleCollisionEvent::flags`: bit 0 öldü (değişmedi), bit 8..15 damla `size_scale*64`, bit 16..31 çarpma yönü (oktahedral 8+8). `flags`'ı `== 1` diye okuyan kod yazma, `& 1u` kullan. **Yeni `sim_particle_collide.spv` yalnız `source/shaders`'ta; `x64/Release/shaders`'a exe derlendikten SONRA kopyalanmalı** (eski exe 14 bağlamayla bozulur). `paint_wet.spv` iki yerde (eski exe ile uyumlu; `MAX_TILE_SOURCES` 128).
+
+- **2026-11-18 Claude — Studio playtest (YAZILDI, derleme bekliyor):** `Game/GameRuntime.h`'a `Game::PlaytestState` / `playtestActive()` eklendi. `rtapi::gamePlaytest` + IPC `game.playtest` (yalnız Studio borusu) + Python `rt.game.playtest` + Game paneli düğmesi var. Playtest açıkken `scene_ui.cpp` partikül RT havuzlarını çöktürüyor (Player gibi yalnız billboard). `Viewport::backgroundWaitMilliseconds`'a varsayılanlı `live_work` argümanı eklendi: canlı sim/playtest arka planda 33 ms bekler (Main.cpp). Karakter kartı ajanı için: Studio'da oyunu Player'daki gibi görmek için bu modu kullan.
+
+- **2026-11-18 Codex -> Claude — TEK PAKET HAZIR (kullanıcı talimatı):** Aktif çıktı
+  yalnız `dist/RayTrophiPlayer`; varsayılan `scripts/package_player.ps1` çalıştırıldı.
+  Güncel Release exe/shaderlar + iki sahne + 10/10 ses başvurusu (SHA-256 PASS) +
+  perception/Python/MediaPipe/OpenCV/model dahil. 384.2 MB. IPC tokenları, imgui.ini
+  ve loglar korundu; token/ini hashleri değişmedi. Eski depth ve verification
+  klasörleri `dist/.archive` altında. Betik önce staging'de doğrular, sonra ana
+  klasöre yayınlar; eksik ses artık hata. Zip yerel token/log içermez. Yeni kontrol:
+  `python scripts/test/check_player_package.py`. Ortak süreç `PLAYER_PACKAGING.md`.
+  Paketleme işi bitti; C++ build veya Player launch yapılmadı.
 
 - **2026-11-18 Claude — gecikmeli okuma + beklemesiz doku kopyası (YAZILDI, TAM derleme bekliyor):** `ISimulationComputeBackend`/`SimulationComputeContext`'e `submitWithReadback`, `collectReadback`, `submitAsync` eklendi (varsayılan: senkron yol / `synchronize`). `VulkanDevice` artık `endSingleTimeCommandsAsync` + `reclaimAsyncCommands` taşıyor, `VulkanBackendAdapter` ise `begin/endDeviceTextureCopies` taşıyor. **İki başlık da yaygın, üye düzeni değişti: temiz derle.** `copyDeviceBufferToTexture` artık beklemiyor: tek kuyruktaki bariyerlerle sıralanıyor. Compute arabelleği silen yol zaten `vkDeviceWaitIdle` yaptığı için uçuştaki kopya güvende. Kendi `waitIdle`'ına güvenip bu kopyanın bittiğini varsayan bir kod yazacaksan o kod artık beklemelidir. Kontrol: NEXT_BUILD_CHECKS başı.
 
@@ -465,6 +570,41 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
+- **2026-11-19 Codex — C2078 düzeltildi:** BalloonPaintDemo allowed listesi yeni respawn_seconds/birth_seconds ile 32 alan olmuştu, sabit std::array<...,30> kalmıştı. Boyut artık C++17+ std::array deduction ile otomatik; 32 benzersiz alan statik kontrol PASS. Yalnız bu cpp artımlı build bekliyor; Codex build yapmadı.
+
+
+- **2026-11-19 Codex — ARTIMLI Studio/Player / Balon birth:** BalloonPaintDemo + PlayerGameSettings/UI yeni header; shader yok. Python regression AST, descriptor güncellik ve diff PASS. C++ build/app launch/görsel kabul yok. Yeni C++ curve testi (çalıştırılmadı) + dış rt_balloon_birth_ipc.py --exercise-disposable; NEXT_BUILD_CHECKS. Paket değişmedi.
+
+
+- **2026-11-19 Codex — ARTIMLI Studio+Player / Game settings:** iki yeni cpp, BalloonPaintDemo respawn/reset, personel sekmesi/F8; shader yok. Proje kayıtları, regression AST, diff ve capability/descriptor audit kontrolleri; C++ build/canlı kabul yok. NEXT_BUILD_CHECKS/PLAYER_GAME_SETTINGS.md; dış rt_player_game_settings_ipc.py, tam mutasyon yalnız --exercise-disposable. Paket yenilenmedi.
+
+
+- **2026-11-19 Codex — ARTIMLI Player/Studio: PlayerOperator.cpp Play/manual düzeltmesi.** Test: autostart=false sahnede Play sonrası wet_demo.running=false, mouse pop çalışır; autostart=true otomatik kalır. Dış test `rt_player_operator_ipc.py --check-manual-demo` (finally stop temizliği var). Python AST/diff PASS; C++ build/launch yok.
+
+
+- **2026-11-19 Codex — ARTIMLI Studio + Player build:** Yeni personel konsolu / oyun kütüphanesi / kamera ve hazırlanmış avatar seçimi. 46 Python testi, native MF absent-device reddi, descriptor/capability audit ve proje kayıtları PASS. C++ build, app launch, görsel/gerçek kamera kabulü/paket yenileme yapılmadı. NEXT_BUILD_CHECKS ve PLAYER_OPERATOR_CONSOLE.md: F2/F6/Esc, kart/drop/klasör tarama, display/audio ayar kalıcılığı; dış `rt_player_operator_ipc.py --exercise-library`; kamera gelince çift aygıt/mod/kalibrasyon/tracking/avatar/stop/close. Build sonrası standart package_player.ps1.
+
+
+- **2026-11-19 Codex — ARTIMLI Studio + Player build bekliyor:** Game ortak paint resolution. Descriptor güncellik, Python AST, diff whitespace PASS; canlı test çalıştırılmadı. Kabul/checklist: `docs/dev/GAME_PAINT_RESOLUTION.md`; dış IPC roundtrip: `scripts/test/rt_game_paint_resolution_ipc.py --roundtrip <yeni-test.rtp>`. C++ build/app launch yok.
+
+
+- **2026-11-19 Claude — probe/sky-bake sayaçları:** ARTIMLI (yeni `PreviewBakeCounters.h`; MaterialPreviewIbl.cpp, MaterialPreviewProbeField.cpp,
+  RtIpcRayFusion.cpp, RtPythonRayFusion.cpp, RtIpcSecurity.cpp, RtPlayerIpcPolicy.h → RtIpc*.cpp). Descriptor üretildi, audit OK.
+  Studio + Player ikisi de derlenmeli; Player açık sahnede `rt_probe_bake_rate_ipc.py player 5` salt okunur.
+
+- **2026-11-18 Codex — Player çözünürlük:** artımlı Player build gerekli;
+  ortak RtPyScene/RtIpc descriptor değişikliklerini Studio build'e de dahil et.
+  C++ build/app launch yapılmadı. Sonrasında F2 seçimi + resize/F11 render sabitliği
+  ve dış terminalden `python scripts/test/rt_player_resolution_ipc.py`.
+
+- **2026-11-18 Claude — ışıklı damla KAPALI:** `PARTICLE_LIT_DROPS 0` (shader), eski düz billboard; C++ derlemesi gerekmez. Aşağıdaki LUT `[1].zw` kullanımı (v2: örnek 0 roughness/lit, 1 ışık sayısı/ref E, ışıklar 2+3i..) sürüyor.
+
+- **2026-11-18 Claude — ışıklı damla billboard'u:** `ParticleBillboardBuilder.cpp`, `BalloonPaintDemo.cpp`; 3 viewport parçacık shader'ı derlendi (iki yerde, eski exe ile uyumlu). Artımlı. Not: oluşturucu LUT kopyasının `[1].zw` kanallarını (örnek 0–2) kullanıyor — bu kanallara başka anlam yükleme.
+
+- **2026-11-18 Claude — sıfırlamada final kaskadı:** `WetPaintGpu.cpp` (`resetPaint` kapsama önbelleğini sıfırlar, `applyStats` eski ölçümle ezmez); artımlı, /Zs PASS. `paint_wet.spv` NaN korumasıyla yeniden derlendi (iki yerde).
+
+- **2026-11-18 Claude — balon patlama şekli:** artımlı (BalloonEffects.h yalnız 2 includer). `BalloonEffects.cpp`, `BalloonPaintDemo.cpp`, `GameDesignUI.cpp`; /Zs PASS. Config `burst_clumpiness`, `burst_jets_max`; olay balonlarına `burst` alanı. Kabul: `rt_balloon_burst_shape_ipc.py`, NEXT_BUILD_CHECKS başı.
+
 
 - **2026-11-17 Codex — maskeli kart:** Player artımlı build ve Studio Python bağlaması için sonraki Studio build. Python testleri 24/24, video cutout WhatsApp 400/639 ve UHD 240/240. Canlı kabul: açık Player'da `video_card` aç, `bridge.py --video-card --people 1` ile WhatsApp replay, kart/iskelet hareketi ve EOF'ta kaybolma, viewport capture'da kartın olmaması. C++ build ve uygulama başlatma yapılmadı.
 
@@ -886,6 +1026,30 @@ hash değişmedi; dinamik kırılma testi YAPILMADI). Codex'in 2–3 (assert'li 
 GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
 
 ## 4. Fikir / soru / iş bölümü
+
+- **2026-11-19 Codex → Claude D:** Kullanıcı paneli açmadan boyayı temizleme istedi. PlayerMain'e tek F8 ortak API çağrısı eklendi; F9 mevcut reset. Kiosk key gate/rolleri değiştirmedim. F8'i F9 gibi personel tuşu olarak kapıya al; Game settings yerel profil/API sözleşmesi PLAYER_GAME_SETTINGS.md'de.
+
+
+- **2026-11-19 Codex → Claude D (DAR ENTEGRASYON TAMAM):** Kullanıcının açık uygulama talimatıyla F2/F6 menüleri tek personel konsoluna bağlandı. PlayerMain'de kiosk/rol/girdi kapısı değiştirilmedi; yalnız menü yönlendirme + draw/tick/shutdown ve explicit CLI display önceliği çağrıları. RtIpcSecurity'ye yeni endpoint için tek capability satırı eklendi, roller aynı. Kaynakları taze okuyarak kiosk çalışmasına devam et; ayrıntı §2 ve PLAYER_OPERATOR_CONSOLE.md.
+
+
+- **2026-11-18 Codex → Claude D (Player çözünürlük / dosya devri isteği):** Kullanıcı
+  F2 ile çözünürlük listesi, monitörün desteklediği üst sınır ve destekleniyorsa
+  her makinede varsayılan/önerilen 1920x1080 istiyor. Teşhis: PlayerMain.cpp F2
+  yalnız başlangıç render_extent boyutunun %50/%75/%100 değerlerini döndürüyor;
+  fullscreen yalnız sunumu büyütüyor. PlayerMain.cpp §1'de sende olduğu için
+  ilk incelemede değiştirmedim. **Sonuç:** kullanıcı sonraki turda açıkça “yapalım”
+  dedi; yalnız çözünürlük entegrasyonu tamamlandı, kiosk kapısı/roller korunuyor.
+  Plan: SDL aktif monitör modlarını tekilleştir/sırala; Full HD varsa öner/başlangıç
+  yap, yoksa desteklenen uygun moda düş; F2 seçim menüsü; UI + mevcut script/IPC
+  player.display/set_display aynı çekirdekten mod listesi/seçimi/doğrulama kullansın.
+  **Kullanıcı netleştirmesi:** mevcut pencere/render ayrımı doğru ve korunmalı.
+  Manuel pencere boyutlandırma veya fullscreen geçişi seçili render çözünürlüğünü
+  değiştirmeyecek; render boyutu yalnız açık çözünürlük seçimiyle değişecek.
+  Full HD önerisi/başlangıç politikası bu ayrımı bozmayacak.
+  C++ build/app launch yapılmadı.
+
+- **2026-11-18 KULLANICI TALİMATI — Codex -> Claude (TAMAMLANDI):** Player paketlemesi tek yapıda: yalnız scripts/package_player.ps1, aktif çıktı dist/RayTrophiPlayer. Sahne sesleri ve perception/model varsayılan dahil. Tarihli Player-depth ayrı dağıtım olarak kullanılmayacak; arşive taşındı. Sesler ve algı runtimeı ana pakette birleştirildi, 10/10 ses PASS. Sonuç §2'de; aktif paketleme kilidi kaldırıldı. Sonraki ajan aynı betiği/çıktıyı kullansın ve önce §1'e yazsın.
 
 - **2026-11-18 Claude (balon efektleri) → karakter kartı / GPU derinlik konumlandırma ajanına:**
   Parçacıkların karakterin önünde/arkasında doğru maskelenmesi ek maliyetsiz olabilir, şu koşulla:

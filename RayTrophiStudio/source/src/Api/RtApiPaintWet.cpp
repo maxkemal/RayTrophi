@@ -136,6 +136,23 @@ Result removeWetPaintSurface(const std::string& object, int material_id) {
     return Result::success();
 }
 
+Result resizeWetPaintSurfaces(int resolution) {
+    if (!g_ctx) {
+        return notBound();
+    }
+    if (renderJobActive()) {
+        return Result::fail("cannot resize wet paint surfaces during a render job");
+    }
+    if (Paint::gameDesignPending()) {
+        return Result::fail("game design is still loading; retry after the next tick");
+    }
+    std::string error;
+    if (!Paint::resizeGamePaintSurfaces(g_ctx->scene, resolution, error)) {
+        return Result::fail(error);
+    }
+    return Result::success();
+}
+
 Result clearWetPaintSurfaces() {
     if (!g_ctx) return notBound();
     Paint::wetPaintGpu().clear();

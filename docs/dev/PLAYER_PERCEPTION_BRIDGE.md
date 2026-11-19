@@ -12,6 +12,12 @@ Kod: `tools/perception_bridge/`. Kaynak sözleşme:
 
 ## Kurulum ve uygulamasız doğrulama
 
+**2026-11-18 güncellemesi:** Kullanıcı build sonrası sentetik Vulkan derinliği,
+balon/damla örtmesi ve paketli MP4 başlatma/doğal bitiş/erken kapatma canlı PASS.
+35 Python testi geçiyor. Üstteki 2026-11-15 özeti tarihseldir.
+[Güncel kabul ve sınırlar](PLAYER_DEPTH_PACKAGE_ACCEPTANCE_2026_11_18.md).
+Gerçek kamera bağlantısı, oda kalibrasyonu ve uçtan uca gecikme henüz ölçülmedi.
+
 Depo kökünden, Python 3.10+ ile:
 
 ```powershell
@@ -97,10 +103,115 @@ yeniden kullanılmaz. ID yalnız süreç/oturum içindir; biyometrik kimlik değ
 ani yön değişimi ve birbirine çok yakın çocuklarda ID değişimi mümkündür. Köprü kayıp
 iskeletleri uydurup göndermez; motorun 0,5 saniyelik düşürme davranışını kullanır.
 
-Görüntü kodlama, görüntü dosyası, kayıt, görüntü logu ve video IPC kanalı yoktur.
-`bridge.py` landmark/poz günlüklemesi de yapmaz; metrics yalnız toplu zamanlar, sayaçlar
-ve hata sınıfları içerir. Kalibrasyon aracı RAM'de canlı önizleme gösterir. İki araç da
-kameranın görüntüsünü diske yazmaz. Paylaşımlı bellek/ayna görüntüsü sonraki dalgadır.
+`bridge.py` görüntü veya landmark kaydı yazmaz. Metrics yalnız toplu zamanlar,
+sayaçlar ve hata sınıfları içerir. Kalibrasyon önizlemesi bellekte kalır.
+İsteğe bağlı ayna prototipi, RGBA kareleri Windows paylaşımlı belleğinde taşır.
+
+## Kamera olmadan video replay
+
+Sabit açıdan, sabit kare hızlı kısa bir MP4 kullanın. İlk karede dört zemin
+referansı, jest boyunca eller ve ayaklar görünür olsun. Kollar aşağıdayken
+başlayıp iki kolu kaldırın. Aşağıdaki oda koordinatları örnektir. Tıklama sırasını
+sahnenizin X/Z koordinatlarına göre ayarlayın. Video modunda çözünürlük dosyadan okunur.
+
+```powershell
+$bridgePython = 'tools/perception_bridge/.venv/Scripts/python'
+$clip = 'tools/perception_bridge/out/gesture.mp4'
+$floor = 'tools/perception_bridge/out/video-floor.json'
+& $bridgePython tools/perception_bridge/calibrate.py --video $clip --room-xz 0 0 4 0 4 3 0 3 --output $floor
+& $bridgePython tools/perception_bridge/bridge.py --video $clip --calibration $floor --model tools/perception_bridge/models/pose_landmarker.task --people 1 --offline --metrics tools/perception_bridge/out/video-offline.json
+```
+
+`frames_with_pose` ve `accepted_poses` geçerli oda pozuna dönüşen kareleri ve pozları
+sayar. Player'da jest kuralı etkin test sahnesi açıkken, aynı komutu dış terminalde
+`--offline` olmadan çalıştırın. Video dosyanın kare hızında gönderilir ve bittiğinde
+pozlar temizlenir. Kabul için kollar aşağıdayken pop olmamasını, kaldırınca bir pop
+oluşmasını ve GPU boyanın yüzeye ulaşmasını kontrol edin.
+
+### Player iskelet çizimi
+
+Güncel Player derlemesinde `player.set_display` isteğine `body_overlay: true` verin.
+Aşağıdaki komutlar yerel IPC'yi kullanan harici Python örnekleridir.
+İlk satırla çizimi açın, üstteki video komutunu `--offline` olmadan çalıştırın
+ve Player penceresini önde tutun. İskeletin kollarla birlikte hareket ettiğini
+ve görüntü bitince kaybolduğunu gözleyin. Son satır çizimi kapatır.
+
+```powershell
+python -c "from tools.perception_bridge.transport import connect; c=connect(); print(c.call('player.set_display', body_overlay=True)); c.close()"
+# Run bridge.py --video ... while Player is in the foreground.
+python -c "from tools.perception_bridge.transport import connect; c=connect(); c.call('player.set_display', body_overlay=False); c.close()"
+```
+
+`player.display` geçerli `body_overlay` durumunu bildirir. Yerleşik Python
+bağlaması `rt.player.set_body_overlay(enabled)` aynı hizmeti çağırır ve bir
+Player görüntü hostu ister. Paketli Player'ın betik istemcisi dış Python'dur.
+Çizim varsayılan olarak kapalıdır ve Player pencere sunumunda görünür.
+Oda uzayı pozları sahne kamerasından çizilir. Yaklaşık video kalibrasyonu
+ekrandaki yerleşimi de yaklaşık yapar. Kamera arkasındaki ve güven eşiğinin
+altındaki eklemler çizilmez.
+
+### Maskeli video kartı
+
+Windows Player'da `player.set_display` ile `video_card: true` verin. İskeleti
+aynı anda görmek için `body_overlay: true` ekleyebilirsiniz. Scripting bağlaması
+`rt.player.set_video_card(enabled)` aynı görüntü hizmetini kullanır. Paketli
+Player için dış Python istemcisini kullanın.
+
+```powershell
+python -c "from tools.perception_bridge.transport import connect; c=connect(); c.call('player.set_display', video_card=True, body_overlay=True); c.close()"
+& $bridgePython tools/perception_bridge/bridge.py --video $clip --calibration $floor --model tools/perception_bridge/models/pose_landmarker.task --people 1 --video-card --metrics tools/perception_bridge/out/video-card-live.json
+python -c "from tools.perception_bridge.transport import connect; c=connect(); c.call('player.set_display', video_card=False, body_overlay=False); c.close()"
+```
+
+Player penceresini önde tutun. `--offline` eklenirse yalnız kesit üretimi ölçülür
+ve Player bağlantısı veya paylaşımlı bellek açılmaz. `card_frames` geçerli RGBA
+kesit üretilen kare sayısıdır. Kart için güvenilir bir ayak bileği ve baş gerekir.
+Poz ve kesit aynı kaynak karesinden çıkar. Bir sonraki sunum turunda en güncel
+geçerli kare kullanılır. Bitimde kart ve iskelet kaybolur.
+
+İlk sürüm tek kişiyi, ayak hizasına yerleştirilen kamera yönelimli bir kart
+olarak Player pencere kompozisyonuna çizer. Poz kalibrasyonu kartın yerleşimini de
+belirler. Sahne nesneleri ve partiküller kartı derinlikte örtemez. Yalnız Player
+penceresine eklenen kart, sahne render çıktısı ve viewport yakalamasına girmez.
+
+Windows oturumu başına bir yayıncı, `Local\RayTrophiVideoCard.v1` eşlemesine
+en güncel kareyi yazar. 40 bayt little-endian başlık ve en fazla 640×640
+straight-alpha RGBA8 ayrılır. Kare verisi IPC JSON'a girmez. Okuyucu kilidi
+beklemeden dener ve 300 ms'yi geçen kareyi gizler. Normal kapanışta yayıncı
+eşlemeyi boş kareye çevirip piksel alanını sıfırlar.
+
+### RGB-D derinlik referansı
+
+`rgbd_reference.py` hizalanmış RGBA8 ve metre cinsinden derinlik alır. Sensör
+intrinsics ile noktaları açıp kalibre edilmiş rijit dönüşümle Player kamera
+uzayına taşır. Sanal kamera intrinsics ile tekrar piksellere yerleştirir.
+Aynı hedef piksele gelen örnekler arasından en yakını seçer. Geçersiz derinlik
+ve maske dışı pikseller boş kalır. Giriş derinliği kamera Z ekseni boyunca
+ölçülür. Bir sensör adaptörü radyal mesafe sağlarsa önce eksenel Z'ye çevirmelidir.
+
+```powershell
+tools/perception_bridge/.venv/Scripts/python -m unittest discover -s tools/perception_bridge/tests -p test_rgbd_reference.py
+```
+
+Sentetik testler en yakın derinliği, sahne nesnesi örtmesini, öndeki ve arkadaki
+partikülü ve yarı saydam maske kenarında alpha/additive birleşimini sınar.
+Bu referans bellek içi Python hesabıdır. Canlı Player gerçek sensör RGB-D verisi
+henüz tüketmez; yeni sentetik kanal piksel başına kamera-ileri metre ofseti alır.
+
+Player entegrasyonunda RGB-D kare en güncel örnek olarak tek bir slotta
+aktarılmalı. 640×480 RGBA8 + 16 bit derinlik 30 Hz'de yaklaşık 55 MB/s
+ham piksel verisidir. Kamera verisini GPU'ya bir kere yükleyip yeniden
+izdüşüm ve örtme testlerini GPU'da tutun. Sahne derinliğini CPU'ya indirmeyin.
+Düz kart için tek sahne derinliği kullanılabilir. Piksel başına kipte
+Vulkan raster derinliğini ve karakter derinliğini aynı uzaya getirin.
+
+Opak sahne karakteri ve partikülleri örter. Yarı saydam kenarlarda arkadaki
+partikül karakterden önce, öndeki partikül karakterden sonra birleştirilir.
+Tam opak karakter piksellerinde arkadaki etki elenir. Kompozisyon Player
+penceresine ayrılmalı ki viewport yakalaması ve render çıktısı temiz kalsın.
+Bu katmanın performansı GPU kompozisyon süresi, kare yaşı, atlanan kaynak
+kareler ve Player render/present p95 ile ölçülmeli. İlk hedef 30 Hz kaynak,
+Player sunum hızı ayrı ölçülür.
 
 ## Sahte çocuklar ve canlı oturum planı
 

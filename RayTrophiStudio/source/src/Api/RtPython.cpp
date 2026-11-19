@@ -74,6 +74,8 @@
 #include "RtPythonAgent.h"
 #include "RtPythonMeshEdit.h"
 
+namespace rtapi { Result newProject(); }  // RtApi.cpp; kept out of RtApi.h (rebuild cost)
+
 namespace py = pybind11;
 
 namespace {
@@ -6006,6 +6008,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         requireResult(rtapi::setAutosaveSettings(enabled, interval_sec, st));
         return autosaveStatusToDict(st);
     }, py::arg("enabled") = py::none(), py::arg("interval_sec") = py::none());
+    project.def("new", []() { requireResult(rtapi::newProject()); });
     project.def("open", [](const std::string& path) {
         requireResult(rtapi::openProject(path));
     }, py::arg("path"));

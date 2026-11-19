@@ -1,4 +1,5 @@
 #include "Paint/BalloonPaintDemo.h"
+#include "Paint/BalloonBirthAnimation.h"
 
 #include "Api/RtApi.h"
 #include "Backend/IBackend.h"
@@ -84,6 +85,8 @@ struct Balloon {
     size_t visual_slot = 0;
     bool inflated = false;
     double respawn_at = 0.0;
+    double birth_started_at = 0.0;
+    bool birth_settled = true;
 };
 
 struct State {
@@ -425,13 +428,15 @@ json validatedConfig(const json& input, SceneData& scene) {
     if (!input.is_object()) {
         throw std::runtime_error("config must be an object");
     }
-    const std::array<const char*, 28> allowed = {
+    const std::array allowed = {
         "surfaces", "resolution", "seed", "balloons", "particles_per_balloon",
-        "interval_min", "interval_max", "autostart", "visual_nodes", "pop_sound",
+        "interval_min", "interval_max", "autostart", "respawn_seconds", "birth_seconds",
+        "visual_nodes", "pop_sound",
         "size_min", "size_max", "idle_reset_seconds", "colors",
         "surprise_chance", "surprise_sound", "room_goal", "celebrate_sound",
         "finale_reset_seconds", "spawn_min", "spawn_max", "float_amplitude", "drift_speed",
-        "transmission", "sparkles", "sparkle_trails", "drop_sparks", "drop_trails"
+        "transmission", "sparkles", "sparkle_trails", "drop_sparks", "drop_trails",
+        "burst_clumpiness", "burst_jets_max"
     };
     for (auto it = input.begin(); it != input.end(); ++it) {
         if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end()) {
@@ -440,12 +445,24 @@ json validatedConfig(const json& input, SceneData& scene) {
     }
     json c = {{"resolution", 1024}, {"seed", 417}, {"balloons", 12},
               {"particles_per_balloon", 1800}, {"interval_min", 2.5},
-              {"interval_max", 5.0}, {"autostart", true},
+              {"interval_max", 5.0}, {"autostart", true}, {"respawn_seconds", 3.5},
+              {"birth_seconds", 0.75},
               {"size_min", 1.0}, {"size_max", 1.0}, {"idle_reset_seconds", 0.0},
               {"surprise_chance", 0.1}, {"room_goal", 0.5}, {"finale_reset_seconds", 10.0},
               {"float_amplitude", 0.08}, {"drift_speed", 0.12},
-              {"sparkles", 90}, {"sparkle_trails", true}, {"drop_sparks", 0.25}, {"drop_trails", true}};
+              {"sparkles", 90}, {"sparkle_trails", true}, {"drop_sparks", 0.25}, {"drop_trails", true},
+              {"burst_clumpiness", 0.7}, {"burst_jets_max", 10}};
     c.update(input);
+    // Pop shape (Paint::balloonBurstPattern): 0 = even fine spray, 1 = ligaments,
+    // clumps and blobs only; ligaments per pop are drawn from 3..burst_jets_max.
+    if (!c["burst_clumpiness"].is_number() || !(c["burst_clumpiness"].get<double>() >= 0.0) ||
+        c["burst_clumpiness"].get<double>() > 1.0) {
+        throw std::runtime_error("burst_clumpiness must be a number in 0..1 (0 = even spray)");
+    }
+    if (!c["burst_jets_max"].is_number_integer() || c["burst_jets_max"].get<int64_t>() < 3 ||
+        c["burst_jets_max"].get<int64_t>() > 24) {
+        throw std::runtime_error("burst_jets_max must be an integer 3..24");
+    }
     for (const char* key : {"resolution", "seed", "balloons", "particles_per_balloon"}) {
         if (!c[key].is_number_integer()) {
             throw std::runtime_error(std::string(key) + " must be an integer");
@@ -553,6 +570,15 @@ json validatedConfig(const json& input, SceneData& scene) {
     const double hi = c["interval_max"].get<double>();
     if (!std::isfinite(lo) || !std::isfinite(hi) || lo < 2.0 || hi < lo || hi > 30.0) {
         throw std::runtime_error("intervals must be finite seconds: 2 <= min <= max <= 30");
+    }
+    if (!c["birth_seconds"].is_number() || !std::isfinite(c["birth_seconds"].get<double>()) ||
+        c["birth_seconds"].get<double>() < 0.0 || c["birth_seconds"].get<double>() > 3.0) {
+        throw std::runtime_error("birth_seconds must be finite seconds in 0..3 (0 = instant)");
+    }
+    if (!c["respawn_seconds"].is_number() ||
+        !std::isfinite(c["respawn_seconds"].get<double>()) ||
+        c["respawn_seconds"].get<double>() < 0.25 || c["respawn_seconds"].get<double>() > 60.0) {
+        throw std::runtime_error("respawn_seconds must be finite seconds in 0.25..60");
     }
     if (!c["autostart"].is_boolean()) {
         throw std::runtime_error("autostart must be boolean");
@@ -755,9 +781,11 @@ void moveMeshVisual(SceneData& scene, size_t index, const Balloon& balloon) {
         return;
     }
     Matrix4x4 matrix = state.visual_base[index];
+    const auto birth = Paint::balloonBirthScale(state.seconds - balloon.birth_started_at,
+                                               state.config.value("birth_seconds", 0.75));
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 3; ++c) {
-            matrix.m[r][c] *= balloon.size;
+            matrix.m[r][c] *= balloon.size * (c == 1 ? birth.vertical : birth.radial);
         }
     }
     matrix.m[0][3] = balloon.position.x;
@@ -774,7 +802,10 @@ void moveMeshVisual(SceneData& scene, size_t index, const Balloon& balloon) {
 void tickMotion(SceneData& scene, float dt) {
     const float amplitude = state.config["float_amplitude"].get<float>();
     const float speed = state.config["drift_speed"].get<float>();
-    if ((amplitude <= 0.0f && speed <= 0.0f) || !state.config.contains("visual_nodes")) {
+    const bool birthing = std::any_of(state.balloons.begin(), state.balloons.end(),
+        [](const Balloon& balloon) { return balloon.inflated && !balloon.birth_settled; });
+    if (!state.config.contains("visual_nodes") ||
+        (amplitude <= 0.0f && speed <= 0.0f && !birthing)) {
         return;
     }
     const float step = std::min(dt, 0.1f);
@@ -819,7 +850,14 @@ void tickMotion(SceneData& scene, float dt) {
     state.motion_clock = 0.0;
     const auto start = Clock::now();
     for (size_t i = 0; i < state.balloons.size(); ++i) {
-        if (state.balloons[i].inflated) moveMeshVisual(scene, i, state.balloons[i]);
+        auto& balloon = state.balloons[i];
+        if (balloon.inflated) {
+            moveMeshVisual(scene, i, balloon);
+            if (state.seconds - balloon.birth_started_at >=
+                state.config.value("birth_seconds", 0.75)) {
+                balloon.birth_settled = true;
+            }
+        }
     }
     state.motion_ms_max = std::max(state.motion_ms_max, elapsedMs(start));
     ++state.motion_pushes;
@@ -860,7 +898,13 @@ void inflate(SceneData& scene, Balloon& balloon) {
     visual.size_scale = balloon.size;
     balloon.visual_slot = system(scene, kVisualSystem)->spawn(visual);
     balloon.inflated = true;
-    updateMeshVisual(scene, static_cast<size_t>(&balloon - state.balloons.data()), balloon, true);
+    balloon.birth_started_at = state.seconds;
+    balloon.birth_settled = !state.config.contains("visual_nodes") ||
+        state.config.value("birth_seconds", 0.75) <= 0.0;
+    const auto index = static_cast<size_t>(&balloon - state.balloons.data());
+    updateMeshVisual(scene, index, balloon, true);
+    // Apply the tiny first pose before a frame can show the full-sized respawn.
+    moveMeshVisual(scene, index, balloon);
 }
 
 // Pops exactly these inflated balloons: one event, one droplet burst each.
@@ -973,28 +1017,31 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         updateMeshVisual(scene, available[b], balloon, false);
         system(scene, kVisualSystem)->kill(balloon.visual_slot);
         balloon.inflated = false;
-        balloon.respawn_at = state.seconds + 3.5;
+        balloon.respawn_at = state.seconds + state.config.value("respawn_seconds", 3.5);
         // A surprise throws half as much paint again, in every palette colour.
         const int particles = dropsFor(balloon.size) * (balloon.surprise ? 3 : 2) / 2;
         spawned += particles;
-        for (int i = 0; i < particles; ++i) {
-            // Uniform solid-angle sphere, independent of the emitter spread convention.
-            const float z = randomRange(-1.0f, 1.0f);
-            const float angle = randomRange(0.0f, 6.28318530718f);
-            const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
-            const Vec3 direction(r * std::cos(angle), z, r * std::sin(angle));
+        BalloonBurstShape shape;
+        shape.clumpiness = state.config["burst_clumpiness"].get<float>();
+        shape.jets_max = state.config["burst_jets_max"].get<int>();
+        std::vector<BalloonBurstDrop> pattern;
+        const BalloonBurstSummary burst =
+            balloonBurstPattern(state.random, particles, balloon.size, shape, pattern);
+        // A rainbow surprise colours a whole clump alike: it lands as one splat.
+        int color = balloon.color;
+        for (size_t i = 0; i < pattern.size(); ++i) {
+            const BalloonBurstDrop& p = pattern[i];
             ParticleSpawnDesc drop;
-            drop.position = balloon.position + direction * randomRange(0.0f, 0.22f * balloon.size);
-            drop.velocity = direction * randomRange(4.5f, 9.0f);
+            drop.position = balloon.position + p.offset;
+            drop.velocity = p.velocity;
             drop.lifetime_seconds = 2.8f;
             drop.mass = 0.001f;
-            int color = balloon.color;
-            if (balloon.surprise) {
+            if (balloon.surprise && (i == 0 || p.clump != pattern[i - 1].clump)) {
                 color = std::uniform_int_distribution<int>(
                     0, static_cast<int>(state.palette.size()) - 1)(state.random);
             }
             drop.appearance_profile_id = state.drop_profiles[color];
-            drop.size_scale = randomRange(0.65f, 1.3f);
+            drop.size_scale = p.size_scale;
             // A profile id belongs to one system: a rainbow drop goes to the
             // system that holds its colour's profile.
             auto* target = color == balloon.color ? runtime
@@ -1006,7 +1053,13 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         playPopSound(scene, balloon.position, balloon.size, balloon.surprise);
         popped.push_back({{"balloon", available[b]}, {"color", balloon.color},
                           {"size", balloon.size}, {"drops", particles}, {"surprise", balloon.surprise},
-                          {"position", {balloon.position.x, balloon.position.y, balloon.position.z}}});
+                          {"position", {balloon.position.x, balloon.position.y, balloon.position.z}},
+                          {"burst", {{"jets", burst.jets}, {"blobs", burst.blobs},
+                                     {"clumps", burst.clumps}, {"jet_drops", burst.jet_drops},
+                                     {"blob_drops", burst.blob_drops},
+                                     {"spray_drops", burst.spray_drops},
+                                     {"heaviest_jet_share", burst.heaviest_jet_share},
+                                     {"tear", {burst.tear.x, burst.tear.y, burst.tear.z}}}}});
     }
     state.events.push_back({{"id", ++state.event_serial}, {"time_s", state.seconds},
                             {"simultaneous", count}, {"spawned", spawned},
@@ -1078,7 +1131,12 @@ int pickBalloon(SceneData& scene, float x, float y) {
             continue;
         }
         const float miss = (to_centre - direction * along).length();
-        if (miss <= kPickRadius * balloon.size && along < nearest) {
+        const auto birth = state.config.contains("visual_nodes") ?
+            Paint::balloonBirthScale(state.seconds - balloon.birth_started_at,
+                                     state.config.value("birth_seconds", 0.75)) :
+            Paint::BalloonBirthScale{};
+        if (miss <= kPickRadius * balloon.size * std::max(birth.radial, birth.vertical) &&
+            along < nearest) {
             nearest = along;
             hit = static_cast<int>(i);
         }
@@ -1093,6 +1151,12 @@ json status() {
         json entry = {{"id", i}, {"inflated", b.inflated}, {"color", b.color}, {"size", b.size},
                       {"surprise", b.surprise},
                       {"position", {b.position.x, b.position.y, b.position.z}}};
+        const auto birth = state.config.contains("visual_nodes") && b.inflated ?
+            Paint::balloonBirthScale(state.seconds - b.birth_started_at,
+                                     state.config.value("birth_seconds", 0.75)) :
+            Paint::BalloonBirthScale{};
+        entry["birth_active"] = b.inflated && !b.birth_settled;
+        entry["visual_scale"] = {birth.radial, birth.vertical, birth.radial};
         if (state.config.contains("visual_nodes")) {
             const auto name = state.config["visual_nodes"][i].get<std::string>();
             auto* mesh = state.scene ? state.scene->getFlatNodeMesh(name) : nullptr;
@@ -1220,7 +1284,10 @@ void prepare(SceneData& scene, const json& config) {
             }
             entry.render.shape = SceneData::ParticleRenderShape::Sphere;
             entry.render.emissive = false;
-            entry.render.roughness = 0.3f;
+            // Non-emissive spheres are drawn as LIT billboards (roughness =
+            // the GGX highlight): paint drops wet and glossy like the paint on
+            // the walls, particle balloons satin.
+            entry.render.roughness = entry.name == kVisualSystem ? 0.3f : 0.12f;
             SceneData::applyParticleSystemEnabledState(entry);
         }
     }
@@ -1412,6 +1479,17 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
                 if (!wetPaintGpu().empty()) wetPaintGpu().resetPaint();
             } else {
                 resetRoom(scene);
+            }
+        } else if (operation == "reset_balloons") {
+            if (!state.prepared || state.scene != &scene) {
+                throw std::runtime_error("configure the demo before renewing balloons");
+            }
+            state.cascade.clear();
+            state.finale_reset_at = -1.0;
+            for (auto& balloon : state.balloons) {
+                if (!balloon.inflated) {
+                    inflate(scene, balloon);
+                }
             }
         } else if (operation == "stop") {
             state.running = false;

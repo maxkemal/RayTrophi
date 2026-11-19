@@ -4,6 +4,42 @@
 
 ## Devir notu (her partide güncellenir)
 
+### 2026-11-19 — Personel Oyun Ayarları / KAYNAK HAZIR
+
+Aynı konsola Game settings sekmesi: Calm/Balanced/Lively taslakları; manuel/otomatik,
+balon sayısı ve geri gelme, ortak boya kuruma/akış/çözünürlük, idle/finale reset ve
+room goal. F8 yalnız boya; F9 mevcut oda reseti. Session apply ve oyun-başına yerel
+player_game_settings.json kaydı ayrı; .rtp yazılmaz. Her scene revision sonrası
+kayıtlı profil bir kez uygulanır, Restore özgün projeyi yeniden yükler. UI/script/IPC
+aynı hizmet; yeni C++ modüller iki hedefe kayıtlı. Derleme/canlı kabul bekliyor.
+[API, davranışlar ve checklist](PLAYER_GAME_SETTINGS.md).
+
+
+### 2026-11-19 — Modern personel konsolu / KAYNAK HAZIR
+
+F2/F6 tek viewport üstü konsolda birleştirildi: RayTrophi ikonu, özel vektör ikonlar,
+kartlı yerel/paket oyun kütüphanesi, klasör tarama + sürükle/bırak; ekran/çözünürlük,
+Master ses, çoklu MF kamera seçimi/mod listesi, RAM önizleme, zemin kalibrasyonu ve
+mevcut köprüyle algılama kontrolü. Kamera kartı veya hazırlanmış 3D avatar eşlemesi
+seçilebilir; yeni retarget/geometry yolu yok. UI/Python/IPC aynı operator servisini
+kullanır. Kamera gelmediği için gerçek kamera ve görsel kabul yapılmadı.
+46 Python testi + capability/descriptor audit PASS; C++ build/app launch/paket yenileme yok.
+Artımlı Studio + Player build ve sonrasında standart paketleme bekliyor.
+Ayrıntılar/API/sınırlar/kabul: [PLAYER_OPERATOR_CONSOLE.md](PLAYER_OPERATOR_CONSOLE.md).
+
+
+### 2026-11-18 — Sentetik derinlik ve algı paketi canlı PASS
+
+Kullanıcı build sonrası Vulkan'da balon ve damlaların sentetik maskenin önünde/
+arkasında doğru örtüldüğü gözlendi. Köprü + taşınabilir Python + MediaPipe/OpenCV +
+model Player paketinde; paketli dış oyun betiğinin MP4 ile başlatma, doğal bitiş,
+erken durdurma ve poz temizliği canlı PASS. 35 Python testi; Player 668/668 clean.
+Güncel tek paket `dist/RayTrophiPlayer` (sahne sesleri ve algı runtime'ı dahil;
+ortak süreç: [PLAYER_PACKAGING.md](PLAYER_PACKAGING.md)). Personel paneli yok,
+görüntü bellekte. Gerçek kamera bağlantısı, oda kalibrasyonu ve uçtan uca gecikme
+saha işi olarak açık. Alpha kenar/RGB-D/capture ve performans sınırları:
+[Kabul raporu](PLAYER_DEPTH_PACKAGE_ACCEPTANCE_2026_11_18.md).
+
 ### 2026-11-16 — Güncel devir: graph + sabit çözünürlük kullanıcı PASS
 
 İlk okunacak güncel özet: [PLAYER_HANDOFF_2026_11_16.md](PLAYER_HANDOFF_2026_11_16.md).

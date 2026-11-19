@@ -582,6 +582,141 @@ void balloonConfettiRain(SceneData& scene, const Vec3& spawn_min, const Vec3& sp
     }
 }
 
+BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float balloon_size,
+                                        const BalloonBurstShape& shape,
+                                        std::vector<BalloonBurstDrop>& out) {
+    out.clear();
+    BalloonBurstSummary summary;
+    if (drops <= 0) return summary;
+    out.reserve(static_cast<size_t>(drops));
+    constexpr float kTwoPi = 6.28318530718f;
+    constexpr float kMaxSpeed = 12.0f;
+    auto uni = [&](float lo, float hi) { return std::uniform_real_distribution<float>(lo, hi)(random); };
+    auto uniInt = [&](int lo, int hi) { return std::uniform_int_distribution<int>(lo, hi)(random); };
+    auto sphere = [&]() {
+        const float z = uni(-1.0f, 1.0f);
+        const float a = uni(0.0f, kTwoPi);
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        return Vec3(r * std::cos(a), z, r * std::sin(a));
+    };
+    // Uniform direction within half_angle of a unit axis.
+    auto cone = [&](const Vec3& axis, float half_angle) {
+        const float cos_t = uni(std::cos(half_angle), 1.0f);
+        const float sin_t = std::sqrt(std::max(0.0f, 1.0f - cos_t * cos_t));
+        const float phi = uni(0.0f, kTwoPi);
+        const Vec3 helper = std::fabs(axis.y) < 0.9f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+        const Vec3 u = Vec3::cross(axis, helper).normalize();
+        const Vec3 v = Vec3::cross(axis, u);
+        return axis * cos_t + (u * std::cos(phi) + v * std::sin(phi)) * sin_t;
+    };
+    auto capped = [&](const Vec3& velocity) {
+        const float speed = velocity.length();
+        return speed > kMaxSpeed ? velocity * (kMaxSpeed / speed) : velocity;
+    };
+    uint32_t clump_id = 0;
+    auto push = [&](const Vec3& offset, const Vec3& velocity, float size) {
+        BalloonBurstDrop d;
+        d.offset = offset;
+        d.velocity = capped(velocity);
+        d.size_scale = std::clamp(size, 0.35f, 2.2f);
+        d.clump = clump_id;
+        out.push_back(d);
+    };
+
+    const float clump = std::clamp(shape.clumpiness, 0.0f, 1.0f);
+    const float radius = 0.22f * balloon_size;
+    const Vec3 tear = sphere();
+    summary.tear = tear;
+    // Hardness of a direction: the tear side bursts up to 1.4x, the far side 0.6x.
+    auto hardness = [&](const Vec3& dir) { return 1.0f + 0.4f * Vec3::dot(dir, tear); };
+
+    // Shares, drawn per pop.
+    const float spray_share =
+        clump <= 0.0f ? 1.0f : std::clamp((1.0f - clump) * uni(0.75f, 1.25f) + 0.06f, 0.0f, 1.0f);
+    const int spray = std::min(drops, static_cast<int>(std::lround(drops * spray_share)));
+    int rest = drops - spray;
+    const int blobs = rest >= 32 ? uniInt(1, 3) : 0;
+    std::vector<int> blob_sizes;
+    for (int b = 0; b < blobs; ++b) {
+        const int n = std::min(rest / 4, std::max(4, static_cast<int>(drops * uni(0.02f, 0.05f))));
+        if (n <= 0) break;
+        blob_sizes.push_back(n);
+        rest -= n;
+    }
+    const int jets_max = std::max(3, shape.jets_max);
+    int jets = rest > 0 ? std::clamp(uniInt(3, jets_max), 1, std::max(1, rest / 6)) : 0;
+
+    // Ligament masses: gamma(0.6) is heavy-tailed, so one or two ligaments
+    // carry most of the paint and some carry almost none.
+    std::vector<int> jet_sizes;
+    if (jets > 0) {
+        std::gamma_distribution<float> gamma(0.6f, 1.0f);
+        std::vector<float> w(static_cast<size_t>(jets));
+        float total = 0.0f;
+        for (float& x : w) { x = gamma(random) + 1e-3f; total += x; }
+        int given = 0;
+        size_t heaviest = 0;
+        for (size_t k = 0; k < w.size(); ++k) {
+            const int n = static_cast<int>(std::floor(rest * w[k] / total));
+            jet_sizes.push_back(n);
+            given += n;
+            if (w[k] > w[heaviest]) heaviest = k;
+        }
+        jet_sizes[heaviest] += rest - given;
+        summary.heaviest_jet_share = rest > 0 ? static_cast<float>(jet_sizes[heaviest]) / rest : 0.0f;
+    }
+
+    // Ligaments: beads along a stretched sheet finger, in clumps.
+    for (int n_k : jet_sizes) {
+        if (n_k <= 0) continue;
+        ++summary.jets;
+        Vec3 axis = sphere();
+        if (uni(0.0f, 1.0f) < 0.5f) axis = (axis + tear * uni(0.3f, 1.2f)).normalize();
+        const float speed = uni(4.5f, 8.0f) * hardness(axis);
+        const float half_angle = uni(0.05f, 0.25f);
+        for (int i = 0; i < n_k;) {
+            // Clump size: geometric, mostly single beads, sometimes eight.
+            int m = 1;
+            while (m < 8 && uni(0.0f, 1.0f) < 0.55f) ++m;
+            m = std::min(m, n_k - i);
+            const float s = uni(0.0f, 1.0f);   // 0 = root (slow), 1 = tip (fast)
+            const Vec3 dir = cone(axis, half_angle * (1.2f - 0.6f * s));
+            const Vec3 v = dir * (speed * (0.4f + 0.8f * s));
+            const float bead = std::exp(std::normal_distribution<float>(0.0f, 0.3f)(random)) *
+                               (0.8f + 0.5f * s) * (m > 1 ? 1.15f : 1.0f);
+            const Vec3 at = dir * (radius * uni(0.7f, 1.0f));
+            ++clump_id;
+            for (int j = 0; j < m; ++j) {
+                push(at + sphere() * 0.012f, v + sphere() * uni(0.0f, 0.18f), bead * uni(0.85f, 1.1f));
+            }
+            if (m > 1) ++summary.clumps;
+            summary.jet_drops += m;
+            i += m;
+        }
+    }
+    // Heavy blobs: the paint pooled low in the balloon, slow, tight, falling.
+    for (int n : blob_sizes) {
+        ++summary.blobs;
+        const Vec3 dir = (sphere() + Vec3(0.0f, -0.6f, 0.0f)).normalize();
+        const Vec3 v = dir * (uni(2.0f, 4.5f) * hardness(dir));
+        const Vec3 at = dir * (radius * 0.6f);
+        const float size = uni(1.3f, 1.9f);
+        ++clump_id;
+        for (int j = 0; j < n; ++j) {
+            push(at + sphere() * 0.02f, v + sphere() * uni(0.0f, 0.1f), size * uni(0.85f, 1.1f));
+        }
+        summary.blob_drops += n;
+    }
+    // Fine spray: the even part, small and fast.
+    for (int i = 0; i < spray; ++i) {
+        const Vec3 dir = sphere();
+        ++clump_id;
+        push(dir * (radius * uni(0.0f, 1.0f)), dir * (uni(3.5f, 10.0f) * hardness(dir)), uni(0.4f, 0.85f));
+    }
+    summary.spray_drops = spray;
+    return summary;
+}
+
 void balloonSparkles(SceneData& scene, const Vec3& centre, float radius) {
     auto* sparks = system(scene, kSparkleSystem);
     const int count = fx.setup.sparkles;

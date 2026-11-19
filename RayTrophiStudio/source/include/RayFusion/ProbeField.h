@@ -110,6 +110,13 @@ public:
     bool configure(const Grid& grid, Revision revision, std::string& error);
     bool scroll(const Cell& minimum, std::string& error);
     bool invalidate(Revision revision, std::string& error);
+    // Soft invalidation: the measured packets STAY (and stay valid, so the
+    // consumer keeps reading them) but every slot becomes due for re-measurement
+    // and outstanding tickets are rejected. For inputs that change continuously
+    // and only slightly (a moving body's placement): a hard invalidate on every
+    // change blanks the field faster than the budget refills it, so only the
+    // first-scheduled slots ever hold data.
+    bool refresh(Revision revision, std::string& error);
     std::vector<Ticket> schedule(const Budget& budget);
     bool publish(const Ticket& ticket, const ProbePacket& packet,
                  float historyWeight, std::string& error);

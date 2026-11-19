@@ -53,11 +53,61 @@ uint rfSlotFor(ivec3 cell) {
     return uint((c.z * n.y + c.y) * n.x + c.x);
 }
 
-uint rfDirectionalIndex(uint slot, vec3 direction) {
-    vec2 oct = rfOctEncode(direction) * 0.5 + 0.5;
-    ivec2 texel = clamp(ivec2(oct * float(RF_PROBE_SIDE)),
-                        ivec2(0), ivec2(int(RF_PROBE_SIDE) - 1));
-    return slot * RF_PROBE_TEXELS + uint(texel.y) * RF_PROBE_SIDE + uint(texel.x);
+// Octahedral border: a neighbour one texel past an edge is the edge texel
+// mirrored across the map's centre line (the same rule DDGI's border copy uses).
+ivec2 rfOctWrap(ivec2 t) {
+    const int S = int(RF_PROBE_SIDE);
+    if (t.x < 0) { t.x = 0; t.y = S - 1 - t.y; }
+    else if (t.x >= S) { t.x = S - 1; t.y = S - 1 - t.y; }
+    if (t.y < 0) { t.y = 0; t.x = S - 1 - t.x; }
+    else if (t.y >= S) { t.y = S - 1; t.x = S - 1 - t.x; }
+    return t;
+}
+
+struct RfProbeSample {
+    vec3 irradiance; // scene-linear diffuse irradiance, valid texels only
+    vec2 moments;    // mean distance, mean squared distance
+    float valid;     // 1 when any of the four texels was valid
+};
+
+// ★★★★ BILINEAR over the 8x8 octahedral map (2026-11-19). It was a NEAREST
+//   texel lookup: 64 directions per probe, so a smooth surface's normal snapped
+//   between them and the ambient changed in steps with hard edges -- smooth
+//   objects looked flat shaded. Invisible under a uniform environment (every
+//   texel the same), obvious once an HDRI or the physical sky made the
+//   directions differ. The producer writes texel CENTRES ((x + 0.5) / side),
+//   hence the half-texel shift. Moments blend linearly (as in DDGI).
+RfProbeSample rfProbeDirectional(uint slot, vec3 direction) {
+    RfProbeSample s;
+    s.irradiance = vec3(0.0);
+    s.moments = vec2(0.0);
+    s.valid = 0.0;
+    vec2 p = (rfOctEncode(direction) * 0.5 + 0.5) * float(RF_PROBE_SIDE) - 0.5;
+    ivec2 base = ivec2(floor(p));
+    vec2 f = p - vec2(base);
+    float weightSum = 0.0;
+    float momentWeight = 0.0;
+    for (int j = 0; j < 2; ++j)
+    for (int i = 0; i < 2; ++i) {
+        ivec2 t = rfOctWrap(base + ivec2(i, j));
+        float w = (i == 0 ? 1.0 - f.x : f.x) * (j == 0 ? 1.0 - f.y : f.y);
+        if (w <= 0.0) continue;
+        RfProbeTexel texel = rfProbeTexels[slot * RF_PROBE_TEXELS +
+                                           uint(t.y) * RF_PROBE_SIDE + uint(t.x)];
+        // Distance moments are traced for every texel; the irradiance of an
+        // invalid texel is not a measurement and must not dilute the valid ones.
+        s.moments += texel.distance.xy * w;
+        momentWeight += w;
+        if (texel.irradiance.a < 0.5) continue;
+        s.irradiance += max(texel.irradiance.rgb, vec3(0.0)) * w;
+        weightSum += w;
+    }
+    if (momentWeight > 0.0) s.moments /= momentWeight;
+    if (weightSum > 1e-6) {
+        s.irradiance /= weightSum;
+        s.valid = 1.0;
+    }
+    return s;
 }
 
 // Same bounded estimate as RayFusion::momentVisibility (world units).
@@ -132,8 +182,8 @@ bool rfSampleProbeField(vec3 worldPos, vec3 normal, out vec3 irradiance) {
         if (weight <= 0.0) continue;
         uint slot = rfSlotFor(neighbour);
         if (slot >= uint(rfGridCounts.w)) continue;
-        RfProbeTexel packet = rfProbeTexels[rfDirectionalIndex(slot, n)];
-        if (packet.irradiance.a < 0.5) continue;
+        RfProbeSample packet = rfProbeDirectional(slot, n);
+        if (packet.valid < 0.5) continue;
 
         vec3 probeToSurface = worldPos - (vec3(neighbour) + vec3(0.5)) * spacing;
         float distanceToSurface = length(probeToSurface);
@@ -142,10 +192,10 @@ bool rfSampleProbeField(vec3 worldPos, vec3 normal, out vec3 irradiance) {
         // still blocks those probes; no positive floor is applied to visibility.
         float facing = distanceToSurface > 1e-6 ? 0.5 * dot(n, -direction) + 0.5 : 1.0;
         weight *= max(facing * facing, 0.01);
-        vec2 moments = rfProbeTexels[rfDirectionalIndex(slot, direction)].distance.xy;
+        vec2 moments = rfProbeDirectional(slot, direction).moments;
         float visibility = rfMomentVisibility(moments, distanceToSurface);
         baseWeightSum += weight;
-        irradiance += max(packet.irradiance.rgb, vec3(0.0)) * weight * visibility;
+        irradiance += packet.irradiance * weight * visibility;
     }
     if (baseWeightSum <= 0.0) return false;
     // Normalize spatial/normal weights only. Normalizing visibility away would

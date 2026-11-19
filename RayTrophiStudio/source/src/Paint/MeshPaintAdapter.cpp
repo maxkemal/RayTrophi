@@ -106,6 +106,25 @@ void fillTextureDefault(Texture& texture, PaintChannel channel) {
     }
 }
 
+bool isGeneratedPaintTexture(const Texture& texture) {
+    return texture.name.rfind("generated/", 0) == 0;
+}
+
+uint8_t linearToSrgbByteForFill(float value) {
+    const float v = std::clamp(value, 0.0f, 1.0f);
+    const float s = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+    return static_cast<uint8_t>(std::clamp(std::lround(s * 255.0f), 0L, 255L));
+}
+
+// Base colour canvases hold sRGB bytes; material colours are linear.
+void fillTextureWithLinearColor(Texture& texture, const Vec3& linear) {
+    const CompactVec4 fill(linearToSrgbByteForFill(linear.x), linearToSrgbByteForFill(linear.y),
+                           linearToSrgbByteForFill(linear.z), 255);
+    for (auto& pixel : texture.pixels) {
+        pixel = fill;
+    }
+}
+
 const BrushChannelInput* getBrushChannelInput(const BrushSettings& brush, PaintChannel channel) {
     const size_t index = static_cast<size_t>(channel);
     if (index >= brush.channel_inputs.size()) {
@@ -2650,9 +2669,23 @@ bool MeshPaintAdapter::assignTextureToChannel(PaintChannel channel) {
         const std::string texture_name = std::string("generated/") + baseName + ".png";
         bool seeded = false;
         std::shared_ptr<Texture> source_texture = getChannelSourceTexture(channel);
+        // ★ Our own paint canvas is never a SOURCE. A saved project keeps the
+        // material pointing at "generated/..." (the canvas made last session);
+        // seeding from it froze the first base colour forever: a wall painted
+        // white once stayed white after its material was made blue (the bound
+        // texture overrides the colour). The original is the material colour.
+        if (source_texture && isGeneratedPaintTexture(*source_texture)) {
+            source_texture.reset();
+        }
         target_texture = cloneTextureForPaint(source_texture, texture_name, set.resolution, toTextureType(channel), channel, seeded);
         if (!seeded && target_texture) {
             fillTextureDefault(*target_texture, channel);
+            // No texture under the paint: the canvas starts as the material's
+            // own colour (overlay over the colour, as over a texture).
+            std::shared_ptr<Material> material = triangle_ ? triangle_->getMaterial() : nullptr;
+            if (channel == PaintChannel::BaseColor && material) {
+                fillTextureWithLinearColor(*target_texture, material->albedoProperty.color);
+            }
         }
         set.setSourceInfo(channel, seeded, (source_texture && !source_texture->name.empty()) ? source_texture->name : "");
         set.setSourceTexture(channel, source_texture);

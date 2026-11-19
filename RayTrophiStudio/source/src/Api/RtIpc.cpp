@@ -87,6 +87,8 @@
 
 using json = nlohmann::json;
 
+namespace rtapi { Result newProject(); }  // RtApi.cpp; kept out of RtApi.h (rebuild cost)
+
 namespace {
 
 constexpr std::size_t kMaxMessageBytes = rtipc_transport::kMaxMessageBytes;
@@ -2016,21 +2018,26 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "player.set_display") {
         // Optional keys, all validated by the Player's display host before any
         // is applied: fullscreen, width, height, render_scale, pacing_hz,
-        // continuous, hud. The value() reads below are what the descriptor
+        // continuous, hud, body_overlay, video_card. The value() reads below are what the descriptor
         // generator types each key from, and so what checkParams() rejects
         // before dispatch: a wrong-typed value never reaches the host.
         json patch = json::object();
         for (const char* key : {"fullscreen", "width", "height", "render_scale",
-                                "pacing_hz", "continuous", "hud"}) {
+                                "pacing_hz", "continuous", "hud", "body_overlay", "video_card",
+                                "render_width", "render_height"}) {
             if (params.contains(key)) patch[key] = params[key];
         }
         (void)params.value("fullscreen", false);
         (void)params.value("width", 0);
         (void)params.value("height", 0);
         (void)params.value("render_scale", 1.0);
+        (void)params.value("render_width", 0);
+        (void)params.value("render_height", 0);
         (void)params.value("pacing_hz", 60.0);
         (void)params.value("continuous", false);
         (void)params.value("hud", true);
+        (void)params.value("body_overlay", false);
+        (void)params.value("video_card", false);
         return enqueueQuery([patch](UIContext&) {
             const rtapi::Result r = AppRuntime::setRuntimeDisplay(patch);
             if (!r.ok) return json{{"__error", r.error}};
@@ -2218,9 +2225,10 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "material.create") {
         std::string type = requireString(params, "type");
         std::string name = params.value("name", "");
-        return enqueueQuery([type, name](UIContext&) {
+        std::string clone_from = optionalString(params, "clone_from", "");
+        return enqueueQuery([type, name, clone_from](UIContext&) {
             std::string created;
-            rtapi::Result r = rtapi::createMaterial(type, name, created);
+            rtapi::Result r = rtapi::createMaterial(type, name, created, clone_from);
             if (!r.ok) return json{{"__error", r.error}};
             return json(created);
         });
@@ -2234,8 +2242,9 @@ json dispatchMethod(const std::string& method, const json& params) {
     if (method == "material.assign") {
         std::string obj = requireString(params, "object_name");
         std::string mat = requireString(params, "material_name");
-        return enqueueResult([obj, mat](UIContext&) {
-            return rtapi::assignMaterial(obj, mat);
+        std::string source = optionalString(params, "source_material_name", "");
+        return enqueueResult([obj, mat, source](UIContext&) {
+            return rtapi::assignMaterial(obj, mat, source);
         });
     }
     if (method == "material.set_texture") {
@@ -7118,6 +7127,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             rtapi::Result r = rtapi::setAutosaveSettings(enabled, interval_sec, st);
             return autosaveStatusJson(st, r);
         });
+    }
+    if (method == "project.new") {
+        return enqueueResult([](UIContext&) { return rtapi::newProject(); });
     }
     if (method == "project.open") {
         std::string path = requireString(params, "path");

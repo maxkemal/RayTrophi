@@ -3,11 +3,22 @@
 #include "Api/RtApiBodyPose.h"
 #include "Api/RtApiExternalBody.h"
 #include "Api/RtApiCharacter.h"
+#include "Api/RtApiPlayerOperator.h"
 
 using json = nlohmann::json;
 
 bool dispatchBodyPoseIpc(const std::string &method, const json &params,
                          const RtIpcPaintWetEnqueue &enqueue, json &output) {
+    if (method == "player.operator") {
+        const std::string operation = params.value("operation", std::string("status"));
+        const json config = params.value("config", json::object());
+        output = enqueue([operation, config](UIContext&) {
+            json value;
+            const auto result = rtapi::playerOperator(operation, config, value);
+            return result.ok ? value : json{{"__error", result.error}};
+        });
+        return true;
+    }
     if (method == "anim.delete_character") {
         if (!params.contains("character") || !params["character"].is_string()) {
             output = {{"__error", "character must be a string"}};

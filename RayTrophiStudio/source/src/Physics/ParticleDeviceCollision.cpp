@@ -333,7 +333,7 @@ bool ParticleSimulationSystem::stepDeviceCollisions(SimulationComputeContext& co
     const auto orPlaceholder = [&](const ComputeBufferHandle& h) {
         return h.valid() && h.backend == compute.backendType() ? h : placeholder;
     };
-    ComputeBufferHandle bindings[14] = {
+    ComputeBufferHandle bindings[15] = {
         resident_buffers_.position_x, resident_buffers_.position_y,
         resident_buffers_.position_z, resident_buffers_.velocity_x,
         resident_buffers_.velocity_y, resident_buffers_.velocity_z,
@@ -343,11 +343,14 @@ bool ParticleSimulationSystem::stepDeviceCollisions(SimulationComputeContext& co
         sdf_floats > 0 ? orPlaceholder(resident_buffers_.collider_sdf) : placeholder,
         record ? orPlaceholder(resident_buffers_.collision_events) : placeholder,
         record ? orPlaceholder(resident_buffers_.collision_counter) : placeholder,
+        // The drop size goes into the event flags (bits 8..15): the wet paint
+        // splat scales its paint load and radius by it.
+        resident_buffers_.size_scale,
     };
     ComputeDispatch cmd;
     cmd.kernel = "sim_particle_collide";
     cmd.buffers = bindings;
-    cmd.buffer_count = 14;
+    cmd.buffer_count = 15;
     cmd.constants = &constants;
     cmd.constants_size = sizeof(constants);
     cmd.groups.groups_x = (static_cast<uint32_t>(constants.particle_count) + 255u) / 256u;

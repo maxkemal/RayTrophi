@@ -353,7 +353,23 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
     const void* data[4] = {instances.data(), materials.data(), lights.data(), emissives.data()};
     const uint64_t bytes[4] = {instances.size() * sizeof(instances[0]), materials.size() * sizeof(materials[0]), lights.size() * sizeof(lights[0]), emissives.size() * sizeof(emissives[0])};
     if (signature != status.signature || !s.buffers[0].buffer) {
-        drainInteractiveViewportInFlight();
+        // ★★★★ Drain ONLY when a buffer is (re)allocated (2026-11-19). It used to
+        //   drain on every signature change, and the signature hashes the
+        //   material table: each colour edit (and each frame a colour picker is
+        //   held) waited for the in-flight viewport frame (~20 ms), throwing away
+        //   the frame ring's overlap -- measured resource_drains +8 for 10 albedo
+        //   sets and loop.viewport_render ~22 ms each.
+        //   Destroying a buffer an in-flight frame reads is a device loss, so a
+        //   reallocation still drains. Rewriting a host-visible table in place
+        //   cannot fault: reads stay inside the buffer and the in-flight frame
+        //   keeps its own counts (push constants); at worst that one frame's
+        //   bounce light mixes the edited entry's old and new value, and the
+        //   next frame (the edit marked the viewport dirty) uses the new table.
+        bool reallocate = false;
+        for (uint32_t i = 0; i < 4; ++i) {
+            reallocate = reallocate || !s.buffers[i].buffer || s.buffers[i].size < bytes[i];
+        }
+        if (reallocate) drainInteractiveViewportInFlight();
         for (uint32_t i = 0; i < 4; ++i) {
             if (!s.buffers[i].buffer || s.buffers[i].size < bytes[i]) {
                 if (s.buffers[i].buffer) m_device->destroyBuffer(s.buffers[i]);

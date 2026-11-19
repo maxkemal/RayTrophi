@@ -7,6 +7,8 @@
 #include "Backend/VulkanBackend.h"
 #include "Paint/MeshPaintAdapter.h"
 #include "Paint/PaintHeightNormalMath.h"
+#include "MaterialManager.h"
+#include "Material.h"
 #include "PrincipledBSDF.h"
 #include "ParticleSimulation.h"
 #include "SimulationComputeVulkanContext.h"
@@ -41,6 +43,9 @@ constexpr uint32_t kTile = 32u;
 constexpr uint32_t kStatsStride = 16u;
 constexpr uint32_t kBindingCount = 17u;
 constexpr int kGutterTexels = 2;
+// A painted surface's base follows its material colour once that colour has
+// stayed put this long (a colour picker drag rebuilds nothing until it stops).
+constexpr double kBaseSettleSeconds = 0.25;
 
 enum WetPaintMode : uint32_t {
     kModeStamp = 0, kModeTick = 1, kModeResolve = 2, kModeRotate = 3,
@@ -145,6 +150,30 @@ std::shared_ptr<Triangle> findPaintTriangle(SceneData& scene, const std::string&
     return nullptr;
 }
 
+// Every distinct material slot an object's faces use, in first-use order.
+std::vector<uint16_t> objectPaintMaterials(SceneData& scene, const std::string& object) {
+    std::vector<uint16_t> out;
+    for (const auto& obj : scene.world.objects) {
+        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
+        if (!mesh || mesh->nodeName != object || !mesh->geometry) {
+            continue;
+        }
+        const auto& geometry = *mesh->geometry;
+        const auto* materials = geometry.get_attribute_data<uint16_t>("materialID");
+        for (size_t face = 0; face < mesh->num_triangles(); ++face) {
+            const uint32_t vertex = geometry.indices[face * 3];
+            if (vertex >= geometry.get_vertex_count()) {
+                continue;
+            }
+            const uint16_t material = materials ? materials[vertex] : 0;
+            if (std::find(out.begin(), out.end(), material) == out.end()) {
+                out.push_back(material);
+            }
+        }
+    }
+    return out;
+}
+
 struct FlatPaintFace {
     std::array<Vec3, 3> positions;
     std::array<Vec3, 3> normals;
@@ -215,6 +244,12 @@ struct WetPaintGpu::Surface {
     std::vector<float> pos_valid;      // 4 per texel
     std::vector<float> flow_normal;    // 4 per texel
     std::vector<uint32_t> base;        // RGBA8, original base colour
+    bool base_from_color = false;      // base = the material colour (no texture under it)
+    Vec3 base_linear = Vec3(1.0f);     // that colour when the base was filled
+    bool base_upload = false;          // base changed on the host: rewrite its device slice
+    bool base_pending = false;         // material colour moved, waiting for it to settle
+    Vec3 base_pending_color = Vec3(0.0f);
+    std::chrono::steady_clock::time_point base_pending_since{};
     std::array<std::weak_ptr<Texture>, 3> channel_textures;
     std::array<std::vector<uint32_t>, 3> channel_base; // roughness, height mask, normal
     std::vector<Vec2> normal_spans;    // same Jacobian metric used by CPU Paint
@@ -303,6 +338,16 @@ std::array<double, 8> WetPaintGpu::geometryKey(SceneData& scene, const std::stri
         const size_t count = mesh->geometry->get_vertex_count();
         if (!positions) continue;
         key[0] += static_cast<double>(count);
+        // The atlas IS the mesh's UV layout: a re-unwrap with the same
+        // positions moves every texel, so the UVs are part of the key (folded
+        // into slot 0; the key is compared for equality only).
+        if (const Vec2* uvs = mesh->geometry->get_uvs()) {
+            if (mesh->geometry->get_core_attribute_count(DNA::Attr::UV) == count) {
+                for (size_t i = 0; i < count; ++i) {
+                    key[0] += 1.000123 * uvs[i].u + 2.000457 * uvs[i].v;
+                }
+            }
+        }
         for (size_t i = 0; i < count; ++i) {
             const Vec3& v = positions[i];
             key[1] += v.x; key[2] += v.y; key[3] += v.z;
@@ -463,6 +508,34 @@ bool WetPaintGpu::addSurface(SceneData& scene, const std::string& object, int ma
         error = "wet paint resolution must be between 32 and 4096";
         return false;
     }
+    // material_id < 0 = EVERY material slot of the object, one surface each.
+    // It used to mean "the slot of the first triangle": an object with several
+    // slots (a sofa's seat and base, a toy shelf's back and planks) got paint on
+    // one of them only, and the others stayed clean with no message (2026-11-19).
+    if (material_id < 0) {
+        const auto slots = objectPaintMaterials(scene, object);
+        if (slots.empty()) {
+            error = "paint target mesh/material not found: " + object;
+            return false;
+        }
+        // Check every slot before adding any, so a refusal leaves nothing half added.
+        for (uint16_t slot : slots) {
+            for (const auto& other : surfaces_) {
+                if (other->material_id == slot && other->object != object) {
+                    error = "material " + std::to_string(slot) + " (a slot of " + object +
+                            ") is shared with wet paint surface '" + other->object +
+                            "': give each painted object its own material (material.assign)";
+                    return false;
+                }
+            }
+        }
+        for (uint16_t slot : slots) {
+            if (!addSurface(scene, object, slot, resolution, error)) {
+                return false;
+            }
+        }
+        return true;
+    }
     auto triangle = findPaintTriangle(scene, object, material_id);
     if (!triangle) {
         error = "paint target mesh/material not found: " + object;
@@ -514,6 +587,12 @@ bool WetPaintGpu::addSurface(SceneData& scene, const std::string& object, int ma
     const size_t texels = static_cast<size_t>(s.width) * s.height;
     s.base.resize(texels);
     for (size_t i = 0; i < texels; ++i) s.base[i] = packRgba8(texture->pixels[i]);
+    // No texture under the canvas: the base is the material colour and
+    // follows it (tick). MeshPaintAdapter seeded the canvas with it.
+    s.base_from_color = !set->wasSeededFromExisting(PaintChannel::BaseColor);
+    if (const Material* material = MaterialManager::getInstance().getMaterial(mat)) {
+        s.base_linear = material->albedoProperty.color;
+    }
 
     s.uv_set = adapter.getTarget().uv_set;
     s.paint_material = adapter.getMaterialID();
@@ -535,8 +614,10 @@ bool WetPaintGpu::addSurface(SceneData& scene, const std::string& object, int ma
     return true;
 }
 
+// material_id < 0 removes every slot of the object (see addSurface).
 bool WetPaintGpu::removeSurface(const std::string& object, int material_id, SceneData* scene) {
-    for (auto it = surfaces_.begin(); it != surfaces_.end(); ++it) {
+    bool removed = false;
+    for (auto it = surfaces_.begin(); it != surfaces_.end();) {
         if ((*it)->object == object && (material_id < 0 || (*it)->material_id == material_id)) {
             if (scene) {
                 // A removed surface must not keep painting its material: the bound
@@ -551,12 +632,14 @@ bool WetPaintGpu::removeSurface(const std::string& object, int material_id, Scen
                     }
                 }
             }
-            surfaces_.erase(it);
+            it = surfaces_.erase(it);
             layout_dirty_ = true;
-            return true;
+            removed = true;
+            continue;
         }
+        ++it;
     }
-    return false;
+    return removed;
 }
 
 void WetPaintGpu::clear() {
@@ -571,22 +654,27 @@ void WetPaintGpu::clear() {
     channels_dirty_ = false;
 }
 
+// material_id < 0 sets every slot of the object (see addSurface).
 bool WetPaintGpu::setSurfaceSettings(const std::string& object, int material_id,
                                      const WetPaintSurfaceSettings& settings) {
-    Surface* s = find(object, material_id);
-    if (!s) return false;
-    const auto& previous = s->settings;
-    const bool changed = previous.roughness_channel != settings.roughness_channel ||
-        previous.height_normal_channel != settings.height_normal_channel ||
-        previous.wet_roughness != settings.wet_roughness ||
-        previous.dry_roughness != settings.dry_roughness ||
-        previous.height_contribution != settings.height_contribution ||
-        previous.normal_strength != settings.normal_strength;
-    s->settings = settings;
-    s->channels_refresh = s->channels_refresh || changed;
-    channels_dirty_ = channels_dirty_ || changed;
-    settings_dirty_ = true;
-    return true;
+    bool found = false;
+    for (auto& surface : surfaces_) {
+        Surface* s = surface.get();
+        if (s->object != object || (material_id >= 0 && s->material_id != material_id)) continue;
+        found = true;
+        const auto& previous = s->settings;
+        const bool changed = previous.roughness_channel != settings.roughness_channel ||
+            previous.height_normal_channel != settings.height_normal_channel ||
+            previous.wet_roughness != settings.wet_roughness ||
+            previous.dry_roughness != settings.dry_roughness ||
+            previous.height_contribution != settings.height_contribution ||
+            previous.normal_strength != settings.normal_strength;
+        s->settings = settings;
+        s->channels_refresh = s->channels_refresh || changed;
+        channels_dirty_ = channels_dirty_ || changed;
+    }
+    if (found) settings_dirty_ = true;
+    return found;
 }
 
 void WetPaintGpu::setSplatSettings(const WetPaintSplatSettings& settings) {
@@ -601,6 +689,21 @@ bool WetPaintGpu::resetPaint() {
     reset_requested_ = true;
     if (device_) device_->channels_force = device_->channels_allocated;
     pending_dabs_.clear();
+    // ★ The paint is clean from here on: the cached coverage must say so. Before
+    // 2026-11-18 the cache kept the pre-reset ratio, the room goal's next
+    // (allow_stale) poll read it, room_progress jumped back to 1 and all four
+    // milestones fired in one tick - the finale cascade popped every balloon
+    // right after a reset. A new serial with a zero answer; measurements of
+    // older ticks still in flight are dropped by applyStats.
+    ++paint_serial_;
+    coverage_cache_.covered_texels = 0;
+    coverage_cache_.ratio = 0.0f;
+    for (auto& s : coverage_cache_.surfaces) {
+        s.covered_texels = s.wet_texels = s.roughness_texels = s.normal_texels = 0;
+        s.ratio = 0.0f;
+        s.mean_color[0] = s.mean_color[1] = s.mean_color[2] = 0.0f;
+    }
+    coverage_serial_ = paint_serial_;
     return true;
 }
 
@@ -1051,6 +1154,69 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
                 surface->geometry_key = key;   // do not retry every check
             }
         }
+        // A surface painted over its material COLOUR (no texture underneath)
+        // follows that colour: made blue in the material panel, the wall must
+        // turn blue (the bound canvas overrides the colour, so nothing else
+        // would show it). The wet paint starts over (as it always did).
+        //
+        // ★★★★ Only the base slice is rewritten (2026-11-19). This used to set
+        //   layout_dirty_ (the WHOLE atlas rebuilt: every surface's position,
+        //   flow and normal pages re-uploaded, tens of MB) and g_materials_dirty
+        //   (a full material-table sync with its drains) on every colour step.
+        //   A colour picker held on a painted wall in a game scene hitched
+        //   ~300 ms in loop.ui_draw whenever the colour settled; a scene
+        //   without wet paint surfaces never did. Now: the new base goes into
+        //   this surface's slice of the device base buffer below, and a reset
+        //   of THIS surface's tile range (MODE_RESET: out = base, its tiles
+        //   marked dirty) republishes it through the normal path - device copy
+        //   to the render device, per-material host sync for the viewport.
+        //   ★ Not resetPaint(): that resets and republishes EVERY surface, and
+        //   in a 20-surface room the Studio preview (a second VkDevice, host
+        //   path) re-read ~270 MB per colour step (measured 10 GB in 60 s).
+        //   Paint on the other surfaces now survives the edit.
+        for (auto& surface : surfaces_) {
+            if (!surface->base_from_color) continue;
+            const Material* material =
+                MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(surface->material_id));
+            if (!material) continue;
+            const Vec3 c = material->albedoProperty.color;
+            const auto differs = [](const Vec3& a, const Vec3& b) {
+                return std::abs(a.x - b.x) + std::abs(a.y - b.y) + std::abs(a.z - b.z) >= 1e-4f;
+            };
+            if (!differs(c, surface->base_linear)) {
+                surface->base_pending = false;
+                continue;
+            }
+            // ★★★ Applied once the colour SETTLES (kBaseSettleSeconds unchanged),
+            //   not on every step of a drag: each application republishes the
+            //   whole surface, and the Studio preview (a second VkDevice) reads
+            //   it back through the host. While the picker moves nothing is
+            //   rebuilt; the canvas shows the new colour a moment after it stops.
+            const auto now = std::chrono::steady_clock::now();
+            if (!surface->base_pending || differs(c, surface->base_pending_color)) {
+                surface->base_pending = true;
+                surface->base_pending_color = c;
+                surface->base_pending_since = now;
+                continue;
+            }
+            if (std::chrono::duration<double>(now - surface->base_pending_since).count() <
+                kBaseSettleSeconds) {
+                continue;
+            }
+            surface->base_pending = false;
+            surface->base_linear = c;
+            auto texture = surface->texture.lock();
+            if (!texture) continue;
+            auto srgb = [](float v) {
+                v = std::clamp(v, 0.0f, 1.0f);
+                const float s = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
+                return static_cast<uint8_t>(std::clamp(std::lround(s * 255.0f), 0L, 255L));
+            };
+            const CompactVec4 fill(srgb(c.x), srgb(c.y), srgb(c.z), 255);
+            for (auto& pixel : texture->pixels) pixel = fill;
+            std::fill(surface->base.begin(), surface->base.end(), packRgba8(fill));
+            surface->base_upload = true;
+        }
     }
     stats_.surfaces = static_cast<uint32_t>(surfaces_.size());
     if (surfaces_.empty()) {
@@ -1065,19 +1231,27 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     SimulationComputeContext& c = *d.compute;
     const bool layout_fresh = layout_dirty_;
     if (layout_dirty_ && !rebuildDevice(scene)) return false;
+    // A base colour change (above): this surface's slice of the device base
+    // only, and a reset of its own tiles below (out = base, paint cleared,
+    // tiles marked dirty for publish). A fresh layout already uploaded every
+    // base and starts clean.
+    std::vector<std::pair<uint32_t, uint32_t>> base_resets;   // (first tile, tile count)
+    for (auto& sp : surfaces_) {
+        Surface& s = *sp;
+        if (!s.base_upload) continue;
+        s.base_upload = false;
+        if (layout_fresh || d.texel_count == 0 || s.tiles.empty()) continue;
+        const std::size_t cnt = static_cast<std::size_t>(s.width) * s.height;
+        if (!c.uploadBuffer(d.base, s.base.data(), cnt * 4, s.page_offset * 4)) {
+            layout_dirty_ = true;   // could not patch: fall back to a full rebuild next tick
+            continue;
+        }
+        base_resets.emplace_back(s.tile_offset, static_cast<uint32_t>(s.tiles.size()));
+    }
     if (!prepareChannels(scene)) return false;
     if (settings_dirty_) uploadSurfaceTable();
     stats_.device_ready = true;
     stats_.tiles = d.tile_count;
-
-    dt = dt > 0.0f ? std::min(dt, 2.5f / 60.0f) : (1.0f / 60.0f);
-
-    WetPaintGpuConstants k;
-    k.surface_count = n;
-    k.tile_count = d.tile_count;
-    k._p0 = d.channels_allocated ? d.texel_count : 0u;
-    k._p1 = d.channels_force ? 1u : 0u;
-    k.dt = dt;
     const uint32_t n = static_cast<uint32_t>(surfaces_.size());
 
     // The previous dispatching tick's stats (dirty rectangles, active tiles,
@@ -1094,6 +1268,15 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             ++stats_.stats_readbacks_lost;
         }
     }
+
+    dt = dt > 0.0f ? std::min(dt, 2.5f / 60.0f) : (1.0f / 60.0f);
+
+    WetPaintGpuConstants k;
+    k.surface_count = n;
+    k.tile_count = d.tile_count;
+    k._p0 = d.channels_allocated ? d.texel_count : 0u;
+    k._p1 = d.channels_force ? 1u : 0u;
+    k.dt = dt;
     k.splat_radius = std::max(0.0f, splat_.radius);
     k.splat_amount = std::clamp(splat_.amount, 0.0f, 1.0f);
     k.splat_min_speed = std::max(0.0f, splat_.min_speed);
@@ -1197,28 +1380,36 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         }
     }
     // Idle: nothing wet, nothing arriving. No dispatch, no readback.
-    if (dabs.empty() && device_sources.empty() && !reset_requested_ && stats_.active_tiles == 0 &&
-        !layout_fresh && !d.channels_force) {
+    if (dabs.empty() && device_sources.empty() && !reset_requested_ && base_resets.empty() &&
+        stats_.active_tiles == 0 && !layout_fresh && !d.channels_force) {
         stats_.status = "idle";
+        ++stats_.idle_ticks;
+        stats_.event_sources = 0;
         stats_.ticked_tiles = stats_.stamped_texels = 0;
         stats_.last_tick_ms = msSince(t0);
         return true;
     }
+    ++paint_serial_;   // this tick dispatches: coverage() must measure again
+    stats_.event_sources = static_cast<uint32_t>(device_sources.size());
     // Per-tick stat slots: dirty bbox min = max uint, the rest zero.
     std::vector<uint32_t> stats_init(static_cast<std::size_t>(n) * kStatsStride, 0u);
     for (uint32_t si = 0; si < n; ++si) {
         stats_init[si * kStatsStride + kStDirtyMinX] = 0xFFFFFFFFu;
         stats_init[si * kStatsStride + kStDirtyMinY] = 0xFFFFFFFFu;
     }
-        ++stats_.idle_ticks;
-        stats_.event_sources = 0;
     c.uploadBuffer(d.stats, stats_init.data(), stats_init.size() * 4);
+    // MODE_RESET reads source_count as its first tile (paint_wet.comp).
     if (reset_requested_) {
+        k.source_count = 0;
         run(kModeReset, d.tile_count);
         reset_requested_ = false;
-    ++paint_serial_;   // this tick dispatches: coverage() must measure again
-    stats_.event_sources = static_cast<uint32_t>(device_sources.size());
+    } else {
+        for (const auto& range : base_resets) {
+            k.source_count = range.first;
+            run(kModeReset, range.second);
+        }
     }
+    k.source_count = 0;
 
     if (!dabs.empty() && ensure(d.dabs, d.dab_capacity, dabs.size(), sizeof(GpuDab), "WetPaintDabs") &&
         c.uploadBuffer(d.dabs, dabs.data(), dabs.size() * sizeof(GpuDab))) {
@@ -1296,16 +1487,6 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         stats_.last_tick_ms = msSince(t0);
         return false;
     }
-    stats_.active_tiles = stats_.ticked_tiles = stats_.stamped_texels = 0;
-    for (uint32_t si = 0; si < n; ++si) {
-        Surface& s = *surfaces_[si];
-        const uint32_t* v = st.data() + si * kStatsStride;
-        s.last.active_tiles = v[kStActiveTiles];
-        s.last.ticked_tiles = v[kStTickedTiles];
-        s.last.stamped_texels = v[kStStampedTexels];
-        s.last.sources_dropped = v[kStSourcesDropped];
-        stats_.active_tiles += v[kStActiveTiles];
-        stats_.ticked_tiles += v[kStTickedTiles];
     const std::size_t stats_bytes = static_cast<std::size_t>(n) * kStatsStride * 4;
     const uint64_t ticket = c.submitWithReadback(d.stats, stats_bytes, 0);
     if (ticket != 0) {
@@ -1342,11 +1523,23 @@ void WetPaintGpu::applyStats(const std::vector<uint32_t>& st, bool force, bool m
                              uint64_t serial) {
     const uint32_t n = static_cast<uint32_t>(surfaces_.size());
     if (st.size() < static_cast<std::size_t>(n) * kStatsStride) return;
-    if (measured_coverage) {
+    // Never replace the cache with an OLDER measurement (a delayed readback of
+    // a tick before a reset or before a synchronous coverage() call).
+    if (measured_coverage && (coverage_serial_ == ~0ull || serial >= coverage_serial_)) {
         readCoverage(st, coverage_cache_);
         coverage_serial_ = serial;
         ++stats_.coverage_in_tick;
     }
+    stats_.active_tiles = stats_.ticked_tiles = stats_.stamped_texels = 0;
+    for (uint32_t si = 0; si < n; ++si) {
+        Surface& s = *surfaces_[si];
+        const uint32_t* v = st.data() + si * kStatsStride;
+        s.last.active_tiles = v[kStActiveTiles];
+        s.last.ticked_tiles = v[kStTickedTiles];
+        s.last.stamped_texels = v[kStStampedTexels];
+        s.last.sources_dropped = v[kStSourcesDropped];
+        stats_.active_tiles += v[kStActiveTiles];
+        stats_.ticked_tiles += v[kStTickedTiles];
         stats_.stamped_texels += v[kStStampedTexels];
         stats_.sources_dropped += v[kStSourcesDropped];
         if (v[kStDirtyMaxX] >= v[kStDirtyMinX] && v[kStDirtyMinX] != 0xFFFFFFFFu) {
@@ -1531,16 +1724,6 @@ void WetPaintGpu::readCoverage(const std::vector<uint32_t>& st, WetPaintCoverage
 bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out, bool allow_stale) {
     out = WetPaintCoverage{};
     if (surfaces_.empty() || !ensureCompute(scene)) return false;
-    if (layout_dirty_ && !rebuildDevice(scene)) return false;
-    if (!prepareChannels(scene)) return false;
-    if (settings_dirty_) uploadSurfaceTable();
-    Device& d = *device_;
-    SimulationComputeContext& c = *d.compute;
-    const uint32_t n = static_cast<uint32_t>(surfaces_.size());
-    std::vector<uint32_t> st(static_cast<std::size_t>(n) * kStatsStride, 0u);
-    // Only the coverage slots are cleared; the tick slots keep their values.
-    for (uint32_t si = 0; si < n; ++si) {
-        c.uploadBuffer(d.stats, st.data(), (kStatsStride - kStCoveredTexels) * 4,
     // Unchanged paint (every tick since the last measurement was idle, no
     // layout or settings change): the answer is the same. The room goal asks
     // twice a second; each measurement is a dispatch + synchronize + download.
@@ -1555,6 +1738,16 @@ bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out, bool allow_s
         ++stats_.coverage_cached;
         return true;
     }
+    if (layout_dirty_ && !rebuildDevice(scene)) return false;
+    if (!prepareChannels(scene)) return false;
+    if (settings_dirty_) uploadSurfaceTable();
+    Device& d = *device_;
+    SimulationComputeContext& c = *d.compute;
+    const uint32_t n = static_cast<uint32_t>(surfaces_.size());
+    std::vector<uint32_t> st(static_cast<std::size_t>(n) * kStatsStride, 0u);
+    // Only the coverage slots are cleared; the tick slots keep their values.
+    for (uint32_t si = 0; si < n; ++si) {
+        c.uploadBuffer(d.stats, st.data(), (kStatsStride - kStCoveredTexels) * 4,
                        (static_cast<std::size_t>(si) * kStatsStride + kStCoveredTexels) * 4);
     }
     ComputeBufferHandle bindings[kBindingCount] = {

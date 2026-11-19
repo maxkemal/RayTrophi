@@ -1,5 +1,6 @@
 #include "UI/GrainGeneratorUI.h"
 #include "Core/RuntimeSimulationClock.h"
+#include "Game/GameRuntime.h"
 #include "PostProcess/PostService.h"
 #include "UI/VolumeMaterialUI.h"
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3845,8 +3846,13 @@ void SceneUI::draw(UIContext& ctx)
     // Debug display mode (1) uses the lightweight ImGui overlay, so the instanced
     // geometry is suppressed there (Solid/Render show it).
     // Skipped while the sequence-render worker owns the bridge (see above).
+    // A Studio play test draws the game as the Player does: billboards only.
+    // The RT instance pools (one slot per SoA slot, dead slots at scale 0) were
+    // ALSO drawn by the raster viewport - 266k instances for four 62k droplet
+    // pools, droplets twice - so Studio measured and looked like another game.
+    // Collapsing keeps the slots (no TLAS topology change, see the bridge).
     if (!render_owns_sim) {
-        ctx.scene.syncParticleRenderInstances(ctx.particle_display_mode != 1);
+        ctx.scene.syncParticleRenderInstances(ctx.particle_display_mode != 1 && !Game::playtestActive());
         uploadParticleBillboards(ctx);
     }
 

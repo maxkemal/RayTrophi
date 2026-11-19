@@ -2437,6 +2437,22 @@ Result setAutosaveSettings(std::optional<bool> enabled, std::optional<int> inter
     return Result::success();
 }
 
+// Same reset as File > New (SceneUI::performNewProject), which lives with the
+// Studio UI; the Player has no editor scene to reset and refuses.
+// Declared locally by its IPC/Python callers (not in RtApi.h: that header is
+// included almost everywhere and a new line there rebuilds most of the tree).
+Result newProject() {
+    if (!g_ctx) return notBound();
+#ifdef RT_PLAYER
+    return Result::fail("project.new is not available in the Player");
+#else
+    if (rendering_in_progress.load() || g_render_job.state == RenderJobState::Rendering)
+        return Result::fail("cannot start a new project while rendering");
+    ui.performNewProject(*g_ctx);
+    return Result::success();
+#endif
+}
+
 Result openProject(const std::string& filepath) {
     if (!g_ctx) return notBound();
     if (rendering_in_progress.load() || g_render_job.state == RenderJobState::Rendering)

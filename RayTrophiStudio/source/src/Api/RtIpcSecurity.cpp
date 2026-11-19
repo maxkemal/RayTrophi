@@ -211,6 +211,8 @@ bool loadLocked(std::string& error) {
 }
 
 uint32_t requiredCapabilities(const std::string& method) {
+    // Operator command includes local folder discovery and owned camera processes.
+    if (method == "player.operator") return Admin | SceneWrite | FilesRead | FilesWrite;
     if (method == "uv.capabilities" || method == "uv.targets" ||
         method == "uv.info" || method == "uv.layout") return Read;
     if (method == "gas.get_source_materials") return Read;
@@ -292,6 +294,8 @@ uint32_t requiredCapabilities(const std::string& method) {
     if (method == "script.run_file") return Scripts | FilesRead;
     if (method == "addons.enable" || method == "addons.disable" || method == "addons.reload")
         return Addons;
+    // project.new discards the current scene like project.open replaces it.
+    if (method == "project.new") return SceneWrite;
     if (method == "project.open" || method == "scene.import_model" ||
         method == "scene.import_vdb" ||
         method == "terrain.import_heightmap" || method == "paint.import_channel")
@@ -368,7 +372,8 @@ uint32_t requiredCapabilities(const std::string& method) {
         method == "physics.collider.proxy_set.sample" ||
         method == "physics.collider.proxy_set.solver_stamps") return Read;
     if (method == "rayfusion.core_status" || method == "rayfusion.validate_core" ||
-        method == "rayfusion.probe_field" || method == "rayfusion.scene_as") return Read;
+        method == "rayfusion.probe_field" || method == "rayfusion.scene_as" ||
+        method == "rayfusion.bake_counters") return Read;
     // Choosing the probe producer changes what the viewport renders, so it is
     // Render and not Read -- it is a measurement lever, but the measurement is
     // taken on the live image.

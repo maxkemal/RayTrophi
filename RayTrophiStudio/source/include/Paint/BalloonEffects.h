@@ -4,6 +4,7 @@
 #include "json.hpp"
 
 #include <cstdint>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,32 @@ void balloonConfettiRain(SceneData& scene, const Vec3& spawn_min, const Vec3& sp
 // an invisible CPU twin that flies the same path and carries the drop's trail.
 void balloonDropLaunched(SceneData& scene, const Vec3& position, const Vec3& velocity,
                          int color, float size_scale, float lifetime);
+// How a popped balloon's paint leaves it. Liquid from a burst membrane does not
+// spread as an even sphere: the sheet tears into a few ligaments of very
+// unequal mass, the side of the tear bursts harder, a ligament stretches (tip
+// fast, root slow) and breaks into beads that fly in clumps and land as one
+// thick splat, a few heavy blobs fall slow and the rest is fine spray. Every
+// share is drawn per pop, so no two pops look alike (seeded: reproducible).
+// The wet paint splat radius is fixed, so a "big drop" is a co-moving clump.
+struct BalloonBurstShape {
+    float clumpiness = 0.7f;   // 0 = fine spray only (even sphere), 1 = ligaments and blobs only
+    int jets_max = 10;         // ligaments per pop: drawn from 3..jets_max
+};
+struct BalloonBurstDrop {
+    Vec3 offset;               // from the balloon centre
+    Vec3 velocity;
+    float size_scale = 1.0f;
+    uint32_t clump = 0;        // drops of one clump/blob share it and sit adjacent in the output
+};
+struct BalloonBurstSummary {
+    int jets = 0, blobs = 0, clumps = 0;
+    int jet_drops = 0, blob_drops = 0, spray_drops = 0;
+    float heaviest_jet_share = 0.0f;   // of the jet drops; even split = 1/jets
+    Vec3 tear = Vec3(0.0f);            // direction of the rupture (hardest side)
+};
+BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float balloon_size,
+                                        const BalloonBurstShape& shape,
+                                        std::vector<BalloonBurstDrop>& out);
 // One firework shell of `sparkles` sparks.
 void balloonSparkles(SceneData& scene, const Vec3& centre, float radius);
 // Every frame BEFORE the simulation step (the drop tap reads the previous step).

@@ -3,6 +3,11 @@
 #include "Api/RtApi.h"
 #include "Api/RtIpc.h"
 
+#ifdef RT_PLAYER
+#include "Core/PlayerVideoCard.h"
+#include "Core/RuntimeProjectHost.h"
+#endif
+
 #include <SDL.h>
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
@@ -12,8 +17,17 @@
 
 extern SDL_Window* window;
 extern SDL_Renderer* renderer;
+#ifdef RT_PLAYER
+extern SDL_Surface* original_surface;
+#endif
 
 namespace AppRuntime {
+
+#ifdef RT_PLAYER
+namespace {
+PlayerVideoCard video_card;
+}
+#endif
 
 void FrameCycle::beginIteration() {
     started_ = std::chrono::steady_clock::now();
@@ -41,6 +55,28 @@ void FrameCycle::pumpMainThreadWork(bool scene_ready) {
         requestRedraw();
         observed_ipc_running_ = ipc_running;
     }
+#ifdef RT_PLAYER
+    static bool was_enabled = false;
+    static std::uint64_t last_packet = 0;
+    static Input::BodyPoseRuntime::Clock::time_point final_redraw{};
+    const bool enabled = playerBodyOverlayEnabled();
+    const auto now = Input::BodyPoseRuntime::Clock::now();
+    const auto packet = Input::bodyPoses().packetCount();
+    if (enabled != was_enabled || (enabled && packet != last_packet)) {
+        requestRedraw();
+        final_redraw = enabled ? now + std::chrono::milliseconds(550)
+                               : Input::BodyPoseRuntime::Clock::time_point{};
+    } else if (enabled && final_redraw != Input::BodyPoseRuntime::Clock::time_point{} &&
+               now >= final_redraw) {
+        requestRedraw();
+        final_redraw = {};
+    }
+    was_enabled = enabled;
+    last_packet = packet;
+    if (video_card.poll(playerVideoCardEnabled(), renderer)) {
+        requestRedraw();
+    }
+#endif
 }
 
 bool FrameCycle::isForeground() const {
@@ -64,6 +100,15 @@ void FrameCycle::beginUiFrame() {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
+#ifdef RT_PLAYER
+    if (original_surface && (playerBodyOverlayEnabled() || playerVideoCardEnabled())) {
+        const PlayerOverlayProjection projection(original_surface->w, original_surface->h);
+        video_card.draw(projection);
+        if (playerBodyOverlayEnabled()) {
+            drawPlayerBodyOverlay(projection);
+        }
+    }
+#endif
 }
 
 void FrameCycle::endUiFrame() {

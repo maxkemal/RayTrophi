@@ -10,6 +10,7 @@
 #include "Fluid/FluidParticleVisualRadius.h"
 #include "Fluid/FluidRenderProxy.h"
 #include "Fluid/FluidViewResolver.h"
+#include "Light.h"
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +29,125 @@ void appendRow(std::vector<float>& lut, const float* row) {
 uint32_t rowCount(const std::vector<float>& lut) {
     return static_cast<uint32_t>(lut.size() /
                                  RayTrophiSim::kParticleAppearanceLutFloatsPerRow);
+}
+
+// ── Lit drops (2026-11-18) ──────────────────────────────────────────────────
+// A system drawn as non-emissive spheres (ParticleRenderSettings: shape Sphere,
+// emissive false - the same setting the RT bridge reads) is shaded in the
+// billboard shaders as a lit liquid bead: the vertex stage weighs the scene's
+// lights at the particle (the RT falloff: colour * intensity / d^2), the two
+// strongest light it directly (wrap diffuse + GGX at render.roughness), the
+// rest tint its ambient; Fresnel sky reflection on top. Emissive systems
+// (sparks, confetti, the fallback) stay flat as before.
+//
+// The billboards are drawn in the display-referred overlay pass, after the
+// tonemap, so absolute HDR units cannot be matched: brightness is RELATIVE,
+// the particle's irradiance over the irradiance at a reference point (below
+// the light centroid), square-rooted and clamped.
+//
+// The inputs ride in the BUILDER'S COPY of the row, in the sample slots [1].zw
+// that the LUT layout leaves zero (the CPU sampler, the wet paint colour
+// lookup and the vertex size/emission read only [1].xy):
+//   sample 0: (roughness, 1 = lit)   sample 1: (light count, reference E)
+//   light i (i < 8): sample 2+3i: (pos.x, pos.y)  3+3i: (pos.z, R)  4+3i: (G, B)
+// with RGB = colour * intensity (directional: a point 1e4 m away, x 1e8).
+// No push constant, pipeline or header changes.
+constexpr int kLitMaxLights = 8;
+
+struct LitShading {
+    bool lit = false;
+    float roughness = 0.3f;
+};
+
+LitShading litShadingFor(const SceneData::ParticleRenderSettings& render) {
+    LitShading out;
+    out.lit = render.shape == SceneData::ParticleRenderShape::Sphere && !render.emissive;
+    out.roughness = std::clamp(render.roughness, 0.03f, 1.0f);
+    return out;
+}
+
+struct LitLight {
+    Vec3 position;
+    Vec3 radiance;   // colour * intensity (RT units, / d^2 at the particle)
+};
+struct LitLights {
+    std::vector<LitLight> lights;
+    float reference_e = 1.0f;
+};
+
+float luminance(const Vec3& c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+
+// Point and spot lights as points (spot cones are ignored: a drop is small and
+// rarely outside a room light's cone); a directional light as a point 1e4 m
+// away with its radiance scaled by d^2, so one falloff serves every kind.
+// Area lights as a point at their centre. Strongest kLitMaxLights by radiance.
+LitLights litLightsFor(const SceneData& scene) {
+    LitLights out;
+    for (const auto& light : scene.lights) {
+        if (!light || !light->visible) continue;
+        const Vec3 rad = light->color * light->intensity;
+        if (!(luminance(rad) > 0.0f)) continue;
+        LitLight l;
+        if (light->type() == LightType::Directional) {
+            const Vec3 d = -light->direction;
+            if (!(d.length() > 1e-6f)) continue;
+            l.position = d.normalize() * 1.0e4f;
+            l.radiance = rad * 1.0e8f;
+        } else {
+            l.position = light->position;
+            l.radiance = rad;
+        }
+        out.lights.push_back(l);
+    }
+    if (out.lights.empty()) {
+        // No light at all: a soft key from above-front (the raster preview's).
+        out.lights.push_back({Vec3(0.45f, 0.8f, 0.35f).normalize() * 1.0e4f, Vec3(1.0e8f)});
+    }
+    std::sort(out.lights.begin(), out.lights.end(), [](const LitLight& a, const LitLight& b) {
+        const bool fa = a.position.length() > 1.0e3f, fb = b.position.length() > 1.0e3f;
+        const float ea = luminance(a.radiance) * (fa ? 1.0e-8f : 1.0f);
+        const float eb = luminance(b.radiance) * (fb ? 1.0e-8f : 1.0f);
+        return ea > eb;
+    });
+    if (out.lights.size() > static_cast<std::size_t>(kLitMaxLights)) {
+        out.lights.resize(kLitMaxLights);
+    }
+    // Reference point: 1.5 m under the centroid of the near lights (room
+    // lights hang at the ceiling; drops fly below them).
+    Vec3 centroid(0.0f);
+    int near_count = 0;
+    for (const auto& l : out.lights) {
+        if (l.position.length() < 1.0e3f) { centroid = centroid + l.position; ++near_count; }
+    }
+    centroid = near_count > 0 ? centroid * (1.0f / near_count) - Vec3(0.0f, 1.5f, 0.0f) : Vec3(0.0f, 1.0f, 0.0f);
+    float e = 0.0f;
+    for (const auto& l : out.lights) {
+        const Vec3 d = l.position - centroid;
+        e += luminance(l.radiance) / std::max(d.x * d.x + d.y * d.y + d.z * d.z, 0.04f);
+    }
+    out.reference_e = e > 0.0f ? e : 1.0f;
+    return out;
+}
+
+void markLitRow(std::vector<float>& lut, uint32_t row, const LitShading& shading,
+                const LitLights& lights) {
+    if (!shading.lit) return;
+    float* r = lut.data() + static_cast<std::size_t>(row) *
+                                RayTrophiSim::kParticleAppearanceLutFloatsPerRow;
+    constexpr int kSample = RayTrophiSim::kParticleAppearanceLutFloatsPerSample;
+    auto slot = [&](int sample, float z, float w) {
+        r[sample * kSample + 6] = z;
+        r[sample * kSample + 7] = w;
+    };
+    const int count = static_cast<int>(lights.lights.size());
+    slot(0, shading.roughness, 1.0f);
+    slot(1, static_cast<float>(count), lights.reference_e);
+    for (int i = 0; i < count; ++i) {
+        const LitLight& l = lights.lights[static_cast<std::size_t>(i)];
+        slot(2 + 3 * i, l.position.x, l.position.y);
+        slot(3 + 3 * i, l.position.z, l.radiance.x);
+        slot(4 + 3 * i, l.radiance.y, l.radiance.z);
+    }
 }
 
 void pushQuad(std::vector<ParticleBillboardVertex>& out, float x, float y, float z,
@@ -54,7 +174,8 @@ void pushQuad(std::vector<ParticleBillboardVertex>& out, float x, float y, float
 // simulation buffers (vertex pulling). Its profile rows go into the LUT like
 // any other system's; the id -> row map goes into row_lookup.
 bool appendPulledSystem(const RayTrophiSim::ParticleSimulationSystem& runtime,
-                        void* viewport_device, ParticleBillboardUpload& out) {
+                        void* viewport_device, const LitShading& shading,
+                        const LitLights& lights, ParticleBillboardUpload& out) {
     RayTrophiSim::ParticleResidentDrawBuffers device;
     if (!viewport_device || !runtime.residentDrawBuffers(device) ||
         device.device != viewport_device || device.capacity == 0) {
@@ -76,9 +197,10 @@ bool appendPulledSystem(const RayTrophiSim::ParticleSimulationSystem& runtime,
     for (const auto& profile : runtime.appearanceProfiles()) {
         const bool alpha = profile.blend == RayTrophiSim::ParticleAppearanceBlend::Alpha;
         draw.has_alpha = draw.has_alpha || alpha;
-        out.row_lookup[draw.lookup_offset + profile.id] =
-            rowCount(out.lut) | (alpha ? 0x80000000u : 0u);
+        const uint32_t row = rowCount(out.lut);
+        out.row_lookup[draw.lookup_offset + profile.id] = row | (alpha ? 0x80000000u : 0u);
         appendRow(out.lut, runtime.appearanceLutRow(profile.id));
+        markLitRow(out.lut, row, shading, lights);
     }
     out.pulled.push_back(draw);
     return true;
@@ -92,13 +214,15 @@ void appendParticleSystems(const SceneData& scene, void* viewport_device,
         bool alpha = false;
     };
     std::unordered_map<uint32_t, RowInfo> rows;
+    const LitLights lights = litLightsFor(scene);
 
     for (const auto& system : scene.particle_systems) {
         if (!system.visible || !system.runtime || system.render.emitter_only) {
             continue;
         }
         auto& runtime = *system.runtime;
-        if (appendPulledSystem(runtime, viewport_device, out)) {
+        const LitShading shading = litShadingFor(system.render);
+        if (appendPulledSystem(runtime, viewport_device, shading, lights, out)) {
             continue;
         }
         // Not pullable: either the host already holds the state, or the
@@ -114,6 +238,7 @@ void appendParticleSystems(const SceneData& scene, void* viewport_device,
             info.row = rowCount(out.lut);
             info.alpha = profile.blend == ParticleAppearanceBlend::Alpha;
             appendRow(out.lut, runtime.appearanceLutRow(profile.id));
+            markLitRow(out.lut, info.row, shading, lights);
             rows[profile.id] = info;
         }
 

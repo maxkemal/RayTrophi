@@ -397,10 +397,42 @@ nlohmann::json request(const std::string& operation, const nlohmann::json& param
                 return failure("uv_invalid_atlas_options");
             }
             uint32_t preserved_faces = 0;
-            if (!atlas(layout, operation == "unwrap", uint32_t(resolution),
-                       uint32_t(padding), error, &preserved_faces)) {
+            // ★★★ Chart in WORLD units. P_orig is the unscaled mesh; a cube
+            //   stretched to an 8 x 0.07 x 8 m floor slab got six equal charts
+            //   (measured 2026-11-17: every face 0.106 of UV space, so the 64 m2
+            //   top face had the same texels as a 0.5 m2 edge). xatlas sizes
+            //   charts by the positions it is given, so give it the transformed
+            //   ones -- the same source project_view already uses.
+            std::vector<Vec3> local_positions;
+            const auto& atlas_geometry = *mesh->geometry;
+            const Vec3* world_positions = atlas_geometry.get_positions();
+            const bool use_world = world_positions &&
+                atlas_geometry.get_core_attribute_count(DNA::Attr::P) == layout.positions.size();
+            if (use_world) {
+                local_positions.swap(layout.positions);
+                layout.positions.assign(world_positions, world_positions + local_positions.size());
+            }
+            const bool atlas_ok = atlas(layout, operation == "unwrap", uint32_t(resolution),
+                                        uint32_t(padding), error, &preserved_faces);
+            if (use_world) {
+                // Restore the local snapshot (revision fingerprint), following any
+                // seam splits the atlas introduced.
+                std::vector<Vec3> restored;
+                if (layout.source_vertices.size() == layout.positions.size()) {
+                    restored.reserve(layout.positions.size());
+                    for (uint32_t source : layout.source_vertices) {
+                        restored.push_back(source < local_positions.size()
+                                               ? local_positions[source] : Vec3());
+                    }
+                } else {
+                    restored = local_positions;
+                }
+                layout.positions.swap(restored);
+            }
+            if (!atlas_ok) {
                 return failure(error);
             }
+            summary["atlas_world_scale"] = use_world;
             summary["atlas_preserved_faces"] = preserved_faces;
         }
         const bool topology_changed = before_indices != layout.indices;

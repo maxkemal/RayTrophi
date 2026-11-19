@@ -128,6 +128,7 @@ Result addWetPaintSurface(const std::string& object, int material_id, int resolu
                           WetPaintSurfaceRuntimeInfo& out);
 Result removeWetPaintSurface(const std::string& object, int material_id);
 Result clearWetPaintSurfaces();
+Result resizeWetPaintSurfaces(int resolution);
 Result getWetPaintStatus(WetPaintStatusInfo& out);
 Result getWetPaintSurfaceSettings(const std::string& object, int material_id,
                                   WetPaintSurfaceSettingsInfo& out);

@@ -27,6 +27,7 @@
 #include "Renderer.h"
 
 #include <memory>
+#include <algorithm>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -144,13 +145,34 @@ Result getMaterial(const std::string& name, MaterialInfo& out) {
 }
 
 Result createMaterial(const std::string& type, const std::string& requested_name,
-                      std::string& out_name) {
+                      std::string& out_name, const std::string& clone_from) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
 
     std::shared_ptr<Material> material;
     std::string base_name = requested_name;
-    if (type == "principled") {
+    if (!clone_from.empty()) {
+        uint16_t source_id = 0;
+        Material* source = nullptr;
+        if (Result result = resolveMaterial(clone_from, source_id, source); !result) {
+            return result;
+        }
+        if (type != materialTypeName(source)) {
+            return Result::fail("clone type must match source material type");
+        }
+        if (auto* surface = dynamic_cast<PrincipledBSDF*>(source)) {
+            auto copy = std::make_shared<PrincipledBSDF>(*surface);
+            copy->gpuMaterial.reset();
+            material = std::move(copy);
+        } else if (auto* volume = dynamic_cast<Volumetric*>(source)) {
+            material = std::make_shared<Volumetric>(*volume);
+        } else {
+            return Result::fail("material type does not support cloning: " + clone_from);
+        }
+        if (base_name.empty()) {
+            base_name = clone_from + " Copy";
+        }
+    } else if (type == "principled") {
         // Same defaults as the panel's "Create New Surface".
         material = std::make_shared<PrincipledBSDF>(Vec3(0.8f), 0.5f, 0.0f);
         if (base_name.empty()) base_name = "Surface";
@@ -189,7 +211,8 @@ std::vector<std::string> objectMaterials(const std::string& object_name) {
     return out;
 }
 
-Result assignMaterial(const std::string& object_name, const std::string& material_name) {
+Result assignMaterial(const std::string& object_name, const std::string& material_name,
+                      const std::string& source_material_name) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (!objectExists(object_name)) return Result::fail("object not found: " + object_name);
@@ -197,10 +220,18 @@ Result assignMaterial(const std::string& object_name, const std::string& materia
     uint16_t new_id = 0;
     Material* replacement = nullptr;
     if (Result r = resolveMaterial(material_name, new_id, replacement); !r) return r;
+    uint16_t source_id = 0;
+    if (!source_material_name.empty()) {
+        Material* source = nullptr;
+        if (Result r = resolveMaterial(source_material_name, source_id, source); !r) return r;
+        const auto used = objectMaterialIds(*g_ctx, object_name);
+        if (std::find(used.begin(), used.end(), source_id) == used.end()) {
+            return Result::fail("source material is not assigned to object: " + object_name);
+        }
+    }
 
-    // Repaint every flat mesh carrying this node name. Unlike the panel, which
-    // swaps one slot, this replaces the object's whole material assignment —
-    // that is the useful primitive for a script building a look.
+    // Repaint the flat SoA IDs directly. An explicit source preserves sibling
+    // slots; omitting it retains the existing whole-object assignment behavior.
     bool touched = false;
     std::unordered_set<uint16_t> replaced_ids;
     auto embree = std::dynamic_pointer_cast<EmbreeBVH>(g_ctx->scene.bvh);
@@ -214,6 +245,9 @@ Result assignMaterial(const std::string& object_name, const std::string& materia
         const size_t vertex_count = mesh->geometry->get_vertex_count();
         std::unordered_set<uint16_t> mesh_ids;
         for (size_t v = 0; v < vertex_count; ++v) {
+            if (!source_material_name.empty() && material_ids[v] != source_id) {
+                continue;
+            }
             if (material_ids[v] == new_id) continue;
             mesh_ids.insert(material_ids[v]);
             material_ids[v] = new_id;

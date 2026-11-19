@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include "Backend/PreviewBakeCounters.h"
 #include <fstream>
 #include <vector>
 
@@ -604,6 +605,7 @@ bool VulkanBackendAdapter::refreshWorldSkyCapture(uint64_t& signature) {
 
     state->skySignature = stamp;
     state->skyCaptured = true;
+    previewBakeCounters().sky_captures.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -694,6 +696,7 @@ void VulkanBackendAdapter::refreshMaterialPreviewIbl() {
     };
 
     dispatch(0u, 0u, kIrradianceWidth, kIrradianceHeight, 128u, 0.0f);
+    previewBakeCounters().ibl_regenerations.fetch_add(1, std::memory_order_relaxed);
 
     // Copy the freshly written irradiance out while the image is still GENERAL.
     // Doing it after the chain would mean transitioning back out of

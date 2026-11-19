@@ -124,7 +124,29 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
         out_result = enqueue([=](UIContext&) {
             rtapi::WetPaintSurfaceRuntimeInfo info;
             const rtapi::Result r = rtapi::addWetPaintSurface(object, material_id, resolution, info);
-            return r.ok ? surfaceJson(info) : json{{"__error", r.error}};
+            if (!r.ok) return json{{"__error", r.error}};
+            // material_id -1 adds one surface per material slot: list them all,
+            // so a caller can see every slot took part (not only the first).
+            json out = surfaceJson(info);
+            json slots = json::array();
+            rtapi::WetPaintStatusInfo status;
+            if (rtapi::getWetPaintStatus(status).ok) {
+                for (const auto& surface : status.surface_list) {
+                    if (surface.object == object &&
+                        (material_id < 0 || surface.material_id == material_id)) {
+                        slots.push_back(surfaceJson(surface));
+                    }
+                }
+            }
+            out["surfaces"] = std::move(slots);
+            return out;
+        });
+        return true;
+    }
+    if (method == "paint.wet_resize_surfaces") {
+        const int resolution = optionalInt(params, "resolution", 0);
+        out_result = enqueue([=](UIContext&) {
+            return resultToJson(rtapi::resizeWetPaintSurfaces(resolution));
         });
         return true;
     }

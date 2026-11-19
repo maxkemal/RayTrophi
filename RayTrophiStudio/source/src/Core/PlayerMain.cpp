@@ -20,6 +20,10 @@
 #include "Core/RuntimeSceneViewer.h"
 #include "Core/RuntimeProjectHost.h"
 #include "Core/PlayerRenderExtent.h"
+#include "Core/PlayerResolutionMenu.h"
+#include "Core/PlayerOperator.h"
+#include "UI/PlayerOperatorUI.h"
+#include "Api/RtApiPlayerOperator.h"
 
 #include "globals.h"
 #include "scene_data.h"
@@ -163,36 +167,6 @@ std::vector<PlayerSceneEntry> loadPackagedSceneList() {
     return scenes;
 }
 
-// Scene picker (F6). Returns the clicked entry, or -1.
-int drawSceneMenu(const std::vector<PlayerSceneEntry>& scenes, const std::string& current_utf8) {
-    int chosen = -1;
-    const ImGuiViewport* vp = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(ImVec2(vp->WorkPos.x + vp->WorkSize.x * 0.5f,
-                                   vp->WorkPos.y + vp->WorkSize.y * 0.5f),
-                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowBgAlpha(0.85f);
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
-                                   ImGuiWindowFlags_NoSavedSettings;
-    if (ImGui::Begin("##player_scene_menu", nullptr, flags)) {
-        ImGui::TextUnformatted("Scenes");
-        ImGui::Separator();
-        const auto current = AppRuntime::projectPathFromUtf8(current_utf8);
-        for (int i = 0; i < static_cast<int>(scenes.size()); ++i) {
-            const bool active = !current_utf8.empty() &&
-                                AppRuntime::projectPathFromUtf8(scenes[i].path_utf8) == current;
-            const std::string label = std::to_string(i + 1) + "  " + scenes[i].name +
-                                      (active ? "  (open)" : "");
-            if (ImGui::Button(label.c_str(), ImVec2(360.0f, 0.0f))) {
-                chosen = i;
-            }
-        }
-        ImGui::Separator();
-        ImGui::TextDisabled("1-9 or click to open, F6 to close");
-    }
-    ImGui::End();
-    return chosen;
-}
-
 using Clock = std::chrono::steady_clock;
 
 double millisecondsBetween(Clock::time_point from, Clock::time_point to) {
@@ -205,17 +179,25 @@ double millisecondsBetween(Clock::time_point from, Clock::time_point to) {
 class PlayerDisplay final : public AppRuntime::DisplayHost {
 public:
     bool fullscreen = false;
-    float render_scale = 1.0f;     // fraction of the fixed initial render resolution
+    float render_scale = 1.0f;     // fraction of the explicitly selected render resolution
     int pacing_hz = 60;            // 0 = uncapped (measure the real frame cost)
     bool continuous = false;       // render every iteration, even a settled scene
     bool hud = true;
     bool targets_dirty = true;     // presentation targets must be rebuilt
+    bool resolution_menu = false;
 
     AppRuntime::PlayerRenderExtent render_extent{
         original_surface ? original_surface->w : image_width,
         original_surface ? original_surface->h : image_height};
 
-    PlayerDisplay() { AppRuntime::bindDisplayHost(*this); }
+    PlayerDisplay() {
+        const auto choices = AppRuntime::playerResolutionChoices(window);
+        if (!choices.modes.empty()) {
+            render_extent = AppRuntime::PlayerRenderExtent(
+                choices.recommended.first, choices.recommended.second);
+        }
+        AppRuntime::bindDisplayHost(*this);
+    }
     ~PlayerDisplay() override { AppRuntime::unbindDisplayHost(*this); }
 
     // --- telemetry, fed by the loop ---------------------------------------
@@ -308,7 +290,8 @@ public:
         int window_w = 0, window_h = 0, output_w = 0, output_h = 0;
         if (window) SDL_GetWindowSize(window, &window_w, &window_h);
         if (renderer) SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
-        return {
+        auto result = AppRuntime::playerResolutionChoices(window).status();
+        result.update(nlohmann::json{
             {"fullscreen", fullscreen}, {"render_scale", render_scale},
             {"pacing_hz", pacing_hz}, {"continuous", continuous}, {"hud", hud},
             {"window", {window_w, window_h}}, {"output", {output_w, output_h}},
@@ -316,7 +299,8 @@ public:
             {"render", {original_surface ? original_surface->w : 0,
                         original_surface ? original_surface->h : 0}},
             {"frame", snapshot_},
-        };
+        });
+        return result;
     }
 
     rtapi::Result setDisplay(const nlohmann::json& params) override {
@@ -360,9 +344,38 @@ public:
         if ((width != 0.0 || height != 0.0) && next_fullscreen) {
             return rtapi::Result::fail("width/height apply to windowed mode; send fullscreen:false");
         }
+        std::pair<int, int> resolution = render_extent.base();
+        const bool selecting = params.contains("render_width") || params.contains("render_height");
+        if (selecting) {
+            const auto choices = AppRuntime::playerResolutionChoices(window);
+            double render_width = 0.0, render_height = 0.0;
+            for (const auto& error : {number("render_width", render_width),
+                                      number("render_height", render_height)}) {
+                if (!error.empty()) {
+                    return rtapi::Result::fail(error);
+                }
+            }
+            if (!std::isfinite(render_width) || !std::isfinite(render_height) ||
+                render_width < 320 || render_width > 16384 || render_height < 240 ||
+                render_height > 16384 || std::floor(render_width) != render_width ||
+                std::floor(render_height) != render_height ||
+                !choices.supports(static_cast<int>(render_width), static_cast<int>(render_height))) {
+                return rtapi::Result::fail(
+                    "render_width/render_height must be a supported resolution pair from player.display");
+            }
+            resolution = {static_cast<int>(render_width), static_cast<int>(render_height)};
+            // An explicit resolution denotes actual pixels unless scale is also explicit.
+            if (!params.contains("render_scale") || params["render_scale"].is_null()) {
+                scale = 1.0;
+            }
+        }
         continuous = next_continuous;
         hud = next_hud;
         pacing_hz = static_cast<int>(pacing);
+        if (resolution != render_extent.base()) {
+            render_extent = AppRuntime::PlayerRenderExtent(resolution.first, resolution.second);
+            targets_dirty = true;
+        }
         if (static_cast<float>(scale) != render_scale) {
             render_scale = static_cast<float>(scale);
             targets_dirty = true;
@@ -387,7 +400,7 @@ public:
         }
     }
 
-    // Only an explicit render-scale change rebuilds the render surface.
+    // Only an explicit resolution/render-scale change rebuilds the render surface.
     // SDL_RenderCopy scales that fixed texture to the current window output.
     bool applyTargets(UIContext& context, AppRuntime::RuntimeSceneViewer& viewer) {
         if (!targets_dirty || !renderer) return false;
@@ -414,15 +427,38 @@ public:
         switch (key.keysym.sym) {
             case SDLK_F11: applyFullscreen(!fullscreen); return true;
             case SDLK_ESCAPE:
+                if (AppRuntime::playerOperatorOpen()) {
+                    AppRuntime::closePlayerOperator();
+                    return true;
+                }
+                if (resolution_menu) {
+                    resolution_menu = false;
+                    return true;
+                }
                 if (fullscreen) { applyFullscreen(false); return true; }
                 return false;
             case SDLK_F1: hud = !hud; return true;
             case SDLK_F2:
-                render_scale = render_scale > 0.9f ? 0.75f : (render_scale > 0.6f ? 0.5f : 1.0f);
-                targets_dirty = true;
+                if (AppRuntime::playerOperatorOpen()) {
+                    AppRuntime::closePlayerOperator();
+                } else {
+                    AppRuntime::showPlayerOperator("display");
+                }
+                return true;
+            case SDLK_F6:
+                AppRuntime::showPlayerOperator("games");
                 return true;
             case SDLK_F3: pacing_hz = pacing_hz == 0 ? 60 : 0; return true;
             case SDLK_F4: continuous = !continuous; return true;
+            case SDLK_F8: {
+                nlohmann::json output;
+                const auto result = rtapi::playerOperator(
+                    "game.settings.clear_paint", nlohmann::json::object(), output);
+                if (!result.ok) {
+                    SCENE_LOG_WARN("[Player] clear paint: " + result.error);
+                }
+                return true;
+            }
             case SDLK_F9: {
                 // Attendant: clean room now (paint cleared, popped balloons back).
                 // Same core as paint.wet_demo reset and the session's room.reset.
@@ -514,7 +550,7 @@ void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
         ImGui::Text("pacing %s%s", display.pacing_hz ? (std::to_string(display.pacing_hz) + " Hz").c_str()
                                                      : "uncapped",
                     display.continuous ? ", continuous" : "");
-        ImGui::TextDisabled("F11 fullscreen  F1 HUD  F2 scale  F3 pacing  F4 continuous  F6 scenes");
+        ImGui::TextDisabled("F11 fullscreen  F1 HUD  F2 console  F3 pacing  F4 continuous  F6 library  F8 clear paint");
     }
     ImGui::End();
 }
@@ -584,6 +620,7 @@ int main(int argc, char* argv[]) {
     imgui_config.enable_keyboard_nav = true;
     imgui_config.enable_docking = false;  // game HUD, no editor layout
     AppRuntime::initImGui(imgui_config);
+    AppRuntime::loadPlayerOperatorFonts();
 
     // The viewer renders flat meshes through Vulkan. Embree and CPU authoring
     // queries are not part of this Player slice.
@@ -620,9 +657,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    AppRuntime::setPlayerOperatorLaunchOverrides(launch_display);
+
     bool running = true;
-    bool scene_menu = false;
-    int scene_request = -1;  // index into packaged_scenes, opened between events
     bool debug_camera = false;
     float debug_orbit_x = 0.0f, debug_orbit_y = 0.0f;
     float debug_pan_x = 0.0f, debug_pan_y = 0.0f;
@@ -641,7 +678,8 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_DROPFILE) {
                 const std::string path = event.drop.file ? event.drop.file : "";
                 SDL_free(event.drop.file);
-                const auto loaded = rtapi::openProject(path);
+                nlohmann::json output;
+                const auto loaded = rtapi::playerOperator("library.open", {{"path", path}}, output);
                 if (!loaded.ok) {
                     SCENE_LOG_WARN("[Player] " + loaded.error);
                 }
@@ -651,31 +689,21 @@ int main(int argc, char* argv[]) {
                 event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
                 frame_cycle.requestRedraw();
             }
-            if (event.type == SDL_KEYDOWN && !ImGui::GetIO().WantCaptureKeyboard &&
+            if (event.type == SDL_KEYDOWN &&
+                (!ImGui::GetIO().WantCaptureKeyboard ||
+                 ((display.resolution_menu || AppRuntime::playerOperatorOpen()) &&
+                  (event.key.keysym.sym == SDLK_F2 || event.key.keysym.sym == SDLK_F6 ||
+                   event.key.keysym.sym == SDLK_F8 || event.key.keysym.sym == SDLK_ESCAPE))) &&
                 display.handleKey(event.key)) {
                 frame_cycle.requestRedraw();
-            }
-            // Scene picker (packaged builds). A kiosk key gate must keep F6 out
-            // of the children's reach, like F5 and F9.
-            if (event.type == SDL_KEYDOWN && !event.key.repeat && !packaged_scenes.empty()) {
-                const SDL_Keycode key = event.key.keysym.sym;
-                if (key == SDLK_F6) {
-                    scene_menu = !scene_menu;
-                    frame_cycle.requestRedraw();
-                } else if (scene_menu && key >= SDLK_1 && key <= SDLK_9 &&
-                           static_cast<size_t>(key - SDLK_1) < packaged_scenes.size()) {
-                    scene_request = static_cast<int>(key - SDLK_1);
-                } else if (scene_menu && key == SDLK_ESCAPE) {
-                    scene_menu = false;
-                    frame_cycle.requestRedraw();
-                }
             }
             // Debug camera (F5, off at launch). A diagnostic aid, not gameplay
             // input: it drives the same rtapi camera calls camera.orbit /
             // camera.dolly expose over IPC. Left drag orbits, right or middle
             // drag pans, the wheel dollies. A kiosk key gate must keep F5 out.
             if (event.type == SDL_KEYDOWN && !event.key.repeat &&
-                event.key.keysym.sym == SDLK_F5 && !ImGui::GetIO().WantCaptureKeyboard) {
+                event.key.keysym.sym == SDLK_F5 && !AppRuntime::playerOperatorOpen() &&
+                !ImGui::GetIO().WantCaptureKeyboard) {
                 debug_camera = !debug_camera;
                 SCENE_LOG_INFO(std::string("[Player] Debug camera ") +
                                (debug_camera ? "on" : "off"));
@@ -686,7 +714,8 @@ int main(int argc, char* argv[]) {
             // the debug camera on, the left button orbits instead. No demo
             // prepared, or nothing under the cursor: the call does nothing.
             if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT &&
-                !debug_camera && !ImGui::GetIO().WantCaptureMouse) {
+                !debug_camera && !AppRuntime::playerOperatorOpen() &&
+                !ImGui::GetIO().WantCaptureMouse) {
                 int window_w = 0, window_h = 0;
                 SDL_GetWindowSize(window, &window_w, &window_h);
                 if (window_w > 0 && window_h > 0) {
@@ -734,19 +763,12 @@ int main(int argc, char* argv[]) {
             debug_wheel = 0;
             frame_cycle.requestRedraw();
         }
-        if (scene_request >= 0 && scene_request < static_cast<int>(packaged_scenes.size())) {
-            const auto& entry = packaged_scenes[static_cast<size_t>(scene_request)];
-            SCENE_LOG_INFO("[Player] Opening scene '" + entry.name + "'");
-            const auto loaded = rtapi::openProject(entry.path_utf8);
-            if (!loaded.ok) {
-                SCENE_LOG_WARN("[Player] " + loaded.error);
-            }
-            scene_menu = false;
+        AppRuntime::tickPlayerOperator();
+        if (AppRuntime::playerOperatorOpen()) {
             frame_cycle.requestRedraw();
         }
-        scene_request = -1;
         // Window/fullscreen changes affect presentation only. F2 and explicit
-        // render_scale changes resize targets against the fixed render base.
+        // resolution/render_scale changes resize the render targets explicitly.
         if (display.applyTargets(state->ctx, *viewer)) {
             frame_cycle.requestRedraw();
         }
@@ -793,14 +815,7 @@ int main(int argc, char* argv[]) {
             if (display.hud) {
                 drawHud(rtipc::isRunning(), *viewer, display);
             }
-            if (scene_menu) {
-                const int clicked = drawSceneMenu(
-                    packaged_scenes, viewer->status().value("project_path", ""));
-                if (clicked >= 0) {
-                    scene_request = clicked;  // opened next iteration, outside the UI frame
-                    frame_cycle.requestRedraw();
-                }
-            }
+            AppRuntime::drawPlayerOperator(renderer);
             frame_cycle.endUiFrame();
 
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
@@ -837,6 +852,8 @@ int main(int argc, char* argv[]) {
 
     // Same order as Studio: IPC stops before the facade it enqueues into.
     rtipc::stop();
+    AppRuntime::shutdownPlayerOperator();
+    AppRuntime::releasePlayerOperatorUI();
     viewer.reset();
     rtapi::unbind();
     state.reset();

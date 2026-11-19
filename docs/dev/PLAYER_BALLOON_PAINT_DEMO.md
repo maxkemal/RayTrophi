@@ -72,7 +72,11 @@ aynı hata metniyle script/IPC'ye döner. Bu komut uç noktası SceneWrite ister
 Config: dört farklı flat mesh adı `surfaces`; `resolution` 32..2048;
 `seed` 0..2147483647; `balloons` 3..24; `particles_per_balloon` 32..8192;
 bu ikisinin çarpımı en çok 131072; `2 <= interval_min <= interval_max <= 30`
-saniye; boolean `autostart`. Sahne dört `BalloonPaintRed/Blue/Yellow/Green`
+saniye; boolean `autostart`. Patlama şekli (2026-11-18): `burst_clumpiness`
+0..1 (vars. 0.7; 0 = eşit ince sprey) ve `burst_jets_max` 3..24 (vars. 10) —
+her patlama yırtılma yönü, eşitsiz (gamma) kopma bağı payları, 1..8'lik damla
+kümeleri, 1..3 ağır blob ve sprey payını yeniden çeker (`Paint::balloonBurstPattern`).
+Islak boya iz yarıçapı sabit olduğu için "iri damla" birlikte uçan kümedir. Sahne dört `BalloonPaintRed/Blue/Yellow/Green`
 sistemini, her birinde dört analitik çarpıştırıcı ve sıfır domain ile taşımalıdır.
 Yerleşim aralığı bu 8×8 m fixture'a aittir; genel oda sınırı editörü değildir.
 Mevcut boya dokusunun boyutu istenen çözünürlükten farklıysa configure açıkça

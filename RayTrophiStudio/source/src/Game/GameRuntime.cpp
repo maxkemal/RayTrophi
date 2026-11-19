@@ -142,6 +142,11 @@ void sampleContacts(SceneData &scene, const std::map<int, Input::BodyPerson> &pe
 }
 } // namespace
 
+PlaytestState &playtest() {
+    static PlaytestState state;
+    return state;
+}
+
 void resetRuntime() {
     Input::resetExternalBodyRigs();
     session().clear();

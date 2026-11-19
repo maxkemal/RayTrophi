@@ -753,9 +753,10 @@ struct MaterialInfo {
 std::vector<MaterialInfo> listMaterials();
 Result getMaterial(const std::string& name, MaterialInfo& out);
 Result createMaterial(const std::string& type, const std::string& requested_name,
-                      std::string& out_name);
+                      std::string& out_name, const std::string& clone_from = "");
 std::vector<std::string> objectMaterials(const std::string& object_name);
-Result assignMaterial(const std::string& object_name, const std::string& material_name);
+Result assignMaterial(const std::string& object_name, const std::string& material_name,
+                      const std::string& source_material_name = "");
 Result setMaterialTexture(const std::string& material_name, const std::string& slot,
                           const std::string& filepath);
 Result clearMaterialTexture(const std::string& material_name, const std::string& slot);

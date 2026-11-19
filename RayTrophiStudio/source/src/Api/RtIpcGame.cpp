@@ -24,6 +24,15 @@ bool dispatchGameIpc(const std::string &method, const json &params,
         });
         return true;
     }
+    if (method == "game.playtest") {
+        const auto operation = params.value("operation", std::string("status"));
+        output = enqueue([operation](UIContext &) {
+            json result;
+            const auto status = rtapi::gamePlaytest(operation, result);
+            return status.ok ? result : json{{"__error", status.error}};
+        });
+        return true;
+    }
     if (method == "game.rules") {
         output = enqueue([](UIContext &) {
             json result;

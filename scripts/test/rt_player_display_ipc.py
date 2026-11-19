@@ -79,7 +79,9 @@ def run(project, seconds):
 
         # Wrong input is refused and changes nothing.
         for bad in ({"render_scale": 2.0}, {"pacing_hz": 3.0}, {"render_scale": "half"},
-                    {"fullscreen": True, "width": 800, "height": 600}):
+                    {"fullscreen": True, "width": 800, "height": 600},
+                    {"body_overlay": "true", "hud": not original["hud"]},
+                    {"video_card": 1, "hud": not original["hud"]}):
             try:
                 ipc.call("player.set_display", **bad)
             except RtIpcError:
@@ -87,6 +89,13 @@ def run(project, seconds):
             else:
                 raise AssertionError(f"player.set_display accepted {bad}")
         assert ipc.call("player.display")["render_scale"] == original["render_scale"]
+        assert ipc.call("player.display")["hud"] == original["hud"]
+        assert ipc.call("player.set_display", body_overlay=True)["body_overlay"] is True
+        assert ipc.call("player.display")["body_overlay"] is True
+        assert ipc.call("player.set_display", body_overlay=False)["body_overlay"] is False
+        assert ipc.call("player.set_display", video_card=True)["video_card"] is True
+        assert ipc.call("player.display")["video_card"] is True
+        assert ipc.call("player.set_display", video_card=False)["video_card"] is False
 
         for scale in (1.0, 0.75, 0.5):
             row = measure(ipc, seconds, fullscreen=False, render_scale=scale,
@@ -132,7 +141,7 @@ def run(project, seconds):
                   f"  {r['settings'].get('pacing_hz')}")
     finally:
         restore = {k: original[k] for k in ("fullscreen", "render_scale", "pacing_hz",
-                                            "continuous", "hud")}
+                                            "continuous", "hud", "body_overlay", "video_card")}
         try:
             ipc.call("player.set_display", fullscreen=False,
                      width=original["window"][0], height=original["window"][1])

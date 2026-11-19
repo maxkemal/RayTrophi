@@ -23,6 +23,10 @@ inline bool supportsMethod(const std::string& method) {
            method == "camera.dolly" || method == "viewport.capture" ||
            method == "viewport.get_screenshot" || method == "viewport.frame_telemetry" ||
            method == "viewport.status" ||
+           // RayFusion probe field + sky bake counters (read-only): the Player
+           // builds the same probe field, and a flicker there must be measurable.
+           method == "rayfusion.probe_field" || method == "rayfusion.core_status" ||
+           method == "rayfusion.scene_as" || method == "rayfusion.bake_counters" ||
            // Read-only scene values: the simulation clock moves bodies in the
            // Player, and a test that cannot read the simulated pose cannot
            // verify it (rigid motion is baked into vertices, not transforms).
@@ -33,6 +37,7 @@ inline bool supportsMethod(const std::string& method) {
            method == "material.of_object" || method == "material.set" ||
            // Display surface and frame timing (window, render scale, pacing, FPS).
            method == "player.display" || method == "player.set_display" ||
+           method == "player.operator" ||
            // Shared scene grading, consumed by the existing raster post pass.
            method == "post.get" || method == "post.set_exposure" ||
            method == "post.set_gamma" || method == "post.set_saturation" ||

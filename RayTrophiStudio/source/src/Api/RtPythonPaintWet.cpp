@@ -82,11 +82,28 @@ void registerPaintWetBindings(py::module_& paint) {
     paint.def("wet_add_surface", [](const std::string& object, int material_id, int resolution) {
         rtapi::WetPaintSurfaceRuntimeInfo info;
         requireResult(rtapi::addWetPaintSurface(object, material_id, resolution, info));
-        return surfaceDict(info);
+        // Same shape as IPC paint.wet_add_surface: material_id -1 adds every
+        // material slot, and "surfaces" lists each of them.
+        py::dict d = surfaceDict(info);
+        py::list slots;
+        rtapi::WetPaintStatusInfo status;
+        if (rtapi::getWetPaintStatus(status).ok) {
+            for (const auto& surface : status.surface_list) {
+                if (surface.object == object &&
+                    (material_id < 0 || surface.material_id == material_id)) {
+                    slots.append(surfaceDict(surface));
+                }
+            }
+        }
+        d["surfaces"] = slots;
+        return d;
     }, py::arg("object"), py::arg("material_id") = -1, py::arg("resolution") = 1024);
     paint.def("wet_remove_surface", [](const std::string& object, int material_id) {
         requireResult(rtapi::removeWetPaintSurface(object, material_id));
     }, py::arg("object"), py::arg("material_id") = -1);
+    paint.def("wet_resize_surfaces", [](int resolution) {
+        requireResult(rtapi::resizeWetPaintSurfaces(resolution));
+    }, py::arg("resolution"));
     paint.def("wet_clear_surfaces", [] { requireResult(rtapi::clearWetPaintSurfaces()); });
     paint.def("wet_status", [] {
         rtapi::WetPaintStatusInfo s;

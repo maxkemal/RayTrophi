@@ -4968,7 +4968,13 @@ void VulkanDevice::updateMaterialBuffer(const void* coreData, uint64_t coreSize,
     // halves of the split material record.
     auto ensureBuffer = [this](BufferHandle& buf, uint64_t size, uint32_t binding) {
         if (buf.size >= size) return;
-        if (buf.buffer) destroyBuffer(buf);
+        if (buf.buffer) {
+            // A per-material patch (updateMaterial) may still be queued against
+            // this buffer without a CPU wait: destroying it under that submission
+            // is a device loss. Drain the async submits first.
+            reclaimAsyncCommands(true);
+            destroyBuffer(buf);
+        }
 
         BufferCreateInfo ci;
         ci.size = size > 1024 ? size : 1024; // Min size
@@ -13655,10 +13661,34 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
     VulkanRT::VkGpuMaterialCore gmCore{};
     VulkanRT::VkGpuMaterialExt  gmExt{};
     VulkanRT::splitGpuMaterial(gm, gmCore, gmExt);
-    m_device->uploadBuffer(m_device->m_materialBuffer, &gmCore, sizeof(gmCore),
-                           (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterialCore));
-    m_device->uploadBuffer(m_device->m_materialExtBuffer, &gmExt, sizeof(gmExt),
-                           (uint64_t)materialIndex * sizeof(VulkanRT::VkGpuMaterialExt));
+    const VkDeviceSize coreOffset = (VkDeviceSize)materialIndex * sizeof(VulkanRT::VkGpuMaterialCore);
+    const VkDeviceSize extOffset = (VkDeviceSize)materialIndex * sizeof(VulkanRT::VkGpuMaterialExt);
+    // ★★★ No CPU wait (2026-11-19). The buffers are GPU_ONLY, so uploadBuffer
+    //   went through a staging copy + endSingleTimeCommands TWICE per edit, and
+    //   on the device's single in-order queue that fence only signals after
+    //   EVERY earlier submission: each colour change waited for the frame, the
+    //   wet paint and the simulation in flight (measured ~35 ms per albedo set;
+    //   the preview path patches two backends). It got worse as more GPU work
+    //   moved onto that queue. Now the record goes inline (vkCmdUpdateBuffer,
+    //   160 + 256 bytes, no staging) and the queue orders it:
+    //     before: earlier submissions finish READING the old record (WAR);
+    //     after:  every later stage READS the new one.
+    VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
+    if (cmd != VK_NULL_HANDLE) {
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 0, nullptr, 0, nullptr, 0, nullptr);
+        vkCmdUpdateBuffer(cmd, m_device->m_materialBuffer.buffer, coreOffset, sizeof(gmCore), &gmCore);
+        vkCmdUpdateBuffer(cmd, m_device->m_materialExtBuffer.buffer, extOffset, sizeof(gmExt), &gmExt);
+        VkMemoryBarrier toFrames{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        toFrames.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        toFrames.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             0, 1, &toFrames, 0, nullptr, 0, nullptr);
+        m_device->endSingleTimeCommandsAsync(cmd);
+    } else {
+        m_device->uploadBuffer(m_device->m_materialBuffer, &gmCore, sizeof(gmCore), coreOffset);
+        m_device->uploadBuffer(m_device->m_materialExtBuffer, &gmExt, sizeof(gmExt), extOffset);
+    }
     m_cachedGpuMaterials[materialIndex] = gm;
     m_interactiveViewport.dirty = true;
     resetAccumulation();

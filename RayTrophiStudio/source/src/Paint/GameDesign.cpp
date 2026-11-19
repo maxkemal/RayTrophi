@@ -2,11 +2,16 @@
 
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/WetPaintGpu.h"
+#include "Paint/MeshPaintAdapter.h"
+#include "TriangleMesh.h"
+#include "Triangle.h"
 #include "globals.h"
 #include "scene_data.h"
+#include "ParticleSimulation.h"
 
 #include <algorithm>
 #include <cmath>
+#include <unordered_set>
 
 namespace Paint {
 namespace {
@@ -69,7 +74,94 @@ WetPaintSurfaceSettings settingsFromJson(const json& j) {
     return s;
 }
 
+std::shared_ptr<MeshPaintAdapter> gamePaintAdapter(SceneData& scene,
+                                                 const std::string& object_name,
+                                                 int material_id) {
+    std::shared_ptr<Triangle> representative;
+    // Flat meshes are authoritative. One representative supplies only the
+    // existing texture adapter's material key, never scene geometry.
+    for (const auto& object : scene.world.objects) {
+        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
+        if (!mesh || mesh->nodeName != object_name || !mesh->geometry) {
+            continue;
+        }
+        const auto& geometry = *mesh->geometry;
+        const auto* materials = geometry.get_attribute_data<uint16_t>("materialID");
+        for (size_t face = 0; face < mesh->num_triangles(); ++face) {
+            const size_t offset = face * 3;
+            if (offset >= geometry.indices.size()) {
+                continue;
+            }
+            const auto vertex = geometry.indices[offset];
+            if (materials && vertex < geometry.get_vertex_count() &&
+                material_id >= 0 && materials[vertex] != material_id) {
+                continue;
+            }
+            auto candidate = std::make_shared<Triangle>(mesh, static_cast<uint32_t>(face));
+            if (material_id < 0 || candidate->getMaterialID() == material_id) {
+                representative = candidate;
+                break;
+            }
+        }
+        if (representative) {
+            break;
+        }
+    }
+    if (!representative) {
+        return nullptr;
+    }
+    return std::make_shared<MeshPaintAdapter>(&scene, representative);
+}
+
 } // namespace
+
+bool resizeGamePaintSurfaces(SceneData& scene, int resolution, std::string& error) {
+    if (resolution < 32 || resolution > 4096) {
+        error = "wet paint resolution must be between 32 and 4096";
+        return false;
+    }
+    auto& paint = wetPaintGpu();
+    const auto surfaces = paint.surfaces();
+    if (surfaces.empty()) {
+        error = "no wet paint surfaces registered";
+        return false;
+    }
+    std::vector<std::shared_ptr<MeshPaintAdapter>> adapters;
+    bool changed = false;
+    for (const auto& surface : surfaces) {
+        auto adapter = gamePaintAdapter(scene, surface.object, surface.material_id);
+        if (!adapter || !adapter->isValid() || !adapter->getTextureSet() ||
+            !adapter->getTextureSet()->initialized) {
+            error = "paint texture unavailable: " + surface.object;
+            return false;
+        }
+        adapters.push_back(adapter);
+        changed |= surface.resolution != resolution;
+    }
+    if (!changed) {
+        return true;
+    }
+    // Release device atlas references before texture storage is resized.
+    paint.clear();
+    bool ok = true;
+    for (size_t i = 0; i < surfaces.size(); ++i) {
+        const auto& surface = surfaces[i];
+        if (surface.resolution != resolution && !adapters[i]->resizeTextureSet(resolution)) {
+            error += "resize failed: " + surface.object + "; ";
+            ok = false;
+        }
+        std::string restore_error;
+        if (!paint.addSurface(scene, surface.object, surface.material_id,
+                              resolution, restore_error)) {
+            error += surface.object + ": " + restore_error + "; ";
+            ok = false;
+            continue;
+        }
+        paint.setSurfaceSettings(surface.object, surface.material_id, surface.settings);
+    }
+    g_materials_dirty = true;
+    return ok;
+}
 
 json saveGameDesign() {
     auto& paint = wetPaintGpu();
@@ -146,6 +238,48 @@ std::string gameDesignStatus() {
     return apply_status;
 }
 
+bool reconcileGameDesign(SceneData& scene) {
+    // Do not prune during project replacement: its flat nodes are still loading.
+    if (pending_design.is_object() || scene.isSimulationBaking()) {
+        return false;
+    }
+    const auto missing = [&scene](const std::string& object) {
+        return scene.isEditorPendingDeleteObjectName(object) ||
+               !scene.getFlatNodeMesh(object);
+    };
+    auto& paint = wetPaintGpu();
+    std::unordered_set<std::string> removed;
+    for (const auto& surface : paint.surfaces()) {
+        if (missing(surface.object)) {
+            removed.insert(surface.object);
+            paint.removeSurface(surface.object, surface.material_id, &scene);
+        }
+    }
+    bool changed = !removed.empty();
+    for (auto& entry : scene.particle_systems) {
+        if (!entry.runtime) {
+            continue;
+        }
+        auto& colliders = entry.runtime->colliders();
+        for (size_t i = colliders.size(); i > 0; --i) {
+            const auto& collider = colliders[i - 1];
+            const auto& object = collider.source_name;
+            const bool managed = collider.name == object + " PaintCollider";
+            if (!object.empty() && (managed || removed.count(object) != 0) &&
+                missing(object)) {
+                entry.runtime->removeCollider(i - 1);
+                changed = true;
+            }
+        }
+    }
+    if (changed) {
+        // Preserve live pools; only invalidate obsolete scene/collider history.
+        scene.clearSimFrameCache();
+        scene.preserveScriptSimulationPreview();
+    }
+    return changed;
+}
+
 void tickGameDesign(SceneData& scene) {
     if (pending_demo.is_object()) {
         tickPendingDemo(scene);
@@ -178,6 +312,18 @@ void tickGameDesign(SceneData& scene) {
                 const int material = entry.value("material_id", -1);
                 const int resolution = std::clamp(entry.value("resolution", 1024), 32, 4096);
                 std::string error;
+                // Existing serialized Paint Edit textures may have a different
+                // size. Honor the saved game surface size before baking its atlas.
+                auto adapter = gamePaintAdapter(scene, object, material);
+                if (adapter && adapter->getTextureSet() &&
+                    adapter->getTextureSet()->initialized) {
+                    const auto texture = adapter->getTextureSet()->getTexture(PaintChannel::BaseColor);
+                    if (texture && (texture->width != resolution || texture->height != resolution) &&
+                        !adapter->resizeTextureSet(resolution)) {
+                        note(object + ": could not restore saved paint resolution");
+                        continue;
+                    }
+                }
                 if (!paint.addSurface(scene, object, material, resolution, error)) {
                     // A renamed or deleted object: say so, keep the rest.
                     note(object + ": " + error);

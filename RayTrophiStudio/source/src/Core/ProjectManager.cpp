@@ -1,3 +1,4 @@
+#include "RayFusion/ProbeSettings.h"
 #include "OfflineDeviceHooks.h"
 #include "Game/GameRuntime.h"
 #include "Paint/BalloonPaintDemo.h"
@@ -1319,6 +1320,60 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
 // NEW SAVE PROJECT (Self-Contained with Geometry)
 // ============================================================================
 
+// World environment images (HDRI background, Nishita overlay) are project
+// assets, not references into the author's disk. On save the file is copied
+// into "<project stem>_environment/" next to the project and stored as a path
+// relative to the project; on open a relative path is resolved against the
+// project folder. An absolute path from an older project is left untouched
+// (it still works on the author's machine), and is migrated on its next save.
+static void portabilizeWorldImagePath(nlohmann::json& holder, const char* key,
+                                      const fs::path& project_json_path) {
+    if (!holder.is_object() || !holder.contains(key) || !holder[key].is_string()) return;
+    const std::string stored = holder[key].get<std::string>();
+    if (stored.empty()) return;
+    try {
+        const fs::path project_dir = project_json_path.parent_path();
+        fs::path source = pathFromUtf8(stored);
+        if (source.is_relative()) return;                 // already portable
+        std::error_code ec;
+        if (!fs::exists(source, ec)) {
+            SCENE_LOG_WARN("[ProjectManager] World image is missing, path kept as stored: " + stored);
+            return;
+        }
+        const fs::path env_dir = project_dir / (project_json_path.stem().string() + "_environment");
+        fs::path target = env_dir / source.filename();
+        const std::string rel_to_project = fs::relative(source, project_dir, ec).generic_string();
+        // Empty = different drive; ".." prefix = outside the project folder.
+        const bool inside_project = !ec && !rel_to_project.empty() && rel_to_project.rfind("..", 0) != 0;
+        if (!inside_project) {
+            fs::create_directories(env_dir, ec);
+            if (!fs::exists(target, ec) || fs::file_size(target, ec) != fs::file_size(source, ec)) {
+                fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
+                if (ec) {
+                    SCENE_LOG_WARN("[ProjectManager] Could not copy world image into the project (" +
+                                   ec.message() + "): " + stored);
+                    return;
+                }
+            }
+        } else {
+            target = source;
+        }
+        holder[key] = fs::relative(target, project_dir, ec).generic_string();
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("[ProjectManager] World image portability failed: ") + e.what());
+    }
+}
+
+static void resolveWorldImagePath(nlohmann::json& holder, const char* key,
+                                  const fs::path& project_json_path) {
+    if (!holder.is_object() || !holder.contains(key) || !holder[key].is_string()) return;
+    const std::string stored = holder[key].get<std::string>();
+    if (stored.empty()) return;
+    const fs::path p = pathFromUtf8(stored);
+    if (p.is_absolute()) return;
+    holder[key] = (project_json_path.parent_path() / p).generic_string();
+}
+
 bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings, Renderer& renderer,
                                   std::function<void(int, const std::string&)> progress_callback) {
     if (g_project.current_file_path.empty()) {
@@ -1722,11 +1777,18 @@ bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& sce
         if (progress_callback) progress_callback(82, "Saving world settings...");
         json j_world;
         renderer.world.serialize(j_world);
+        portabilizeWorldImagePath(j_world, "hdri_path", fs::path(filepath));
+        if (j_world.contains("advanced"))
+            portabilizeWorldImagePath(j_world["advanced"], "env_overlay_path", fs::path(filepath));
         root["world"] = j_world;
         
         // Water System
         if (progress_callback) progress_callback(83, "Saving water surfaces...");
         root["water"] = WaterManager::getInstance().serialize();
+
+        // RayFusion probe producer: without this the Player re-traced the whole
+        // probe field on every open even when Studio had it switched off.
+        root["rayfusion_probe"] = {{"traced", RayFusion::probeProducerTraced().load() != 0}};
 
         // Game design: paint surfaces + their settings, splat rules, balloon demo.
         {
@@ -2400,13 +2462,29 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             simdjson::dom::element world_el;
             if (!root["world"].get(world_el)) {
                 ScopedPerfTimer timer("openProject deserialize world");
-                renderer.world.deserialize(sjsonToNlohmann(world_el));
+                nlohmann::json world_json = sjsonToNlohmann(world_el);
+                resolveWorldImagePath(world_json, "hdri_path", fs::path(filepath));
+                if (world_json.contains("advanced"))
+                    resolveWorldImagePath(world_json["advanced"], "env_overlay_path", fs::path(filepath));
+                renderer.world.deserialize(world_json);
             }
 
             // Water Surfaces
             simdjson::dom::element water_el;
             if (!root["water"].get(water_el)) {
                 WaterManager::getInstance().deserialize(sjsonToNlohmann(water_el), scene);
+            }
+
+            // Probe producer. A project that stores nothing gets the default, so one
+            // project's choice never leaks into the next one opened in this process.
+            {
+                bool traced = true;
+                simdjson::dom::element probe_el;
+                if (!root["rayfusion_probe"].get(probe_el)) {
+                    bool v = true;
+                    if (!probe_el["traced"].get(v)) traced = v;
+                }
+                RayFusion::probeProducerTraced().store(traced ? 1 : 0);
             }
 
             // Game design: applied by the shared simulation clock on its next
@@ -5790,6 +5868,7 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["name"] = collider.name;
         c["source_mode"] = particleColliderSourceModeToString(collider.source_mode);
         c["source_name"] = collider.source_name;
+        c["sdf_resolution_mode"] = collider.sdf_resolution_mode;
         c["enabled"] = collider.enabled;
         c["fluid_collision_enabled"] = collider.fluid_collision_enabled;
         c["plane_y"] = collider.plane_y;
@@ -6349,6 +6428,8 @@ void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& sce
         collider.name = item.value("name", collider.name);
         collider.source_mode = particleColliderSourceModeFromString(item.value("source_mode", std::string("PlaneY")));
         collider.source_name = item.value("source_name", collider.source_name);
+        collider.sdf_resolution_mode = std::clamp(
+            item.value("sdf_resolution_mode", collider.sdf_resolution_mode), 0, 4);
         collider.enabled = item.value("enabled", collider.enabled);
         collider.fluid_collision_enabled = item.value("fluid_collision_enabled", collider.fluid_collision_enabled);
         collider.plane_y = item.value("plane_y", collider.plane_y);

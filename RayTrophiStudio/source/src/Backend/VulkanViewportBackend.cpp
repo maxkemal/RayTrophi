@@ -1,5 +1,8 @@
 ﻿#include "Backend/VulkanViewportBackend.h"
 #include "Backend/VulkanFailureReporting.h"
+#ifdef RT_PLAYER
+#include "Core/RuntimeProjectHost.h"
+#endif
 #include "Viewport/RasterBackground.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "Viewport/RasterInstanceUpload.h"
@@ -264,7 +267,12 @@ static std::vector<float> bakeEnvMap(bool outdoor) {
 
 } // namespace
 
-VulkanViewportBackend::~VulkanViewportBackend() = default;
+VulkanViewportBackend::~VulkanViewportBackend() {
+#ifdef RT_PLAYER
+    drainInteractiveViewportInFlight();
+    m_playerDepthCard.reset();
+#endif
+}
 
 void VulkanViewportBackend::drainInteractiveViewportInFlight() {
     // A resource drain, not a presentation stall: the two are counted apart so
@@ -724,6 +732,9 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     m_hasRasterPresentedFrame = false;
     VkDevice vkDevice = m_device->getDevice();
     m_probeOverlay.reset();
+#ifdef RT_PLAYER
+    m_playerDepthCard.reset();
+#endif
 
     if (m_interactiveViewport.framebuffer != VK_NULL_HANDLE) {
         vkDestroyFramebuffer(vkDevice, m_interactiveViewport.framebuffer, nullptr);
@@ -3924,6 +3935,11 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         return;
     }
     const auto cpuRecordStart = std::chrono::steady_clock::now();
+#ifdef RT_PLAYER
+    m_playerDepthCard.prepare(*m_device, m_interactiveViewport.renderPass, shaderDir,
+        usingFrameRing ? cmd : VK_NULL_HANDLE,
+        AppRuntime::playerVideoCardEnabled() && !rtapi::viewportCaptureEnabled());
+#endif
     // ★★ Opened on the SAME instant the host record clock starts, so the stage
     //   host times sum to cpuRecordMs exactly. Started later, the stages would
     //   quietly add up to less than the frame and the gap would look like
@@ -4902,6 +4918,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         float particleView[16];
         matrixToGL(viewProj, particleViewProj);
         matrixToGL(view, particleView);
+#ifdef RT_PLAYER
+        m_playerDepthCard.draw(cmd, particleViewProj, particleView);
+#endif
         recordParticleBillboards(cmd, particleViewProj, particleView);
     }
 

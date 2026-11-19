@@ -1,5 +1,7 @@
+#include "Backend/PreviewBakeCounters.h"
 #include "Backend/VulkanBackend.h"
 #include "RayFusion/ProbeField.h"
+#include "RayFusion/ProbeSettings.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -238,6 +240,9 @@ public:
     uint32_t sourceHeight = 0;
     uint64_t sourceSignature = 0;
     uint64_t appliedRevision = 0;
+    // Everything in the revision EXCEPT instance placement. A change here means
+    // the old measurements describe a different world and must be dropped.
+    uint64_t appliedHard = 0;
     bool configured = false;
     bool ready = false;
     bool uploaded = false;
@@ -341,6 +346,7 @@ void VulkanBackendAdapter::setMaterialPreviewProbeSource(
     state->sourceWidth = width;
     state->sourceHeight = height;
     state->sourceSignature = signature;
+    previewBakeCounters().probe_source_changes.fetch_add(1, std::memory_order_relaxed);
 }
 
 // Izgarayi sahneye oturtur. IKI REJIM var ve hangisinin kostugu DURUM olarak
@@ -454,6 +460,10 @@ void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
     auto state = m_materialPreviewProbes;
     if (state) state->pump = false;
     if (!state || !state->ready || !m_device) return;
+    // The project-carried setting is the authority; follow it before anything
+    // is scheduled so a project that stores "sky bake" never traces a batch.
+    if (state->preferTraced != (RayFusion::probeProducerTraced().load() != 0))
+        setRayFusionProbeProducer(!state->preferTraced);
     if (state->sourceSignature == 0u || state->sourceIrradiance.empty()) return;
 
     // ★★★ The traced producer depends on GEOMETRY as well as on the sky, so the
@@ -478,6 +488,15 @@ void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
         producerSignature = producerSignature * 1099511628211ull ^ bounceSignature;
     }
 
+    // Instance placement alone (a body moving) refreshes the field softly; sky,
+    // geometry set, bounce inputs or the producer kind drop it.
+    uint64_t hardSignature = state->sourceSignature;
+    hardSignature = hardSignature * 1099511628211ull ^ (useTraced ? 1u : 0u);
+    if (useTraced) {
+        hardSignature = hardSignature * 1099511628211ull ^ asStatus.geometry_signature;
+        hardSignature = hardSignature * 1099511628211ull ^ bounceSignature;
+    }
+
     // The producer signature IS the scene epoch here. When the sun moves the
     // bake is regenerated, the signature changes, and the whole field is
     // invalidated -- old light is never carried into a new sky.
@@ -487,6 +506,30 @@ void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
     revision.lighting = producerSignature;
     revision.geometry = useTraced ? asStatus.geometry_signature : 0u;
 
+    {
+        // Which component moved since the last service call? Recorded only when
+        // the field is actually about to be invalidated (below), but the
+        // previous values must be tracked every call.
+        auto& c = previewBakeCounters();
+        const uint64_t geo = useTraced ? asStatus.geometry_signature : 0u;
+        const uint64_t ins = useTraced ? asStatus.instance_signature : 0u;
+        const uint64_t bnc = useTraced ? bounceSignature : 0u;
+        const bool wouldInvalidate = state->configured && !state->reconfigure &&
+                                     state->appliedRevision != producerSignature;
+        if (wouldInvalidate) {
+            if (c.last_sky.load() != state->sourceSignature) c.cause_sky.fetch_add(1);
+            if (c.last_geometry.load() != geo) c.cause_geometry.fetch_add(1);
+            if (c.last_instances.load() != ins) c.cause_instances.fetch_add(1);
+            if (c.last_bounce.load() != bnc) c.cause_bounce.fetch_add(1);
+            if (c.last_traced.load() != (useTraced ? 1u : 0u)) c.cause_producer_switch.fetch_add(1);
+            c.probe_invalidations.fetch_add(1);
+        }
+        c.last_sky.store(state->sourceSignature);
+        c.last_geometry.store(geo);
+        c.last_instances.store(ins);
+        c.last_bounce.store(bnc);
+        c.last_traced.store(useTraced ? 1u : 0u);
+    }
     std::string error;
     // A shape change (counts or spacing) rebuilds the slot array and drops every
     // measurement, because the cells themselves are different volumes of world.
@@ -515,14 +558,20 @@ void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
         state->configured = true;
         state->reconfigure = false;
         state->uploaded = false;
+        previewBakeCounters().probe_reconfigures.fetch_add(1, std::memory_order_relaxed);
         state->appliedRevision = producerSignature;
+        state->appliedHard = hardSignature;
     } else if (state->appliedRevision != producerSignature) {
-        if (!state->field.invalidate(revision, error)) {
+        const bool soft = state->appliedHard == hardSignature;
+        if (!(soft ? state->field.refresh(revision, error)
+                   : state->field.invalidate(revision, error))) {
             SCENE_LOG_WARN(std::string("[RayFusion] probe field invalidate failed: ") + error);
             return;
         }
         state->appliedRevision = producerSignature;
-        state->uploaded = false;
+        state->appliedHard = hardSignature;
+        if (soft) previewBakeCounters().probe_soft_refreshes.fetch_add(1, std::memory_order_relaxed);
+        else state->uploaded = false;
     }
 
     if (state->followCamera) {
@@ -592,6 +641,7 @@ void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
                                  traced) &&
             traced.size() >= tickets.size() * RayFusion::kProbeTexels) {
             tracedThisBatch = true;
+            previewBakeCounters().deferred_streak.store(0, std::memory_order_relaxed);
             double hitSum = 0.0;
             double meanDistanceSum = 0.0;
             for (size_t i = 0; i < tickets.size(); ++i) {
@@ -649,6 +699,25 @@ void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
         }
     } else if (state->preferTraced) {
         state->producerReason = "scene acceleration structure is not ready";
+    }
+
+    // A traced field must never be filled by the sky bake as a fallback.
+    //   The trace refuses transiently (environment radiance not generated yet,
+    //   TLAS being rebuilt, descriptors not ready). Publishing the uniform,
+    //   unoccluded sky into those tickets made the slots VALID, so nothing ever
+    //   re-measured them: a patch of the first-scheduled slots stayed
+    //   sky-lit while the rest were traced, and every redraw that re-armed the
+    //   field re-created the patch -- a shimmering region around the first
+    //   slots. Release the tickets instead; they stay pending and are retried.
+    if (useTraced && !tracedThisBatch) {
+        for (const auto& ticket : tickets) state->field.cancel(ticket);
+        auto& counters = previewBakeCounters();
+        counters.trace_deferred.fetch_add(1, std::memory_order_relaxed);
+        // Keep frames coming so the retry happens, but only briefly: a world
+        // that never produces environment radiance (solid colour) must not pin
+        // the viewport at full redraw forever.
+        state->pump = counters.deferred_streak.fetch_add(1, std::memory_order_relaxed) < 120u;
+        return;
     }
 
     // ── Producer B: sky bake (step 1a) ─────────────────────────────────────
@@ -761,6 +830,7 @@ bool VulkanBackendAdapter::bindMaterialPreviewProbeDescriptors(VkDescriptorSet s
 }
 
 void VulkanBackendAdapter::setRayFusionProbeProducer(bool traced) {
+    RayFusion::probeProducerTraced().store(traced ? 1 : 0);
     if (!ensureMaterialPreviewProbeResources()) return;
     auto state = m_materialPreviewProbes;
     if (!state || state->preferTraced == traced) return;
@@ -770,6 +840,7 @@ void VulkanBackendAdapter::setRayFusionProbeProducer(bool traced) {
     // every slot; without that, half the field would still hold the other
     // producer's answer and the A/B comparison would measure a mixture.
     state->appliedRevision = 0;
+    state->appliedHard = 0;
     state->rejectedInside = 0;
     // Bu da sifirlanmali: aksi halde yeni ureticinin ilk okumasi ESKI
     // ureticinin sayisini gosterir ve A/B karsilastirmasi karisimi olcer.

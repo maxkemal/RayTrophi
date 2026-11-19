@@ -144,6 +144,22 @@ bool ProbeField::invalidate(Revision revision, std::string& error) {
     return true;
 }
 
+bool ProbeField::refresh(Revision revision, std::string& error) {
+    error.clear();
+    if (m_slots.empty()) { error = "probe field is not configured"; return false; }
+    if (!validRevision(revision, error)) return false;
+    if (revision == m_revision) return true;
+    m_revision = revision;
+    ++m_generation;   // outstanding tickets no longer match
+    // The cursor is NOT reset: a refresh that fires every frame must keep
+    // sweeping forward, not restart at slot 0 and starve the rest.
+    for (auto& slot : m_slots) {
+        slot.updates = 0;
+        slot.inFlight = false;
+    }
+    return true;
+}
+
 std::vector<Ticket> ProbeField::schedule(const Budget& budget) {
     std::vector<Ticket> batch;
     if (m_slots.empty() || !budget.raysPerProbe) return batch;

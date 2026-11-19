@@ -37,6 +37,9 @@ bool tickWetPaint(SceneData& scene, float dt) {
 
 SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationClockInput& input) {
     SimulationClockResult result;
+    if (!input.render_owns_sim && !scene.isSimulationBaking()) {
+        result.render_updated = Paint::reconcileGameDesign(scene);
+    }
     if (Paint::gameDesignPending() && !input.render_owns_sim) {
         // A just-opened project's game design (paint surfaces, demo). Applied
         // here, not in the loader, so it lands on a ready scene in both apps.

@@ -2,6 +2,7 @@
 #include "RtIpcScreenGi.h"
 #include "RtIpcReflection.h"
 #include "Api/RtApiRayFusion.h"
+#include "Backend/PreviewBakeCounters.h"
 #include <stdexcept>
 
 namespace {
@@ -130,6 +131,28 @@ bool dispatchRayFusionIpc(const std::string& method, const nlohmann::json& param
                 {"planned_rays_per_probe", s.planned_rays_per_probe},
                 {"planned_probes_per_update", s.planned_probes_per_update},
                 {"planned_rays_per_update", s.planned_rays_per_update}};
+        });
+        return true;
+    }
+    if (method == "rayfusion.bake_counters") {
+        if (!params.empty()) throw std::invalid_argument("rayfusion.bake_counters takes no parameters");
+        // Plain atomics, no UI-thread hop needed; still enqueued so the numbers
+        // are read between frames, not mid-frame.
+        result = enqueue([](UIContext&) {
+            auto& c = Backend::previewBakeCounters();
+            return json{{"sky_captures", c.sky_captures.load()},
+                {"ibl_regenerations", c.ibl_regenerations.load()},
+                {"probe_source_changes", c.probe_source_changes.load()},
+                {"probe_invalidations", c.probe_invalidations.load()},
+                {"probe_reconfigures", c.probe_reconfigures.load()},
+                {"probe_soft_refreshes", c.probe_soft_refreshes.load()},
+                {"trace_deferred", c.trace_deferred.load()},
+                {"cause_sky", c.cause_sky.load()},
+                {"cause_geometry", c.cause_geometry.load()},
+                {"cause_instances", c.cause_instances.load()},
+                {"cause_bounce", c.cause_bounce.load()},
+                {"cause_producer_switch", c.cause_producer_switch.load()},
+                {"last_traced", c.last_traced.load()}};
         });
         return true;
     }

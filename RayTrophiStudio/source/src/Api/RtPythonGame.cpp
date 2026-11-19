@@ -28,6 +28,14 @@ void registerGameBindings(py::module_ &module) {
         "post_event",
         [](const py::dict &event) { requireResult(rtapi::postGameEvent(fromPython(event))); },
         py::arg("event"));
+    game.def(
+        "playtest",
+        [](const std::string &operation) {
+            nlohmann::json output;
+            requireResult(rtapi::gamePlaytest(operation, output));
+            return toPython(output);
+        },
+        py::arg("operation") = "status");
     game.def("rules", [] {
         nlohmann::json output;
         requireResult(rtapi::getGameRules(output));

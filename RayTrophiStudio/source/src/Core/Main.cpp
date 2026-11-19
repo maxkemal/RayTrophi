@@ -7,6 +7,7 @@
 #include "Core/FatalSignalTrace.h"
 #include "Backend/VulkanRecoveryPolicy.h"
 #include "Viewport/ViewportGpuWorkPolicy.h"
+#include "Game/GameRuntime.h"
 #include "Viewport/ViewportPresentationStats.h"
 #include "PostProcess/PostService.h"
 #include <OpenImageDenoise/oidn.h>
@@ -6913,7 +6914,12 @@ int main(int argc, char* argv[]) try {
             (!g_solid_viewport_active && g_vulkan_geometry_append_pending) ||
             (!g_solid_viewport_active && g_optix_rebuild_pending) ||
             g_bvh_rebuild_pending;
-        const bool rendering_active = did_render_this_frame || start_render ||
+        // A live simulation or a Studio play test changes the frame on its own:
+        // without this a still mouse made the loop "dormant" - nothing presented,
+        // 200 ms waits, the game on screen at ~5 fps (2026-11-18).
+        const bool live_work = Game::playtestActive() ||
+            (!g_sim_timeline_mode && ui_ctx.scene.anySimulationRuntimeEnabled());
+        const bool rendering_active = live_work || did_render_this_frame || start_render ||
                            autonomous_anim_graph_playing || pending_scene_refresh ||
                                        ui_ctx.render_settings.is_rendering_active;
 
@@ -7009,7 +7015,7 @@ int main(int argc, char* argv[]) try {
                 SDL_WaitEventTimeout(nullptr, Viewport::backgroundWaitMilliseconds(
                     ui.timeline.isPlaying() || autonomous_anim_graph_playing ||
                         g_seq_save_active,
-                    keep_pumping_scene_load));
+                    keep_pumping_scene_load, live_work));
             } else {
                 // Foreground dormant: moderate wait, responsive to mouse/keyboard.
                 SDL_WaitEventTimeout(nullptr, 200);

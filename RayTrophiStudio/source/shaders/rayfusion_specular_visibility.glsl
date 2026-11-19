@@ -42,18 +42,20 @@ float rfSpecularSkyVisibility(vec3 worldPos, vec3 normal, vec3 reflection) {
         if (weight <= 0.0) continue;
         uint slot = rfSlotFor(neighbour);
         if (slot >= uint(rfGridCounts.w)) continue;
-        RfProbeTexel packet = rfProbeTexels[rfDirectionalIndex(slot, r)];
-        if (packet.irradiance.a < 0.5) continue;
+        // Bilinear, like the irradiance (probe_field.glsl): a nearest texel made
+        // the sky reflection on a smooth glossy surface step in 64 directions.
+        RfProbeSample packet = rfProbeDirectional(slot, r);
+        if (packet.valid < 0.5) continue;
         vec3 delta = worldPos - (vec3(neighbour) + vec3(0.5)) * spacing;
         float distanceToSurface = length(delta);
         vec3 direction = distanceToSurface > 1e-6 ? delta / distanceToSurface : n;
         float facing = distanceToSurface > 1e-6 ? 0.5 * dot(n, -direction) + 0.5 : 1.0;
         weight *= max(facing * facing, 0.01);
-        vec2 connection = rfProbeTexels[rfDirectionalIndex(slot, direction)].distance.xy;
+        vec2 connection = rfProbeDirectional(slot, direction).moments;
         float surfaceVisibility = rfMomentVisibility(connection, distanceToSurface);
         // Small tolerance avoids treating float accumulation error on an all-
         // miss packet as an occluder. This does not shorten the trace itself.
-        float skyVisibility = rfMomentVisibility(packet.distance.xy, horizon * 0.999);
+        float skyVisibility = rfMomentVisibility(packet.moments, horizon * 0.999);
         total += weight;
         visible += weight * surfaceVisibility * skyVisibility;
     }

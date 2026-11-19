@@ -32,7 +32,9 @@ layout(local_size_x = 256) in;
 
 const uint TILE = 32u;
 const uint TEXELS_PER_THREAD = 4u;   // 32*32 / 256
-const uint MAX_TILE_SOURCES = 64u;
+// 128 since 2026-11-18: balloon clumps land many drops on one tile and 64
+// dropped a large share of a burst's splats (paint.wet_status sources_dropped).
+const uint MAX_TILE_SOURCES = 128u;
 
 const uint MODE_STAMP = 0u;
 const uint MODE_TICK = 1u;
@@ -140,7 +142,14 @@ float blendChannelLinear(float dst, float target, float alpha) {
     return clamp(floor(linearToSrgb01(c + (g - c) * t) * 255.0 + 0.5), 0.0, 255.0);
 }
 vec4 unpackColor(uint c) { return unpackUnorm4x8(c) * 255.0; }
-uint packColor(vec4 c) { return packUnorm4x8(clamp(c, 0.0, 255.0) / 255.0); }
+// ★ NaN guard (2026-11-18): a NaN colour packs to rgb 0 while the alpha comes
+// from a finite pigment, i.e. BLACK paint, and NaN state spreads down the
+// runoff. A bad colour becomes an empty (transparent) texel instead.
+uint packColor(vec4 c) {
+    if (any(isnan(c)) || any(isinf(c))) return 0u;
+    return packUnorm4x8(clamp(c, 0.0, 255.0) / 255.0);
+}
+vec4 cleanState(vec4 v) { return (any(isnan(v)) || any(isinf(v))) ? vec4(0.0) : v; }
 
 float brushWeight(float dist_norm, float radius_px, float falloff) {
     if (radius_px <= 0.0) return 0.0;
@@ -214,7 +223,31 @@ vec4 sampleColor(Surface s, float gx, float gy) {
     vec4 b = unpackColor(color[texelIndex(s, x0 + 1, y0)]);
     vec4 c = unpackColor(color[texelIndex(s, x0, y0 + 1)]);
     vec4 d = unpackColor(color[texelIndex(s, x0 + 1, y0 + 1)]);
-    return mix(mix(a, b, fx), mix(c, d, fx), fy);
+    // ★ Weighted by coverage (alpha): an empty texel is rgb 0 / alpha 0, and a
+    // plain bilinear mix pulled its BLACK into every stain edge the runoff read.
+    vec4 w = vec4((1.0 - fx) * (1.0 - fy), fx * (1.0 - fy), (1.0 - fx) * fy, fx * fy) *
+             vec4(a.a, b.a, c.a, d.a);
+    float sw = w.x + w.y + w.z + w.w;
+    float alpha = mix(mix(a.a, b.a, fx), mix(c.a, d.a, fx), fy);
+    if (sw <= 1e-4) return vec4(0.0, 0.0, 0.0, alpha);
+    return vec4((a.rgb * w.x + b.rgb * w.y + c.rgb * w.z + d.rgb * w.w) / sw, alpha);
+}
+
+// Paint carried by the runoff/transport into dst. The colour layer of an empty
+// texel is rgb 0 / alpha 0, so blending raw rgb made black both ways: an empty
+// SOURCE (the top of a fresh stain) pulled the paint toward black, and an empty
+// DESTINATION (the drip front) went from black part way to the paint colour
+// while its alpha rose. Only covered paint carries colour, and an uncovered
+// destination takes the incoming colour as its own.
+vec4 carryPaint(vec4 dst, vec4 src, float alpha) {
+    float src_cov = clamp(src.a / 255.0 * 4.0, 0.0, 1.0);
+    float t = alpha * src_cov;
+    if (t <= 0.0005) return dst;
+    vec3 base = mix(src.rgb, dst.rgb, clamp(dst.a / 255.0 * 4.0, 0.0, 1.0));
+    dst.r = blendChannelLinear(base.r, src.r, t);
+    dst.g = blendChannelLinear(base.g, src.g, t);
+    dst.b = blendChannelLinear(base.b, src.b, t);
+    return dst;
 }
 
 // ── STAMP ───────────────────────────────────────────────────────────────────
@@ -223,6 +256,114 @@ shared uint s_list[MAX_TILE_SOURCES];
 shared uint s_count;
 shared uint s_flag;
 shared uint s_sum[4];
+
+// ── Event splat shape (2026-11-18) ──────────────────────────────────────────
+// A drop hitting a wall is not a disc. sim_particle_collide.comp packs the
+// drop's size_scale (flags bits 8..15, /64; 0 = unknown -> 1) and its impact
+// direction (bits 16..31, octahedral) into the event. From those:
+//   * core radius and paint LOAD grow with the drop (load ~ size^2): a big drop
+//     leaves a wet, heavy centre that the TICK's runoff carries down a little,
+//     a small one dries in place;
+//   * a grazing hit stretches the splat along the wall and shifts it forward;
+//   * the rim is a few random low lobes plus sharp spikes that grow with the
+//     impact speed, and satellite droplets sit just outside the rim.
+// Everything is seeded per event (particle slot + position), so it costs a few
+// ALU ops per texel-source pair and no memory.
+uint hashU(uint x) {
+    x ^= x >> 16u; x *= 0x7feb352du; x ^= x >> 15u; x *= 0x846ca68bu; x ^= x >> 16u;
+    return x;
+}
+float hash01(uint x) { return float(hashU(x) & 0xFFFFFFu) / 16777216.0; }
+
+float eventDropSize(uint flags) {
+    uint q = (flags >> 8u) & 255u;
+    return q == 0u ? 1.0 : clamp(float(q) / 64.0, 0.35, 2.5);
+}
+bool eventImpactDir(uint flags, out vec3 d) {
+    d = vec3(0.0, -1.0, 0.0);
+    if (((flags >> 8u) & 255u) == 0u) return false;
+    vec2 o = vec2(float((flags >> 16u) & 255u), float((flags >> 24u) & 255u)) / 255.0 * 2.0 - 1.0;
+    vec3 n = vec3(o.x, o.y, 1.0 - abs(o.x) - abs(o.y));
+    if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    d = normalize(n);
+    return true;
+}
+uint eventSeed(CollisionEvent e) {
+    return hashU(e.particle * 747796405u ^ hashU(floatBitsToUint(e.position[0]) ^
+                 hashU(floatBitsToUint(e.position[1]) + floatBitsToUint(e.position[2]))));
+}
+float eventCoreRadius(CollisionEvent e) {
+    float speed_f = clamp(0.8 + 0.035 * e.speed, 0.85, 1.25);
+    return pc.splat_radius * (0.5 + 0.5 * eventDropSize(e.flags)) * speed_f;
+}
+// Tangential share of the impact (0 head-on, 1 grazing) and its direction.
+float eventGraze(CollisionEvent e, vec3 n, out vec3 u) {
+    vec3 v;
+    if (eventImpactDir(e.flags, v)) {
+        vec3 vt = v - n * dot(v, n);
+        float g = length(vt);
+        if (g > 0.05) { u = vt / g; return g; }
+    }
+    vec3 helper = abs(n.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+    vec3 a = normalize(cross(n, helper));
+    vec3 b = cross(n, a);
+    float phi = hash01(eventSeed(e) + 7u) * 6.2831853;
+    u = a * cos(phi) + b * sin(phi);
+    return 0.0;
+}
+// Bounding radius (tile culling, early reject): rim lobes/spikes reach ~2 core
+// radii, satellites 1.95, all stretched by up to 1.9 and shifted 0.3 forward.
+float eventBoundRadius(CollisionEvent e) {
+    vec3 n = normalize(vec3(e.normal[0], e.normal[1], e.normal[2]));
+    vec3 u;
+    float g = eventGraze(e, n, u);
+    return eventCoreRadius(e) * (2.0 * (1.0 + 0.9 * g) + 0.3);
+}
+// Weight of event e at texel position tp; load = paint carried there.
+float eventSplatWeight(CollisionEvent e, vec3 tp, float falloff, out float load) {
+    vec3 p = vec3(e.position[0], e.position[1], e.position[2]);
+    vec3 n = normalize(vec3(e.normal[0], e.normal[1], e.normal[2]));
+    uint seed = eventSeed(e);
+    float size = eventDropSize(e.flags);
+    float core_r = eventCoreRadius(e);
+    vec3 u;
+    float g = eventGraze(e, n, u);
+    vec3 w = cross(n, u);
+    vec3 d = tp - p;
+    float x = (dot(d, u) - 0.3 * g * core_r) / (1.0 + 0.9 * g) / core_r;
+    float y = dot(d, w) / core_r;
+    // ★ Distance OFF the contact plane counts too. Without it a floor splat
+    // weighed only in the floor plane, so a wall texel straight above the hit
+    // was "at the centre": every drop landing along a wall's foot painted a
+    // full-weight band up the wall as high as the bound radius (~0.5 m), a
+    // rectangle along the bottom of every vertical wall (2026-11-18).
+    float h = dot(d, n) / core_r;
+    float rho = length(vec3(x, y, h));
+    load = clamp(size * size, 0.3, 3.0) * (0.85 + 0.3 * hash01(seed + 6u));
+    if (rho > 2.1) return 0.0;
+    // atan(0, 0) is undefined in GLSL (NaN on some drivers): the texel AT the
+    // contact point used to seed NaN paint that ran black down the wall.
+    float th = rho > 1e-5 ? atan(y, x) : 0.0;
+    vec4 ph = vec4(hash01(seed + 1u), hash01(seed + 2u), hash01(seed + 3u), hash01(seed + 4u)) * 6.2831853;
+    float jag = clamp(0.25 + 0.03 * e.speed, 0.25, 0.7) * (0.7 + 0.6 * hash01(seed + 5u));
+    float rim = 1.0 + 0.16 * sin(3.0 * th + ph.x) + 0.10 * sin(5.0 * th + ph.y) +
+                0.06 * sin(9.0 * th + ph.z) + jag * pow(max(0.0, sin(14.0 * th + ph.w)), 8.0);
+    float weight = brushWeight(rho / max(0.4, rim), 2.0, falloff);
+    // One candidate satellite per angular sector (11 sectors), centred well
+    // inside its sector so a texel only ever needs its own sector's.
+    const float K = 11.0;
+    float sector = clamp(floor((th + 3.14159265) / 6.2831853 * K), 0.0, K - 1.0);
+    uint sh = hashU(seed ^ (uint(sector) * 2654435761u));
+    if (hash01(sh) < clamp(jag * 0.9, 0.2, 0.6)) {
+        float tc = (sector + 0.25 + 0.5 * hash01(sh + 1u)) / K * 6.2831853 - 3.14159265;
+        float rc = 1.2 + 0.6 * hash01(sh + 2u);
+        float sr = 0.07 + 0.08 * hash01(sh + 3u);
+        float ds = length(vec3(vec2(x, y) - rc * vec2(cos(tc), sin(tc)), h)) / sr;
+        float ws = brushWeight(ds, 2.0, falloff) * 0.9;
+        if (ws > weight) { weight = ws; load *= 0.5; }
+    }
+    return weight;
+}
 
 bool sourceAt(uint idx, out vec3 p, out float r, out vec3 n, out bool facing,
               out vec3 srgb255, out float amount) {
@@ -238,7 +379,7 @@ bool sourceAt(uint idx, out vec3 p, out float r, out vec3 n, out bool facing,
     p = vec3(e.position[0], e.position[1], e.position[2]);
     n = vec3(e.normal[0], e.normal[1], e.normal[2]);
     facing = true;
-    r = pc.splat_radius;
+    r = pc.splat_radius > 0.0 ? eventBoundRadius(e) : 0.0;
     amount = pc.splat_amount;
     if (e.speed < pc.splat_min_speed) return false;
     // Colour: the particle's appearance LUT at its age (linear rgb).
@@ -319,8 +460,15 @@ void stampTile(uint tile_index) {
             float activation = clamp(clamp(a, 0.0, 1.0) * clamp(s.wetness, 0.0, 1.0) *
                                      (0.04 + deposited * 0.96), 0.0, 1.0);
             if (activation <= 0.001) continue;
-            float weight = brushWeight(dist_norm, 2.0, clamp(s.falloff, 0.0, 1.0));
-            float wet_add = weight * activation;
+            const bool splat = pc.source_kind == SOURCE_EVENTS;
+            float load = 1.0;
+            float weight = splat
+                ? eventSplatWeight(events[s_list[j]], pv.xyz, clamp(s.falloff, 0.0, 1.0), load)
+                : brushWeight(dist_norm, 2.0, clamp(s.falloff, 0.0, 1.0));
+            if (!(weight > 0.001) || isinf(weight)) continue;   // also skips NaN
+            // A drop's paint load scales what it leaves: wetness drives the
+            // TICK's runoff, so a heavy drop runs a little and a fine one stays.
+            float wet_add = min(weight * activation * load, 1.0);
             if (wet_add <= 0.001) continue;
             float pigment_add = wet_add * deposited;
             st.x = clamp(st.x + wet_add * (0.18 + deposited * 0.82), 0.0, 1.0);
@@ -337,7 +485,9 @@ void stampTile(uint tile_index) {
             // seeds ~0.5 alpha where the layer is still empty. A splat here is
             // the whole stroke, so the brush deposit is applied (alpha-over in
             // byte space, the CPU layer blend) and the seed is its floor.
-            float seed = max(clamp(weight * clamp(a, 0.0, 1.0), 0.0, 1.0),
+            // A fresh drop's core covers fully (vivid paint, not a tint of the
+            // wall): its opacity rises with the load it carries.
+            float seed = max(clamp(weight * clamp(a * (splat ? 0.85 + 0.25 * load : 1.0), 0.0, 1.0), 0.0, 1.0),
                              clamp(wet_add * (0.22 + deposited * 0.78), 0.0, 1.0));
             // Pickup: the brush colour takes on the wet paint under it
             // (sampleWetPickupReservoir + underpaint_mix of the CPU brush). The
@@ -348,7 +498,8 @@ void stampTile(uint tile_index) {
             float underpaint_mix = clamp(reservoir * wetness * (1.0 - fresh_bias * (oil ? 0.92 : 0.82)) *
                                          ((oil ? 0.08 : 0.18) + pickup * (oil ? 0.18 : 0.34)) *
                                          ((oil ? 0.36 : 0.55) - load * (oil ? 0.10 : 0.18)),
-                                         0.0, oil ? 0.20 : 0.42);
+                                         0.0, oil ? 0.20 : 0.42) *
+                                   (splat ? 1.0 - 0.7 * clamp(load * 0.5, 0.0, 1.0) : 1.0);
             vec3 sampled = mix(unpackColor(base_color[ti]).rgb, px.rgb, px.a / 255.0);
             c = mix(c, sampled, underpaint_mix);
             float dst_a = px.a / 255.0;
@@ -361,7 +512,7 @@ void stampTile(uint tile_index) {
             hit = true;
         }
         if (hit) {
-            state[ti] = st;
+            state[ti] = cleanState(st);
             color[ti] = packColor(px);
             ++touched;
         }
@@ -472,9 +623,11 @@ void tickTexel(Surface s, int px, int py) {
                 for (int ox = -1; ox <= 1; ++ox) {
                     uint si = texelIndex(s, px + ox, py + oy);
                     vec4 sst = state[si];
-                    float w = sst.y * (0.10 + sst.x);
-                    if (w <= 0.0005) continue;
                     vec4 sp = unpackColor(color[si]);
+                    // Coverage-weighted: pigment can reach a texel a step before
+                    // its colour does (rgb still 0), which mixed in black.
+                    float w = sst.y * (0.10 + sst.x) * (sp.a / 255.0);
+                    if (w <= 0.0005) continue;
                     sum += vec3(srgbToLinear01(sp.r / 255.0), srgbToLinear01(sp.g / 255.0),
                                 srgbToLinear01(sp.b / 255.0)) * w;
                     sum_w += w;
@@ -483,13 +636,9 @@ void tickTexel(Surface s, int px, int py) {
         }
 
         if (f.color_runoff_alpha > 0.001) {
-            dst.r = blendChannelLinear(dst.r, advected_pixel.r, f.color_runoff_alpha);
-            dst.g = blendChannelLinear(dst.g, advected_pixel.g, f.color_runoff_alpha);
-            dst.b = blendChannelLinear(dst.b, advected_pixel.b, f.color_runoff_alpha);
+            dst = carryPaint(dst, advected_pixel, f.color_runoff_alpha);
             if (f.color_drip_head_alpha > 0.001) {
-                dst.r = blendChannelLinear(dst.r, advected_pixel.r, f.color_drip_head_alpha);
-                dst.g = blendChannelLinear(dst.g, advected_pixel.g, f.color_drip_head_alpha);
-                dst.b = blendChannelLinear(dst.b, advected_pixel.b, f.color_drip_head_alpha);
+                dst = carryPaint(dst, advected_pixel, f.color_drip_head_alpha);
             }
             liftLayerAlpha(dst, max(st.y, f.advected_pigment), max(st.x, f.advected_wet),
                            advected_pixel.a / 255.0, max(f.color_runoff_alpha, f.color_drip_head_alpha));
@@ -505,9 +654,7 @@ void tickTexel(Surface s, int px, int py) {
             vec3 avg255 = vec3(floor(linearToSrgb01(avg.r) * 255.0 + 0.5),
                                floor(linearToSrgb01(avg.g) * 255.0 + 0.5),
                                floor(linearToSrgb01(avg.b) * 255.0 + 0.5));
-            dst.r = blendChannelLinear(dst.r, avg255.r, mix_alpha);
-            dst.g = blendChannelLinear(dst.g, avg255.g, mix_alpha);
-            dst.b = blendChannelLinear(dst.b, avg255.b, mix_alpha);
+            dst = carryPaint(dst, vec4(avg255, 255.0), mix_alpha);
             liftLayerAlpha(dst, max(next_pigment, pigment_presence), max(st.x, f.advected_wet), 1.0, mix_alpha);
             float thickness_mix_alpha = clamp(mix_alpha * 0.32, 0.0, 1.0);
             float local_target = clamp(max(st.z, f.advected_thickness * (0.55 + f.color_runoff_alpha * 0.25)), 0.0, 1.0);
@@ -556,9 +703,7 @@ void tickTexel(Surface s, int px, int py) {
                       clamp((transported_pigment - 0.015) / 0.22, 0.0, 1.0)
                 : transport_alpha * (0.18 + transported_pigment * 0.82), 0.0, 1.0);
             if (pigment_transport_alpha > 0.001) {
-                dst.r = blendChannelLinear(dst.r, source_px.r, pigment_transport_alpha);
-                dst.g = blendChannelLinear(dst.g, source_px.g, pigment_transport_alpha);
-                dst.b = blendChannelLinear(dst.b, source_px.b, pigment_transport_alpha);
+                dst = carryPaint(dst, source_px, pigment_transport_alpha);
                 liftLayerAlpha(dst, transported_pigment, transported_wet, source_px.a / 255.0, pigment_transport_alpha);
             }
             next_wet = max(next_wet, transported_wet * (0.16 + transported_pigment * 0.84));
@@ -567,7 +712,7 @@ void tickTexel(Surface s, int px, int py) {
     }
 
     color_scratch[ti] = packColor(dst);
-    state_scratch[ti] = vec4(next_wet, next_pigment, next_thickness, 0.0);
+    state_scratch[ti] = cleanState(vec4(next_wet, next_pigment, next_thickness, 0.0));
 }
 
 void tickTile(uint tile_index) {
@@ -620,7 +765,7 @@ void resolveTile(uint tile_index) {
         int x, y; tileTexel(t, k, x, y);
         if (!inSurface(s, x, y)) continue;
         uint ti = texelIndex(s, x, y);
-        vec4 st = state_scratch[ti];
+        vec4 st = cleanState(state_scratch[ti]);
         uint c = color_scratch[ti];
         state[ti] = st;
         color[ti] = c;
@@ -728,12 +873,21 @@ void main() {
         if (gl_GlobalInvocationID.x == 0u) { counter[0] = 0u; counter[1] = 0u; }
         return;
     }
+    // RESET of a tile RANGE: source_count (unused by this mode otherwise) is the
+    // first tile, 0 for the whole atlas. One surface whose base colour changed
+    // resets and republishes only its own tiles (2026-11-19: resetting all 20
+    // surfaces of a game room re-read ~270 MB per colour step into the second
+    // VkDevice of the Studio preview).
+    if (pc.mode == MODE_RESET) {
+        uint t = wg + pc.source_count;
+        if (t < pc.tile_count) resetTile(t);
+        return;
+    }
     if (wg >= pc.tile_count) return;
     if (pc.mode == MODE_STAMP) stampTile(wg);
     else if (pc.mode == MODE_TICK) tickTile(wg);
     else if (pc.mode == MODE_RESOLVE) resolveTile(wg);
     else if (pc.mode == MODE_COVERAGE) coverageTile(wg);
-    else if (pc.mode == MODE_RESET) resetTile(wg);
     else if (pc.mode == MODE_CHANNELS) channelTile(wg);
     else if (pc.mode == MODE_SEED_HEIGHT) seedHeightTile(wg);
 }

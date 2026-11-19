@@ -2,6 +2,7 @@
 
 #include "Api/RtApi.h"
 #include "Api/RtApiPaintWet.h"
+#include "Api/RtApiGame.h"
 #include "Audio/AudioService.h"
 #include "UI/AudioSourceLabel.h"
 #include "UIContext.h"
@@ -47,8 +48,10 @@ struct DemoDraft {
     float surprise_chance = 0.1f;
     int sparkles = 90;            // firework sparks per surprise pop / milestone burst, 0 = off
     bool sparkle_trails = true;
-    float drop_sparks = 0.25f;
-    bool drop_trails = true;      // paint drops leave trails in their colour    // chance a sampled paint drop contact sparks, 0 = off
+    float drop_sparks = 0.25f;    // chance a sampled paint drop contact sparks, 0 = off
+    bool drop_trails = true;      // paint drops leave trails in their colour
+    float burst_clumpiness = 0.7f;  // pop shape: 0 = even fine spray, 1 = ligaments/clumps/blobs
+    int burst_jets_max = 10;        // ligaments per pop drawn from 3..this
     float room_goal = 0.5f;              // 0 = no shared goal
     float finale_reset_seconds = 10.0f;  // 0 = no auto reset after the finale
     std::string celebrate_sound;
@@ -115,6 +118,8 @@ void syncDraft(const json& config) {
     draft.sparkle_trails = config.value("sparkle_trails", true);
     draft.drop_sparks = config.value("drop_sparks", 0.25f);
     draft.drop_trails = config.value("drop_trails", true);
+    draft.burst_clumpiness = config.value("burst_clumpiness", 0.7f);
+    draft.burst_jets_max = config.value("burst_jets_max", 10);
     draft.room_goal = config.value("room_goal", 0.5f);
     draft.finale_reset_seconds = config.value("finale_reset_seconds", 10.0f);
     draft.celebrate_sound = config.value("celebrate_sound", std::string());
@@ -160,6 +165,8 @@ json draftConfig() {
     config["sparkle_trails"] = draft.sparkle_trails;
     config["drop_sparks"] = std::clamp(draft.drop_sparks, 0.0f, 1.0f);
     config["drop_trails"] = draft.drop_trails;
+    config["burst_clumpiness"] = std::clamp(draft.burst_clumpiness, 0.0f, 1.0f);
+    config["burst_jets_max"] = std::clamp(draft.burst_jets_max, 3, 24);
     // Below the valid minimum means off, never an out-of-range config.
     config["room_goal"] = draft.room_goal < 0.05f ? 0.0f : draft.room_goal;
     config["finale_reset_seconds"] =
@@ -491,6 +498,12 @@ void drawDemo(const std::string& selected_object, const std::vector<std::string>
         ImGui::TextDisabled("Balloons: %zu (one per mesh, 3..24)", draft.visual_nodes.size());
     }
     ImGui::DragInt("Drops per balloon", &draft.particles_per_balloon, 8.0f, 32, 8192);
+    ImGui::SliderFloat("Pop clumpiness", &draft.burst_clumpiness, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How the paint leaves a popped balloon (drawn anew every pop).\n"
+                          "0 = even fine spray; 1 = uneven ligaments, clumps and heavy blobs.");
+    }
+    ImGui::SliderInt("Pop ligaments (max)", &draft.burst_jets_max, 3, 24);
     ImGui::DragInt("Seed", &draft.seed, 1.0f, 0, 2147483647);
     ImGui::DragFloatRange2("Pop interval (s)", &draft.interval_min, &draft.interval_max,
                            0.05f, 2.0f, 30.0f, "%.1f", "%.1f");
@@ -638,6 +651,29 @@ void drawSection(const std::string& selected_object) {
     }
     ImGui::TextDisabled("Saved with the project. Paint itself is not saved.");
 
+    // Play test: the same core as IPC game.playtest. The panel holds no state.
+    {
+        nlohmann::json play;
+        if (rtapi::gamePlaytest("status", play).ok) {
+            const bool active = play.value("active", false);
+            if (ImGui::Button(active ? "Stop play test" : "Play in Studio")) {
+                nlohmann::json ignored;
+                const auto result = rtapi::gamePlaytest(active ? "stop" : "start", ignored);
+                if (!result.ok) last_error = result.error;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Runs the room the way the Player does: live simulation, the demo\n"
+                                  "started when it is set to start automatically, particles drawn as\n"
+                                  "billboards only, and it keeps running when Studio is in the\n"
+                                  "background. Stop returns to the previous simulation mode.");
+            }
+            if (active) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("playing %.0f s", play.value("seconds", 0.0));
+            }
+        }
+    }
+
     rtapi::WetPaintStatusInfo status;
     const bool have_status = rtapi::getWetPaintStatus(status).ok;
     const rtapi::WetPaintSurfaceRuntimeInfo* selected = nullptr;
@@ -651,9 +687,7 @@ void drawSection(const std::string& selected_object) {
     }
 
     ImGui::SeparatorText("Wet paint surfaces");
-    // Default to the size the scene's surfaces already use: a mesh re-added at
-    // another size keeps its old paint texture, which is how a 512/1024 mix
-    // happens by accident.
+    // Start from the actual size; the selection is a request until Apply is pressed.
     static int resolution_index = 1;
     static bool resolution_touched = false;
     if (!resolution_touched && have_status && !status.surface_list.empty()) {
@@ -691,7 +725,25 @@ void drawSection(const std::string& selected_object) {
         ImGui::TextDisabled("None yet. Droplets paint only these surfaces.");
     }
     const char* resolutions[] = {"512", "1024", "2048"};
-    resolution_touched |= ImGui::Combo("New surface size", &resolution_index, resolutions, 3);
+    resolution_touched |= ImGui::Combo("Paint texture size", &resolution_index, resolutions, 3);
+    if (!listed.empty()) {
+        const int first = listed.front().resolution;
+        const bool mixed = std::any_of(listed.begin(), listed.end(), [first](const auto& s) {
+            return s.resolution != first;
+        });
+        if (mixed) {
+            ImGui::TextDisabled("Current surfaces: mixed sizes");
+        } else {
+            ImGui::TextDisabled("Current surfaces: %d px", first);
+        }
+        ImGui::TextDisabled("Apply resizes all surfaces and clears wet paint.");
+        if (ImGui::Button("Apply to all surfaces")) {
+            report(rtapi::resizeWetPaintSurfaces(512 << resolution_index));
+            UIWidgets::EndSection();
+            return; // Refresh status on the next frame.
+        }
+    }
+    ImGui::TextDisabled("New surfaces also use the selected size.");
     const bool selected_addable = !selected_object.empty() && !selected;
     ImGui::BeginDisabled(!selected_addable);
     if (ImGui::Button("Add selected")) {

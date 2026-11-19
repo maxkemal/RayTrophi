@@ -18,6 +18,8 @@
 */
 
 #include "RtPyCommon.h"
+#include "Core/RuntimeProjectHost.h"
+#include "Api/RtApiPlayerOperator.h"
 
 #include <string>
 #include <vector>
@@ -59,6 +61,42 @@ py::dict materialToDict(const rtapi::MaterialInfo& info) {
 } // namespace
 
 void registerSceneBindings(py::module_& module) {
+    auto player = module.def_submodule("player", "Player presentation controls");
+    player.def("operator", [](const std::string& operation, const py::dict& config) {
+        const auto codec = py::module_::import("json");
+        const auto encoded = py::cast<std::string>(codec.attr("dumps")(config));
+        const auto request = nlohmann::json::parse(encoded, nullptr, false);
+        if (request.is_discarded()) {
+            throw py::value_error("operator config must be JSON-compatible");
+        }
+        nlohmann::json output;
+        requireResult(rtapi::playerOperator(operation, request, output));
+        return codec.attr("loads")(output.dump());
+    }, py::arg("operation") = "status", py::arg("config") = py::dict());
+    player.def("display", [] {
+        nlohmann::json output;
+        requireResult(AppRuntime::runtimeDisplayStatus(output));
+        return py::module_::import("json").attr("loads")(output.dump());
+    });
+    player.def("set_display", [](const py::dict& settings) {
+        const auto encoded = py::cast<std::string>(
+            py::module_::import("json").attr("dumps")(settings));
+        const auto params = nlohmann::json::parse(encoded, nullptr, false);
+        if (params.is_discarded()) {
+            throw py::value_error("display settings must be JSON-compatible");
+        }
+        requireResult(AppRuntime::setRuntimeDisplay(params));
+        nlohmann::json output;
+        requireResult(AppRuntime::runtimeDisplayStatus(output));
+        return py::module_::import("json").attr("loads")(output.dump());
+    }, py::arg("settings"));
+    player.def("set_body_overlay", [](bool enabled) {
+        requireResult(AppRuntime::setRuntimeDisplay({{"body_overlay", enabled}}));
+    }, py::arg("enabled").noconvert());
+    player.def("set_video_card", [](bool enabled) {
+        requireResult(AppRuntime::setRuntimeDisplay({{"video_card", enabled}}));
+    }, py::arg("enabled").noconvert());
+
     // -----------------------------------------------------------------------
     // rt.select — most editor operations are selection-driven. Not undoable.
     // -----------------------------------------------------------------------
@@ -134,11 +172,13 @@ void registerSceneBindings(py::module_& module) {
         return materialToDict(info);
     }, py::arg("name"));
 
-    materials.def("create", [](const std::string& type, const std::string& name) {
+    materials.def("create", [](const std::string& type, const std::string& name,
+                               const std::string& clone_from) {
         std::string created;
-        requireResult(rtapi::createMaterial(type, name, created));
+        requireResult(rtapi::createMaterial(type, name, created, clone_from));
         return created;
     }, py::arg("type") = std::string("principled"), py::arg("name") = std::string(),
+       py::arg("clone_from") = std::string(),
        "Creates a material asset. Returns the registered name, which may differ "
        "from the requested one when that name was taken.");
 
@@ -146,10 +186,12 @@ void registerSceneBindings(py::module_& module) {
         return rtapi::objectMaterials(object_name);
     }, py::arg("object_name"), "Material names used by an object.");
 
-    materials.def("assign", [](const std::string& object_name, const std::string& material_name) {
-        requireResult(rtapi::assignMaterial(object_name, material_name));
+    materials.def("assign", [](const std::string& object_name, const std::string& material_name,
+                               const std::string& source_material_name) {
+        requireResult(rtapi::assignMaterial(object_name, material_name, source_material_name));
     }, py::arg("object_name"), py::arg("material_name"),
-       "Replaces the object's whole material assignment.");
+       py::arg("source_material_name") = std::string(),
+       "Replaces all slots, or only the named source material when specified.");
 
     materials.def("set_texture", [](const std::string& material_name, const std::string& slot,
                                     const std::string& filepath) {

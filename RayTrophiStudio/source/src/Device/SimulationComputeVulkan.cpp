@@ -1497,8 +1497,8 @@ private:
             { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 56 },
             { "sim_particle_spawn",                  "sim_particle_spawn.spv",               12, 16 },
             // Device collisions + contact events (ParticleDeviceCollision.cpp):
-            // 14 bindings, ParticleCollideGpuConstants = 48 B.
-            { "sim_particle_collide",                "sim_particle_collide.spv",            14, 48 },
+            // 15 bindings (14 = size_scale, packed into event flags), ParticleCollideGpuConstants = 48 B.
+            { "sim_particle_collide",                "sim_particle_collide.spv",            15, 48 },
             // GPU wet paint (WetPaintGpu.cpp): 17 bindings, WetPaintGpuConstants = 64 B.
             { "paint_wet",                           "paint_wet.spv",                       17, 64 },
             // GasCombustionGpuConstants = 18 x 4 = 72 (FG1 air inputs).

@@ -45,5 +45,7 @@ void bindDisplayHost(DisplayHost& host);
 void unbindDisplayHost(DisplayHost& host);
 rtapi::Result runtimeDisplayStatus(nlohmann::json& out);
 rtapi::Result setRuntimeDisplay(const nlohmann::json& params);
+bool playerBodyOverlayEnabled();
+bool playerVideoCardEnabled();
 
 } // namespace AppRuntime
