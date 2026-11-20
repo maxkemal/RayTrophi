@@ -1,4 +1,5 @@
 #include "Input/BodyPoseRuntime.h"
+#include "Paint/HiddenGameObjects.h"
 
 #include <algorithm>
 #include <cmath>
@@ -97,6 +98,7 @@ bool BodyPoseRuntime::set(const nlohmann::json &packet, std::string &error,
     for (auto &entry : parsed) {
         const auto found = tracks_.find(entry.first);
         Track current;
+        Paint::constrainHiddenBodyPerson(entry.second);
         current.person = std::move(entry.second);
         current.received = received;
         current.sender_t = sender_t;
@@ -190,6 +192,7 @@ void BodyPoseRuntime::tick(double dt) {
 }
 
 void BodyPoseRuntime::clear() {
+    Paint::clearHiddenPlayerHistory();
     tracks_.clear();
     last_sender_t_ = -1.0;
 }
@@ -205,6 +208,11 @@ const std::map<int, BodyPerson> BodyPoseRuntime::persons() const {
 const BodyPerson* BodyPoseRuntime::findPerson(int id) const {
     const auto found = tracks_.find(id);
     return found == tracks_.end() ? nullptr : &found->second.person;
+}
+
+BodyPoseRuntime::Clock::time_point BodyPoseRuntime::receivedAt(int id) const {
+    const auto found = tracks_.find(id);
+    return found == tracks_.end() ? Clock::time_point{} : found->second.received;
 }
 
 nlohmann::json BodyPoseRuntime::snapshot(Clock::time_point now) {

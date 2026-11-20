@@ -2287,6 +2287,33 @@
     </ClCompile>
     <ClCompile Include="source\src\Paint\BalloonEffects.cpp" />
     <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp" />
+    <ClCompile Include="source\src\Paint\HiddenObjectMotion.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenPaintSafety.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenGameObjects.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenGamePlacement.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenPlayerCollision.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorHiddenUI.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonBodyInteraction.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonInteraction.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\PlayerBalloonInput.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
     <ClCompile Include="source\src\Paint\GameDesign.cpp" />
     <ClCompile Include="source\src\Api\RtApiPaintWet.cpp" />
     <ClCompile Include="source\src\Api\RtIpcPaintWet.cpp" />

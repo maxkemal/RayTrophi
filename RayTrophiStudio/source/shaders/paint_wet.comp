@@ -70,6 +70,7 @@ const uint ST_NORMAL_TEXELS = 15u;
 const uint SURFACE_OIL = 1u;
 const uint SURFACE_ROUGHNESS = 2u;
 const uint SURFACE_HEIGHT_NORMAL = 4u;
+const uint SURFACE_REVEAL_OPACITY = 8u;
 
 struct Surface {
     uint width; uint height; uint page_offset; uint tile_offset;
@@ -857,6 +858,12 @@ void resetTile(uint tile_index) {
         if (pc._p0 != 0u) {
             for (uint channel=1u;channel<=3u;++channel)
                 out_color[channel*pc._p0+ti] = sourceChannel(channel,ti);
+            // Bit 1 opts into the five-output atlas. Old hosts pass only 0/1,
+            // so they must never access this extra output/source plane.
+            if ((pc._p1 & 2u) != 0u) {
+                out_color[4u * pc._p0 + ti] = (s.flags & SURFACE_REVEAL_OPACITY) != 0u
+                    ? 0u : 0xFFFFFFFFu;
+            }
         }
     }
     if (gl_LocalInvocationIndex == 0u) {

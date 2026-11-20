@@ -6,6 +6,7 @@
 #include "Paint/WetPaintGpu.h"
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/GameDesign.h"
+#include "Paint/HiddenPaintSafety.h"
 #include "globals.h"
 #include "scene_data.h"
 
@@ -31,6 +32,7 @@ Paint::WetPaintSurfaceSettings toCore(const WetPaintSurfaceSettingsInfo& in) {
     s.oil = in.oil;
     s.roughness_channel = in.roughness_channel;
     s.height_normal_channel = in.height_normal_channel;
+    s.reveal_opacity = in.reveal_opacity;
     s.wet_roughness = in.wet_roughness;
     s.dry_roughness = in.dry_roughness;
     s.height_contribution = in.height_contribution;
@@ -54,6 +56,7 @@ WetPaintSurfaceSettingsInfo fromCore(const Paint::WetPaintSurfaceSettings& s) {
     o.oil = s.oil;
     o.roughness_channel = s.roughness_channel;
     o.height_normal_channel = s.height_normal_channel;
+    o.reveal_opacity = s.reveal_opacity;
     o.wet_roughness = s.wet_roughness;
     o.dry_roughness = s.dry_roughness;
     o.height_contribution = s.height_contribution;
@@ -185,6 +188,8 @@ Result getWetPaintStatus(WetPaintStatusInfo& out) {
     out.publish_device_copies = s.publish_device_copies;
     out.publish_host_downloads = s.publish_host_downloads;
     out.publish_bytes_downloaded = s.publish_bytes_downloaded;
+    out.device_rebuilds = s.device_rebuilds;
+    out.geometry_uploads = s.geometry_uploads;
     out.geometry_rebakes = s.geometry_rebakes;
     out.publish_mode = s.publish_mode;
     out.compute_context = s.compute_context;
@@ -284,6 +289,7 @@ Result wetPaintDab(const WetPaintDabInfo& in) {
 
 Result resetWetPaint() {
     if (!g_ctx) return notBound();
+    Paint::clearBalloonPaintInFlight(g_ctx->scene);
     if (!Paint::wetPaintGpu().resetPaint()) return Result::fail("no wet paint surface");
     return Result::success();
 }

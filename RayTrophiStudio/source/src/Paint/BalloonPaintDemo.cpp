@@ -1,5 +1,9 @@
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/BalloonBirthAnimation.h"
+#include "Paint/BalloonInteraction.h"
+#include "Paint/BalloonBodyInteraction.h"
+#include "Paint/HiddenGameObjects.h"
+#include "Paint/HiddenPaintSafety.h"
 
 #include "Api/RtApi.h"
 #include "Backend/IBackend.h"
@@ -431,7 +435,7 @@ json validatedConfig(const json& input, SceneData& scene) {
     const std::array allowed = {
         "surfaces", "resolution", "seed", "balloons", "particles_per_balloon",
         "interval_min", "interval_max", "autostart", "respawn_seconds", "birth_seconds",
-        "visual_nodes", "pop_sound",
+        "visual_nodes", "pop_sound", "interaction_mode", "body_controls",
         "size_min", "size_max", "idle_reset_seconds", "colors",
         "surprise_chance", "surprise_sound", "room_goal", "celebrate_sound",
         "finale_reset_seconds", "spawn_min", "spawn_max", "float_amplitude", "drift_speed",
@@ -446,13 +450,25 @@ json validatedConfig(const json& input, SceneData& scene) {
     json c = {{"resolution", 1024}, {"seed", 417}, {"balloons", 12},
               {"particles_per_balloon", 1800}, {"interval_min", 2.5},
               {"interval_max", 5.0}, {"autostart", true}, {"respawn_seconds", 3.5},
-              {"birth_seconds", 0.75},
+              {"birth_seconds", 0.75}, {"body_controls", false},
+              {"interaction_mode", input.contains("visual_nodes") ? "carry" : "pop"},
               {"size_min", 1.0}, {"size_max", 1.0}, {"idle_reset_seconds", 0.0},
               {"surprise_chance", 0.1}, {"room_goal", 0.5}, {"finale_reset_seconds", 10.0},
               {"float_amplitude", 0.08}, {"drift_speed", 0.12},
               {"sparkles", 90}, {"sparkle_trails", true}, {"drop_sparks", 0.25}, {"drop_trails", true},
               {"burst_clumpiness", 0.7}, {"burst_jets_max", 10}};
     c.update(input);
+    if (!c["interaction_mode"].is_string() ||
+        (c["interaction_mode"] != "pop" && c["interaction_mode"] != "carry")) {
+        throw std::runtime_error("interaction_mode must be pop|carry");
+    }
+    if (c["interaction_mode"] == "carry" && !c.contains("visual_nodes")) {
+        throw std::runtime_error("carry requires mesh balloon visuals");
+    }
+    if (!c["body_controls"].is_boolean() ||
+        (c["body_controls"] == true && !c.contains("visual_nodes"))) {
+        throw std::runtime_error("body_controls requires bool and mesh balloon visuals");
+    }
     // Pop shape (Paint::balloonBurstPattern): 0 = even fine spray, 1 = ligaments,
     // clumps and blobs only; ligaments per pop are drawn from 3..burst_jets_max.
     if (!c["burst_clumpiness"].is_number() || !(c["burst_clumpiness"].get<double>() >= 0.0) ||
@@ -811,7 +827,7 @@ void tickMotion(SceneData& scene, float dt) {
     const float step = std::min(dt, 0.1f);
     for (size_t i = 0; i < state.balloons.size(); ++i) {
         Balloon& b = state.balloons[i];
-        if (!b.inflated) continue;
+        if (!b.inflated || balloonIsHeld(static_cast<int>(i))) continue;
         if (speed > 0.0f) {
             const float max_speed = speed / std::sqrt(std::max(0.3f, b.size));
             // Wander: a small random push, then steer.
@@ -1006,6 +1022,9 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
     int spawned = 0;
     for (int b = 0; b < count; ++b) {
         Balloon& balloon = state.balloons[available[b]];
+        if (balloonIsHeld(static_cast<int>(available[b]))) {
+            cancelBalloonInteraction();
+        }
         // Colours share the four droplet systems; a system carries several profiles.
         auto* runtime = system(scene, kSystems[balloon.color % kSystems.size()]);
         if (balloon.surprise) {
@@ -1020,7 +1039,7 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         balloon.respawn_at = state.seconds + state.config.value("respawn_seconds", 3.5);
         // A surprise throws half as much paint again, in every palette colour.
         const int particles = dropsFor(balloon.size) * (balloon.surprise ? 3 : 2) / 2;
-        spawned += particles;
+        int emitted = 0;
         BalloonBurstShape shape;
         shape.clumpiness = state.config["burst_clumpiness"].get<float>();
         shape.jets_max = state.config["burst_jets_max"].get<int>();
@@ -1028,11 +1047,16 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         const BalloonBurstSummary burst =
             balloonBurstPattern(state.random, particles, balloon.size, shape, pattern);
         // A rainbow surprise colours a whole clump alike: it lands as one splat.
+        const HiddenPaintSpawnGuard spawn_guard(scene);
+        const bool origin_allowed = spawn_guard.allows(balloon.position);
         int color = balloon.color;
         for (size_t i = 0; i < pattern.size(); ++i) {
             const BalloonBurstDrop& p = pattern[i];
             ParticleSpawnDesc drop;
             drop.position = balloon.position + p.offset;
+            if (!origin_allowed || !spawn_guard.allows(drop.position)) {
+                continue;
+            }
             drop.velocity = p.velocity;
             drop.lifetime_seconds = 2.8f;
             drop.mass = 0.001f;
@@ -1047,12 +1071,14 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
             auto* target = color == balloon.color ? runtime
                                                   : system(scene, kSystems[color % kSystems.size()]);
             target->spawn(drop);
+            ++emitted;
+            ++spawned;
             balloonDropLaunched(scene, drop.position, drop.velocity, color, drop.size_scale,
                                 drop.lifetime_seconds);
         }
         playPopSound(scene, balloon.position, balloon.size, balloon.surprise);
         popped.push_back({{"balloon", available[b]}, {"color", balloon.color},
-                          {"size", balloon.size}, {"drops", particles}, {"surprise", balloon.surprise},
+                          {"size", balloon.size}, {"drops", emitted}, {"surprise", balloon.surprise},
                           {"position", {balloon.position.x, balloon.position.y, balloon.position.z}},
                           {"burst", {{"jets", burst.jets}, {"blobs", burst.blobs},
                                      {"clumps", burst.clumps}, {"jet_drops", burst.jet_drops},
@@ -1077,6 +1103,11 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
 // (no re-warm); drops still in flight land within their 2.8 s lifetime, so the
 // paint is cleared once more 3 s later.
 void resetRoom(SceneData& scene) {
+    std::string placement_error;
+    clearBalloonPaintInFlight(scene);
+    resetHiddenGameObjects(scene, placement_error);
+    cancelBalloonInteraction();
+    resetBalloonBodyInteraction();
     auto& paint = wetPaintGpu();
     if (!paint.empty()) {
         paint.resetPaint();
@@ -1100,7 +1131,7 @@ void resetRoom(SceneData& scene) {
 void burst(SceneData& scene, int requested) {
     std::vector<size_t> available;
     for (size_t i = 0; i < state.balloons.size(); ++i) {
-        if (state.balloons[i].inflated) {
+        if (state.balloons[i].inflated && !balloonIsHeld(static_cast<int>(i))) {
             available.push_back(i);
         }
     }
@@ -1112,36 +1143,32 @@ void burst(SceneData& scene, int requested) {
 // Nearest inflated balloon along the camera ray through a window point
 // (x, y in 0..1 from the top-left corner), or -1. The same pick serves the
 // Player's mouse click and paint.wet_demo pop over IPC.
-int pickBalloon(SceneData& scene, float x, float y) {
-    if (!scene.camera) {
-        throw std::runtime_error("pop by screen point needs a scene camera");
-    }
-    const Ray ray = scene.camera->get_ray(x, 1.0f - y);
-    const Vec3 direction = ray.direction.normalize();
-    int hit = -1;
-    float nearest = std::numeric_limits<float>::max();
+std::vector<BalloonInteractionTarget> interactionTargets() {
+    std::vector<BalloonInteractionTarget> targets;
     for (size_t i = 0; i < state.balloons.size(); ++i) {
-        const Balloon& balloon = state.balloons[i];
+        const auto& balloon = state.balloons[i];
         if (!balloon.inflated) {
             continue;
         }
-        const Vec3 to_centre = balloon.position - ray.origin;
-        const float along = Vec3::dot(to_centre, direction);
-        if (along <= 0.0f) {
-            continue;
+        if (state.config.contains("visual_nodes")) {
+            const auto name = state.config["visual_nodes"][i].get<std::string>();
+            const auto* mesh = state.scene ? state.scene->getFlatNodeMesh(name) : nullptr;
+            if (!mesh || !mesh->visible) {
+                continue;
+            }
         }
-        const float miss = (to_centre - direction * along).length();
         const auto birth = state.config.contains("visual_nodes") ?
-            Paint::balloonBirthScale(state.seconds - balloon.birth_started_at,
-                                     state.config.value("birth_seconds", 0.75)) :
-            Paint::BalloonBirthScale{};
-        if (miss <= kPickRadius * balloon.size * std::max(birth.radial, birth.vertical) &&
-            along < nearest) {
-            nearest = along;
-            hit = static_cast<int>(i);
-        }
+            balloonBirthScale(state.seconds - balloon.birth_started_at,
+                               state.config.value("birth_seconds", 0.75)) : BalloonBirthScale{};
+        targets.push_back({static_cast<int>(i), balloon.position,
+            kPickRadius * balloon.size * std::max(birth.radial, birth.vertical),
+            kPickRadius * balloon.size * 1.15f});
     }
-    return hit;
+    return targets;
+}
+
+int pickBalloon(SceneData& scene, float x, float y) {
+    return pickBalloonTarget(scene, x, y, interactionTargets());
 }
 
 json status() {
@@ -1155,6 +1182,7 @@ json status() {
             Paint::balloonBirthScale(state.seconds - b.birth_started_at,
                                      state.config.value("birth_seconds", 0.75)) :
             Paint::BalloonBirthScale{};
+        entry["held"] = balloonIsHeld(static_cast<int>(i));
         entry["birth_active"] = b.inflated && !b.birth_settled;
         entry["visual_scale"] = {birth.radial, birth.vertical, birth.radial};
         if (state.config.contains("visual_nodes")) {
@@ -1204,6 +1232,9 @@ json status() {
             {"pop_sounds_dropped", state.pop_sounds_dropped},
             {"pop_sound_error", state.pop_sound_error},
             {"effects", balloonEffectsStatus(state.prepared ? state.scene : nullptr)},
+            {"interaction", balloonInteractionStatus()},
+            {"body_interaction", balloonBodyInteractionStatus(
+                state.config.is_object() && state.config.value("body_controls", false))},
             {"config", state.config}, {"balloons", balloons}, {"pools", pools},
             {"events", state.events}};
 }
@@ -1222,6 +1253,8 @@ void prepare(SceneData& scene, const json& config) {
         }
     }
     hideMeshVisuals();
+    cancelBalloonInteraction();
+    resetBalloonBodyInteraction();
     state = State{};
     state.scene = &scene;
     state.config = config;
@@ -1443,7 +1476,69 @@ void prepare(SceneData& scene, const json& config) {
 bool balloonPaintCommand(SceneData& scene, const std::string& operation,
                          const json& input, json& output, std::string& error) {
     try {
+        if (operation == "hidden") {
+            return hiddenGameObjectsCommand(scene, input, output, error);
+        }
         int popped_balloon = -1;
+        if (operation == "body") {
+            if ((!state.prepared || state.scene != &scene) && !input.empty()) {
+                error = "configure the demo before enabling body controls";
+                return false;
+            }
+            return balloonBodyControlCommand(state.config, input, output, error);
+        }
+        if (operation == "pointer") {
+            const bool cancel = input.is_object() && input.value("action", json()) == "cancel";
+            if ((!state.prepared || state.scene != &scene) && !cancel) {
+                throw std::runtime_error("configure the demo before pointer input");
+            }
+            if (!cancel) {
+                for (const char* name : kSystems) {
+                    if (!system(scene, name)) {
+                        throw std::runtime_error("demo droplet system was removed");
+                    }
+                }
+                if (!system(scene, kVisualSystem)) {
+                    throw std::runtime_error("demo visual system was removed");
+                }
+            }
+            const auto config = state.config.is_object() ? state.config : json::object();
+            const auto action = balloonPointerCommand(scene, input,
+                config.value("interaction_mode", std::string("pop")), interactionTargets(),
+                config.value("visual_nodes", std::vector<std::string>{}));
+            if (action.move >= 0) {
+                auto& balloon = state.balloons[static_cast<size_t>(action.move)];
+                balloon.position = balloon.anchor = action.position;
+                balloon.drift = Vec3(0.0f);
+                balloon.phase = 0.0f;
+                moveMeshVisual(scene, static_cast<size_t>(action.move), balloon);
+            }
+            if (action.pop >= 0) {
+                popBalloons(scene, {static_cast<size_t>(action.pop)});
+                state.dirty = true;
+            }
+            if (action.move >= 0 || action.pop >= 0 || heldBalloon() >= 0) {
+                state.last_activity = state.seconds;
+            }
+            output = balloonInteractionStatus();
+            output["moved"] = action.move;
+            output["popped"] = action.pop;
+            return true;
+        }
+        if (operation == "interaction") {
+            if (!state.prepared || state.scene != &scene || !input.is_object() ||
+                input.size() != 1 || !input.contains("mode") || !input["mode"].is_string() ||
+                (input["mode"] != "pop" && input["mode"] != "carry")) {
+                throw std::runtime_error("prepared demo and interaction mode pop|carry required");
+            }
+            if (input["mode"] == "carry" && !state.config.contains("visual_nodes")) {
+                throw std::runtime_error("carry requires mesh balloon visuals");
+            }
+            cancelBalloonInteraction();
+            state.config["interaction_mode"] = input["mode"];
+            output = status();
+            return true;
+        }
         if (!input.is_object()) {
             throw std::runtime_error("demo input must be an object");
         }
@@ -1476,6 +1571,8 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
         } else if (operation == "reset") {
             if (!state.prepared || state.scene != &scene) {
                 // No demo: still a clean room for whatever paint exists.
+                clearBalloonPaintInFlight(scene);
+                resetHiddenGameObjects(scene, error);
                 if (!wetPaintGpu().empty()) wetPaintGpu().resetPaint();
             } else {
                 resetRoom(scene);
@@ -1682,6 +1779,7 @@ bool setBalloonPaintCollider(SceneData& scene, const std::string& object, const 
     }
     mirrorBalloonEffectColliders(scene);   // no-op until configure prepared the effects
     scene.clearSimFrameCache();
+    scene.preserveScriptSimulationPreview();
     return true;
 }
 
@@ -1719,13 +1817,20 @@ bool loadBalloonPaintProject(SceneData& scene, const std::string& project_path,
 
 void resetBalloonPaintDemo() {
     // Called after project replacement too: never look old names up in a new scene.
+    cancelBalloonInteraction();
+    resetBalloonBodyInteraction();
     state = State{};
     resetBalloonEffects();
     wetPaintGpu().clear();
 }
 
 void tickBalloonPaintDemo(SceneData& scene, float dt) {
-    if (!state.prepared || state.scene != &scene || !std::isfinite(dt) || dt <= 0.0f) {
+    if (!state.prepared || state.scene != &scene) {
+        cancelBalloonInteraction();
+        resetBalloonBodyInteraction();
+        return;
+    }
+    if (!std::isfinite(dt) || dt <= 0.0f) {
         return;
     }
     // This tick's own cost, for the per-event breakdown (observeBalloonPaintFrame).
@@ -1737,16 +1842,27 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
         if (!system(scene, name)) {
             state.running = false;
             state.error = "demo particle system was removed";
+            cancelBalloonInteraction();
+            resetBalloonBodyInteraction();
             return;
         }
     }
     if (!system(scene, kVisualSystem)) {
         state.running = false;
         state.error = "demo visual system was removed";
+        cancelBalloonInteraction();
+        resetBalloonBodyInteraction();
         return;
     }
     try {
         state.seconds += std::min(dt, 0.25f);
+        if (state.config.value("body_controls", false)) {
+            tickBalloonBodyInteraction(scene, true, interactionTargets());
+        }
+        const int held = heldBalloon();
+        if (held >= 0) {
+            state.last_activity = state.seconds;
+        }
         for (auto& balloon : state.balloons) {
             if (!balloon.inflated && state.seconds >= balloon.respawn_at) {
                 inflate(scene, balloon);
@@ -1779,12 +1895,12 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
         if (!state.cascade.empty() && state.seconds >= state.next_cascade) {
             const size_t next = state.cascade.back();
             state.cascade.pop_back();
-            if (state.balloons[next].inflated) {
+            if (state.balloons[next].inflated && !balloonIsHeld(static_cast<int>(next))) {
                 popBalloons(scene, {next});
             }
             state.next_cascade = state.seconds + 0.18;
         }
-        if (state.finale_reset_at >= 0.0 && state.seconds >= state.finale_reset_at) {
+        if (held < 0 && state.finale_reset_at >= 0.0 && state.seconds >= state.finale_reset_at) {
             resetRoom(scene);
         }
         const double idle_reset = state.config["idle_reset_seconds"].get<double>();
@@ -1800,6 +1916,8 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
                 state.config["interval_min"].get<float>(), state.config["interval_max"].get<float>());
         }
     } catch (const std::exception& error) {
+        cancelBalloonInteraction();
+        resetBalloonBodyInteraction();
         state.running = false;
         state.prepared = false;
         state.error = error.what();

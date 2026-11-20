@@ -2,6 +2,7 @@
 // See include/Paint/WetPaintGpu.h and shaders/paint_wet.comp.
 
 #include "Paint/WetPaintGpu.h"
+#include "Paint/HiddenGameObjects.h"
 
 #include "Backend/IBackend.h"
 #include "Backend/VulkanBackend.h"
@@ -189,8 +190,16 @@ std::vector<FlatPaintFace> paintFaces(SceneData& scene, const std::string& objec
             continue;
         }
         const auto& geometry = *mesh->geometry;
-        const auto* positions = geometry.get_positions();
-        const auto* normals = geometry.get_normals();
+        const bool instance_pose = hiddenObjectUsesInstancePose(mesh->nodeName) &&
+            mesh->transform && !mesh->hasSkinWeights() && geometry.get_positions_orig();
+        const auto* positions = instance_pose
+            ? geometry.get_positions_orig() : geometry.get_positions();
+        const auto* normals = instance_pose ? geometry.get_normals_orig() : geometry.get_normals();
+        const size_t normal_count = geometry.get_core_attribute_count(
+            instance_pose ? DNA::Attr::N_orig : DNA::Attr::N);
+        const auto world = instance_pose ? mesh->transform->getFinal() : Matrix4x4::identity();
+        const auto normal_matrix = instance_pose ? world.inverse().transpose()
+                                                : Matrix4x4::identity();
         const auto* materials = geometry.get_attribute_data<uint16_t>("materialID");
         const auto* uvs = uv_set > 0
             ? geometry.get_attribute_data<Vec2>("uv" + std::to_string(uv_set))
@@ -203,15 +212,17 @@ std::vector<FlatPaintFace> paintFaces(SceneData& scene, const std::string& objec
         }
         for (size_t offset = 0; offset + 2 < geometry.indices.size(); offset += 3) {
             const uint32_t* indices = geometry.indices.data() + offset;
-            const size_t count = geometry.get_vertex_count();
+            const size_t count = instance_pose ? geometry.get_positions_orig_count()
+                                               : geometry.get_vertex_count();
             if (indices[0] >= count || indices[1] >= count || indices[2] >= count ||
                 (materials ? materials[indices[0]] : 0) != material_id) {
                 continue;
             }
             FlatPaintFace face;
             for (size_t i = 0; i < 3; ++i) {
-                face.positions[i] = positions[indices[i]];
-                face.normals[i] = normals ? normals[indices[i]] : Vec3(0.0f);
+                face.positions[i] = world.transform_point(positions[indices[i]]);
+                face.normals[i] = normals && indices[i] < normal_count
+                    ? normal_matrix.transform_vector(normals[indices[i]]) : Vec3(0.0f);
                 face.uvs[i] = uvs[indices[i]];
             }
             faces.push_back(face);
@@ -246,12 +257,13 @@ struct WetPaintGpu::Surface {
     std::vector<uint32_t> base;        // RGBA8, original base colour
     bool base_from_color = false;      // base = the material colour (no texture under it)
     Vec3 base_linear = Vec3(1.0f);     // that colour when the base was filled
+    bool geometry_upload = false; // Same dimensions: patch pages without retiring GPU handles.
     bool base_upload = false;          // base changed on the host: rewrite its device slice
     bool base_pending = false;         // material colour moved, waiting for it to settle
     Vec3 base_pending_color = Vec3(0.0f);
     std::chrono::steady_clock::time_point base_pending_since{};
-    std::array<std::weak_ptr<Texture>, 3> channel_textures;
-    std::array<std::vector<uint32_t>, 3> channel_base; // roughness, height mask, normal
+    std::array<std::weak_ptr<Texture>, 4> channel_textures;
+    std::array<std::vector<uint32_t>, 4> channel_base; // roughness, height, normal, opacity
     std::vector<Vec2> normal_spans;    // same Jacobian metric used by CPU Paint
     bool channels_refresh = false;
     std::vector<GpuTile> tiles;        // surface field filled at layout
@@ -259,11 +271,11 @@ struct WetPaintGpu::Surface {
     WetPaintSurfaceSettings settings;
     int uv_set = 0;
     uint16_t paint_material = 0;
-    std::array<double, 8> geometry_key{};   // geometryKey() at the last bake
+    std::array<double, 24> geometry_key{};   // geometryKey() at the last bake
     // Dirty texel rectangle not yet in each backend (0 render, 1 viewport).
     struct Rect { bool any = false; int x0 = 0, y0 = 0, x1 = -1, y1 = -1; };
     Rect pending[2];
-    Rect channel_pending[2][3];
+    Rect channel_pending[2][4];
     WetPaintSurfaceInfo last;
 };
 
@@ -276,6 +288,7 @@ struct WetPaintGpu::Device {
     std::size_t dab_capacity = 0, lut_capacity = 0, lookup_capacity = 0;
     uint32_t texel_count = 0, tile_count = 0;
     bool channels_allocated = false;
+    bool reveal_allocated = false;
     bool channels_force = false;
     // The stats of the last dispatching tick, read one tick later
     // (SimulationComputeContext::submitWithReadback), with what that tick knew.
@@ -298,7 +311,7 @@ struct WetPaintGpu::Device {
         }
         dab_capacity = lut_capacity = lookup_capacity = 0;
         texel_count = tile_count = 0;
-        channels_allocated = channels_force = false;
+        channels_allocated = channels_force = reveal_allocated = false;
         compute = nullptr;
     }
 };
@@ -327,15 +340,30 @@ WetPaintGpu::Surface* WetPaintGpu::find(const std::string& object, int material_
 
 // Cheap fingerprint of an object's world geometry (flat meshes carry their
 // transform in the positions): vertex count, position sum and bounds.
-std::array<double, 8> WetPaintGpu::geometryKey(SceneData& scene, const std::string& object) {
-    std::array<double, 8> key{};
+std::array<double, 24> WetPaintGpu::geometryKey(SceneData& scene, const std::string& object) {
+    std::array<double, 24> key{};
     key[5] = key[6] = key[7] = 0.0;
     double mn[3] = {1e30, 1e30, 1e30}, mx[3] = {-1e30, -1e30, -1e30};
     for (const auto& obj : scene.world.objects) {
         auto mesh = std::dynamic_pointer_cast<TriangleMesh>(obj);
         if (!mesh || mesh->nodeName != object || !mesh->geometry) continue;
-        const auto* positions = mesh->geometry->get_positions();
-        const size_t count = mesh->geometry->get_vertex_count();
+        const auto& geometry = *mesh->geometry;
+        const bool instance_pose = hiddenObjectUsesInstancePose(mesh->nodeName) &&
+            mesh->transform && !mesh->hasSkinWeights() && geometry.get_positions_orig();
+        const auto* positions = instance_pose
+            ? geometry.get_positions_orig() : geometry.get_positions();
+        const size_t count = instance_pose ? geometry.get_positions_orig_count()
+                                           : geometry.get_vertex_count();
+        const auto world = instance_pose ? mesh->transform->getFinal() : Matrix4x4::identity();
+        if (instance_pose) {
+            // Exact pose components also detect symmetric rotations whose
+            // position sum/AABB stay unchanged while the UV-facing normals move.
+            for (int row = 0; row < 4; ++row) {
+                for (int column = 0; column < 4; ++column) {
+                    key[8 + row * 4 + column] += world.m[row][column];
+                }
+            }
+        }
         if (!positions) continue;
         key[0] += static_cast<double>(count);
         // The atlas IS the mesh's UV layout: a re-unwrap with the same
@@ -349,7 +377,7 @@ std::array<double, 8> WetPaintGpu::geometryKey(SceneData& scene, const std::stri
             }
         }
         for (size_t i = 0; i < count; ++i) {
-            const Vec3& v = positions[i];
+            const Vec3 v = world.transform_point(positions[i]);
             key[1] += v.x; key[2] += v.y; key[3] += v.z;
             mn[0] = std::min(mn[0], double(v.x)); mx[0] = std::max(mx[0], double(v.x));
             mn[1] = std::min(mn[1], double(v.y)); mx[1] = std::max(mx[1], double(v.y));
@@ -363,8 +391,9 @@ std::array<double, 8> WetPaintGpu::geometryKey(SceneData& scene, const std::stri
 
 // Rasterises the surface's triangles into texel space: world position,
 // flow and normal per texel, gutter and tile bounds. Flat meshes keep their
-// world transform in the geometry, so moving or scaling the object changes
-// what this produces - tick() re-runs it when geometryKey() changes.
+// world transform in the geometry. Managed hidden objects instead use local
+// P_orig/N_orig + current instance pose, matching the SDF resolver and renderer.
+// geometryKey reads that same world space to trigger rebaking after a move.
 bool WetPaintGpu::bakeGeometry(SceneData& scene, Surface& s, std::string& error) {
     const size_t texels = static_cast<size_t>(s.width) * s.height;
     s.pos_valid.assign(texels * 4, 0.0f);
@@ -665,6 +694,7 @@ bool WetPaintGpu::setSurfaceSettings(const std::string& object, int material_id,
         const auto& previous = s->settings;
         const bool changed = previous.roughness_channel != settings.roughness_channel ||
             previous.height_normal_channel != settings.height_normal_channel ||
+            previous.reveal_opacity != settings.reveal_opacity ||
             previous.wet_roughness != settings.wet_roughness ||
             previous.dry_roughness != settings.dry_roughness ||
             previous.height_contribution != settings.height_contribution ||
@@ -874,8 +904,57 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
         d.compute = keep;
         return false;
     }
+    for (auto& surface : surfaces_) surface->geometry_upload = false;
     layout_dirty_ = false;
     settings_dirty_ = true;
+    ++stats_.device_rebuilds;
+    return true;
+}
+
+// Only geometric pages change on a rigid hidden-object move. Preserve colour,
+// output/channel buffers and texture handles that asynchronous frames still use.
+bool WetPaintGpu::patchGeometry() {
+    Device& d = *device_;
+    auto& compute = *d.compute;
+    bool pending = false;
+    for (const auto& surface : surfaces_) {
+        pending = pending || surface->geometry_upload;
+    }
+    if (!pending) return true;
+    compute.synchronize(); // Rare edit/reset boundary, never the normal paint tick.
+    for (size_t index = 0; index < surfaces_.size(); ++index) {
+        auto& surface = *surfaces_[index];
+        if (!surface.geometry_upload) continue;
+        const size_t count = static_cast<size_t>(surface.width) * surface.height;
+        for (auto& tile : surface.tiles) tile.surface = static_cast<uint32_t>(index);
+        bool ok = compute.uploadBuffer(d.pos_valid, surface.pos_valid.data(), count * 16,
+                                       static_cast<size_t>(surface.page_offset) * 16) &&
+                  compute.uploadBuffer(d.flow_normal, surface.flow_normal.data(), count * 16,
+                                       static_cast<size_t>(surface.page_offset) * 16) &&
+                  compute.uploadBuffer(d.tiles, surface.tiles.data(),
+                                       surface.tiles.size() * sizeof(GpuTile),
+                                       static_cast<size_t>(surface.tile_offset) * sizeof(GpuTile));
+        if (ok && d.channels_allocated) {
+            std::vector<float> metric(count);
+            for (int axis = 0; axis < 2; ++axis) {
+                for (size_t pixel = 0; pixel < count; ++pixel) {
+                    metric[pixel] = axis == 0 ? surface.normal_spans[pixel].u
+                                              : surface.normal_spans[pixel].v;
+                }
+                const size_t offset = (static_cast<size_t>(4 + axis) * d.texel_count +
+                                       surface.page_offset) * 4;
+                ok = compute.uploadBuffer(d.base, metric.data(), count * 4, offset) && ok;
+            }
+        }
+        if (!ok) {
+            stats_.status = "geometry_patch_failed: " + surface.object;
+            return false;
+        }
+        surface.geometry_upload = false;
+        ++stats_.geometry_uploads;
+        surface.base_upload = true; // Existing per-surface reset/publish after the pose edit.
+        settings_dirty_ = true;
+    }
     return true;
 }
 
@@ -884,22 +963,29 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
 bool WetPaintGpu::prepareChannels(SceneData& scene) {
     Device& d = *device_;
     const bool enabled = std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
-        return s->settings.roughness_channel || s->settings.height_normal_channel;
+        return s->settings.roughness_channel || s->settings.height_normal_channel ||
+               s->settings.reveal_opacity;
     });
     if (!enabled && !d.channels_allocated) {
         channels_dirty_ = false;
         return true;
     }
     if (!channels_dirty_ && d.channels_allocated) return true;
-    bool upload = !d.channels_allocated;
-    static constexpr PaintChannel channels[3] = {
-        PaintChannel::Roughness, PaintChannel::Mask, PaintChannel::Normal
+    const bool reveal_atlas = d.reveal_allocated ||
+        std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
+            return s->settings.reveal_opacity;
+        });
+    const bool expand = !d.channels_allocated || (reveal_atlas && !d.reveal_allocated);
+    bool upload = expand;
+    static constexpr PaintChannel channels[4] = {
+        PaintChannel::Roughness, PaintChannel::Mask, PaintChannel::Normal, PaintChannel::Opacity
     };
     for (auto& surface : surfaces_) {
         Surface& s = *surface;
         const bool need_roughness = s.settings.roughness_channel && s.channel_base[0].empty();
         const bool need_normal = s.settings.height_normal_channel && s.channel_base[2].empty();
-        if (!need_roughness && !need_normal) continue;
+        const bool need_opacity = s.settings.reveal_opacity && s.channel_base[3].empty();
+        if (!need_roughness && !need_normal && !need_opacity) continue;
         auto triangle = findPaintTriangle(scene, s.object, s.material_id);
         if (!triangle || !triangle->getMaterial()) {
             stats_.status = "channel_material_missing: " + s.object;
@@ -922,16 +1008,22 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
         // by an earlier surface of another size can never be used. Pin the set
         // to the base size and recreate mismatched channel textures.
         PaintTextureSet& channel_set = adapter.ensureTextureSet(static_cast<int>(s.width));
-        for (int ch = 0; ch < 3; ++ch) {
-            if ((ch == 0 && !need_roughness) || (ch != 0 && !need_normal)) continue;
+        for (int ch = 0; ch < 4; ++ch) {
+            if ((ch == 0 && !need_roughness) ||
+                ((ch == 1 || ch == 2) && !need_normal) || (ch == 3 && !need_opacity)) {
+                continue;
+            }
             std::shared_ptr<Texture>& existing = channel_set.getTextureRef(channels[ch]);
             if (existing && (existing->width != static_cast<int>(s.width) ||
                              existing->height != static_cast<int>(s.height))) {
                 existing.reset();
             }
         }
-        for (int ch = 0; ch < 3; ++ch) {
-            if ((ch == 0 && !need_roughness) || (ch != 0 && !need_normal)) continue;
+        for (int ch = 0; ch < 4; ++ch) {
+            if ((ch == 0 && !need_roughness) ||
+                ((ch == 1 || ch == 2) && !need_normal) || (ch == 3 && !need_opacity)) {
+                continue;
+            }
             if (!adapter.assignTextureToChannel(channels[ch])) {
                 stats_.status = "channel_target_failed: " + s.object;
                 return false;
@@ -940,8 +1032,11 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
         auto* set = adapter.getTextureSet();
         if (!set) return false;
         const std::size_t count = static_cast<std::size_t>(s.width) * s.height;
-        for (int ch = 0; ch < 3; ++ch) {
-            if ((ch == 0 && !need_roughness) || (ch != 0 && !need_normal)) continue;
+        for (int ch = 0; ch < 4; ++ch) {
+            if ((ch == 0 && !need_roughness) ||
+                ((ch == 1 || ch == 2) && !need_normal) || (ch == 3 && !need_opacity)) {
+                continue;
+            }
             auto texture = set->getTexture(channels[ch]);
             if (!texture || texture->width != static_cast<int>(s.width) ||
                 texture->height != static_cast<int>(s.height) || texture->pixels.size() != count) {
@@ -950,6 +1045,9 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
             }
             texture->name = "generated/wet/" + std::to_string(texture->m_uid) + ".png";
             texture->is_srgb = false;
+            if (ch == 3) {
+                texture->has_alpha = true;
+            }
             s.channel_textures[ch] = texture;
             s.channel_base[ch].resize(count);
             for (std::size_t pixel = 0; pixel < count; ++pixel) {
@@ -962,6 +1060,10 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
                     const auto byte = static_cast<uint8_t>(
                         std::clamp(scalar, 0.0f, 1.0f) * 255.0f + 0.5f);
                     value = CompactVec4(byte, byte, byte, 255);
+                } else if (ch == 3) {
+                    // Reveal owns opacity on solid geometry. Never seed from a
+                    // saved transient reveal mask: a clean reload must be paintable.
+                    value = CompactVec4(255, 255, 255, 255);
                 } else if (ch == 2 && normal_strength != 1.0f) {
                     Vec3 n(value.r / 127.5f - 1.0f, value.g / 127.5f - 1.0f,
                            value.b / 127.5f - 1.0f);
@@ -987,11 +1089,12 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
         if (need_normal) material->set_normal_strength(1.0f);
         // A later channel assignment may flatten the original CPU stack again.
         // Reinstall all ORIGINAL channel pixels, never GPU paint pixels.
-        for (int ch = 0; ch < 3; ++ch) {
+        for (int ch = 0; ch < 4; ++ch) {
             auto texture = s.channel_textures[ch].lock();
             if (!texture) continue;
             for (std::size_t pixel = 0; pixel < count; ++pixel) {
-                const uint32_t v = s.channel_base[ch][pixel];
+                const uint32_t v = (ch == 3 && s.settings.reveal_opacity)
+                    ? 0u : s.channel_base[ch][pixel];
                 texture->pixels[pixel] = CompactVec4(v & 255u, (v >> 8u) & 255u,
                                                      (v >> 16u) & 255u, v >> 24u);
             }
@@ -1019,8 +1122,14 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
                 std::memcpy(&original[5 * count + offset + pixel], &s.normal_spans[pixel].v, 4);
             }
         }
+        // Source planes 4/5 remain the UV metric; opacity needs no extra source plane.
+        std::vector<uint32_t> outputs(count * (reveal_atlas ? 5 : 4), 0u);
+        std::copy_n(original.begin(), count * 4, outputs.begin());
+        if (reveal_atlas) {
+            std::fill(outputs.begin() + count * 4, outputs.end(), 0xFFFFFFFFu);
+        }
         ComputeBufferHandle new_base, new_output;
-        if (!d.channels_allocated) {
+        if (expand) {
             ComputeBufferDesc desc;
             desc.debug_name = "WetPaintChannelSources";
             desc.size_bytes = original.size() * 4;
@@ -1028,7 +1137,7 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
                          ComputeBufferUsage::ReadOnly;
             new_base = compute.createBuffer(desc);
             desc.debug_name = "WetPaintChannelOutputs";
-            desc.size_bytes = count * 16;
+            desc.size_bytes = outputs.size() * 4;
             desc.usage = ComputeBufferUsage::Storage | ComputeBufferUsage::Upload |
                          ComputeBufferUsage::Download | ComputeBufferUsage::ReadWrite;
             new_output = compute.createBuffer(desc);
@@ -1039,28 +1148,29 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
                 return false;
             }
         }
-        auto& base = d.channels_allocated ? d.base : new_base;
-        auto& output = d.channels_allocated ? d.output : new_output;
+        auto& base = expand ? new_base : d.base;
+        auto& output = expand ? new_output : d.output;
         compute.synchronize();
         const bool ok = compute.uploadBuffer(base, original.data(), original.size() * 4) &&
-                        compute.uploadBuffer(output, original.data(), count * 16);
+                        compute.uploadBuffer(output, outputs.data(), outputs.size() * 4);
         if (!ok) {
             if (new_base.valid()) compute.destroyBuffer(new_base);
             if (new_output.valid()) compute.destroyBuffer(new_output);
             stats_.status = "channel_upload_failed";
             return false;
         }
-        if (!d.channels_allocated) {
+        if (expand) {
             compute.destroyBuffer(d.base);
             compute.destroyBuffer(d.output);
             d.base = new_base;
             d.output = new_output;
             d.channels_allocated = true;
+            d.reveal_allocated = reveal_atlas;
         }
     }
     d.channels_force = true;
     channels_dirty_ = false;
-    stats_.pbr_buffer_bytes = static_cast<uint64_t>(d.texel_count) * 32u;
+    stats_.pbr_buffer_bytes = static_cast<uint64_t>(d.texel_count) * (d.reveal_allocated ? 36u : 32u);
     stats_.pbr_texture_bytes = 0;
     for (const auto& s : surfaces_) {
         for (const auto& texture : s->channel_textures) {
@@ -1089,7 +1199,7 @@ void WetPaintGpu::uploadSurfaceTable() {
         g.tiles_x = s.tiles_x;
         g.tiles_y = s.tiles_y;
         g.flags = (w.oil ? 1u : 0u) | (w.roughness_channel ? 2u : 0u) |
-                  (w.height_normal_channel ? 4u : 0u);
+                  (w.height_normal_channel ? 4u : 0u) | (w.reveal_opacity ? 8u : 0u);
         const auto unorm = [](float value, uint32_t scale) {
             return static_cast<uint32_t>(std::clamp(value, 0.0f, 1.0f) * scale + 0.5f);
         };
@@ -1146,9 +1256,17 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             }
             if (!changed) continue;
             std::string error;
+            const size_t previous_tiles = surface->tiles.size();
+            const size_t previous_texels = surface->pos_valid.size();
             if (bakeGeometry(scene, *surface, error)) {
                 ++stats_.geometry_rebakes;
-                layout_dirty_ = true;
+                if (!layout_dirty_ && device_ && device_->compute &&
+                    previous_tiles == surface->tiles.size() &&
+                    previous_texels == surface->pos_valid.size()) {
+                    surface->geometry_upload = true;
+                } else {
+                    layout_dirty_ = true;
+                }
             } else {
                 stats_.status = "rebake_failed: " + surface->object + ": " + error;
                 surface->geometry_key = key;   // do not retry every check
@@ -1231,6 +1349,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     SimulationComputeContext& c = *d.compute;
     const bool layout_fresh = layout_dirty_;
     if (layout_dirty_ && !rebuildDevice(scene)) return false;
+    if (!patchGeometry()) return false;
     // A base colour change (above): this surface's slice of the device base
     // only, and a reset of its own tiles below (out = base, paint cleared,
     // tiles marked dirty for publish). A fresh layout already uploaded every
@@ -1275,7 +1394,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     k.surface_count = n;
     k.tile_count = d.tile_count;
     k._p0 = d.channels_allocated ? d.texel_count : 0u;
-    k._p1 = d.channels_force ? 1u : 0u;
+    k._p1 = (d.channels_force ? 1u : 0u) | (d.reveal_allocated ? 2u : 0u);
     k.dt = dt;
     k.splat_radius = std::max(0.0f, splat_.radius);
     k.splat_amount = std::clamp(splat_.amount, 0.0f, 1.0f);
@@ -1399,6 +1518,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     }
     c.uploadBuffer(d.stats, stats_init.data(), stats_init.size() * 4);
     // MODE_RESET reads source_count as its first tile (paint_wet.comp).
+    const bool clearing_paint = reset_requested_;
     if (reset_requested_) {
         k.source_count = 0;
         run(kModeReset, d.tile_count);
@@ -1448,7 +1568,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         k.event_capacity = view.capacity;
         k.lut_rows = tables ? static_cast<uint32_t>(lut.size() / RayTrophiSim::kParticleAppearanceLutFloatsPerRow) : 0u;
         k.lookup_count = tables ? static_cast<uint32_t>(lookup.size()) : 0u;
-        run(kModeStamp, d.tile_count);
+        if (!clearing_paint) run(kModeStamp, d.tile_count);
         run(kModeConsume, 1);   // the consume: counter back to zero
         ++stats_.device_event_dispatches;
         bindings[13] = d.dummy_events;
@@ -1462,7 +1582,8 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     if (d.channels_allocated) {
         if (d.channels_force) run(kModeSeedHeight, d.tile_count);
         const bool enabled = std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
-            return s->settings.roughness_channel || s->settings.height_normal_channel;
+            return s->settings.roughness_channel || s->settings.height_normal_channel ||
+                   s->settings.reveal_opacity;
         });
         if (enabled || d.channels_force) {
             run(kModeChannels, d.tile_count);
@@ -1553,9 +1674,9 @@ void WetPaintGpu::applyStats(const std::vector<uint32_t>& st, bool force, bool m
                        r.x1 = std::max(r.x1, x1); r.y1 = std::max(r.y1, y1); }
             };
             for (auto& r : s.pending) merge(r);
-            for (int channel = 0; channel < 3; ++channel) {
+            for (int channel = 0; channel < 4; ++channel) {
                 const bool enabled = channel == 0 ? s.settings.roughness_channel
-                                                  : s.settings.height_normal_channel;
+                    : (channel == 3 ? s.settings.reveal_opacity : s.settings.height_normal_channel);
                 if ((enabled || s.channels_refresh || force) &&
                     !s.channel_textures[channel].expired()) {
                     for (auto& pending : s.channel_pending) merge(pending[channel]);
@@ -1683,7 +1804,7 @@ int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* v
     for (auto& sp : surfaces_) {
         Surface& s = *sp;
         publishPlane(s, s.texture.lock(), 0u, s.pending[0], s.pending[1]);
-        for (uint32_t channel = 0; channel < 3; ++channel) {
+        for (uint32_t channel = 0; channel < 4; ++channel) {
             if (!s.channel_pending[0][channel].any && !s.channel_pending[1][channel].any) continue;
             publishPlane(s, s.channel_textures[channel].lock(), channel + 1u,
                          s.channel_pending[0][channel], s.channel_pending[1][channel]);

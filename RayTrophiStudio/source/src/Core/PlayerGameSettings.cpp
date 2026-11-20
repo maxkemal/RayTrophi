@@ -1,6 +1,8 @@
 #include "Core/PlayerGameSettings.h"
+#include "Paint/HiddenGameObjects.h"
 #include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiPaintWet.h"
+#include "Api/RtApi.h"
 #include "UIContext.h"
 #include <algorithm>
 #include <cmath>
@@ -24,7 +26,7 @@ using json = nlohmann::json;
 namespace fs = std::filesystem;
 constexpr const char *demo_fields[] = {
     "autostart",    "balloons",           "respawn_seconds",      "birth_seconds", "interval_min",
-    "interval_max", "idle_reset_seconds", "finale_reset_seconds", "room_goal"};
+    "interval_max", "idle_reset_seconds", "finale_reset_seconds", "room_goal", "interaction_mode", "body_controls"};
 struct Session {
     std::string project;
     std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
@@ -145,7 +147,7 @@ bool ensureSession(UIContext &context) {
     return true;
 }
 json values() {
-    json result = json::object();
+    json result = {{"hidden_objects", Paint::hiddenGameObjectsDesign()}};
     const auto state = demo();
     if (state.value("prepared", false)) {
         const auto &config = state["config"];
@@ -154,6 +156,8 @@ json values() {
                 result[key] = config[key];
             }
         }
+        result["interaction_mode"] = config.value("interaction_mode", config.contains("visual_nodes") ? "carry" : "pop");
+        result["body_controls"] = config.value("body_controls", false);
         result["respawn_seconds"] = config.value("respawn_seconds", 3.5);
         result["birth_seconds"] = config.value("birth_seconds", 0.75);
     }
@@ -190,6 +194,27 @@ void validate(const json &patch, const json &current) {
     require(patch.is_object(), "Game settings must be an object");
     for (const auto &field : patch.items()) {
         require(current.contains(field.key()), "Unsupported game setting: " + field.key());
+    }
+    if (patch.contains("hidden_objects")) {
+        std::string error;
+        auto* context = rtapi::boundContext();
+        require(context != nullptr, "No scene context");
+        require(Paint::validateHiddenGameObjects(context->scene, patch["hidden_objects"], error),
+                error);
+    }
+    if (patch.contains("body_controls")) {
+        require(patch["body_controls"].is_boolean(), "body_controls must be boolean");
+        require(patch["body_controls"] != true ||
+                    session.authored_demo.contains("visual_nodes"),
+                "body controls require mesh balloon visuals");
+    }
+    if (patch.contains("interaction_mode")) {
+        require(patch["interaction_mode"].is_string() &&
+                    (patch["interaction_mode"] == "pop" || patch["interaction_mode"] == "carry"),
+                "interaction_mode must be pop|carry");
+        require(patch["interaction_mode"] != "carry" ||
+                    session.authored_demo.contains("visual_nodes"),
+                "carry requires mesh balloon visuals");
     }
     if (patch.contains("autostart")) {
         require(patch["autostart"].is_boolean(), "autostart must be boolean");
@@ -240,7 +265,8 @@ json apply(const json &patch) {
     for (const auto *key : demo_fields) {
         if (patch.contains(key) && patch[key] != current[key]) {
             config[key] = patch[key];
-            rebuild_demo = true;
+            rebuild_demo = rebuild_demo || (std::string(key) != "interaction_mode" &&
+                                           std::string(key) != "body_controls");
         }
     }
     if (rebuild_demo && config.contains("visual_nodes")) {
@@ -271,6 +297,18 @@ json apply(const json &patch) {
         std::string output;
         check(rtapi::wetPaintDemoCommand("configure", config.dump(), output));
     }
+    if (!rebuild_demo && patch.contains("interaction_mode") &&
+        patch["interaction_mode"] != current["interaction_mode"]) {
+        std::string output;
+        check(rtapi::wetPaintDemoCommand("interaction",
+            json{{"mode", patch["interaction_mode"]}}.dump(), output));
+    }
+    if (!rebuild_demo && patch.contains("body_controls") &&
+        patch["body_controls"] != current["body_controls"]) {
+        std::string output;
+        check(rtapi::wetPaintDemoCommand("body",
+            json{{"enabled", patch["body_controls"]}}.dump(), output));
+    }
     bool resized = false;
     if (patch.contains("resolution") && patch["resolution"] != current["resolution"]) {
         check(rtapi::resizeWetPaintSurfaces(patch["resolution"].get<int>()));
@@ -279,6 +317,11 @@ json apply(const json &patch) {
     for (const auto &surface : updated) {
         check(rtapi::setWetPaintSurfaceSettings(surface.object, surface.material_id,
                                                 surface.settings));
+    }
+    if (patch.contains("hidden_objects") && patch["hidden_objects"] != current["hidden_objects"]) {
+        std::string error;
+        require(Paint::configureHiddenGameObjects(rtapi::boundContext()->scene,
+                    patch["hidden_objects"], error), error);
     }
     return {{"ok", true}, {"balloons_reprepared", rebuild_demo}, {"wet_paint_cleared", resized}};
 }
@@ -319,6 +362,7 @@ json status() {
             {"revision", session.revision},
             {"values", session.ready ? values() : json::object()},
             {"max_balloons", capacity(session.authored_demo)},
+            {"supports_carry", session.authored_demo.contains("visual_nodes")},
             {"saved", profiles["games"].contains(session.project)},
             {"error", session.error},
             {"storage", "player_game_settings.json"}};

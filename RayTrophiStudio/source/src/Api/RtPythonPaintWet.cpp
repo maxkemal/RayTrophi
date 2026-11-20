@@ -11,6 +11,7 @@
 #include <pybind11/stl.h>
 
 #include <string>
+#include <unordered_set>
 
 namespace py = pybind11;
 
@@ -25,6 +26,7 @@ py::dict settingsDict(const rtapi::WetPaintSurfaceSettingsInfo& s) {
     d["brush_radius"] = s.brush_radius; d["oil"] = s.oil;
     d["roughness_channel"] = s.roughness_channel;
     d["height_normal_channel"] = s.height_normal_channel;
+    d["reveal_opacity"] = s.reveal_opacity;
     d["wet_roughness"] = s.wet_roughness;
     d["dry_roughness"] = s.dry_roughness;
     d["height_contribution"] = s.height_contribution;
@@ -122,6 +124,8 @@ void registerPaintWetBindings(py::module_& paint) {
         d["pbr_texture_bytes"] = s.pbr_texture_bytes;
         d["publish_host_downloads"] = s.publish_host_downloads;
         d["publish_bytes_downloaded"] = s.publish_bytes_downloaded;
+        d["device_rebuilds"] = s.device_rebuilds;
+        d["geometry_uploads"] = s.geometry_uploads;
         d["geometry_rebakes"] = s.geometry_rebakes;
         d["publish_mode"] = s.publish_mode; d["last_tick_ms"] = s.last_tick_ms;
         d["compute_context"] = s.compute_context;
@@ -140,6 +144,23 @@ void registerPaintWetBindings(py::module_& paint) {
         return settingsDict(s);
     }, py::arg("object"), py::arg("material_id") = -1);
     paint.def("wet_set_settings", [](const std::string& object, int material_id, const py::kwargs& kw) {
+        static const std::unordered_set<std::string> allowed = {
+            "wetness", "lifetime_seconds", "diffusion", "runoff", "absorption",
+            "drip_head", "falloff", "paint_load", "deposit_rate", "pickup_rate",
+            "brush_radius", "oil", "roughness_channel", "height_normal_channel",
+            "reveal_opacity", "wet_roughness", "dry_roughness", "height_contribution",
+            "normal_strength"
+        };
+        for (const auto& item : kw) {
+            const auto key = py::cast<std::string>(item.first);
+            if (allowed.count(key) == 0) {
+                throw py::type_error("Unknown wet paint setting: " + key);
+            }
+        }
+        if (kw.contains("reveal_opacity") &&
+            !py::isinstance<py::bool_>(kw["reveal_opacity"])) {
+            throw py::type_error("reveal_opacity must be a bool");
+        }
         rtapi::WetPaintSurfaceSettingsInfo s;
         requireResult(rtapi::getWetPaintSurfaceSettings(object, material_id, s));
         take(kw, "wetness", s.wetness); take(kw, "lifetime_seconds", s.lifetime_seconds);
@@ -151,6 +172,7 @@ void registerPaintWetBindings(py::module_& paint) {
         take(kw, "oil", s.oil);
         take(kw, "roughness_channel", s.roughness_channel);
         take(kw, "height_normal_channel", s.height_normal_channel);
+        take(kw, "reveal_opacity", s.reveal_opacity);
         take(kw, "wet_roughness", s.wet_roughness);
         take(kw, "dry_roughness", s.dry_roughness);
         take(kw, "height_contribution", s.height_contribution);

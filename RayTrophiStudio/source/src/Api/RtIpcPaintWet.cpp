@@ -73,7 +73,12 @@ json settingsJson(const rtapi::WetPaintSurfaceSettingsInfo& s) {
                 {"falloff", s.falloff}, {"paint_load", s.paint_load},
                 {"deposit_rate", s.deposit_rate}, {"pickup_rate", s.pickup_rate},
                 {"brush_radius", s.brush_radius},
-                {"oil", s.oil}, {"roughness_channel", s.roughness_channel}, {"height_normal_channel", s.height_normal_channel}, {"wet_roughness", s.wet_roughness}, {"dry_roughness", s.dry_roughness}, {"height_contribution", s.height_contribution}, {"normal_strength", s.normal_strength}};
+                {"oil", s.oil}, {"roughness_channel", s.roughness_channel},
+                {"height_normal_channel", s.height_normal_channel},
+                {"reveal_opacity", s.reveal_opacity},
+                {"wet_roughness", s.wet_roughness}, {"dry_roughness", s.dry_roughness},
+                {"height_contribution", s.height_contribution},
+                {"normal_strength", s.normal_strength}};
 }
 
 json surfaceJson(const rtapi::WetPaintSurfaceRuntimeInfo& s) {
@@ -185,6 +190,8 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
                         {"pbr_texture_bytes", s.pbr_texture_bytes},
                         {"publish_host_downloads", s.publish_host_downloads},
                         {"publish_bytes_downloaded", s.publish_bytes_downloaded},
+                        {"device_rebuilds", s.device_rebuilds},
+                        {"geometry_uploads", s.geometry_uploads},
                         {"geometry_rebakes", s.geometry_rebakes},
                         {"publish_mode", s.publish_mode}, {"last_tick_ms", s.last_tick_ms},
                         {"compute_context", s.compute_context},
@@ -237,6 +244,8 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
         const bool roughness_channel = optionalBool(params, "roughness_channel", false);
         const bool has_height_normal_channel = params.contains("height_normal_channel");
         const bool height_normal_channel = optionalBool(params, "height_normal_channel", false);
+        const bool has_reveal_opacity = params.contains("reveal_opacity");
+        const bool reveal_opacity = optionalBool(params, "reveal_opacity", false);
         const bool has_wet_roughness = params.contains("wet_roughness");
         const float wet_roughness = optionalFloat(params, "wet_roughness", 0.12f);
         const bool has_dry_roughness = params.contains("dry_roughness");
@@ -263,6 +272,7 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
             if (has_oil) s.oil = oil;
             if (has_roughness_channel) s.roughness_channel = roughness_channel;
             if (has_height_normal_channel) s.height_normal_channel = height_normal_channel;
+            if (has_reveal_opacity) s.reveal_opacity = reveal_opacity;
             if (has_wet_roughness) s.wet_roughness = wet_roughness;
             if (has_dry_roughness) s.dry_roughness = dry_roughness;
             if (has_height_contribution) s.height_contribution = height_contribution;

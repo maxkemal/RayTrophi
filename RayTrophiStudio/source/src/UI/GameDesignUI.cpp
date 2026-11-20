@@ -39,6 +39,8 @@ struct DemoDraft {
     float interval_min = 2.5f;
     float interval_max = 5.0f;
     bool autostart = false;
+    std::string interaction_mode = "carry";
+    bool body_controls = false;
     float size_min = 1.0f;
     float size_max = 1.0f;
     float idle_reset_seconds = 0.0f;   // 0 = off
@@ -99,6 +101,9 @@ void syncDraft(const json& config) {
     draft.interval_min = config.value("interval_min", draft.interval_min);
     draft.interval_max = config.value("interval_max", draft.interval_max);
     draft.autostart = config.value("autostart", draft.autostart);
+    draft.body_controls = config.value("body_controls", false);
+    draft.interaction_mode = config.value("interaction_mode",
+        config.contains("visual_nodes") ? std::string("carry") : std::string("pop"));
     draft.size_min = config.value("size_min", 1.0f);
     draft.size_max = config.value("size_max", 1.0f);
     draft.idle_reset_seconds = config.value("idle_reset_seconds", 0.0f);
@@ -149,6 +154,8 @@ json draftConfig() {
                    {"interval_min", draft.interval_min},
                    {"interval_max", draft.interval_max},
                    {"autostart", draft.autostart},
+                   {"interaction_mode", draft.visual_nodes.empty() ? "pop" : draft.interaction_mode},
+                   {"body_controls", !draft.visual_nodes.empty() && draft.body_controls},
                    {"size_min", draft.size_min},
                    {"size_max", draft.size_max},
                    // 0 = off; 1..9 is not a valid setting, round it up.
@@ -301,6 +308,11 @@ void drawSurfaceSettings(const rtapi::WetPaintSurfaceRuntimeInfo& surface) {
     changed |= ImGui::DragFloat("Trail radius (px@1024)", &s.brush_radius, 0.1f, 0.01f, 256.0f, "%.2f");
     changed |= ImGui::Checkbox("Oil paint", &s.oil);
     ImGui::SeparatorText("Material channels");
+    changed |= ImGui::Checkbox("Reveal object with paint", &s.reveal_opacity);
+    if (s.reveal_opacity) {
+        ImGui::TextWrapped("Unpainted areas are invisible. Clear paint hides the object again. "
+                           "This mode replaces the opacity map on solid geometry.");
+    }
     changed |= ImGui::Checkbox("Roughness while wet", &s.roughness_channel);
     if (s.roughness_channel) {
         changed |= ImGui::SliderFloat("Wet roughness", &s.wet_roughness, 0.0f, 1.0f);
@@ -508,6 +520,9 @@ void drawDemo(const std::string& selected_object, const std::vector<std::string>
     ImGui::DragFloatRange2("Pop interval (s)", &draft.interval_min, &draft.interval_max,
                            0.05f, 2.0f, 30.0f, "%.1f", "%.1f");
     ImGui::Checkbox("Start automatically", &draft.autostart);
+    ImGui::BeginDisabled(draft.visual_nodes.empty());
+    ImGui::Checkbox("Two-hand body balloon controls", &draft.body_controls);
+    ImGui::EndDisabled();
     drawPalette(status);
     ImGui::DragFloatRange2("Balloon size", &draft.size_min, &draft.size_max, 0.01f, 0.3f, 2.0f,
                            "%.2fx", "%.2fx");

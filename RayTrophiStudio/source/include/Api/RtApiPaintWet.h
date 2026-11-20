@@ -24,9 +24,11 @@ struct WetPaintSurfaceSettingsInfo {
     float pickup_rate = 0.35f;
     float brush_radius = 5.0f;   // CPU brush.radius (px at 1024): transport trail scale
     bool oil = false;
-    // Optional outputs reuse PaintTextureSet Roughness / Mask(height) / Normal.
+    // Optional outputs reuse PaintTextureSet Roughness / Mask(height) / Normal / Opacity.
     bool roughness_channel = false;
     bool height_normal_channel = false;
+    // Owns opacity on solid geometry: paint coverage reveals it; reset hides it.
+    bool reveal_opacity = false;
     float wet_roughness = 0.12f;
     float dry_roughness = 0.30f;
     float height_contribution = 0.35f;
@@ -82,6 +84,8 @@ struct WetPaintStatusInfo {
     uint64_t publish_device_copies = 0;
     uint64_t publish_host_downloads = 0;
     uint64_t publish_bytes_downloaded = 0;
+    uint64_t device_rebuilds = 0;
+    uint64_t geometry_uploads = 0;
     uint64_t geometry_rebakes = 0;
     std::string publish_mode;
     std::string compute_context;   // simulation | own | none

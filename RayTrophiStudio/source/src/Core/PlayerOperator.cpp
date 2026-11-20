@@ -2,6 +2,7 @@
 #include "Core/Localization.h"
 #include "Core/PlayerCamera.h"
 #include "Core/PlayerGameSettings.h"
+#include "Paint/HiddenGameObjects.h"
 #include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiPlayerOperator.h"
 #include "Api/RtApiBodyPose.h"
@@ -480,6 +481,13 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
             output = Localization::status();
             return rtapi::Result::success();
         }
+        if (operation.rfind("game.hidden.", 0) == 0) {
+            auto input = config;
+            input["operation"] = operation.substr(12);
+            std::string error;
+            return Paint::hiddenGameObjectsCommand(context.scene, input, output, error)
+                ? rtapi::Result::success() : rtapi::Result::fail(error);
+        }
         if (operation.rfind("game.settings.", 0) == 0) {
             if (operation == "game.settings.restore" && s.camera.status().value("active", false)) {
                 return rtapi::Result::fail("Stop camera input before restoring the authored game");
@@ -510,6 +518,11 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
                                                                json::object(), game_settings);
             output["game_settings"] = game_result.ok ? game_settings :
                 json{{"ready", false}, {"error", game_result.error}};
+            json hidden;
+            std::string hidden_error;
+            if (Paint::hiddenGameObjectsCommand(context.scene, json::object(), hidden, hidden_error)) {
+                output["hidden_objects"] = std::move(hidden);
+            }
             output["language"] = Localization::status();
             output["calibration_ready"] = calibrationReady(s.preferences["camera"]);
             output["monitors"] = json::array();

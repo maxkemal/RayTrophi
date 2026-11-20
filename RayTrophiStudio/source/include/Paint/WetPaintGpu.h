@@ -55,9 +55,11 @@ struct WetPaintSurfaceSettings {
     // scales the transport trail length exactly like tickWetPaint does.
     float brush_radius = 5.0f;
     bool oil = false;
-    // Optional outputs reuse PaintTextureSet Roughness / Mask(height) / Normal.
+    // Optional outputs reuse PaintTextureSet Roughness / Mask(height) / Normal / Opacity.
     bool roughness_channel = false;
     bool height_normal_channel = false;
+    // Owns opacity on solid geometry: paint coverage reveals it; reset hides it.
+    bool reveal_opacity = false;
     float wet_roughness = 0.12f;
     float dry_roughness = 0.30f;
     float height_contribution = 0.35f;
@@ -122,6 +124,8 @@ struct WetPaintStats {
     uint64_t publish_device_copies = 0;     // dirty rectangles copied device-to-device
     uint64_t publish_host_downloads = 0;    // dirty rectangles that went through the host
     uint64_t publish_bytes_downloaded = 0;
+    uint64_t device_rebuilds = 0;
+    uint64_t geometry_uploads = 0;
     uint64_t geometry_rebakes = 0;          // surfaces re-baked after their object moved/scaled
     std::string publish_mode = "none";      // device_copy | host_download | none
     // simulation: the simulation context (a GPU particle system keeps it on
@@ -182,6 +186,7 @@ public:
     void queueDab(const WetPaintDab& dab);
     // Clears all paint (layer, wetness) back to the original base colour.
     bool resetPaint();
+    void checkGeometryNextTick() { geometry_check_clock_ = 0.5f; }
 
     // Stamp + tick on the simulation compute context. Called once per frame
     // by the shared simulation clock (Studio and Player).
@@ -214,11 +219,12 @@ private:
 
     Surface* find(const std::string& object, int material_id);
     bool rebuildDevice(SceneData& scene);
+    bool patchGeometry();
     void uploadSurfaceTable();
     bool ensureCompute(SceneData& scene);
     bool prepareChannels(SceneData& scene);
     bool bakeGeometry(SceneData& scene, Surface& s, std::string& error);
-    static std::array<double, 8> geometryKey(SceneData& scene, const std::string& object);
+    static std::array<double, 24> geometryKey(SceneData& scene, const std::string& object);
     bool channels_dirty_ = false;
     float geometry_check_clock_ = 0.0f;
 

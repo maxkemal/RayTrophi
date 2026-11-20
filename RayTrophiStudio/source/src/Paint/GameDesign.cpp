@@ -1,4 +1,5 @@
 #include "Paint/GameDesign.h"
+#include "Paint/HiddenGameObjects.h"
 
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/WetPaintGpu.h"
@@ -34,6 +35,7 @@ json settingsToJson(const WetPaintSurfaceSettings& s) {
             {"brush_radius", s.brush_radius}, {"oil", s.oil},
             {"roughness_channel", s.roughness_channel},
             {"height_normal_channel", s.height_normal_channel},
+            {"reveal_opacity", s.reveal_opacity},
             {"wet_roughness", s.wet_roughness}, {"dry_roughness", s.dry_roughness},
             {"height_contribution", s.height_contribution},
             {"normal_strength", s.normal_strength}};
@@ -67,6 +69,7 @@ WetPaintSurfaceSettings settingsFromJson(const json& j) {
     s.oil = flag(j, "oil", s.oil);
     s.roughness_channel = flag(j, "roughness_channel", s.roughness_channel);
     s.height_normal_channel = flag(j, "height_normal_channel", s.height_normal_channel);
+    s.reveal_opacity = flag(j, "reveal_opacity", s.reveal_opacity);
     s.wet_roughness = number(j, "wet_roughness", s.wet_roughness, 0.0f, 1.0f);
     s.dry_roughness = number(j, "dry_roughness", s.dry_roughness, 0.0f, 1.0f);
     s.height_contribution = number(j, "height_contribution", s.height_contribution, 0.0f, 1.0f);
@@ -186,6 +189,7 @@ json saveGameDesign() {
     if (!demo.is_null()) {
         design["balloon_demo"] = demo;
     }
+    design["hidden_objects"] = hiddenGameObjectsDesign();
     return design;
 }
 
@@ -196,6 +200,7 @@ void queueGameDesign(const json& design) {
 }
 
 void resetGameDesign() {
+    clearHiddenGameObjects();
     pending_design = json();
     pending_demo = json();
     apply_status.clear();
@@ -351,6 +356,12 @@ void tickGameDesign(SceneData& scene) {
                     std::clamp<uint32_t>(j["max_events_per_tick"].get<uint32_t>(), 1u, 1u << 20);
             }
             paint.setSplatSettings(splat);
+        }
+        if (design.contains("hidden_objects")) {
+            std::string error;
+            if (!configureHiddenGameObjects(scene, design["hidden_objects"], error)) {
+                note("Hidden objects: " + error);
+            }
         }
         if (design.contains("balloon_demo") && design["balloon_demo"].is_object()) {
             // Configured on a later tick, once every droplet collider is cooked.

@@ -22,6 +22,7 @@
 #include "Core/PlayerRenderExtent.h"
 #include "Core/PlayerResolutionMenu.h"
 #include "Core/PlayerOperator.h"
+#include "Core/PlayerBalloonInput.h"
 #include "UI/PlayerOperatorUI.h"
 #include "Api/RtApiPlayerOperator.h"
 
@@ -708,28 +709,10 @@ int main(int argc, char* argv[]) {
                 SCENE_LOG_INFO(std::string("[Player] Debug camera ") +
                                (debug_camera ? "on" : "off"));
             }
-            // Balloon paint demo: a left click pops the balloon under the cursor.
-            // Game input, so it goes through the same core call as IPC
-            // paint.wet_demo pop (screen point in 0..1 from the top-left). With
-            // the debug camera on, the left button orbits instead. No demo
-            // prepared, or nothing under the cursor: the call does nothing.
-            if (event.type == SDL_MOUSEBUTTONDOWN && event.button.button == SDL_BUTTON_LEFT &&
-                !debug_camera && !AppRuntime::playerOperatorOpen() &&
-                !ImGui::GetIO().WantCaptureMouse) {
-                int window_w = 0, window_h = 0;
-                SDL_GetWindowSize(window, &window_w, &window_h);
-                if (window_w > 0 && window_h > 0) {
-                    const float px = std::clamp(static_cast<float>(event.button.x) /
-                                                static_cast<float>(window_w), 0.0f, 1.0f);
-                    const float py = std::clamp(static_cast<float>(event.button.y) /
-                                                static_cast<float>(window_h), 0.0f, 1.0f);
-                    std::string popped;
-                    // json, not std::to_string: a Turkish locale writes "0,5".
-                    (void)rtapi::wetPaintDemoCommand(
-                        "pop", nlohmann::json{{"screen", {px, py}}}.dump(), popped);
-                    frame_cycle.requestRedraw();
-                }
-            }
+            // Mouse and future tracked pointers share the balloon interaction service.
+            AppRuntime::queuePlayerBalloonInput(event, window,
+                !debug_camera && !display.resolution_menu && !AppRuntime::playerOperatorOpen() &&
+                !ImGui::GetIO().WantCaptureMouse);
             // Only ACCUMULATED here. A mouse reports far more often than the
             // loop iterates; applying each event as its own camera update made
             // hand-driven motion stutter while one IPC orbit per iteration was
@@ -747,6 +730,11 @@ int main(int argc, char* argv[]) {
                     debug_wheel += event.wheel.y;
                 }
             }
+        }
+        if (AppRuntime::flushPlayerBalloonInput(!debug_camera && !display.resolution_menu &&
+                !AppRuntime::playerOperatorOpen() && !ImGui::GetIO().WantCaptureMouse &&
+                (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) != 0)) {
+            frame_cycle.requestRedraw();
         }
         if (debug_orbit_x != 0.0f || debug_orbit_y != 0.0f) {
             rtapi::orbitCamera(-debug_orbit_x * 0.25f, -debug_orbit_y * 0.25f);
@@ -851,6 +839,7 @@ int main(int argc, char* argv[]) {
     }
 
     // Same order as Studio: IPC stops before the facade it enqueues into.
+    AppRuntime::cancelPlayerBalloonInput();
     rtipc::stop();
     AppRuntime::shutdownPlayerOperator();
     AppRuntime::releasePlayerOperatorUI();

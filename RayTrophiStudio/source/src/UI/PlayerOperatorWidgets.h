@@ -163,6 +163,7 @@ inline void icon(ImDrawList *draw, ImVec2 c, const std::string &kind, ImU32 tint
 }
 void games(SDL_Renderer *renderer);
 void gameSettings();
+void hiddenObjects(json& values, json& patch);
 bool applyGameSettingsDraft(bool save);
 void camera(SDL_Renderer *renderer);
 void players();

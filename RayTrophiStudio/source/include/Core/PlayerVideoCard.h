@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/PlayerBodyOverlay.h"
+#include "Paint/HiddenGameObjects.h"
 
 #include <SDL.h>
 #include <windows.h>
@@ -47,7 +48,8 @@ public:
         if (!texture_) {
             return;
         }
-        const Vec3 anchor(shown_.x, 0.0f, shown_.z);
+        const Vec3 anchor = Paint::constrainHiddenPlayerAnchor(
+            "video_card", Vec3(shown_.x, 0.0f, shown_.z), 0.25f, shown_.height);
         const float width = shown_.height * shown_.width_px / shown_.height_px;
         const Vec3 half_width = projection.right * (width * 0.5f);
         ImVec2 top_left, bottom_right;

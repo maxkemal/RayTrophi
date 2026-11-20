@@ -134,10 +134,11 @@ const char* ParticleSimulationSystem::deviceColliderIneligibility() const {
             case ParticleColliderSourceMode::ObjectOBB:
                 break;
             case ParticleColliderSourceMode::ObjectMeshSDF:
-                // The CPU reference also skips an uncooked SDF; the device does
-                // the same only once a grid exists, so the step stays on the
-                // CPU (with the reason) until the cook lands.
-                if (!sdfCooked(collider)) return "host_consumer_collider_sdf_not_cooked";
+                // Both the CPU reference and stepDeviceCollisions skip an
+                // uncooked SDF. Keep kinematics resident while a cook is pending:
+                // falling back here downloads the whole droplet pool for a
+                // collider the CPU cannot use either. The packed device list
+                // includes the SDF automatically once its grid is published.
                 break;
             case ParticleColliderSourceMode::ObjectConvexDecomp:
             case ParticleColliderSourceMode::ObjectMeshBVH:

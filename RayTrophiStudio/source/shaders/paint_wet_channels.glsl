@@ -1,5 +1,5 @@
 // Existing Paint channel resolve, included after colour/state resolve.
-// Atlas planes: colour / roughness / height mask / normal. Source planes
+// Atlas planes: colour / roughness / height mask / normal / optional opacity. Source planes
 // additionally carry the two float-bit UV Jacobian distances baked by CPU Paint.
 uint sourceChannel(uint plane, uint texel) {
     return base_color[plane * pc._p0 + texel];
@@ -83,7 +83,7 @@ void channelTile(uint tile_index) {
     if (pc._p0 == 0u) return;
     Tile t = tiles[tile_index];
     Surface s = surfaces[t.surface];
-    bool update = pc._p1 != 0u;
+    bool update = (pc._p1 & 1u) != 0u;
     // The derivative reaches two pixels beyond colour resolve's tile apron.
     // Dispatch after resolve so it reads the final height across workgroups.
     for (int oy = -2; oy <= 2 && !update; ++oy)
@@ -117,6 +117,17 @@ void channelTile(uint tile_index) {
         }
         out_color[2u*pc._p0+ti] = height;
         out_color[3u*pc._p0+ti] = normal;
+        if ((pc._p1 & 2u) != 0u) {
+            uint originalOpacity = 0xFFFFFFFFu;
+            uint opacity = originalOpacity;
+            if ((s.flags & SURFACE_REVEAL_OPACITY) != 0u) {
+                float original = float(originalOpacity & 255u);
+                float visible = pos_valid[ti].w > 0.5 ? coverage : 0.0;
+                float value = floor(original * visible + 0.5);
+                opacity = packColor(vec4(value));
+            }
+            out_color[4u * pc._p0 + ti] = opacity;
+        }
     }
     if (gl_LocalInvocationIndex == 0u) markDirty(t);
 }

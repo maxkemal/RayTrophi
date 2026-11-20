@@ -40,6 +40,9 @@ class BodyPoseRuntime {
     }
     // Main-thread borrowed view; expire first when sampling outside the live tick.
     const BodyPerson* findPerson(int id) const;
+    // Receiver timestamp, so retained/omitted identities are never treated as
+    // a newly observed hand sample by gesture consumers.
+    Clock::time_point receivedAt(int id) const;
 
   private:
     struct Track {

@@ -178,6 +178,25 @@ void gameSettings() {
             "player.player_mode_uses_mouse_or_body_input_automatic_demo_also_pops_random_balloons",
             "Player mode uses mouse or body input. Automatic demo also pops random balloons."));
         ImGui::Separator();
+        label(tr("player.balloon_controls", "BALLOON CONTROLS"), mint);
+        if (draft.values.value("interaction_mode", std::string("carry")) == "carry") {
+            hint(tr("player.carry_help",
+                    "Click to pop. Hold the left mouse button to carry. Wheel moves in/out. "
+                    "Release pops. Escape or opening a menu cancels without popping."));
+        } else {
+            hint(tr("player.touch_pop", "Touch and pop"));
+        }
+        ImGui::Separator();
+        bool body_controls = draft.values.value("body_controls", false);
+        ImGui::BeginDisabled(!status.value("supports_carry", false));
+        if (ImGui::Checkbox(trId("player.two_hand_controls", "Two-hand body controls"),
+                             &body_controls)) {
+            change("body_controls", body_controls);
+        }
+        ImGui::EndDisabled();
+        hint(tr("player.two_hand_help",
+                "One hand touches to pop. Two hands hold and carry; separate to release. "
+                "Lost tracking cancels without popping."));
         label(tr("player.balloons", "BALLOONS"), violet);
         int count = static_cast<int>(number("balloons", 3));
         label(tr("player.balloon_count", "Balloon count"));
@@ -268,6 +287,7 @@ void gameSettings() {
         ImGui::EndDisabled();
     }
     ImGui::Separator();
+    hiddenObjects(draft.values, draft.patch);
     hint(tr("player.only_edited_fields_are_applied_demo_changes_renew_balloons_and_clear_in_fli_"
             "d0535529",
             "Only edited fields are applied. Demo changes renew balloons and clear in-flight "
