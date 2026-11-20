@@ -29,14 +29,49 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 | Ajan | Dosya(lar) | Amaç | Tarih |
 |---|---|---|---|
-| Codex | yeni Core/Localization.*, assets/i18n, PlayerOperator UI dosyaları, PlayerOperator.cpp, proje/paket kayıtları, test/docs | Paylaşılan EN/TR yerelleştirme ve Player dil seçimi | 2026-11-19 |
-| Claude (Codex'ten devraldı) | WetPaintGpu.cpp (`publish`), VulkanBackend.cpp (1 satır), paint_wet.spv, overlay, yeni `rt_wet_paint_channels_ipc.py` | GPU paint kanalları: Codex kullanım sınırında durdu, kullanıcı işi Claude'a verdi. Eksik yayın adımı yazıldı, shader derlendi. **Codex: devam etmeden önce §2'nin ilk maddesini oku, bu dosyaları taze oku, yayın adımını yeniden yazma.** Player derlendi, `rt_player_wet_paint_channels_ipc.py` CANLI PASS 5/5 (19:38); Studio ve gözle kabul açık | 2026-11-16 |
-| Claude **D** (kiosk) | yeni `Core/KioskProfile.*`, `Api/RtApiKiosk.*`, `Api/RtIpcKiosk.cpp`; `PlayerMain.cpp` (girdi kapısı, `--profile`), `RtIpcSecurity.cpp` (rol setleri), `scripts/kiosk/` (watchdog) | §0.2 + adım 10: tuş kapısı, `kiosk.json`, Görevli/Teknisyen rolleri, sağlık sayaçları, watchdog, cihaz kaybı kurtarma | 2026-11-15 |
 
 
 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
+
+- **2026-11-20 Codex — ozel demo Git gecmisi temizlendi / main gonderildi:** kullanici onayiyla workshop sahne/ses/art varliklari, dist, onceki balloon-paint-room fixture ve scripts/scenes uretim betikleri main'in erisilebilir tum gecmisinden filtrelendi; kod/test/teknik notlar kaldı. .gitignore mevcut ozel-demo kurallari korundu. Motor commit f7b6e101, paketleme commit 13148f3f; main 13148f3f lease-korumali push ile GitHub'a gonderildi. Iki eski uzak dalin tum commitleri main icindeydi; atomik lease-korumali islemle silindi, uzak yalniz main. Yerel eski Claude worktree klasorleri silinmedi.
+
+- **2026-11-20 Codex — temizlik guvenlik/kabul:** filtreleme adimlarindan biri yanlis cwd ile ana depoda da calisti; kullaniciya bildirildi. Onceden commitlenmis son main tree hash'i bit-bit ayni dogrulandi, commitlenmemis koordinasyon notlari korunmus yerel capture tree'den kurtarildi ve origin/upstream geri kuruldu. Yerel rtp/bin/kart/ZIP SHA-256'lari esit. Tam onceki Git yedegi yalniz ignore edilen docs/dev/.captures/history-cleanup/before-cleanup.bundle altinda kalir; gonderilmedi. Ref/tree/history audit PASS, AST/JSON/XML/deployed shader hash/diff PASS; yeni C++ build yok. Eski klon/indirilen kopyalar bu islemle kendiliginden silinmez.
+
+
+- **2026-11-20 Codex — Gizli Renkler TEK SAHNE PAKET TAMAM:** scripts/package_player.ps1 default yalniz workshop; source rtp korunur, acik Player'dan salt-okunur game_design snapshot workshop.distribution.json ile staged kopyaya uygulanir. 11 balon/3 hidden paint obje, mouse default/body_controls=false; mevcut body bool etiket/help artik Kamera-iskelet secimini ve fare yedegini aciklar (yeni C++ yok). Imagegen urun karti workshop.preview.png + TEST.md/kok KAMERA_TESTI.md. Sahne agaci verified dist altinda yenilenir, eski sahneler dagitimdan cikar; kaynaklar silinmedi. ZIP temiz tr/roots=scenes operator defaults, yerel aktif token/imgui/operator config hashleri korundu.
+
+- **2026-11-20 Codex — paket kabul:** dist/RayTrophiPlayer 396.8MiB, ZIP182.7MiB/191557490byte, tek rtp, 11DLL, 7ses; 4915 dosya ZIP/aktif hash PASS, exe Release+bin/shared/art hash PASS, locales/model/runtime PASS, kisisel kamera/calibration/video/token/profil YOK. Portable native import ve CPU pose model create/close PASS (kamera acilmadi). Fiziksel kamera e2e kabul bekliyor; kontrollu saha testi, kalibrasyon coordinate hizasi dahil TEST.md. C++ build/app launch yok. Son F9 in-place atlas duzeltmesini kullanici coklu Player testinde sorunsuz onayladi. PLAYER_PACKAGING.md.
+
+
+- **2026-11-20 Codex — F9 painted-room device loss mitigation KAYNAK HAZIR:** kullanici atlas poz fix'ini dogruladi, shown+paint+F9 sonrasi device loss bildirdi. Log write_invalid, tracked buffer owner yok; kesin fail kaynagi/ispat yok. WetPaintGpu ayni sayfa/tile boyutunda geometry rebake sonrasi full atlas release/rebuild yerine in-place pos/flow/tiles + UV metric source4/5 patch yapar, mevcut per-surface reset/publish; output/color/channel/texture handle korunur. Hidden reset basinda compute sync + viewport/render waitForCompletion yalniz reset siniri. CPU WetPaintStats/WetPaintStatusInfo yeni uint64 device_rebuilds/geometry_uploads; API/IPC/Python ayni sayaclari verir. Shader/GPU ABI degismedi.
+
+
+- **2026-11-20 Codex — instance-motion wet atlas fix KAYNAK HAZIR:** gizli objenin handle'i tasinirken WetPaintGpu paintFaces/geometryKey eski CPU dunya P/N okuyordu; explicit check tek basina rebake uretemiyordu. Managed static hidden mesh icin P_orig/N_orig + current final transform, normal inverse-transpose; diger yuzeylerde eski P/N yolu korunur. Geometry fingerprint internal 8->24 double, 16 exact pose bileseni ile simetrik yaw da invalidates. GPU struct/shader/descriptor ABI AYNI. Yeni helper hiddenObjectUsesInstancePose shared registry'de.
+
+
+- **2026-11-20 Codex — F9 grounded placement fix KAYNAK HAZIR:** canli status round0 / 3 enabled / No safe placement64. RTP8 flat fixture incelemesi Cube_1 floor_top=.033003, eski aday alti=.030000 -> tum adaylar floor/mobilya overlap reddi. HiddenGamePlacement oda sinirindaki genis ince horizontal slab'lari geometriyle tanir, floor-top / ceiling-bottom kullanir ve occupied listesinden cikarir; duvar/kamera/mobilya testleri korunur. roomGeometry opsiyonel boundary_slabs output internal; ortak status.room.boundary_slabs ad listesi yeni. PaintFloor/PaintCeiling oda isimlerine eklendi. Shader/ABI yok. Ek canli scene.list_objects sorgusu auto-review kullanim limitiyle calistirilamadi (guvenlik reddi degil); alternatif IPC/transport denenmedi.
+
+
+- **2026-11-20 Codex — gizli obje/reset DUZELTME KAYNAK HAZIR:** onceki serbest XYZ default yerine room.placement=walls_floor (free opsiyonel), wall_band=.65 (0.1..2), camera_clearance=3 (0..10); mevcut kayitlarda alan yoksa yeni default. Reset balon benzeri flat transform+instance yolu, P_orig canonical, CPU rebake/undo yok. Yeni HiddenObjectMotion.cpp sabit olcek rigid reset'te mevcut yerel SDF'yi korur; sil/re-add/4x recook YOK (onceki notun bu kismi gecersiz). Yeni HiddenPaintSafety.cpp boya damlasi/ghost/trail clear; reset tick eski contact'lari stamp etmeden consume. Exterior-only conservative AABB spawn guard + hidden operation paint_origin(position)->allowed, events drops gercek dogan sayi. ParticleDeviceCollision eligibility, uncooked SDF icin gereksiz CPU fallback yapmaz; CPU ve mevcut GPU packer zaten o collider'i atlar. Yeni 2 cpp iki vcxproj EHsc. Shader/ABI/paket degismedi.
+
+- **2026-11-20 Codex — acik Player tani:** kullanici screenshot'taki havada kalan renkli kumeler ic boya diye yorumlanmadi. IPC'de Red pool alive151639/status host_consumer_collider_sdf_not_cooked, diger3 sifir; gizli3 SDF ready=false. Tek collider recook denemesinde ready hala false, Red pool sifira dondu. Atlas reset damlalarin omru beklendikten sonra iki coverage olcumunde 0/0 ve 8 yuzey sifir. Kullanici test esnasinda da patlatiyordu; bu sayilar tek basina kalici shader boya hatasi kaniti degil. Yeni C++ davranisi canli test EDILMEDI. HIDDEN_GAME_OBJECTS.md.
+
+
+- **2026-11-20 Codex — gizli oyun objeleri KAYNAK HAZIR:** yeni HiddenGameObjects.cpp / HiddenGamePlacement.cpp / HiddenPlayerCollision.cpp ve PlayerOperatorHiddenUI.cpp iki vcxproj'de EHsc. Ortak `paint.wet_demo` hidden operation status/update/bounds/configure/randomize/player_anchor; operator game.hidden.* ayni cekirdek. game_design.hidden_objects ve local game settings nested snapshot. Gorunurluk paint|shown|hidden, reset XYZ oda ici serbest, baseline gore Y default +/-15 (izin +/-45), blocks_player/blocks_balloon default false; damla boyama collider'i bagimsiz. BodyPoseRuntime input ve video card anchor ayni istege bagli oyuncu engel servisi; 15-joint / 40-byte kart ABI AYNI. Balloon carry snapshot yonetilen nonblocking objeleri atlar. Reset mevcut collider modunu yeniden baglar/SDF recook, wet geometry check sonraki tick. Flat DNA; shader degismedi. HIDDEN_GAME_OBJECTS.md.
+
+
+- **2026-11-20 Codex — kamera olmadan iki-el body controls KAYNAK HAZIR:** yeni Paint/BalloonBodyInteraction.cpp iki vcxproj'de EHsc; Input BodyPoseRuntime yeni receivedAt(id) receiver-zamani metodu (layout/paket semasi degismedi). Demo config `body_controls` bool default false; wet_demo `body` {enabled?:bool} + status body_interaction phases/counters. Player local settings ve Studio/Player UI ortak servis, Python/IPC ayni wet_demo. Pointer'a screen yerine world `position` ve down'da opsiyonel `balloon` eklendi; world hold ayni collision/instance/pop yolunda, depth=0; wheel yalniz ekran. Iki el .12s grip, tek el .24s karar, ayrilma .15s release; guven kaybi .8s cancel/no-pop. Real/sentetik input.set_body_poses ayni giris. Yeni shader/ABI yok. Offline 113 schema packet PASS; kullanici Player canli testini PASS bildirdi: grabs2/moves49/releases1/taps1/tracking_cancels1. Yeni gizli-obje hooks bu kabulden sonra ve yeni build bekliyor. BALLOON_BODY_CONTROLS.md.
+
+
+- **2026-11-20 Codex — tek normal balon kontrolu:** kullanici carry+klik davranisini Player'da basarili buldu. Artik interaction_mode ALANI YOKSA mesh visual_nodes olan config carry, particle fallback pop kullanir. Acikca kayitli pop (proje/local profile/script) uyumluluk icin korunur. Player/Studio normal UI mod secicileri kaldirildi; API interaction/interaction_mode aynen durur. Son default/UI degisikligi CPP build bekliyor; shader yok.
+
+
+- **2026-11-20 Codex — Balloon carry KAYNAK HAZIR:** configure/project demo config `interaction_mode` pop|carry (default pop); yeni wet_demo `interaction` {mode} havuzlari yeniden kurmadan kontrolu degistirir, `pointer` {action:down|move|up|wheel|cancel, screen?, wheel?, owner?} kompakt {held,owner,depth,moved,popped} dondurur. Status interaction ve balloons[].held ekler. Script/IPC/UI ayni rtapi cekirdegi; local game settings kaydina dahil. Yeni BalloonInteraction.cpp + PlayerBalloonInput.cpp iki vcxproj'de EHsc. PlayerMain yalniz balon girisi/flush/shutdown hook'u; kullanici izin verdi ve baska aktif ajan olmadigini bildirdi. Shader/ABI yok. Canli/build yok; BALLOON_CARRY_CONTROLS.md / rt_balloon_carry_ipc.py.
+
+
+- **2026-11-20 Codex — kullanici onayiyla wet paint devralindi / opacity reveal KAYNAK HAZIR:** Claude publish/base reset duzeltmeleri korundu. WetPaintSurfaceSettings ve API info yeni bool reveal_opacity (default false); GameDesign JSON/script/IPC/UI ortak servis. GPU surface flag8, 17 binding/64-byte push AYNI. Push _p1 artik bit0=force-refresh, bit1=opsiyonel output plane4(opacity); kaynak plane4/5 UV metrigi AYNI, ekstra source plane yok. Yeni shader eski host _p1=0/1 ile eski boyutlari korur. Reveal kullanilinca atlas texel basina +4byte output ve yuzey opacity dokusu; mevcut PBR-only sahnelerde eski maliyet. Shader derlendi/spirv-val PASS, source+runtime hash esit. 3136 ucgen/512 rabbit fixture hazir; kullanici 2026-11-20 Player denemesi CALISIYOR / BASARILI onayi verdi (otomatik kabul testi calistirilmadi). PAINT_REVEAL_RABBIT.md.
 
 - **2026-11-20 Claude — `paint_wet.comp` `MODE_RESET` artık bir karo ARALIĞI sıfırlıyor (derlendi, iki yerde):**
   `pc.source_count` = ilk karo (0 = bütün atlas); gruplar = karo sayısı. Push boyutu ve bağlama aynı.
@@ -570,6 +605,32 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
+- **2026-11-20 Codex — ARTIMLI Studio + Player / F9 GPU atlas yasami:** WetPaintGpu.h/cpp, HiddenObjectMotion/Placement/Internal, RtApiPaintWet.h/cpp + IPC/Python stats. AST/stats mapping/no create-destroy in geometry patch/source-size/diff PASS. C++ build/app launch/live failure regression CALISTIRILMADI; shader degismedi. Kullanici derlemesinden sonra disposable `python scripts/test/rt_hidden_game_objects_ipc.py --player --exercise-disposable` shown/paint dort boyali F9 dongusu, atlas rebuild sayaci sabit / geometry upload artisi / device_lost=false / yeni-konum dab assert eder. Device-loss kesin cozuldu kabul edilmedi; HIDDEN_GAME_OBJECTS.md son bolum.
+
+
+- **2026-11-20 Codex — ARTIMLI Studio + Player / hareketten sonra boya atlasinin eski yerde kalmasi:** WetPaintGpu.cpp/header fingerprint ve bake; HiddenGameObjects.h/cpp helper. AST/declaration boyut uyumu/bake+key pose yolu/kaynak <2000/diff PASS. C++ build YOK, shader degismedi. `rt_hidden_game_objects_ipc.py --player --exercise-disposable` artik reset sonrasi geometry_rebakes artisi ve yeni dunya kutusunda facing=false dab ile >90% target coverage assert eder; SDF ready ayri kontrol. Yeni canli test CALISTIRILMADI. HIDDEN_GAME_OBJECTS.md son bolum.
+
+
+- **2026-11-20 Codex — ARTIMLI Studio + Player / F9 konum degismiyor:** HiddenGamePlacement.cpp + internal signature header. Kullanici C++ build yapar; Codex build yapmadi. Fixture geometri olcumu / eski floor overlap kaniti, Python AST ve diff PASS. Yeni planner canli test YOK. `python scripts/test/rt_hidden_game_objects_ipc.py --player --exercise-disposable` artik dogrudan F9 ile ayni wet_demo reset'i iki kez cagirir, round artisi/farkli poz/zemin ustu/slab tespiti/kamera/SDF assert eder. HIDDEN_GAME_OBJECTS.md son bolum.
+
+
+- **2026-11-20 Codex — ARTIMLI Studio + Player / donan damla + gizli reset fix:** yeni HiddenObjectMotion/HiddenPaintSafety cpp kayitlari + HiddenGamePlacement/Objects/UI + BalloonPaintDemo + RtApiPaintWet reset + WetPaintGpu eski-event consume + ParticleDeviceCollision eligibility. Kaynak/AST/help/EN-TR JSON/XML-EHsc/diff kontrolleri PASS. C++ build YOK, shader degismedi. Derleme sonrasi disposable sahnede `python scripts/test/rt_hidden_game_objects_ipc.py --player --exercise-disposable` ve `python scripts/test/rt_paint_drop_cleanup_ipc.py --player --exercise-disposable`. Gercek hareket/omur, gorunur damlalar, F8 reset, duvar/zemin/kamera boslugu ve SDF korunumu kullanici kabul bekliyor. Mevcut acik Player eski binary; tani disinda yeni davranis gosteremez.
+
+
+- **2026-11-20 Codex — ARTIMLI Studio + Player / gizli obje kontrolu:** dort yeni cpp + GameDesign/PlayerGameSettings/PlayerOperator/UI + BodyPoseRuntime/VideoCard/BalloonInteraction/BalloonPaintDemo hook; WetPaintGpu yalniz checkGeometryNextTick inline metodu. Python AST/help, EN/TR JSON/duplicate keys, iki vcxproj XML/kayit/EHsc, kaynak boyut ve diff PASS. C++ build veya uygulama/canli test CALISTIRILMADI. Kullanici derlemesinden sonra disposable hazir sahnede `python scripts/test/rt_hidden_game_objects_ipc.py --player --exercise-disposable`; once salt-okunur komut icin son bayragi kaldir. Player metadata restore edilir, test pozlari/boya/history kalir; orijinal proje kaydedilmez. Detay HIDDEN_GAME_OBJECTS.md. Onceki body-core Player testi kullanici tarafindan PASS.
+
+
+- **2026-11-20 Codex — ARTIMLI Studio + Player / iki el iskelet cekirdegi:** yeni BalloonBodyInteraction.cpp kaydi + BalloonInteraction world-input + BalloonPaintDemo hook/config + BodyPoseRuntime receivedAt metodu/header + personnel settings/UI/dil. C++ build Codex yapmadi. Shader yok. Offline `python scripts/test/rt_balloon_body_ipc.py --plan` 113 paket/15 joint PASS; bu tanima motorunu calistirmaz. Build sonrasi kamera/sender kapali, disposable hazir sahnede `python scripts/test/rt_balloon_body_ipc.py --run --exercise-disposable` (default Player; Studio icin --studio ve Playtest). Probe direkt pointer/pop/burst gondermez, yalniz body pose; transient durum geri alinmaz, config restore edilir. Doc BALLOON_BODY_CONTROLS.md.
+
+
+- **2026-11-20 Codex — ARTIMLI / carry varsayilan + UI sadelestirme:** BalloonPaintDemo.cpp, PlayerGameSettings.cpp, GameDesignUI.cpp, PlayerOperatorGameUI.cpp. Mesh config alan yoksa carry; acik legacy pop korunur. Fare kontrol secicileri normal UI'den kaldirildi, EN/TR ipucu guncellendi. Header/shader yok. Kullanici onceki carry Player davranisini dogruladi; bu son degisiklik build bekler. AST/default/UI/config statik kontrolleri + diff PASS; C++ build yok.
+
+
+- **2026-11-20 Codex — ARTIMLI Studio + Player / Balloon carry:** iki yeni cpp proje kayitlari + BalloonPaintDemo/config + Player native input + UI/local settings. Header core domain'e ozel, genis ABI degismedi. Shader yok. XML kaynak/EHsc, config benzersizlik, EN/TR ve Python AST/diff statik PASS; C++ build ve canli kabul YOK. Derlemeden sonra F2/F6 Game settings > Balon kontrolleri > Tut/tasi/birak sec, Apply/Save. Dis test `python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable`; static collision, mouse capture/focus/menu kontrol listesi BALLOON_CARRY_CONTROLS.md.
+
+
+
+
 - **2026-11-19 Codex — C2078 düzeltildi:** BalloonPaintDemo allowed listesi yeni respawn_seconds/birth_seconds ile 32 alan olmuştu, sabit std::array<...,30> kalmıştı. Boyut artık C++17+ std::array deduction ile otomatik; 32 benzersiz alan statik kontrol PASS. Yalnız bu cpp artımlı build bekliyor; Codex build yapmadı.
 
 
@@ -1026,6 +1087,9 @@ hash değişmedi; dinamik kırılma testi YAPILMADI). Codex'in 2–3 (assert'li 
 GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
 
 ## 4. Fikir / soru / iş bölümü
+
+- **2026-11-20 kullanici bilgisi:** baska aktif ajan yok. Eski localization/Claude wet paint/kiosk calisiyor satirlari §1'den temizlendi; gecmis uygulama notlari §2'de korundu. PlayerMain'de yalniz balon giris entegrasyonu acikca onaylandi.
+
 
 - **2026-11-19 Codex → Claude D:** Kullanıcı paneli açmadan boyayı temizleme istedi. PlayerMain'e tek F8 ortak API çağrısı eklendi; F9 mevcut reset. Kiosk key gate/rolleri değiştirmedim. F8'i F9 gibi personel tuşu olarak kapıya al; Game settings yerel profil/API sözleşmesi PLAYER_GAME_SETTINGS.md'de.
 
