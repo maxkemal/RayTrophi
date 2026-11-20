@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Builds a self-contained RayTrophi Player folder (and optional zip) from the
   current Release output and a list of .rtp scenes.
@@ -30,11 +30,10 @@
 param(
     # Scene order matters: the first one opens at launch.
     [string[]]$Scenes = @(
-        'RayTrophiStudio\assets\scenes\pastel-paint-workshop\workshop.rtp',
-        'RayTrophiStudio\assets\scenes\pastel-play-room\pastel-play-room-simple.rtp'
+        'RayTrophiStudio\assets\scenes\pastel-paint-workshop\workshop.rtp'
     ),
     # Display names for the F6 list, same order as -Scenes. Empty = file name.
-    [string[]]$SceneNames = @('Boyama Atolyesi', 'Oyun Odasi'),
+    [string[]]$SceneNames = @('Gizli Renkler'),
     # Canonical shared output. Use other destinations only for explicit diagnostics.
     [string]$OutDir = 'dist\RayTrophiPlayer',
     [switch]$Zip,
@@ -164,6 +163,34 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
         if (Test-Path $p) { Copy-Item $p $dst }
         elseif ($suffix -in @('', '.bin')) { throw "Scene part missing: $p" }
     }
+    # Intentional game cover + field-test instructions (not verification captures).
+    foreach ($assetName in @("$stem.preview.png", "$stem.TEST.md")) {
+        $assetPath = Join-Path $src $assetName
+        if (Test-Path -LiteralPath $assetPath) { Copy-Item -LiteralPath $assetPath -Destination $dst }
+    }
+    if ($i -eq 0 -and (Test-Path -LiteralPath (Join-Path $src "$stem.TEST.md"))) {
+        Copy-Item -LiteralPath (Join-Path $src "$stem.TEST.md") -Destination (Join-Path $out 'KAMERA_TESTI.md')
+    }
+    # Distribute a reviewed live design snapshot without changing the authored .rtp.
+    $distributionPath = Join-Path $src "$stem.distribution.json"
+    if (Test-Path -LiteralPath $distributionPath) {
+        $distribution = Get-Content -LiteralPath $distributionPath -Raw | ConvertFrom-Json
+        if ($distribution.schema -ne 1 -or -not $distribution.game_design.balloon_demo) {
+            throw "Invalid scene distribution design: $distributionPath"
+        }
+        $projectCopy = Join-Path $dst $file
+        $document = Get-Content -LiteralPath $projectCopy -Raw | ConvertFrom-Json
+        $document | Add-Member -NotePropertyName game_design -NotePropertyValue $distribution.game_design -Force
+        $document | Add-Member -NotePropertyName project_name -NotePropertyValue $distribution.name -Force
+        $document | Add-Member -NotePropertyName description -NotePropertyValue $distribution.description -Force
+        [IO.File]::WriteAllText($projectCopy, ($document | ConvertTo-Json -Depth 100),
+                              (New-Object Text.UTF8Encoding($false)))
+        # Keep the legacy fallback consistent too: no obsolete fixture node names.
+        [IO.File]::WriteAllText("$projectCopy.balloons.json",
+            ($distribution.game_design.balloon_demo | ConvertTo-Json -Depth 100),
+            (New-Object Text.UTF8Encoding($false)))
+        Copy-Item -LiteralPath $distributionPath -Destination $dst
+    }
     # World HDRI / sky overlay images saved next to the project (ProjectManager).
     $envDir = Join-Path $src "${stem}_environment"
     if (Test-Path $envDir) { Copy-Item $envDir (Join-Path $dst "${stem}_environment") -Recurse }
@@ -200,6 +227,10 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
     $name = if ($i -lt $SceneNames.Count -and $SceneNames[$i]) { $SceneNames[$i] } else { $stem }
     $listEntries += [ordered]@{ name = $name; path = "scenes/$(Split-Path -Leaf $src)/$file" }
 }
+# A clean recipient gets portable library roots, no camera IDs/calibration/tokens.
+$defaults = [ordered]@{ version = 1; roots = @('scenes'); locale = 'tr'; appearance = 'camera' }
+[IO.File]::WriteAllText((Join-Path $out 'player_operator.json'),
+    ($defaults | ConvertTo-Json -Depth 4), (New-Object Text.UTF8Encoding($false)))
 $listJson = [ordered]@{ scenes = $listEntries } | ConvertTo-Json -Depth 4
 [System.IO.File]::WriteAllText((Join-Path $out 'player_scenes.json'), $listJson, (New-Object System.Text.UTF8Encoding($false)))
 
@@ -211,11 +242,13 @@ $readme = @"
 RayTrophi Player
 ================
 Run RayTrophiPlayer.exe. The first scene in player_scenes.json opens at launch.
+For this demo, read KAMERA_TESTI.md for mouse/camera selection and camera setup.
 
 Keys
   F6        scene list (1-9 or click to open)
   F11       fullscreen        F1  HUD
-  F2        render scale      F3  60 Hz / uncapped
+  F2        operator console  F3  60 Hz / uncapped
+  F8        clear paint and in-flight paint drops
   F9        clean the room (paint + balloons)
   F5        debug camera
 
@@ -245,7 +278,9 @@ Perception runtime
   perception\python\python.exe is a separate portable Python runtime.
   Game scripts use perception\bridge\game_bridge.py (BridgeProcess context manager).
   The worker requires --model and --calibration; --video replays an existing MP4.
-  Frames stay in memory. No recording or personnel panel is installed.
+  F2 > Camera selects a device, previews, calibrates and starts tracking.
+  F2 > Game settings > Camera / skeleton controls toggles body input; mouse remains usable.
+  Frames stay in memory. No camera recordings or machine-specific calibration are included.
   See perception\manifest.json for dependency versions and the model SHA-256.
 "@
 }
@@ -258,6 +293,7 @@ $manifest = [ordered]@{
     scene_audio = (-not $NoSceneAudio)
     perception = (-not $NoPerception)
     audio_assets = @($audioEntries)
+    scenes = @($listEntries)
 }
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out 'package_manifest.json') -Encoding utf8
 if ($Zip) {
@@ -284,10 +320,26 @@ foreach ($excludedTarget in $excludedTargets) {
     }
     if (Test-Path -LiteralPath $resolved) { Remove-Item -LiteralPath $resolved -Recurse -Force }
 }
+# The generated scene tree is replaced, so removing a scene from -Scenes really
+# removes its .rtp and assets from distribution and recursive library discovery.
+$publishedScenes = [IO.Path]::GetFullPath((Join-Path $packageTarget 'scenes'))
+$packagePrefix = $packageTarget.TrimEnd('\') + '\'
+if (-not $publishedScenes.StartsWith($packagePrefix, [StringComparison]::OrdinalIgnoreCase) -or
+    [IO.Path]::GetFileName($publishedScenes) -ne 'scenes' -or
+    -not (Test-Path -LiteralPath (Join-Path $out $marker))) {
+    throw 'Refusing to reconcile an unverified generated scene directory.'
+}
+if (Test-Path -LiteralPath $publishedScenes) {
+    Remove-Item -LiteralPath $publishedScenes -Recurse -Force
+}
 foreach ($item in Get-ChildItem -LiteralPath $out -Force) {
+    # Keep this local installation's settings; the zip carries only clean defaults.
+    if ($item.Name -eq 'player_operator.json' -and
+        (Test-Path -LiteralPath (Join-Path $packageTarget $item.Name))) { continue }
+
     Copy-Item -LiteralPath $item.FullName -Destination $packageTarget -Recurse -Force
 }
-# The only recursive removal is this invocation's verified, generated staging tree.
+# Remove this invocation's verified, generated staging tree after publication.
 $stagePath = [IO.Path]::GetFullPath($out)
 if (-not $stagePath.StartsWith($packageTarget + '.staging-', [StringComparison]::OrdinalIgnoreCase) -or
     -not (Test-Path -LiteralPath (Join-Path $stagePath $marker))) {
