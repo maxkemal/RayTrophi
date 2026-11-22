@@ -1802,7 +1802,9 @@
     <ClCompile Include="external\miniz_tinfl.c" />
     <ClCompile Include="external\miniz_zip.c" />
     <ClCompile Include="external\ozz-animation\src\base\log.cc" />
-    <ClCompile Include="external\ozz-animation\src\base\platform.cc" />
+    <ClCompile Include="external\ozz-animation\src\base\platform.cc">
+      <ObjectFileName>$(IntDir)OzzBasePlatform.obj</ObjectFileName>
+    </ClCompile>
     <ClCompile Include="external\ozz-animation\src\base\containers\string_archive.cc" />
     <ClCompile Include="external\ozz-animation\src\base\encode\group_varint.cc" />
     <ClCompile Include="external\ozz-animation\src\base\io\archive.cc" />
