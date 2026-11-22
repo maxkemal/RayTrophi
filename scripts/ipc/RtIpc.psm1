@@ -16,7 +16,16 @@
 # ★ Pipe TEK ISTEMCI kabul ediyor (CreateNamedPipeW nMaxInstances = 1). Isin
 # bitince Disconnect-RtIpc cagir, yoksa bir sonraki oturum baglanamaz.
 
+#
+# ── ANDROID (Player) ────────────────────────────────────────────────────────
+# Cihazda pipe yok; RtIpcTransportLocal.cpp soyut unix soketi acar (SO_PEERCRED
+# yalniz uygulama + adb shell). PC'den:
+#   adb forward tcp:47391 localabstract:RayTrophiPlayer
+#   Connect-RtIpc -Port 47391      (ya da $env:RAYTROPHI_IPC_PORT = 47391)
+# Cerceve: 4 bayt big-endian uzunluk + UTF-8 JSON (TLS tasimasiyla ayni).
+
 $script:RtPipe = $null
+$script:RtTcp = $null
 $script:RtNextId = 1
 
 function Connect-RtIpc {
@@ -27,9 +36,29 @@ function Connect-RtIpc {
         Pipe hazir degilse ne kadar beklenecegi. Uygulama acilirken IPC sunucusu
         Python baslatildiktan SONRA ayaga kalkiyor, o yuzden acilistan hemen
         sonra birkac saniye beklemek normal.
+    .PARAMETER Port
+        Android: adb forward ile yonlendirilmis yerel TCP portu. Verilmezse
+        $env:RAYTROPHI_IPC_PORT, o da yoksa Windows pipe'i kullanilir.
     #>
     [CmdletBinding()]
-    param([int]$TimeoutMs = 15000)
+    param([int]$TimeoutMs = 15000, [int]$Port = 0)
+
+    if ($Port -le 0 -and $env:RAYTROPHI_IPC_PORT) { $Port = [int]$env:RAYTROPHI_IPC_PORT }
+    if ($Port -gt 0) {
+        if ($null -ne $script:RtTcp -and $script:RtTcp.Connected) { return }
+        $client = New-Object System.Net.Sockets.TcpClient
+        try {
+            $task = $client.ConnectAsync('127.0.0.1', $Port)
+            if (-not $task.Wait($TimeoutMs)) { throw "zaman asimi" }
+        } catch {
+            $client.Dispose()
+            throw "127.0.0.1:$Port baglanamadi. 'adb forward tcp:$Port localabstract:RayTrophiPlayer' yapildi mi, Player acik mi? ($($_.Exception.Message))"
+        }
+        $client.NoDelay = $true
+        $script:RtTcp = $client
+        $script:RtNextId = 1
+        return
+    }
 
     if ($null -ne $script:RtPipe -and $script:RtPipe.IsConnected) {
         Write-Verbose "Zaten bagli."
@@ -61,6 +90,21 @@ function Disconnect-RtIpc {
         try { $script:RtPipe.Dispose() } catch {}
         $script:RtPipe = $null
     }
+    if ($null -ne $script:RtTcp) {
+        try { $script:RtTcp.Dispose() } catch {}
+        $script:RtTcp = $null
+    }
+}
+
+function Read-RtIpcExact([System.IO.Stream]$Stream, [int]$Count) {
+    $data = New-Object byte[] $Count
+    $offset = 0
+    while ($offset -lt $Count) {
+        $read = $Stream.Read($data, $offset, $Count - $offset)
+        if ($read -le 0) { throw "IPC baglantisi yanit sirasinda kapandi." }
+        $offset += $read
+    }
+    return ,$data
 }
 
 function Invoke-RtIpc {
@@ -82,8 +126,10 @@ function Invoke-RtIpc {
         [switch]$Raw
     )
 
-    if ($null -eq $script:RtPipe -or -not $script:RtPipe.IsConnected) {
+    $useTcp = ($null -ne $script:RtTcp -and $script:RtTcp.Connected)
+    if (-not $useTcp -and ($null -eq $script:RtPipe -or -not $script:RtPipe.IsConnected)) {
         Connect-RtIpc
+        $useTcp = ($null -ne $script:RtTcp -and $script:RtTcp.Connected)
     }
 
     $request = @{ id = $script:RtNextId; method = $Method; params = $Params }
@@ -94,19 +140,32 @@ function Invoke-RtIpc {
     $json = $request | ConvertTo-Json -Depth 20 -Compress
 
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-    $script:RtPipe.Write($bytes, 0, $bytes.Length)
-    $script:RtPipe.Flush()
+    if ($useTcp) {
+        $stream = $script:RtTcp.GetStream()
+        $n = $bytes.Length
+        $header = [byte[]]@((($n -shr 24) -band 0xff), (($n -shr 16) -band 0xff),
+                            (($n -shr 8) -band 0xff), ($n -band 0xff))
+        $stream.Write($header, 0, 4)
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+        $h = Read-RtIpcExact $stream 4
+        $size = ([int]$h[0] -shl 24) -bor ([int]$h[1] -shl 16) -bor ([int]$h[2] -shl 8) -bor [int]$h[3]
+        $text = [System.Text.Encoding]::UTF8.GetString((Read-RtIpcExact $stream $size))
+    } else {
+        $script:RtPipe.Write($bytes, 0, $bytes.Length)
+        $script:RtPipe.Flush()
 
-    $buffer = New-Object byte[] 65536
-    $memory = New-Object System.IO.MemoryStream
-    do {
-        $read = $script:RtPipe.Read($buffer, 0, $buffer.Length)
-        if ($read -le 0) { throw "IPC baglantisi yanit sirasinda kapandi ('$Method')." }
-        $memory.Write($buffer, 0, $read)
-    } until ($script:RtPipe.IsMessageComplete)
+        $buffer = New-Object byte[] 65536
+        $memory = New-Object System.IO.MemoryStream
+        do {
+            $read = $script:RtPipe.Read($buffer, 0, $buffer.Length)
+            if ($read -le 0) { throw "IPC baglantisi yanit sirasinda kapandi ('$Method')." }
+            $memory.Write($buffer, 0, $read)
+        } until ($script:RtPipe.IsMessageComplete)
 
-    $text = [System.Text.Encoding]::UTF8.GetString($memory.ToArray())
-    $memory.Dispose()
+        $text = [System.Text.Encoding]::UTF8.GetString($memory.ToArray())
+        $memory.Dispose()
+    }
     $response = $text | ConvertFrom-Json
 
     if ($Raw) { return $response }

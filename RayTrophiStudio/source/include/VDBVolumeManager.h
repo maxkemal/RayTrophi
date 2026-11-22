@@ -106,7 +106,8 @@ struct VDBVolumeData {
     bool has_temperature = false;
     bool has_velocity = false;
     
-    // Internal handles (opaque to users)
+    // Opaque handles keep the header independent of OpenVDB and NanoVDB.
+    // OpenVDB handles stay null on targets that disable OpenVDB.
     void* internal_openvdb_grid = nullptr;        // openvdb::FloatGrid::Ptr (Density)
     void* internal_openvdb_temperature = nullptr; // openvdb::FloatGrid::Ptr (Temperature)
     

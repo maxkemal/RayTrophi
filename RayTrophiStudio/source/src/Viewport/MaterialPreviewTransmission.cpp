@@ -1,3 +1,4 @@
+#include "Viewport/RayFusionViewportPasses.h"
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterGpuCull.h"
 #include "Viewport/RasterInstanceUpload.h"
@@ -30,16 +31,6 @@ void matrixToGL(const Matrix4x4& matrix, float out[16]) {
     std::memcpy(out, transposed.m, sizeof(float) * 16u);
 }
 
-struct PreviewPush {
-    float viewProj[16];
-    float view[16];
-    float cameraPos[4];
-    float lightDir0[4];
-    float lightDir1[4];
-    float lightDir2[4];
-    uint32_t materialMeta[4];
-};
-static_assert(sizeof(PreviewPush) == 208u, "Material preview push ABI changed");
 
 void imageBarrier(VkCommandBuffer cmd, VkImage image, VkImageAspectFlags aspect,
                   VkImageLayout oldLayout, VkImageLayout newLayout,
@@ -344,9 +335,8 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
                             m_interactiveViewport.materialPreviewPipelineLayout,
                             0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
 
-    PreviewPush push{};
+    RayFusionDrawPush push{};
     matrixToGL(viewProj, push.viewProj);
-    matrixToGL(view, push.view);
     push.cameraPos[0] = m_camera.origin.x;
     push.cameraPos[1] = m_camera.origin.y;
     push.cameraPos[2] = m_camera.origin.z;

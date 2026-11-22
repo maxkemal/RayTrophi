@@ -8,6 +8,9 @@
 * =========================================================================
 */
 #include "GridFluidSolver.h"
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
 #include "Fluid/GasSourceProvenance.h"
 #include "GridAdvectionTrace.h"
 
@@ -21,7 +24,7 @@
 #include <limits>
 #include <vector>
 
-#ifdef OPENVDB_ENABLED
+#if defined(OPENVDB_ENABLED) && !defined(RT_NO_OPENVDB)
 #include <openvdb/openvdb.h>
 #include <openvdb/tools/GridSampler.h>
 #endif
@@ -1182,7 +1185,7 @@ void project(FluidGrid& grid, const SolverParams& params, float dt) {
             }
 }
 
-#ifdef OPENVDB_ENABLED
+#if defined(OPENVDB_ENABLED) && !defined(RT_NO_OPENVDB)
 // Sparse, active-voxel-only pressure projection for the OpenVDB solver path.
 // Mirrors project() exactly — forward-difference divergence, 7-point SOR
 // Gauss-Seidel Poisson, backward-difference gradient subtraction, all at
@@ -1453,7 +1456,17 @@ void stepSparseVDB(FluidGrid& grid,
                    const SimulationForceFieldSnapshot* forces,
                    float time_seconds,
                    GasSolverStats* stats) {
-#ifdef OPENVDB_ENABLED
+#if defined(RT_NO_OPENVDB)
+    (void)grid;
+    (void)params;
+    (void)dt;
+    (void)forces;
+    (void)time_seconds;
+    if (stats) {
+        *stats = {};
+    }
+    OpenVdbUnavailable::report();
+#elif defined(OPENVDB_ENABLED)
     if (stats) *stats = GasSolverStats{};
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0 || dt <= 0.0f) {
         return;

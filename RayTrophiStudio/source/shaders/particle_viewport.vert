@@ -33,6 +33,6 @@ void main() {
     int row = int(inLook.y + 0.5);
     vColor = particleLook(row, inLook.x, inLook.z, halfSize);
     particleLighting(row, inCenter, vShade, vL1, vC1, vL2, vC2, vAmb, vUp);
-    gl_Position = particleClip(inCenter, inCorner, halfSize);
-    vUV = inCorner;
+    vUV = particleEffectCorner(inCorner, vColor.a, inLook.x, inLook.z, vShade);
+    gl_Position = particleClip(inCenter, vUV, halfSize);
 }

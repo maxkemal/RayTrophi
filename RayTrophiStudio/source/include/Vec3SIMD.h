@@ -11,7 +11,7 @@
 #ifndef VEC3SIMD_H
 #define VEC3SIMD_H
 
-#include <immintrin.h> // AVX header
+#include "Math/SimdIntrin.h"
 #include <cmath>
 #include <random>
 #include <iostream>

@@ -172,3 +172,84 @@ alındı. Oynanışın her koşulda sıçramasız olduğu veya mevcut GPU beklem
 kaldırıldığı iddia edilmiyor. Ürün kaynaklarında bu kabul turunda değişiklik yok.
 Kısa/uzun ham ölçüler: `PLAYER_BALLOON_PAINT_ACCEPTANCE_2026_11_15.json`.
 
+## Jolt Soft Body prototipi
+
+Mevcut mesh balon demo ayarlarına `"soft_body": true` ekleyin. Alan isteğe bağlı
+ve bool türündedir. Hem sahnenin demo ayarında hem de aynı servise bağlanan
+Python `rt.paint.wet_demo("configure", config)` ve IPC `paint.wet_demo`
+çağrılarında kullanılabilir. `true` için `visual_nodes` gerekir.
+
+Taşıma sırasında duvar basıncı oluştuğunda tek bir kapalı Jolt kabuğu, temas
+eksenine göre iki plaka arasında 60 Hz fizik adımıyla sıkışır. Kabuğun boyutları
+görünür flat mesh'in instance ölçeğini sürer. Bu prototipte dünya temasını
+ve patlama konumunu mevcut taşıma kodu belirler. Balon eldeyken temas kesilirse
+ölçek kademeli toparlanır. Yerel yüzey deformasyonu sonraki aşamadır.
+
+Durumda `soft_body_axial_scale` anlık ölçeği, `soft_body_min_axial_scale`
+yapılandırmadan beri en küçük değeri, `soft_body_ms_max` ise kabuk güncellemesinin
+en uzun CPU süresini verir. Toplam kare maliyeti için aynı sahneyi özellik kapalı
+ve açık olarak karşılaştırın.
+
+Windows Player derlemesinden sonra, `PaintBack` içeren geçici balon sahnesinde:
+
+```powershell
+python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable
+python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable --soft-body
+```
+
+Android Player portu derlenebilir olduğunda aynı sahnede fizik maliyetini ve
+kare süresini gerçek bir `arm64-v8a` cihazda ölçün.
+
+## Tüm balonlarla Jolt hareket testi
+
+Mesh balon demolarında Jolt hareketi ve çarpışma kabukları varsayılan olarak
+açıktır. `"jolt_motion": false` ile önceki hareketi seçebilirsiniz. Python
+`rt.paint.wet_demo` ve IPC `paint.wet_demo` aynı ayar ve durum alanlarını
+kullanır. `soft_body` açıkken eldeki balonun duvar sıkışması da birlikte çalışır.
+
+Her şişmiş balon Jolt dünyasında küresel bir gövde alır. Gövdeler birbirleriyle
+ve hazırlıkta alınan statik flat mesh oda geometrisiyle çarpışır. Serbest
+balonlar farklı zamanlarda düşer ve kaldırma kuvvetiyle yeniden yükselir.
+Etkin yerçekimi düşük, kaldırma kuvveti kademeli devreye girer ve hafif hava
+akımı balonları yana sürükler. Jolt gövdesinin dönüşü sahnedeki balon modeline
+uygulanır. Hava akışı serbest balonlara düşük bir dönme momenti verir.
+
+`jolt_motion` açıkken her balon için 18 köşeli basınçlı bir soft-body kabuğu
+ayrılır. Zemin, oda ve balon temasları kendi kabuğunu yükler. Kabuğun temas
+eksenindeki daralması ve yanlara genişlemesi görünür modelin şeklini sürer.
+Kabuğun boyutları instance dönüşümüne uygulanır. Oda ve balon çarpışmalarında
+birbirini iten gövdeler küreseldir. `"impact_soft_body": false` ile kabukları
+kapatıp önceki görsel sıkışmayla aynı sahnede maliyeti karşılaştırabilirsiniz.
+Player'da balonu patlatmadan düşürmek için sol tuşu **Shift basılıyken** bırakın.
+Dış istemcide bunun karşılığı mevcut `pointer` işleminin `cancel` eylemidir.
+Normal sol tuş bırakma boya patlamasını tetikler.
+
+`status.jolt_motion` aktif balon gövdesi sayısını, fizik adımlarını, yeni
+balon ve oda temaslarını ve Jolt hareket güncellemesinin son/en uzun CPU süresini
+verir. `motion_ms_max` görsel dönüşüm gönderimini, `soft_body_ms_max` eldeki
+balonun sıkışma simülasyonunu ayrı ölçer. Kare süresini özellik kapalı ve açıkken
+aynı sahnede karşılaştırın.
+`squashes` başlatılan esnemeleri, `peak_squash` en yüksek hedef sıkışma
+oranını gösterir.
+`soft_shells` ayrılan kabukları, `peak_shell_squash` ölçülen daralmayı,
+`shell_step_ms_max` kabuk maliyetinin bir fizik adımındaki tepesini ve
+`rotating_bodies` anlık dönen gövdeleri bildirir.
+
+`wind_strength` 0–1 aralığındadır ve varsayılanı 0,25'tir. `wind` işlemi
+`{"wind_strength": 0.5}` gibi bir ayarı mevcut balonları yenilemeden uygular.
+Player Oyun Kontrolleri aynı ayarı kullanır. Balon Fiziği bölümünde Jolt ve
+çarpışma kabukları ayrı ayrı açılıp kapatılabilir.
+
+Üç duvarlı odalarda ön sınır yan duvarların bitiminden 25 cm öteye kurulur.
+Oda geometrisinden hesaplandığı için kamera hareket ettiğinde yer değiştirmez.
+Sınıra yaklaşan serbest balonlar içeri yönelir. Taşıma da aynı sınırda durur ve
+sanal yüzeyde beklemek balonu patlatmaz. `status.jolt_motion.front_barrier`
+etkin düzlemin dünya koordinatını ve içeri yönünü verir.
+
+```powershell
+python scripts/test/rt_balloon_jolt_motion_ipc.py --exercise-disposable --expect-front-barrier
+```
+
+Dağıtımdaki Pastel Paint Workshop açıkken testi çalıştırın. Görsel kontrolde
+bir balonu diğerinin üstünde bırakıp teması ve savrulmayı da gözleyin.
+

@@ -160,6 +160,26 @@ live IPC probes.
 | `appearance.camera` | Empty |
 | `game.start`, `game.stop`, `game.reset` | Empty |
 
+Library cards are selected with one click. **Load selected scene** opens the
+selection. The active project is marked by canonical path, independent of
+selection. The destination card shows loader checkpoints until the game
+setup and first scene frame are ready. A failed load stays marked on its card.
+
+The shared `player.operator` / `rt.player.operator` status exposes
+`scene_load` with path, state, progress, stage, error, elapsed time and
+individual stage timings. Runtime discovery exposes the same object. Percent
+values correspond to checkpoints, and a synchronous stage can hold the bar
+until it returns. Total elapsed time includes progress presentation.
+
+```powershell
+python scripts/test/rt_player_scene_load_ipc.py dist/RayTrophiPlayer/scenes/pastel-paint-workshop/workshop.rtp --exercise-disposable
+```
+
+For manual verification, click another scene card while a scene is open and
+check that the current scene stays visible. Press **Load selected scene** and
+check that progress appears on the destination card. After the first frame,
+check that the current scene marker follows the new project.
+
 Unknown operations/fields, invalid types/ranges, unavailable devices/modes and edits
 during active capture fail explicitly. Camera width/height: 160..8192 / 120..8192;
 FPS 1..240; people 1..10; confidence 0.1..1. Actual modes must also be present in the

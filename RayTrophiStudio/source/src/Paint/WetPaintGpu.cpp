@@ -27,7 +27,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <tuple>
+#include <unordered_map>
 
 namespace Paint {
 
@@ -283,9 +285,27 @@ struct WetPaintGpu::Device {
     SimulationComputeContext* compute = nullptr;
     ComputeBackendType backend = ComputeBackendType::CPU;
     ComputeBufferHandle surfaces, tiles, pos_valid, flow_normal, base, color, state,
-        color_scratch, state_scratch, output, tile_flags, stats, dabs, lut, lookup,
+        color_scratch, state_scratch, output, tile_flags, stats, dabs,
         dummy_events, dummy_counter;
-    std::size_t dab_capacity = 0, lut_capacity = 0, lookup_capacity = 0;
+    std::size_t dab_capacity = 0;
+
+    struct AppearanceTables {
+        std::weak_ptr<RayTrophiSim::ParticleSimulationSystem> owner;
+        ComputeBufferHandle lut, lookup;
+        std::size_t lut_capacity = 0, lookup_capacity = 0;
+        uint32_t lut_rows = 0, lookup_count = 0;
+        std::optional<uint64_t> revision;
+
+        void release(SimulationComputeContext& context) {
+            for (const auto& handle : {lut, lookup}) {
+                if (sameCompute(handle, context)) {
+                    context.destroyBuffer(handle);
+                }
+            }
+        }
+    };
+    std::unordered_map<const RayTrophiSim::ParticleSimulationSystem*, AppearanceTables>
+        appearance_tables;
     uint32_t texel_count = 0, tile_count = 0;
     bool channels_allocated = false;
     bool reveal_allocated = false;
@@ -301,15 +321,19 @@ struct WetPaintGpu::Device {
     void release() {
         stats_ticket = 0;   // a dropped ticket's slot is reused by the backend
         if (compute) {
+            for (auto& entry : appearance_tables) {
+                entry.second.release(*compute);
+            }
             for (ComputeBufferHandle* h : {&surfaces, &tiles, &pos_valid, &flow_normal, &base, &color,
                                            &state, &color_scratch, &state_scratch, &output,
-                                           &tile_flags, &stats, &dabs, &lut, &lookup,
+                                           &tile_flags, &stats, &dabs,
                                            &dummy_events, &dummy_counter}) {
                 if (sameCompute(*h, *compute)) compute->destroyBuffer(*h);
                 *h = {};
             }
         }
-        dab_capacity = lut_capacity = lookup_capacity = 0;
+        appearance_tables.clear();
+        dab_capacity = 0;
         texel_count = tile_count = 0;
         channels_allocated = channels_force = reveal_allocated = false;
         compute = nullptr;
@@ -1435,8 +1459,17 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         return h.valid();
     };
 
+    for (auto it = d.appearance_tables.begin(); it != d.appearance_tables.end();) {
+        if (it->second.owner.expired()) {
+            it->second.release(c);
+            it = d.appearance_tables.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
     // Particle systems: device buffers on this context, or host contacts.
-    std::vector<RayTrophiSim::ParticleSimulationSystem*> device_sources;
+    std::vector<std::shared_ptr<RayTrophiSim::ParticleSimulationSystem>> device_sources;
     std::vector<GpuDab> dabs;
     dabs.reserve(pending_dabs_.size());
     for (const WetPaintDab& w : pending_dabs_) {
@@ -1466,7 +1499,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
                 // nothing wet. The tick after the last particle died still stamps.
                 const bool alive = system.runtime->aliveCount() > 0;
                 bool& was_alive = source_alive_[system.runtime.get()];
-                if (alive || was_alive) device_sources.push_back(system.runtime.get());
+                if (alive || was_alive) device_sources.push_back(system.runtime);
                 was_alive = alive;
             }
             host_events.clear();
@@ -1539,35 +1572,53 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         run(kModeStamp, d.tile_count);
         bindings[12] = d.dummy_events;
     }
-    for (RayTrophiSim::ParticleSimulationSystem* system : device_sources) {
+    for (const auto& system : device_sources) {
         RayTrophiSim::ParticleDeviceEventView view;
         if (!system->deviceCollisionEventView(c, view)) continue;
-        // Colour table: this system's LUT rows and id -> row map.
-        std::vector<float> lut;
-        std::vector<uint32_t> lookup;
-        uint32_t max_id = 0;
-        for (const auto& profile : system->appearanceProfiles()) max_id = std::max(max_id, profile.id);
-        lookup.assign(static_cast<std::size_t>(max_id) + 1, 0xFFFFFFFFu);
-        for (const auto& profile : system->appearanceProfiles()) {
-            const float* row = system->appearanceLutRow(profile.id);
-            if (!row) continue;
-            lookup[profile.id] = static_cast<uint32_t>(lut.size() / RayTrophiSim::kParticleAppearanceLutFloatsPerRow);
-            lut.insert(lut.end(), row, row + RayTrophiSim::kParticleAppearanceLutFloatsPerRow);
+        auto& tables = d.appearance_tables[system.get()];
+        const uint64_t revision = system->appearanceRevision();
+        if (tables.revision != revision) {
+            tables.owner = system;
+            tables.revision.reset();
+            tables.lut_rows = tables.lookup_count = 0;
+            const auto& profiles = system->appearanceProfiles();
+            if (profiles.empty()) {
+                tables.revision = revision;
+            } else {
+                const auto max_profile = std::max_element(
+                    profiles.begin(), profiles.end(),
+                    [](const auto& a, const auto& b) { return a.id < b.id; });
+                std::vector<uint32_t> lookup(static_cast<std::size_t>(max_profile->id) + 1,
+                                             0xFFFFFFFFu);
+                constexpr auto row_size = RayTrophiSim::kParticleAppearanceLutFloatsPerRow;
+                std::vector<float> lut;
+                lut.reserve(profiles.size() * row_size);
+                for (const auto& profile : profiles) {
+                    const float* row = system->appearanceLutRow(profile.id);
+                    lookup[profile.id] = static_cast<uint32_t>(lut.size() / row_size);
+                    lut.insert(lut.end(), row, row + row_size);
+                }
+                if (ensure(tables.lut, tables.lut_capacity, lut.size(), sizeof(float),
+                           "WetPaintLut") &&
+                    ensure(tables.lookup, tables.lookup_capacity, lookup.size(), sizeof(uint32_t),
+                           "WetPaintLookup") &&
+                    c.uploadBuffer(tables.lut, lut.data(), lut.size() * sizeof(float)) &&
+                    c.uploadBuffer(tables.lookup, lookup.data(), lookup.size() * sizeof(uint32_t))) {
+                    tables.lut_rows = static_cast<uint32_t>(lut.size() / row_size);
+                    tables.lookup_count = static_cast<uint32_t>(lookup.size());
+                    tables.revision = revision;
+                }
+            }
         }
-        const bool tables = !lut.empty() &&
-            ensure(d.lut, d.lut_capacity, lut.size(), sizeof(float), "WetPaintLut") &&
-            ensure(d.lookup, d.lookup_capacity, lookup.size(), sizeof(uint32_t), "WetPaintLookup") &&
-            c.uploadBuffer(d.lut, lut.data(), lut.size() * sizeof(float)) &&
-            c.uploadBuffer(d.lookup, lookup.data(), lookup.size() * sizeof(uint32_t));
         bindings[13] = view.events;
         bindings[14] = view.counter;
-        bindings[15] = tables ? d.lut : d.dummy_events;
-        bindings[16] = tables ? d.lookup : d.dummy_counter;
+        bindings[15] = tables.lut_rows ? tables.lut : d.dummy_events;
+        bindings[16] = tables.lookup_count ? tables.lookup : d.dummy_counter;
         k.source_kind = kSourceEvents;
         k.source_count = 0;
         k.event_capacity = view.capacity;
-        k.lut_rows = tables ? static_cast<uint32_t>(lut.size() / RayTrophiSim::kParticleAppearanceLutFloatsPerRow) : 0u;
-        k.lookup_count = tables ? static_cast<uint32_t>(lookup.size()) : 0u;
+        k.lut_rows = tables.lut_rows;
+        k.lookup_count = tables.lookup_count;
         if (!clearing_paint) run(kModeStamp, d.tile_count);
         run(kModeConsume, 1);   // the consume: counter back to zero
         ++stats_.device_event_dispatches;

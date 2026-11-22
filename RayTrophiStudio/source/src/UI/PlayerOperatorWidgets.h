@@ -2,6 +2,7 @@
 
 #include "Api/RtApiPlayerOperator.h"
 #include "Core/Localization.h"
+#include "Core/PlayerSceneLoad.h"
 #include "Core/RuntimeProjectHost.h"
 #include "imgui.h"
 #include <SDL.h>
@@ -37,6 +38,7 @@ struct Console {
     bool game_settings_dirty = false;
     std::string page = "games";
     std::string error;
+    std::string selected_scene;
     json status;
     double next_refresh = 0;
     ImFont *heading = nullptr;
@@ -94,6 +96,9 @@ inline bool action(const char *text, ImVec2 size = ImVec2(0, 38), bool primary =
     return clicked;
 }
 inline bool call(const std::string &operation, const json &config = json::object()) {
+    if (AppRuntime::playerSceneLoad().presenting()) {
+        return false;
+    }
     json output;
     const auto result = rtapi::playerOperator(operation, config, output);
     ui.next_refresh = 0;

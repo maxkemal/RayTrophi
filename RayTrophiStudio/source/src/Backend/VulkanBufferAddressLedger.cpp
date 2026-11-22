@@ -1,10 +1,14 @@
 #include "Backend/VulkanBufferAddressLedger.h"
 
+#include "Platform/Platform.h"
+
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
 #include <dbghelp.h>
 #pragma comment(lib, "dbghelp.lib")
+#endif
 
 #include <cstdio>
 #include <cstring>
@@ -46,6 +50,7 @@ std::string hex(uint64_t v) {
 }
 
 std::string symbolize(const Record& r) {
+#ifdef _WIN32
     static bool initialized = false;
     HANDLE process = GetCurrentProcess();
     if (!initialized) {
@@ -78,6 +83,10 @@ std::string symbolize(const Record& r) {
         }
     }
     return out;
+#else
+    (void)r;
+    return " stack trace unavailable (pid=" + std::to_string(Platform::processId()) + ")";
+#endif
 }
 
 std::string line(const Record& r, uint64_t address) {
@@ -102,8 +111,10 @@ void noteCreated(VkDevice device, VkBuffer buffer, uint64_t address, uint64_t si
     r.buffer = buffer;
     r.address = address;
     r.size = size;
+#ifdef _WIN32
     // Skip this frame and VulkanDevice::createBuffer: frame 0 is the caller.
     r.frames = CaptureStackBackTrace(2, kFrames, r.stack, nullptr);
+#endif
     std::lock_guard<std::mutex> lock(g_mutex);
     r.createSerial = ++g_serial;
     g_live[buffer] = r;

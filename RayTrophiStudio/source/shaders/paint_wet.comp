@@ -398,6 +398,21 @@ bool sourceAt(uint idx, out vec3 p, out float r, out vec3 n, out bool facing,
     return r > 0.0 && amount > 0.0;
 }
 
+float paintHeightGain(Surface s) {
+    return clamp(float(s.pbr_params >> 16u) * (1.6 / 65535.0), 0.0, 1.0);
+}
+
+float paintBaseHeight(uint texel) {
+    float original = float(base_color[2u * pc._p0 + texel] & 255u);
+    return clamp((original - 128.0) / 127.0, 0.0, 1.0);
+}
+
+float buildPaintHeight(float current, float ceiling, float load) {
+    // A deposit fills a fraction of the available relief and never lowers an
+    // existing ridge when the operator turns the control down.
+    return current + max(ceiling - current, 0.0) * clamp(load, 0.0, 0.30);
+}
+
 void stampTile(uint tile_index) {
     Tile t = tiles[tile_index];
     if (t.valid_texels == 0u) return;
@@ -441,6 +456,9 @@ void stampTile(uint tile_index) {
     const float deposit_ratio = clamp(fresh_bias * (0.78 + 0.22 * load), 0.0, 1.0);
     // noteWetDab, per texel, sources applied in order.
     const float deposited = deposit_ratio * (0.25 + load * 0.75);
+    const float height_gain = paintHeightGain(s);
+    const bool deposit_height = (s.flags & SURFACE_HEIGHT_NORMAL) != 0u &&
+                                pc._p0 != 0u && height_gain > 0.0;
     uint touched = 0u;
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x, y; tileTexel(t, k, x, y);
@@ -452,6 +470,7 @@ void stampTile(uint tile_index) {
         vec4 st = state[ti];
         vec4 px = unpackColor(color[ti]);
         bool hit = false;
+        float height_ceiling = 0.0;
         for (uint j = 0u; j < listed; ++j) {
             vec3 p; float r; vec3 n; bool facing; vec3 c; float a;
             sourceAt(s_list[j], p, r, n, facing, c, a);
@@ -474,11 +493,13 @@ void stampTile(uint tile_index) {
             float pigment_add = wet_add * deposited;
             st.x = clamp(st.x + wet_add * (0.18 + deposited * 0.82), 0.0, 1.0);
             st.y = clamp(st.y + pigment_add, 0.0, 1.0);
-            if ((s.flags & SURFACE_HEIGHT_NORMAL) != 0u && pc._p0 != 0u) {
-                float original_h = float(base_color[2u * pc._p0 + ti] & 255u);
-                st.z = max(st.z, clamp((original_h - 128.0) / 127.0, 0.0, 1.0));
-                float contribution = float(s.pbr_params >> 16u) / 65535.0;
-                st.z = clamp(st.z + pigment_add * clamp(contribution * 1.6, 0.0, 1.0),0.0,1.0);
+            if (deposit_height) {
+                if (!hit) {
+                    float base_height = paintBaseHeight(ti);
+                    height_ceiling = mix(base_height, 1.0, height_gain);
+                    st.z = max(st.z, base_height);
+                }
+                st.z = buildPaintHeight(st.z, height_ceiling, pigment_add);
             }
             // Deposit. On the CPU noteWetDab is the wet half of a stroke whose
             // colour comes from a paintLayerAtUV dab (Normal brush: alpha =
@@ -494,8 +515,8 @@ void stampTile(uint tile_index) {
             // (sampleWetPickupReservoir + underpaint_mix of the CPU brush). The
             // "sampled" colour is what the surface shows: layer over base.
             float wet_gate = clamp((st.x - 0.04) / 0.28, 0.0, 1.0);
-            float thick_gate = clamp((st.z - 0.02) / 0.20, 0.0, 1.0);
-            float reservoir = clamp(wet_gate * (0.30 + thick_gate * 0.70), 0.0, 1.0);
+            float pigment_gate = clamp((st.y - 0.02) / 0.20, 0.0, 1.0);
+            float reservoir = clamp(wet_gate * (0.30 + pigment_gate * 0.70), 0.0, 1.0);
             float underpaint_mix = clamp(reservoir * wetness * (1.0 - fresh_bias * (oil ? 0.92 : 0.82)) *
                                          ((oil ? 0.08 : 0.18) + pickup * (oil ? 0.18 : 0.34)) *
                                          ((oil ? 0.36 : 0.55) - load * (oil ? 0.10 : 0.18)),
@@ -644,8 +665,13 @@ void tickTexel(Surface s, int px, int py) {
             liftLayerAlpha(dst, max(st.y, f.advected_pigment), max(st.x, f.advected_wet),
                            advected_pixel.a / 255.0, max(f.color_runoff_alpha, f.color_drip_head_alpha));
         }
-        next_thickness = clamp(next_thickness * (1.0 - f.color_runoff_alpha * (oil ? 0.10 : 0.28)) +
-                               f.advected_thickness * f.color_runoff_alpha * (oil ? 0.55 : 1.0), 0.0, 1.0);
+        // Runoff redistributes relief without making a taller ridge than
+        // either contributing texel, including relief from older settings.
+        float retained_height = next_thickness *
+                                (1.0 - f.color_runoff_alpha * (oil ? 0.10 : 0.28));
+        float carried_height = f.advected_thickness * f.color_runoff_alpha * (oil ? 0.55 : 1.0);
+        next_thickness = min(retained_height + carried_height,
+                             max(next_thickness, f.advected_thickness));
         next_pigment = clamp(max(st.y * (oil ? 0.985 : 0.992),
                                  f.advected_pigment * (oil ? f.color_runoff_alpha : (0.28 + f.color_runoff_alpha * 0.72))) -
                              pc.dt * (oil ? (0.10 + s.absorption * 0.20) : (0.06 + s.absorption * 0.12)),

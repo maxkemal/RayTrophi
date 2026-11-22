@@ -31,7 +31,11 @@
 #else
 
 #ifndef __align__
+#if defined(_MSC_VER)
 #define __align__(n) __declspec(align(n))
+#else
+#define __align__(n) __attribute__((aligned(n)))
+#endif
 #endif
 #ifndef __device__
 #define __device__
@@ -40,7 +44,11 @@
 #define __host__
 #endif
 #ifndef __forceinline__
+#if defined(_MSC_VER)
 #define __forceinline__ __forceinline
+#else
+#define __forceinline__ inline __attribute__((always_inline))
+#endif
 #endif
 
 // Host-side (non-__CUDACC__, x64) layouts from CUDA's vector_types.h:

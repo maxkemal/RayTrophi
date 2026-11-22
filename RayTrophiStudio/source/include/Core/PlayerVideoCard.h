@@ -4,7 +4,9 @@
 #include "Paint/HiddenGameObjects.h"
 
 #include <SDL.h>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 #include <cstdint>
 #include <cstring>
@@ -13,6 +15,7 @@ namespace AppRuntime {
 
 // Mirrors tools/perception_bridge/video_card.py. Frames travel only in this
 // session-local mapping. The pose stream and display controls still use IPC.
+#ifdef _WIN32
 class PlayerVideoCard {
 public:
     ~PlayerVideoCard() {
@@ -158,5 +161,13 @@ private:
     SDL_Texture* texture_ = nullptr;
     Frame shown_{};
 };
+#else
+// The perception video card is a Windows named-mapping feed; no source exists on other platforms.
+class PlayerVideoCard {
+public:
+    bool poll(bool, SDL_Renderer*) { return false; }
+    void draw(const PlayerOverlayProjection&) const {}
+};
+#endif
 
 } // namespace AppRuntime

@@ -156,9 +156,9 @@ Kaynak düzeltmeleri:
 - Room reset / `paint.wet_reset` mevcut demo damlalarını, ghost'ları ve ortak
   trail havuzunu temizler; atlas tekrar eski damlalarla boyanmaz. Reset tick
   eski collision event'lerini stamp etmeden tüketir.
-- Ayrı koruma: gizli paint objesinin genişletilmiş dünya AABB'sinde patlayan
-  balondan boya doğmaz. Dışarıdaki patlamanın içeride doğacak damlaları da
-  atlanır. Ses/balon patlaması çalışır. Bu geniş AABB koruması açık/içbükey
+- Gizli paint objesinin genişletilmiş dünya AABB'sinde başlayacak damlalar
+  atlanır. Balonun merkezi kutunun içinde olsa da kutu dışında başlayan
+  damlalar üretilir. Ses/balon patlaması çalışır. Bu AABB koruması açık/içbükey
   objelerde bilinçli olarak fazla tutucudur; per-particle üçgen sorgusu veya
   GPU download yoktur. `hidden.paint_origin` operation (position XYZ) aynı
   servisten `{allowed:bool}` döndürür. Gerçek doğan damla sayısı pop events

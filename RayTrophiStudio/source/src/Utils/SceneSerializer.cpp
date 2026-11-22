@@ -67,8 +67,10 @@ static fs::path pathFromUtf8(const std::string& utf8_path) {
     if (!wide.empty()) {
         return fs::path(wide);
     }
-#endif
     return fs::path(utf8_path);
+#else
+    return fs::u8path(utf8_path);
+#endif
 }
 
 static simdjson::error_code loadJsonRootFromFile(simdjson::dom::parser& parser,

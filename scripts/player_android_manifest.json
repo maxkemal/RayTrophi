@@ -1,0 +1,116 @@
+{
+  "_comment": "Android overlay for scripts/gen_player_android_cmake.py. The Android Player source set is the Windows Player set (Studio vcxproj + scripts/player_include_manifest.json) MINUS android_exclude, PLUS android_stubs. Paths are relative to RayTrophiStudio/source (globs use fnmatch on the 'src/...' form). Everything Android-specific lives here as data; the generator hardcodes none of it.",
+  "abis": [
+    "arm64-v8a",
+    "x86_64"
+  ],
+  "min_sdk": 29,
+  "android_exclude": [
+    "src/Core/PlayerOperator.cpp",
+    "src/Core/PlayerCamera.cpp",
+    "src/Api/RtApiPlayerOperator.cpp",
+    "src/UI/PlayerOperator*",
+    "src/Api/RtIpcTransportTls.cpp",
+    "src/Utils/TextureCompressionCache.cpp",
+    "src/Physics/GasSimulator.cpp",
+    "src/Physics/GasSimulatorHost.cpp",
+    "src/Physics/VDBVolumeManager.cpp",
+    "src/Physics/VDBVolumeHost.cpp"
+  ],
+  "_comment_android_exclude": "Operator/kiosk layer + camera-perception bridge (Windows-only, out of scope for the touch build), the TLS remote IPC transport (Winsock+OpenSSL server), the DirectXTex BC compressor, and legacy OpenVDB simulation and volume I/O. Every excluded file whose symbols are still referenced by kept files has a stub below.",
+  "android_stubs": [
+    {
+      "stub": "src/Platform/Stubs/PlayerOperatorAndroidStub.cpp",
+      "replaces": [
+        "src/Core/PlayerOperator.cpp",
+        "src/Core/PlayerCamera.cpp",
+        "src/Api/RtApiPlayerOperator.cpp",
+        "src/UI/PlayerOperator*"
+      ]
+    },
+    {
+      "stub": "src/Platform/Stubs/RtIpcTransportTlsAndroidStub.cpp",
+      "replaces": [
+        "src/Api/RtIpcTransportTls.cpp"
+      ]
+    },
+    {
+      "stub": "src/Platform/Stubs/TextureCompressionCacheAndroidStub.cpp",
+      "replaces": [
+        "src/Utils/TextureCompressionCache.cpp"
+      ]
+    },
+    {
+      "stub": "src/Platform/Stubs/GasSimulatorAndroidStub.cpp",
+      "replaces": [
+        "src/Physics/GasSimulator.cpp",
+        "src/Physics/GasSimulatorHost.cpp"
+      ]
+    },
+    {
+      "stub": "src/Platform/Stubs/VDBVolumeManagerAndroidStub.cpp",
+      "replaces": [
+        "src/Physics/VDBVolumeManager.cpp",
+        "src/Physics/VDBVolumeHost.cpp"
+      ]
+    }
+  ],
+  "drop_defines": [
+    "WIN32",
+    "_WINDOWS",
+    "_CONSOLE",
+    "_CRT_SECURE_NO_WARNINGS",
+    "_DEBUG"
+  ],
+  "add_defines": [
+    "RT_ANDROID=1",
+    "RT_NO_OPENVDB=1"
+  ],
+  "include_dirs": [
+    "external/simde",
+    "external/imgui",
+    "third_party/FidelityFX/1.1.4/include"
+  ],
+  "exception_sources": [
+    "src/Math/Vec3SIMD.cpp"
+  ],
+  "_comment_exception_sources": "Vec3SIMD::get throws on an invalid lane index.",
+  "cxx_flags_common": [
+    "-fno-strict-aliasing",
+    "-Wno-deprecated-declarations",
+    "-fdeclspec",
+    "-include",
+    "${RT_PROJECT_DIR}/source/include/Platform/AndroidCompat.h"
+  ],
+  "cxx_flags_per_abi": {
+    "x86_64": [
+      "-mavx2",
+      "-mfma",
+      "-mf16c",
+      "-mlzcnt",
+      "-mbmi"
+    ],
+    "arm64-v8a": []
+  },
+  "_comment_cxx_flags_per_abi": "The x86_64 emulator uses native AVX2/FMA. Jolt derives JPH_USE_LZCNT/TZCNT/F16C from __AVX2__, so -mf16c -mlzcnt -mbmi must accompany -mavx2 (MSVC needs no per-feature flags). AArch64 uses SIMDe through Math/SimdIntrin.h.",
+  "link_system_libs": [
+    "vulkan",
+    "android",
+    "log"
+  ],
+  "deps": [
+    {
+      "var": "RT_SDL2_DIR",
+      "kind": "subproject",
+      "target": "SDL2",
+      "note": "SDL2 source tree (contains CMakeLists.txt and android-project/). Built as libSDL2.so by this CMake via add_subdirectory."
+    },
+    {
+      "var": "RT_SDL2_IMAGE_DIR",
+      "kind": "subproject",
+      "target": "SDL2_image",
+      "note": "SDL2_image source tree (PNG/JPG). Needs RT_SDL2_DIR first."
+    }
+  ],
+  "_comment_include_dirs": "Dirs the Windows build gets from VC++ <IncludePath> or the FidelityFX .targets import, which the generator does not parse. FSR headers only: the runtime DLL is Windows-only, so the loader reports FSR unavailable on Android."
+}

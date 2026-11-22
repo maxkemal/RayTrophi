@@ -7,9 +7,9 @@
   Layout of the package:
     RayTrophiPlayer.exe + the DLLs it actually loads (resolved with dumpbin)
     VC++ runtime DLLs (app-local, from the Visual Studio redist folder)
-    shaders\                 every .spv the Player can load
+    shaders\                 Release shaders selected by player_shader_manifest.json
     scenes\<folder>\         .rtp + .rtp.bin + .rtp.shared + sidecars + <stem>_audio\
-    player_scenes.json       scene list; the FIRST entry opens at launch, F6 switches
+    player_scenes.json       scene list; F6 opens the game library
     licenses\                third-party notices
     redist\vc_redist.x64.exe fallback installer if app-local runtime is refused
 
@@ -28,12 +28,13 @@
 #>
 [CmdletBinding()]
 param(
-    # Scene order matters: the first one opens at launch.
+    # Scene order determines the order of cards in the library.
     [string[]]$Scenes = @(
-        'RayTrophiStudio\assets\scenes\pastel-paint-workshop\workshop.rtp'
+        'RayTrophiStudio\assets\scenes\pastel-paint-workshop\workshop.rtp',
+        'RayTrophiStudio\assets\scenes\kids-play-room\kids-play-room.rtp'
     ),
     # Display names for the F6 list, same order as -Scenes. Empty = file name.
-    [string[]]$SceneNames = @('Gizli Renkler'),
+    [string[]]$SceneNames = @('Gizli Renkler', 'Pastel Oyun Odası'),
     # Canonical shared output. Use other destinations only for explicit diagnostics.
     [string]$OutDir = 'dist\RayTrophiPlayer',
     [switch]$Zip,
@@ -41,6 +42,7 @@ param(
     # confirmed licence live there; see commit d1c1709a).
     [switch]$NoSceneAudio,
     [switch]$NoPerception,
+    [switch]$ShaderInventoryOnly,
     [string]$BridgePython = 'tools\perception_bridge\.venv\Scripts\python.exe',
     [string]$PoseModel = 'tools\perception_bridge\models\pose_landmarker.task'
 )
@@ -54,6 +56,48 @@ $packageTarget = [IO.Path]::GetFullPath($out)
 $marker = '.raytrophi_player_package'
 $warnings = New-Object System.Collections.Generic.List[string]
 function Warn([string]$m) { $warnings.Add($m); Write-Warning $m }
+
+$shaderDirectory = Join-Path $release 'shaders'
+$shaderManifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'player_shader_manifest.json') -Raw |
+    ConvertFrom-Json
+$shaderGroups = @{}
+foreach ($classification in @('required', 'conditional')) {
+    foreach ($group in $shaderManifest.$classification.PSObject.Properties) {
+        foreach ($name in $group.Value) {
+            if ($shaderGroups.ContainsKey($name) -or $name -in $shaderManifest.studioOnly) {
+                throw "Conflicting Player shader classification: $name"
+            }
+            $shaderGroups[$name] = "$classification/$($group.Name)"
+            if ($classification -eq 'required' -and
+                -not (Test-Path -LiteralPath (Join-Path $shaderDirectory $name) -PathType Leaf)) {
+                throw "Required Player shader missing from Release: $name"
+            }
+        }
+    }
+}
+$shaderFiles = @(Get-ChildItem -LiteralPath $shaderDirectory -File | Sort-Object Name)
+$playerShaderFiles = @($shaderFiles | Where-Object { $_.Name -notin $shaderManifest.studioOnly })
+
+if ($ShaderInventoryOnly) {
+    $inventory = foreach ($file in $shaderFiles | Where-Object Extension -eq '.spv') {
+        $bytes = [IO.File]::ReadAllBytes($file.FullName)
+        if ($bytes.Length -lt 20 -or ($bytes.Length % 4) -ne 0 -or
+            [BitConverter]::ToUInt32($bytes, 0) -ne 0x07230203) {
+            throw "Invalid SPIR-V header: $($file.Name)"
+        }
+        $version = [BitConverter]::ToUInt32($bytes, 4)
+        $group = if ($file.Name -in $shaderManifest.studioOnly) { 'studioOnly' }
+                 elseif ($shaderGroups.ContainsKey($file.Name)) { $shaderGroups[$file.Name] }
+                 else { 'retained/unclassified' }
+        [PSCustomObject]@{
+            name = $file.Name
+            group = $group
+            spirv = '{0}.{1}' -f (($version -shr 16) -band 255), (($version -shr 8) -band 255)
+        }
+    }
+    $inventory | ConvertTo-Json -Depth 3
+    return
+}
 
 # --- 0. Sanity ---------------------------------------------------------------
 if (-not (Test-Path $exe)) { throw "Player exe not found: $exe (build RayTrophiPlayer first)" }
@@ -129,7 +173,11 @@ if ($redistRoot) {
 }
 
 # --- 3. Shaders ------------------------------------------------------------------
-Copy-Item (Join-Path $release 'shaders') (Join-Path $out 'shaders') -Recurse
+$packageShaderDirectory = Join-Path $out 'shaders'
+New-Item -ItemType Directory -Force $packageShaderDirectory | Out-Null
+foreach ($shaderFile in $playerShaderFiles) {
+    Copy-Item -LiteralPath $shaderFile.FullName -Destination $packageShaderDirectory
+}
 # Shared locale catalogs are product resources; local language preferences are preserved.
 $localeSource = Join-Path $repo 'RayTrophiStudio/assets/i18n'
 if (-not (Test-Path -LiteralPath (Join-Path $localeSource 'locales.json'))) {
@@ -227,6 +275,12 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
     $name = if ($i -lt $SceneNames.Count -and $SceneNames[$i]) { $SceneNames[$i] } else { $stem }
     $listEntries += [ordered]@{ name = $name; path = "scenes/$(Split-Path -Leaf $src)/$file" }
 }
+# The scene folders carry runtime assets only, including in recursive sidecars.
+$sourceAssets = @(Get-ChildItem -LiteralPath $sceneDir -Recurse -File |
+    Where-Object { $_.Name -match '\.(blend\d*|glb|gltf)$' })
+if ($sourceAssets.Count -ne 0) {
+    throw "Authoring files in staged scenes: $($sourceAssets.FullName -join ', ')"
+}
 # A clean recipient gets portable library roots, no camera IDs/calibration/tokens.
 $defaults = [ordered]@{ version = 1; roots = @('scenes'); locale = 'tr'; appearance = 'camera' }
 [IO.File]::WriteAllText((Join-Path $out 'player_operator.json'),
@@ -238,14 +292,16 @@ $listJson = [ordered]@{ scenes = $listEntries } | ConvertTo-Json -Depth 4
 $assets = Join-Path $repo 'RayTrophiStudio\assets'
 if (Test-Path (Join-Path $assets 'licenses')) { Copy-Item (Join-Path $assets 'licenses') (Join-Path $out 'licenses') -Recurse }
 if (Test-Path (Join-Path $assets 'THIRD_PARTY_ASSETS.md')) { Copy-Item (Join-Path $assets 'THIRD_PARTY_ASSETS.md') $out }
+$playerExeHash = (Get-FileHash -LiteralPath (Join-Path $out 'RayTrophiPlayer.exe') -Algorithm SHA256).Hash
 $readme = @"
 RayTrophi Player
 ================
-Run RayTrophiPlayer.exe. The first scene in player_scenes.json opens at launch.
+Run RayTrophiPlayer.exe. With multiple bundled games, select a card in the library.
+A single bundled game opens directly.
 For this demo, read KAMERA_TESTI.md for mouse/camera selection and camera setup.
 
 Keys
-  F6        scene list (1-9 or click to open)
+  F6        game library
   F11       fullscreen        F1  HUD
   F2        operator console  F3  60 Hz / uncapped
   F8        clear paint and in-flight paint drops
@@ -256,10 +312,20 @@ Command line
   RayTrophiPlayer.exe [scene.rtp] --fullscreen --no-hud --render-scale 0.75
 
 Requirements
-  Windows 10/11 x64, a GPU with a current Vulkan 1.2 driver.
+  Windows 10/11 x64, a GPU and driver supporting Vulkan 1.3 and the
+  RayFusion and scene compute features used by the selected project.
   If the program does not start, run redist\vc_redist.x64.exe once.
   Install into a user-writable folder (not Program Files): logs are written next to the exe.
   The first launch on a new GPU/driver compiles shaders in the driver and is slower.
+
+Vulkan 1.2 candidate test
+  Extract the complete package to a writable folder. Launch RayTrophiPlayer.exe.
+  Check that the workshop appears, pop a balloon, and check that paint reaches
+  the room surfaces. If the camera is configured, also check the depth card.
+  Report which step passed or failed. Include SceneLog.txt from the package
+  folder before launching again. If generated during the test, also include
+  StartupCrashStack.txt. Do not send the entire folder.
+  Packaged Player EXE SHA-256: $playerExeHash
 "@
 Set-Content -Path (Join-Path $out 'README.txt') -Value $readme -Encoding utf8
 
@@ -299,8 +365,21 @@ $manifest | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $out '
 if ($Zip) {
     # Archive generated payload only, never the active package's local IPC tokens/logs.
     $zipPath = "$packageTarget.zip"
-    if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-    Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zipPath -CompressionLevel Optimal
+    $zipTemporary = "$out.zip"
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    try {
+        [IO.Compression.ZipFile]::CreateFromDirectory(
+            $out, $zipTemporary, [IO.Compression.CompressionLevel]::Fastest, $false)
+        if ([IO.File]::Exists($zipPath)) {
+            [IO.File]::Replace($zipTemporary, $zipPath, [NullString]::Value)
+        } else {
+            [IO.File]::Move($zipTemporary, $zipPath)
+        }
+    } finally {
+        if ([IO.File]::Exists($zipTemporary)) {
+            Remove-Item -LiteralPath $zipTemporary
+        }
+    }
 }
 New-Item -ItemType Directory -Force $packageTarget | Out-Null
 # Explicit lean-package switches must also work when refreshing an existing package.
@@ -338,6 +417,17 @@ foreach ($item in Get-ChildItem -LiteralPath $out -Force) {
         (Test-Path -LiteralPath (Join-Path $packageTarget $item.Name))) { continue }
 
     Copy-Item -LiteralPath $item.FullName -Destination $packageTarget -Recurse -Force
+}
+# Reconcile the known Studio-only files left by an older generated package.
+$publishedShaders = Join-Path $packageTarget 'shaders'
+foreach ($name in $shaderManifest.studioOnly) {
+    if ($name -ne [IO.Path]::GetFileName($name) -or $name -notlike '*.spv') {
+        throw "Invalid Studio-only shader filename: $name"
+    }
+    $oldShader = Join-Path $publishedShaders $name
+    if (Test-Path -LiteralPath $oldShader -PathType Leaf) {
+        Remove-Item -LiteralPath $oldShader -Force
+    }
 }
 # Remove this invocation's verified, generated staging tree after publication.
 $stagePath = [IO.Path]::GetFullPath($out)

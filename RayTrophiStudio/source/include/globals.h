@@ -603,7 +603,6 @@ extern const float infinity;
 extern  std::string baseDirectory;
 extern const float aperture;
 extern const float focusdistance;
-extern const float gamma;
 extern const float exposure ;
 extern const float saturation ;
 const float BASE_EPSILON = 1e-6f;

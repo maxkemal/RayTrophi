@@ -8,9 +8,24 @@ Shader değişmedi. Gizli objelerle ana salonu yenileme sonraki çalışmadır.
 
 Mesh balonlarda varsayılan ve normal arayüzdeki tek fare kontrolü:
 
-- Tıkla ve bırak: balon olduğu yerde patlar.
+- Tıkla ve bırak: balon olduğu yerde patlar. Fare ışını önce en yakın
+  görünen balon yüzeyine isabeti arar. Yüzeye isabet yoksa seçim yarıçapı
+  içindeki adaylardan ışına en yakın olanı seçer.
 - Sol basılı tut: fareyle sağ/sol/yukarı/aşağı taşı; tekerlekle ileri/geri taşı.
   Pozitif tekerlek kameradan uzaklaştırır (adım başına 0,35 metre).
+- Taşırken diğer şişik balonlara temas edersen onları itersin. Balonlar arası
+  temas, görsel mesh boyutlarından hesaplanan elipsoidle sınanır. İtiş temas
+  normalinde ilerler ve her kısa itişten sonra yeniden sınanır. Öndeki balon
+  duvara dayandığında teğet hareket hafif sürtünmeyle devam eder. Balon
+  bastırıldığı yönde yassılaşır, basınç kalkınca eski şekline döner.
+  Belirgin basınç yaklaşık 0,28 saniye sürerse balon mevcut boya patlaması
+  yolundan patlar. Tekerlek adımları tek başına sıkışma patlamasını başlatmaz.
+  Oda teması da balonun görsel elipsoidini kullanır. Köşede duvar ve zemin
+  baskıları birlikte hesaplanır. Sıkışınca boya balonun bulunduğu noktadan
+  normal patlama deseniyle dağılır.
+- Kutlama konfetisi uçarken kısa parlamalar yapar. İlk yüzey temasında
+  kaybolur. Her konfetide en fazla 16 küçük sim parçacığı üretilir. Kıvılcım
+  yüzeye değince söner; temas noktasında en fazla bir kısa parıltı kalır.
 - Bırak: son kabul edilmiş dünya konumunda patlat.
 - Escape, odak kaybı veya menü/debug kamera açma: patlatmadan iptal et.
 
@@ -57,7 +72,7 @@ devralamaz, hareket ettiremez, bırakamaz veya iptal edemez (başarılı no-op).
 Tek anda bir tutma vardır. Gelecekte iskelet el girişleri aynı servise örneğin
 `owner="body:7:right"` ile bağlanabilir; bu tur iskelet jest algılayıcısı eklenmedi.
 
-`pointer` sonucu kompakt `{held, owner, depth, moved, popped}` nesnesidir.
+`pointer` sonucu kompakt `{held, owner, depth, compression, moved, popped}` nesnesidir.
 -1 balon bulunmadığı/işlem yapılmadığı anlamına gelir. `depth` kamera ileri
 eksenindeki metre mesafesidir; duvara yaslandıktan sonra tekerlek ters yönde
 hemen yanıt verebilsin diye kabul edilen konuma uyarlanır. Diğer demo işlemleri

@@ -1,0 +1,71 @@
+{
+  "required": {
+    "RayFusion": [
+      "material_preview.spv",
+      "material_preview_frag.spv",
+      "raster_post.spv"
+    ],
+    "BalloonPaint": [
+      "particle_viewport_frag.spv",
+      "particle_viewport.spv",
+      "particle_viewport_pull.spv",
+      "sim_particle_ballistic.spv",
+      "sim_particle_spawn.spv",
+      "sim_particle_collide.spv",
+      "paint_wet.spv"
+    ],
+    "CameraDepthCard": [
+      "player_depth_card.spv",
+      "player_depth_card_frag.spv"
+    ]
+  },
+  "conditional": {
+    "RayFusionEffects": [
+      "material_preview_covered.spv",
+      "material_preview_ibl.spv",
+      "material_preview_shadow.spv",
+      "material_preview_shadow_frag.spv",
+      "material_preview_shadow_opaque.spv",
+      "raster_cull.spv",
+      "raster_taa.spv",
+      "reflection_trace.spv",
+      "reflection_filter.spv"
+    ],
+    "World": [
+      "material_preview_sky.spv",
+      "material_preview_sky_vert.spv",
+      "world_sky_capture.spv",
+      "atmosphere_lut.spv",
+      "atmosphere_aerial_froxel.spv",
+      "cloud_noise.spv",
+      "cloud_sample.spv",
+      "cloud_cells.spv",
+      "cloud_volume_gen.spv",
+      "cloud_raster.spv",
+      "cloud_resolve.spv",
+      "cloud_scene.spv",
+      "cloud_shadow.spv",
+      "lens_water_sim.spv",
+      "lens_water_draw.spv"
+    ],
+    "SceneGeometry": [
+      "skinning.spv",
+      "material_preview_volume.spv",
+      "material_preview_volume_shadow.spv",
+      "material_preview_sdf_surface.spv"
+    ]
+  },
+  "studioOnly": [
+    "edit_overlay.spv",
+    "edit_overlay_frag.spv",
+    "edit_overlay_point.spv",
+    "edit_overlay_point_frag.spv",
+    "hair_viewport.spv",
+    "hair_viewport_geom.spv",
+    "hair_viewport_frag.spv",
+    "selection_mask.spv",
+    "selection_mask_frag.spv",
+    "selection_outline.spv",
+    "selection_outline_frag.spv"
+  ]
+}

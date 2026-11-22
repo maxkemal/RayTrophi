@@ -1,6 +1,8 @@
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/BalloonBirthAnimation.h"
 #include "Paint/BalloonInteraction.h"
+#include "Paint/BalloonJoltMotion.h"
+#include "Paint/BalloonSoftBody.h"
 #include "Paint/BalloonBodyInteraction.h"
 #include "Paint/HiddenGameObjects.h"
 #include "Paint/HiddenPaintSafety.h"
@@ -50,9 +52,8 @@ using RayTrophiSim::ParticleAppearanceProfile;
 using RayTrophiSim::ParticleSpawnDesc;
 
 constexpr const char* kVisualSystem = "BalloonDemoVisuals";
-// Click target radius in metres. Balloons keep 0.8 m between centres, so two
-// targets never overlap.
-constexpr float kPickRadius = 0.4f;
+constexpr float kPickRadius = 0.4f;  // Pointer tolerance and interaction envelope.
+constexpr float kBalloonBillboardDiameter = 0.65f;
 constexpr std::array<const char*, 4> kSystems = {
     "BalloonPaintRed", "BalloonPaintBlue", "BalloonPaintYellow", "BalloonPaintGreen"
 };
@@ -94,6 +95,10 @@ struct Balloon {
 };
 
 struct State {
+    std::unique_ptr<BalloonJoltMotion> jolt_motion;
+    std::unique_ptr<BalloonSoftBody> soft_body;
+    double soft_body_ms_max = 0.0;
+    float soft_body_min_axial = 1.0f;
     SceneData* scene = nullptr;
     bool prepared = false;
     bool running = false;
@@ -440,7 +445,8 @@ json validatedConfig(const json& input, SceneData& scene) {
         "surprise_chance", "surprise_sound", "room_goal", "celebrate_sound",
         "finale_reset_seconds", "spawn_min", "spawn_max", "float_amplitude", "drift_speed",
         "transmission", "sparkles", "sparkle_trails", "drop_sparks", "drop_trails",
-        "burst_clumpiness", "burst_jets_max"
+        "burst_clumpiness", "burst_jets_max", "soft_body", "jolt_motion", "impact_soft_body",
+        "wind_strength"
     };
     for (auto it = input.begin(); it != input.end(); ++it) {
         if (std::find(allowed.begin(), allowed.end(), it.key()) == allowed.end()) {
@@ -458,12 +464,22 @@ json validatedConfig(const json& input, SceneData& scene) {
               {"sparkles", 90}, {"sparkle_trails", true}, {"drop_sparks", 0.25}, {"drop_trails", true},
               {"burst_clumpiness", 0.7}, {"burst_jets_max", 10}};
     c.update(input);
+    if (c.contains("visual_nodes")) {
+        c["jolt_motion"] = input.value("jolt_motion", json(true));
+        c["impact_soft_body"] = input.value("impact_soft_body", json(true));
+        c["wind_strength"] = input.value("wind_strength", json(defaultBalloonWindStrength));
+    }
+    validateBalloonJoltMotion(c);
     if (!c["interaction_mode"].is_string() ||
         (c["interaction_mode"] != "pop" && c["interaction_mode"] != "carry")) {
         throw std::runtime_error("interaction_mode must be pop|carry");
     }
     if (c["interaction_mode"] == "carry" && !c.contains("visual_nodes")) {
         throw std::runtime_error("carry requires mesh balloon visuals");
+    }
+    if (c.contains("soft_body") && (!c["soft_body"].is_boolean() ||
+        (c["soft_body"] == true && !c.contains("visual_nodes")))) {
+        throw std::runtime_error("soft_body must be a boolean and true requires mesh visuals");
     }
     if (!c["body_controls"].is_boolean() ||
         (c["body_controls"] == true && !c.contains("visual_nodes"))) {
@@ -797,6 +813,9 @@ void moveMeshVisual(SceneData& scene, size_t index, const Balloon& balloon) {
         return;
     }
     Matrix4x4 matrix = state.visual_base[index];
+    if (state.jolt_motion) {
+        matrix = state.jolt_motion->visualRotation(index) * matrix;
+    }
     const auto birth = Paint::balloonBirthScale(state.seconds - balloon.birth_started_at,
                                                state.config.value("birth_seconds", 0.75));
     for (int r = 0; r < 3; ++r) {
@@ -807,7 +826,18 @@ void moveMeshVisual(SceneData& scene, size_t index, const Balloon& balloon) {
     matrix.m[0][3] = balloon.position.x;
     matrix.m[1][3] = balloon.position.y;
     matrix.m[2][3] = balloon.position.z;
+    const auto id = static_cast<int>(index);
+    if (state.soft_body && state.soft_body->held() == id) {
+        applyBalloonCarryCompression(id, matrix, state.soft_body->axial(),
+                                     state.soft_body->lateral());
+    } else {
+        applyBalloonCarryCompression(id, matrix, state.soft_body ? 1.0f : 0.0f);
+    }
     mesh->transform->setBase(matrix);
+    // Impact squash only affects the rendered instance. Carry keeps its stable collision shape.
+    if (state.jolt_motion && (!balloonIsHeld(id) || balloonCarryCompression() <= 0.0f)) {
+        state.jolt_motion->applyImpactVisual(index, matrix);
+    }
     pushBalloonTransform(*context, name, matrix);
 }
 
@@ -821,43 +851,47 @@ void tickMotion(SceneData& scene, float dt) {
     const bool birthing = std::any_of(state.balloons.begin(), state.balloons.end(),
         [](const Balloon& balloon) { return balloon.inflated && !balloon.birth_settled; });
     if (!state.config.contains("visual_nodes") ||
-        (amplitude <= 0.0f && speed <= 0.0f && !birthing)) {
+        (!state.jolt_motion && amplitude <= 0.0f && speed <= 0.0f && !birthing)) {
         return;
     }
     const float step = std::min(dt, 0.1f);
-    for (size_t i = 0; i < state.balloons.size(); ++i) {
-        Balloon& b = state.balloons[i];
-        if (!b.inflated || balloonIsHeld(static_cast<int>(i))) continue;
-        if (speed > 0.0f) {
-            const float max_speed = speed / std::sqrt(std::max(0.3f, b.size));
-            // Wander: a small random push, then steer.
-            Vec3 accel(randomRange(-1.0f, 1.0f), randomRange(-0.5f, 0.5f), randomRange(-1.0f, 1.0f));
-            accel = accel * (0.6f * max_speed);
-            const float margin = 0.4f * b.size;
-            const auto away = [&](float v, float lo, float hi) {
-                if (v < lo + margin) return (lo + margin - v) * 2.0f;
-                if (v > hi - margin) return (hi - margin - v) * 2.0f;
-                return 0.0f;
-            };
-            accel = accel + Vec3(away(b.anchor.x, state.spawn_min.x, state.spawn_max.x),
-                                 away(b.anchor.y, state.spawn_min.y, state.spawn_max.y),
-                                 away(b.anchor.z, state.spawn_min.z, state.spawn_max.z));
-            for (size_t j = 0; j < state.balloons.size(); ++j) {
-                if (j == i || !state.balloons[j].inflated) continue;
-                const Vec3 d = b.anchor - state.balloons[j].anchor;
-                const float reach = 0.4f * (b.size + state.balloons[j].size) + 0.25f;
-                const float len = d.length();
-                if (len > 1e-4f && len < reach) {
-                    accel = accel + d * ((reach - len) / len * 3.0f);
+    if (state.jolt_motion) {
+        state.jolt_motion->advance(state.balloons, heldBalloon(), dt);
+    } else {
+        for (size_t i = 0; i < state.balloons.size(); ++i) {
+            Balloon& b = state.balloons[i];
+            if (!b.inflated || balloonIsHeld(static_cast<int>(i))) continue;
+            if (speed > 0.0f) {
+                const float max_speed = speed / std::sqrt(std::max(0.3f, b.size));
+                // Wander: a small random push, then steer.
+                Vec3 accel(randomRange(-1.0f, 1.0f), randomRange(-0.5f, 0.5f), randomRange(-1.0f, 1.0f));
+                accel = accel * (0.6f * max_speed);
+                const float margin = 0.4f * b.size;
+                const auto away = [&](float v, float lo, float hi) {
+                    if (v < lo + margin) return (lo + margin - v) * 2.0f;
+                    if (v > hi - margin) return (hi - margin - v) * 2.0f;
+                    return 0.0f;
+                };
+                accel = accel + Vec3(away(b.anchor.x, state.spawn_min.x, state.spawn_max.x),
+                                     away(b.anchor.y, state.spawn_min.y, state.spawn_max.y),
+                                     away(b.anchor.z, state.spawn_min.z, state.spawn_max.z));
+                for (size_t j = 0; j < state.balloons.size(); ++j) {
+                    if (j == i || !state.balloons[j].inflated) continue;
+                    const Vec3 d = b.anchor - state.balloons[j].anchor;
+                    const float reach = 0.4f * (b.size + state.balloons[j].size) + 0.25f;
+                    const float len = d.length();
+                    if (len > 1e-4f && len < reach) {
+                        accel = accel + d * ((reach - len) / len * 3.0f);
+                    }
                 }
+                b.drift = b.drift + accel * step;
+                const float v = b.drift.length();
+                if (v > max_speed) b.drift = b.drift * (max_speed / v);
+                b.anchor = b.anchor + b.drift * step;
             }
-            b.drift = b.drift + accel * step;
-            const float v = b.drift.length();
-            if (v > max_speed) b.drift = b.drift * (max_speed / v);
-            b.anchor = b.anchor + b.drift * step;
+            b.phase += step * (6.28318530718f / (3.0f + b.size * 1.5f));
+            b.position = b.anchor + Vec3(0.0f, amplitude * std::sin(b.phase), 0.0f);
         }
-        b.phase += step * (6.28318530718f / (3.0f + b.size * 1.5f));
-        b.position = b.anchor + Vec3(0.0f, amplitude * std::sin(b.phase), 0.0f);
     }
     state.motion_clock += step;
     if (state.motion_clock < 1.0 / 30.0) {
@@ -918,6 +952,9 @@ void inflate(SceneData& scene, Balloon& balloon) {
     balloon.birth_settled = !state.config.contains("visual_nodes") ||
         state.config.value("birth_seconds", 0.75) <= 0.0;
     const auto index = static_cast<size_t>(&balloon - state.balloons.data());
+    if (state.jolt_motion) {
+        state.jolt_motion->spawn(index, balloon.position, kPickRadius * balloon.size);
+    }
     updateMeshVisual(scene, index, balloon, true);
     // Apply the tiny first pose before a frame can show the full-sized respawn.
     moveMeshVisual(scene, index, balloon);
@@ -1034,6 +1071,7 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
             balloonSparkles(scene, balloon.position, 0.25f * balloon.size);
         }
         updateMeshVisual(scene, available[b], balloon, false);
+        if (state.jolt_motion) state.jolt_motion->remove(available[b]);
         system(scene, kVisualSystem)->kill(balloon.visual_slot);
         balloon.inflated = false;
         balloon.respawn_at = state.seconds + state.config.value("respawn_seconds", 3.5);
@@ -1048,13 +1086,12 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
             balloonBurstPattern(state.random, particles, balloon.size, shape, pattern);
         // A rainbow surprise colours a whole clump alike: it lands as one splat.
         const HiddenPaintSpawnGuard spawn_guard(scene);
-        const bool origin_allowed = spawn_guard.allows(balloon.position);
         int color = balloon.color;
         for (size_t i = 0; i < pattern.size(); ++i) {
             const BalloonBurstDrop& p = pattern[i];
             ParticleSpawnDesc drop;
             drop.position = balloon.position + p.offset;
-            if (!origin_allowed || !spawn_guard.allows(drop.position)) {
+            if (!spawn_guard.allows(drop.position)) {
                 continue;
             }
             drop.velocity = p.velocity;
@@ -1150,9 +1187,10 @@ std::vector<BalloonInteractionTarget> interactionTargets() {
         if (!balloon.inflated) {
             continue;
         }
+        const TriangleMesh* mesh = nullptr;
         if (state.config.contains("visual_nodes")) {
             const auto name = state.config["visual_nodes"][i].get<std::string>();
-            const auto* mesh = state.scene ? state.scene->getFlatNodeMesh(name) : nullptr;
+            mesh = state.scene ? state.scene->getFlatNodeMesh(name) : nullptr;
             if (!mesh || !mesh->visible) {
                 continue;
             }
@@ -1162,7 +1200,8 @@ std::vector<BalloonInteractionTarget> interactionTargets() {
                                state.config.value("birth_seconds", 0.75)) : BalloonBirthScale{};
         targets.push_back({static_cast<int>(i), balloon.position,
             kPickRadius * balloon.size * std::max(birth.radial, birth.vertical),
-            kPickRadius * balloon.size * 1.15f});
+            kPickRadius * balloon.size * 1.15f, mesh,
+            0.5f * kBalloonBillboardDiameter * balloon.size});
     }
     return targets;
 }
@@ -1215,6 +1254,11 @@ json status() {
             {"simulation_ms_max", state.max_simulation_ms},
             {"frame_interval_ms_max", state.max_frame_interval_ms},
             {"visual_mode", state.config.contains("visual_nodes") ? "flat_mesh" : "particle"},
+            {"soft_body", state.soft_body != nullptr},
+            {"soft_body_ms_max", state.soft_body_ms_max},
+            {"soft_body_axial_scale", state.soft_body ? state.soft_body->axial() : 1.0f},
+            {"soft_body_min_axial_scale", state.soft_body_min_axial},
+            {"jolt_motion", balloonJoltMotionStatus(state.jolt_motion.get())},
             {"resets", state.resets}, {"dirty", state.dirty}, {"surprise_pops", state.surprise_pops},
             {"room_progress", state.room_progress}, {"milestones", state.milestones},
             {"shows", state.shows}, {"finale_cascade_left", state.cascade.size()},
@@ -1241,6 +1285,11 @@ json status() {
 
 void prepare(SceneData& scene, const json& config) {
     const auto start = Clock::now();
+    auto jolt_motion = prepareBalloonJoltMotion(scene, config, state.scene == &scene
+        ? state.config.value("visual_nodes", std::vector<std::string>{})
+        : std::vector<std::string>{});
+    auto soft_body = config.value("soft_body", false) ?
+        std::make_unique<BalloonSoftBody>() : nullptr;
     std::map<std::string, float> previous_gold_transmission;
     if (state.scene == &scene && state.config.contains("visual_nodes")) {
         const auto& nodes = state.config["visual_nodes"];
@@ -1256,6 +1305,8 @@ void prepare(SceneData& scene, const json& config) {
     cancelBalloonInteraction();
     resetBalloonBodyInteraction();
     state = State{};
+    state.jolt_motion = std::move(jolt_motion);
+    state.soft_body = std::move(soft_body);
     state.scene = &scene;
     state.config = config;
     state.random.seed(config["seed"].get<uint32_t>());
@@ -1327,10 +1378,11 @@ void prepare(SceneData& scene, const json& config) {
     state.visual_profiles.clear();
     for (size_t c = 0; c < state.palette.size(); ++c) {
         state.visual_profiles.push_back(visuals->findOrAddAppearanceProfile(
-            profile("Balloon " + colorKey(state.palette[c]), state.palette[c], 0.65f)));
+            profile("Balloon " + colorKey(state.palette[c]), state.palette[c],
+                    kBalloonBillboardDiameter)));
     }
     state.gold_visual_profile = visuals->findOrAddAppearanceProfile(
-        profile("Balloon Surprise Gold", kGold, 0.65f));
+        profile("Balloon Surprise Gold", kGold, kBalloonBillboardDiameter));
 
     {
         BalloonEffectsSetup fx;
@@ -1505,17 +1557,33 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
             const auto config = state.config.is_object() ? state.config : json::object();
             const auto action = balloonPointerCommand(scene, input,
                 config.value("interaction_mode", std::string("pop")), interactionTargets(),
-                config.value("visual_nodes", std::vector<std::string>{}));
-            if (action.move >= 0) {
-                auto& balloon = state.balloons[static_cast<size_t>(action.move)];
-                balloon.position = balloon.anchor = action.position;
+                config.value("visual_nodes", std::vector<std::string>{}),
+                state.jolt_motion ? &state.jolt_motion->front().triangles : nullptr);
+            const auto move = [&](int id, const Vec3& position) {
+                const auto index = static_cast<size_t>(id);
+                auto& balloon = state.balloons[index];
+                balloon.position = balloon.anchor = position;
                 balloon.drift = Vec3(0.0f);
                 balloon.phase = 0.0f;
-                moveMeshVisual(scene, static_cast<size_t>(action.move), balloon);
+                moveMeshVisual(scene, index, balloon);
+            };
+            if (action.move >= 0) {
+                move(action.move, action.position);
+            }
+            for (const auto& pushed : action.pushed) {
+                if (state.jolt_motion) {
+                    state.jolt_motion->push(pushed.id,
+                        pushed.position - state.balloons[pushed.id].position);
+                } else {
+                    move(pushed.id, pushed.position);
+                }
             }
             if (action.pop >= 0) {
                 popBalloons(scene, {static_cast<size_t>(action.pop)});
                 state.dirty = true;
+            }
+            if (state.jolt_motion) {
+                state.jolt_motion->syncHold(state.balloons, heldBalloon());
             }
             if (action.move >= 0 || action.pop >= 0 || heldBalloon() >= 0) {
                 state.last_activity = state.seconds;
@@ -1523,6 +1591,14 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
             output = balloonInteractionStatus();
             output["moved"] = action.move;
             output["popped"] = action.pop;
+            return true;
+        }
+        if (operation == "wind") {
+            if (!state.prepared || state.scene != &scene) {
+                throw std::runtime_error("configure the demo before adjusting wind");
+            }
+            applyBalloonWind(input, state.config, state.jolt_motion.get());
+            output = status();
             return true;
         }
         if (operation == "interaction") {
@@ -1866,6 +1942,30 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
         for (auto& balloon : state.balloons) {
             if (!balloon.inflated && state.seconds >= balloon.respawn_at) {
                 inflate(scene, balloon);
+            }
+        }
+        const int released = takeReleasedCompressedBalloon();
+        if (released >= 0 && static_cast<size_t>(released) < state.balloons.size() &&
+            state.balloons[released].inflated) {
+            moveMeshVisual(scene, static_cast<size_t>(released), state.balloons[released]);
+        }
+        if (const int crushed = updateBalloonCrush(dt); crushed >= 0) {
+            popBalloons(scene, {static_cast<size_t>(crushed)});
+            state.dirty = true;
+        }
+        if (state.soft_body) {
+            const int active = heldBalloon();
+            const float compression = balloonCarryCompression();
+            const auto begin = Clock::now();
+            const float axial = state.soft_body->axial();
+            const float lateral = state.soft_body->lateral();
+            state.soft_body->update(active, compression, dt);
+            state.soft_body_min_axial = std::min(state.soft_body_min_axial, state.soft_body->axial());
+            state.soft_body_ms_max = std::max(state.soft_body_ms_max, elapsedMs(begin));
+            if (active >= 0 &&
+                (axial != state.soft_body->axial() || lateral != state.soft_body->lateral())) {
+                const auto index = static_cast<size_t>(active);
+                moveMeshVisual(scene, index, state.balloons[index]);
             }
         }
         tickMotion(scene, std::min(dt, 0.25f));

@@ -35,6 +35,102 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
 
+- 2026-11-22 Codex A2c: Android defines RT_NO_OPENVDB and substitutes both VDB implementations and their Windows Player host companions. The Android manifest now requires only the SDL source dependencies. VDB import and sparse VDB selection return a platform error. Windows layouts and IPC method signatures are unchanged.
+
+- 2026-11-22 Claude A3: `Platform.h` + `secureRandomBytes`. `RtIpcSecurity`/`RtIpcSession` artık OpenSSL içermiyor (`Utils/Sha256.h` + Platform RNG); yalnız TLS taşıması OpenSSL kullanıyor. `RtPlayerIpcPolicy.h` + `localSocketName`. Android yerel IPC = soyut unix soketi, 4 bayt BE çerçeve; `RtIpc.psm1 Connect-RtIpc -Port`. TLS Android stub'ı uzak IPC istenmediyse `true` döner (yoksa bütün IPC kapanıyordu).
+
+- 2026-11-22 Codex A2b: Android manifest adds vendored SIMDe headers and enables exceptions for Vec3SIMD.cpp. AArch64 native aliases are scoped to Math/SimdIntrin.h. The native x86 compiler flags are unchanged.
+
+- 2026-11-22 Claude: `scripts/player_include_manifest.json` artık `src/UI/PlayerOperator*` içeriyor. A1 yeniden üretimi bu 6 UI dosyasını Player vcxproj'dan düşürmüştü (elle eklenmişlerdi) → Windows Player link kırığı. Player'a yeni dosya eklerken vcxproj'u değil MANİFESTİ düzenle. Android: `scripts/player_android_manifest.json` + `gen_player_android_cmake.py --check`.
+
+- 2026-11-22 Codex A1: `Platform.cpp` is shared by Studio and Player. On Android, Player working directory and exe-relative lookups resolve to SDL internal storage. A4 should extract `assets/`, `scenes/`, and `shaders/` under that root. The Platform header and pipe ACL contract are unchanged.
+
+- 2026-11-21 Codex: Player operator and runtime discovery add `scene_load` including attempt ID, canonical project key, checkpoint progress and timed stages through the first frame. Scene cards expose the canonical key. `FrameCycle::beginUiFrame` accepts an optional runtime-overlay flag.
+
+- 2026-11-21 Codex: Mesh balloon demos now default to Jolt motion and impact shells. `paint.wet_demo` adds `wind` for live `wind_strength` changes and `jolt_motion.front_barrier` status. Player game settings persist `jolt_motion`, `impact_soft_body`, and `wind_strength`.
+
+- 2026-11-21 Codex: `paint.wet_demo` adds optional `impact_soft_body` with default true under `jolt_motion`. Status adds `soft_shells`, `peak_shell_squash`, `shell_step_ms_max`, and `rotating_bodies`.
+
+- 2026-11-21 Codex: `paint.wet_demo` Jolt motion status adds `squashes` and `peak_squash`. Visual impact squash leaves sphere geometry and carry transforms intact.
+
+- 2026-11-21 Codex: Optional `paint.wet_demo` bool config `jolt_motion` enables a sphere per live mesh balloon and static flat room geometry. Status adds `jolt_motion` counters/timing. Shift + mouse release uses the existing owned pointer cancel, which releases a held Jolt sphere into free fall.
+
+- 2026-11-21 Codex: `paint.wet_demo` configure accepts optional boolean `soft_body` for mesh visuals. Status adds `soft_body`, `soft_body_axial_scale`, `soft_body_min_axial_scale` and `soft_body_ms_max`. Existing compression and pop fields keep their meanings.
+
+- 2026-11-21 Codex: Paint thickness determines gradual added-relief ceiling instead of a per-drop multiplier. Existing ridges survive lowering; pigment pickup reads pigment, and runoff cannot exceed the incoming/local relief maximum. paint_wet.spv source/runtime Vulkan 1.2 validated with unchanged capabilities/bindings/offsets.
+
+- 2026-11-21 Codex: Player game settings adds paint_thickness (0..1, null for mixed). Shared apply/save converts to existing surface height_contribution and enables height/normal for positive values. Existing profiles without the field stay compatible. No headers or shader ABI changed.
+
+- 2026-11-21 Codex: Flat sprite style tag 3 selects Player foil confetti with triangle/quad/pentagon variations and edge glints. No descriptor, push constant or IPC layout changes. Three source/runtime SPVs validated for Vulkan 1.2.
+
+- 2026-11-21 Codex: Spark lens streak distance tuning is shader-only. vShade.zw carry the longer envelope and stretch; the fragment uses a pixel-width floor for thin streaks. Descriptor and location decorations unchanged. Three Vulkan 1.2 source/runtime modules validated; restart Player to load updated pipelines.
+
+- 2026-11-21 Codex: Particle billboard LUT metadata reuses the roughness slot only on flat sparks for halo/star style. Fragment input/output decorations and buffer layouts match, Vulkan 1.2 validation passes, source/runtime SPV hashes agree.
+
+- 2026-11-21 Codex: Effects status adds confetti_motes_spawned. impact_sparks now counts short contact glints (one per processed head impact, bounded), rather than four secondary moving sparks. No shader ABI changes.
+
+- 2026-11-21 Codex: Squeeze pop again uses the regular burst origin, direction and event format. The experimental burst.tear_origin and burst.latex_fragments fields were removed. Particle shader ABI unchanged.
+
+- 2026-11-21 Codex: paint.wet_demo pointer/interaction status adds compression (visual squash fraction). A sustained direct wall press can emit the existing pop event from the demo tick. Shader ABI unchanged.
+
+- 2026-11-21 Codex: BalloonInteractionResult carries pushed positions internally; paint.wet_demo response fields, project data, shader ABI unchanged. Mouse and world pointer share the swept carry path.
+
+- 2026-11-21 Codex: ParticleSimulationSystem layout gains an appearance revision; rebuild dependent objects together. Wet paint uses per-system GPU LUT buffers. Shader ABI and IPC fields unchanged.
+
+- 2026-11-21 Codex: BalloonInteractionTarget carries a flat visual mesh pointer and billboard radius for mouse picking. Pop event drops still counts emitted droplets; a blocked balloon center no longer suppresses exterior droplets. IPC fields and shader ABI unchanged.
+
+- 2026-11-20 Codex: Player loader'a gore Vulkan 1.2/1.3 instance secer. Fiziksel cihaz kabulunde RayFusion feature ve graphics/compute queue aranir. Sim registry uyumsuz SPIR-V veya push limitini driver cagirisindan once atlar. 20 scene shader SPV1.5 olarak source/runtime kopyalandi. Manifestte 40/40 spirv-val Vulkan1.2 PASS; binding ve push ABI ayni.
+
+
+- 2026-11-20 Codex: 3 partikül raster, 2 derinlik kartı, ballistic ve spawn shader çıktıları Vulkan 1.2/SPV1.5 olarak source/runtime dizinlerine dağıtıldı. spirv-val ve descriptor/offset/capability karşılaştırması PASS. ABI, EXE ve dist paketi değişmedi.
+
+
+- 2026-11-20 Codex: RayFusion draw push 208 -> 128 B, set 0 binding 28 frame UBO 80 B. Base/viewport layout 29 binding. 11 Vulkan 1.2 SPV source + x64/Release/shaders, spirv-val ve ABI offsetleri PASS. Eski EXE ile yeni RayFusion shaderlarini karistirmayin. dist paketi yeni EXE ile birlikte yenilenmeli.
+
+
+- 2026-11-20 Codex: Vulkan cihaz capabilities struct etkin independentBlend ve fragmentStoresAndAtomics bilgilerini tasir. RayFusion admission ve Player hata raporu bunlari kullanir. Header degisikligi hedefleri yeniden derletir. Shader ABI ayni.
+
+
+- 2026-11-20 Codex: RayFusion viewport binding 1 kapasitesi gercek descriptor layout, sampler/sampled image, storage ve fragment kaynak limitlerinden hesaplanir. Binding numaralari ve shader ABI ayni. Runtime kapasite loglanir.
+
+
+- 2026-11-20 Codex: Player Solid/Matcap, grid, hair-line, secim/edit mesh kurulumlari ayrildi. Ortak HDR/LDR pass'ler RayFusionViewportPasses.cpp, iki VS hedefinde kayitli. MaterialPreview hazir degilse mevcut runtime error alani kurulum asamasini gosterir. Shader baglama ve push ABI ayni.
+
+
+- 2026-11-20 Codex: VULKAN_RASTER_REQUIREMENTS_AUDIT.md salt-okunur audit.
+  Paket temel raster SPV1.6 -> cihaz Vulkan1.3; instance sabit1.3 ama GPU secimi
+  API seviyesini elemez. Solid layout176/draw168 byte, push-limit gate YOK.
+  MP208 + descriptor-indexing gate var ama descriptor layout13 SSBO/1 image/
+  N+14sampler; kapasite hesabi12 ayiriyor, diger sampler/SSBO limitleri gate yok.
+  VK_INFO null log, AMD cihaz/API kaydi kayip. Efekt pipeline init kosulsuz.
+  Alti raster SPV vulkan1.3 val PASS; vulkan1.2 Solid negatif test beklenen ret.
+  Motor/shader degismedi, C++ build/app launch yok; profil/fix henuz uygulanmadi.
+
+- 2026-11-20 Codex: AMD siyah viewport icin ignore edilen dist/diagnostics/
+  basic-gpu-test.zip hazir: flat RTP8, 4 mesh/48 triangle (zemin+RGB kup),
+  tek kamera/isik, solid world; oyun/particle/paint/audio/HDRI/texture yok.
+  Mevcut demo ve shaderlar degismedi. Zip yalniz uc RTP dosyasi+TEST.txt;
+  mevcut EXE uzerine RTP surukle-birak. Offline assertions PASS; app acilmadi.
+  Kaynakta ensureAtmosphereLUTPipeline aerial/cloud kurulumlarini kosulsuz
+  denedigi icin efektler kapali sahnede de startup pipeline uyarisi gorulebilir.
+
+- 2026-11-20 Codex GUNCEL: kullanici istegiyle forces shader deneyleri geri alindi.
+  Iki derleme scripti HEAD ayarlarina dondu; orijinal SPV1.6/27620 byte eski
+  Vulkan1.3/-O ayariyla derlenip source/runtime/dist'e kondu; orijinal SHA256
+  2225C782...98158 bit-bit esit, spirv-val PASS. SPV HEAD'de bulunmuyordu.
+  Asagidaki Vulkan1.2/-O0 notlari artik aktif degil. Tani C++ kodu korundu.
+
+- 2026-11-20 Codex: laptop yeni trace SPV1.5/27676 byte ile ayni forces pipeline'da
+  kesildi; hedef dusurmek tek basina cozum olmadi. Izole ikinci test yalniz forces
+  Vulkan1.2/-O0 SPV1.5/37944 byte; validation PASS, source/runtime/dist guncel.
+  Iki bulk script bu tek shader icin -O0 korur. ABI/C++/ZIP degismedi.
+
+- 2026-11-20 Codex: laptop trace iki kez sim_fluid_particle_forces pipeline.begin'de
+  kesildi; onceki SPV1.6 yalniz Shader capability, vulkan1.3 validation PASS.
+  Izole test icin yalniz bu SPV Vulkan1.2/-O -> SPIR-V1.5 derlendi, validation PASS,
+  source/runtime/dist hash esit. Ana compile_shaders.ps1 bu tek hedefi korur;
+  compile_sim_shaders.bat zaten Vulkan1.2. ABI degismedi, ZIP guncellenmedi.
+
 - **2026-11-20 Codex — ozel demo Git gecmisi temizlendi / main gonderildi:** kullanici onayiyla workshop sahne/ses/art varliklari, dist, onceki balloon-paint-room fixture ve scripts/scenes uretim betikleri main'in erisilebilir tum gecmisinden filtrelendi; kod/test/teknik notlar kaldı. .gitignore mevcut ozel-demo kurallari korundu. Motor commit f7b6e101, paketleme commit 13148f3f; main 13148f3f lease-korumali push ile GitHub'a gonderildi. Iki eski uzak dalin tum commitleri main icindeydi; atomik lease-korumali islemle silindi, uzak yalniz main. Yerel eski Claude worktree klasorleri silinmedi.
 
 - **2026-11-20 Codex — temizlik guvenlik/kabul:** filtreleme adimlarindan biri yanlis cwd ile ana depoda da calisti; kullaniciya bildirildi. Onceden commitlenmis son main tree hash'i bit-bit ayni dogrulandi, commitlenmemis koordinasyon notlari korunmus yerel capture tree'den kurtarildi ve origin/upstream geri kuruldu. Yerel rtp/bin/kart/ZIP SHA-256'lari esit. Tam onceki Git yedegi yalniz ignore edilen docs/dev/.captures/history-cleanup/before-cleanup.bundle altinda kalir; gonderilmedi. Ref/tree/history audit PASS, AST/JSON/XML/deployed shader hash/diff PASS; yeni C++ build yok. Eski klon/indirilen kopyalar bu islemle kendiliginden silinmez.
@@ -604,6 +700,101 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
   paketleniyordu). DEM gözenekli yolu da aynı tuzağa açık olabilir — Codex bakabilir.
 
 ## 3. Derleme bekleyen işler
+
+- 2026-11-22 Codex A5: Windows Player MSVC x64 /Zs and Android NDK x86_64/arm64-v8a syntax checks passed for all three changed units. Android x86_64 APK rebuild and emulator touch/paint acceptance pending. Windows Player incremental build and mouse acceptance pending after the earlier full rebuild requirements. See NEXT_BUILD_CHECKS.md.
+
+- 2026-11-22 Codex A2c: Studio/Player MSVC x64 /Zs passed under normal defines and RT_NO_OPENVDB. Windows incremental build and visible VDB import check pending. Android NDK link and device checks pending. See NEXT_BUILD_CHECKS.md.
+
+- 2026-11-22 Codex A2b: MSVC x64 /Zs passed in both target configurations. Windows performance comparison pending a user build. Android target syntax and device checks pending the NDK sysroot. See NEXT_BUILD_CHECKS.md.
+
+- 2026-11-22 Codex A1: Incremental Studio and Player build pending. MSVC x64 /Zs passed for all 12 touched C++ units under both target definitions. Check Windows Player startup paths and asset visibility first, then follow NEXT_BUILD_CHECKS.md. Android compilation and device checks pending SDK/NDK and packaging.
+
+- 2026-11-22 Codex: Incremental Player build pending for multi-game library startup. Launch the two-scene package with no arguments and verify both cards appear before any project loads. Select each card from a fresh launch. Verify single-scene auto-open and explicit --project launch, then refresh the canonical package with scripts/package_player.ps1 -Zip.
+
+- 2026-11-22 Codex: Incremental Studio build pending for Game Design per-material wet paint controls and Jolt toggles/timings. Select a partially registered multi-material prop, add missing slots, verify existing resolutions/settings and per-slot removal. On the same scene compare frame time with Jolt off, Jolt on with soft shells off, and both on, using Reconfigure between runs. No shader or IPC contract changes.
+
+- 2026-11-21 Codex: Incremental Player/Studio build pending for selection-only library cards and card load status. Verify with packaged locales and `python scripts/test/rt_player_scene_load_ipc.py dist/RayTrophiPlayer/scenes/pastel-paint-workshop/workshop.rtp --exercise-disposable`. Packaged Workshop log showed geometry reads of 1–2 ms and loader totals of 556 / 1907 ms before the new checkpoint timings.
+
+- 2026-11-21 Codex: Incremental Player/Studio build pending for wind control and invisible Workshop front barrier. Run `python scripts/test/rt_balloon_jolt_motion_ipc.py --exercise-disposable --expect-front-barrier` and verify live wind and saved controls with the disposable Player game-settings test.
+
+- 2026-11-21 Codex: Incremental Player/Studio build pending for per-balloon soft shells and rigid-body rotation of authored balloon meshes. Run `python scripts/test/rt_balloon_jolt_motion_ipc.py --exercise-disposable`, visually check balloon knot rotation and floor/balloon contacts, compare Jolt timing with `impact_soft_body` on/off.
+
+- 2026-11-21 Codex: Incremental Player/Studio build pending for calmer Jolt motion and impact squash. Run `python scripts/test/rt_balloon_jolt_motion_ipc.py --exercise-disposable` on packaged Workshop; check floating speed, impacts and compare peak physics/visual timing with the previous 11-body run.
+
+- 2026-11-21 Codex: Incremental Player/Studio build pending for all-balloon Jolt motion. Validate packaged Workshop with `python scripts/test/rt_balloon_jolt_motion_ipc.py --exercise-disposable` and visually drop a balloon onto another. Read Jolt timing and contact counts with the full balloon pool active.
+
+- 2026-11-21 Codex: Incremental Player/Studio build pending for Jolt squeeze jitter. In the packaged Workshop with soft_body on, drag along the back wall then oscillate at the contact edge with the mouse. The held balloon should recover smoothly and only pop on sustained pressure or release. No IPC or shader changes.
+
+- 2026-11-21 Codex: Jolt balloon squeeze prototype needs incremental Player/Studio build. Run `python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable` with and without `--soft-body`. Android arm64 device profiling awaits the Player port.
+
+- 2026-11-21 Codex: Incremental Player build pending for single Paint Thickness control. Check new paint at 0 and 1 on multiple surfaces, apply without reset, and save/reopen. IPC regression: python scripts/test/rt_player_game_settings_ipc.py --exercise-disposable.
+
+- 2026-11-21 Codex: Foil confetti now expires on the first collider hit using its existing CPU system. Incremental BalloonEffects.cpp build pending. Stable-fade experiment removed and original vertex SPVs restored/validated for Vulkan 1.2. Check that foil disappears on contact without flicker.
+
+- 2026-11-21 Codex: Incremental build pending for foil confetti (ParticleBillboardBuilder.cpp and BalloonEffects.cpp). Check silhouette variation and brief streak without loss of body color. Verify firework streak remains visible independently.
+
+- 2026-11-21 Codex: Incremental BalloonEffects.cpp build pending for slimmer burst-start trails and reduced lightness on pale colors. Check several simultaneous pale heads, visible colored taper, and unchanged lens streak. IPC test: python scripts/test/rt_balloon_sparkle_ipc.py --player. No header/shader/IPC format changes.
+
+- 2026-11-21 Codex: Incremental build for firework hues, halo and star (ParticleBillboardBuilder.cpp and BalloonEffects.cpp; no header edits). Verify the active Player reads the deployed shader and blue/red cores retain hue, only firework heads show short rays, and paint drops stay unchanged.
+
+- 2026-11-21 Codex: Dark-palette highlights use additive blending for sparks, motes, and trails after Player reported dark alpha-blended sprites. Foil remains alpha blended. Incremental build (BalloonEffects.cpp only) and bright-wall live verification pending. Profile IPC regression: python scripts/test/rt_balloon_sparkle_ipc.py --player. No shader/IPC changes.
+
+- 2026-11-21 Codex: BalloonEffects.cpp-only incremental Player/Studio build pending. Verify metallic confetti flickers, foil settles without rebound, and emissive sparks extinguish on collision. IPC check: python scripts/test/rt_balloon_sparkle_ipc.py --player.
+
+- 2026-11-21 Codex: Restored original squeeze pop spray; incremental Player/Studio build pending (Paint-only headers). Check wall/corner paint reaches its surface and pop is centered; confetti and spark settings remain as last tuned. Disposable test: python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable.
+
+- 2026-11-21 Codex: Artimli Player/Studio build bekler (BalloonInteraction.cpp). Room sweep uses visual ellipsoid and combines contact pressure on floor-wall edges. IPC/shader unchanged. Verify floor contact height, corner drag without squash-axis flicker, and existing wall slide/pop.
+
+- 2026-11-21 Codex: Wall slide and crush pop await incremental Player/Studio build (Paint-only header). Check direct press visibly compresses, tangential drag slides, stepping back restores shape, and holding firm pressure pops once. Disposable acceptance: python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable.
+
+- 2026-11-21 Codex: Previous swept carry build showed premature shared motion in Player. Visual ellipsoid and normal-only push correction awaits incremental build (BalloonInteraction.cpp only). Verify no motion across a visible gap, glancing contact separation, direct push and wall stop. Disposable acceptance: python scripts/test/rt_balloon_carry_ipc.py --player --exercise-disposable.
+
+- 2026-11-21 Codex: Player/Studio build pending (ParticleSimulation.h triggers broad recompilation). Check successive balloon pops, live particle profile edits, room reset/reopen, and CPU particles reappearing after the pool is empty.
+
+- 2026-11-21 Codex: Balloon pointer priority and paint spawn filtering await incremental Player/Studio builds. Verify exposed rear balloon, fully occluded rear balloon, near-miss tolerance, and a balloon partly inside a paint-reveal AABB (exterior drops spawn).
+
+- 2026-11-20 Codex: Saha loguna GPU storage binding/format destek raporu ve dort balon compute kernel asamasi eklendi. Onceki ilk kare loguyla birlikte tek Player Release build bekler. Shader ABI, SPV ve paket degismedi.
+
+
+- 2026-11-20 Codex: Kullanici son Player build ve kamera karti regresyonunu PASS bildirdi. Saha logu ekleri icin bir artimli Player build bekler. Ardindan canonical paket aliciya gonderilir; kabul alicinin makinesinde, SceneLog.txt + varsa StartupCrashStack.txt.
+
+
+- 2026-11-20 Codex: Tek artimli Player Release build sonrasi Vulkan 1.3 regresyon ve Vulkan 1.2 cihaz kabulu. Plan: PLAYER_RAYFUSION_RESOURCE_PLAN.md. Canli 1.2 kabulune kadar paket gereksinimi 1.3; dist degismedi.
+
+
+- 2026-11-20 Codex: Ortak Vulkan header degisti. Son toplu Player + Studio Release build gerekli. PBR, Transmission, boya, sky/golge, hacim ve kamera derinlik karti tek kabul oturumunda. Shaders hazir.
+
+
+- 2026-11-20 Codex: Vulkan header ve RayFusion cihaz kabul/tani degisikligi son toplu Player/Studio build ve kabul oturumuna eklendi. Ara build istenmiyor.
+
+
+- 2026-11-20 Codex: RayFusion descriptor butcesi icin artimli Player/Studio build; kapasite logu, dokulu PBR/islak boya ve yari gecirgen balon smoke testi. Shader degismedi.
+
+
+- 2026-11-20 Codex: Player lens weather compute pipeline kurulumu etkin kameraya baglandi. Artimli Player build, ayni sahnede kapali -> acik -> kapali -> acik gecisi. Post descriptor ve shader ABI ayni.
+
+
+- 2026-11-20 Codex: Player SurfaceSDF ilk aktif grid adresli isosurface slotu geldiginde kurulur. Artimli Player build sonrasi balon -> normal hacim -> isosurface kabul. Transmission ve shader ABI ayni.
+
+
+- 2026-11-20 Codex: Player atmosfer LUT, aerial froxel ve bulut pipeline kurulumu ilk istege baglandi. Artimli Player build, balon -> Nishita/bulut -> renk/HDRI yukseklik sisi, clouds.sample IPC. Lens weather ve shader ABI ayni.
+
+
+
+
+- 2026-11-20 Codex: RayFusion Player kaynak ayrimi tek artimli Player + Studio build ve ortak kabul oturumu bekliyor. Balon oda/boya/derinlik karti, resize/reopen, volume ve Studio mod/overlay matrisi: PLAYER_RAYFUSION_RESOURCE_PLAN.md.
+
+
+- 2026-11-20 Codex: SimulationPipelineTrace.h varsayilan dosya I/O kapali;
+  yalniz RT_SIM_PIPELINE_TRACE=1 ile acilir (env bir kez okunur). Kullanici
+  Player artimli build bekliyor; NEXT_BUILD_CHECKS.md. Shader/ABI degismedi.
+
+- 2026-11-20 Codex: Player artimli build bekliyor. SimulationPipelineTrace.h +
+  SimulationComputeVulkan.cpp minimal wiring: module/pipeline begin/end, kernel,
+  SPV path/version/bytes/result append trace; her kayitta dosya kapanir.
+  GPU/shader ABI degismedi, shader derlemesi gerekmez. Laptopta tek acilis sonrasi
+  SimulationPipelineTrace.txt son eslesmeyen begin shader'i belirler.
+  NEXT_BUILD_CHECKS.md; Codex C++ build/app launch yapmadi.
 
 - **2026-11-20 Codex — ARTIMLI Studio + Player / F9 GPU atlas yasami:** WetPaintGpu.h/cpp, HiddenObjectMotion/Placement/Internal, RtApiPaintWet.h/cpp + IPC/Python stats. AST/stats mapping/no create-destroy in geometry patch/source-size/diff PASS. C++ build/app launch/live failure regression CALISTIRILMADI; shader degismedi. Kullanici derlemesinden sonra disposable `python scripts/test/rt_hidden_game_objects_ipc.py --player --exercise-disposable` shown/paint dort boyali F9 dongusu, atlas rebuild sayaci sabit / geometry upload artisi / device_lost=false / yeni-konum dab assert eder. Device-loss kesin cozuldu kabul edilmedi; HIDDEN_GAME_OBJECTS.md son bolum.
 

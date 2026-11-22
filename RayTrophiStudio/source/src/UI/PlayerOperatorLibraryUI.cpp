@@ -200,14 +200,48 @@ void games(SDL_Renderer *renderer) {
     }
     ImGui::EndDisabled();
     ImGui::Spacing();
+    const auto load = AppRuntime::playerSceneLoad().status();
+    const auto load_state = load.value("state", "");
+    const auto load_key = load.value("key", "");
+    const bool loading = load_state == "loading";
+    const auto current = load_state == "ready" ? load_key : ui.status.value("project", "");
+    const auto entries = ui.status.value("games", json::array());
+    if (!current.empty()) {
+        const auto active = std::find_if(entries.begin(), entries.end(), [&](const json& game) {
+            return game.value("key", "") == current;
+        });
+        const auto title = active == entries.end()
+            ? AppRuntime::projectPathToUtf8(AppRuntime::projectPathFromUtf8(current).stem())
+            : active->value("name", "");
+        label((std::string(tr("player.current_scene", "Current scene")) + "  ·  " + title).c_str(),
+              mint);
+    }
+    const auto selected = std::find_if(entries.begin(), entries.end(), [](const json& game) {
+        return game.value("key", "") == ui.selected_scene;
+    });
+    ImGui::BeginDisabled(loading || selected == entries.end() || ui.selected_scene == current);
+    if (action(trId("player.load_selected_scene", "Load selected scene"), ImVec2(0, 34), true)) {
+        call("library.open", {{"path", (*selected)["path"]}});
+    }
+    ImGui::EndDisabled();
+    if (selected != entries.end()) {
+        ImGui::SameLine();
+        const auto name = selected->value("name", "");
+        label(name.c_str(), muted);
+    }
     const float available = ImGui::GetContentRegionAvail().x;
     const int columns = std::max(1, std::min(3, static_cast<int>((available + 14) / 230)));
     const float width = (available - (columns - 1) * 14) / columns;
     int shown = 0;
     const auto search = lower(ui.search);
-    for (const auto &game : ui.status.value("games", json::array())) {
+    for (const auto &game : entries) {
         const auto title = game.value("name", tr("player.untitled", "Untitled"));
-        if (!search.empty() && lower(title).find(search) == std::string::npos) {
+        const auto key = game.value("key", "");
+        const bool card_loading = loading && key == load_key;
+        const bool failed = load_state == "failed" && key == load_key;
+        const bool active = !key.empty() && key == current;
+        const bool chosen = !key.empty() && key == ui.selected_scene;
+        if (!card_loading && !search.empty() && lower(title).find(search) == std::string::npos) {
             continue;
         }
         if (shown % columns) {
@@ -216,11 +250,13 @@ void games(SDL_Renderer *renderer) {
         ImGui::PushID(game["path"].get<std::string>().c_str());
         ImGui::BeginGroup();
         const auto p = ImGui::GetCursorScreenPos();
-        const bool clicked = ImGui::InvisibleButton("card", ImVec2(width, 190));
+        const bool clicked = ImGui::InvisibleButton("card", ImVec2(width, 190)) && !loading;
         const bool hovered = ImGui::IsItemHovered();
         auto *draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(p, add(p, width, 190), hovered ? IM_COL32(37, 49, 71, 255) : panel, 13);
-        draw->AddRect(p, add(p, width, 190), hovered ? mint : border, 13, 0, 1);
+        draw->AddRectFilled(p, add(p, width, 190),
+                            (chosen || hovered) ? IM_COL32(37, 49, 71, 255) : panel, 13);
+        draw->AddRect(p, add(p, width, 190),
+                      (active || card_loading) ? mint : (chosen ? violet : border), 13, 0, 1);
         if (auto *image = thumbnail(renderer, game.value("thumbnail", ""))) {
             draw->AddImageRounded(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(image)),
                                   add(p, 8, 8), add(p, width - 8, 120), ImVec2(0, 0), ImVec2(1, 1),
@@ -250,17 +286,36 @@ void games(SDL_Renderer *renderer) {
         }
         draw->PushClipRect(add(p, 14, 130), add(p, width - 10, 180), true);
         draw->AddText(add(p, 14, 132), ink, title.c_str());
-        draw->AddText(add(p, 14, 160), muted,
-                      game.value("packaged", false)
-                          ? tr("player.raytrophi_experience", "RAYTROPHI EXPERIENCE")
-                          : tr("player.local_project", "LOCAL PROJECT"));
+        if (card_loading) {
+            const auto progress = load.value("progress", 0);
+            const auto text = tr("player.scene_loading", "Loading scene");
+            const auto stage = load.value("stage", "");
+            const auto phase = Localization::text("player.load_stage." + stage, text);
+            draw->AddText(add(p, 14, 155), mint, phase);
+            const float track = std::max(0.0f, width - 28);
+            draw->AddRectFilled(add(p, 14, 174), add(p, 14 + track, 178), border, 2);
+            draw->AddRectFilled(add(p, 14, 174), add(p, 14 + track * progress / 100.0f, 178),
+                                mint, 2);
+        } else if (failed) {
+            draw->AddText(add(p, 14, 160), IM_COL32(255, 173, 133, 255),
+                          tr("player.scene_load_failed", "Load failed"));
+        } else if (active) {
+            draw->AddText(add(p, 14, 160), mint, tr("player.current_scene", "Current scene"));
+        } else {
+            draw->AddText(add(p, 14, 160), chosen ? violet : muted,
+                          chosen ? tr("player.selected_scene", "Selected") :
+                          (game.value("packaged", false)
+                              ? tr("player.raytrophi_experience", "RAYTROPHI EXPERIENCE")
+                              : tr("player.local_project", "LOCAL PROJECT")));
+        }
         draw->PopClipRect();
         if (hovered) {
-            ImGui::SetTooltip(tr("player.open_s_s", "Open %s\n%s"), title.c_str(),
-                              game["path"].get<std::string>().c_str());
+            const auto detail = failed ? load.value("error", "") :
+                                (card_loading ? load.value("detail", "") : game.value("path", ""));
+            ImGui::SetTooltip("%s\n%s", title.c_str(), detail.c_str());
         }
         if (clicked) {
-            call("library.open", {{"path", game["path"]}});
+            ui.selected_scene = key;
         }
         ImGui::EndGroup();
         ImGui::PopID();

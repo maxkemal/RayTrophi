@@ -2471,6 +2471,7 @@ public:
     const ParticleAppearanceProfile* findAppearanceProfile(uint32_t id) const;
     // Baked LUT row of `id`, or the fallback row when the id resolves to nothing.
     const float* appearanceLutRow(uint32_t id) const;
+    uint64_t appearanceRevision() const;
     // Adds a copy of `profile`. Its id is honoured when non-zero and unused
     // (project load), otherwise a fresh one is issued. Returns 0 and fills
     // `error` when the profile is invalid.
@@ -2952,6 +2953,7 @@ private:
     std::vector<ParticleEmitterDesc> emitters_;
     std::vector<ParticleAppearanceProfile> appearance_profiles_;
     std::vector<std::vector<float>> appearance_luts_;  // parallel to the profiles
+    uint64_t appearance_revision_ = 0;
     uint32_t next_appearance_profile_id_ = 1;
     std::vector<ParticleColliderDesc> colliders_;
     std::vector<ResolvedCollider> resolved_colliders_;

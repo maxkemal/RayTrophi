@@ -395,6 +395,11 @@ void GasVolume::uploadToGPU(void* stream_ptr) {
 
 
 void GasVolume::initialize() {
+#ifdef RT_NO_OPENVDB
+    simulator.initialize(getSettings());
+    initialized = false;
+    return;
+#endif
     // Ensure our transform scale matches the physical grid_size from settings
     auto& settings = getSettings();
     

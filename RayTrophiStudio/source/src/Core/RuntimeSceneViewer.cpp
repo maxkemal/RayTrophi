@@ -1,5 +1,7 @@
 #include <sstream>
 #include "Core/RuntimeSceneViewer.h"
+#include "Viewport/RayFusionViewportPasses.h"
+#include "Core/PlayerSceneLoad.h"
 #ifdef RT_PLAYER
 #include "Core/RuntimeProjectHost.h"
 #endif
@@ -162,6 +164,12 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
     }
     auto backend = std::make_unique<Backend::VulkanViewportBackend>();
     if (!backend->initialize()) {
+        // Name the GPU and the missing feature: on Android this is the only thing the
+        // user can act on (an unsupported device), so it must reach the screen, not the log.
+        const std::string rejected = Backend::rayFusionDeviceRejections();
+        if (!rejected.empty()) {
+            return rtapi::Result::fail("This device's GPU is not supported - " + rejected);
+        }
         return rtapi::Result::fail("Player Vulkan viewport initialization failed");
     }
     backend->setViewportMode(Backend::ViewportMode::MaterialPreview);
@@ -260,6 +268,9 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
     // Same two-way material service Studio uses: Renderer uploads to its own
     // backend and to a separate viewport backend only when one exists. The
     // Player has a single device, so this is one upload.
+    if (playerSceneLoad().busy()) {
+        playerSceneLoad().checkpoint(83, "upload_materials");
+    }
     context_.renderer.updateBackendMaterials(context_.scene, backend_);
     auto* vulkan = dynamic_cast<Backend::VulkanBackendAdapter*>(backend_);
     auto* device = vulkan ? vulkan->getVulkanDevice() : nullptr;
@@ -267,6 +278,9 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
                              device->m_materialBuffer.size > 0;
     if (!material_buffer_ready_) {
         return rtapi::Result::fail("Vulkan material buffer upload did not produce a valid buffer");
+    }
+    if (playerSceneLoad().busy()) {
+        playerSceneLoad().checkpoint(87, "prepare_viewport");
     }
     buildRasterScene(*backend_, context_.scene, context_.renderer);
     // Volume table after the raster build, same order as Studio's rebuild path
@@ -309,19 +323,26 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
 }
 
 rtapi::Result RuntimeSceneViewer::openProject(const std::string& path) {
+    auto& load = playerSceneLoad();
+    load.begin(path);
+    load.checkpoint(2, "check_project");
     if (g_vulkan_device_lost) {
         last_open_error_ = "Vulkan device lost; restart Player before opening another project";
+        load.finish(last_open_error_);
         return rtapi::Result::fail(last_open_error_);
     }
     const auto validation = validateProjectSlice(path);
     if (!validation.ok) {
         last_open_error_ = validation.error;
+        load.finish(last_open_error_);
         return validation;
     }
     try {
+        load.checkpoint(8, "prepare_device");
         const auto initialization = initializeBackend();
         if (!initialization.ok) {
             last_open_error_ = initialization.error;
+            load.finish(last_open_error_);
             releaseBackend();
             return initialization;
         }
@@ -352,15 +373,30 @@ rtapi::Result RuntimeSceneViewer::openProject(const std::string& path) {
         // Same canonical parser/flat data loader used by Studio and rt.project.open.
         g_dense_mesh_as_hittable = true;
         Paint::resetBalloonPaintDemo();
+        load.checkpoint(15, "project_data");
         if (!ProjectManager::getInstance().openProject(path, context_.scene,
-                context_.render_settings, context_.renderer, backend_)) {
+                context_.render_settings, context_.renderer, backend_,
+                [&load](int progress, const std::string& detail) {
+                    const char* stage = "project_data";
+                    switch (progress) {
+                        case 10: stage = "read_geometry"; break;
+                        case 35: stage = "read_textures"; break;
+                        case 40: stage = "read_materials"; break;
+                        case 80: stage = "restore_audio"; break;
+                        case 81: stage = "prepare_particles"; break;
+                        case 82: stage = "restore_physics"; break;
+                    }
+                    load.checkpoint(15 + progress * 55 / 100, stage, detail);
+                })) {
             error_ = "project open failed: " + path;
         } else {
+            load.checkpoint(72, "game_setup");
             // The project's own game design wins; the .balloons.json sidecar is
             // the older self-contained form, read only when there is none.
             const bool sidecar_ok = Paint::gameDesignPending() ||
                 Paint::loadBalloonPaintProject(context_.scene, path, error_);
             if (sidecar_ok) {
+                load.checkpoint(80, "scene_setup");
                 const auto preparation = prepareScene();
                 if (!preparation.ok) {
                     error_ = preparation.error;
@@ -369,6 +405,7 @@ rtapi::Result RuntimeSceneViewer::openProject(const std::string& path) {
         }
         if (!error_.empty()) {
             last_open_error_ = error_;
+            load.finish(last_open_error_);
             return rtapi::Result::fail(error_);
         }
         project_path_ = path;
@@ -379,10 +416,16 @@ rtapi::Result RuntimeSceneViewer::openProject(const std::string& path) {
         refresh_requested_ = true;
         last_open_error_.clear();
         rtapi::notifySceneLoaded();
+        if (Paint::gameDesignPending()) {
+            load.checkpoint(91, "game_design");
+        } else {
+            load.checkpoint(97, "first_frame");
+        }
         return rtapi::Result::success();
     } catch (const std::exception& error) {
         error_ = error.what();
         last_open_error_ = error_;
+        load.finish(last_open_error_);
         scene_ready_ = false;
         return rtapi::Result::fail("Player project initialization failed: " + error_);
     }
@@ -408,6 +451,10 @@ void RuntimeSceneViewer::requestFrame() {
 }
 
 void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
+    auto& load = playerSceneLoad();
+    if (load.busy() && g_vulkan_device_lost) {
+        load.finish("Vulkan device lost");
+    }
     if (!scene_ready_ || !backend_ || g_vulkan_device_lost) {
         return;
     }
@@ -457,6 +504,10 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         g_gpu_refit_pending = true;
     }
     const SimulationClockResult clock = simulationClock().tick(scene, input);
+    if (load.busy() && load.stage() == "game_design" && !Paint::gameDesignPending()) {
+        load.checkpoint(97, "first_frame", Paint::gameDesignStatus());
+        refresh_requested_ = true;
+    }
     if (clock.pause_requested) {
         simulation_stopped_ = true;
         simulation_error_ = clock.step_error;
@@ -605,6 +656,7 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
             error_ = "Vulkan device lost; restart Player to recreate the scene viewer";
             scene_ready_ = false;
             frame_available_ = false;
+            playerSceneLoad().finish(error_);
             return false;
         }
         if (width_ != surface->w || height_ != surface->h) {
@@ -651,8 +703,13 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
         }
         if (upload_failed) {
             error_ = g_vulkan_device_lost ? "Vulkan device lost" : SDL_GetError();
+            SCENE_LOG_ERROR("[Player] Frame delivery failed at " +
+                            (g_vulkan_device_lost
+                                ? std::string("Vulkan: ") + g_vulkan_device_lost_msg
+                                : std::string("SDL_UpdateTexture: ") + error_));
             scene_ready_ = false;
             frame_available_ = false;
+            playerSceneLoad().finish(error_);
             return false;
         }
         ++frames_rendered_;
@@ -668,19 +725,37 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
             ((telemetry.frames_consumed > 0 &&
               (telemetry.frames_consumed != consumed_baseline_ || settled)) ||
              (!telemetry.async_present && telemetry.draw_calls > 0 && settled));
+        const bool firstSceneFrame = frame_available_ && frame_scene_revision_ != scene_revision_;
         if (frame_available_) {
             frame_scene_revision_ = scene_revision_;
+            auto& load = playerSceneLoad();
+            if (load.busy() && load.stage() == "first_frame") {
+                load.finish();
+            }
         }
         // Cheap signature for camera/reload acceptance, not a second image render.
         const auto* bytes = static_cast<const unsigned char*>(surface->pixels);
         pixel_signature_ = 1469598103934665603ull;
+        unsigned nonzeroSamples = 0;
         for (int y = 0; y < height_; y += (height_ / 16 + 1)) {
             for (int x = 0; x < width_; x += (width_ / 16 + 1)) {
                 const auto* pixel = bytes + y * surface->pitch + x * 4;
+                if (firstSceneFrame && (pixel[0] || pixel[1] || pixel[2])) {
+                    ++nonzeroSamples;
+                }
                 for (int channel = 0; channel < 3; ++channel) {
                     pixel_signature_ = (pixel_signature_ ^ pixel[channel]) * 1099511628211ull;
                 }
             }
+        }
+        if (firstSceneFrame) {
+            SCENE_LOG_INFO("[Player] First scene frame uploaded: revision=" +
+                           std::to_string(scene_revision_) +
+                           " size=" + std::to_string(width_) + "x" + std::to_string(height_) +
+                           " submitted=" + std::to_string(telemetry.frames_submitted) +
+                           " consumed=" + std::to_string(telemetry.frames_consumed) +
+                           " draws=" + std::to_string(telemetry.draw_calls) +
+                           " nonzero_rgb_samples=" + std::to_string(nonzeroSamples));
         }
         const bool capture_enabled = rtapi::viewportCaptureEnabled();
         if (capture_enabled && frame_available_) {
@@ -689,6 +764,8 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
         return true;
     } catch (const std::exception& error) {
         error_ = error.what();
+        SCENE_LOG_ERROR("[Player] Render failed: " + error_);
+        playerSceneLoad().finish(error_);
         scene_ready_ = false;
         frame_available_ = false;
         return false;
@@ -747,6 +824,7 @@ nlohmann::json RuntimeSceneViewer::status() const {
         {"scene_ready", scene_ready_}, {"frame_available", frame_available_},
         {"render_pending", needsFrame()},
         {"project_path", project_path_}, {"scene_revision", scene_revision_},
+        {"scene_load", playerSceneLoad().status()},
         {"frame_scene_revision", frame_scene_revision_},
         {"last_open_error", last_open_error_}, {"error", error_},
         {"flat_meshes", flat_meshes_}, {"triangles", triangles_},

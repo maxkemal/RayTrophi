@@ -9,10 +9,14 @@ namespace rtipc_product {
 inline constexpr bool isPlayer = true;
 inline constexpr const char* appName = "RayTrophi Player";
 inline constexpr const wchar_t* pipeName = LR"(\\.\pipe\RayTrophiPlayer)";
+// POSIX/Android: abstract unix socket name (no leading NUL here; the transport adds it).
+// Reach it from the PC with: adb forward tcp:<port> localabstract:RayTrophiPlayer
+inline constexpr const char* localSocketName = "RayTrophiPlayer";
 #else
 inline constexpr bool isPlayer = false;
 inline constexpr const char* appName = "RayTrophi Studio";
 inline constexpr const wchar_t* pipeName = LR"(\\.\pipe\RayTrophiStudio)";
+inline constexpr const char* localSocketName = "RayTrophiStudio";
 #endif
 
 inline bool supportsMethod(const std::string& method) {

@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cmath>
 #include <new>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -129,11 +130,41 @@ LitLights litLightsFor(const SceneData& scene) {
     return out;
 }
 
-void markLitRow(std::vector<float>& lut, uint32_t row, const LitShading& shading,
-                const LitLights& lights) {
-    if (!shading.lit) return;
+float flatSpriteStyle(std::string_view system,
+                      const RayTrophiSim::ParticleAppearanceProfile& profile) {
+    if (system == "BalloonConfetti" && profile.name.starts_with("Confetti ")) {
+        return 3.0f;
+    }
+    if (profile.blend != RayTrophiSim::ParticleAppearanceBlend::Additive) {
+        return 0.0f;
+    }
+    const std::string_view name = profile.name;
+    if (system == "BalloonSparkles") {
+        if (name.starts_with("Sparkle ")) {
+            return 2.0f;
+        }
+        if (name.starts_with("Drop Spark ") || name.starts_with("Confetti Mote ")) {
+            return 1.0f;
+        }
+    }
+    if (system == "BalloonSparkleTrails" &&
+        (name.starts_with("Sparkle Quench ") || name.starts_with("Sparkle Glitter "))) {
+        return 1.0f;
+    }
+    return 0.0f;
+}
+
+void markParticleRow(std::vector<float>& lut, uint32_t row, const LitShading& shading,
+                     const LitLights& lights, std::string_view system,
+                     const RayTrophiSim::ParticleAppearanceProfile& profile) {
     float* r = lut.data() + static_cast<std::size_t>(row) *
                                 RayTrophiSim::kParticleAppearanceLutFloatsPerRow;
+    if (!shading.lit) {
+        // The roughness slot is unused by flat sprites. Carry the sprite
+        // style through the existing vertex output, with no layout changes.
+        r[6] = flatSpriteStyle(system, profile);
+        return;
+    }
     constexpr int kSample = RayTrophiSim::kParticleAppearanceLutFloatsPerSample;
     auto slot = [&](int sample, float z, float w) {
         r[sample * kSample + 6] = z;
@@ -174,7 +205,7 @@ void pushQuad(std::vector<ParticleBillboardVertex>& out, float x, float y, float
 // simulation buffers (vertex pulling). Its profile rows go into the LUT like
 // any other system's; the id -> row map goes into row_lookup.
 bool appendPulledSystem(const RayTrophiSim::ParticleSimulationSystem& runtime,
-                        void* viewport_device, const LitShading& shading,
+                        std::string_view system_name, void* viewport_device, const LitShading& shading,
                         const LitLights& lights, ParticleBillboardUpload& out) {
     RayTrophiSim::ParticleResidentDrawBuffers device;
     if (!viewport_device || !runtime.residentDrawBuffers(device) ||
@@ -200,7 +231,7 @@ bool appendPulledSystem(const RayTrophiSim::ParticleSimulationSystem& runtime,
         const uint32_t row = rowCount(out.lut);
         out.row_lookup[draw.lookup_offset + profile.id] = row | (alpha ? 0x80000000u : 0u);
         appendRow(out.lut, runtime.appearanceLutRow(profile.id));
-        markLitRow(out.lut, row, shading, lights);
+        markParticleRow(out.lut, row, shading, lights, system_name, profile);
     }
     out.pulled.push_back(draw);
     return true;
@@ -222,7 +253,7 @@ void appendParticleSystems(const SceneData& scene, void* viewport_device,
         }
         auto& runtime = *system.runtime;
         const LitShading shading = litShadingFor(system.render);
-        if (appendPulledSystem(runtime, viewport_device, shading, lights, out)) {
+        if (appendPulledSystem(runtime, system.name, viewport_device, shading, lights, out)) {
             continue;
         }
         // Not pullable: either the host already holds the state, or the
@@ -232,13 +263,16 @@ void appendParticleSystems(const SceneData& scene, void* viewport_device,
         if (runtime.kinematicResidency() != RayTrophiSim::ParticleKinematicResidency::Host) {
             runtime.syncHostState("foreign_device");
         }
+        if (runtime.aliveCount() == 0) {
+            continue;
+        }
         rows.clear();
         for (const auto& profile : runtime.appearanceProfiles()) {
             RowInfo info;
             info.row = rowCount(out.lut);
             info.alpha = profile.blend == ParticleAppearanceBlend::Alpha;
             appendRow(out.lut, runtime.appearanceLutRow(profile.id));
-            markLitRow(out.lut, info.row, shading, lights);
+            markParticleRow(out.lut, info.row, shading, lights, system.name, profile);
             rows[profile.id] = info;
         }
 

@@ -53,13 +53,13 @@ layout(set = 0, binding = 20, std430) readonly buffer PreviewVolumeRawBuffer {
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
-    mat4 view;
+
     // cameraPos.w: lightweight Solid/Matcap workbench shading
     vec4 cameraPos;
     // lightDir0.w: opaque depth snapshot is valid
     vec4 lightDir0;
     vec4 lightDir1;
-    vec4 lightDir2;
+
     // x=material count, y=quality, z=lighting preset, w=volume count
     uvec4 materialMeta;
 } pc;

@@ -117,6 +117,24 @@ void particleLighting(int row, vec3 center, out vec4 shade, out vec3 l1, out vec
     l2 = vec3(dot(d2, r), dot(d2, u), dot(d2, f));
 }
 
+vec2 particleEffectCorner(vec2 corner, float opacity, float age, float scale,
+                          inout vec4 shade) {
+    if (shade.y < 0.5 && shade.x >= 3.0) {
+        // Confetti uses a stable silhouette variation from its per-particle size.
+        shade.x = 3.0 + floor(3.0 * fract(scale * 17.413));
+        float first = 1.0 - smoothstep(0.01, 0.082, abs(age - 0.20));
+        float second = 1.0 - smoothstep(0.01, 0.075, abs(age - 0.56));
+        shade.z = max(first, second * 0.68);
+        shade.w = 1.0 + 0.62 * shade.z;
+        corner.x *= shade.w;
+    } else if (shade.y < 0.5 && shade.x > 1.5) {
+        shade.z = smoothstep(0.43, 0.72, opacity);
+        shade.w = 1.0 + 1.8 * shade.z;
+        corner.x *= shade.w;
+    }
+    return corner;
+}
+
 vec4 particleClip(vec3 center, vec2 corner, float halfSize) {
     vec3 world = center + (pc.cameraRight.xyz * corner.x + pc.cameraUp.xyz * corner.y) * halfSize;
     return pc.viewProj * vec4(world, 1.0);

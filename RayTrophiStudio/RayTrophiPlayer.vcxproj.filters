@@ -56,6 +56,7 @@
     <Filter Include="source\src\Physics" />
     <Filter Include="source\src\Physics\Fluid" />
     <Filter Include="source\src\Physics\Jolt" />
+    <Filter Include="source\src\Platform" />
     <Filter Include="source\src\PostProcess" />
     <Filter Include="source\src\RayFusion" />
     <Filter Include="source\src\Render" />
@@ -899,6 +900,9 @@
     <ClCompile Include="source\src\Api\RtApiPhaseGrid.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Api\RtApiPlayerOperator.cpp">
+      <Filter>source\src\Api</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Api\RtApiPost.cpp">
       <Filter>source\src\Api</Filter>
     </ClCompile>
@@ -1307,7 +1311,22 @@
     <ClCompile Include="source\src\Core\globals.cpp">
       <Filter>source\src\Core</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Core\Localization.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\PlayerBalloonInput.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\PlayerCamera.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\PlayerGameSettings.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Core\PlayerMain.cpp">
+      <Filter>source\src\Core</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Core\PlayerOperator.cpp">
       <Filter>source\src\Core</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Core\ProjectManager.cpp">
@@ -1481,13 +1500,34 @@
     <ClCompile Include="source\src\MeshEdit\SplineSurfaceAuthoring.cpp">
       <Filter>source\src\MeshEdit</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonBodyInteraction.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Paint\BalloonEffects.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\BalloonInteraction.cpp">
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\BalloonPaintDemo.cpp">
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\GameDesign.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenGameObjects.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenGamePlacement.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenObjectMotion.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenPaintSafety.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\HiddenPlayerCollision.cpp">
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\MeshPaintAdapter.cpp">
@@ -2072,6 +2112,9 @@
     <ClCompile Include="source\src\Physics\WaterSystemHost.cpp">
       <Filter>source\src\Physics</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Platform\PlatformOs.cpp">
+      <Filter>source\src\Platform</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\PostProcess\Exposure.cpp">
       <Filter>source\src\PostProcess</Filter>
     </ClCompile>
@@ -2426,6 +2469,24 @@
     <ClCompile Include="source\src\UI\ParticleBillboardBuilder.cpp">
       <Filter>source\src\UI</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorCameraUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorGameUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorHiddenUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorLibraryUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorSettingsUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\UI\scene_ui_agent_chat.cpp">
       <Filter>source\src\UI</Filter>
     </ClCompile>
@@ -2568,6 +2629,9 @@
       <Filter>source\src\Viewport</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\RayFusionSceneAS.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionViewportPasses.cpp">
       <Filter>source\src\Viewport</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp">

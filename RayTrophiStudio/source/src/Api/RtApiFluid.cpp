@@ -1,3 +1,6 @@
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
 #include "Fluid/LiquidEmissionAuthoring.h"
 #include "Api/MatterSeedSourcesApi.h"
 /*
@@ -2482,6 +2485,11 @@ Result updateFluidDomain(const std::string& domain_id_or_name,
                          const int* granular_max_solver_substeps) {
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
+#ifdef RT_NO_OPENVDB
+    if (backend && parseDomainBackend(*backend) == RayTrophiSim::SimulationDomainBackend::CPU_SparseVDB) {
+        return Result::fail(OpenVdbUnavailable::report());
+    }
+#endif
     if (surface_offset_voxels &&
         (!std::isfinite(*surface_offset_voxels) ||
          *surface_offset_voxels < -0.75f || *surface_offset_voxels > 1.25f)) {

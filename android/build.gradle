@@ -1,0 +1,4 @@
+// Root build file. AGP 8.5 needs Gradle 8.7+ and JDK 17.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}

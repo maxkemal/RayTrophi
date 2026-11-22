@@ -77,10 +77,32 @@ public:
     bool value(T& out) {
         skipSpace();
         const char* start = (p_ < end_ && *p_ == '+') ? p_ + 1 : p_;
+#if defined(__ANDROID__)
+        if constexpr (std::is_floating_point_v<T>) {
+            // NDK libc++ has no floating-point from_chars. Copy the number so strtod never reads
+            // past end_ (the buffer is not guaranteed to be NUL terminated); Bionic is "C" locale.
+            char numberText[64];
+            std::size_t n = 0;
+            while (start + n < end_ && n < sizeof(numberText) - 1 && start[n] != ' ' &&
+                   start[n] != '\t' && start[n] != '\r' && start[n] != '\n') {
+                numberText[n] = start[n];
+                ++n;
+            }
+            numberText[n] = '\0';
+            char* numberEnd = nullptr;
+            const double parsed = std::strtod(numberText, &numberEnd);
+            if (numberEnd == numberText) return false;
+            out = static_cast<T>(parsed);
+            p_ = start + (numberEnd - numberText);
+            return true;
+        } else
+#endif
+        {
         const auto result = std::from_chars(start, end_, out);
         if (result.ec != std::errc()) return false;
         p_ = result.ptr;
         return true;
+        }
     }
 
     // A texture path is "whatever is left", never one token: MTL filenames are

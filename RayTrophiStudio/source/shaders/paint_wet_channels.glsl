@@ -64,6 +64,8 @@ void seedHeightTile(uint tile_index) {
     Tile t = tiles[tile_index];
     Surface s = surfaces[t.surface];
     if ((s.flags & SURFACE_HEIGHT_NORMAL) == 0u) return;
+    float height_gain = paintHeightGain(s);
+    if (height_gain <= 0.0) return;
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x,y; tileTexel(t,k,x,y);
         if (!inSurface(s,x,y)) continue;
@@ -71,10 +73,9 @@ void seedHeightTile(uint tile_index) {
         // Enable over existing paint without clearing/restamping its colour.
         float coverage = unpackColor(color[ti]).a / 255.0;
         if (coverage > 0.0 && state[ti].z == 0.0) {
-            float original = float(sourceChannel(2u,ti)&255u);
-            float contribution = float(s.pbr_params>>16u)/65535.0;
-            state[ti].z = clamp(max(0.0,(original-128.0)/127.0) +
-                coverage*s.paint_load*clamp(contribution*1.6,0.0,1.0),0.0,1.0);
+            float base_height = paintBaseHeight(ti);
+            float ceiling = mix(base_height, 1.0, height_gain);
+            state[ti].z = buildPaintHeight(base_height, ceiling, coverage * s.paint_load);
         }
     }
 }

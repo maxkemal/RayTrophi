@@ -207,6 +207,27 @@ void gameSettings() {
         }
         hint(tr("player.limited_by_the_scene_s_prepared_balloon_meshes_and_particle_budget",
                 "Limited by the scene's prepared balloon meshes and particle budget."));
+        if (draft.values.contains("wind_strength")) {
+            const bool jolt = draft.values.value("jolt_motion", true);
+            ImGui::BeginDisabled(!jolt);
+            field("wind_strength", tr("player.wind_strength", "Wind strength"),
+                  0.0f, 1.0f, 0.25f, "%.2f",
+                  tr("player.wind_strength_hint", "Set to 0 for still air."));
+            ImGui::EndDisabled();
+            if (ImGui::TreeNode(trId("player.balloon_physics", "Balloon physics"))) {
+                bool enabled = jolt;
+                if (ImGui::Checkbox(trId("player.jolt_motion", "Jolt physics"), &enabled)) {
+                    change("jolt_motion", enabled);
+                }
+                bool shells = draft.values.value("impact_soft_body", true);
+                ImGui::BeginDisabled(!enabled);
+                if (ImGui::Checkbox(trId("player.impact_soft_body", "Soft-body impacts"), &shells)) {
+                    change("impact_soft_body", shells);
+                }
+                ImGui::EndDisabled();
+                ImGui::TreePop();
+            }
+        }
         field("respawn_seconds", tr("player.return_after_a_pop", "Return after a pop"), .25f, 60,
               3.5f, tr("player.2f_s", "%.2f s"),
               tr("player.how_long_a_popped_balloon_waits_before_appearing_again",
@@ -234,6 +255,10 @@ void gameSettings() {
               tr("player.2f_s", "%.2f s"),
               tr("player.longer_keeps_paint_wet_for_longer_it_does_not_erase_the_dry_colour",
                  "Longer keeps paint wet for longer; it does not erase the dry colour."));
+        field("paint_thickness", tr("player.paint_thickness", "Paint thickness"),
+              0.0f, 1.0f, 0.56f, "%.2f",
+              tr("player.paint_thickness_hint",
+                 "Controls how much relief new paint leaves on every paintable surface."));
         field("diffusion", tr("player.paint_spread", "Paint spread"), 0, 2, .24f, "%.2f",
               tr("player.higher_lets_wet_colour_spread_farther",
                  "Higher lets wet colour spread farther."));

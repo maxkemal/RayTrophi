@@ -24,9 +24,12 @@ namespace AppRuntime {
 namespace {
 using json = nlohmann::json;
 namespace fs = std::filesystem;
+// The paint stamp reaches full height gain at 0.625 (gain = height * 1.6).
+constexpr float kFullHeightContribution = 0.625f;
 constexpr const char *demo_fields[] = {
     "autostart",    "balloons",           "respawn_seconds",      "birth_seconds", "interval_min",
-    "interval_max", "idle_reset_seconds", "finale_reset_seconds", "room_goal", "interaction_mode", "body_controls"};
+    "interval_max", "idle_reset_seconds", "finale_reset_seconds", "room_goal",
+    "interaction_mode", "body_controls", "wind_strength", "jolt_motion", "impact_soft_body"};
 struct Session {
     std::string project;
     std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
@@ -165,7 +168,11 @@ json values() {
     check(rtapi::getWetPaintStatus(paint));
     bool first = true;
     for (const auto &surface : paint.surface_list) {
+        const float thickness = surface.settings.height_normal_channel
+            ? std::min(1.0f, surface.settings.height_contribution / kFullHeightContribution)
+            : 0.0f;
         const json row = {{"lifetime_seconds", surface.settings.lifetime_seconds},
+                          {"paint_thickness", thickness},
                           {"diffusion", surface.settings.diffusion},
                           {"runoff", surface.settings.runoff},
                           {"resolution", surface.resolution}};
@@ -219,6 +226,11 @@ void validate(const json &patch, const json &current) {
     if (patch.contains("autostart")) {
         require(patch["autostart"].is_boolean(), "autostart must be boolean");
     }
+    for (const auto* key : {"jolt_motion", "impact_soft_body"}) {
+        if (patch.contains(key)) {
+            require(patch[key].is_boolean(), std::string(key) + " must be boolean");
+        }
+    }
     if (patch.contains("balloons")) {
         require(patch["balloons"].is_number_integer() && patch["balloons"].get<double>() >= 3 &&
                     patch["balloons"].get<double>() <= capacity(session.authored_demo),
@@ -231,9 +243,11 @@ void validate(const json &patch, const json &current) {
     }
     scalar(patch, "respawn_seconds", 0.25, 60);
     scalar(patch, "birth_seconds", 0, 3);
+    scalar(patch, "wind_strength", 0, 1);
     scalar(patch, "interval_min", 2, 30);
     scalar(patch, "interval_max", 2, 30);
     scalar(patch, "lifetime_seconds", 0.05, 600);
+    scalar(patch, "paint_thickness", 0, 1);
     scalar(patch, "diffusion", 0, 2);
     scalar(patch, "runoff", 0, 2);
     scalar(patch, "idle_reset_seconds", 0, 3600);
@@ -265,8 +279,9 @@ json apply(const json &patch) {
     for (const auto *key : demo_fields) {
         if (patch.contains(key) && patch[key] != current[key]) {
             config[key] = patch[key];
-            rebuild_demo = rebuild_demo || (std::string(key) != "interaction_mode" &&
-                                           std::string(key) != "body_controls");
+            const std::string field(key);
+            rebuild_demo = rebuild_demo || (field != "interaction_mode" &&
+                                            field != "body_controls" && field != "wind_strength");
         }
     }
     if (rebuild_demo && config.contains("visual_nodes")) {
@@ -281,6 +296,13 @@ json apply(const json &patch) {
     for (auto &surface : updated) {
         if (patch.contains("lifetime_seconds")) {
             surface.settings.lifetime_seconds = patch["lifetime_seconds"];
+        }
+        if (patch.contains("paint_thickness")) {
+            const float thickness = patch["paint_thickness"].get<float>();
+            surface.settings.height_contribution = thickness * kFullHeightContribution;
+            if (thickness > 0.0f) {
+                surface.settings.height_normal_channel = true;
+            }
         }
         if (patch.contains("diffusion")) {
             surface.settings.diffusion = patch["diffusion"];
@@ -308,6 +330,12 @@ json apply(const json &patch) {
         std::string output;
         check(rtapi::wetPaintDemoCommand("body",
             json{{"enabled", patch["body_controls"]}}.dump(), output));
+    }
+    if (!rebuild_demo && patch.contains("wind_strength") &&
+        patch["wind_strength"] != current["wind_strength"]) {
+        std::string output;
+        check(rtapi::wetPaintDemoCommand("wind",
+            json{{"wind_strength", patch["wind_strength"]}}.dump(), output));
     }
     bool resized = false;
     if (patch.contains("resolution") && patch["resolution"] != current["resolution"]) {

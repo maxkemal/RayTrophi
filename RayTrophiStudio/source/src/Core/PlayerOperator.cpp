@@ -1,4 +1,5 @@
 #include "Core/PlayerOperator.h"
+#include "Core/PlayerSceneLoad.h"
 #include "Core/Localization.h"
 #include "Core/PlayerCamera.h"
 #include "Core/PlayerGameSettings.h"
@@ -63,14 +64,7 @@ std::string text(const json &value, const char *key) {
     return value[key].get<std::string>();
 }
 std::string pathKey(const fs::path &path) {
-    std::error_code error;
-    auto resolved = fs::weakly_canonical(path, error);
-    auto result = projectPathToUtf8(error ? path.lexically_normal() : resolved);
-#ifdef _WIN32
-    std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-#endif
-    return result;
+    return playerScenePathKey(path);
 }
 struct ScanResult {
     json games = json::array();
@@ -81,7 +75,11 @@ ScanResult scan(const json &roots) {
     std::set<std::string> seen;
     const auto add = [&](const fs::path &path, const std::string &title, bool packaged) {
         std::error_code error;
-        if (!fs::is_regular_file(path, error) || !seen.insert(pathKey(path)).second) {
+        if (!fs::is_regular_file(path, error)) {
+            return;
+        }
+        const auto key = pathKey(path);
+        if (!seen.insert(key).second) {
             return;
         }
         auto thumbnail = path;
@@ -89,6 +87,7 @@ ScanResult scan(const json &roots) {
         result.games.push_back(
             {{"name", title.empty() ? projectPathToUtf8(path.stem()) : title},
              {"path", projectPathToUtf8(fs::absolute(path))},
+             {"key", key},
              {"packaged", packaged},
              {"thumbnail",
               fs::is_regular_file(thumbnail, error) ? projectPathToUtf8(thumbnail) : ""}});
@@ -357,6 +356,8 @@ void tickPlayerOperator() {
             s.error = "Game changed; restart camera input for the new scene";
         }
         s.current_project = project;
+    } else if (s.context) {
+        s.current_project.clear();
     }
     if (s.context) {
         tickPlayerGameSettings(*s.context);
@@ -512,6 +513,7 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
                       {"body", poses},
                       {"characters", characters(s, context)},
                       {"project", s.current_project},
+                      {"scene_load", playerSceneLoad().status()},
                       {"error", s.error}};
             json game_settings;
             const auto game_result = playerGameSettingsCommand(context, "game.settings.status",
@@ -568,6 +570,8 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
             s.scanning = std::async(std::launch::async, [roots] { return scan(roots); });
         } else if (operation == "library.open") {
             keys(config, {"path"});
+            require(s.pending_open.empty() && !playerSceneLoad().busy(),
+                    "A game is already loading");
             const auto path = fs::absolute(projectPathFromUtf8(text(config, "path")));
             auto extension = projectPathToUtf8(path.extension());
             std::transform(extension.begin(), extension.end(), extension.begin(),

@@ -132,6 +132,8 @@ struct GPUCapabilities {
     bool supportsBufferDeviceAddress = false;
     bool supportsShaderInt64 = false;
     bool supportsDescriptorIndexing = false;
+    bool fragmentStoresAndAtomicsEnabled = false;
+    bool independentBlendEnabled = false;
     // VK_EXT_memory_budget: the only live VRAM reading we have. Without it the
     // app can only report what it THINKS it allocated.
     bool supportsMemoryBudget = false;
@@ -2736,6 +2738,9 @@ protected:
     bool ensureMaterialPreviewShadowResources(const std::string& shaderDir);
     void destroyMaterialPreviewShadowResources();
     bool ensureMaterialPreviewIblResources(const std::string& shaderDir);
+    bool ensureMaterialPreviewFrameUniform();
+    void recordMaterialPreviewFrameUniform(VkCommandBuffer cmd, const Matrix4x4& view);
+    void destroyMaterialPreviewFrameUniform();
     // Physical Sky has no source image, so one is baked from the canonical
     // world before the IBL builder runs. Signature-gated: an unchanged sky
     // costs a comparison, not a dispatch.
@@ -3020,6 +3025,7 @@ protected:
         VkDescriptorSetLayout materialPreviewDescLayout = VK_NULL_HANDLE;
         VkDescriptorPool materialPreviewDescPool = VK_NULL_HANDLE;
         VkDescriptorSet materialPreviewDescSet = VK_NULL_HANDLE;
+        VulkanRT::BufferHandle materialPreviewFrameUniform;
         uint32_t materialPreviewTextureArrayLen = 0;
         // ★★★ TRIPWIRE: binding 1 bu descriptor set'e YAZILDIGI andaki doku
         //   kusagi. `purgeUploadedTextureCacheLocked` her cagrildiginda

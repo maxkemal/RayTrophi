@@ -8252,10 +8252,8 @@ std::string processJsonMessage(const std::string& message,
 namespace rtipc {
 
 bool start(std::string& error) {
-#ifndef _WIN32
-    error = "IPC server is only supported on Windows";
-    return false;
-#else
+    // All platforms: the local transport is a named pipe on Windows and an abstract
+    // unix socket elsewhere (RtIpcTransportLocal.cpp). Android's QA channel depends on it.
     if (g_running.load()) {
         return true;  // already running
     }
@@ -8325,7 +8323,6 @@ bool start(std::string& error) {
     }
     g_running.store(true, std::memory_order_release);
     return true;
-#endif
 }
 
 void stop() noexcept {

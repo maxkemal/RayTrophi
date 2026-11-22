@@ -1,4 +1,7 @@
 #include "Api/RtApiVdbVolume.h"
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
 
 #include "Api/RtApiInternal.h"
 #include "Core/RuntimeProjectHost.h"
@@ -62,6 +65,9 @@ Backend::IBackend* vdbRenderBackend() {
 
 Result importVdbVolume(const std::string& path, int orientation_preset, VdbImportInfo& out) {
     out = VdbImportInfo{};
+#ifdef RT_NO_OPENVDB
+    return Result::fail(OpenVdbUnavailable::report());
+#endif
     if (!g_ctx) return notBound();
     if (renderJobActive()) return Result::fail("scene is locked by the final render job");
     if (path.empty()) return Result::fail("path is empty");

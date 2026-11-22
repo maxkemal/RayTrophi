@@ -4,18 +4,10 @@
  */
 
 #include "TerrainFFT.h"
+#include "Platform/Platform.h"
 #include "DllLoadPolicy.h"
 #include <algorithm>
 #include <cstring>
-
-#ifdef _WIN32
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#include <windows.h>
-#else
-#include <dlfcn.h>
-#endif
 
 namespace TerrainFFT {
 
@@ -91,16 +83,22 @@ bool TerrainFFTManager::initCUDA() {
     }
     
     // Load essential functions
-    pfnCudaGetDeviceCount_ = (PFN_CudaGetDeviceCount)GetProcAddress(cudartDLL_, "cudaGetDeviceCount");
-    pfnCudaSetDevice_ = (PFN_CudaSetDevice)GetProcAddress(cudartDLL_, "cudaSetDevice");
-    pfnCudaMalloc_ = (PFN_CudaMalloc)GetProcAddress(cudartDLL_, "cudaMalloc");
-    pfnCudaFree_ = (PFN_CudaFree)GetProcAddress(cudartDLL_, "cudaFree");
-    pfnCudaMemcpy_ = (PFN_CudaMemcpy)GetProcAddress(cudartDLL_, "cudaMemcpy");
-    pfnCudaDeviceSynchronize_ = (PFN_CudaDeviceSynchronize)GetProcAddress(cudartDLL_, "cudaDeviceSynchronize");
+    pfnCudaGetDeviceCount_ = reinterpret_cast<PFN_CudaGetDeviceCount>(
+        Platform::findSymbol(cudartDLL_, "cudaGetDeviceCount"));
+    pfnCudaSetDevice_ = reinterpret_cast<PFN_CudaSetDevice>(
+        Platform::findSymbol(cudartDLL_, "cudaSetDevice"));
+    pfnCudaMalloc_ = reinterpret_cast<PFN_CudaMalloc>(
+        Platform::findSymbol(cudartDLL_, "cudaMalloc"));
+    pfnCudaFree_ = reinterpret_cast<PFN_CudaFree>(
+        Platform::findSymbol(cudartDLL_, "cudaFree"));
+    pfnCudaMemcpy_ = reinterpret_cast<PFN_CudaMemcpy>(
+        Platform::findSymbol(cudartDLL_, "cudaMemcpy"));
+    pfnCudaDeviceSynchronize_ = reinterpret_cast<PFN_CudaDeviceSynchronize>(
+        Platform::findSymbol(cudartDLL_, "cudaDeviceSynchronize"));
     
     if (!pfnCudaGetDeviceCount_ || !pfnCudaMalloc_ || !pfnCudaFree_ || !pfnCudaMemcpy_) {
         cudaStatusMessage_ = "Failed to load CUDA functions - using CPU fallback";
-        FreeLibrary(cudartDLL_);
+        Platform::unloadLibrary(cudartDLL_);
         cudartDLL_ = nullptr;
         return false;
     }
@@ -111,7 +109,7 @@ bool TerrainFFTManager::initCUDA() {
     
     if (result != 0 || deviceCount == 0) {
         cudaStatusMessage_ = "No CUDA devices found - using CPU fallback";
-        FreeLibrary(cudartDLL_);
+        Platform::unloadLibrary(cudartDLL_);
         cudartDLL_ = nullptr;
         return false;
     }
@@ -138,21 +136,24 @@ bool TerrainFFTManager::initCUDA() {
     cudaInitialized_ = true;
     cudaStatusMessage_ = "CUDA initialized successfully (" + std::to_string(deviceCount) + " device(s))";
     
+#elif defined(__ANDROID__)
+    cudaStatusMessage_ = "CUDA is not supported on this platform - using CPU fallback";
+    return false;
 #else
-    // Linux/Mac - similar approach with dlopen
-    cudartDLL_ = dlopen("libcudart.so", RTLD_LAZY);
+    cudartDLL_ = Platform::loadLibrary("libcudart.so");
     if (!cudartDLL_) {
         cudaStatusMessage_ = "CUDA runtime not found - using CPU fallback";
         return false;
     }
     
     // Load functions with dlsym
-    pfnCudaGetDeviceCount_ = (PFN_CudaGetDeviceCount)dlsym(cudartDLL_, "cudaGetDeviceCount");
+    pfnCudaGetDeviceCount_ = reinterpret_cast<PFN_CudaGetDeviceCount>(
+        Platform::findSymbol(cudartDLL_, "cudaGetDeviceCount"));
     
     int deviceCount = 0;
     if (!pfnCudaGetDeviceCount_ || pfnCudaGetDeviceCount_(&deviceCount) != 0 || deviceCount == 0) {
         cudaStatusMessage_ = "No CUDA devices available - using CPU fallback";
-        dlclose(cudartDLL_);
+        Platform::unloadLibrary(cudartDLL_);
         cudartDLL_ = nullptr;
         return false;
     }
@@ -173,27 +174,11 @@ void TerrainFFTManager::cleanupCUDA() {
         cudaState_->initialized = false;
     }
     
-    // Unload DLLs
-#ifdef _WIN32
-    if (cufftDLL_) {
-        FreeLibrary(cufftDLL_);
-        cufftDLL_ = nullptr;
-    }
-    if (cudartDLL_) {
-        FreeLibrary(cudartDLL_);
-        cudartDLL_ = nullptr;
-    }
-#else
-    if (cufftDLL_) {
-        dlclose(cufftDLL_);
-        cufftDLL_ = nullptr;
-    }
-    if (cudartDLL_) {
-        dlclose(cudartDLL_);
-        cudartDLL_ = nullptr;
-    }
-#endif
-    
+    Platform::unloadLibrary(cufftDLL_);
+    cufftDLL_ = nullptr;
+    Platform::unloadLibrary(cudartDLL_);
+    cudartDLL_ = nullptr;
+
     cudaAvailable_ = false;
     cudaInitialized_ = false;
 }

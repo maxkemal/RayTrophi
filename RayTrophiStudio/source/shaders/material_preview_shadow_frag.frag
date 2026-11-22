@@ -14,11 +14,11 @@ layout(set = 0, binding = 1) uniform sampler2D textures[];
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
-    mat4 view;
+
     vec4 cameraPos;
     vec4 lightDir0;
     vec4 lightDir1;
-    vec4 lightDir2;
+
     uvec4 materialMeta;
 } pc;
 

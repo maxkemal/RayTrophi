@@ -1,3 +1,4 @@
+#include "Viewport/RayFusionViewportPasses.h"
 #include "Backend/VulkanBackend.h"
 #include "globals.h"
 
@@ -17,6 +18,9 @@ public:
     VkBuffer boundVolumeBuffer = VK_NULL_HANDLE;
     bool missingShaderReported = false;
     bool unsupportedDeviceReported = false;
+#ifdef RT_PLAYER
+    bool initializationAttempted = false;
+#endif
 };
 
 namespace {
@@ -37,16 +41,6 @@ void matrixToGL(const Matrix4x4& matrix, float out[16]) {
     std::memcpy(out, transposed.m, sizeof(float) * 16u);
 }
 
-struct PreviewPush {
-    float viewProj[16];
-    float view[16];
-    float cameraPos[4];
-    float lightDir0[4];
-    float lightDir1[4];
-    float lightDir2[4];
-    uint32_t materialMeta[4];
-};
-static_assert(sizeof(PreviewPush) == 208u, "Material preview push ABI changed");
 
 } // namespace
 
@@ -84,8 +78,11 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     }
 
     if (m_materialPreviewVolume &&
-        m_materialPreviewVolume->previewPipeline != VK_NULL_HANDLE &&
-        m_materialPreviewVolume->solidPipeline != VK_NULL_HANDLE) {
+        m_materialPreviewVolume->previewPipeline != VK_NULL_HANDLE
+#ifndef RT_PLAYER
+        && m_materialPreviewVolume->solidPipeline != VK_NULL_HANDLE
+#endif
+    ) {
         updateMaterialPreviewVolumeBinding();
         return true;
     }
@@ -94,6 +91,13 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
             std::make_shared<MaterialPreviewVolumeResources>();
     }
     auto& state = *m_materialPreviewVolume;
+#ifdef RT_PLAYER
+    // Player checks demand on every frame. Retry after viewport teardown.
+    if (state.initializationAttempted) {
+        return false;
+    }
+    state.initializationAttempted = true;
+#endif
     const std::vector<uint32_t> vert =
         loadVolumeSpv(shaderDir + "/material_preview_sky_vert.spv");
     const std::vector<uint32_t> frag =
@@ -114,13 +118,20 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     smci.codeSize = vert.size() * sizeof(uint32_t);
     smci.pCode = vert.data();
     VkShaderModule vertModule = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device, &smci, nullptr, &vertModule) != VK_SUCCESS)
+    const VkResult vertexResult = vkCreateShaderModule(device, &smci, nullptr, &vertModule);
+    if (vertexResult != VK_SUCCESS) {
+        SCENE_LOG_WARN("[Viewport] Volume vertex shader creation failed, VkResult " +
+                       std::to_string(static_cast<int>(vertexResult)));
         return false;
+    }
     smci.codeSize = frag.size() * sizeof(uint32_t);
     smci.pCode = frag.data();
     VkShaderModule fragModule = VK_NULL_HANDLE;
-    if (vkCreateShaderModule(device, &smci, nullptr, &fragModule) != VK_SUCCESS) {
+    const VkResult fragmentResult = vkCreateShaderModule(device, &smci, nullptr, &fragModule);
+    if (fragmentResult != VK_SUCCESS) {
         vkDestroyShaderModule(device, vertModule, nullptr);
+        SCENE_LOG_WARN("[Viewport] Volume fragment shader creation failed, VkResult " +
+                       std::to_string(static_cast<int>(fragmentResult)));
         return false;
     }
 
@@ -225,8 +236,12 @@ bool VulkanBackendAdapter::ensureMaterialPreviewVolumeResources(
     const VkResult previewResult = createPipeline(
         previewRenderPass, hasHdrPass ? 4u : 1u, false,
         state.previewPipeline);
+#ifdef RT_PLAYER
+    constexpr VkResult solidResult = VK_SUCCESS;
+#else
     const VkResult solidResult = createPipeline(
         m_interactiveViewport.renderPass, 1u, true, state.solidPipeline);
+#endif
     vkDestroyShaderModule(device, fragModule, nullptr);
     vkDestroyShaderModule(device, vertModule, nullptr);
     if (previewResult != VK_SUCCESS || solidResult != VK_SUCCESS) {
@@ -316,9 +331,8 @@ void VulkanBackendAdapter::recordMaterialPreviewVolumePass(
     vkCmdSetViewport(cmd, 0, 1, &viewport);
     vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-    PreviewPush push{};
+    RayFusionDrawPush push{};
     matrixToGL(viewProj, push.viewProj);
-    matrixToGL(view, push.view);
     push.cameraPos[0] = m_camera.origin.x;
     push.cameraPos[1] = m_camera.origin.y;
     push.cameraPos[2] = m_camera.origin.z;

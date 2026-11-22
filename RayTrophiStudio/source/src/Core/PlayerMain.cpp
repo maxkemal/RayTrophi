@@ -22,6 +22,7 @@
 #include "Core/PlayerRenderExtent.h"
 #include "Core/PlayerResolutionMenu.h"
 #include "Core/PlayerOperator.h"
+#include "Core/PlayerSceneLoad.h"
 #include "Core/PlayerBalloonInput.h"
 #include "UI/PlayerOperatorUI.h"
 #include "Api/RtApiPlayerOperator.h"
@@ -39,6 +40,9 @@
 #include "Api/RtApiPaintWet.h"
 #include "json.hpp"
 #include "Api/RtIpc.h"
+#include "Core/FatalSignalTrace.h"
+#include <csignal>
+#include <exception>
 
 #include <SDL.h>
 #include <SDL_main.h>
@@ -55,9 +59,7 @@
 #include <thread>
 #include <vector>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
+#include "Platform/Platform.h"
 
 extern SDL_Window* window;
 extern SDL_Renderer* renderer;
@@ -100,17 +102,59 @@ struct PlayerState {
     };
 };
 
-void setWorkingDirectoryToExe(char* argv0) {
+// Crash capture for the Player: without it a startup fault leaves nothing
+// behind (StartupCrashStack.txt next to the exe, same writer Studio uses).
+void playerSignalHandler(int sig) {
+    writeFatalSignalTrace(sig);
+    std::_Exit(EXIT_FAILURE);
+}
+
+void playerTerminateHandler() {
+    writeFatalSignalTrace(-1);
+    std::_Exit(EXIT_FAILURE);
+}
+
 #ifdef _WIN32
+LONG WINAPI playerExceptionFilter(EXCEPTION_POINTERS* info) {
+    // Negative code = SEH exception; the low bits carry the NTSTATUS.
+    writeFatalSignalTrace(info && info->ExceptionRecord
+        ? -static_cast<int>(info->ExceptionRecord->ExceptionCode & 0x7FFFFFFF) : -2);
+    return EXCEPTION_EXECUTE_HANDLER;
+}
+#endif
+
+void installPlayerCrashHandlers() {
+#ifdef _WIN32
+    SetUnhandledExceptionFilter(playerExceptionFilter);
+#endif
+    std::set_terminate(playerTerminateHandler);
+    std::signal(SIGABRT, playerSignalHandler);
+    std::signal(SIGSEGV, playerSignalHandler);
+    std::signal(SIGFPE, playerSignalHandler);
+    std::signal(SIGILL, playerSignalHandler);
+}
+
+bool setWorkingDirectoryToExe(char* argv0) {
+#if defined(__ANDROID__)
     (void)argv0;
-    char exe_path[MAX_PATH];
-    GetModuleFileNameA(nullptr, exe_path, MAX_PATH);
-    std::filesystem::current_path(std::filesystem::path(exe_path).parent_path());
+    const auto directory = Platform::appDataRoot();
+    std::error_code error;
+    if (!directory.empty()) {
+        std::filesystem::current_path(directory, error);
+    }
+    if (directory.empty() || error) {
+        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Cannot open the Player internal data directory");
+        return false;
+    }
+#elif defined(_WIN32)
+    (void)argv0;
+    std::filesystem::current_path(Platform::appDataRoot());
 #else
     if (argv0) {
         std::filesystem::current_path(std::filesystem::path(argv0).parent_path());
     }
 #endif
+    return true;
 }
 
 // Packaged scene list: player_scenes.json next to the exe.
@@ -487,6 +531,38 @@ private:
     nlohmann::json snapshot_ = nlohmann::json::object();
 };
 
+// No scene and a viewer error (e.g. an unsupported GPU): say so in the middle of the
+// screen whether or not the debug HUD is on. A black screen with the reason only in the
+// log is the failure mode this exists to prevent (Android A6a).
+void drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
+    if (viewer.hasScene()) return;
+    const auto status = viewer.status();
+    // Backend initialization runs inside the project open, so its failure arrives as
+    // last_open_error; a later runtime fault arrives as error.
+    std::string error = status.value("error", "");
+    if (error.empty()) error = status.value("last_open_error", "");
+    if (error.empty()) return;
+    const ImGuiViewport* view = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(ImVec2(view->WorkPos.x + view->WorkSize.x * 0.5f,
+                                   view->WorkPos.y + view->WorkSize.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(ImVec2(view->WorkSize.x * 0.6f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowBgAlpha(0.85f);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+                                   ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
+                                   ImGuiWindowFlags_NoFocusOnAppearing;
+    if (ImGui::Begin("##player_startup_failure", nullptr, flags)) {
+        ImGui::SetWindowFontScale(1.6f);
+        const bool unsupported_gpu = error.rfind("This device's GPU is not supported", 0) == 0;
+        ImGui::TextUnformatted(unsupported_gpu ? "RayTrophi Player cannot run on this device"
+                                               : "RayTrophi Player could not open the scene");
+        ImGui::SetWindowFontScale(1.0f);
+        ImGui::Separator();
+        ImGui::TextWrapped("%s", error.c_str());
+    }
+    ImGui::End();
+}
+
 void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
              const PlayerDisplay& display) {
     ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_Always);
@@ -498,15 +574,18 @@ void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
         ImGui::TextUnformatted("RayTrophi Player");
         ImGui::Text("IPC: %s", ipc_running ? "running" : "stopped");
         const auto status = viewer.status();
+        const auto error = status.value("error", "");
+        const auto open_error = status.value("last_open_error", "");
         if (viewer.hasScene()) {
             const auto path = AppRuntime::projectPathFromUtf8(status.value("project_path", ""));
             const auto name = AppRuntime::projectPathToUtf8(path.filename());
             ImGui::TextUnformatted(name.c_str());
-        } else {
+#ifndef __ANDROID__
+        } else if (error.empty() && open_error.empty()) {
+            // Only an invitation when dropping a project could actually work.
             ImGui::TextUnformatted("Drop an .rtp project here");
+#endif
         }
-        const auto error = status.value("error", "");
-        const auto open_error = status.value("last_open_error", "");
         if (!error.empty() || !open_error.empty()) {
             ImGui::TextWrapped("%s", (error.empty() ? open_error : error).c_str());
         }
@@ -595,13 +674,33 @@ int main(int argc, char* argv[]) {
             std::filesystem::absolute(AppRuntime::projectPathFromUtf8(launch_project)));
     }
     g_main_thread_id = std::this_thread::get_id();
-    setWorkingDirectoryToExe(argc > 0 ? argv[0] : nullptr);
+    installPlayerCrashHandlers();
+    if (!setWorkingDirectoryToExe(argc > 0 ? argv[0] : nullptr)) {
+        return 1;
+    }
     g_sceneLog.initLogLocation();
+    const auto startupDirectory = std::filesystem::current_path();
+    SCENE_LOG_INFO("[Player Startup] Working directory: " +
+                   AppRuntime::projectPathToUtf8(startupDirectory) +
+                   " | Package shader directory: " +
+                   AppRuntime::projectPathToUtf8(startupDirectory / "shaders"));
 
-    // Packaged build: the scene list is relative to the exe (the working
-    // directory now). A command-line project still wins over its first entry.
+    // Android: shaders/scenes/assets live inside the APK; copy them under the working
+    // directory first so everything below reads plain files exactly as on Windows.
+    {
+        std::string asset_report;
+        const bool assets_ok = Platform::extractBundledAssets(asset_report);
+        if (!asset_report.empty()) {
+            if (assets_ok) SCENE_LOG_INFO("[Player Startup] " + asset_report);
+            else SCENE_LOG_ERROR("[Player Startup] Bundled assets: " + asset_report);
+        }
+    }
+
+    // An explicit project bypasses the library. A single-scene package can
+    // launch directly, while multiple bundled games need a selection first.
     const std::vector<PlayerSceneEntry> packaged_scenes = loadPackagedSceneList();
-    if (launch_project.empty() && !packaged_scenes.empty()) {
+    const bool open_library = launch_project.empty() && packaged_scenes.size() > 1;
+    if (launch_project.empty() && packaged_scenes.size() == 1) {
         launch_project = packaged_scenes.front().path_utf8;
     }
 
@@ -634,7 +733,13 @@ int main(int argc, char* argv[]) {
     rtapi::bind(&state->ctx, &ui.history);
     ui.viewport_settings.shading_mode = 1;  // MaterialPreview, same Vulkan path as Studio.
     auto viewer = std::make_unique<AppRuntime::RuntimeSceneViewer>(state->ctx, ui.history);
+    // Show the window BEFORE the project loads: a slow or failing load must not
+    // look like "the app never started". Pump events so the OS does not mark
+    // the window as not responding while the scene is read.
+    SDL_ShowWindow(window);
+    SDL_PumpEvents();
     if (!launch_project.empty()) {
+        SCENE_LOG_INFO("[Player] Window shown, opening project");
         const auto loaded = rtapi::openProject(launch_project);
         if (!loaded.ok) {
             SCENE_LOG_WARN("[Player] " + loaded.error);
@@ -648,8 +753,6 @@ int main(int argc, char* argv[]) {
         SCENE_LOG_WARN("[Player] IPC server failed to start: " + ipc_error);
     }
 
-    SDL_ShowWindow(window);
-
     PlayerDisplay display;
     if (!launch_display.empty()) {
         const auto applied = display.setDisplay(launch_display);
@@ -659,6 +762,9 @@ int main(int argc, char* argv[]) {
     }
 
     AppRuntime::setPlayerOperatorLaunchOverrides(launch_display);
+    if (open_library) {
+        AppRuntime::showPlayerOperator("games");
+    }
 
     bool running = true;
     bool debug_camera = false;
@@ -667,6 +773,28 @@ int main(int argc, char* argv[]) {
     int debug_wheel = 0;
     Uint64 previous_tick = SDL_GetPerformanceCounter();
     AppRuntime::FrameCycle frame_cycle;
+    AppRuntime::playerSceneLoad().setPresenter([&frame_cycle, last = Clock::time_point{}]() mutable {
+        if (!AppRuntime::playerOperatorOpen()) {
+            return;
+        }
+        const auto now = Clock::now();
+        if (AppRuntime::playerSceneLoad().stage() != "check_project" &&
+            now - last < std::chrono::milliseconds(50)) {
+            return;
+        }
+        last = now;
+        SDL_PumpEvents();
+        frame_cycle.beginUiFrame(false);
+        AppRuntime::drawPlayerOperator(renderer);
+        frame_cycle.endUiFrame();
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+        if (raytrace_texture) {
+            SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+        }
+        frame_cycle.drawUi();
+        frame_cycle.present();
+    });
     SDL_Event event;
     AppRuntime::EventInfo event_info;
     while (running) {
@@ -791,7 +919,8 @@ int main(int argc, char* argv[]) {
         const bool capture_requested = rtapi::viewportCaptureEnabled();
         bool image_updated = false;
         if (render_requested &&
-            (frame_cycle.isForeground() || capture_requested || display.continuous)) {
+            (frame_cycle.isForeground() || capture_requested || display.continuous ||
+             AppRuntime::playerSceneLoad().busy())) {
             image_updated = viewer->render(original_surface, raytrace_texture);
             display.recordRender(viewer->lastRenderMs(), viewer->lastUploadMs(),
                                  viewer->lastTelemetry());
@@ -803,6 +932,7 @@ int main(int argc, char* argv[]) {
             if (display.hud) {
                 drawHud(rtipc::isRunning(), *viewer, display);
             }
+            drawStartupFailureNotice(*viewer);
             AppRuntime::drawPlayerOperator(renderer);
             frame_cycle.endUiFrame();
 
@@ -841,6 +971,7 @@ int main(int argc, char* argv[]) {
     // Same order as Studio: IPC stops before the facade it enqueues into.
     AppRuntime::cancelPlayerBalloonInput();
     rtipc::stop();
+    AppRuntime::playerSceneLoad().setPresenter({});
     AppRuntime::shutdownPlayerOperator();
     AppRuntime::releasePlayerOperatorUI();
     viewer.reset();

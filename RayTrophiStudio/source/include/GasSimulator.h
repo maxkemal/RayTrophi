@@ -47,7 +47,9 @@ namespace FluidSim {
 }
 
 // Forward declarations
+#ifndef RT_NO_OPENVDB
 namespace openvdb { template<typename T> class Grid; }
+#endif
 namespace Physics { class ForceFieldManager; }
 namespace RayTrophiSim { class SimulationForceFieldSnapshot; }
 

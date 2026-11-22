@@ -153,6 +153,22 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
     } | Sort-Object Name) {
         if ($shader.Name -eq 'shadow_anyhit.rchit') { continue }
         $flags = @('--target-env=vulkan1.3', '-O')
+        if ($shader.Name -in @(
+                'material_preview_sky_vert.vert', 'raster_post.comp',
+                'particle_viewport.vert', 'particle_viewport_pull.vert', 'particle_viewport_frag.frag',
+                'player_depth_card.vert', 'player_depth_card_frag.frag',
+                'sim_particle_ballistic.comp', 'sim_particle_spawn.comp',
+                'material_preview_ibl.comp', 'material_preview_volume_shadow.comp',
+                'raster_cull.comp', 'raster_taa.comp', 'reflection_trace.comp',
+                'reflection_filter.comp', 'skinning.comp', 'world_sky_capture.comp',
+                'atmosphere_lut.comp', 'atmosphere_aerial_froxel.comp',
+                'cloud_noise.comp', 'cloud_sample.comp', 'cloud_cells.comp',
+                'cloud_volume_gen.comp', 'cloud_raster.comp', 'cloud_resolve.comp',
+                'cloud_scene.comp', 'cloud_shadow.comp',
+                'lens_water_sim.comp', 'lens_water_draw.comp') -or
+            $shader.Name -match '^material_preview(?:_frag|_sky|_shadow|_shadow_frag|_shadow_opaque|_sdf_surface|_volume)?\.(vert|frag)$') {
+            $flags = @('--target-env=vulkan1.2', '-O')
+        }
         if ($shader.Name -eq 'volume_closesthit.rchit' -and
             $VolumeOptimization -in @('Off', 'Modular')) {
             # Explicit reference mode for performance/image comparisons.
@@ -191,7 +207,7 @@ foreach ($name in $windowShaders) {
         '-DRT_FLUID_WINDOW=1', '--target-env=vulkan1.2', '-O')
 }
 Add-Shader (Join-Path $shaderRoot 'material_preview_frag.frag') 'material_preview_covered' @(
-    '-DPREVIEW_COVERED_SHADING=1', '--target-env=vulkan1.3', '-O')
+    '-DPREVIEW_COVERED_SHADING=1', '--target-env=vulkan1.2', '-O')
 $sculptPath = Join-Path $PSScriptRoot 'shaders\sculpt.comp'
 if (Test-Path -LiteralPath $sculptPath) {
     Add-Shader $sculptPath 'sculpt' @('--target-env=vulkan1.3', '-O')

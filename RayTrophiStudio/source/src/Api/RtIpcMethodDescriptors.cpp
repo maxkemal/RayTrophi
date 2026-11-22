@@ -5681,7 +5681,7 @@ static const MethodDescriptor desc_paint_wet_dab = {
 static const MethodRegistration reg_paint_wet_dab(desc_paint_wet_dab);
 
 static const MethodParam params_paint_wet_demo[] = {
-    {"operation", "string", false, "configure/status/pop/pointer/interaction/body/hidden/start/stop/burst/reset/reset_balloons/set_collider", "status", nullptr, "string", false},
+    {"operation", "string", false, "configure/status/pop/pointer/interaction/body/hidden/start/stop/burst/reset/reset_balloons/set_collider/wind", "status", nullptr, "string", false},
     {"config", "object", false, "", "{}", nullptr, nullptr, false},
 };
 static const MethodDescriptor desc_paint_wet_demo = {

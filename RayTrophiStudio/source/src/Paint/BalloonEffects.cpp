@@ -27,6 +27,9 @@ constexpr const char* kTrailSystem = "BalloonSparkleTrails";
 constexpr const char* kGhostSystem = "BalloonDropGhosts";
 constexpr double kTrailInterval = 1.0 / 30.0;
 constexpr size_t kConfettiReserve = 220 * 12;
+constexpr int kConfettiMotesPerBurst = 16;
+constexpr size_t kSparkPoolMoteLimit = 384;
+constexpr int kImpactGlintsPerTick = 24;
 // Sparkle physics, shared by effectSystem() and the bounce detector.
 const Vec3 kSparkGravity(0.0f, -4.0f, 0.0f);
 constexpr float kSparkDrag = 1.4f;
@@ -42,7 +45,6 @@ constexpr size_t kTrailCap = 3000;
 struct SparkSeen {
     Vec3 velocity;
     float age = -1.0f;
-    int impacts = 0;
 };
 
 struct GhostSeen {
@@ -59,7 +61,8 @@ struct Effects {
     std::mt19937 random;
     std::vector<uint32_t> confetti_profiles;  // palette + gold
     std::vector<uint32_t> sparkle_profiles;   // palette + gold, kSparkleSystem
-    std::vector<uint32_t> impact_profiles;    // same order, kSparkleSystem
+    std::vector<uint32_t> impact_profiles;    // same order, kTrailSystem
+    std::vector<uint32_t> mote_profiles;     // same order, kSparkleSystem
     std::vector<uint32_t> drop_spark_profiles;// same order, kSparkleSystem (no trail)
     std::vector<uint32_t> drop_trail_profiles;// same order, kTrailSystem
     std::vector<uint32_t> ghost_profiles;     // same order, kGhostSystem (never drawn)
@@ -74,6 +77,7 @@ struct Effects {
     std::vector<GhostSeen> ghost_last;        // per ghost slot, last tick
     double trail_clock = 0.0;
     uint64_t sparkles_spawned = 0;
+    uint64_t confetti_motes_spawned = 0;
     uint64_t trail_spawned = 0;
     uint64_t glitter_spawned = 0;
     uint64_t impacts = 0;
@@ -147,13 +151,29 @@ ParticleAppearanceProfile cardProfile(const std::string& name, const Vec3& color
     return p;
 }
 
-// Paint-coloured spark: the palette colour, ALPHA blended, with emission > 1.
-// The billboard shader outputs rgb * emission, and the palette keeps its
-// secondary channels near zero, so emission brightens the hue without
-// whitening it. What turned the first look WHITE in the lit room (2026-11-18)
-// was additive blending (light added onto an already bright wall) plus a
-// white-hot core; emission 1 then lost the glow ("parıltıları kaybettik").
-// Emission decays with age: a spark never brightens again, so it cannot flash.
+float peakChannel(const Vec3& color) {
+    return std::max({color.x, color.y, color.z});
+}
+
+Vec3 highlightTint(const Vec3& paint, float warm_share) {
+    const Vec3 warm(1.0f, 0.90f, 0.68f);
+    const Vec3 hue = paint / std::max(peakChannel(paint), 0.08f);
+    const Vec3 tint = hue * (1.0f - warm_share) + warm * warm_share;
+    return tint / peakChannel(tint);
+}
+
+ParticleAppearanceProfile foilProfile(const std::string& name, const Vec3& color) {
+    auto profile = cardProfile(name, color, 0.067f);
+    const Vec3 low = color * 0.8f;
+    const Vec3 reflection = highlightTint(color, 0.72f);
+    // Bake display-limited tints into the ramp so interpolating colour and
+    // emission independently cannot overshoot the peak on the LDR overlay.
+    profile.color_ramp = {{0.0f, low}, {0.13f, low}, {0.20f, reflection},
+                          {0.28f, low}, {0.49f, low}, {0.56f, reflection * 0.90f},
+                          {0.65f, low}, {1.0f, color * 0.55f}};
+    return profile;
+}
+
 ParticleAppearanceProfile sparkProfile(const std::string& name, const Vec3& color, float size,
                                        float emission) {
     ParticleAppearanceProfile p;
@@ -166,21 +186,57 @@ ParticleAppearanceProfile sparkProfile(const std::string& name, const Vec3& colo
     return p;
 }
 
+ParticleAppearanceProfile hotSparkProfile(const std::string& name, const Vec3& color,
+                                         float size, float peak) {
+    auto profile = sparkProfile(name, color, size, 1.0f);
+    // Light sprites on the LDR overlay must add light to the scene.
+    // Alpha blending replaces bright background pixels with the dimmer tail.
+    profile.blend = RayTrophiSim::ParticleAppearanceBlend::Additive;
+    profile.opacity_curve = {{0.0f, 0.72f}, {0.34f, 0.58f}, {1.0f, 0.0f}};
+    // Keep the hue in the billboard input so the shader can draw a pale
+    // core and a more saturated halo from the same colour.
+    const Vec3 hue = highlightTint(color, 0.12f);
+    profile.color_ramp = {{0.0f, hue * peak}, {0.12f, hue * (peak * 0.84f)},
+                          {0.34f, hue * (peak * 0.57f)}, {1.0f, hue * 0.16f}};
+    profile.emission_curve = {{0.0f, 1.0f}, {1.0f, 1.0f}};
+    return profile;
+}
+
+ParticleAppearanceProfile coloredTrailProfile(const std::string& name, const Vec3& color,
+                                              float size, float brightness) {
+    auto profile = sparkProfile(name, color, size, 1.0f);
+    profile.blend = RayTrophiSim::ParticleAppearanceBlend::Additive;
+    profile.opacity_curve = {{0.0f, 0.49f}, {0.35f, 0.26f},
+                             {0.72f, 0.09f}, {1.0f, 0.0f}};
+    profile.size_curve = {{0.0f, size}, {0.40f, size * 0.59f}, {1.0f, size * 0.16f}};
+    const Vec3 tint = highlightTint(color, 0.08f);
+    const Vec3 saturated = tint * tint;
+    // Pale particles hit the LDR ceiling sooner when several paths overlap.
+    const float lightness = Vec3::dot(color, Vec3(0.2126f, 0.7152f, 0.0722f));
+    const float strength = brightness * (1.0f - 0.34f * lightness);
+    profile.color_ramp = {{0.0f, saturated * strength},
+                          {1.0f, saturated * (strength * 0.35f)}};
+    profile.emission_curve = {{0.0f, 1.0f}, {1.0f, 1.0f}};
+    return profile;
+}
+
 // Glitter: a tiny drifting point in the paint colour that glints twice over
 // its 1.2..1.8 s life (1.1..1.7 Hz, every point on its own phase), the second
-// glint dimmer (emission and opacity together; alpha blended, so the hue holds).
+// glint dimmer (colour and opacity together).
 // Flash safety: a few pixels each, below 3 Hz, never in step. ★ The glint count
 // is tied to the lifetime: shortening the life with four glints made 3.3 Hz.
 ParticleAppearanceProfile glitterProfile(const std::string& name, const Vec3& color) {
     ParticleAppearanceProfile p;
     p.name = name;
-    p.blend = RayTrophiSim::ParticleAppearanceBlend::Alpha;
-    p.color_ramp = {{0.0f, color}, {1.0f, color}};
-    p.opacity_curve = {{0.0f, 0.3f}, {0.2f, 1.0f}, {0.45f, 0.2f}, {0.7f, 0.8f},
+    p.blend = RayTrophiSim::ParticleAppearanceBlend::Additive;
+    const Vec3 glint = highlightTint(color, 0.12f);
+    const Vec3 base = highlightTint(color, 0.16f) * 0.28f;
+    p.color_ramp = {{0.0f, base}, {0.2f, glint * 0.98f}, {0.45f, base},
+                    {0.7f, glint * 0.76f}, {1.0f, base}};
+    p.opacity_curve = {{0.0f, 0.2f}, {0.2f, 0.72f}, {0.45f, 0.14f}, {0.7f, 0.55f},
                        {1.0f, 0.0f}};
-    p.size_curve = {{0.0f, 0.04f}, {1.0f, 0.025f}};
-    p.emission_curve = {{0.0f, 1.0f}, {0.2f, 4.0f}, {0.45f, 1.0f}, {0.7f, 3.0f},
-                        {1.0f, 1.0f}};
+    p.size_curve = {{0.0f, 0.06f}, {1.0f, 0.036f}};
+    p.emission_curve = {{0.0f, 1.0f}, {1.0f, 1.0f}};
     return p;
 }
 
@@ -196,7 +252,8 @@ uint32_t upsertProfile(ParticleSimulationSystem& runtime, const ParticleAppearan
 // A CPU-only effect system: no events, Bounce on contact.
 ParticleSimulationSystem* effectSystem(SceneData& scene, const char* name, const Vec3& gravity,
                                        float drag, size_t reserve,
-                                       SceneData::ParticleRenderShape shape, bool billboard_only) {
+                                       SceneData::ParticleRenderShape shape, bool billboard_only,
+                                       bool emissive = false) {
     if (!system(scene, name)) {
         scene.addParticleSystemObject(name);
     }
@@ -216,7 +273,7 @@ ParticleSimulationSystem* effectSystem(SceneData& scene, const char* name, const
             entry.visible = true;
             entry.render.emitter_only = false;
             entry.render.shape = shape;
-            entry.render.emissive = false;
+            entry.render.emissive = emissive;
             entry.render.roughness = 0.5f;
             // Spark systems draw ONLY as billboards (per-profile colour). The RT
             // instance bridge gives a whole system ONE material - with no emitter
@@ -242,6 +299,8 @@ void mirrorDropletColliders(SceneData& scene, const char* name, float restitutio
     while (!target->colliders().empty()) {
         target->removeCollider(target->colliders().size() - 1);
     }
+    target->setCollisionPlane(source->collisionPlaneY(), source->collisionPlaneEnabled(),
+                              restitution);
     for (const auto& c : source->colliders()) {
         RayTrophiSim::ParticleColliderDesc desc = c;
         desc.restitution = restitution;
@@ -269,6 +328,24 @@ void spawnCard(ParticleSimulationSystem& confetti, const Vec3& position, const V
     card.rotation = randomRange(0.0f, 6.28318530718f);
     card.angular_velocity = randomRange(-9.0f, 9.0f);
     confetti.spawn(card);
+}
+
+void spawnConfettiMote(ParticleSimulationSystem* motes, const Vec3& position,
+                       const Vec3& velocity, int& budget) {
+    if (budget <= 0 || !motes || fx.mote_profiles.empty() ||
+        motes->aliveCount() >= kSparkPoolMoteLimit) {
+        return;
+    }
+    ParticleSpawnDesc mote;
+    mote.position = position;
+    mote.velocity = velocity;
+    mote.lifetime_seconds = randomRange(0.55f, 0.95f);
+    mote.mass = 0.0005f;
+    mote.appearance_profile_id = fx.mote_profiles[randomIndex(fx.mote_profiles.size())];
+    mote.size_scale = randomRange(0.65f, 1.15f);
+    motes->spawn(mote);
+    ++fx.confetti_motes_spawned;
+    --budget;
 }
 
 // Small fan of sparks thrown off a surface along its normal.
@@ -343,6 +420,11 @@ void ghostContacts(SceneData& scene, float dt) {
 constexpr int kGhostEvery = 8;
 constexpr size_t kGhostCap = 600;
 
+float trailBirthWidth(float age) {
+    // Right after the pop the sources still overlap near the burst origin.
+    return 0.52f + 0.48f * std::clamp(age / 0.14f, 0.0f, 1.0f);
+}
+
 void tickDropTrails(SceneData& scene, float dt) {
     auto* trails = system(scene, kTrailSystem);
     auto* ghosts = system(scene, kGhostSystem);
@@ -363,67 +445,70 @@ void tickDropTrails(SceneData& scene, float dt) {
         const Vec3 v(b.velocity_x[i], b.velocity_y[i], b.velocity_z[i]);
         // Two dots per tick (at the drop and half a tick behind) keep the
         // streak continuous at 4.5..9 m/s.
-        for (int k = 0; k < 2; ++k) {
+        const float width = trailBirthWidth(b.age_seconds[i]);
+        for (int k = 0; k < 2 && trails->aliveCount() < kTrailCap; ++k) {
             ParticleSpawnDesc dot;
             dot.position = p - v * (half_tick * static_cast<float>(k));
             dot.velocity = v * 0.05f;
             dot.lifetime_seconds = 0.15f;
             dot.mass = 0.0005f;
             dot.appearance_profile_id = fx.drop_trail_profiles[static_cast<size_t>(color)];
-            dot.size_scale = b.size_scale[i];
+            dot.size_scale = b.size_scale[i] * width * (k == 0 ? 1.0f : 0.70f);
             trails->spawn(dot);
+            ++fx.drop_trail_spawned;
         }
-        fx.drop_trail_spawned += 2;
     }
 }
 
-// A spark head whose velocity jumped more than gravity and drag explain since
-// the last frame bounced: it throws a fan of impact sparks (at most two bounces
-// per spark; impact and drop sparks never spark again). 30 times a second every
-// head and impact spark leaves a trail dot in its own colour, and a head
-// sometimes sheds a twinkling glitter point that drifts down.
+// A dead head whose age is still below its lifetime hit a collider. Use
+// the CPU solver's resolved position for one stationary fading glint.
 void tickSparkles(SceneData& scene, float dt) {
     auto* sparks = system(scene, kSparkleSystem);
     auto* trails = system(scene, kTrailSystem);
-    if (!sparks || !trails || sparks->aliveCount() == 0) {
+    if (!sparks || !trails) {
+        return;
+    }
+    const bool alive = sparks->aliveCount() > 0;
+    const bool collision_kills = sparks->stats().collision_kills > 0;
+    if (!alive && !collision_kills) {
         fx.trail_clock = 0.0;
+        fx.spark_last.clear();
         return;
     }
     const auto& b = sparks->buffers();
     const size_t slots = b.alive.size();
-    if (fx.spark_last.size() < slots) fx.spark_last.resize(slots);
-    struct Impact { Vec3 position, normal; int color; };
-    std::vector<Impact> hits;
+    fx.spark_last.resize(slots);
+    int impact_budget = kImpactGlintsPerTick;
     for (size_t i = 0; i < slots; ++i) {
         auto& seen = fx.spark_last[i];
+        const float age = b.age_seconds[i];
         if (!b.alive[i]) {
+            if (collision_kills && seen.age >= 0.0f && age > seen.age &&
+                age < b.lifetime_seconds[i] && impact_budget > 0 &&
+                trails->aliveCount() < kTrailCap) {
+                const int color = profileIndex(fx.sparkle_profiles, b.appearance_profile[i]);
+                if (color >= 0) {
+                    ParticleSpawnDesc glint;
+                    glint.position = Vec3(b.position_x[i], b.position_y[i], b.position_z[i]) -
+                                     seen.velocity.normalize() * 0.018f;
+                    glint.lifetime_seconds = 0.13f;
+                    glint.appearance_profile_id = fx.impact_profiles[static_cast<size_t>(color)];
+                    glint.size_scale = b.size_scale[i];
+                    trails->spawn(glint);
+                    ++fx.impacts;
+                    ++fx.impact_sparks;
+                    --impact_budget;
+                }
+            }
             seen.age = -1.0f;
             continue;
         }
-        const Vec3 v(b.velocity_x[i], b.velocity_y[i], b.velocity_z[i]);
-        const float age = b.age_seconds[i];
-        const bool same = seen.age >= 0.0f && age > seen.age;   // not a reused slot
-        if (same && seen.impacts < 2) {
-            const int color = profileIndex(fx.sparkle_profiles, b.appearance_profile[i]);
-            const Vec3 expected = seen.velocity + (kSparkGravity - seen.velocity * kSparkDrag) * dt;
-            const Vec3 jump = v - expected;
-            if (color >= 0 && jump.length() > 1.5f) {
-                hits.push_back({Vec3(b.position_x[i], b.position_y[i], b.position_z[i]),
-                                jump.normalize(), color});
-                ++seen.impacts;
-            }
-        } else if (!same) {
-            seen.impacts = 0;
-        }
-        seen.velocity = v;
+        seen.velocity = Vec3(b.velocity_x[i], b.velocity_y[i], b.velocity_z[i]);
         seen.age = age;
     }
-    // Spawned after the scan: spawning may grow the buffers scanned above.
-    for (const auto& hit : hits) {
-        sparkFan(*sparks, hit.position, hit.normal, fx.impact_profiles[static_cast<size_t>(hit.color)],
-                 4, 1.0f, 0.3f, 0.55f);
-        ++fx.impacts;
-        fx.impact_sparks += 4;
+    if (!alive) {
+        fx.trail_clock = 0.0;
+        return;
     }
 
     fx.trail_clock += dt;
@@ -432,10 +517,8 @@ void tickSparkles(SceneData& scene, float dt) {
     const auto& now = sparks->buffers();
     for (size_t i = 0; i < now.alive.size() && trails->aliveCount() < kTrailCap; ++i) {
         if (!now.alive[i]) continue;
-        int color = profileIndex(fx.sparkle_profiles, now.appearance_profile[i]);
-        const bool head = color >= 0;
-        if (!head) color = profileIndex(fx.impact_profiles, now.appearance_profile[i]);
-        if (color < 0) continue;   // drop sparks: too many for trails
+        const int color = profileIndex(fx.sparkle_profiles, now.appearance_profile[i]);
+        if (color < 0) continue;   // motes and drop sparks do not shed trails
         const Vec3 p(now.position_x[i], now.position_y[i], now.position_z[i]);
         const Vec3 v(now.velocity_x[i], now.velocity_y[i], now.velocity_z[i]);
         const float life = now.lifetime_seconds[i] > 0.0f
@@ -443,14 +526,14 @@ void tickSparkles(SceneData& scene, float dt) {
         ParticleSpawnDesc dot;
         dot.position = p;
         dot.velocity = v * 0.1f;
-        dot.lifetime_seconds = head ? 0.2f : 0.12f;
+        dot.lifetime_seconds = 0.16f;
         dot.mass = 0.0005f;
         dot.appearance_profile_id = fx.trail_profiles[static_cast<size_t>(color)];
-        // The trail thins as its spark ages; impact sparks leave a finer one.
-        dot.size_scale = now.size_scale[i] * std::max(0.25f, 1.0f - life) * (head ? 1.0f : 0.6f);
+        dot.size_scale = now.size_scale[i] * trailBirthWidth(now.age_seconds[i]) *
+                         std::max(0.25f, 1.0f - life);
         trails->spawn(dot);
         ++fx.trail_spawned;
-        if (head && randomRange(0.0f, 1.0f) < 0.05f) {
+        if (trails->aliveCount() < kTrailCap && randomRange(0.0f, 1.0f) < 0.05f) {
             ParticleSpawnDesc glint;
             glint.position = p;
             glint.velocity = v * 0.05f + randomDirection() * 0.15f;
@@ -473,16 +556,17 @@ void prepareBalloonEffects(SceneData& scene, const BalloonEffectsSetup& setup) {
     std::vector<Vec3> colors = setup.palette;
     colors.push_back(setup.gold);
 
-    // Confetti: light gravity, strong drag (paper flutters down), lands on the
-    // room's surfaces (mirrored colliders, low bounce, high friction).
+    // Stop drawing confetti on its first surface contact.
     auto* confetti = effectSystem(scene, kConfettiSystem, Vec3(0.0f, -2.5f, 0.0f), 2.2f,
                                   kConfettiReserve, SceneData::ParticleRenderShape::Quad, false);
-    // Sparkles (heads, impact sparks, drop sparks) and the trail system (trail
-    // dots and glitter: light gravity, heavy drag, no colliders - they drift).
+    confetti->physicsSettings().collision_response = RayTrophiSim::ParticleCollisionResponse::Die;
+    // Heads, drop sparks and confetti motes die on contact. Their trails
+    // and short contact glints just drift and expire without colliders.
     auto* sparkles = effectSystem(scene, kSparkleSystem, kSparkGravity, kSparkDrag, 4096,
-                                  SceneData::ParticleRenderShape::Sphere, true);
+                                  SceneData::ParticleRenderShape::Sphere, true, true);
+    sparkles->physicsSettings().collision_response = RayTrophiSim::ParticleCollisionResponse::Die;
     auto* trails = effectSystem(scene, kTrailSystem, Vec3(0.0f, -0.5f, 0.0f), 6.0f, 16384,
-                                SceneData::ParticleRenderShape::Sphere, true);
+                                SceneData::ParticleRenderShape::Sphere, true, true);
     // Drop ghosts: the droplets' own gravity and drag, Die on contact, never
     // drawn (emitter_only keeps them simulating; visible=false would stop them).
     Vec3 drop_gravity(0.0f, -9.81f, 0.0f);
@@ -505,19 +589,21 @@ void prepareBalloonEffects(SceneData& scene, const BalloonEffectsSetup& setup) {
         const std::string key = colorKey(color);
         // Confetti keeps its original names ("Confetti Gold"): saved projects match.
         fx.confetti_profiles.push_back(upsertProfile(*confetti,
-            cardProfile(gold ? std::string("Confetti Gold") : "Confetti " + key, color, 0.05f)));
+            foilProfile(gold ? std::string("Confetti Gold") : "Confetti " + key, color)));
         fx.sparkle_profiles.push_back(upsertProfile(*sparkles,
-            sparkProfile("Sparkle " + key, color, 0.11f, 3.0f)));
-        fx.impact_profiles.push_back(upsertProfile(*sparkles,
-            sparkProfile("Sparkle Impact " + key, color, 0.06f, 3.0f)));
+            hotSparkProfile("Sparkle " + key, color, 0.18f, 0.98f)));
+        fx.impact_profiles.push_back(upsertProfile(*trails,
+            hotSparkProfile("Sparkle Quench " + key, color, 0.085f, 0.88f)));
+        fx.mote_profiles.push_back(upsertProfile(*sparkles,
+            glitterProfile("Confetti Mote " + key, color)));
         fx.drop_spark_profiles.push_back(upsertProfile(*sparkles,
-            sparkProfile("Drop Spark " + key, color, 0.05f, 3.0f)));
+            hotSparkProfile("Drop Spark " + key, color, 0.08f, 0.92f)));
         fx.trail_profiles.push_back(upsertProfile(*trails,
-            sparkProfile("Sparkle Trail " + key, color, 0.075f, 2.0f)));
+            coloredTrailProfile("Sparkle Trail " + key, color, 0.075f, 0.53f)));
         fx.glitter_profiles.push_back(upsertProfile(*trails,
             glitterProfile("Sparkle Glitter " + key, color)));
         fx.drop_trail_profiles.push_back(upsertProfile(*trails,
-            sparkProfile("Drop Trail " + key, color, 0.05f, 1.6f)));
+            coloredTrailProfile("Drop Trail " + key, color, 0.05f, 0.44f)));
         fx.ghost_profiles.push_back(upsertProfile(*ghosts,
             sparkProfile("Drop Ghost " + key, color, 0.05f, 1.0f)));
     }
@@ -531,8 +617,8 @@ void resetBalloonEffects() {
 
 void mirrorBalloonEffectColliders(SceneData& scene) {
     if (!fx.prepared) return;
-    mirrorDropletColliders(scene, kConfettiSystem, 0.12f, 0.7f);   // paper settles
-    mirrorDropletColliders(scene, kSparkleSystem, 0.35f, 0.3f);    // sparks skip on
+    mirrorDropletColliders(scene, kConfettiSystem, 0.0f, 0.0f);    // dies on contact
+    mirrorDropletColliders(scene, kSparkleSystem, 0.0f, 0.0f);    // quenched on contact
     mirrorDropletColliders(scene, kGhostSystem, 0.0f, 0.0f);       // ghosts die there
 }
 
@@ -560,25 +646,35 @@ void balloonConfettiBurst(SceneData& scene, const Vec3& centre, float radius, in
                           float speed_min, float speed_max) {
     auto* confetti = system(scene, kConfettiSystem);
     if (!fx.prepared || !confetti || fx.confetti_profiles.empty()) return;
+    auto* motes = system(scene, kSparkleSystem);
+    int mote_budget = kConfettiMotesPerBurst;
     for (int i = 0; i < cards; ++i) {
-        const Vec3 direction = randomDirection(-0.3f);   // mostly upward and outward
-        spawnCard(*confetti, centre + direction * radius, direction * randomRange(speed_min, speed_max),
+        const Vec3 direction = randomDirection(-0.3f);
+        const Vec3 position = centre + direction * radius;
+        spawnCard(*confetti, position, direction * randomRange(speed_min, speed_max),
                   randomRange(2.5f, 4.0f));
+        if (i % 8 == 0) {
+            spawnConfettiMote(motes, position, direction * randomRange(0.7f, 1.5f), mote_budget);
+        }
     }
 }
 
 void balloonConfettiRain(SceneData& scene, const Vec3& spawn_min, const Vec3& spawn_max, int cards) {
     auto* confetti = system(scene, kConfettiSystem);
     if (!fx.prepared || !confetti || fx.confetti_profiles.empty()) return;
+    auto* motes = system(scene, kSparkleSystem);
+    int mote_budget = kConfettiMotesPerBurst;
     for (int i = 0; i < cards; ++i) {
-        // Inside the room: confetti collides, so rain started above the ceiling
-        // would settle on top of it. The automatic spawn volume ends 1 m under
-        // the ceiling.
-        spawnCard(*confetti,
-                  Vec3(randomRange(spawn_min.x, spawn_max.x), spawn_max.y + randomRange(0.3f, 0.6f),
-                       randomRange(spawn_min.z, spawn_max.z)),
-                  Vec3(randomRange(-0.3f, 0.3f), randomRange(-0.6f, 0.0f), randomRange(-0.3f, 0.3f)),
-                  randomRange(4.0f, 6.0f));
+        // Start inside the room so rain cannot settle on top of the ceiling.
+        const Vec3 position(randomRange(spawn_min.x, spawn_max.x),
+                            spawn_max.y + randomRange(0.3f, 0.6f),
+                            randomRange(spawn_min.z, spawn_max.z));
+        const Vec3 velocity(randomRange(-0.3f, 0.3f), randomRange(-0.6f, 0.0f),
+                            randomRange(-0.3f, 0.3f));
+        spawnCard(*confetti, position, velocity, randomRange(4.0f, 6.0f));
+        if (i % 16 == 0) {
+            spawnConfettiMote(motes, position, velocity, mote_budget);
+        }
     }
 }
 
@@ -789,6 +885,7 @@ json balloonEffectsStatus(SceneData* scene) {
         }
     }
     return {{"systems", systems}, {"sparkles_spawned", fx.sparkles_spawned},
+            {"confetti_motes_spawned", fx.confetti_motes_spawned},
             {"trail_spawned", fx.trail_spawned}, {"glitter_spawned", fx.glitter_spawned},
             {"impacts", fx.impacts}, {"impact_sparks", fx.impact_sparks},
             {"drop_contacts_seen", fx.drop_contacts_seen},

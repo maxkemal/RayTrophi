@@ -1,5 +1,6 @@
 ﻿#include "AABB.h"
 #include <globals.h>
+#include "Math/SimdIntrin.h"
 
 AABB surrounding_box(const AABB& box0, const AABB& box1) {
     if (!box0.is_valid()) return box1;

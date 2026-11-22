@@ -2393,6 +2393,9 @@
     <ClCompile Include="source\src\Utils\SceneCommand.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Platform\PlatformOs.cpp">
+      <Filter>Kaynak Dosyalar\Utils</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Utils\PerfProfile.cpp">
       <Filter>Kaynak Dosyalar\Utils</Filter>
     </ClCompile>
@@ -2987,6 +2990,9 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\MaterialPreviewIbl.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\RayFusionViewportPasses.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\MaterialPreviewTransmission.cpp">

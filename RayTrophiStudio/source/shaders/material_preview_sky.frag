@@ -49,13 +49,18 @@ layout(set = 0, binding = 12) uniform sampler2D atmosphereMultiScatter;
 // Read only when pc.materialMeta.x == 1 (the adapter wrote it this frame).
 layout(set = 0, binding = 25) uniform sampler2D cloudLayer;
 
+layout(std140, set = 0, binding = 28) uniform RayFusionFrameUniform {
+    mat4 view;
+    vec4 lightDir2;
+} rayFusionFrame;
+
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
-    mat4 view;
+
     vec4 cameraPos;       // w = viewport aspect for the sky pass
     vec4 lightDir0;       // w = tan(vertical fov / 2) for the sky pass
     vec4 lightDir1;
-    vec4 lightDir2;
+
     uvec4 materialMeta;
 } pc;
 
@@ -137,7 +142,7 @@ void main() {
     float tanHalfFov = max(pc.lightDir0.w, 0.001);
     vec3 viewDir = normalize(vec3(vNdc.x * max(pc.cameraPos.w, 0.001) * tanHalfFov,
                                   -vNdc.y * tanHalfFov, -1.0));
-    vec3 d = normalize(transpose(mat3(pc.view)) * viewDir);
+    vec3 d = normalize(transpose(mat3(rayFusionFrame.view)) * viewDir);
 
     vec3 sky;
     if (worldMode == 1u && (sceneFlags & 2u) != 0u)

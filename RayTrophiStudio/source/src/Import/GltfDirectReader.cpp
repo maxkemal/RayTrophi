@@ -12,6 +12,7 @@
 * =========================================================================
 */
 #include <charconv>
+#include <cstdlib>
 #include <cstring>
 #include <system_error>
 
@@ -25,8 +26,16 @@ thread_local bool gltfJsonNumberInvalid = false;
 double gltfJsonNumber(const char* text) {
     const char* end = text + std::strlen(text);
     double value = 0.0;
+#if defined(__ANDROID__)
+    // NDK libc++ has no floating-point from_chars. Bionic's locale support is "C" only,
+    // so strtod always uses '.' here and stays locale-independent.
+    char* parsed_end = nullptr;
+    value = std::strtod(text, &parsed_end);
+    if (parsed_end != end || parsed_end == text) {
+#else
     const auto parsed = std::from_chars(text, end, value, std::chars_format::general);
     if (parsed.ec != std::errc{} || parsed.ptr != end) {
+#endif
         // Let cgltf finish/release its C allocations before rejecting the file.
         gltfJsonNumberInvalid = true;
         return 0.0;
@@ -64,6 +73,7 @@ double gltfJsonNumber(const char* text) {
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <functional>

@@ -16,9 +16,13 @@ Aktif çıktı **`dist/RayTrophiPlayer/`**, arşiv dosyası
 içindir. Önceki `Player-depth-2026-11-18` dağıtımı `.archive` altına taşındı;
 güncel çalıştırma yolu ana klasördeki `RayTrophiPlayer.exe` dosyasıdır.
 
-Varsayılan yük: mevcut Release exe ve bağımlılıkları, shaderlar, tek Gizli Renkler sahnesi ve
-yan dosyaları, **sahnelerin ses klasörleri**, taşınabilir Python, algı köprüsü,
-MediaPipe/OpenCV ve model. Kişisel MP4/kalibrasyon verisi pakete alınmaz.
+Varsayılan yük mevcut Release exe ve bağımlılıkları, shaderlar, Gizli Renkler
+ve Pastel Oyun Odası sahneleri, sahne kartları, sahne sesleri, taşınabilir
+Python, algı köprüsü, MediaPipe/OpenCV ve model içerir. Birden fazla oyun
+paketlendiğinde Player açılışta oyun kütüphanesini gösterir. Tek oyunlu paket
+doğrudan sahneyi açar. `--project` ile verilen proje doğrudan yüklenir.
+Blender, GLB ve glTF kaynak dosyaları dağıtım dışındadır.
+Kişisel MP4/kalibrasyon verisi pakete alınmaz.
 `-NoSceneAudio` ve `-NoPerception` yalnız özellikle istenen eksiltilmiş paket
 seçenekleridir; normal teslimde kullanılmaz.
 
@@ -79,3 +83,42 @@ kamerayla uçtan uca oyun kabulü yapılmadı; bu paket kamera saha testi içind
 Panelin pozitif köşe koordinatları ile salonun negatif koordinatlarının
 hizalanması gerektiği test notunda açıkça belirtilir; gerçek RGB-D sensör
 entegresi doğrulanmış diye sunulmaz. C++ build/app launch yapılmadı.
+## Shader envanteri
+
+`scripts/player_shader_manifest.json` RayFusion, balon boyası, derinlik kartı
+ve sahne efektlerinin doğrulanmış dosyalarını listeler. Paket, zorunlu bir
+shader Release dizininde eksikse hazırlığa başlamadan hata verir. Yalnızca
+Studio mesh düzenleme, seçili obje konturu ve hair viewport shader'ları
+paketten çıkarılır. Henüz sınıflandırılmamış shader'lar ve diğer Release
+shader dosyaları taşınmaya devam eder.
+
+Salt okunur envanteri görmek için `./scripts/package_player.ps1 -ShaderInventoryOnly`
+çalıştır. Çıktı her SPIR-V dosyasının grubunu ve binary başlığındaki sürümü verir.
+Bu komut paket oluşturmaz. SPIR-V sürümü cihazın Vulkan feature ve limit
+uyumluluğunu tek başına göstermez.
+
+Manifestte sınıflandırılan 12 zorunlu ve 28 koşullu shader Vulkan 1.2 hedefinde
+SPIR-V 1.5 olarak doğrulandı. Yeni Player kaynağı loader'a göre 1.2 veya 1.3
+instance ister ve RayFusion özelliklerine sahip adaptörleri seçer. Canlı 1.2
+kabulü beklenirken paket dokümanındaki Vulkan 1.3 gereksinimi geçerlidir.
+Manifest dışında korunan shader'lar da bulunur.
+
+## Vulkan 1.2 saha kabulü
+
+Testi alıcı kendi makinesinde yapar. Paketi yazılabilir bir klasöre çıkarır,
+Player'ı çalıştırır, workshop görüntüsünü, balon patlamasını ve yüzeydeki boyayı
+kontrol eder. Kurulu kamera varsa derinlik kartını da dener. Sonucu ve
+`SceneLog.txt` dosyasını yeniden başlatmadan önce gönderir. O koşuda
+`StartupCrashStack.txt` oluştuysa onu da ekler. Paket README'sindeki EXE
+SHA-256 değeri gönderilen sürümü tanımlar.
+
+Tanıda instance API sürümü ile fiziksel cihaz API sürümüne ayrı bakılır.
+`[Player GPU]` satırları 15 binding'lik çarpışma ve 17 binding'lik boya
+gereksiniminin storage descriptor limitlerine sığıp sığmadığını gösterir.
+Ayrıca HDR/LDR, derinlik ve Transmission görüntülerinin kullanım sorgularını,
+HDR blending ve Transmission atomik desteğini kaydeder. Sorgu başarısı,
+çalışma anındaki bellek tahsisi için ayrı bir kontroldür.
+`[Player compute]` satırları spawn, ballistic, collide ve wet paint
+shader'larının kurulum aşamasını, SPIR-V sürümünü ve Vulkan sonuç kodunu verir.
+`First scene frame uploaded` kaydı GPU kare sayaçlarını, draw sayısını ve
+sıfır dışı örnek sayısını verir. Görsel kabulü alıcının sahne gözlemi tamamlar.

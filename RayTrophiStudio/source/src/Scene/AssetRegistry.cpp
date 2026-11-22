@@ -11,7 +11,10 @@
 #include <fstream>
 #include <set>
 #include <unordered_set>
+#include "Platform/Platform.h"
+#ifdef _WIN32
 #include <windows.h>
+#endif
 
 namespace {
 
@@ -68,22 +71,6 @@ bool isDirectoryPath(const std::filesystem::path& path) {
 bool isRegularFilePath(const std::filesystem::path& path) {
     std::error_code ec;
     return std::filesystem::is_regular_file(path, ec);
-}
-
-std::filesystem::path getExecutableDirectory() {
-    std::wstring buffer(MAX_PATH, L'\0');
-    DWORD length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    while (length >= buffer.size() - 1) {
-        buffer.resize(buffer.size() * 2);
-        length = GetModuleFileNameW(nullptr, buffer.data(), static_cast<DWORD>(buffer.size()));
-    }
-
-    if (length == 0) {
-        return {};
-    }
-
-    buffer.resize(length);
-    return std::filesystem::path(buffer).parent_path();
 }
 
 std::string safeReadString(const nlohmann::json& json, const char* key, const std::string& fallback = "") {
@@ -356,7 +343,15 @@ bool AssetRegistry::writeMetadataStub(const AssetRecord& asset) const {
 }
 
 std::filesystem::path AssetRegistry::resolveDefaultRoot() {
-    const std::filesystem::path exe_dir = getExecutableDirectory();
+    const std::filesystem::path exe_dir = Platform::appDataRoot();
+#ifdef __ANDROID__
+    std::error_code error;
+    const auto assets = exe_dir / "assets";
+    if (!exe_dir.empty() && std::filesystem::is_directory(assets, error)) {
+        return assets;
+    }
+    return {};
+#else
     const std::vector<std::filesystem::path> candidates = {
         exe_dir / "assets",
         exe_dir / ".." / "assets",
@@ -374,6 +369,7 @@ std::filesystem::path AssetRegistry::resolveDefaultRoot() {
         }
     }
     return {};
+#endif
 }
 
 AssetRecord AssetRegistry::buildRecordFromFile(const std::filesystem::path& root_path, const std::filesystem::path& directory_path, const std::filesystem::path& entry_path) {

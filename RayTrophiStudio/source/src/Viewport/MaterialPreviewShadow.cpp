@@ -1,3 +1,4 @@
+#include "Viewport/RayFusionViewportPasses.h"
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterGpuCull.h"
 #include "Viewport/RasterInstanceUpload.h"
@@ -36,16 +37,6 @@ struct ShadowView {
     bool perspective = false;
 };
 
-struct PreviewPush {
-    float viewProj[16]{};
-    float view[16]{};
-    float cameraPos[4]{};
-    float lightDir0[4]{};
-    float lightDir1[4]{};
-    float lightDir2[4]{};
-    uint32_t materialMeta[4]{};
-};
-static_assert(sizeof(PreviewPush) == 208u, "Material preview push ABI changed");
 
 void matrixToGL(const Matrix4x4& matrix, float out[16]) {
     const Matrix4x4 transposed = matrix.transpose();
@@ -1011,8 +1002,7 @@ void VulkanBackendAdapter::recordMaterialPreviewSkyPass(
                             0, 1, &m_interactiveViewport.materialPreviewDescSet,
                             0, nullptr);
 
-    PreviewPush push{};
-    matrixToGL(view, push.view);
+    RayFusionDrawPush push{};
     push.cameraPos[0] = m_camera.origin.x;
     push.cameraPos[1] = m_camera.origin.y;
     push.cameraPos[2] = m_camera.origin.z;
@@ -1246,7 +1236,7 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
     vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
     vkCmdSetDepthBias(cmd, 1.25f, 0.0f, 1.75f);
 
-    PreviewPush push{};
+    RayFusionDrawPush push{};
     push.materialMeta[0] = m_interactiveViewport.materialPreviewBoundMaterialCount;
     push.materialMeta[3] = m_interactiveViewport.materialPreviewTextureArrayLen;
     for (const ShadowView* dirtyView : dirtyViews) {

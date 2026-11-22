@@ -38,6 +38,12 @@ bool initPlatform(StartupLogFn startup_log) {
 void createMainWindow(const WindowConfig& config) {
     // Enable IME UI (must be set before creating window) so SDL can show native IME when needed
     SDL_SetHint(SDL_HINT_IME_SHOW_UI, "1");
+#ifdef __ANDROID__
+    // A resizable SDL window otherwise asks Android for "full user" orientation and the
+    // manifest's sensorLandscape is overridden (observed: portrait on the emulator).
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    SDL_SetHintWithPriority(SDL_HINT_TOUCH_MOUSE_EVENTS, "0", SDL_HINT_OVERRIDE);
+#endif
 
     startupLog(config.startup_log, "[Startup] before SDL_CreateWindow");
     window = SDL_CreateWindow(config.title,
@@ -49,6 +55,12 @@ void createMainWindow(const WindowConfig& config) {
     startupLog(config.startup_log,
                std::string("[Startup] SDL_CreateWindow done, ptr=") + (window ? "valid" : "null"));
 
+#ifdef __ANDROID__
+    // SDL2 starts text input with the video subsystem; on a touch device that pops the
+    // on-screen keyboard over the game (observed on a Lenovo tablet). ImGui's SDL backend
+    // starts text input again only while a text field is active.
+    SDL_StopTextInput();
+#endif
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     startupLog(config.startup_log,
                std::string("[Startup] SDL_CreateRenderer done, ptr=") + (renderer ? "valid" : "null"));
@@ -67,8 +79,12 @@ void createMainWindow(const WindowConfig& config) {
 
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
     startupLog(config.startup_log, "[Startup] SDL_SetTextureBlendMode done");
-    // Ensure SDL_TEXTINPUT events are enabled so ImGui_ImplSDL2 can receive UTF-8 characters
+    // Ensure SDL_TEXTINPUT events are enabled so ImGui_ImplSDL2 can receive UTF-8 characters.
+    // Not on Android: there it opens the on-screen keyboard over the game for the whole session.
+    // The touch game has no text fields; one that needs typing must start input itself.
+#ifndef __ANDROID__
     SDL_StartTextInput();
+#endif
 }
 
 void initImGui(const ImGuiConfig& config) {

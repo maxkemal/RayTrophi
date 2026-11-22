@@ -22,6 +22,7 @@ console and leaves the current live settings unchanged.
 | Automatic pop min/max | Existing interval settings, 2 <= min <= max <= 30 seconds. |
 | Drying time | `lifetime_seconds`, API 0.05..600 seconds; personnel slider up to 120. Drying does not erase dry colour. |
 | Paint spread / flow | Existing diffusion/runoff, 0..2; all registered surfaces. |
+| Paint thickness | `paint_thickness`, 0..1 relief limit for new paint on all registered surfaces. Each deposit fills part of the remaining relief. A positive value enables the height/normal channel. A value of 0 stops new height deposition. Lowering the value preserves existing ridges. Colour remains mixable at the relief limit. |
 | Texture resolution | 512/1024/2048 through the existing bulk Paint Edit resize service. |
 | Reset after inactivity | Existing `idle_reset_seconds`: 0 disables, otherwise 10..3600 seconds without a player pop, once the room is dirty. |
 | Reset after finale | Existing `finale_reset_seconds`: 0 disables, otherwise 3..120 seconds after the room-goal finale. |
@@ -95,6 +96,11 @@ Admin|SceneWrite|FilesRead|FilesWrite. No shader, binding layout or ABI change.
 | `game.settings.restore` | Empty -> scheduled/reload_project; camera must be stopped. |
 | `game.settings.clear_paint` | Empty -> queued paint reset. |
 | `game.settings.renew_balloons` | Empty -> existing demo status after renewal. |
+
+Mesh balloon games expose `wind_strength` (0–1, default 0.25), `jolt_motion`
+and `impact_soft_body`. Wind updates the live simulation without renewing
+balloons or resetting paint. The physics toggles rebuild the balloon demo and
+are also saved in the local per-scene Player profile.
 
 `player.operator(status)` also includes `game_settings`. Direct
 `paint.wet_demo(configure)` accepts `respawn_seconds`; direct

@@ -12,7 +12,7 @@
 #include "WaterShaderCommon.h"
 #include <cmath>
 #include <algorithm>
-#include <immintrin.h>
+#include "Math/SimdIntrin.h"
 #include "Vec3SIMD.h"
 
 // ═══════════════════════════════════════════════════════════════════════════════

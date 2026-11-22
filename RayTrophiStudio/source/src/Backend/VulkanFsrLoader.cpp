@@ -1,6 +1,8 @@
 #include "Backend/VulkanFsrLoader.h"
 
 #include <filesystem>
+#include "Platform/Platform.h"
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -38,11 +40,7 @@ void FsrDeviceFeatures::append(VkPhysicalDevice physical, void**& nextLink, bool
 }
 
 VulkanFsrLoader::~VulkanFsrLoader() {
-#ifdef _WIN32
-    if (m_module) {
-        FreeLibrary(static_cast<HMODULE>(m_module));
-    }
-#endif
+    Platform::unloadLibrary(m_module);
 }
 
 bool VulkanFsrLoader::open(std::string& reason) {
@@ -50,13 +48,12 @@ bool VulkanFsrLoader::open(std::string& reason) {
         return true;
     }
 #ifdef _WIN32
-    wchar_t executable[32768]{};
-    const DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
-    if (length == 0 || length >= 32768) {
+    const auto directory = Platform::appDataRoot();
+    if (directory.empty()) {
         reason = "cannot resolve application directory for the FSR runtime";
         return false;
     }
-    const auto path = std::filesystem::path(executable).parent_path() / L"amd_fidelityfx_vk.dll";
+    const auto path = directory / L"amd_fidelityfx_vk.dll";
     HMODULE module = LoadLibraryExW(path.c_str(), nullptr,
         LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!module) {
@@ -65,13 +62,13 @@ bool VulkanFsrLoader::open(std::string& reason) {
             "); run scripts/setup_fidelityfx.ps1, then toggle upscale off/on";
         return false;
     }
-    create = reinterpret_cast<PfnFfxCreateContext>(GetProcAddress(module, "ffxCreateContext"));
-    destroy = reinterpret_cast<PfnFfxDestroyContext>(GetProcAddress(module, "ffxDestroyContext"));
-    configure = reinterpret_cast<PfnFfxConfigure>(GetProcAddress(module, "ffxConfigure"));
-    query = reinterpret_cast<PfnFfxQuery>(GetProcAddress(module, "ffxQuery"));
-    dispatch = reinterpret_cast<PfnFfxDispatch>(GetProcAddress(module, "ffxDispatch"));
+    create = reinterpret_cast<PfnFfxCreateContext>(Platform::findSymbol(module, "ffxCreateContext"));
+    destroy = reinterpret_cast<PfnFfxDestroyContext>(Platform::findSymbol(module, "ffxDestroyContext"));
+    configure = reinterpret_cast<PfnFfxConfigure>(Platform::findSymbol(module, "ffxConfigure"));
+    query = reinterpret_cast<PfnFfxQuery>(Platform::findSymbol(module, "ffxQuery"));
+    dispatch = reinterpret_cast<PfnFfxDispatch>(Platform::findSymbol(module, "ffxDispatch"));
     if (!create || !destroy || !configure || !query || !dispatch) {
-        FreeLibrary(module);
+        Platform::unloadLibrary(module);
         reason = "FSR runtime is missing one of the five required FFX API exports";
         return false;
     }

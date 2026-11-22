@@ -80,6 +80,6 @@ void main() {
     int row = int(entry & 0x7fffffffu);
     vColor = particleLook(row, normalizedAge, sizeScale[p], halfSize);
     particleLighting(row, center, vShade, vL1, vC1, vL2, vC2, vAmb, vUp);
-    gl_Position = particleClip(center, corner, halfSize);
-    vUV = corner;
+    vUV = particleEffectCorner(corner, vColor.a, normalizedAge, sizeScale[p], vShade);
+    gl_Position = particleClip(center, vUV, halfSize);
 }

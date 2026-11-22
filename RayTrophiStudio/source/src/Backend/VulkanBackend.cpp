@@ -11,6 +11,7 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include "Viewport/RayFusionViewportPasses.h"
 #include "Viewport/RasterBackground.h"
 #include "Backend/VulkanVolumePipelineProbe.h"
 #include "Backend/VulkanVolumeStageSplit.h"
@@ -72,12 +73,15 @@
 #include "CameraPresets.h"
 #include "Camera.h"
 #include "InstanceManager.h"
+#include "Platform/Platform.h"
 #include "DllLoadPolicy.h"
 #include "material_gpu.h"
 
 // Delay-load handler: attempt to LoadLibrary when a delay-loaded DLL fails
+#ifdef _WIN32
 #include <windows.h>
 #include <delayimp.h>
+#endif
 
 // CUDA runtime — used only by the Vulkan→CUDA OIDN denoiser interop path
 // (getDenoiserFrameGPU). Guarded by supportsExternalMemoryWin32 capability.
@@ -361,6 +365,7 @@ bool refreshVulkanInstanceDataBinding(VulkanRT::VulkanDevice* device,
 }
 }
 
+#ifdef _WIN32
 extern "C" FARPROC WINAPI DelayLoadFailureHook(unsigned int dliNotify, PDelayLoadInfo pdli) {
     if (!pdli) return nullptr;
 
@@ -407,6 +412,7 @@ ExternC const PfnDliHook __pfnDliFailureHook2 = DelayLoadFailureHook;
 
 // ============================================================================
 #include <vulkan/vulkan_win32.h>
+#endif
 // Debug Callback & Logging
 // ============================================================================
 
@@ -1244,15 +1250,24 @@ void VulkanDevice::shutdown() {
 // ========================================================================
 
 bool VulkanDevice::createInstance(bool validationLayers) {
-    // Ensure Vulkan loader is actually loadable.
-    // GetModuleHandle only checks if the module is already loaded in this process,
-    // which can cause false negatives on systems where vulkan-1.dll exists but wasn't loaded yet.
-    static HMODULE s_vulkanLoader = nullptr;
+    const auto loadVulkan = []() -> void* {
+#ifdef _WIN32
+        return Platform::Dll::loadModuleWithPolicy(
+            "vulkan-1.dll", Platform::Dll::DllCategory::Driver, false);
+#else
+        return Platform::loadLibrary("libvulkan.so");
+#endif
+    };
+    static void* s_vulkanLoader = nullptr;
     if (!s_vulkanLoader) {
-        s_vulkanLoader = Platform::Dll::loadModuleWithPolicy("vulkan-1.dll", Platform::Dll::DllCategory::Driver, false);
+        s_vulkanLoader = loadVulkan();
     }
     if (!s_vulkanLoader) {
+#ifdef _WIN32
         VK_WARN() << "[VulkanDevice] Vulkan loader (vulkan-1.dll) not found or failed to load." << std::endl;
+#else
+        VK_WARN() << "[VulkanDevice] Vulkan loader (libvulkan.so) not found or failed to load." << std::endl;
+#endif
         return false;
     }
     VkApplicationInfo appInfo{};
@@ -1297,13 +1312,13 @@ bool VulkanDevice::createInstance(bool validationLayers) {
     // Resolve vkCreateInstance directly from loader to avoid sporadic delay-import thunk faults
     // during backend switch transitions.
     PFN_vkGetInstanceProcAddr pfnGetInstanceProcAddr =
-        reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(s_vulkanLoader, "vkGetInstanceProcAddr"));
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(Platform::findSymbol(s_vulkanLoader, "vkGetInstanceProcAddr"));
     if (!pfnGetInstanceProcAddr) {
         // Handle stale/invalid cached module handles after backend switching.
-        s_vulkanLoader = Platform::Dll::loadModuleWithPolicy("vulkan-1.dll", Platform::Dll::DllCategory::Driver, false);
+        s_vulkanLoader = loadVulkan();
         if (s_vulkanLoader) {
             pfnGetInstanceProcAddr =
-                reinterpret_cast<PFN_vkGetInstanceProcAddr>(GetProcAddress(s_vulkanLoader, "vkGetInstanceProcAddr"));
+                reinterpret_cast<PFN_vkGetInstanceProcAddr>(Platform::findSymbol(s_vulkanLoader, "vkGetInstanceProcAddr"));
         }
     }
     if (!pfnGetInstanceProcAddr) {
@@ -1315,10 +1330,22 @@ bool VulkanDevice::createInstance(bool validationLayers) {
         return false;
     }
 
+#ifdef RT_PLAYER
+    const VkResult versionResult =
+        Backend::selectRayFusionInstanceVersion(pfnGetInstanceProcAddr, appInfo.apiVersion);
+    if (versionResult != VK_SUCCESS) {
+        SCENE_LOG_ERROR("[Player] Vulkan 1.2 loader required, VkResult " +
+                        std::to_string(static_cast<int>(versionResult)));
+        return false;
+    }
+    SCENE_LOG_INFO("[Player] Vulkan instance API 1." +
+                   std::to_string(VK_API_VERSION_MINOR(appInfo.apiVersion)));
+#endif
+
     PFN_vkCreateInstance pfnCreateInstance =
         reinterpret_cast<PFN_vkCreateInstance>(pfnGetInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
     if (!pfnCreateInstance) {
-        pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(GetProcAddress(s_vulkanLoader, "vkCreateInstance"));
+        pfnCreateInstance = reinterpret_cast<PFN_vkCreateInstance>(Platform::findSymbol(s_vulkanLoader, "vkCreateInstance"));
     }
     if (!pfnCreateInstance) {
         VK_ERROR() << "[VulkanDevice] Failed to resolve vkCreateInstance from loader." << std::endl;
@@ -1338,6 +1365,9 @@ bool VulkanDevice::createInstance(bool validationLayers) {
 // ========================================================================
 
 bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
+#ifdef RT_PLAYER
+    Backend::clearRayFusionDeviceRejections();
+#endif
     uint32_t deviceCount = 0;
     vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
     if (deviceCount == 0) {
@@ -1354,6 +1384,14 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
         VkPhysicalDeviceProperties props;
         vkGetPhysicalDeviceProperties(dev, &props);
 
+#ifdef RT_PLAYER
+        if (const char* reason = Backend::rayFusionDeviceRejection(dev, props)) {
+            SCENE_LOG_WARN(std::string("[Player] Skipping Vulkan adapter ") +
+                           props.deviceName + ": " + reason);
+            Backend::recordRayFusionDeviceRejection(props.deviceName, reason);
+            continue;
+        }
+#endif
         int score = 0;
         if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score += 1000;
         else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) score += 100;
@@ -1397,6 +1435,9 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
 
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
+#ifdef RT_PLAYER
+    Backend::logRayFusionDeviceLimits(m_physicalDevice, props.limits);
+#endif
     VK_INFO() << "[VulkanDevice] Selected: " << props.deviceName << std::endl;
     return true;
 }
@@ -1855,6 +1896,10 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     // Latch enabled-at-create descriptor indexing state into capabilities.
     // detectCapabilities() must NOT overwrite this — it now preserves the flag.
     m_capabilities.supportsDescriptorIndexing = enabledDescIdx;
+    m_capabilities.fragmentStoresAndAtomicsEnabled =
+        result == VK_SUCCESS && features2.features.fragmentStoresAndAtomics == VK_TRUE;
+    m_capabilities.independentBlendEnabled =
+        result == VK_SUCCESS && features2.features.independentBlend == VK_TRUE;
     m_capabilities.supportsSamplerAnisotropy = enabledSamplerAnisotropy;
     m_capabilities.supportsBufferDeviceAddress = enabledBDA;
     m_capabilities.supportsShaderInt64 = enabledShaderInt64;
@@ -16554,6 +16599,7 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
     if (!m_device) return;
     destroyMaterialPreviewTransmissionResources();
     if (!keepPipeline) {
+        destroyMaterialPreviewFrameUniform();
         destroyMaterialPreviewSdfSurfaceResources();
         destroyMaterialPreviewVolumeResources();
         destroyMaterialPreviewShadowResources();
@@ -16671,8 +16717,10 @@ void VulkanBackendAdapter::destroyInteractiveViewportResourcesImpl(bool keepPipe
 // asiri maliyetli", ikincisi VK_ERROR_DEVICE_LOST demekti.
 bool VulkanBackendAdapter::ensureAtmosphereLUTPipeline(const std::string& shaderDir) {
     if (!m_device || !m_device->isInitialized()) return false;
+#ifndef RT_PLAYER
     ensureAerialFroxelPipeline(shaderDir);
     ensureCloudPipelines(shaderDir);
+#endif
     if (m_device->hasAtmosphereLUTPipeline()) return true;
     if (m_atmosphereLutPipelineAttempted) return false;
     m_atmosphereLutPipelineAttempted = true;
@@ -16723,7 +16771,9 @@ bool VulkanBackendAdapter::ensureAerialFroxelPipeline(const std::string& shaderD
 // ── Clouds (Faz 3a) ─────────────────────────────────────────────────────────
 bool VulkanBackendAdapter::ensureCloudPipelines(const std::string& shaderDir) {
     if (!m_device || !m_device->isInitialized()) return false;
+#ifndef RT_PLAYER
     m_device->loadLensWeatherPipelines(shaderDir);
+#endif
     if (m_device->hasCloudResources()) return true;
     if (m_cloudPipelineAttempted) return false;
     m_cloudPipelineAttempted = true;
@@ -16966,11 +17016,16 @@ bool VulkanBackendAdapter::sampleClouds(uint32_t mode, uint32_t steps,
                                         std::vector<float>& out, std::string& why) {
     out.clear();
     if (!m_device || !m_device->isInitialized()) { why = "no Vulkan device"; return false; }
+    std::lock_guard<std::recursive_mutex> lock(m_mutex);
+#ifdef RT_PLAYER
+    if (!m_device->hasCloudResources() && !m_cloudPipelineAttempted) {
+        ensureCloudPipelines(resolveRayFusionShaderDirectory());
+    }
+#endif
     if (!m_device->hasCloudResources()) {
         why = "cloud pipelines unavailable on this device (compile_shaders.bat?)";
         return false;
     }
-    std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device->generateCloudNoise() ||
         !m_device->generateCloudWeather(Backend::makeCloudWeatherGenParams(m_cachedClouds))) {
         why = "cloud texture generation failed";
@@ -17341,13 +17396,13 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
     // ── Material Preview Pipeline (created once, reuses solid render pass) ──
     // Capability gate: this pipeline requires descriptor indexing (runtimeDescriptorArray +
-    // partially-bound) plus 208 bytes of push-constant space. The shader material_preview_frag.spv
+    // partially-bound) plus the shared RayFusion draw constants. The material_preview_frag shader
     // uses `sampler2D textures[]` with nonuniformEXT. On GPUs that lack these (e.g. GTX 850M),
     // pipeline creation or first draw hits a null-deref inside the vendor driver.
     // When unsupported, skip the pipeline entirely and fall back to the matcap path, and notify
     // the user via the HUD. Covers the base VulkanBackendAdapter path (g_backend).
     const bool mpHasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
-    constexpr uint32_t kMpPushBytes_Base = sizeof(float) * 48 + sizeof(uint32_t) * 4;
+    constexpr uint32_t kMpPushBytes_Base = sizeof(RayFusionDrawPush);
     bool mpPushOkGate = false;
     if (m_device && m_device->getPhysicalDevice()) {
         VkPhysicalDeviceProperties _p{};
@@ -17360,7 +17415,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
             m_materialPreviewUnsupportedNotified = true;
             SCENE_LOG_WARN(std::string("[Vulkan] Material preview unsupported on this GPU ") +
                 "(descriptorIndexing=" + (mpHasDescIdx ? "yes" : "no") +
-                ", pushConstants>=208=" + (mpPushOkGate ? "yes" : "no") +
+                ", pushConstants>=128=" + (mpPushOkGate ? "yes" : "no") +
                 "). Falling back to matcap.");
             if (m_statusCallback) {
                 m_statusCallback("Material preview not supported on this GPU - using matcap fallback.", 1);
@@ -17390,20 +17445,13 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                 if (mpVertModule && mpFragModule) {
                     VkPhysicalDeviceProperties mpDevProps{};
                     vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
-                    const uint32_t mpTextureArrayLen = (mpDevProps.limits.maxPerStageDescriptorSampledImages > 12u)
-                        ? (std::min)(static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY),
-                                     mpDevProps.limits.maxPerStageDescriptorSampledImages - 12u)
-                        : 1u;
-                    m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
-
-                    VkDescriptorSetLayoutBinding mpDslBindings[28]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[29]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
                     mpDslBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpDslBindings[1].binding = 1;
                     mpDslBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    mpDslBindings[1].descriptorCount = mpTextureArrayLen;
                     mpDslBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpDslBindings[2].binding = 2;
                     mpDslBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -17500,11 +17548,18 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpDslBindings[27].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[27].descriptorCount = 1;
                     mpDslBindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    mpDslBindings[28] = {kRayFusionFrameUniformBinding,
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                    const uint32_t mpTextureArrayLen = rayFusionMaterialTextureCapacity(
+                        mpDevProps.limits, mpDslBindings, 29,
+                        static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY));
+                    mpDslBindings[1].descriptorCount = mpTextureArrayLen;
+                    m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
                     // Some older drivers crash inside vkCreateDescriptorSetLayout or vkCreatePipelineLayout
                     // when push constants exceed maxPushConstantsSize, rather than returning an error.
-                    constexpr uint32_t kMpPushBytes = sizeof(float) * 48 + sizeof(uint32_t) * 4; // 208 bytes
+                    constexpr uint32_t kMpPushBytes = sizeof(RayFusionDrawPush);
                     const bool mpPushOk = mpDevProps.limits.maxPushConstantsSize >= kMpPushBytes;
                     if (!mpPushOk) {
                         SCENE_LOG_WARN("[Vulkan] Material preview pipeline skipped: "
@@ -17515,9 +17570,9 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 28;
+                    mpDslci.bindingCount = 29;
                     mpDslci.pBindings = mpDslBindings;
-                    VkDescriptorBindingFlags mpBindingFlags[28] = {
+                    VkDescriptorBindingFlags mpBindingFlags[29] = {
                         0,
                         VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
                         0,
@@ -17529,16 +17584,16 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpBindingFlags[27] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 28;
+                    mpBindingFlagsCI.bindingCount = 29;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     mpDslci.pNext = &mpBindingFlagsCI;
-                    if (mpPushOk) {
+                    if (mpPushOk && mpTextureArrayLen > 0) {
                         vkCreateDescriptorSetLayout(vkDevice, &mpDslci, nullptr,
                                                     &m_interactiveViewport.materialPreviewDescLayout);
                     }
 
                     // Descriptor pool
-                    VkDescriptorPoolSize mpPoolSizes[3]{};
+                    VkDescriptorPoolSize mpPoolSizes[4]{};
                     mpPoolSizes[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     // 0 (materials) + 3 (terrain) + 4 (material ext)
                     // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
@@ -17549,15 +17604,16 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 14u;
                     mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                     mpPoolSizes[2].descriptorCount = 1;
+                    mpPoolSizes[3] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
                     VkDescriptorPoolCreateInfo mpDpci{};
                     mpDpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-                    mpDpci.poolSizeCount = 3;
+                    mpDpci.poolSizeCount = 4;
                     mpDpci.pPoolSizes = mpPoolSizes;
                     mpDpci.maxSets = 1;
                     vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
                                            &m_interactiveViewport.materialPreviewDescPool);
 
-                    // Push constant range: 2x mat4 + 4x vec4 + uvec4 = 208 bytes
+                    // Shared RayFusion draw constants
                     VkPushConstantRange mpPushRange{};
                     mpPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpPushRange.offset = 0;
@@ -17817,6 +17873,7 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
     }
 
     if (m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE) {
+        ensureMaterialPreviewFrameUniform();
         ensureMaterialPreviewIblResources(shaderDir);
         ensureMaterialPreviewShadowResources(shaderDir);
     }
@@ -17904,10 +17961,10 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         if (!std::filesystem::exists(shaderDir + "/solid.spv")) shaderDir = "source/shaders";
         if (!std::filesystem::exists(shaderDir + "/solid.spv")) shaderDir = "../shaders";
         if (!std::filesystem::exists(shaderDir + "/solid.spv")) {
-            char exePath[MAX_PATH] = {};
-            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-            std::string exeDir = std::filesystem::path(exePath).parent_path().string();
-            shaderDir = exeDir + "/shaders";
+            const auto directory = Platform::executableDir();
+            if (!directory.empty()) {
+                shaderDir = directory.string() + "/shaders";
+            }
         }
         return shaderDir;
     };
@@ -18122,6 +18179,9 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
         m_interactiveViewport.dirty = true;
         return;
     }
+    if (m_viewportMode == ViewportMode::MaterialPreview) {
+        recordMaterialPreviewFrameUniform(cmd, view);
+    }
     recordMaterialPreviewShadowPass(cmd);
     // Clouds (Faz 3c): compute, so before the render pass; the sky pass
     // composites the result.
@@ -18162,7 +18222,8 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                                      (m_viewportMode == ViewportMode::MaterialPreview) &&
                                      m_interactiveViewport.materialPreviewPipeline != VK_NULL_HANDLE &&
                                      m_interactiveViewport.materialPreviewDescSet != VK_NULL_HANDLE &&
-                                     m_device->m_materialBuffer.buffer != VK_NULL_HANDLE;
+                                     m_device->m_materialBuffer.buffer != VK_NULL_HANDLE &&
+                                     m_interactiveViewport.materialPreviewFrameUniform.buffer;
 
     // Gokyuzu de scene-linear yazar: ayni kapi.
     if (useMaterialPreview) {
@@ -18212,18 +18273,8 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                                         m_interactiveViewport.materialPreviewPipelineLayout,
                                         0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
                 // Material Preview push constants
-                struct MaterialPreviewPushConstants {
-                    float viewProj[16];
-                    float view[16];
-                    float cameraPos[4];   // xyz + pad
-                    float lightDir0[4];   // xyz = dir, w = intensity
-                    float lightDir1[4];   // fill
-                    float lightDir2[4];   // rim
-                    uint32_t materialMeta[4];
-                };
-                MaterialPreviewPushConstants mpPush{};
+                RayFusionDrawPush mpPush{};
                 matrixToGL(viewProj, mpPush.viewProj);
-                matrixToGL(view, mpPush.view);
                 mpPush.cameraPos[0] = m_camera.origin.x;
                 mpPush.cameraPos[1] = m_camera.origin.y;
                 mpPush.cameraPos[2] = m_camera.origin.z;
@@ -18233,7 +18284,6 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
                 // Fill light: from left side, softer
                 mpPush.lightDir1[0] = -0.6f; mpPush.lightDir1[1] = 0.3f; mpPush.lightDir1[2] = 0.4f; mpPush.lightDir1[3] = 0.8f;
                 // Rim light: from behind
-                mpPush.lightDir2[0] = -0.2f; mpPush.lightDir2[1] = 0.4f; mpPush.lightDir2[2] = -0.8f; mpPush.lightDir2[3] = 1.2f;
                 uint32_t previewQuality = 2u;
                 switch (::render_settings.raster_viewport_quality_preset) {
                     case ::RasterViewportQualityPreset::Performance: previewQuality = 1u; break;
@@ -18250,7 +18300,7 @@ void VulkanBackendAdapter::renderInteractiveViewportImpl(void* s, int width, int
 
                 vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(MaterialPreviewPushConstants), &mpPush);
+                                   0, sizeof(mpPush), &mpPush);
 
                 // Bind 4 vertex buffers: pos, normal, matId, instance
                 VkBuffer mpVertBuffers[4] = {
@@ -18866,10 +18916,10 @@ void VulkanBackendAdapter::renderProgressiveImpl(void* s, void* w, void* r, int 
             probe = "../shaders"; // Exe inside x64/Release, shaders at project/shaders
         if (!std::filesystem::exists(probe + "/raygen.spv")) {
             // Try exe-relative path
-            char exePath[MAX_PATH] = {};
-            GetModuleFileNameA(nullptr, exePath, MAX_PATH);
-            std::string exeDir = std::filesystem::path(exePath).parent_path().string();
-            probe = exeDir + "/shaders";
+            const auto directory = Platform::executableDir();
+            if (!directory.empty()) {
+                probe = directory.string() + "/shaders";
+            }
         }
         s_cachedShaderDir = probe;
     }
@@ -20117,7 +20167,7 @@ bool VulkanBackendAdapter::applyStylizeGPU(void* surfacePtr,
     if (!m_device || !m_device->isInitialized() || !m_device->hasStylizePipeline()) return false;
 
     // Skip while viewport tears down/rebuilds (same hazard class as the denoiser).
-    extern std::atomic<bool> g_viewport_rebuild_in_progress;
+    using ::g_viewport_rebuild_in_progress; // block-scope extern would name the enclosing namespace on conforming compilers
     if (g_viewport_rebuild_in_progress.load(std::memory_order_acquire)) return false;
 
     const int w = m_imageWidth, h = m_imageHeight;
@@ -20410,6 +20460,12 @@ void VulkanBackendAdapter::uploadAtmosphereLUT(const AtmosphereLUT* lut) {
 
 bool VulkanBackendAdapter::generateAtmosphereLUTGPU(const WorldData* worldData) {
     if (!m_device || !m_device->isInitialized() || !worldData) return false;
+#ifdef RT_PLAYER
+    if (worldData->mode == WORLD_MODE_NISHITA &&
+        !m_device->hasAtmosphereLUTPipeline() && !m_atmosphereLutPipelineAttempted) {
+        ensureAtmosphereLUTPipeline(resolveRayFusionShaderDirectory());
+    }
+#endif
     if (!m_device->hasAtmosphereLUTPipeline()) return false;
 
     // ★★★ Compute gecisi, raster viewport'un binding 8'den ORNEKLEDIGI ayni LUT

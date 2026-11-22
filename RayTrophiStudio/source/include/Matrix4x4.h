@@ -14,7 +14,7 @@
 #include "Vec3.h"  // Vec3 sınıfı için gerekli başlık dosyası
 #include "Vec3SIMD.h"
 #include <cmath>
-#include <immintrin.h> // AVX header
+#include "Math/SimdIntrin.h"
 
 class Mat3x3 {
 public:

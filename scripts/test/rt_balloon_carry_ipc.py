@@ -45,6 +45,7 @@ def project(point, camera, aspect):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--player", action="store_true")
+    parser.add_argument("--soft-body", action="store_true")
     parser.add_argument("--exercise-disposable", action="store_true", required=True)
     args = parser.parse_args()
     ipc = RtIpc(PLAYER_PIPE_NAME if args.player else PIPE_NAME)
@@ -78,11 +79,21 @@ def main():
     original.pop("resolution", None)
     config = dict(original, interaction_mode="carry", birth_seconds=0, autostart=False,
                   respawn_seconds=30, float_amplitude=.08, drift_speed=.12,
-                  room_goal=0, idle_reset_seconds=0)
+                  room_goal=0, idle_reset_seconds=0, soft_body=args.soft_body,
+                  jolt_motion=False)
     try:
         config.pop("interaction_mode", None)
         configured = demo("configure", config)
         assert configured["config"]["interaction_mode"] == "carry", "Mesh default is not carry"
+        if args.soft_body:
+            assert configured["soft_body"], "Jolt shell did not initialize"
+            assert "PaintBack" in ipc.call("scene.list_objects"), "Soft-body probe needs PaintBack"
+            try:
+                demo("configure", dict(config, soft_body="true"))
+            except RtIpcError:
+                assert demo()["soft_body"], "Invalid configuration disturbed the live demo"
+            else:
+                raise AssertionError("Non-boolean soft_body was accepted")
         id, screen = pick()
         held = demo()
         serial = held["events_total"]
@@ -123,6 +134,63 @@ def main():
         assert cancelled["interaction"]["held"] == -1 and row(cancelled, id)["inflated"]
         assert cancelled["events_total"] == serial, "Cancel popped the balloon"
         print("PASS hold/move/depth/frozen drift/strict validation/owner/cancel")
+
+        # World pointer input goes through the same carry solver as mouse input.
+        # Freeze passive bob/drift while checking the swept contact geometry.
+        demo("configure", dict(config, float_amplitude=0, drift_speed=0))
+        demo("reset_balloons")
+        balloons = [b for b in demo()["balloons"] if b["inflated"]]
+        pairs = sorted(
+            (math.dist(a["position"], b["position"]), a["id"], b["id"])
+            for a in balloons for b in balloons if a["id"] != b["id"]
+        )
+        def visual_bounds(balloon):
+            info = ipc.call("scene.object_info", name=balloon["visual_node"])
+            radii = [(high - low) * .5 for low, high in zip(info["world_min"], info["world_max"])]
+            center = [(high + low) * .5 for low, high in zip(info["world_min"], info["world_max"])]
+            return radii, sub(center, balloon["position"])
+
+        for _, source_id, target_id in pairs:
+            state = demo()
+            source, target = row(state, source_id), row(state, target_id)
+            start, obstacle = source["position"], target["position"]
+            source_radii, source_offset = visual_bounds(source)
+            target_radii, target_offset = visual_bounds(target)
+            radii = [a + b for a, b in zip(source_radii, target_radii)]
+            delta = [b + ob - a - oa for a, b, oa, ob in
+                     zip(start, obstacle, source_offset, target_offset)]
+            separation = math.sqrt(dot(delta, delta))
+            if separation < .02:
+                continue
+            direction = unit(delta)
+            reach = 1 / math.sqrt(sum((d / r) ** 2 for d, r in zip(direction, radii)))
+            if separation <= reach + .06:
+                continue
+            near = [x + d * (separation - reach - .04) for x, d in zip(start, direction)]
+            end = [x + d * (separation + .25) for x, d in zip(start, direction)]
+            fields = {"owner": "carry-contact-probe"}
+            try:
+                down = pointer("down", balloon=source_id, position=start, **fields)
+                assert down["held"] == source_id
+                pointer("move", position=near, **fields)
+                assert math.dist(row(demo(), target_id)["position"], obstacle) < .002, (
+                    "Balloon moved before its visual contact envelope was reached"
+                )
+                pointer("move", position=end, **fields)
+                after = demo()
+            finally:
+                pointer("cancel", **fields)
+            moved_source = row(after, source_id)["position"]
+            moved_target = row(after, target_id)["position"]
+            center_gap = [a + oa - b - ob for a, b, oa, ob in
+                          zip(moved_source, moved_target, source_offset, target_offset)]
+            assert sum((d / r) ** 2 for d, r in zip(center_gap, radii)) >= .98
+            if dot(sub(moved_target, obstacle), direction) > .02:
+                break
+        else:
+            raise AssertionError("No free balloon pair could be pushed; check room clearance")
+        print("PASS swept carry pushes another balloon without crossing it")
+
         id, screen = pick()
         demo("burst", {"count": 3})
         assert row(demo(), id)["inflated"], "Random burst popped the held balloon"
@@ -142,6 +210,52 @@ def main():
         assert math.dist(actual, expected) < .02, "Release burst moved from its accepted position"
         print("PASS held excluded from random burst / wall constraint / release world position")
         demo("reset_balloons")
+        if "PaintBack" in ipc.call("scene.list_objects"):
+            wall = ipc.call("scene.object_info", name="PaintBack")
+            wall_z = wall["world_max"][2]
+            mid_x = (wall["world_min"][0] + wall["world_max"][0]) * .5
+            candidate = min(
+                (b for b in demo()["balloons"] if b["inflated"]),
+                key=lambda b: b["position"][2] - wall_z + abs(b["position"][0] - mid_x),
+            )
+            id = candidate["id"]
+            start = candidate["position"]
+            fields = {"owner": "wall-slide-probe"}
+            assert pointer("down", balloon=id, position=start, **fields)["held"] == id
+            try:
+                press = [start[0], start[1], wall_z - 1.0]
+                assert pointer("move", position=press, **fields)["compression"] > 0
+                at_wall = row(demo(), id)["position"]
+                sideways = .22 if at_wall[0] < mid_x else -.22
+                slide = [at_wall[0] + sideways, at_wall[1], at_wall[2] - .04]
+                pointer("move", position=slide, **fields)
+                slid = row(demo(), id)["position"]
+                assert abs(slid[0] - at_wall[0]) > .12, "Wall contact blocked lateral motion"
+                assert slid[2] > wall_z, "Sliding crossed the wall"
+                assert row(demo(), id)["inflated"], "A glancing slide popped the balloon"
+
+                press = [slid[0], slid[1], wall_z - 1.0]
+                assert pointer("move", position=press, **fields)["compression"] > 0
+                deadline = time.monotonic() + 2.0
+                while row(demo(), id)["inflated"] and time.monotonic() < deadline:
+                    time.sleep(.03)
+                crushed = demo()
+                assert not row(crushed, id)["inflated"], "Sustained wall pressure did not pop"
+                assert crushed["interaction"]["held"] == -1
+                if args.soft_body:
+                    assert crushed["soft_body_min_axial_scale"] < .995, "Jolt shell did not yield"
+                    assert crushed["soft_body_axial_scale"] == 1, "Popped shell remained active"
+                    print(f'PASS Jolt shell yielded, peak CPU {crushed["soft_body_ms_max"]:.3f} ms')
+                event = next(e for e in reversed(crushed["events"]) if "balloons" in e)
+                balloon_pop = next(b for b in event["balloons"] if b["balloon"] == id)
+                assert balloon_pop["drops"] > 0, "Squeeze pop emitted no paint"
+                assert math.dist(balloon_pop["position"], slid) < .025, (
+                    "Squeeze pop shifted the balloon position"
+                )
+            finally:
+                pointer("cancel", **fields)
+            print("PASS wall slide and squeeze pop at the balloon position")
+            demo("reset_balloons")
         id, screen = pick()
         mode = demo("interaction", {"mode": "pop"})
         assert mode["interaction"]["held"] == -1 and row(mode, id)["inflated"]

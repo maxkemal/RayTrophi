@@ -18,7 +18,6 @@ std::atomic<int> next_row(0);
 //constexpr double infinity = std::numeric_limits<double>::max();
 std::string baseDirectory="";
 
-constexpr float gamma= 1.0f;
 constexpr float exposure= 1.0f;
 constexpr float saturation=1.0f;
 constexpr float aperture = 0.0f;

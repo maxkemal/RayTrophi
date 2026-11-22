@@ -72,13 +72,18 @@ layout(set = 0, binding = 20, std430) readonly buffer PreviewVolumeRawBuffer {
     uint volumeWords[];
 };
 
+layout(std140, set = 0, binding = 28) uniform RayFusionFrameUniform {
+    mat4 view;
+    vec4 lightDir2;
+} rayFusionFrame;
+
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
-    mat4 view;
+
     vec4 cameraPos;
     vec4 lightDir0;
     vec4 lightDir1;
-    vec4 lightDir2;
+
     // x=material count, y=quality, z=lighting preset, w=volume count
     uvec4 materialMeta;
 } pc;
@@ -431,7 +436,7 @@ RtPostParams sdfPostParams() {
 }
 
 vec3 sdfMatcapColor(vec3 worldNormal, int preset) {
-    vec3 viewNormal = normalize(mat3(pc.view) * worldNormal);
+    vec3 viewNormal = normalize(mat3(rayFusionFrame.view) * worldNormal);
     vec2 uv = viewNormal.xy * 0.5 + 0.5;
     float diagonal = uv.y * 0.6 + uv.x * 0.4;
     vec3 highlight = vec3(0.95, 0.90, 0.82);

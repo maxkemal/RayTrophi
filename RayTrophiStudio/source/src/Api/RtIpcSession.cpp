@@ -1,6 +1,6 @@
 #include "RtIpcSession.h"
 
-#include <openssl/rand.h>
+#include "Platform/Platform.h"
 
 #include <algorithm>
 #include <chrono>
@@ -21,7 +21,7 @@ int64_t unixNow() {
 
 std::string randomId() {
     unsigned char bytes[16]{};
-    if (RAND_bytes(bytes, sizeof(bytes)) != 1) return {};
+    if (!Platform::secureRandomBytes(bytes, sizeof(bytes))) return {};
     static constexpr char digits[] = "0123456789abcdef";
     std::string result(32, '0');
     for (size_t i = 0; i < sizeof(bytes); ++i) {

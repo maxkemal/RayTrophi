@@ -1,8 +1,7 @@
 #include "RtIpcSecurity.h"
 
 #include "json.hpp"
-#include <openssl/evp.h>
-#include <openssl/rand.h>
+#include "Utils/Sha256.h"
 
 #include <algorithm>
 #include <cctype>
@@ -13,6 +12,8 @@
 #include <fstream>
 #include <mutex>
 #include <sstream>
+
+#include "Platform/Platform.h"
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -53,22 +54,14 @@ std::string hex(const unsigned char* bytes, size_t count) {
 
 bool randomHex(size_t bytes, std::string& out) {
     std::vector<unsigned char> buffer(bytes);
-    if (RAND_bytes(buffer.data(), static_cast<int>(buffer.size())) != 1) return false;
+    if (!Platform::secureRandomBytes(buffer.data(), buffer.size())) return false;
     out = hex(buffer.data(), buffer.size());
     return true;
 }
 
 bool sha256(const std::string& value, std::string& out) {
-    unsigned char digest[EVP_MAX_MD_SIZE]{};
-    unsigned int digest_size = 0;
-    EVP_MD_CTX* context = EVP_MD_CTX_new();
-    if (!context) return false;
-    const bool ok = EVP_DigestInit_ex(context, EVP_sha256(), nullptr) == 1 &&
-                    EVP_DigestUpdate(context, value.data(), value.size()) == 1 &&
-                    EVP_DigestFinal_ex(context, digest, &digest_size) == 1;
-    EVP_MD_CTX_free(context);
-    if (ok) out = hex(digest, digest_size);
-    return ok;
+    out = rtutil::Sha256::hexDigest(value);
+    return true;
 }
 
 bool constantTimeEqual(const std::string& lhs, const std::string& rhs) {
@@ -83,15 +76,10 @@ bool constantTimeEqual(const std::string& lhs, const std::string& rhs) {
 }
 
 std::filesystem::path defaultStorePath() {
-#ifdef _WIN32
-    std::wstring executable(32768, L'\0');
-    const DWORD length = GetModuleFileNameW(nullptr, executable.data(),
-                                            static_cast<DWORD>(executable.size()));
-    if (length > 0 && length < executable.size()) {
-        executable.resize(length);
-        return std::filesystem::path(executable).parent_path() / L"ipc_tokens.json";
+    const auto directory = Platform::appDataRoot();
+    if (!directory.empty()) {
+        return directory / "ipc_tokens.json";
     }
-#endif
     return std::filesystem::current_path() / "ipc_tokens.json";
 }
 

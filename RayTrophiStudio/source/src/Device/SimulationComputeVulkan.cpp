@@ -33,6 +33,7 @@
 #include "Backend/VulkanFailureReporting.h"
 #include "SimulationCompute.h"
 #include "SimulationComputeVulkanContext.h"
+#include "SimulationPipelineTrace.h"
 
 #include <vulkan/vulkan.h>
 
@@ -386,7 +387,15 @@ public:
         VkBufferDeviceAddressInfo info{};
         info.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
         info.buffer = it->second.buffer;
+#if defined(__ANDROID__)
+        // libvulkan.so for API 29 does not export Vulkan 1.2 core entry points; resolve through the device.
+        const auto fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
+            vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
+        if (!fpGetAddress) return 0;
+        return static_cast<uint64_t>(fpGetAddress(m_device, &info));
+#else
         return static_cast<uint64_t>(vkGetBufferDeviceAddress(m_device, &info));
+#endif
     }
 
     // ── Upload / Download ─────────────────────────────────────────────────────
@@ -705,12 +714,13 @@ public:
         return report;
     }
 
-    bool dispatch(const ComputeDispatch& cmd) override {
-        if (!m_ready || !cmd.constants || cmd.constants_size == 0) return false;
-        if (cmd.buffer_count > MAX_BINDINGS) return false;
-
+    // True when the kernel needs a device feature this device did not enable.
+    // Used at dispatch AND before pipeline creation: compiling a SPIR-V module
+    // whose capability (float atomics, float64) is not enabled is undefined
+    // behaviour, and the NVIDIA driver on older GPUs (Maxwell) crashes inside
+    // vkCreateComputePipelines instead of failing.
+    bool kernelNeedsMissingFeature(const std::string& kernel) const {
         // Kernels using float atomics (P2G scatter, density splat) need hardware support.
-        const std::string kernel(cmd.kernel ? cmd.kernel : "");
         const bool needs_atomics = (kernel == "sim_fluid_p2g_scatter" ||
                                     kernel == "sim_sparse_mac_p2g" ||
                                     kernel == "sim_sparse_mac_matter_p2g" ||
@@ -725,11 +735,7 @@ public:
                                     kernel == "terrain_hydraulic_droplet" ||
                                     kernel == "terrain_fluvial_runoff" ||
                                     kernel == "terrain_fluvial_talus");
-        if (needs_atomics && !m_has_float_atomics) return false;
-        // The block P2G also adds floats in SHARED memory: refused (the host
-        // falls back to the fused kernel) unless that feature is on as well.
-        if (kernel == "sim_matter_p2g_block" && !m_has_shared_float_atomics) return false;
-
+        if (needs_atomics && !m_has_float_atomics) return true;
         // The MGPCG dot / device-scalar kernels work in double — running them
         // without the shaderFloat64 device feature is UB. Failing here sends
         // the host cleanly to the CPU PCG fallback.
@@ -758,8 +764,20 @@ public:
               kernel == "sim_fluid_cg_spmv_dot_var_window") ||
              (kernel == "sim_fluid_cg_axpy2_dev" ||
               kernel == "sim_fluid_cg_axpy2_dev_window"))) {
-            return false;
+            return true;
         }
+        return false;
+    }
+
+    bool dispatch(const ComputeDispatch& cmd) override {
+        if (!m_ready || !cmd.constants || cmd.constants_size == 0) return false;
+        if (cmd.buffer_count > MAX_BINDINGS) return false;
+
+        const std::string kernel(cmd.kernel ? cmd.kernel : "");
+        if (kernelNeedsMissingFeature(kernel)) return false;
+        // The block P2G also adds floats in SHARED memory: refused (the host
+        // falls back to the fused kernel) unless that feature is on as well.
+        if (kernel == "sim_matter_p2g_block" && !m_has_shared_float_atomics) return false;
 
         auto pit = m_pipelines.find(kernel);
         if (pit == m_pipelines.end()) return false;
@@ -911,6 +929,10 @@ private:
 
     VkDevice         m_device     = VK_NULL_HANDLE;
     VkPhysicalDevice m_physDevice = VK_NULL_HANDLE;
+#ifdef RT_PLAYER
+    uint32_t m_maxSpirvVersion = 0;
+    uint32_t m_maxPushConstantSize = 0;
+#endif
     VkQueue          m_queue      = VK_NULL_HANDLE;
     uint32_t         m_queueFamily = 0;
 
@@ -1102,6 +1124,11 @@ private:
         m_descLayouts[0] = VK_NULL_HANDLE;
         VkPhysicalDeviceProperties properties{};
         vkGetPhysicalDeviceProperties(m_physDevice, &properties);
+#ifdef RT_PLAYER
+        m_maxSpirvVersion = properties.apiVersion >= VK_API_VERSION_1_3
+            ? 0x00010600u : 0x00010500u;
+        m_maxPushConstantSize = properties.limits.maxPushConstantsSize;
+#endif
         const auto binding_limit = std::min(MAX_BINDINGS,
             std::min(properties.limits.maxPerStageDescriptorStorageBuffers,
                      properties.limits.maxDescriptorSetStorageBuffers));
@@ -1133,16 +1160,39 @@ private:
                         uint32_t bufferCount,
                         uint32_t pushConstantSize) {
         auto spv = loadSPV(spvPath);
-        if (spv.empty()) return false;
+        if (spv.empty()) {
+            traceSimulationPipeline("module.missing_or_unreadable", kernelName, spvPath, spv,
+                                    VK_ERROR_INITIALIZATION_FAILED);
+            return false;
+        }
+#ifdef RT_PLAYER
+        if (spv.size() < 5 || spv[0] != 0x07230203u || spv[1] > m_maxSpirvVersion) {
+            traceSimulationPipeline("module.incompatible_spirv", kernelName, spvPath, spv,
+                                    VK_ERROR_INCOMPATIBLE_DRIVER);
+            return false;
+        }
+        if (pushConstantSize > m_maxPushConstantSize) {
+            traceSimulationPipeline("layout.push_limit", kernelName, spvPath, spv,
+                                    VK_ERROR_FEATURE_NOT_PRESENT);
+            return false;
+        }
+#endif
         if (bufferCount == 0 || bufferCount > MAX_BINDINGS ||
-            m_descLayouts[bufferCount] == VK_NULL_HANDLE) return false;
+            m_descLayouts[bufferCount] == VK_NULL_HANDLE) {
+            traceSimulationPipeline("layout.storage_bindings_unavailable", kernelName, spvPath, spv,
+                                    VK_ERROR_FEATURE_NOT_PRESENT);
+            return false;
+        }
 
         VkShaderModuleCreateInfo smci{};
         smci.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
         smci.codeSize = spv.size() * sizeof(uint32_t);
         smci.pCode    = spv.data();
         VkShaderModule mod = VK_NULL_HANDLE;
-        if (vkCreateShaderModule(m_device, &smci, nullptr, &mod) != VK_SUCCESS)
+        traceSimulationPipeline("module.begin", kernelName, spvPath, spv);
+        const VkResult moduleResult = vkCreateShaderModule(m_device, &smci, nullptr, &mod);
+        traceSimulationPipeline("module.end", kernelName, spvPath, spv, moduleResult);
+        if (moduleResult != VK_SUCCESS)
             return false;
 
         VkPushConstantRange pcr{};
@@ -1159,7 +1209,10 @@ private:
         plci.pPushConstantRanges    = &pcr;
 
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-        if (vkCreatePipelineLayout(m_device, &plci, nullptr, &pipelineLayout) != VK_SUCCESS) {
+        traceSimulationPipeline("layout.begin", kernelName, spvPath, spv);
+        const VkResult layoutResult = vkCreatePipelineLayout(m_device, &plci, nullptr, &pipelineLayout);
+        traceSimulationPipeline("layout.end", kernelName, spvPath, spv, layoutResult);
+        if (layoutResult != VK_SUCCESS) {
             vkDestroyShaderModule(m_device, mod, nullptr);
             return false;
         }
@@ -1173,8 +1226,11 @@ private:
         cpci.stage.pName    = "main";
 
         VkPipeline pipeline = VK_NULL_HANDLE;
-        bool ok = vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &cpci,
-                                           nullptr, &pipeline) == VK_SUCCESS;
+        traceSimulationPipeline("pipeline.begin", kernelName, spvPath, spv);
+        const VkResult pipelineResult = vkCreateComputePipelines(
+            m_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline);
+        traceSimulationPipeline("pipeline.end", kernelName, spvPath, spv, pipelineResult);
+        bool ok = pipelineResult == VK_SUCCESS;
         vkDestroyShaderModule(m_device, mod, nullptr);
         if (!ok) {
             vkDestroyPipelineLayout(m_device, pipelineLayout, nullptr);
@@ -1638,6 +1694,7 @@ private:
                               std::string(d.name) == "sim_matter_p2g_fused")) {
                 spv = std::string(d.name) + "_clustered.spv";
             }
+            if (kernelNeedsMissingFeature(d.name)) continue;  // unsupported: never compile
             createPipeline(d.name, sd + "/" + spv, d.bufs, d.pc);
         }
         m_clustered_p2g = clustered;

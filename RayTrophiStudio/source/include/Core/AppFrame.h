@@ -19,7 +19,7 @@ public:
     bool shouldPresent(bool continuous) const;
     void requestRedraw();
 
-    void beginUiFrame();
+    void beginUiFrame(bool draw_runtime_overlays = true);
     void endUiFrame();
     void drawUi();
     void present();

@@ -8,7 +8,7 @@
  */
 
 // Enable OpenVDB support for Fluid Simulation exports
-#ifndef OPENVDB_ENABLED
+#if !defined(RT_NO_OPENVDB) && !defined(OPENVDB_ENABLED)
 #define OPENVDB_ENABLED
 #endif
 
@@ -18,6 +18,9 @@
 #endif
 
 #include "Fluid/FluidSimulationSystem.h"
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
 #include "Fluid/FluidDomainSubstance.h"
 #include "MaterialStateField.h"
 #include "globals.h"
@@ -27,7 +30,7 @@
 #include <iostream>
 #include <filesystem>
 
-#ifdef OPENVDB_ENABLED
+#if defined(OPENVDB_ENABLED) && !defined(RT_NO_OPENVDB)
 #include <openvdb/openvdb.h>
 #endif
 
@@ -35,7 +38,12 @@ namespace RayTrophiSim {
 namespace Fluid {
 
 // Helper to load VDB frame into fluid grids directly from disk cache
-#ifdef OPENVDB_ENABLED
+#if defined(RT_NO_OPENVDB)
+bool loadVDBFrameIntoFluid(FluidObject&, const std::string&) {
+    OpenVdbUnavailable::report();
+    return false;
+}
+#elif defined(OPENVDB_ENABLED)
 bool loadVDBFrameIntoFluid(FluidObject& obj, const std::string& filepath) {
     try {
         openvdb::initialize();
@@ -141,7 +149,11 @@ bool loadVDBFrameIntoFluid(FluidObject& obj, const std::string& filepath) {
 #endif
 
 bool FluidObject::exportToVDB(const std::string& filepath) const {
-#ifdef OPENVDB_ENABLED
+#if defined(RT_NO_OPENVDB)
+    (void)filepath;
+    OpenVdbUnavailable::report();
+    return false;
+#elif defined(OPENVDB_ENABLED)
     openvdb::initialize();
     if (grid.nx <= 0 || grid.ny <= 0 || grid.nz <= 0) return false;
     

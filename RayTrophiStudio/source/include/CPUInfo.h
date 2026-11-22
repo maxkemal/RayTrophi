@@ -14,7 +14,11 @@
 #include <bitset>
 #include <vector>
 #include <string>
+#if defined(__aarch64__)
+#include <algorithm>
+#else
 #include <intrin.h>
+#endif
 
 class CPUInfo {
 private:
@@ -32,6 +36,7 @@ private:
 
     static CPUData data;
 
+#if !defined(__aarch64__)
     static void detect_vendor() {
         std::array<int, 4> cpui;
         __cpuid(cpui.data(), 0);
@@ -139,13 +144,23 @@ private:
         if (f_7_EBX[28]) data.features.push_back("AVX512CD");
     }
 
+#endif
+
 public:
     static void initialize() {
+#if defined(__aarch64__)
+        data = CPUData{};
+        data.vendor = "ARM";
+        data.brand = "Unknown";
+        data.architecture = "AArch64";
+        data.features = {"NEON"};
+#else
         detect_vendor();
         detect_brand();
         detect_extended_info();
         detect_architecture();
         detect_features();
+#endif
     }
 
     static void print_cpu_info() {
@@ -160,6 +175,9 @@ public:
             std::cout << feature << " ";
         }
         std::cout << std::endl;
+#if defined(__aarch64__)
+        std::cout << "SIMD: NEON" << std::endl;
+#endif
     }
 
     static bool has_feature(const std::string& feature) {

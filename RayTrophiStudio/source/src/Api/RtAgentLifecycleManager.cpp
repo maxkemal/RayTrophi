@@ -8,6 +8,7 @@
  */
 
 #include "RtAgentLifecycleManager.h"
+#include "Platform/Platform.h"
 
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -74,6 +75,10 @@ bool AgentLifecycleManager::getConfig(const std::string& id, AgentConfig& out_co
 }
 
 bool AgentLifecycleManager::startAgent(const std::string& id) {
+    if (!Platform::supportsChildProcesses()) {
+        std::cerr << "Starting an agent process is not supported on this platform\n";
+        return false;
+    }
 #ifdef _WIN32
     std::lock_guard<std::recursive_mutex> lock(mutex_);
 

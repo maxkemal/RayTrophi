@@ -42,6 +42,10 @@ const float* ParticleSimulationSystem::appearanceLutRow(uint32_t id) const {
     return fallback_lut.data();
 }
 
+uint64_t ParticleSimulationSystem::appearanceRevision() const {
+    return appearance_revision_;
+}
+
 uint32_t ParticleSimulationSystem::addAppearanceProfile(
     const ParticleAppearanceProfile& profile, std::string* error) {
     ParticleAppearanceProfile copy = profile;
@@ -59,6 +63,7 @@ uint32_t ParticleSimulationSystem::addAppearanceProfile(
     bakeParticleAppearanceLut(copy, lut);
     appearance_profiles_.push_back(std::move(copy));
     appearance_luts_.push_back(std::move(lut));
+    ++appearance_revision_;
     return appearance_profiles_.back().id;
 }
 
@@ -76,6 +81,7 @@ bool ParticleSimulationSystem::updateAppearanceProfile(
         }
         bakeParticleAppearanceLut(copy, appearance_luts_[i]);
         appearance_profiles_[i] = std::move(copy);
+        ++appearance_revision_;
         return true;
     }
     if (error) *error = "no appearance profile with id " + std::to_string(profile.id);
@@ -100,6 +106,7 @@ bool ParticleSimulationSystem::removeAppearanceProfile(uint32_t id, std::string*
                 appearance_luts_.erase(appearance_luts_.begin() +
                                        static_cast<std::ptrdiff_t>(i));
             }
+            ++appearance_revision_;
             return true;
         }
     }

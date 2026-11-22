@@ -25,6 +25,9 @@
 #include "Animation/NodeHierarchy.h"   // ImportedModelContext::nodeHierarchy
 #include "KeyframeSystem.h"
 #include "VDBVolume.h"
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
 #include "GasVolume.h"
 #include "ForceField.h"
 #include "ParticleSimulation.h"
@@ -7629,6 +7632,10 @@ struct SceneData {
     int exportDomainVDBSequence(std::size_t system_index, std::size_t domain_index,
                                 const std::string& directory, const std::string& base,
                                 int start_frame, int end_frame, float fps) {
+#ifdef RT_NO_OPENVDB
+        OpenVdbUnavailable::report();
+        return 0;
+#endif
         if (system_index >= particle_systems.size() || end_frame < start_frame) return 0;
         const float dt = (fps > 1.0f) ? (1.0f / fps) : (1.0f / 24.0f);
         resetSimulationToStart();

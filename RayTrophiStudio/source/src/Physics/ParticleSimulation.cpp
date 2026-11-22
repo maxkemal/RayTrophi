@@ -76,7 +76,11 @@
 #include <stdexcept>
 #include <utility>
 
-#ifdef OPENVDB_ENABLED
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
+
+#if defined(OPENVDB_ENABLED) && !defined(RT_NO_OPENVDB)
 #include "PerfProfile.h"
 #include <openvdb/openvdb.h>
 #include <openvdb/io/File.h>
@@ -6813,6 +6817,12 @@ const SimulationGpuFoamRenderBuffer* ParticleSimulationSystem::gridDomainFoamRen
 
 bool ParticleSimulationSystem::exportGridDomainToVDB(std::size_t domain_index,
                                                      const std::string& filepath) const {
+#ifdef RT_NO_OPENVDB
+    (void)domain_index;
+    (void)filepath;
+    OpenVdbUnavailable::report();
+    return false;
+#else
     if (domain_index >= grid_domain_states_.size()) {
         return false;
     }
@@ -6926,6 +6936,7 @@ bool ParticleSimulationSystem::exportGridDomainToVDB(std::size_t domain_index,
     file.close();
     return file.good();
 #endif
+#endif // RT_NO_OPENVDB
 }
 
 SimulationGridDomainDesc& ParticleSimulationSystem::addGridDomain(const SimulationGridDomainDesc& desc) {
@@ -8034,6 +8045,13 @@ void ParticleSimulationSystem::stepGridDomains(const SimulationContext& context)
         if (settling_ && !state.settle_stats.pending) {
             continue;
         }
+#ifdef RT_NO_OPENVDB
+        if (grid_domains_[i].backend == SimulationDomainBackend::CPU_SparseVDB) {
+            OpenVdbUnavailable::report();
+            state.gas_stats.cpu = {};
+            continue;
+        }
+#endif
         Fluid::MatterAudioFrame audio_frame(state, grid_domains_[i], dt);
 
         const bool matter_domain =

@@ -1,4 +1,7 @@
 ﻿#include "VDBVolume.h"
+#ifdef RT_NO_OPENVDB
+#include "Utils/OpenVdbUnavailable.h"
+#endif
 #include "VDBVolumeManager.h"
 #include "globals.h"
 #include <algorithm>
@@ -111,6 +114,10 @@ void VDBVolume::updateFromTimeline(int timeline_frame, void* stream) {
 }
 
 bool VDBVolume::loadVDBSequence(const std::string& pattern_or_file) {
+#ifdef RT_NO_OPENVDB
+    OpenVdbUnavailable::report();
+    return false;
+#endif
     // 1. If input is a specific file (e.g. explosion_0045.vdb), try to detect pattern
     std::filesystem::path path(pattern_or_file);
     std::string filename = path.filename().string();

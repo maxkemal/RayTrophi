@@ -168,13 +168,18 @@ layout(set = 0, binding = 17) uniform sampler2D previewOpaqueColor;
 layout(set = 0, binding = 18) uniform sampler2D previewOpaqueDepth;
 layout(set = 0, binding = 19, r32ui) uniform uimage2D previewTransmissionBackDepth;
 
+layout(std140, set = 0, binding = 28) uniform RayFusionFrameUniform {
+    mat4 view;
+    vec4 lightDir2;
+} rayFusionFrame;
+
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
-    mat4 view;
+
     vec4 cameraPos;
     vec4 lightDir0;   // key light
     vec4 lightDir1;   // fill light
-    vec4 lightDir2;   // rim light
+
     // y low 8 bits = quality; bits 8..9 = draw phase
     // (0 combined/backward-compatible, 1 opaque, 2 transmission).
     uvec4 materialMeta; // x = material count, z = lighting preset
@@ -955,7 +960,7 @@ void main() {
         // Positive IEEE float bits preserve ordering for atomicMax. This image
         // is private to transmission and never replaces selection depth.
         if (!gl_FrontFacing) {
-            float backDistance = max(-(pc.view * vec4(vWorldPos, 1.0)).z, 0.0);
+            float backDistance = max(-(rayFusionFrame.view * vec4(vWorldPos, 1.0)).z, 0.0);
             imageAtomicMax(previewTransmissionBackDepth,
                            ivec2(gl_FragCoord.xy), floatBitsToUint(backDistance));
         }
@@ -1056,10 +1061,11 @@ void main() {
     if (lightingPreset == 0u) {
         lightDirs[0] = normalize(pc.lightDir0.xyz);
         lightDirs[1] = normalize(pc.lightDir1.xyz);
-        lightDirs[2] = normalize(pc.lightDir2.xyz);
+        vec4 rimLight = previewDrawPhase() == 2u ? vec4(0.0) : rayFusionFrame.lightDir2;
+        lightDirs[2] = normalize(rimLight.xyz);
         lightIntensities[0] = pc.lightDir0.w;
         lightIntensities[1] = pc.lightDir1.w;
-        lightIntensities[2] = pc.lightDir2.w;
+        lightIntensities[2] = rimLight.w;
         lightColors[0] = vec3(1.0, 0.98, 0.95);
         lightColors[1] = vec3(0.75, 0.82, 0.95);
         lightColors[2] = vec3(0.90, 0.90, 0.95);
@@ -1501,7 +1507,7 @@ void main() {
             refractedDir, roughness, lightingPreset);
     }
     vec3 extinction = previewBeerExtinction(resinTint);
-    float frontViewDistance = max(-(pc.view * vec4(vWorldPos, 1.0)).z, 0.0);
+    float frontViewDistance = max(-(rayFusionFrame.view * vec4(vWorldPos, 1.0)).z, 0.0);
     uint backBits = drawPhase != PREVIEW_PHASE_COMBINED
         ? imageLoad(previewTransmissionBackDepth, ivec2(gl_FragCoord.xy)).r
         : 0u;

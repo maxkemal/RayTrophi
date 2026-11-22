@@ -6,6 +6,8 @@
 #include <cmath>
 #include <unordered_set>
 
+extern std::vector<std::shared_ptr<AnimationData>>* g_uiClipsRef; // defined in Core/RuntimeState.cpp
+
 namespace AnimationGraph {
     
     // Helper for std::string with ImGui
@@ -286,7 +288,7 @@ namespace AnimationGraph {
         static std::vector<const char*> clipNames;
         clipNames.clear();
         
-        extern std::vector<std::shared_ptr<AnimationData>>* g_uiClipsRef; 
+        using ::g_uiClipsRef; // block-scope extern would name the enclosing namespace on conforming compilers
         
         if (g_uiClipsRef) {
             for (auto& clipData : *g_uiClipsRef) {

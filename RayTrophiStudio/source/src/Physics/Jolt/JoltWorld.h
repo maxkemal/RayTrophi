@@ -129,7 +129,10 @@ public:
     JoltWorld(const JoltWorld&) = delete;
     JoltWorld& operator=(const JoltWorld&) = delete;
 
-    bool init(const Config& cfg = Config{});
+    // No `= Config{}` default argument: clang rejects a default argument that needs the
+    // nested struct's default member initializers inside the enclosing class definition.
+    bool init(const Config& cfg);
+    bool init() { return init(Config{}); }
     void shutdown();
     bool isInitialized() const;
 

@@ -236,6 +236,11 @@ VkDescriptorSetLayout VulkanDevice::lensWeatherLayout() {
 }
 
 bool VulkanDevice::loadLensWeatherPipelines(const std::string& directory) {
+#ifdef RT_PLAYER
+    if (!m_lensWeatherCamera.settings.enabled) {
+        return false;
+    }
+#endif
     if (!ensureLensWeatherLayout()) {
         return false;
     }

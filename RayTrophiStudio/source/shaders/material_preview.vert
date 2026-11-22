@@ -36,11 +36,11 @@ layout(location = 10) out vec4 vPreviousClip;
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
-    mat4 view;
+
     vec4 cameraPos;    // xyz = world position, w = unused
     vec4 lightDir0;    // xyz = direction, w = intensity
     vec4 lightDir1;    // xyz = direction (fill), w = intensity
-    vec4 lightDir2;    // xyz = direction (rim), w = intensity
+
     uvec4 materialMeta; // x = material count, y = quality, z = lighting preset
 } pc;
 

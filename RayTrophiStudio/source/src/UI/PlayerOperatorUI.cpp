@@ -49,7 +49,8 @@ void drawPlayerOperator(SDL_Renderer *renderer) {
     if (!ui.open) {
         return;
     }
-    if (ImGui::GetTime() >= ui.next_refresh) {
+    const bool presenting_load = playerSceneLoad().presenting();
+    if (!presenting_load && ImGui::GetTime() >= ui.next_refresh) {
         json status;
         const auto result = rtapi::playerOperator("status", json::object(), status);
         if (result.ok) {
@@ -76,8 +77,9 @@ void drawPlayerOperator(SDL_Renderer *renderer) {
     ImGui::SetNextWindowSize(viewport->WorkSize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(.025f, .04f, .07f, .78f));
+    const ImGuiWindowFlags input_flags = presenting_load ? ImGuiWindowFlags_NoInputs : 0;
     const auto flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
-                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking;
+                       ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoDocking | input_flags;
     ImGui::Begin("##RayTrophiOperator", nullptr, flags);
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 18);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 8);
@@ -89,7 +91,7 @@ void drawPlayerOperator(SDL_Renderer *renderer) {
     ImGui::SetCursorPos(
         ImVec2((viewport->WorkSize.x - width) * .5f, (viewport->WorkSize.y - height) * .5f));
     ImGui::BeginChild("shell", ImVec2(width, height), ImGuiChildFlags_Borders,
-                      ImGuiWindowFlags_NoScrollbar);
+                      ImGuiWindowFlags_NoScrollbar | input_flags);
     const auto origin = ImGui::GetCursorScreenPos();
     ImGui::GetWindowDrawList()->AddRectFilled(origin, add(origin, width, 3), mint, 2);
     ImGui::SetCursorPos(ImVec2(24, 20));
@@ -121,7 +123,7 @@ void drawPlayerOperator(SDL_Renderer *renderer) {
     const bool compact = width < 650;
     const float nav_width = compact ? 52.0f : 190.0f;
     ImGui::SetCursorPos(ImVec2(14, 92));
-    ImGui::BeginChild("navigation", ImVec2(nav_width, height - 178));
+    ImGui::BeginChild("navigation", ImVec2(nav_width, height - 178), 0, input_flags);
     const char *ids[] = {"games", "settings", "camera", "players", "display", "audio"};
     const char *titles[] = {
         tr("player.game_library", "Game library"), tr("player.game_settings", "Game settings"),
@@ -165,7 +167,7 @@ void drawPlayerOperator(SDL_Renderer *renderer) {
     }
     ImGui::EndChild();
     ImGui::SetCursorPos(ImVec2(nav_width + 42, 94));
-    ImGui::BeginChild("content", ImVec2(width - nav_width - 68, height - 192));
+    ImGui::BeginChild("content", ImVec2(width - nav_width - 68, height - 192), 0, input_flags);
     if (ui.page == "games") {
         games(renderer);
     } else if (ui.page == "settings") {

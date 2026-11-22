@@ -105,7 +105,10 @@ public:
 
     // Seed layer 0 from an existing PaintTextureSet (copies pixel data
     // from each channel texture into the bottom layer's buffers).
-    void seedFromTextureSet(const PaintTextureSet& src, const PaintUVParams& uv_params = PaintUVParams());
+    void seedFromTextureSet(const PaintTextureSet& src, const PaintUVParams& uv_params);
+    // Overload instead of a default argument: clang rejects PaintUVParams() as a default
+    // argument inside the class that declares the nested struct.
+    void seedFromTextureSet(const PaintTextureSet& src) { seedFromTextureSet(src, PaintUVParams()); }
 
     // Convenience: ensure at least one layer exists.
     void ensureBaseLayer();

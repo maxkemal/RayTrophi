@@ -2758,8 +2758,8 @@ namespace TerrainNodesV2 {
                 
                 // Update Mesh & Viewport
                 mgr.updateTerrainMesh(cachedTerrain);
-                extern bool g_bvh_rebuild_pending;
-                extern bool g_optix_rebuild_pending;
+                using ::g_bvh_rebuild_pending; // block-scope extern would name the enclosing namespace on conforming compilers
+                using ::g_optix_rebuild_pending; // block-scope extern would name the enclosing namespace on conforming compilers
                 g_bvh_rebuild_pending = true;
                 g_optix_rebuild_pending = true;
                 
@@ -13449,8 +13449,8 @@ namespace TerrainNodesV2 {
             sceneObjectsRemoved |= lakeOutput->applyGeneratedLakes(scene, terrain);
         }
         if (sceneObjectsRemoved) {
-            extern bool g_bvh_rebuild_pending;
-            extern bool g_optix_rebuild_pending;
+            using ::g_bvh_rebuild_pending; // block-scope extern would name the enclosing namespace on conforming compilers
+            using ::g_optix_rebuild_pending; // block-scope extern would name the enclosing namespace on conforming compilers
             g_bvh_rebuild_pending = true;
             g_optix_rebuild_pending = true;
         }

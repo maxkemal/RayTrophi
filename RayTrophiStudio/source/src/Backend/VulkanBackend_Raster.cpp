@@ -727,7 +727,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
 
     // Skip rebuild if raster cache is still valid for the current scene generation.
     {
-        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        using ::g_scene_geometry_generation; // block-scope extern would name the enclosing namespace on conforming compilers
         const uint64_t curGen = g_scene_geometry_generation.load(std::memory_order_acquire);
         if (!m_rasterMeshes.empty() && m_rasterBuiltGeometryGeneration == curGen) {
             SCENE_LOG_INFO(std::string("[Vulkan] Raster build early-out: gen=") +
@@ -1300,7 +1300,7 @@ void VulkanBackendAdapter::buildRasterGeometryImpl(const std::vector<std::shared
 
     // Stamp current scene generation so we can skip redundant rebuilds later.
     {
-        extern std::atomic<uint64_t> g_scene_geometry_generation;
+        using ::g_scene_geometry_generation; // block-scope extern would name the enclosing namespace on conforming compilers
         m_rasterBuiltGeometryGeneration = g_scene_geometry_generation.load(std::memory_order_acquire);
         m_rasterBuiltGenSource = "buildRasterGeometryImpl";
     }
@@ -2215,7 +2215,8 @@ void VulkanBackendAdapter::writeRasterInstanceTransformsToGlobal() {
     unsigned numThreads = std::thread::hardware_concurrency();
     if (numThreads == 0) numThreads = 4;
 
-    for (auto& [key, mesh] : m_rasterMeshes) {
+    for (auto& meshEntry : m_rasterMeshes) {
+        auto& mesh = meshEntry.second; // plain reference: clang rejects capturing a structured binding in OpenMP
         const uint32_t count = static_cast<uint32_t>(mesh.instanceIndices.size());
         if (count == 0) continue;
 

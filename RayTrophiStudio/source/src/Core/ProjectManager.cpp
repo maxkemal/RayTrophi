@@ -523,8 +523,10 @@ static fs::path pathFromUtf8(const std::string& utf8_path) {
     if (!wide.empty()) {
         return fs::path(wide);
     }
-#endif
     return fs::path(utf8_path);
+#else
+    return fs::u8path(utf8_path);
+#endif
 }
 
 static simdjson::error_code loadJsonRootFromFile(simdjson::dom::parser& parser,
@@ -2732,6 +2734,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
             }
 
+            SCENE_LOG_INFO("[ProjectManager] load step: substances");
             // Project substances BEFORE anything that names one. Always
             // replaced, also with an empty set: the previous project's
             // substances must not leak into this one.
@@ -2762,12 +2765,15 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 }
             }
 
+            SCENE_LOG_INFO("[ProjectManager] load step: vdb/gas/forcefields");
             // VDB / Gas / Force Fields / Particle Simulation
             simdjson::dom::element vdb_el, gas_el, ff_el, particles_el;
             simdjson::dom::element kinematic_el, rigid_el;
             if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
             if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
             if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
+            SCENE_LOG_INFO("[ProjectManager] load step: object substances + audio restore");
+            if (progress_callback) progress_callback(80, "Restoring audio...");
             simdjson::dom::element audio_el;
             simdjson::dom::element object_substances_el;
             matter::restoreObjectSubstances(scene,
@@ -2775,7 +2781,11 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 sjsonToNlohmann(object_substances_el));
             scene.audio->restore(root["audio"].get(audio_el) ? json() : sjsonToNlohmann(audio_el),
                                  pathFromUtf8(filepath).parent_path());
+            SCENE_LOG_INFO("[ProjectManager] load step: particles");
+            if (progress_callback) progress_callback(81, "Preparing particle systems...");
             if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
+            SCENE_LOG_INFO("[ProjectManager] load step: kinematic colliders");
+            if (progress_callback) progress_callback(82, "Restoring physics...");
             if (!root["kinematic_colliders"].get(kinematic_el)) {
                 std::string error;
                 if (!RayTrophiSim::deserializeKinematicColliders(
@@ -2786,8 +2796,10 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                         "Kinematic colliders: " + error);
                 }
             }
+            SCENE_LOG_INFO("[ProjectManager] load step: rigid bodies");
             if (!root["rigid_bodies"].get(rigid_el)) deserializeRigidBodies(sjsonToNlohmann(rigid_el), scene);
 
+            SCENE_LOG_INFO("[ProjectManager] load step: hair");
             // Hair System
             // newProject already cleared HairSystem + uploaded empty hair to GPU.
             // Skip the redundant second clear/upload here; only load + upload when
@@ -2808,6 +2820,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 renderer.uploadHairToGPU();
             }
 
+            SCENE_LOG_INFO("[ProjectManager] load step: timeline");
             // Timeline
             simdjson::dom::element timeline_el;
             if (!root["timeline"].get(timeline_el)) {
@@ -2816,6 +2829,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
             // Open at the authored initial state, without replaying a saved scrub frame.
             scene.timeline.current_frame = 0;
 
+            SCENE_LOG_INFO("[ProjectManager] load step: animation graphs");
             // Animation Graphs
             simdjson::dom::element anim_graphs_el;
             if (!root["animationGraphs"].get(anim_graphs_el)) {
@@ -2832,6 +2846,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 }
             }
 
+            SCENE_LOG_INFO("[ProjectManager] load step: bone data");
             // Bone Data
             simdjson::dom::element bone_el;
             if (!root["boneData"].get(bone_el)) {
@@ -2871,6 +2886,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 scene.boneData.rebuildReverseLookup();
             }
 
+            SCENE_LOG_INFO("[ProjectManager] load step: ui settings");
             // UI Settings
             simdjson::dom::element ui_set_el;
             if (!root["ui_settings"].get(ui_set_el)) {
@@ -2878,6 +2894,7 @@ bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
                 scene.load_counter++;
             }
 
+            SCENE_LOG_INFO("[ProjectManager] load step: imported model contexts");
             // Imported Models Contexts
             simdjson::dom::array imc_arr;
             if (!root["importedModelContexts"].get(imc_arr)) {

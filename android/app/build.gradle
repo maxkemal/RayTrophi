@@ -1,0 +1,73 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.raytrophi.player'
+    compileSdk 34
+    // NDK r26+ is required (C++20, libomp, Vulkan 1.3 headers).
+    // Install with: sdkmanager "ndk;26.3.11579264"
+    ndkVersion '27.3.13750724'
+
+    defaultConfig {
+        applicationId 'com.raytrophi.player'
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName '0.1'
+
+        ndk {
+            // -PrtAbis=x86_64 builds a single ABI (emulator round); default is both.
+            abiFilters((project.findProperty('rtAbis') ?: 'arm64-v8a,x86_64').split(',') as String[])
+        }
+        externalNativeBuild {
+            cmake {
+                cppFlags '-std=c++20'
+                arguments '-DANDROID_STL=c++_shared',
+                          '-DANDROID_PLATFORM=android-29'
+                // Third-party roots come from the command line or gradle.properties, e.g.
+                if (project.hasProperty('rtSdl2Dir')) arguments "-DRT_SDL2_DIR=${project.rtSdl2Dir}"
+                if (project.hasProperty('rtSdl2ImageDir')) arguments "-DRT_SDL2_IMAGE_DIR=${project.rtSdl2ImageDir}"
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'src/main/cpp/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+        debug {
+            jniDebuggable true
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    sourceSets {
+        main {
+            // SDL's Java glue (org.libsdl.app.*) lives in the SDL2 source tree, not in this repo.
+            // Pass -PrtSdl2Dir=<SDL2 source> so its android-project Java sources join the build.
+            if (project.hasProperty('rtSdl2Dir')) {
+                java.srcDirs += "${project.rtSdl2Dir}/android-project/app/src/main/java"
+            }
+            // Batch A4: staged by scripts/stage_player_android_assets.py from dist/RayTrophiPlayer
+            // (git-ignored build output). Extracted on first launch by Platform::extractBundledAssets.
+            assets.srcDirs += "${projectDir}/build/rt_assets"
+        }
+    }
+    // Large binaries (.rtp.bin, .spv, audio) are copied with SDL_RWread; storing them
+    // uncompressed keeps the first-launch extraction a plain copy.
+    androidResources {
+        noCompress += ['bin', 'spv', 'rtp', 'shared', 'wav', 'ogg', 'mp3', 'png', 'hdr', 'exr', 'json']
+    }
+}

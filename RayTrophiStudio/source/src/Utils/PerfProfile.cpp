@@ -1,3 +1,4 @@
+#include "Platform/Platform.h"
 #include "PerfProfile.h"
 
 #include <algorithm>
@@ -16,26 +17,10 @@ std::unordered_map<std::string, Section> g_sections;
 uint64_t g_seq = 0;
 std::atomic<bool> g_logging{false};
 
-// x64: __stdcall is ignored; K32GetProcessMemoryInfo is a kernel32 forwarder, so
-// no psapi.lib link is required and <windows.h> stays out of the header.
-extern "C" void* __stdcall GetCurrentProcess(void);
-struct MemCounters {
-    unsigned long cb;
-    unsigned long PageFaultCount;
-    std::size_t PeakWorkingSetSize, WorkingSetSize;
-    std::size_t QuotaPeakPagedPoolUsage, QuotaPagedPoolUsage;
-    std::size_t QuotaPeakNonPagedPoolUsage, QuotaNonPagedPoolUsage;
-    std::size_t PagefileUsage, PeakPagefileUsage;
-};
-extern "C" int __stdcall K32GetProcessMemoryInfo(void*, MemCounters*, unsigned long);
-
 } // namespace
 
 std::size_t workingSetBytes() {
-    MemCounters pmc;
-    pmc.cb = static_cast<unsigned long>(sizeof(pmc));
-    if (K32GetProcessMemoryInfo(GetCurrentProcess(), &pmc, pmc.cb)) return pmc.WorkingSetSize;
-    return 0;
+    return static_cast<std::size_t>(Platform::processResidentBytes());
 }
 
 namespace {

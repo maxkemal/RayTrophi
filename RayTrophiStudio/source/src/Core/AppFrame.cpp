@@ -96,18 +96,21 @@ void FrameCycle::requestRedraw() {
     redraw_requested_ = true;
 }
 
-void FrameCycle::beginUiFrame() {
+void FrameCycle::beginUiFrame(bool draw_runtime_overlays) {
     ImGui_ImplSDLRenderer2_NewFrame();
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 #ifdef RT_PLAYER
-    if (original_surface && (playerBodyOverlayEnabled() || playerVideoCardEnabled())) {
+    if (draw_runtime_overlays && original_surface &&
+        (playerBodyOverlayEnabled() || playerVideoCardEnabled())) {
         const PlayerOverlayProjection projection(original_surface->w, original_surface->h);
         video_card.draw(projection);
         if (playerBodyOverlayEnabled()) {
             drawPlayerBodyOverlay(projection);
         }
     }
+#else
+    (void)draw_runtime_overlays;
 #endif
 }
 

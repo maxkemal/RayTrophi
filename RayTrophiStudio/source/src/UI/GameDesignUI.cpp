@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdio>
 #include <sstream>
+#include <utility>
 #include <vector>
 
 namespace GameDesignUI {
@@ -30,6 +31,36 @@ void report(const rtapi::Result& result) {
     last_error = result.ok ? std::string() : result.error;
 }
 
+bool addPaintMaterial(const std::string& object, rtapi::MaterialInfo material, int resolution) {
+    for (const auto& other : rtapi::listObjects()) {
+        if (other == object) {
+            continue;
+        }
+        const auto slots = rtapi::objectMaterials(other);
+        if (std::find(slots.begin(), slots.end(), material.name) == slots.end()) {
+            continue;
+        }
+        std::string clone;
+        auto result = rtapi::createMaterial(material.type, object + "_Paint_" + material.name,
+                                            clone, material.name);
+        if (result.ok) {
+            result = rtapi::assignMaterial(object, clone, material.name);
+        }
+        if (result.ok) {
+            result = rtapi::getMaterial(clone, material);
+        }
+        if (!result.ok) {
+            report(result);
+            return false;
+        }
+        break;
+    }
+    rtapi::WetPaintSurfaceRuntimeInfo info;
+    const auto result = rtapi::addWetPaintSurface(object, material.id, resolution, info);
+    report(result);
+    return result.ok;
+}
+
 // Unsent demo form. Re-read from the live demo whenever it is (re)configured
 // elsewhere (IPC, project load), so the form never contradicts the core.
 struct DemoDraft {
@@ -41,6 +72,9 @@ struct DemoDraft {
     bool autostart = false;
     std::string interaction_mode = "carry";
     bool body_controls = false;
+    bool jolt_motion = true;
+    bool impact_soft_body = true;
+    float wind_strength = 0.25f;
     float size_min = 1.0f;
     float size_max = 1.0f;
     float idle_reset_seconds = 0.0f;   // 0 = off
@@ -102,6 +136,9 @@ void syncDraft(const json& config) {
     draft.interval_max = config.value("interval_max", draft.interval_max);
     draft.autostart = config.value("autostart", draft.autostart);
     draft.body_controls = config.value("body_controls", false);
+    draft.jolt_motion = config.value("jolt_motion", true);
+    draft.impact_soft_body = config.value("impact_soft_body", true);
+    draft.wind_strength = config.value("wind_strength", 0.25f);
     draft.interaction_mode = config.value("interaction_mode",
         config.contains("visual_nodes") ? std::string("carry") : std::string("pop"));
     draft.size_min = config.value("size_min", 1.0f);
@@ -205,6 +242,9 @@ json draftConfig() {
         // One mesh per balloon: the list decides the count.
         config["balloons"] = static_cast<int>(draft.visual_nodes.size());
         config["visual_nodes"] = draft.visual_nodes;   // absent: particle balloons
+        config["jolt_motion"] = draft.jolt_motion;
+        config["impact_soft_body"] = draft.impact_soft_body;
+        config["wind_strength"] = draft.wind_strength;
     }
     return config;
 }
@@ -560,12 +600,31 @@ void drawDemo(const std::string& selected_object, const std::vector<std::string>
                           "Up to 64 contacts per droplet system are sampled each frame.");
     }
     ImGui::SeparatorText("Floating");
+    ImGui::BeginDisabled(draft.visual_nodes.empty());
+    ImGui::Checkbox("Jolt balloon motion", &draft.jolt_motion);
+    ImGui::BeginDisabled(!draft.jolt_motion);
+    ImGui::Checkbox("Simulate soft impact shells", &draft.impact_soft_body);
+    ImGui::EndDisabled();
+    if (!draft.visual_nodes.empty()) {
+        ImGui::TextDisabled("Motion changes take effect when the demo is prepared again.");
+    }
+    ImGui::EndDisabled();
+    if (status.contains("jolt_motion") && status["jolt_motion"].is_object()) {
+        const auto& jolt = status["jolt_motion"];
+        if (jolt.value("enabled", false)) {
+            ImGui::Text("Jolt update %.2f ms (peak %.2f ms), shell step peak %.2f ms",
+                        jolt.value("last_ms", 0.0), jolt.value("max_ms", 0.0),
+                        jolt.value("shell_step_ms_max", 0.0));
+        }
+    }
+    ImGui::BeginDisabled(draft.jolt_motion && !draft.visual_nodes.empty());
     ImGui::SliderFloat("Bob height (m)", &draft.float_amplitude, 0.0f, 0.5f, "%.2f");
     ImGui::SliderFloat("Drift speed (m/s)", &draft.drift_speed, 0.0f, 1.0f, "%.2f");
     if (ImGui::IsItemHovered()) {
         ImGui::SetTooltip("Balloons wander slowly (big ones slower), keep off the walls and\n"
                           "each other. Mesh balloons only.");
     }
+    ImGui::EndDisabled();
     bool spawn_auto = draft.spawn_auto;
     if (ImGui::Checkbox("Balloon area from the room", &spawn_auto)) {
         draft.spawn_auto = spawn_auto;
@@ -691,16 +750,6 @@ void drawSection(const std::string& selected_object) {
 
     rtapi::WetPaintStatusInfo status;
     const bool have_status = rtapi::getWetPaintStatus(status).ok;
-    const rtapi::WetPaintSurfaceRuntimeInfo* selected = nullptr;
-    if (have_status) {
-        for (const auto& surface : status.surface_list) {
-            if (surface.object == selected_object) {
-                selected = &surface;
-                break;
-            }
-        }
-    }
-
     ImGui::SeparatorText("Wet paint surfaces");
     // Start from the actual size; the selection is a request until Apply is pressed.
     static int resolution_index = 1;
@@ -709,29 +758,55 @@ void drawSection(const std::string& selected_object) {
         const int existing = status.surface_list.front().resolution;
         resolution_index = existing <= 512 ? 0 : (existing <= 1024 ? 1 : 2);
     }
-    const auto add_surface = [](const std::string& object) {
-        rtapi::WetPaintSurfaceRuntimeInfo info;
-        report(rtapi::addWetPaintSurface(object, -1, 512 << resolution_index, info));
-    };
     std::vector<std::string> surface_names;
     if (have_status) {
         for (const auto& surface : status.surface_list) surface_names.push_back(surface.object);
     }
     const std::vector<rtapi::WetPaintSurfaceRuntimeInfo> no_surfaces;
     const auto& listed = have_status ? status.surface_list : no_surfaces;
+    const auto materials = rtapi::listMaterials();
+    const auto is_registered = [&](const std::string& object, int material_id) {
+        return std::any_of(listed.begin(), listed.end(), [&](const auto& surface) {
+            return surface.object == object && surface.material_id == material_id;
+        });
+    };
+    const auto missing_materials = [&](const std::string& object) {
+        std::vector<rtapi::MaterialInfo> missing;
+        for (const auto& name : rtapi::objectMaterials(object)) {
+            rtapi::MaterialInfo material;
+            if (rtapi::getMaterial(name, material).ok && !is_registered(object, material.id)) {
+                missing.push_back(std::move(material));
+            }
+        }
+        return missing;
+    };
+    const auto add_missing = [](const std::string& object, const auto& missing) {
+        for (const auto& material : missing) {
+            if (!addPaintMaterial(object, material, 512 << resolution_index)) {
+                break;
+            }
+        }
+    };
     if (!listed.empty() && beginListBox("##surface_list", listed.size())) {
     for (const auto& surface : listed) {
         ImGui::PushID(surface.object.c_str());
+        ImGui::PushID(surface.material_id);
         if (ImGui::SmallButton("x")) {
             report(rtapi::removeWetPaintSurface(surface.object, surface.material_id));
         }
         ImGui::SameLine();
+        const auto material = std::find_if(materials.begin(), materials.end(), [&](const auto& m) {
+            return m.id == surface.material_id;
+        });
+        const std::string label = surface.object + " / " +
+            (material == materials.end() ? std::to_string(surface.material_id) : material->name);
         if (surface.object == selected_object) {
             ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_CheckMark], "%s (selected)",
-                               surface.object.c_str());
+                               label.c_str());
         } else {
-            ImGui::TextUnformatted(surface.object.c_str());
+            ImGui::TextUnformatted(label.c_str());
         }
+        ImGui::PopID();
         ImGui::PopID();
     }
     }
@@ -759,12 +834,22 @@ void drawSection(const std::string& selected_object) {
         }
     }
     ImGui::TextDisabled("New surfaces also use the selected size.");
-    const bool selected_addable = !selected_object.empty() && !selected;
-    ImGui::BeginDisabled(!selected_addable);
-    if (ImGui::Button("Add selected")) {
-        add_surface(selected_object);
-    }
+    const bool selected_is_target = !selected_object.empty() &&
+        std::find(draft.visual_nodes.begin(), draft.visual_nodes.end(), selected_object) ==
+            draft.visual_nodes.end();
+    const auto missing = selected_is_target ? missing_materials(selected_object)
+                                            : std::vector<rtapi::MaterialInfo>{};
+    ImGui::BeginDisabled(!have_status || missing.empty());
+    const bool add_selected = ImGui::Button("Add missing slots");
     ImGui::EndDisabled();
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Copies shared materials for this object. Clears wet paint.");
+    }
+    if (add_selected) {
+        add_missing(selected_object, missing);
+        UIWidgets::EndSection();
+        return;
+    }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(-1.0f);
     {
@@ -772,16 +857,42 @@ void drawSection(const std::string& selected_object) {
         std::vector<std::string> exclude = surface_names;
         exclude.insert(exclude.end(), draft.visual_nodes.begin(), draft.visual_nodes.end());
         const std::string picked = pickSceneObject("##surface_pick", exclude);
-        if (!picked.empty()) add_surface(picked);
+        if (!picked.empty() && have_status) {
+            add_missing(picked, missing_materials(picked));
+            UIWidgets::EndSection();
+            return;
+        }
     }
     if (!surface_names.empty() && ImGui::Button("Clear paint")) {
         report(rtapi::resetWetPaint());
     }
-    if (selected) {
-        ImGui::SeparatorText(("Paint model: " + selected->object).c_str());
-        ImGui::Text("%d px  |  %u tiles", selected->resolution, selected->tiles);
-        ImGui::PushID("wet_surface");
-        drawSurfaceSettings(*selected);
+    if (have_status && selected_is_target) {
+        ImGui::SeparatorText("Selected object's paint slots");
+        ImGui::PushID(selected_object.c_str());
+        for (const auto& name : rtapi::objectMaterials(selected_object)) {
+            rtapi::MaterialInfo material;
+            if (!rtapi::getMaterial(name, material).ok) {
+                continue;
+            }
+            const auto slot = std::find_if(listed.begin(), listed.end(), [&](const auto& surface) {
+                return surface.object == selected_object && surface.material_id == material.id;
+            });
+            ImGui::PushID(material.id);
+            if (slot == listed.end()) {
+                if (ImGui::SmallButton("Add slot")) {
+                    addPaintMaterial(selected_object, material, 512 << resolution_index);
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Copies shared materials for this object. Clears wet paint.");
+                }
+                ImGui::SameLine();
+                ImGui::TextUnformatted(name.c_str());
+            } else if (ImGui::TreeNode("settings", "%s (%d px)", name.c_str(), slot->resolution)) {
+                drawSurfaceSettings(*slot);
+                ImGui::TreePop();
+            }
+            ImGui::PopID();
+        }
         ImGui::PopID();
     } else if (!surface_names.empty()) {
         ImGui::TextDisabled("Select a surface in the scene to edit its paint model.");
