@@ -1,8 +1,12 @@
 # Sıradaki derleme kontrolleri — Player Android A1 (2026-11-22)
 
-> **Durum:** CANLI — Windows Studio ve Player artımlı derleme ve çalışma zamanı kabulü bekliyor. İki hedefte değişen C++ birimleri MSVC x64 `/Zs` PASS.
+> **Durum:** CANLI — Windows Player Release x64 derlemesi ve demoda fareyle balon yakalama geçti. Studio derlemesi de kullanıcı onayıyla geçti. İki hedefte değişen C++ birimleri MSVC x64 `/Zs` PASS.
 
 ## Player Android A5 — dokunmatik giriş (2026-11-22)
+
+**Emülatör başlangıç ölçümü.** Mevcut APK, `-gpu host`, yatay ekran 1600×720. Kullanıcı fareyle taşıma ve patlatmayı doğruladı. Boşta yaklaşık 56 FPS, çoklu patlamada yaklaşık 21 FPS, ardından tekrar yaklaşık 56 FPS. İç render boyutu doğrulanmadı. Tekerlekle derinlik ve yeni APK'da iki parmakla sıkıştırma kabulü açık.
+
+**Windows Player link düzeltmesi — PASS (kullanıcı, 2026-11-22).** Ozz `platform.cc`, eski RayTrophi `Platform.cpp` ile aynı `platform.obj` yolunu kullanıyordu. Ozz artık `OzzBasePlatform.obj` üretiyor. Visual Studio'da değişen projeyi yeniden yükle ve x64 Release Player derlemesini tekrar al. Linkte `OzzBasePlatform.obj` ile `PlatformOs.obj` görünmeli. `platform.obj` hâlâ link girdisiyse Player için Clean + Rebuild uygula.
 
 1. **APK.** Repo kökünde varlıkları hazırla ve x86_64 APK'yı derle. Kurulumdan sonra `Medium_Phone_API_37.0` (`-gpu host`) üzerinde Gizli Renkler açılmalı. Sahne açılmazsa önce varlık hazırlama çıktısını ve Player başlangıç logunu kontrol et. Android HUD, sahnesiz durumda da proje bırakma metnini göstermemeli.
 
@@ -21,7 +25,7 @@
 2. **Tut, sürükle, bırak.** Görünür bir balonun ortasından başlayan `adb -e shell input swipe X1 Y1 X2 Y2 1500` komutunu ayrı terminalde çalıştır. Swipe öncesinde, sürerken ve sonrasında `(Invoke-RtIpc paint.wet_demo @{operation='status'}).interaction` oku. Beklenen sıra `held=-1 → balon ID'si → -1`, sürüklerken `owner=finger:<id>` ve görünür konum değişimi. Yatay ekranda koordinatı o anki kareden al. Eski APK'da 1725,540 noktası bir balonu tuttu.
    **En sinsi hata:** Fare sentezi açık kalırsa tek dokunuş iki olay dizisi üretir. Balon tutulup hemen bırakılmış gibi görünebilir veya sahip `mouse` olur. Swipe sürerken ölç. Tap sonrasındaki `held=-1` tek başına arızayı göstermez.
 3. **Sıkıştırma ve boya.** Emülatörün çoklu dokunma girişinde ilk parmakla tut, ikinciyle aralığı daralt. Aynı balon ve sahip korunurken `interaction.depth` artmalı. İkinci parmak kalkınca tutuş sürmeli. Ardından balonu duvara bastırıp patlat. Patlama sayacının artması ve duvarda görünür boya beklenir. Patlama olup boya görünmezse A4 boya hattındaki `active_tiles` ve `device_event_dispatches` değerlerine bak.
-4. **Windows fare regresyonu.** Üç değişen birim Player x64 `/Zs` PASS. Önceki tam derleme gereksinimleri tamamlandıysa A5 için artımlı Player derlemesi yeterli. Sol tuşla tut ve sürükle, tekerlekle derinliği değiştir, sol tuşu bırak. Tutarken IPC sahibi `mouse` olmalı. Shift ile bırakma ve odak kaybı mevcut tutuşu iptal etmeli. Sahnesiz ve hatasız açılışta proje bırakma metni görünmeli.
+4. **Windows fare regresyonu.** Kullanıcı demoda fareyle balon yakalamayı doğruladı. Aşağıdaki ayrıntılı kontroller ayrıca raporlanmadı. Üç değişen birim Player x64 `/Zs` PASS. Önceki tam derleme gereksinimleri tamamlandıysa A5 için artımlı Player derlemesi yeterli. Sol tuşla tut ve sürükle, tekerlekle derinliği değiştir, sol tuşu bırak. Tutarken IPC sahibi `mouse` olmalı. Shift ile bırakma ve odak kaybı mevcut tutuşu iptal etmeli. Sahnesiz ve hatasız açılışta proje bırakma metni görünmeli.
 
 ## ★ ÖNCE OKU — bu Windows derlemesi TAM derleme olmalı (Android A1–A3 + NDK düzeltmeleri, 2026-11-22)
 
@@ -29,7 +33,7 @@ Yaygın başlıklar değişti: `GpuInteropTypes.h` (yalnız clang dalı), `globa
 `PlayerVideoCard.h`, `Platform/Platform.h`, `GasSimulator.h`, `VDBVolumeManager.h`. Artımlı derleme eski `.obj` bırakırsa erişim
 ihlali kod hatası sanılır → **Rebuild/temiz derleme**, Studio + Player. Visual Studio "proje dışarıda değişti" derse yeniden yükle.
 
-W1. **Link (önce bu).** ✔ Studio temiz derleme linklendi (2026-11-22, kullanıcı); Player bekliyor. İki hedef hatasız linklenir. Bozuksa: `g_*` tanımsız → `using ::g_x;` değişikliği (VulkanBackend*,
+W1. **Link (önce bu).** ✔ Studio temiz derleme linklendi (2026-11-22, kullanıcı). Player Release x64 linki de Ozz düzeltmesinden sonra kullanıcı tarafından doğrulandı. Bozuksa: `g_*` tanımsız → `using ::g_x;` değişikliği (VulkanBackend*,
     VulkanViewportBackend, TerrainNodesV2, AnimationNodes) global bildirimi göremiyor; `gamma` tanımsız → silinen global'i
     kullanan bir birim kaldı (grep'te bulunmadı); `BCryptGenRandom` → Platform.cpp pragma.
 W2. **Terrain node gamma / animasyon klipleri / viewport raster** her biri bir kez açılsın — `using ::g_x` değişen yollar bunlar.

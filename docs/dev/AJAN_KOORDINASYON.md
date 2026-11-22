@@ -701,7 +701,9 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
-- 2026-11-22 Codex A5: Windows Player MSVC x64 /Zs and Android NDK x86_64/arm64-v8a syntax checks passed for all three changed units. Android x86_64 APK rebuild and emulator touch/paint acceptance pending. Windows Player incremental build and mouse acceptance pending after the earlier full rebuild requirements. See NEXT_BUILD_CHECKS.md.
+- 2026-11-22 Codex: Player LNK2005/LNK1169 fix assigns Ozz `platform.cc` to `OzzBasePlatform.obj` in both Windows projects. Player generator check passed. User confirmed Windows Player Release x64 link and demo mouse grabbing. User also confirmed the Studio build passed.
+
+- 2026-11-22 Codex A5: Windows Player MSVC x64 /Zs and Android NDK x86_64/arm64-v8a syntax checks passed for all three changed units. User confirmed Player and Studio builds and Windows Player mouse grabbing. Existing APK: emulator mouse carry/pop confirmed, 1600×720 display with host GPU, about 56 FPS idle and 21 FPS during multiple pops, then back to 56 FPS. Internal render size unverified. A5 x86_64 APK rebuild and touch, pinch and wall-paint acceptance pending. See NEXT_BUILD_CHECKS.md.
 
 - 2026-11-22 Codex A2c: Studio/Player MSVC x64 /Zs passed under normal defines and RT_NO_OPENVDB. Windows incremental build and visible VDB import check pending. Android NDK link and device checks pending. See NEXT_BUILD_CHECKS.md.
 

@@ -1,12 +1,31 @@
 # Player balon oyunu — Android portu (dokunmatik)
 
-> **Durum:** AKTİF — 2026-11-22: A5 dokunmatik giriş kaynakta hazır. Yeni APK ile emülatör kabulü ve Windows fare regresyon testi bekliyor.
+> **Durum:** AKTİF — 2026-11-22: A1–A5 emülatörde PASS (sahne, ıslak boya, ses, IPC, dokunma); arm64 gerçek cihazda açılıyor ve desteklenmeyen GPU'yu ekranda söylüyor; Windows regresyon PASS. Sıradaki A6: referans cihaz + performans.
 
 ## A5 devir notu (2026-11-22, Codex)
 
 - Eski APK, `Medium_Phone_API_37.0`: görünür balonda `adb shell input swipe 1725 540 1725 540 1100` sırasında IPC `held=3, owner=mouse`, bırakınca `held=-1` döndürdü. Ölçülen noktada koordinat ve SDL fare sentezi çalışıyor. Bir tap bittikten sonra sorgulanan `held=-1` kısa süreli tutmayı kaçırır.
 - Android SDL parmak olayları normalize ekran koordinatları ve `finger:<id>` sahibiyle ortak `paint.wet_demo` pointer yoluna gidiyor. İkinci parmak mevcut `wheel` ile derinliği ayarlıyor. İlk parmak kalkınca balon bırakılıyor. Android pencere kurulmadan önce dokunmadan fare sentezi kapanıyor ve HUD'daki proje bırakma metni gizleniyor.
-- Windows Player MSVC x64 `/Zs`, Android NDK x86_64 ve arm64-v8a `-fsyntax-only` üç değişen birimde geçti. Gizli Renkler için 387 varlık (49.1 MiB) hazırlandı. Yeni APK, dokunarak duvarda boya ve Windows canlı fare kontrolü bekliyor. [A5 kabul listesi](NEXT_BUILD_CHECKS.md#player-android-a5--dokunmatik-giriş-2026-11-22)
+- Mevcut APK ile kullanıcı emülatörde fareyle balon taşıma ve patlatmayı doğruladı. Tekerlekle ileri/geri taşıma doğrulanmadı. `-gpu host` ve 1600×720 ekran ayarında boşta yaklaşık 56 FPS, çoklu patlamada yaklaşık 21 FPS görüldü. Patlamalar bitince yaklaşık 56 FPS'ye döndü. İç render boyutu bu ölçümde doğrulanmadı. Sayılar emülatöre ait.
+- Windows Player MSVC x64 `/Zs`, Android NDK x86_64 ve arm64-v8a `-fsyntax-only` üç değişen birimde geçti. Gizli Renkler için 387 varlık (49.1 MiB) hazırlandı. Kullanıcı Windows Player Release x64 linkini ve demoda fareyle balon yakalamayı doğruladı. Studio derlemesi de kullanıcı onayıyla geçti. Yeni APK ile dokunarak duvarda boya kabulü bekliyor. [A5 kabul listesi](NEXT_BUILD_CHECKS.md#player-android-a5--dokunmatik-giriş-2026-11-22)
+
+
+## Kullanıcı doğrulaması (2026-11-22 akşam)
+
+- Windows Studio + Player derlemeleri GEÇTİ (e1cd0506 sonrası), Player'da fareyle balon yakalama doğrulandı.
+- Mevcut x86_64 APK, emülatör `-gpu host` 1600×720: fareyle taşıma ve patlatma çalışıyor. Boşta ~56 FPS, çoklu patlamada 21 FPS,
+  sonra yine 56. İç render çözünürlüğü doğrulanmadı. Patlama düşüşü emülatör ölçümü değil; A6b geçiş bazlı GPU zamanıyla gerçek cihazda bakılacak.
+- Bekleyen A5 kabulü: yeni x86_64 APK ile dokunarak sürükleme, iki parmakla derinlik, duvarda boya.
+- **A5 emülatör kabulü (Sonnet, aynı akşam):** yeni x86_64 APK (72.8 MiB). Dokunarak sürükleme PASS: `input swipe` sırasında
+  `held=1, owner="finger:0"` (mouse DEĞİL → fare sentezi kapalı, çift olay yok), bırakınca `held=-1`. Duvar boyası PASS (IPC pop:
+  `active_tiles` 0→113). İç render 1600×720 (`render_scale` 1.0), sunum 1600×594; boşta 46 FPS. **Elle kalan:** iki parmakla derinlik
+  ve dokunarak patlatma (adb çoklu dokunma üretemiyor).
+- **Kullanıcı elle (emülatör):** dokunarak patlatma PASS (emülatör fareyi dokunma olarak iletir; balon duvara sıkıştırılınca patlıyor).
+  Ctrl ile iki dokunma noktası: yakalanıp ortaya çekilebiliyor, çökme yok → iki parmak yolu çalışıyor. **A5 emülatörde PASS.**
+  Açık kalan tek şey: "bir parmak tutarken ikinciyle derinlik" — emülatör Ctrl ile yalnız simetrik iki parmak üretir; ilk uygun gerçek
+  dokunmatik cihazda (A6 referans cihazı) denenecek.
+- ★ QA tuzağı: emülatör/telefon ekranı uykudayken SDL ana döngüyü duraklatır → IPC `main thread dispatch timeout`. Test öncesi
+  `adb shell input keyevent KEYCODE_WAKEUP` + `adb shell svc power stayon true` (emülatörde açık bırakıldı).
 
 ## A2c devir notu (2026-11-22, Codex)
 
