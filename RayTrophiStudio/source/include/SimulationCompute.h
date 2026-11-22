@@ -86,6 +86,7 @@ struct GpuKernelTiming {
     std::string kernel;
     double      ms    = 0.0;
     uint32_t    calls = 0;
+    std::vector<double> samples_ms;
 };
 
 struct ComputeBackendCaps {

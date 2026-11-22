@@ -1,4 +1,5 @@
-﻿#include "Backend/VulkanViewportBackend.h"
+﻿#include "Backend/VulkanStartupDiagnostics.h"
+#include "Backend/VulkanViewportBackend.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "Viewport/RayFusionViewportPasses.h"
 
@@ -1381,6 +1382,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         std::vector<uint32_t> postSPV;
         if (std::filesystem::exists(postPath)) postSPV = loadViewportSPV(postPath);
         if (postSPV.empty()) {
+            recordVulkanStartupFailure("loadViewportSPV returned no code", postPath);
             SCENE_LOG_WARN("[Viewport] raster_post.spv missing or unreadable; the realtime "
                            "viewport will show the raw scene-linear image (no tone mapping, "
                            "no depth of field). Run compile_shaders.bat.");
@@ -1390,7 +1392,8 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             smci.codeSize = postSPV.size() * sizeof(uint32_t);
             smci.pCode = postSPV.data();
             VkShaderModule postModule = VK_NULL_HANDLE;
-            bool ok = vkCreateShaderModule(vkDevice, &smci, nullptr, &postModule) == VK_SUCCESS;
+            bool ok = Backend::vulkanStartupResult(
+                "raster_post.spv / vkCreateShaderModule", vkCreateShaderModule(vkDevice, &smci, nullptr, &postModule)) == VK_SUCCESS;
 
             if (ok) {
                 VkDescriptorSetLayoutBinding binds[4]{};
@@ -1410,8 +1413,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
                 dslci.bindingCount = 4;
                 dslci.pBindings = binds;
-                ok = vkCreateDescriptorSetLayout(vkDevice, &dslci, nullptr,
-                                                 &m_interactiveViewport.postDescLayout) == VK_SUCCESS;
+                ok = Backend::vulkanStartupResult(
+                    "raster_post.spv / vkCreateDescriptorSetLayout", vkCreateDescriptorSetLayout(vkDevice, &dslci, nullptr,
+                                                 &m_interactiveViewport.postDescLayout)) == VK_SUCCESS;
             }
             if (ok) {
                 VkDescriptorPoolSize sizes[2]{};
@@ -1424,8 +1428,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 dpci.maxSets = 1;
                 dpci.poolSizeCount = 2;
                 dpci.pPoolSizes = sizes;
-                ok = vkCreateDescriptorPool(vkDevice, &dpci, nullptr,
-                                            &m_interactiveViewport.postDescPool) == VK_SUCCESS;
+                ok = Backend::vulkanStartupResult(
+                    "raster_post.spv / vkCreateDescriptorPool", vkCreateDescriptorPool(vkDevice, &dpci, nullptr,
+                                            &m_interactiveViewport.postDescPool)) == VK_SUCCESS;
             }
             if (ok) {
                 VkDescriptorSetAllocateInfo dsai{};
@@ -1433,8 +1438,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 dsai.descriptorPool = m_interactiveViewport.postDescPool;
                 dsai.descriptorSetCount = 1;
                 dsai.pSetLayouts = &m_interactiveViewport.postDescLayout;
-                ok = vkAllocateDescriptorSets(vkDevice, &dsai,
-                                              &m_interactiveViewport.postDescSet) == VK_SUCCESS;
+                ok = Backend::vulkanStartupResult(
+                    "raster_post.spv / vkAllocateDescriptorSets", vkAllocateDescriptorSets(vkDevice, &dsai,
+                                              &m_interactiveViewport.postDescSet)) == VK_SUCCESS;
             }
             if (ok) {
                 // ★ D32'nin LINEAR filtrelenmesi opsiyoneldir (bkz. transmission
@@ -1451,8 +1457,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 sci.addressModeU = sci.addressModeV = sci.addressModeW =
                     VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
                 sci.maxLod = 0.0f;
-                ok = vkCreateSampler(vkDevice, &sci, nullptr,
-                                     &m_interactiveViewport.postSampler) == VK_SUCCESS;
+                ok = Backend::vulkanStartupResult(
+                    "raster_post.spv / vkCreateSampler", vkCreateSampler(vkDevice, &sci, nullptr,
+                                     &m_interactiveViewport.postSampler)) == VK_SUCCESS;
             }
             if (ok) {
                 VkPushConstantRange pcr{};
@@ -1468,9 +1475,13 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 plci.pSetLayouts = postLayouts;
                 plci.pushConstantRangeCount = 1;
                 plci.pPushConstantRanges = &pcr;
+                if (postLayouts[1] == VK_NULL_HANDLE) {
+                    recordVulkanStartupFailure("VulkanDevice::lensWeatherLayout returned null");
+                }
                 ok = postLayouts[1] != VK_NULL_HANDLE &&
-                    vkCreatePipelineLayout(vkDevice, &plci, nullptr,
-                        &m_interactiveViewport.postPipelineLayout) == VK_SUCCESS;
+                    Backend::vulkanStartupResult(
+                        "raster_post.spv / vkCreatePipelineLayout", vkCreatePipelineLayout(vkDevice, &plci, nullptr,
+                        &m_interactiveViewport.postPipelineLayout)) == VK_SUCCESS;
             }
             if (ok) {
                 VkPipelineShaderStageCreateInfo stage{};
@@ -1482,8 +1493,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
                 cpci.stage = stage;
                 cpci.layout = m_interactiveViewport.postPipelineLayout;
-                ok = vkCreateComputePipelines(vkDevice, VK_NULL_HANDLE, 1, &cpci, nullptr,
-                                              &m_interactiveViewport.postPipeline) == VK_SUCCESS;
+                ok = Backend::vulkanStartupResult(
+                    "raster_post.spv / vkCreateComputePipelines", vkCreateComputePipelines(vkDevice, VK_NULL_HANDLE, 1, &cpci, nullptr,
+                                              &m_interactiveViewport.postPipeline)) == VK_SUCCESS;
             }
             if (postModule != VK_NULL_HANDLE) vkDestroyShaderModule(vkDevice, postModule, nullptr);
             if (!ok) {
@@ -1493,6 +1505,13 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             }
         }
     }
+
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+    if (m_interactiveViewport.postPipeline == VK_NULL_HANDLE) {
+        recordVulkanStartupFailure("Raster post pipeline setup returned no pipeline");
+        return false;
+    }
+#endif
 
     if (m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE && !m_materialPreviewPipelineGaveUp) {
         const std::string mpVertPath = shaderDir + "/material_preview.spv";
@@ -1534,7 +1553,12 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
 #ifdef RT_PLAYER
             const std::string message = "[Player] RayFusion unavailable: " + unsupportedReason;
             SCENE_LOG_ERROR(message);
+#if defined(__ANDROID__)
+            recordVulkanStartupFailure("RayFusion material preview feature check", unsupportedReason);
+            return false;
+#else
             throw std::runtime_error(message);
+#endif
 #else
             if (!m_materialPreviewUnsupportedNotified) {
                 m_materialPreviewUnsupportedNotified = true;
@@ -1559,12 +1583,14 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 mpSmci.codeSize = mpVertSPV.size() * sizeof(uint32_t);
                 mpSmci.pCode = mpVertSPV.data();
                 VkShaderModule mpVertModule = VK_NULL_HANDLE;
-                vkCreateShaderModule(vkDevice, &mpSmci, nullptr, &mpVertModule);
+                Backend::vulkanStartupResult(
+                    "RayFusion material preview / vkCreateShaderModule", vkCreateShaderModule(vkDevice, &mpSmci, nullptr, &mpVertModule));
 
                 mpSmci.codeSize = mpFragSPV.size() * sizeof(uint32_t);
                 mpSmci.pCode = mpFragSPV.data();
                 VkShaderModule mpFragModule = VK_NULL_HANDLE;
-                vkCreateShaderModule(vkDevice, &mpSmci, nullptr, &mpFragModule);
+                Backend::vulkanStartupResult(
+                    "RayFusion material preview / vkCreateShaderModule", vkCreateShaderModule(vkDevice, &mpSmci, nullptr, &mpFragModule));
 
                 if (mpVertModule && mpFragModule) {
                     // Binding 0: material SSBO
@@ -1722,15 +1748,18 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                         mpDslci.pNext = &mpBindingFlagsCI;
                     }
                     if (mpTextureArrayLen == 0) {
+                        recordVulkanStartupFailure("RayFusion material descriptor capacity",
+                                                   "Device descriptor limits cannot fit the material layout");
                         m_materialPreviewPipelineGaveUp = true;
                         SCENE_LOG_WARN(
                             "[RayFusion] Device descriptor limits cannot fit the material layout.");
                     } else {
                         SCENE_LOG_INFO("[RayFusion] Material texture descriptor capacity: " +
                                        std::to_string(mpTextureArrayLen));
-                        const VkResult layoutResult = vkCreateDescriptorSetLayout(
+                        const VkResult layoutResult = Backend::vulkanStartupResult(
+                            "RayFusion material preview / vkCreateDescriptorSetLayout", vkCreateDescriptorSetLayout(
                             vkDevice, &mpDslci, nullptr,
-                            &m_interactiveViewport.materialPreviewDescLayout);
+                            &m_interactiveViewport.materialPreviewDescLayout));
                         if (layoutResult != VK_SUCCESS) {
                             SCENE_LOG_WARN("[RayFusion] Descriptor layout creation failed, VkResult " +
                                            std::to_string(static_cast<int>(layoutResult)));
@@ -1757,8 +1786,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpDpci.poolSizeCount = 4;
                     mpDpci.pPoolSizes = mpPoolSizes;
                     mpDpci.maxSets = 1;
-                    vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
-                                           &m_interactiveViewport.materialPreviewDescPool);
+                    Backend::vulkanStartupResult(
+                        "RayFusion material preview / vkCreateDescriptorPool", vkCreateDescriptorPool(vkDevice, &mpDpci, nullptr,
+                                           &m_interactiveViewport.materialPreviewDescPool));
 
                     VkPushConstantRange mpPushRange{};
                     mpPushRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -1774,8 +1804,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // Only create layout if desc layout and pool succeeded —
                     // passing null desc layout to vkCreatePipelineLayout crashes old drivers.
                     if (m_interactiveViewport.materialPreviewDescPool != VK_NULL_HANDLE) {
-                        vkCreatePipelineLayout(vkDevice, &mpPlci, nullptr,
-                                               &m_interactiveViewport.materialPreviewPipelineLayout);
+                        Backend::vulkanStartupResult(
+                            "RayFusion material preview / vkCreatePipelineLayout", vkCreatePipelineLayout(vkDevice, &mpPlci, nullptr,
+                                               &m_interactiveViewport.materialPreviewPipelineLayout));
                     }
                     } // end if materialPreviewDescLayout valid
 
@@ -2022,6 +2053,8 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     }
 
                     if (mpResult != VK_SUCCESS) {
+                        vulkanStartupResult("RayFusion material preview / graphics pipeline",
+                                            mpResult, "material_preview.spv / material_preview_frag.spv");
                         SCENE_LOG_WARN("[VulkanViewportBackend] Material preview pipeline creation failed — falling back to solid/matcap permanently for this session (likely NVIDIA Maxwell driver bug).");
                         m_interactiveViewport.materialPreviewPipeline = VK_NULL_HANDLE;
                         m_materialPreviewPipelineGaveUp = true;
@@ -2035,7 +2068,8 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                         mpDsai.descriptorPool = m_interactiveViewport.materialPreviewDescPool;
                         mpDsai.descriptorSetCount = 1;
                         mpDsai.pSetLayouts = &m_interactiveViewport.materialPreviewDescLayout;
-                        VkResult mpAllocRes = vkAllocateDescriptorSets(vkDevice, &mpDsai, &m_interactiveViewport.materialPreviewDescSet);
+                        VkResult mpAllocRes = Backend::vulkanStartupResult(
+                            "RayFusion material preview / vkAllocateDescriptorSets", vkAllocateDescriptorSets(vkDevice, &mpDsai, &m_interactiveViewport.materialPreviewDescSet));
                         updateMaterialPreviewProgramBinding();
                        /* SCENE_LOG_INFO(std::string("[MP-init] step=allocDescSet result=") +
                             std::to_string((int)mpAllocRes) +
@@ -2186,6 +2220,16 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
             }
         }
     }
+
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+    if (!m_interactiveViewport.materialPreviewPipeline ||
+        !m_interactiveViewport.materialPreviewDescSet) {
+        recordVulkanStartupFailure("RayFusion material pipeline setup returned incomplete resources",
+                                   shaderDir + "/material_preview.spv, material_preview_frag.spv");
+        return false;
+    }
+    clearVulkanStartupFailure();
+#endif
 
 #ifndef RT_PLAYER
   //  SCENE_LOG_INFO("[MP-init] step=enterHairPipeline");
@@ -2993,6 +3037,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     //   asagidaki zorunlu-kaynak kontrolune girmiyor; yoksa yansima gecisi
     //   kendini kapatir ve viewport env lookup'iyla calismaya devam eder.
     if (!ensureRasterObjectMotionImage(width, height)) {
+        recordVulkanStartupFailure("ensureRasterObjectMotionImage returned false");
         destroyInteractiveViewportResourcesImpl(true);
         return false;
     }
@@ -3022,6 +3067,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         !m_interactiveViewport.hdrColorImage.image ||
         !m_interactiveViewport.depthImage.image ||
         !m_interactiveViewport.stagingBuffer.buffer) {
+        recordVulkanStartupFailure("RayFusion viewport target creation returned an empty image or buffer");
         destroyInteractiveViewportResourcesImpl(true);
         return false;
     }
@@ -3038,7 +3084,8 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     framebufferInfo.width = (uint32_t)width;
     framebufferInfo.height = (uint32_t)height;
     framebufferInfo.layers = 1;
-    if (vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &m_interactiveViewport.framebuffer) != VK_SUCCESS) {
+    if (Backend::vulkanStartupResult(
+        "RayFusion framebuffer / vkCreateFramebuffer", vkCreateFramebuffer(vkDevice, &framebufferInfo, nullptr, &m_interactiveViewport.framebuffer)) != VK_SUCCESS) {
         destroyInteractiveViewportResourcesImpl(true);
         return false;
     }
@@ -3062,12 +3109,14 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         hdrFBI.renderPass = m_interactiveViewport.hdrRenderPass;
         hdrFBI.attachmentCount = 5;
         hdrFBI.pAttachments = hdrAttachments;
-        if (vkCreateFramebuffer(vkDevice, &hdrFBI, nullptr, &m_interactiveViewport.hdrFramebuffer) != VK_SUCCESS) {
+        if (Backend::vulkanStartupResult(
+            "RayFusion framebuffer / vkCreateFramebuffer", vkCreateFramebuffer(vkDevice, &hdrFBI, nullptr, &m_interactiveViewport.hdrFramebuffer)) != VK_SUCCESS) {
             destroyInteractiveViewportResourcesImpl(true);
             return false;
         }
     }
     if (!updateRasterPostDescriptors()) {
+        recordVulkanStartupFailure("updateRasterPostDescriptors returned false");
         destroyInteractiveViewportResourcesImpl(true);
         return false;
     }
@@ -3185,25 +3234,49 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         throw std::runtime_error("[Player] RayFusion MaterialPreview is required");
     }
 #endif
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+    VulkanStartupDiagnostics startup(m_device ? m_device->getPhysicalDevice() : VK_NULL_HANDLE);
+#endif
     const bool resourcesEnsured = ensureInteractiveViewportResourcesImpl(shaderDir, width, height);
 
 #ifdef RT_PLAYER
     if (!resourcesEnsured) {
+#ifdef __ANDROID__
+        throw std::runtime_error(startup.message(
+            "VulkanViewportBackend::ensureInteractiveViewportResourcesImpl returned false"));
+#else
         throw std::runtime_error("[Player] RayFusion viewport target setup failed");
+#endif
     }
     if (m_interactiveViewport.materialPreviewPipeline == VK_NULL_HANDLE ||
         m_interactiveViewport.materialPreviewDescSet == VK_NULL_HANDLE) {
+#ifdef __ANDROID__
+        throw std::runtime_error(startup.message("RayFusion material pipeline or descriptor set is unavailable"));
+#else
         throw std::runtime_error("[Player] RayFusion material pipeline or descriptor set is unavailable");
+#endif
     }
     if (m_interactiveViewport.postPipeline == VK_NULL_HANDLE ||
         m_interactiveViewport.hdrFramebuffer == VK_NULL_HANDLE) {
+#ifdef __ANDROID__
+        throw std::runtime_error(startup.message("RayFusion post pipeline or HDR target is unavailable"));
+#else
         throw std::runtime_error("[Player] RayFusion post pipeline or HDR target is unavailable");
+#endif
     }
     if (!m_interactiveViewport.materialPreviewFrameUniform.buffer) {
+#ifdef __ANDROID__
+        throw std::runtime_error(startup.message("RayFusion frame uniform buffer is unavailable"));
+#else
         throw std::runtime_error("[Player] RayFusion frame uniform buffer is unavailable");
+#endif
     }
     if (!m_externalMaterialBuffer && !m_device->m_materialBuffer.buffer) {
+#ifdef __ANDROID__
+        throw std::runtime_error(startup.message("RayFusion material buffer is unavailable"));
+#else
         throw std::runtime_error("[Player] RayFusion material buffer is unavailable");
+#endif
     }
 #else
     if (!rasterModeRequested ||

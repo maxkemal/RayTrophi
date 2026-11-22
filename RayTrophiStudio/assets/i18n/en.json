@@ -1,4 +1,7 @@
 {
+  "player.startup_log": "Recent errors and warnings",
+  "player.startup_scene_failed": "RayTrophi Player could not open the scene",
+  "player.startup_unsupported_gpu": "RayTrophi Player cannot run on this device",
   "common.language": "Language / Dil",
   "common.language_help": "The interface language changes immediately and is remembered.",
   "diagnostic.at_most_16_library_folders_are_supported": "At most 16 library folders are supported",

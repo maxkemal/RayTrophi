@@ -1,3 +1,4 @@
+#include "Backend/VulkanStartupDiagnostics.h"
 #include <sstream>
 #include "Core/RuntimeSceneViewer.h"
 #include "Viewport/RayFusionViewportPasses.h"
@@ -163,6 +164,9 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
         return rtapi::Result::fail("a different runtime already owns the Vulkan viewport");
     }
     auto backend = std::make_unique<Backend::VulkanViewportBackend>();
+#ifdef __ANDROID__
+    Backend::VulkanStartupDiagnostics startup;
+#endif
     if (!backend->initialize()) {
         // Name the GPU and the missing feature: on Android this is the only thing the
         // user can act on (an unsupported device), so it must reach the screen, not the log.
@@ -170,7 +174,13 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
         if (!rejected.empty()) {
             return rtapi::Result::fail("This device's GPU is not supported - " + rejected);
         }
+#ifdef __ANDROID__
+        const std::string reason = startup.message("VulkanViewportBackend::initialize returned false");
+        SCENE_LOG_ERROR("[Player] Vulkan viewport initialization failed: " + reason);
+        return rtapi::Result::fail(reason);
+#else
         return rtapi::Result::fail("Player Vulkan viewport initialization failed");
+#endif
     }
     backend->setViewportMode(Backend::ViewportMode::MaterialPreview);
     // Match Studio: capture opts into synchronous readback; ordinary display
@@ -188,7 +198,11 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
     // real device instead of the startup all-false capability snapshot.
     if (!getSharedSceneTextureManager()->initialize(
             captureRuntimeRenderCapabilities(), "PlayerSceneViewer")) {
+#ifdef __ANDROID__
+        return rtapi::Result::fail(startup.message("SceneTextureManager::initialize returned false"));
+#else
         return rtapi::Result::fail("Player scene texture service initialization failed");
+#endif
     }
     g_solid_viewport_active = true;
     g_material_preview_viewport_active = true;
@@ -815,7 +829,7 @@ nlohmann::json RuntimeSceneViewer::status() const {
     Backend::RasterFrameTelemetry telemetry;
     const bool measured = backend_ && backend_->getInteractiveViewportFrameTelemetry(telemetry) &&
                           telemetry.available;
-    return {
+    nlohmann::json result = {
         {"host_active", true}, {"host", "player"},
         {"stage", "static_scene_viewer"}, {"scene_loading_supported", true},
         {"rendering_supported", true}, {"animation_playback", true},
@@ -846,6 +860,22 @@ nlohmann::json RuntimeSceneViewer::status() const {
         {"simulation", simulationStatus()},
         {"loop", loop_status_}
     };
+#ifdef __ANDROID__
+    if (!scene_ready_ && (!last_open_error_.empty() || !error_.empty())) {
+        std::vector<LogEntry> lines;
+        g_sceneLog.getLines(lines);
+        std::vector<std::string> recent;
+        for (auto it = lines.rbegin(); it != lines.rend() && recent.size() < 12; ++it) {
+            if (it->level == LogLevel::Warning || it->level == LogLevel::Error) {
+                const char* severity = it->level == LogLevel::Error ? "[ERROR] " : "[WARNING] ";
+                recent.push_back(severity + it->msg);
+            }
+        }
+        std::reverse(recent.begin(), recent.end());
+        result["startup_log"] = std::move(recent);
+    }
+#endif
+    return result;
 }
 
 } // namespace AppRuntime

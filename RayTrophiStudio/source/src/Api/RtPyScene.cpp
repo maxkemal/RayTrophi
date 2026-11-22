@@ -18,6 +18,7 @@
 */
 
 #include "RtPyCommon.h"
+#include "RtApiInternal.h"
 #include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiPlayerOperator.h"
 
@@ -62,6 +63,13 @@ py::dict materialToDict(const rtapi::MaterialInfo& info) {
 
 void registerSceneBindings(py::module_& module) {
     auto player = module.def_submodule("player", "Player presentation controls");
+    player.def("runtime_status", [] {
+        if (!rtapi::g_ctx) {
+            throw std::runtime_error("No bound runtime context");
+        }
+        const auto status = AppRuntime::runtimeStatus(*rtapi::g_ctx);
+        return py::module_::import("json").attr("loads")(status.dump());
+    }, "Read Player scene status and any startup failure diagnostics.");
     player.def("operator", [](const std::string& operation, const py::dict& config) {
         const auto codec = py::module_::import("json");
         const auto encoded = py::cast<std::string>(codec.attr("dumps")(config));

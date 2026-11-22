@@ -23,6 +23,8 @@
 
 #include "RtApiInternal.h"
 #include "PerfProfile.h"
+#include "Paint/WetPaintGpu.h"
+#include "globals.h"
 #include "scene_data.h"
 #include "SimulationCompute.h"
 #include "SimulationWorld.h"
@@ -81,15 +83,20 @@ bool perfLogging() { return rtperf::logging(); }
 // They are still cheap reads of an accumulator, not a device query.
 
 namespace {
-RayTrophiSim::SimulationComputeContext* simCompute() {
-    if (!g_ctx) return nullptr;
+RayTrophiSim::SimulationComputeContext* timingCompute(bool wetPaintFallback) {
+    if (!g_ctx) {
+        return nullptr;
+    }
+    if (wetPaintFallback) {
+        return Paint::wetPaintGpu().fallbackCompute(g_vulkan_sim_compute_ctx.device);
+    }
     return &g_ctx->scene.simulation_world.compute();
 }
 } // namespace
 
-GpuKernelTimingReport gpuKernelTimings(bool reset) {
+GpuKernelTimingReport gpuKernelTimings(bool reset, bool wetPaintFallback) {
     GpuKernelTimingReport out;
-    auto* compute = simCompute();
+    auto* compute = timingCompute(wetPaintFallback);
     if (!compute) return out;                 // supported stays false: ABSENCE
     out.supported = compute->supportsGpuTimestamps();
     if (!out.supported) return out;
@@ -99,15 +106,18 @@ GpuKernelTimingReport gpuKernelTimings(bool reset) {
     if (!compute->fetchGpuTimings(timings, reset)) return out;
     out.kernels.reserve(timings.size());
     for (const auto& t : timings) {
-        out.kernels.push_back(GpuKernelTime{t.kernel, t.ms, t.calls});
+        out.kernels.push_back(GpuKernelTime{t.kernel, t.ms, t.calls, t.samples_ms});
         out.total_ms += t.ms;
     }
     return out;
 }
 
-Result setGpuKernelTiming(bool enabled) {
-    auto* compute = simCompute();
-    if (!compute) return Result::fail("no simulation compute context");
+Result setGpuKernelTiming(bool enabled, bool wetPaintFallback) {
+    auto* compute = timingCompute(wetPaintFallback);
+    if (!compute) {
+        return Result::fail(wetPaintFallback ? "no wet paint fallback compute context"
+                                             : "no simulation compute context");
+    }
     if (!compute->supportsGpuTimestamps())
         return Result::fail("compute queue does not support timestamp queries");
     compute->setGpuTimestampsEnabled(enabled);

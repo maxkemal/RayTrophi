@@ -2,6 +2,57 @@
 
 > **Durum:** CANLI — Windows Player Release x64 derlemesi ve demoda fareyle balon yakalama geçti. Studio derlemesi de kullanıcı onayıyla geçti. İki hedefte değişen C++ birimleri MSVC x64 `/Zs` PASS.
 
+## Android Vulkan viewport hata ekranı
+
+**Durum.** Emülatörde zorlanan arm64 hatası ve yerel x86_64 normal açılışı geçti. ADB'siz telefon testi için E:/rt_android_build/RayTrophiPlayer-arm64-s24.apk kopyalandı. SHA-256: `56452A57FEC657E36554ED170BA2CAA2A9EE41544F2338099E3E18D04AC2AE35`.
+
+1. **Emülatör, yapay hata.** Yeni APK kurulu iken aşağıdaki komutları çalıştır. Ortadaki kutu `vkCreateCommandPool`, `VkResult -3`, seçilen GPU ve driver version göstermeli. `Son hatalar ve uyarılar` başlığına dokun ve en yeni ERROR satırını gör. IPC `agent.get_state_summary` ile `runtime.last_open_error` ve `runtime.startup_log` aynı tanıyı taşımalı. GPU alanı boşsa tanılama adımı cihaz seçiminden önce çalışıyor ya da kayıt zinciri koptu.
+2. **Normal açılış.** Özelliği `0` yap, uygulamayı durdurup yeniden başlat. Gizli Renkler'in ilk karesi gelmeli. **En sinsi hata** eski tanı kaydının yeni denemeye sızıp normal açılışı engellemesi veya seçilmiş GPU'daki hatanın farklı bir adaptörün yetenek reddi olarak gösterilmesi.
+3. **ADB'siz telefon.** Yeni arm64 APK'yı kur ve normal aç. Ret kutusu çıkarsa log başlığını açıp ekran görüntüsü al. Adım, VkResult (Vulkan çağrısından dönmüşse), GPU ve driver satırlarını birlikte gönder. Yalnız genel başlık görülürse ekranın hata gövdesinin de göründüğünü ve kurulan APK'nın sürümünü kontrol et.
+
+```powershell
+adb shell setprop debug.raytrophi.fail_viewport_startup 1
+adb shell am force-stop com.raytrophi.player
+adb shell am start -n com.raytrophi.player/.PlayerActivity
+
+adb shell setprop debug.raytrophi.fail_viewport_startup 0
+adb shell am force-stop com.raytrophi.player
+adb shell am start -n com.raytrophi.player/.PlayerActivity
+```
+
+## Player Android — Adreno float atomik
+
+1. **Yeni APK ve log.** Değişen C++ birimlerinin Studio/Player /Zs ve NDK x86_64/arm64-v8a -fsyntax-only denetimleri geçti. Yeni x86_64 APK'yı al ve host GPU emülatörüne kur. SDK platform-tools PATH'te olsun. İlk komut grubuyla tanılamayı açıp Player'ı yeniden başlat. `SceneLog.txt` içinde `Float atomic add disabled by diagnostic override` ve `module.AtomicFloat32AddEXT_not_supported_on_this_GPU` satırları beklenir. Örnek kernel `sim_matter_p2g`, shader yolu ve VkResult `-8` aynı satırda olmalı. Satır yoksa yeni APK'yı, adb hedefini ve özelliğin açılış öncesinde ayarlandığını kontrol et.
+2. **Görsel kabul.** Gizli Renkler açılınca bir balon patlat. Damlaların duvara temas ettiği yerde boya görünmeli. İstersen mevcut dış IPC istemcisinden `paint.wet_demo status` ve `paint.wet_status` ile olay ve etkin tile artışını da doğrula. **En sinsi hata** sahne açık ve damlalar görünürken duvarda boya veya boyayla açığa çıkan yüzey izinin olmaması. Bu durumda spawn/ballistic/collide ve paint_wet pipeline loglarını, çarpışma olay yayımını ve paint dispatch durumunu kontrol et.
+3. **Anahtarsız karşılaştırma ve gerçek cihaz.** İkinci komut grubuyla özelliği sıfırla ve aynı emülatör oyunu tekrarla. NVIDIA destekliyorsa tanılama satırı ve atomik capability retleri kalkmalı. Ardından yeni arm64-v8a APK'yı S24 Ultra'da anahtar kapalıyken dene. Yerel özellik yoksa capability retleri, açık sahne ve duvarda boya bir arada görünmeli. Adreno sürücüsünün tekrar `OpAtomicFAddEXT` demesi başka bir shader kurulum yolunun kaldığını gösterir.
+
+```powershell
+adb shell setprop debug.raytrophi.force_no_atomic_float 1
+adb shell am force-stop com.raytrophi.player
+adb shell am start -n com.raytrophi.player/.PlayerActivity
+adb shell run-as com.raytrophi.player cat files/SceneLog.txt
+
+adb shell setprop debug.raytrophi.force_no_atomic_float 0
+adb shell am force-stop com.raytrophi.player
+adb shell am start -n com.raytrophi.player/.PlayerActivity
+```
+
+## Player Android A6a ve A6b
+
+1. **Derle ve paketle.** Studio ve Player Release x64 için temiz derleme al. Ortak C++ ölçüm yapılarının boyutu değişti. Android için standart Player paketi üzerinden varlıkları tekrar hazırla ve x86_64/arm64-v8a APK'ları al. Yeni başlık görünmüyorsa paket içindeki `assets/i18n/en.json` ve `tr.json` sürümlerini kontrol et.
+2. **Ölçüm birimi.** Mümkünse `timestampPeriod != 1.0` raporlayan Vulkan cihazı kullan. Capture/debugger üzerinden seçili dispatch ve raster sınırının sorgu tick farkını al. Sayaç genişliğine göre farkı maskele. Beklenen ms `delta_ticks × timestampPeriod / 1_000_000`. Örnek olarak 2.000.000 tick ve 0,5 ns/tick tam 1 ms eder. **En sinsi hata** 2 ms gibi makul görünen ama period çarpanı atlanmış bir değerdir.
+3. **Windows Player.** Sahnenin yüklenmesini bekle ve Player başlangıç logunda IPC sunucusunun açıldığını doğrula. Aşağıdaki ilk komutu ayrı PowerShell sürecinde çalıştır. `Idle` sırasında giriş yapma, `Burst` başlarken birkaç balon patlat. Dört compute satırı ve raster ana geçişi için ilgili aşamada `Available=True` ve pozitif örnek sayısı beklenir. Süre sütunları boşsa destek bayrağını, sahnenin ilgili GPU işini çalıştırdığını ve Player odağını kontrol et.
+4. **Android emülatör.** Yeni x86_64 APK'yı `-gpu host` ile çalıştır. Ekranı uyanık tut. İkinci komut adb TCP yönlendirmesini oluşturup kendi çıkışında kaldırır. Birden çok cihaz varsa `-Serial <adb-seri>` ekle. Windows ile aynı sütunlar dolmalı. Duraklatılmış SDL döngüsü IPC zaman aşımı olarak görünür.
+5. **Ret ekranı.** Desteklenmeyen arm64 cihazda HUD kapalıyken başlangıç ret başlığını ve gövdedeki GPU adı ile Vulkan gereksinimini kontrol et. Android dillerini Türkçe ve İngilizce olarak ayrı açılışlarda dene. Descriptor indexing şartını karşılayıp 15–16 SSBO raporlayan cihaz `paint_wet (17)`, 15'in altı iki kernel gerekçesini göstermeli. Ret edilen aygıtta projenin açılması kabul hatasıdır.
+6. **Boş veri ve API eşliği.** Timestamp desteği olmayan kuyrukta `Supported=False`, `Available=False` ve boş ms sütunları beklenir. Duran sahnede hiç çalışmayan kernelin `Available=False` olması geçerlidir. Studio Python'da `rt.perf.gpu_kernel_timings()` ve `rt.viewport.frame_timings()` ile aynı ek alanları gör. `wet_paint_fallback=True` ayrı boya bağlamını seçer.
+
+```powershell
+.\scripts	est\Measure-PlayerGpuPasses.ps1 -IdleSeconds 5 -BurstSeconds 8
+.\scripts	est\Measure-PlayerGpuPasses.ps1 -Android -IdleSeconds 5 -BurstSeconds 8
+```
+
+Raporda ortalama, tepe ve nearest-rank p95 ayrı GPU örneklerinden hesaplanır. Raster örnekleri GPU'dan birkaç kare geriden okunabilir. Compute tanılama açıkken asenkron gönderimler senkronlaşır. Bu çalıştırmayı zamanlayıcı kapalı FPS ölçümünden ayrı kaydet.
+
 ## Player Android A5 — dokunmatik giriş (2026-11-22)
 
 **Emülatör başlangıç ölçümü.** Mevcut APK, `-gpu host`, yatay ekran 1600×720. Kullanıcı fareyle taşıma ve patlatmayı doğruladı. Boşta yaklaşık 56 FPS, çoklu patlamada yaklaşık 21 FPS, ardından tekrar yaklaşık 56 FPS. İç render boyutu doğrulanmadı. Tekerlekle derinlik ve yeni APK'da iki parmakla sıkıştırma kabulü açık.

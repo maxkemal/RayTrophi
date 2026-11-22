@@ -108,6 +108,7 @@ public:
     // zeroed timing table would be read as "the GPU costs nothing".
     bool supported() const { return m_supported; }
     const char* unsupportedReason() const { return m_reason; }
+    std::uint64_t lastRecordedSerial() const { return m_frameSerial; }
 
     // Opens a slot and writes the frame-start mark. Must be called OUTSIDE a
     // render pass (it resets the query range).
@@ -132,6 +133,7 @@ private:
     bool m_open = false;
     const char* m_reason = "not initialised";
     double m_periodNs = 1.0;
+    std::uint64_t m_timestampMask = 0;
     std::uint32_t m_slot = 0;
     std::uint64_t m_frameSerial = 0;
     // Which marks the frame in each slot actually wrote, and that slot's serial.

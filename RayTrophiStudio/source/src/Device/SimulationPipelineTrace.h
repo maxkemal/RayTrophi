@@ -1,13 +1,12 @@
 #pragma once
 
 #include <vulkan/vulkan.h>
-#ifdef RT_PLAYER
 #include "globals.h"
-#endif
 
 #include <cstdio>
 #include <cstdlib>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace RayTrophiSim {
@@ -20,21 +19,29 @@ inline void traceSimulationPipeline(const char* stage,
                                     const std::vector<uint32_t>& code,
                                     VkResult result = VK_SUCCESS) {
     const uint32_t version = code.size() >= 5 ? code[1] : 0;
+    const std::string_view event(stage);
+    const bool unsupported = event.find("_not_supported_on_this_GPU") != std::string_view::npos;
+    const bool failed = result != VK_SUCCESS && event != "module.missing_or_unreadable";
+    bool playerRequired = false;
 #ifdef RT_PLAYER
-    if (kernel == "sim_particle_spawn" || kernel == "sim_particle_ballistic" ||
-        kernel == "sim_particle_collide" || kernel == "paint_wet") {
-        const std::string message = std::string("[Player compute] ") + stage +
+    playerRequired = kernel == "sim_particle_spawn" || kernel == "sim_particle_ballistic" ||
+                     kernel == "sim_particle_collide" || kernel == "paint_wet";
+#endif
+    if (failed || playerRequired) {
+        const char* prefix = playerRequired ? "[Player compute] " : "[Simulation compute] ";
+        const std::string message = std::string(prefix) + stage +
             " kernel=" + kernel + " shader=" + path +
             " spirv=" + std::to_string((version >> 16) & 0xff) + "." +
             std::to_string((version >> 8) & 0xff) +
             " VkResult=" + std::to_string(static_cast<int>(result));
-        if (result == VK_SUCCESS) {
+        if (unsupported) {
+            SCENE_LOG_WARN(message);
+        } else if (result == VK_SUCCESS) {
             SCENE_LOG_INFO(message);
         } else {
             SCENE_LOG_ERROR(message);
         }
     }
-#endif
     static const bool enabled = [] {
 #ifdef _WIN32
         char* value = nullptr;

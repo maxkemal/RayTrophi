@@ -72,6 +72,8 @@ bool RasterGpuTimers::ensure(VulkanRT::VulkanDevice& device) {
     }
 
     m_periodNs = static_cast<double>(props.limits.timestampPeriod);
+    const auto validBits = families[family].timestampValidBits;
+    m_timestampMask = validBits >= 64 ? UINT64_MAX : (std::uint64_t{1} << validBits) - 1;
     m_slotMarks.fill(0u);
     m_slotSerial.fill(0u);
     m_slotStageBits.fill(0u);
@@ -175,14 +177,9 @@ RasterGpuFrameTimings RasterGpuTimers::collect(VulkanRT::VulkanDevice& device) {
 
         double total = 0.0;
         for (std::uint32_t s = 0; s < static_cast<std::uint32_t>(RasterStage::Count); ++s) {
-            // Ticks are unsigned and the counter can wrap. A negative delta is
-            // a wrap or a driver quirk, not a fast pass; clamp it to zero and
-            // let the total stay honest rather than reporting a negative stage.
-            const std::uint64_t a = stamps[s];
-            const std::uint64_t b = stamps[s + 1u];
-            const double ms = (b > a)
-                ? (static_cast<double>(b - a) * m_periodNs) / 1.0e6
-                : 0.0;
+            // Subtract modulo the queue's timestamp counter width.
+            const std::uint64_t ticks = (stamps[s + 1u] - stamps[s]) & m_timestampMask;
+            const double ms = static_cast<double>(ticks) * m_periodNs * 1e-6;
             out.stageMs[s] = ms;
             out.stageRan[s] = (m_slotStageBits[slot] & (1u << s)) != 0u;
             total += ms;

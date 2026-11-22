@@ -39,11 +39,16 @@ function Connect-RtIpc {
     .PARAMETER Port
         Android: adb forward ile yonlendirilmis yerel TCP portu. Verilmezse
         $env:RAYTROPHI_IPC_PORT, o da yoksa Windows pipe'i kullanilir.
+    .PARAMETER PipeName
+        Windows named pipe. Defaults to RayTrophiStudio. Use RayTrophiPlayer for Player.
     #>
     [CmdletBinding()]
-    param([int]$TimeoutMs = 15000, [int]$Port = 0)
+    param([int]$TimeoutMs = 15000, [int]$Port = 0, [string]$PipeName = 'RayTrophiStudio')
 
-    if ($Port -le 0 -and $env:RAYTROPHI_IPC_PORT) { $Port = [int]$env:RAYTROPHI_IPC_PORT }
+    if ($Port -le 0 -and -not $PSBoundParameters.ContainsKey('PipeName') -and
+        $env:RAYTROPHI_IPC_PORT) {
+        $Port = [int]$env:RAYTROPHI_IPC_PORT
+    }
     if ($Port -gt 0) {
         if ($null -ne $script:RtTcp -and $script:RtTcp.Connected) { return }
         $client = New-Object System.Net.Sockets.TcpClient
@@ -66,7 +71,7 @@ function Connect-RtIpc {
     }
 
     $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(
-        '.', 'RayTrophiStudio',
+        '.', $PipeName,
         [System.IO.Pipes.PipeDirection]::InOut,
         [System.IO.Pipes.PipeOptions]::None,
         [System.Security.Principal.TokenImpersonationLevel]::Impersonation)

@@ -1,4 +1,5 @@
 #include "Viewport/RayFusionViewportPasses.h"
+#include "Backend/VulkanStartupDiagnostics.h"
 #include "Backend/VulkanBackend.h"
 #include "globals.h"
 
@@ -139,6 +140,18 @@ const char* rayFusionDeviceRejection(
     if (properties.apiVersion < VK_API_VERSION_1_2) {
         return "device API below Vulkan 1.2";
     }
+
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+    const auto& limits = properties.limits;
+    const uint32_t storageBindings = (std::min)(
+        limits.maxPerStageDescriptorStorageBuffers, limits.maxDescriptorSetStorageBuffers);
+    if (storageBindings < 15) {
+        return "insufficient SSBO bindings for sim_particle_collide (15) and paint_wet (17)";
+    }
+    if (storageBindings < 17) {
+        return "insufficient SSBO bindings for paint_wet (17)";
+    }
+#endif
 
     VkPhysicalDeviceDescriptorIndexingFeatures indexing{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
@@ -383,7 +396,8 @@ bool ensureRayFusionViewportPasses(
         renderPassInfo.pSubpasses = &subpass;
         renderPassInfo.dependencyCount = 1;
         renderPassInfo.pDependencies = &dependency;
-        return vkCreateRenderPass(vkDevice, &renderPassInfo, nullptr, out) == VK_SUCCESS;
+        return vulkanStartupResult(withGbuffer ? "vkCreateRenderPass (HDR)" : "vkCreateRenderPass (LDR)",
+                                   vkCreateRenderPass(vkDevice, &renderPassInfo, nullptr, out)) == VK_SUCCESS;
     };
 
     return

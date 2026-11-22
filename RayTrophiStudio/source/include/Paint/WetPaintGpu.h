@@ -212,6 +212,9 @@ public:
     bool empty() const { return surfaces_.empty(); }
     std::vector<WetPaintSurfaceInfo> surfaces() const;
     const WetPaintStats& stats() const { return stats_; }
+    RayTrophiSim::SimulationComputeContext* fallbackCompute(void* activeDevice) const {
+        return activeDevice == own_compute_device_ ? own_compute_.get() : nullptr;
+    }
 
 private:
     struct Surface;

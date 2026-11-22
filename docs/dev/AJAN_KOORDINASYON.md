@@ -35,6 +35,12 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
 
+- 2026-11-22 Codex viewport startup: Android Player reports startup stage, VkResult, GPU and driver version. Existing runtime IPC snapshot adds startup_log during failure; Python binds the same host status. No shader or shared layout change.
+
+- 2026-11-22 Codex Adreno: Vulkan simulation pipeline registration now checks actual SPIR-V Float64 and AtomicFloat32AddEXT capabilities before the driver. The Player startup override disables float atomic add at device creation. Registry rows, shader ABI and IPC contracts are unchanged.
+
+- 2026-11-22 Codex A6: GPU timing report, simulation kernel accumulator and raster timing layouts changed. C++ timing methods add a wet-paint fallback selector. IPC/Python add optional samples_ms, wet_paint_fallback, and raster_main_gpu_samples. Android Player adds the 15/17 SSBO admission checks. Shader ABI is unchanged.
+
 - 2026-11-22 Codex A2c: Android defines RT_NO_OPENVDB and substitutes both VDB implementations and their Windows Player host companions. The Android manifest now requires only the SDL source dependencies. VDB import and sparse VDB selection return a platform error. Windows layouts and IPC method signatures are unchanged.
 
 - 2026-11-22 Claude A3: `Platform.h` + `secureRandomBytes`. `RtIpcSecurity`/`RtIpcSession` artık OpenSSL içermiyor (`Utils/Sha256.h` + Platform RNG); yalnız TLS taşıması OpenSSL kullanıyor. `RtPlayerIpcPolicy.h` + `localSocketName`. Android yerel IPC = soyut unix soketi, 4 bayt BE çerçeve; `RtIpc.psm1 Connect-RtIpc -Port`. TLS Android stub'ı uzak IPC istenmediyse `true` döner (yoksa bütün IPC kapanıyordu).
@@ -700,6 +706,12 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
   paketleniyordu). DEM gözenekli yolu da aynı tuzağa açık olabilir — Codex bakabilir.
 
 ## 3. Derleme bekleyen işler
+
+- 2026-11-22 Codex viewport startup: arm64 APK built and copied to E:/rt_android_build/RayTrophiPlayer-arm64-s24.apk. Studio/Player /Zs, Android x86_64/arm64 syntax-only, arm64 forced error on emulator and x86_64 normal first frame passed. ADB-less phone diagnostic pending. See NEXT_BUILD_CHECKS.md.
+
+- 2026-11-22 Codex Adreno: Incremental Studio/Player build and new x86_64/arm64 APKs pending. Studio/Player MSVC /Zs, NDK x86_64 and arm64 syntax-only, and compile-time admission assertions for the 20 atomic and four game SPVs passed. Live forced-off emulator paint and natural Adreno acceptance pending. See NEXT_BUILD_CHECKS.md.
+
+- 2026-11-22 Codex A6: Clean Studio + Player and Android rebuild pending for shared timing layouts. MSVC /Zs, NDK x86_64/arm64 -fsyntax-only, mocked PowerShell capture and descriptor/capability audit passed. Live Windows and emulator capture and localized Android rejection pending. See NEXT_BUILD_CHECKS.md.
 
 - 2026-11-22 Codex: Player LNK2005/LNK1169 fix assigns Ozz `platform.cc` to `OzzBasePlatform.obj` in both Windows projects. Player generator check passed. User confirmed Windows Player Release x64 link and demo mouse grabbing. User also confirmed the Studio build passed.
 

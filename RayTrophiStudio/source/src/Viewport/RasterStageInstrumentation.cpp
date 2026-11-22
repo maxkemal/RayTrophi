@@ -99,7 +99,6 @@ void VulkanBackendAdapter::publishRasterStageTimings(VkCommandBuffer cmd,
                                                       uint64_t visibleTriangles,
                                                       uint32_t drawCalls) {
     if (cmd == VK_NULL_HANDLE) return;
-    m_rasterGpuTimers.endFrame(cmd);
 
     // The GPU numbers that land here belong to an EARLIER frame -- marks are
     // read without waiting, so the newest retired slot is one or two frames
@@ -107,6 +106,9 @@ void VulkanBackendAdapter::publishRasterStageTimings(VkCommandBuffer cmd,
     // frames_with_gpu lagging frames is how the caller sees it.
     RasterGpuFrameTimings gpu{};
     if (m_device) gpu = m_rasterGpuTimers.collect(*m_device);
+    // Close the recording slot after reading retired slots. Its GPU reset
+    // has not executed yet, so reading it now could return an older frame.
+    m_rasterGpuTimers.endFrame(cmd);
 
     RasterAppliedState applied = sampleRasterAppliedState();
     applied.visible_triangles = visibleTriangles;
@@ -114,7 +116,7 @@ void VulkanBackendAdapter::publishRasterStageTimings(VkCommandBuffer cmd,
 
     m_rasterStageAccum.record(m_rasterCpuStageMs.data(), frameCpuMs,
                               gpu.stageMs.data(), gpu.stageRan.data(),
-                              gpu.totalMs, gpu.available, applied);
+                              gpu.totalMs, gpu.available, gpu.frameSerial, applied);
 }
 
 bool VulkanBackendAdapter::getRasterStageTimings(RasterStageTimings& out) const {
@@ -124,7 +126,7 @@ bool VulkanBackendAdapter::getRasterStageTimings(RasterStageTimings& out) const 
 }
 
 bool VulkanBackendAdapter::resetRasterStageTimings() {
-    m_rasterStageAccum.reset();
+    m_rasterStageAccum.reset(m_rasterGpuTimers.lastRecordedSerial());
     // The viewport renders only when dirty. Without this a reset followed by a
     // read on a still camera returns an empty window and reads as "measured
     // nothing" when it should read as "here is the first frame".

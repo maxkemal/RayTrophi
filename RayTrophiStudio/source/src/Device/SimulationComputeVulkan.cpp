@@ -30,10 +30,12 @@
  *   Kernels that need atomics return false (CPU fallback) when unavailable.
  */
 
+#include "SimulationGpuPassSamples.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "SimulationCompute.h"
 #include "SimulationComputeVulkanContext.h"
 #include "SimulationPipelineTrace.h"
+#include "SimulationSpirvRequirements.h"
 
 #include <vulkan/vulkan.h>
 
@@ -180,8 +182,9 @@ public:
         if (!m_timestampsSupported) return false;
         out.clear();
         out.reserve(m_kernelTimes.size());
-        for (const auto& kv : m_kernelTimes)
-            out.push_back(GpuKernelTiming{kv.first, kv.second.ms, kv.second.calls});
+        for (const auto& [kernel, acc] : m_kernelTimes) {
+            out.push_back(GpuKernelTiming{kernel, acc.ms, acc.calls, acc.samplesMs});
+        }
         std::sort(out.begin(), out.end(),
                   [](const GpuKernelTiming& a, const GpuKernelTiming& b) {
                       return a.ms > b.ms;
@@ -715,70 +718,11 @@ public:
     }
 
     // True when the kernel needs a device feature this device did not enable.
-    // Used at dispatch AND before pipeline creation: compiling a SPIR-V module
-    // whose capability (float atomics, float64) is not enabled is undefined
-    // behaviour, and the NVIDIA driver on older GPUs (Maxwell) crashes inside
-    // vkCreateComputePipelines instead of failing.
-    bool kernelNeedsMissingFeature(const std::string& kernel) const {
-        // Kernels using float atomics (P2G scatter, density splat) need hardware support.
-        const bool needs_atomics = (kernel == "sim_fluid_p2g_scatter" ||
-                                    kernel == "sim_sparse_mac_p2g" ||
-                                    kernel == "sim_sparse_mac_matter_p2g" ||
-                                    kernel == "sim_matter_p2g_fused" ||
-                                    kernel == "sim_matter_p2g_block" ||
-                                    kernel == "sim_fluid_occupancy" ||
-                                    kernel == "sim_fluid_density_splat" ||
-                                    kernel == "terrain_thermal" ||
-                                    kernel == "terrain_thermal_hardness" ||
-                                    kernel == "terrain_stream_power" ||
-                                    kernel == "terrain_wind" ||
-                                    kernel == "terrain_hydraulic_droplet" ||
-                                    kernel == "terrain_fluvial_runoff" ||
-                                    kernel == "terrain_fluvial_talus");
-        if (needs_atomics && !m_has_float_atomics) return true;
-        // The MGPCG dot / device-scalar kernels work in double — running them
-        // without the shaderFloat64 device feature is UB. Failing here sends
-        // the host cleanly to the CPU PCG fallback.
-        if (!m_has_shader_float64 &&
-            (kernel == "sim_inventory_conserve" ||
-             kernel == "sim_inventory_summary" ||
-             kernel == "sim_audio_gas_flow" ||
-             kernel == "sim_inventory_surface_exchange" ||
-             kernel.rfind("sim_sparse_pressure_", 0) == 0 ||
-             // The viscosity PCG reduces in double as well.
-             kernel == "sim_fluid_viscosity_pcg" ||
-             kernel == "sim_sparse_viscosity_pcg" ||
-             kernel == "sim_sparse_mac_viscosity_pcg" ||
-             (kernel == "sim_fluid_cg_dot" ||
-              kernel == "sim_fluid_cg_dot_window") ||
-             kernel == "sim_fluid_cg_scalar_step" ||
-             (kernel == "sim_fluid_cg_axpy_dev" ||
-              kernel == "sim_fluid_cg_axpy_dev_window") ||
-             (kernel == "sim_fluid_cg_zpby_dev" ||
-              kernel == "sim_fluid_cg_zpby_dev_window") ||
-             (kernel == "sim_fluid_cg_jacobi_dot" ||
-              kernel == "sim_fluid_cg_jacobi_dot_window") ||
-             (kernel == "sim_fluid_cg_spmv_dot" ||
-              kernel == "sim_fluid_cg_spmv_dot_window") ||
-             (kernel == "sim_fluid_cg_spmv_dot_var" ||
-              kernel == "sim_fluid_cg_spmv_dot_var_window") ||
-             (kernel == "sim_fluid_cg_axpy2_dev" ||
-              kernel == "sim_fluid_cg_axpy2_dev_window"))) {
-            return true;
-        }
-        return false;
-    }
-
     bool dispatch(const ComputeDispatch& cmd) override {
         if (!m_ready || !cmd.constants || cmd.constants_size == 0) return false;
         if (cmd.buffer_count > MAX_BINDINGS) return false;
 
         const std::string kernel(cmd.kernel ? cmd.kernel : "");
-        if (kernelNeedsMissingFeature(kernel)) return false;
-        // The block P2G also adds floats in SHARED memory: refused (the host
-        // falls back to the fused kernel) unless that feature is on as well.
-        if (kernel == "sim_matter_p2g_block" && !m_has_shared_float_atomics) return false;
-
         auto pit = m_pipelines.find(kernel);
         if (pit == m_pipelines.end()) return false;
         const PipelineEntry& pe = pit->second;
@@ -978,6 +922,7 @@ private:
     bool        m_timestampsSupported = false;
     bool        m_timestampsEnabled   = false;
     double      m_timestampPeriodNs   = 0.0;
+    uint64_t    m_timestampMask       = 0;
     uint32_t    m_tsCursor            = 0;    // next free slot in this cmdbuf
     bool        m_tsOverflowed        = false;
     // Kernel name per timestamp PAIR, in recording order for this cmdbuf.
@@ -985,6 +930,7 @@ private:
     struct KernelTimeAccum {
         double   ms    = 0.0;
         uint32_t calls = 0;
+        std::vector<double> samplesMs;
     };
     std::unordered_map<std::string, KernelTimeAccum> m_kernelTimes;
     bool     m_has_float_atomics = false;
@@ -1064,7 +1010,9 @@ private:
         if (m_queueFamily >= familyCount) return;
         std::vector<VkQueueFamilyProperties> families(familyCount);
         vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount, families.data());
-        if (families[m_queueFamily].timestampValidBits == 0) return;
+        const uint32_t validBits = families[m_queueFamily].timestampValidBits;
+        if (validBits == 0) return;
+        m_timestampMask = validBits >= 64 ? UINT64_MAX : (uint64_t{1} << validBits) - 1;
 
         VkQueryPoolCreateInfo qi{};
         qi.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
@@ -1165,8 +1113,19 @@ private:
                                     VK_ERROR_INITIALIZATION_FAILED);
             return false;
         }
+        if (const char* reason = simulationSpirvRejection(
+                spv, m_has_float_atomics, m_has_shader_float64)) {
+            traceSimulationPipeline(reason, kernelName, spvPath, spv,
+                                    VK_ERROR_FEATURE_NOT_PRESENT);
+            return false;
+        }
+        if (kernelName == "sim_matter_p2g_block" && !m_has_shared_float_atomics) {
+            traceSimulationPipeline("module.shared_float_atomic_add_not_supported_on_this_GPU",
+                                    kernelName, spvPath, spv, VK_ERROR_FEATURE_NOT_PRESENT);
+            return false;
+        }
 #ifdef RT_PLAYER
-        if (spv.size() < 5 || spv[0] != 0x07230203u || spv[1] > m_maxSpirvVersion) {
+        if (spv[1] > m_maxSpirvVersion) {
             traceSimulationPipeline("module.incompatible_spirv", kernelName, spvPath, spv,
                                     VK_ERROR_INCOMPATIBLE_DRIVER);
             return false;
@@ -1230,9 +1189,11 @@ private:
         const VkResult pipelineResult = vkCreateComputePipelines(
             m_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline);
         traceSimulationPipeline("pipeline.end", kernelName, spvPath, spv, pipelineResult);
-        bool ok = pipelineResult == VK_SUCCESS;
         vkDestroyShaderModule(m_device, mod, nullptr);
-        if (!ok) {
+        if (pipelineResult != VK_SUCCESS) {
+            if (pipeline != VK_NULL_HANDLE) {
+                vkDestroyPipeline(m_device, pipeline, nullptr);
+            }
             vkDestroyPipelineLayout(m_device, pipelineLayout, nullptr);
             return false;
         }
@@ -1694,7 +1655,6 @@ private:
                               std::string(d.name) == "sim_matter_p2g_fused")) {
                 spv = std::string(d.name) + "_clustered.spv";
             }
-            if (kernelNeedsMissingFeature(d.name)) continue;  // unsupported: never compile
             createPipeline(d.name, sd + "/" + spv, d.bufs, d.pc);
         }
         m_clustered_p2g = clustered;
@@ -1955,10 +1915,13 @@ private:
                 if (results[b + 1] == 0ull || results[b + 3] == 0ull) continue;
                 const uint64_t t0 = results[b + 0];
                 const uint64_t t1 = results[b + 2];
-                if (t1 <= t0) continue;               // wrapped or unordered
-                auto& acc = m_kernelTimes[m_tsLabels[pair]];
-                acc.ms += static_cast<double>(t1 - t0) * m_timestampPeriodNs * 1e-6;
+                const double ms = gpuTimestampDeltaMs(t0, t1, m_timestampMask,
+                                                      m_timestampPeriodNs);
+                const auto& kernel = m_tsLabels[pair];
+                auto& acc = m_kernelTimes[kernel];
+                acc.ms += ms;
                 acc.calls += 1u;
+                recordPlayerGpuPassSample(kernel, ms, acc.samplesMs);
             }
         }
         m_tsCursor = 0;

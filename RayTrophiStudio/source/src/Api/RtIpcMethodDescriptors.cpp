@@ -174,7 +174,7 @@ static const MethodParam params_agent_get_state_summary[] = {
 static const MethodDescriptor desc_agent_get_state_summary = {
     "agent.get_state_summary", "agent",
     "Compact snapshot of scene, lights, camera, timeline and viewport measurement state",
-    "The viewport block is a MEASUREMENT and is only present when frame capture is on and a frame exists; when it is absent that means 'not measured', never 'measured zero'. Turn capture on with viewport.capture before relying on it.",
+    "On Android Player, runtime.error or runtime.last_open_error contains the startup step and available Vulkan result and adapter details. runtime.startup_log lists up to twelve recent SceneLog warnings/errors on startup failure. The viewport block is a MEASUREMENT and is only present when frame capture is on and a frame exists; when it is absent that means 'not measured', never 'measured zero'. Turn capture on with viewport.capture before relying on it.",
     "read", "Read", false, "StateSummary",
     "agent|get|state|summary|context|snapshot|scene|verify",
     "viewport.status|render.probe|scene.list_objects",
@@ -5788,6 +5788,7 @@ static const MethodRegistration reg_paint_wet_resize_surfaces(desc_paint_wet_res
 
 static const MethodParam params_paint_wet_set_settings[] = {
     {"object", "string", true, "", nullptr, nullptr, "string", false},
+    {"reveal_opacity", "bool", false, "Hide unpainted areas; paint coverage reveals opacity; reset hides again", "false", nullptr, "bool", false},
     {"absorption", "float", false, "", "0.18", nullptr, "number", false},
     {"brush_radius", "float", false, "", "5.0", nullptr, "number", false},
     {"deposit_rate", "float", false, "", "0.65", nullptr, "number", false},
@@ -5797,7 +5798,6 @@ static const MethodParam params_paint_wet_set_settings[] = {
     {"falloff", "float", false, "", "0.65", nullptr, "number", false},
     {"height_contribution", "float", false, "", "0.35", nullptr, "number", false},
     {"height_normal_channel", "bool", false, "", "false", nullptr, "bool", false},
-    {"reveal_opacity", "bool", false, "Hide unpainted areas; paint coverage reveals opacity; reset hides again", "false", nullptr, "bool", false},
     {"lifetime_seconds", "float", false, "", "12.0", nullptr, "number", false},
     {"material_id", "int", false, "", "-1", nullptr, "number", false},
     {"normal_strength", "float", false, "", "0.5", nullptr, "number", false},
@@ -5817,7 +5817,7 @@ static const MethodDescriptor desc_paint_wet_set_settings = {
     "paint|wet|set|settings|runoff|drip|diffusion|dry",
     nullptr,
     nullptr, nullptr, nullptr, nullptr,
-    params_paint_wet_set_settings, 20,
+    params_paint_wet_set_settings, 21,
     true
 };
 static const MethodRegistration reg_paint_wet_set_settings(desc_paint_wet_set_settings);
@@ -6589,16 +6589,17 @@ static const MethodRegistration reg_perf_get_gpu_memory(desc_perf_get_gpu_memory
 
 static const MethodParam params_perf_gpu_kernel_timings[] = {
     {"reset", "bool", false, "", "false", nullptr, "bool", false},
+    {"wet_paint_fallback", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_perf_gpu_kernel_timings = {
     "perf.gpu_kernel_timings", "perf",
     "Device time per compute kernel, measured by GPU timestamp queries",
-    "The CPU stage timers in gas.step_stats measure ENQUEUE time once the solver stages stop calling synchronize, so their per-stage rows are not comparable with each other; the work simply lands in whichever later row does synchronize. These numbers come from timestamps the device writes around each dispatch, so they stay true wherever the submission boundary falls. Off by default: enable with perf.set_gpu_kernel_timing, step the frames you want, then read with reset=true. Do not read in the same batch as the stepping that feeds it. supported=false means the compute queue has no timestamp support at all - that is absence, not a measured zero.",
-    "read", "Read", false, "supported/enabled flags, total_ms and a descending kernel table (kernel, ms, calls)",
+    "wet_paint_fallback=true selects the independent Vulkan paint context when present. The default selects the scene simulation context. The CPU stage timers in gas.step_stats measure ENQUEUE time once the solver stages stop calling synchronize, so their per-stage rows are not comparable with each other; the work simply lands in whichever later row does synchronize. These numbers come from timestamps the device writes around each dispatch, so they stay true wherever the submission boundary falls. Off by default: enable with perf.set_gpu_kernel_timing, step the frames you want, then read with reset=true. Do not read in the same batch as the stepping that feeds it. supported=false means the compute queue has no timestamp support at all - that is absence, not a measured zero.",
+    "read", "Read", false, "supported/enabled flags, total_ms and a descending kernel table (kernel, ms, calls). sim_particle_spawn, sim_particle_ballistic, sim_particle_collide and paint_wet include samples_ms when measured, limited to the first 8192 dispatches per reset.",
     "perf|gpu|kernel|timings|timing|profile|simulation|compute|read",
     "perf.set_gpu_kernel_timing|perf.get_gpu_memory|gas.step_stats",
     nullptr, nullptr, nullptr, nullptr,
-    params_perf_gpu_kernel_timings, 1,
+    params_perf_gpu_kernel_timings, 2,
     true
 };
 static const MethodRegistration reg_perf_gpu_kernel_timings(desc_perf_gpu_kernel_timings);
@@ -6647,16 +6648,17 @@ static const MethodRegistration reg_perf_set_blas_compaction(desc_perf_set_blas_
 
 static const MethodParam params_perf_set_gpu_kernel_timing[] = {
     {"enabled", "bool", true, "", nullptr, nullptr, "bool", false},
+    {"wet_paint_fallback", "bool", false, "", "false", nullptr, "bool", false},
 };
 static const MethodDescriptor desc_perf_set_gpu_kernel_timing = {
     "perf.set_gpu_kernel_timing", "perf",
     "Turn GPU timestamp instrumentation of the simulation compute backend on or off",
-    "Writes a timestamp pair around every compute dispatch and reads the query pool back after each submission, so it is a diagnostic rather than a permanent tax. Fails when the compute queue reports no timestamp support. Toggling closes the open command buffer first so the query pool and its label list cannot fall out of step.",
+    "wet_paint_fallback=true selects the independent Vulkan paint context when present. The default selects the scene simulation context. Writes a timestamp pair around every compute dispatch and reads the query pool back after each submission, so it is a diagnostic rather than a permanent tax. Fails when the compute queue reports no timestamp support. Toggling closes the open command buffer first so the query pool and its label list cannot fall out of step.",
     "read", "Read", false, "ok",
     "perf|set|gpu|kernel|timing|profile|simulation|compute|toggle",
     "perf.gpu_kernel_timings|perf.get_gpu_memory",
     nullptr, nullptr, nullptr, nullptr,
-    params_perf_set_gpu_kernel_timing, 1,
+    params_perf_set_gpu_kernel_timing, 2,
     true
 };
 static const MethodRegistration reg_perf_set_gpu_kernel_timing(desc_perf_set_gpu_kernel_timing);
@@ -7114,7 +7116,7 @@ static const MethodParam params_player_operator[] = {
 static const MethodDescriptor desc_player_operator = {
     "player.operator", "player",
     "Control the Player operator console services: library, cameras and player appearance",
-    "Player only; UI and Python rt.player.operator use this same service. operation: status; game.settings.status/apply/save/preset/restore/clear_paint/renew_balloons (gameplay settings, local per-project profiles, draft presets, restore schedules authored scene reload); library.refresh/add/remove/open (path for add/remove/open); camera.refresh/configure/preview/start/stop; calibration.save; display.configure/monitor; audio.configure; avatar.bind; appearance.camera; game.start/stop/reset. config is an object; unknown fields/operations fail. Library scans are asynchronous, deduplicated, depth <=6, <=50000 entries per root, <=4096 projects and <=16 roots. library.open schedules project.open outside the UI frame. Camera uses stable Windows MF symbolic device IDs and native modes, never silently switches devices. Preview is shared-memory only. Stop is asynchronous; settings cannot change while a camera worker runs. Tracking requires floor calibration and packaged model/runtime. Camera appearance uses existing video_card; avatar.bind requires character/person_id and a prepared mapping or saved profile. Avatar binding uses the existing external-pose solver. Operator settings are local to player_operator.json. Mutation failures from file I/O or existing services can leave partial results; errors are reported. This multi-operation endpoint requires Admin, SceneWrite, FilesRead and FilesWrite capabilities, including for status.",
+    "Player only; UI and Python rt.player.operator use this same service. operation: status; language.status/set (set config.locale to a code from language.status.available; persists operator locale, no gameplay changes); game.settings.status/apply/save/preset/restore/clear_paint/renew_balloons (gameplay settings, local per-project profiles, draft presets, restore schedules authored scene reload); library.refresh/add/remove/open (path for add/remove/open); camera.refresh/configure/preview/start/stop; calibration.save; display.configure/monitor; audio.configure; avatar.bind; appearance.camera; game.start/stop/reset. config is an object; unknown fields/operations fail. Library scans are asynchronous, deduplicated, depth <=6, <=50000 entries per root, <=4096 projects and <=16 roots. library.open schedules project.open outside the UI frame. Camera uses stable Windows MF symbolic device IDs and native modes, never silently switches devices. Preview is shared-memory only. Stop is asynchronous; settings cannot change while a camera worker runs. Tracking requires floor calibration and packaged model/runtime. Camera appearance uses existing video_card; avatar.bind requires character/person_id and a prepared mapping or saved profile. Avatar binding uses the existing external-pose solver. Operator settings are local to player_operator.json. Mutation failures from file I/O or existing services can leave partial results; errors are reported. This multi-operation endpoint requires Admin, SceneWrite, FilesRead and FilesWrite capabilities, including for status.",
     "write", "Admin|SceneWrite|FilesRead|FilesWrite", false, "any",
     "player|operator|console|library|camera|avatar|configuration",
     "player.display|player.set_display|input.body_poses|anim.external_poses",
@@ -12693,7 +12695,7 @@ static const MethodRegistration reg_viewport_frame_telemetry(desc_viewport_frame
 static const MethodDescriptor desc_viewport_frame_timings = {
     "viewport.frame_timings", "viewport",
     "Per-pass CPU and GPU cost of the raster viewport frame over the window since the last reset",
-    "HOW TO USE IT: viewport.reset_frame_timings, then DRIVE THE CAMERA (camera.set_position/set_target) for as many frames as you want to average, then read this. The raster viewport renders ONLY when it is marked dirty, so a still camera produces an empty window - measured 2026-09-09, 24 s of a still camera gave 0 raster frames while the display loop kept re-presenting one old image, and a wall-clock FPS A/B over it correctly reported 'noise'. The app also draws NOTHING while its window is not focused. Neither is a bug; both make a measurement silently empty, and 'warnings' names them. WHAT THE STAGES MEAN: shadow_atlas, sky, depth_prepass, rt_shadow, main_pass, volume_sdf, transmission, post, overlay - in frame order. GPU marks are written at BOTTOM_OF_PIPE, so a stage is 'time until this boundary retired', NOT 'what this pass would cost alone'. They sum to the frame exactly; they do not attribute an isolated cost, and deleting a 10 ms stage does not promise a 10 ms frame. ZERO IS TWO DIFFERENT ANSWERS: 'frames_ran' 0 with 0 ms means the stage was SKIPPED every frame - which is a RESULT, not missing data. That is exactly what shadow_atlas reports once the RT shadow handoff takes the light (cross-check applied.rt_cascades_replaced). A stage that ran and cost nothing has frames_ran > 0. GPU NUMBERS LAG: marks are read without waiting, so the newest retired slot is one or two frames back and 'frames_with_gpu' trails 'frames'. Over a window that is irrelevant; on the first few frames after a reset it is why gpu_* can be absent. 'gpu_supported' false means this device or queue cannot timestamp at all - every gpu_* is ABSENT, not zero, and the cpu_* half is still real. 'applied' IS PART OF THE MEASUREMENT: it is what the measured frames ACTUALLY did, sampled from those same frames - never the request side. depth_prepass and gpu_culling in particular have both shipped here as requested-but-not-applied. If any of it changed DURING the window, 'warnings' says so and the means average two different machines: reset and measure again rather than comparing them. 'window_wall_ms' far exceeding frames x frame_cpu_mean_ms means these were individually driven frames, not a sustained frame rate - quote them as ms/frame, never as FPS.",
+    "raster_main_gpu_samples contains available main pass durations (ms) with unique frame_serial values in the rolling window. An empty array means no measured main pass. The field is omitted when GPU timestamps are unsupported. HOW TO USE IT: viewport.reset_frame_timings, then DRIVE THE CAMERA (camera.set_position/set_target) for as many frames as you want to average, then read this. The raster viewport renders ONLY when it is marked dirty, so a still camera produces an empty window - measured 2026-09-09, 24 s of a still camera gave 0 raster frames while the display loop kept re-presenting one old image, and a wall-clock FPS A/B over it correctly reported 'noise'. The app also draws NOTHING while its window is not focused. Neither is a bug; both make a measurement silently empty, and 'warnings' names them. WHAT THE STAGES MEAN: shadow_atlas, sky, depth_prepass, rt_shadow, main_pass, volume_sdf, transmission, post, overlay - in frame order. GPU marks are written at BOTTOM_OF_PIPE, so a stage is 'time until this boundary retired', NOT 'what this pass would cost alone'. They sum to the frame exactly; they do not attribute an isolated cost, and deleting a 10 ms stage does not promise a 10 ms frame. ZERO IS TWO DIFFERENT ANSWERS: 'frames_ran' 0 with 0 ms means the stage was SKIPPED every frame - which is a RESULT, not missing data. That is exactly what shadow_atlas reports once the RT shadow handoff takes the light (cross-check applied.rt_cascades_replaced). A stage that ran and cost nothing has frames_ran > 0. GPU NUMBERS LAG: marks are read without waiting, so the newest retired slot is one or two frames back and 'frames_with_gpu' trails 'frames'. Over a window that is irrelevant; on the first few frames after a reset it is why gpu_* can be absent. 'gpu_supported' false means this device or queue cannot timestamp at all - every gpu_* is ABSENT, not zero, and the cpu_* half is still real. 'applied' IS PART OF THE MEASUREMENT: it is what the measured frames ACTUALLY did, sampled from those same frames - never the request side. depth_prepass and gpu_culling in particular have both shipped here as requested-but-not-applied. If any of it changed DURING the window, 'warnings' says so and the means average two different machines: reset and measure again rather than comparing them. 'window_wall_ms' far exceeding frames x frame_cpu_mean_ms means these were individually driven frames, not a sustained frame rate - quote them as ms/frame, never as FPS.",
     "render", "Render", false, "any",
     "viewport|frame|timings|timing|profile|gpu|cpu|cost|measure|benchmark|stage|pass",
     "viewport.reset_frame_timings|viewport.frame_telemetry|viewport.rt_shadow",

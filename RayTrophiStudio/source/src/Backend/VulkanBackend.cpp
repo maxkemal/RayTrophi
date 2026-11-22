@@ -11,6 +11,8 @@
  * =========================================================================
  */
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanStartupDiagnostics.h"
+#include "PlayerAtomicFloatDiagnostic.h"
 #include "Viewport/RayFusionViewportPasses.h"
 #include "Viewport/RasterBackground.h"
 #include "Backend/VulkanVolumePipelineProbe.h"
@@ -919,6 +921,9 @@ VulkanDevice::~VulkanDevice() {
 
 bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
     VK_INFO() << "[VulkanDevice] Initializing..." << std::endl;
+#ifdef RT_PLAYER
+    Backend::clearRayFusionDeviceRejections();
+#endif
 
     // RT_VK_VALIDATION=1 turns the Khronos validation layer on for a repro run
     // (needs the Vulkan SDK installed); release builds never enable it otherwise.
@@ -930,10 +935,19 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
         validationLayers = true;
         SCENE_LOG_INFO("[VulkanDevice] RT_VK_VALIDATION=1: validation layer requested.");
     }
-    if (!createInstance(validationLayers)) return false;
+    if (!createInstance(validationLayers)) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::createInstance returned false");
+        return false;
+    }
     if (validationLayers) setupDebugMessenger();
-    if (!selectPhysicalDevice(preferHardwareRT)) return false;
-    if (!createLogicalDevice(preferHardwareRT)) return false;
+    if (!selectPhysicalDevice(preferHardwareRT)) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::selectPhysicalDevice returned false");
+        return false;
+    }
+    if (!createLogicalDevice(preferHardwareRT)) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::createLogicalDevice returned false");
+        return false;
+    }
     if (m_capabilities.supportsBufferDeviceAddress) {
         fpGetBufferDeviceAddressKHR =
             reinterpret_cast<PFN_vkGetBufferDeviceAddressKHR>(
@@ -950,9 +964,15 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
                       << std::endl;
         }
     }
-    if (!createCommandPool()) return false;
+    if (!createCommandPool()) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::createCommandPool returned false");
+        return false;
+    }
     detectCapabilities();
-    if (!createDescriptorPool()) return false;
+    if (!createDescriptorPool()) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::createDescriptorPool returned false");
+        return false;
+    }
 
     if (hasHardwareRT()) {
         loadRayTracingFunctions();
@@ -1268,6 +1288,7 @@ bool VulkanDevice::createInstance(bool validationLayers) {
 #else
         VK_WARN() << "[VulkanDevice] Vulkan loader (libvulkan.so) not found or failed to load." << std::endl;
 #endif
+        Backend::recordVulkanStartupFailure("VulkanDevice::createInstance", "Vulkan loader could not be loaded");
         return false;
     }
     VkApplicationInfo appInfo{};
@@ -1327,6 +1348,8 @@ bool VulkanDevice::createInstance(bool validationLayers) {
     }
     if (!pfnGetInstanceProcAddr) {
         VK_ERROR() << "[VulkanDevice] Failed to resolve vkGetInstanceProcAddr from loader." << std::endl;
+        Backend::recordVulkanStartupFailure("VulkanDevice::createInstance",
+                                            "Missing vkGetInstanceProcAddr entry point");
         return false;
     }
 
@@ -1334,6 +1357,8 @@ bool VulkanDevice::createInstance(bool validationLayers) {
     const VkResult versionResult =
         Backend::selectRayFusionInstanceVersion(pfnGetInstanceProcAddr, appInfo.apiVersion);
     if (versionResult != VK_SUCCESS) {
+        Backend::vulkanStartupResult("selectRayFusionInstanceVersion", versionResult,
+                                     "Vulkan 1.2 loader required");
         SCENE_LOG_ERROR("[Player] Vulkan 1.2 loader required, VkResult " +
                         std::to_string(static_cast<int>(versionResult)));
         return false;
@@ -1349,10 +1374,14 @@ bool VulkanDevice::createInstance(bool validationLayers) {
     }
     if (!pfnCreateInstance) {
         VK_ERROR() << "[VulkanDevice] Failed to resolve vkCreateInstance from loader." << std::endl;
+        Backend::recordVulkanStartupFailure("VulkanDevice::createInstance",
+                                            "Missing vkCreateInstance entry point");
         return false;
     }
 
-    VkResult result = pfnCreateInstance(&createInfo, nullptr, &m_instance);
+    VkResult result = Backend::vulkanStartupResult(
+        "vkCreateInstance", pfnCreateInstance(&createInfo, nullptr, &m_instance),
+        validationLayers ? VK_EXT_DEBUG_UTILS_EXTENSION_NAME : "");
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateInstance failed: " << result << std::endl;
         return false;
@@ -1365,18 +1394,24 @@ bool VulkanDevice::createInstance(bool validationLayers) {
 // ========================================================================
 
 bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
-#ifdef RT_PLAYER
-    Backend::clearRayFusionDeviceRejections();
-#endif
     uint32_t deviceCount = 0;
-    vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr);
+    if (Backend::vulkanStartupResult("vkEnumeratePhysicalDevices (count)",
+            vkEnumeratePhysicalDevices(m_instance, &deviceCount, nullptr)) != VK_SUCCESS) {
+        return false;
+    }
     if (deviceCount == 0) {
+        Backend::recordVulkanStartupFailure("vkEnumeratePhysicalDevices", "No Vulkan-capable GPU");
         VK_ERROR() << "[VulkanDevice] No Vulkan-capable GPU found!" << std::endl;
         return false;
     }
 
     std::vector<VkPhysicalDevice> devices(deviceCount);
-    vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
+    const VkResult enumerate = vkEnumeratePhysicalDevices(m_instance, &deviceCount, devices.data());
+    if (enumerate != VK_SUCCESS && enumerate != VK_INCOMPLETE) {
+        Backend::vulkanStartupResult("vkEnumeratePhysicalDevices (list)", enumerate);
+        return false;
+    }
+    devices.resize(deviceCount);
 
     // Score each device
     int bestScore = -1;
@@ -1388,7 +1423,13 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
         if (const char* reason = Backend::rayFusionDeviceRejection(dev, props)) {
             SCENE_LOG_WARN(std::string("[Player] Skipping Vulkan adapter ") +
                            props.deviceName + ": " + reason);
+#ifdef __ANDROID__
+            const std::string adapter = std::string(props.deviceName) +
+                " (driver version " + std::to_string(props.driverVersion) + ")";
+            Backend::recordRayFusionDeviceRejection(adapter.c_str(), reason);
+#else
             Backend::recordRayFusionDeviceRejection(props.deviceName, reason);
+#endif
             continue;
         }
 #endif
@@ -1430,6 +1471,7 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
 
     if (!m_physicalDevice) {
         VK_ERROR() << "[VulkanDevice] No suitable GPU found!" << std::endl;
+        Backend::recordVulkanStartupFailure("VulkanDevice::selectPhysicalDevice", "No suitable GPU");
         return false;
     }
 
@@ -1437,6 +1479,13 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
     vkGetPhysicalDeviceProperties(m_physicalDevice, &props);
 #ifdef RT_PLAYER
     Backend::logRayFusionDeviceLimits(m_physicalDevice, props.limits);
+#ifdef __ANDROID__
+    // Rejections of other adapters must not mask a failure on the selected GPU.
+    Backend::clearRayFusionDeviceRejections();
+    if (Backend::currentVulkanStartup) {
+        Backend::currentVulkanStartup->setGpu(props);
+    }
+#endif
 #endif
     VK_INFO() << "[VulkanDevice] Selected: " << props.deviceName << std::endl;
     return true;
@@ -1476,6 +1525,8 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
 
     if (m_computeQueueFamily == UINT32_MAX) {
         VK_ERROR() << "[VulkanDevice] No compute queue family!" << std::endl;
+        Backend::recordVulkanStartupFailure("VulkanDevice::createLogicalDevice",
+                                            "Missing compute queue family");
         return false;
     }
 
@@ -1488,9 +1539,18 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
 
     // Check which RT extensions are available
     uint32_t extCount = 0;
-    vkEnumerateDeviceExtensionProperties(m_physicalDevice, nullptr, &extCount, nullptr);
+    if (Backend::vulkanStartupResult("vkEnumerateDeviceExtensionProperties (count)",
+            vkEnumerateDeviceExtensionProperties(m_physicalDevice, nullptr, &extCount, nullptr)) != VK_SUCCESS) {
+        return false;
+    }
     std::vector<VkExtensionProperties> availableExts(extCount);
-    vkEnumerateDeviceExtensionProperties(m_physicalDevice, nullptr, &extCount, availableExts.data());
+    const VkResult extensionResult =
+        vkEnumerateDeviceExtensionProperties(m_physicalDevice, nullptr, &extCount, availableExts.data());
+    if (extensionResult != VK_SUCCESS && extensionResult != VK_INCOMPLETE) {
+        Backend::vulkanStartupResult("vkEnumerateDeviceExtensionProperties (list)", extensionResult);
+        return false;
+    }
+    availableExts.resize(extCount);
 
     auto hasExtension = [&](const char* name) {
         return std::any_of(availableExts.begin(), availableExts.end(),
@@ -1651,7 +1711,7 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     const bool canUseSamplerAnisotropy = supportedFeatures.features.samplerAnisotropy == VK_TRUE;
     // The fluid kernels need the buffer (SSBO) float-atomic-add variant; the
     // MPM block P2G also uses the shared-memory one when supported (below).
-    const bool canUseAtomicFloat = hasAtomicFloat &&
+    bool canUseAtomicFloat = hasAtomicFloat &&
         supportedAtomicFloatFeatures.shaderBufferFloat32AtomicAdd == VK_TRUE;
     // Core FP64 feature — needed by the sim compute MGPCG dot kernel
     // (double block partials, CPU-PCG-parity accumulation). Optional: absent
@@ -1660,6 +1720,12 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     if (hasAtomicFloat && !canUseAtomicFloat) {
         VK_WARN() << "[VulkanDevice] shader_atomic_float extension present but shaderBufferFloat32AtomicAdd is unsupported; fluid P2G stays on CPU." << std::endl;
     }
+#ifdef RT_PLAYER
+    if (forceNoAtomicFloatForDiagnostics()) {
+        canUseAtomicFloat = false;
+        SCENE_LOG_INFO("[Player GPU] Float atomic add disabled by diagnostic override.");
+    }
+#endif
     if (!canUseAtomicFloat) {
         deviceExtensions.erase(
             std::remove(deviceExtensions.begin(), deviceExtensions.end(), VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME),
@@ -1871,8 +1937,17 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         VkResult fallback = vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr, &m_device);
         if (fallback != VK_SUCCESS) {
             VK_ERROR() << "[VulkanDevice] Fallback vkCreateDevice also failed: " << fallback << std::endl;
+            Backend::vulkanStartupResult("vkCreateDevice (fallback)", fallback,
+                "Initial vkCreateDevice VkResult " + std::to_string(static_cast<int>(result)));
             return false;
         }
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+        if (Backend::currentVulkanStartup) {
+            Backend::vulkanStartupResult("vkCreateDevice", result,
+                "Fallback device disables descriptor indexing, independentBlend and fragmentStoresAndAtomics required by RayFusion");
+            return false;
+        }
+#endif
         // Fallback succeeded — mark capabilities conservatively.
         // Fallback path passes nullptr pNext, so NO extension features are
         // enabled on the device — critically, descriptor indexing is OFF.
@@ -1937,7 +2012,11 @@ bool VulkanDevice::createCommandPool() {
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = m_computeQueueFamily;
 
-    if (vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_commandPool) != VK_SUCCESS) {
+    const bool diagnosticFailure = Backend::failViewportStartupForDiagnostics();
+    const VkResult result = diagnosticFailure ? VK_ERROR_INITIALIZATION_FAILED
+        : vkCreateCommandPool(m_device, &poolInfo, nullptr, &m_commandPool);
+    if (Backend::vulkanStartupResult("vkCreateCommandPool", result,
+            diagnosticFailure ? "Forced by debug.raytrophi.fail_viewport_startup" : "") != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] Failed to create command pool" << std::endl;
         return false;
     }
@@ -1961,7 +2040,8 @@ bool VulkanDevice::createDescriptorPool() {
     poolInfo.poolSizeCount = hasHardwareRT() ? 5 : 4;
     poolInfo.pPoolSizes = poolSizes;
 
-    if (vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool) != VK_SUCCESS) {
+    if (Backend::vulkanStartupResult("vkCreateDescriptorPool",
+            vkCreateDescriptorPool(m_device, &poolInfo, nullptr, &m_descriptorPool)) != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] Failed to create descriptor pool" << std::endl;
         return false;
     }
@@ -2442,7 +2522,8 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
         bufferInfo.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VkResult result = vkCreateBuffer(m_device, &bufferInfo, nullptr, &handle.buffer);
+    VkResult result = Backend::vulkanStartupResult(
+        "VulkanDevice::createBuffer / vkCreateBuffer", vkCreateBuffer(m_device, &bufferInfo, nullptr, &handle.buffer));
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkCreateBuffer failed (size=" << info.size << ", result=" << result << ")" << std::endl;
         handle = {};
@@ -2458,6 +2539,8 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
     allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, translateMemoryLocation(info.location));
 
     if (allocInfo.memoryTypeIndex == UINT32_MAX) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::createBuffer / findMemoryType",
+                                            "No compatible memory type");
         VK_ERROR() << "[VulkanDevice] No suitable memory type found (size=" << memReq.size << ")" << std::endl;
         vkDestroyBuffer(m_device, handle.buffer, nullptr);
         handle = {};
@@ -2471,7 +2554,8 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
         allocInfo.pNext = &flagsInfo;
     }
 
-    result = vkAllocateMemory(m_device, &allocInfo, nullptr, &handle.memory);
+    result = Backend::vulkanStartupResult(
+        "VulkanDevice::createBuffer / vkAllocateMemory", vkAllocateMemory(m_device, &allocInfo, nullptr, &handle.memory));
     if (result != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] vkAllocateMemory failed (size=" << memReq.size << ", result=" << result << ")" << std::endl;
         // Do not aggressively recreate backend on large readback-buffer failures:
@@ -2490,7 +2574,13 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
     noteMemoryAllocated(handle.memory, memReq.size, allocInfo.memoryTypeIndex,
                         info.category != VramCategory::Other ? info.category
                                                              : VramCategoryScope::current());
-    vkBindBufferMemory(m_device, handle.buffer, handle.memory, 0);
+    result = Backend::vulkanStartupResult("VulkanDevice::createBuffer / vkBindBufferMemory",
+        vkBindBufferMemory(m_device, handle.buffer, handle.memory, 0));
+    if (result != VK_SUCCESS) {
+        VK_ERROR() << "[VulkanDevice] vkBindBufferMemory failed: " << result << std::endl;
+        destroyBuffer(handle);
+        return {};
+    }
 
     // Get device address
     if (m_capabilities.supportsBufferDeviceAddress && fpGetBufferDeviceAddressKHR) {
@@ -2503,8 +2593,14 @@ BufferHandle VulkanDevice::createBuffer(const BufferCreateInfo& info) {
 
     // Upload initial data if provided
     if (info.initialData && info.location != MemoryLocation::GPU_ONLY) {
-        void* mapped;
-        vkMapMemory(m_device, handle.memory, 0, info.size, 0, &mapped);
+        void* mapped = nullptr;
+        result = Backend::vulkanStartupResult("VulkanDevice::createBuffer / vkMapMemory",
+            vkMapMemory(m_device, handle.memory, 0, info.size, 0, &mapped));
+        if (result != VK_SUCCESS) {
+            VK_ERROR() << "[VulkanDevice] vkMapMemory failed: " << result << std::endl;
+            destroyBuffer(handle);
+            return {};
+        }
         memcpy(mapped, info.initialData, info.size);
         vkUnmapMemory(m_device, handle.memory);
     }
@@ -2767,7 +2863,8 @@ VkCommandBuffer VulkanDevice::beginSingleTimeCommands() {
     allocInfo.commandBufferCount = 1;
 
     VkCommandBuffer cmdBuf = VK_NULL_HANDLE;
-    VkResult allocRes = vkAllocateCommandBuffers(m_device, &allocInfo, &cmdBuf);
+    VkResult allocRes = Backend::vulkanStartupResult(
+        "VulkanDevice::beginSingleTimeCommands / vkAllocateCommandBuffers", vkAllocateCommandBuffers(m_device, &allocInfo, &cmdBuf));
     if (allocRes != VK_SUCCESS || cmdBuf == VK_NULL_HANDLE) {
         VK_ERROR() << "[VulkanDevice] beginSingleTimeCommands: vkAllocateCommandBuffers failed (result="
                    << allocRes << ")" << std::endl;
@@ -2778,7 +2875,8 @@ VkCommandBuffer VulkanDevice::beginSingleTimeCommands() {
     VkCommandBufferBeginInfo beginInfo{};
     beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    VkResult beginRes = vkBeginCommandBuffer(cmdBuf, &beginInfo);
+    VkResult beginRes = Backend::vulkanStartupResult(
+        "VulkanDevice::beginSingleTimeCommands / vkBeginCommandBuffer", vkBeginCommandBuffer(cmdBuf, &beginInfo));
     if (beginRes != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] beginSingleTimeCommands: vkBeginCommandBuffer failed (result="
                    << beginRes << ")" << std::endl;
@@ -6397,7 +6495,8 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
     imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
-    if (vkCreateImage(m_device, &imageInfo, nullptr, &handle.image) != VK_SUCCESS) {
+    if (Backend::vulkanStartupResult(
+        "VulkanDevice::createImage2D / vkCreateImage", vkCreateImage(m_device, &imageInfo, nullptr, &handle.image)) != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] Failed to create image" << std::endl;
         return {};
     }
@@ -6411,12 +6510,15 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
     allocInfo.allocationSize = memReq.size;
     allocInfo.memoryTypeIndex = findMemoryType(memReq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
     if (allocInfo.memoryTypeIndex == UINT32_MAX) {
+        Backend::recordVulkanStartupFailure("VulkanDevice::createImage2D / findMemoryType",
+                                            "No compatible memory type");
         VK_ERROR() << "[VulkanDevice] Failed to find device-local memory type for image." << std::endl;
         vkDestroyImage(m_device, handle.image, nullptr);
         return {};
     }
 
-    VkResult allocRes = vkAllocateMemory(m_device, &allocInfo, nullptr, &handle.memory);
+    VkResult allocRes = Backend::vulkanStartupResult(
+        "VulkanDevice::createImage2D / vkAllocateMemory", vkAllocateMemory(m_device, &allocInfo, nullptr, &handle.memory));
     if (allocRes != VK_SUCCESS || !handle.memory) {
         VK_ERROR() << "[VulkanDevice] Failed to allocate image memory ("
                    << width << "x" << height << ", result=" << allocRes << ")" << std::endl;
@@ -6428,7 +6530,8 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
                         VramCategoryScope::current() == VramCategory::Other
                             ? VramCategory::RenderTarget : VramCategoryScope::current());
 
-    VkResult bindRes = vkBindImageMemory(m_device, handle.image, handle.memory, 0);
+    VkResult bindRes = Backend::vulkanStartupResult(
+        "VulkanDevice::createImage2D / vkBindImageMemory", vkBindImageMemory(m_device, handle.image, handle.memory, 0));
     if (bindRes != VK_SUCCESS) {
         VK_ERROR() << "[VulkanDevice] Failed to bind image memory (result=" << bindRes << ")" << std::endl;
         freeTrackedMemory(handle.memory);
@@ -6448,7 +6551,8 @@ ImageHandle VulkanDevice::createImage2D(uint32_t width, uint32_t height, VkForma
     viewInfo.subresourceRange.baseArrayLayer = 0;
     viewInfo.subresourceRange.layerCount = 1;
 
-    VkResult viewRes = vkCreateImageView(m_device, &viewInfo, nullptr, &handle.view);
+    VkResult viewRes = Backend::vulkanStartupResult(
+        "VulkanDevice::createImage2D / vkCreateImageView", vkCreateImageView(m_device, &viewInfo, nullptr, &handle.view));
     if (viewRes != VK_SUCCESS || !handle.view) {
         VK_ERROR() << "[VulkanDevice] Failed to create image view (result=" << viewRes << ")" << std::endl;
         vkDestroyImage(m_device, handle.image, nullptr);
@@ -8178,6 +8282,8 @@ bool VulkanBackendAdapter::initialize() {
         } else {
             VK_ERROR() << "[VulkanBackendAdapter] No hardware RT and no graphics queue, "
                           "Vulkan backend disabled." << std::endl;
+            Backend::recordVulkanStartupFailure("VulkanBackendAdapter::initialize",
+                                                "Missing graphics queue and hardware ray tracing");
             m_device->shutdown();
             return false;
         }

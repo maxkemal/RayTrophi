@@ -69,9 +69,10 @@ bool sameApplied(const RasterAppliedState& a, const RasterAppliedState& b) {
 
 } // namespace
 
-void RasterStageAccumulator::reset() {
+void RasterStageAccumulator::reset(std::uint64_t lastRecordedGpuFrame) {
     m_count = 0;
     m_next = 0;
+    m_lastGpuFrameSerial = lastRecordedGpuFrame;
     m_appliedSeen = false;
     m_settingsChanged = false;
     m_applied = RasterAppliedState{};
@@ -82,6 +83,7 @@ void RasterStageAccumulator::reset() {
 void RasterStageAccumulator::record(const double* cpuStageMs, double cpuFrameMs,
                                     const double* gpuStageMs, const bool* gpuStageRan,
                                     double gpuFrameMs, bool gpuAvailable,
+                                    std::uint64_t gpuFrameSerial,
                                     const RasterAppliedState& applied) {
     Frame& f = m_frames[m_next];
     f = Frame{};
@@ -93,6 +95,13 @@ void RasterStageAccumulator::record(const double* cpuStageMs, double cpuFrameMs,
     f.cpuFrameMs = cpuFrameMs;
     f.gpuFrameMs = gpuAvailable ? gpuFrameMs : 0.0;
     f.gpuAvailable = gpuAvailable;
+    constexpr auto mainPass = static_cast<std::size_t>(RasterStage::MainPass);
+    if (gpuAvailable && gpuFrameSerial > m_lastGpuFrameSerial) {
+        m_lastGpuFrameSerial = gpuFrameSerial;
+        if (f.gpuRan[mainPass]) {
+            f.mainPass = {gpuFrameSerial, f.gpuStage[mainPass]};
+        }
+    }
 
     m_next = (m_next + 1u) % kCapacity;
     if (m_count < kCapacity) ++m_count;
@@ -142,6 +151,9 @@ RasterStageTimings RasterStageAccumulator::snapshot(
         for (std::size_t s = 0; s < kStageCount; ++s)
             cpuStage[s].push_back(f.cpuStage[s]);
         if (!f.gpuAvailable) continue;
+        if (f.mainPass.frame_serial != 0) {
+            out.raster_main_gpu_samples.push_back(f.mainPass);
+        }
         ++out.frames_with_gpu;
         gpuFrame.push_back(f.gpuFrameMs);
         for (std::size_t s = 0; s < kStageCount; ++s) {

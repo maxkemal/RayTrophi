@@ -51,7 +51,8 @@ inline bool supportsMethod(const std::string& method) {
            method == "post.reset_exposure" ||
            // Per-stage host timings of the shared raster frame (read + reset).
            method == "viewport.frame_timings" || method == "viewport.reset_frame_timings" ||
-           method == "perf.list" ||
+           method == "perf.list" || method == "perf.gpu_kernel_timings" ||
+           method == "perf.set_gpu_kernel_timing" ||
            // RT shadow request/readiness: the shared raster pass falls back to
            // cascades without ray query; a test must reach that path on RT GPUs.
            method == "viewport.rt_shadow" || method == "viewport.set_rt_shadow" ||

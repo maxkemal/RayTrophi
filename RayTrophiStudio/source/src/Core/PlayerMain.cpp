@@ -22,8 +22,10 @@
 #include "Core/PlayerRenderExtent.h"
 #include "Core/PlayerResolutionMenu.h"
 #include "Core/PlayerOperator.h"
+#include "Core/Localization.h"
 #include "Core/PlayerSceneLoad.h"
 #include "Core/PlayerBalloonInput.h"
+#include "PlayerStartupFailureTouch.h"
 #include "UI/PlayerOperatorUI.h"
 #include "Api/RtApiPlayerOperator.h"
 
@@ -534,33 +536,58 @@ private:
 // No scene and a viewer error (e.g. an unsupported GPU): say so in the middle of the
 // screen whether or not the debug HUD is on. A black screen with the reason only in the
 // log is the failure mode this exists to prevent (Android A6a).
-void drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
-    if (viewer.hasScene()) return;
+bool drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
+    if (viewer.hasScene()) return false;
     const auto status = viewer.status();
     // Backend initialization runs inside the project open, so its failure arrives as
     // last_open_error; a later runtime fault arrives as error.
     std::string error = status.value("error", "");
     if (error.empty()) error = status.value("last_open_error", "");
-    if (error.empty()) return;
+    if (error.empty()) return false;
     const ImGuiViewport* view = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(view->WorkPos.x + view->WorkSize.x * 0.5f,
                                    view->WorkPos.y + view->WorkSize.y * 0.5f),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+#ifdef __ANDROID__
+    ImGui::SetNextWindowSize(ImVec2(view->WorkSize.x * 0.9f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0),
+                                        ImVec2(view->WorkSize.x, view->WorkSize.y * 0.9f));
+#else
     ImGui::SetNextWindowSize(ImVec2(view->WorkSize.x * 0.6f, 0.0f), ImGuiCond_Always);
+#endif
     ImGui::SetNextWindowBgAlpha(0.85f);
-    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
                                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoNav |
                                    ImGuiWindowFlags_NoFocusOnAppearing;
+#ifdef __ANDROID__
+    flags &= ~ImGuiWindowFlags_NoScrollbar;
+#endif
     if (ImGui::Begin("##player_startup_failure", nullptr, flags)) {
         ImGui::SetWindowFontScale(1.6f);
         const bool unsupported_gpu = error.rfind("This device's GPU is not supported", 0) == 0;
-        ImGui::TextUnformatted(unsupported_gpu ? "RayTrophi Player cannot run on this device"
-                                               : "RayTrophi Player could not open the scene");
+        const std::string title = unsupported_gpu
+            ? Localization::text("player.startup_unsupported_gpu",
+                                 "RayTrophi Player cannot run on this device")
+            : Localization::text("player.startup_scene_failed",
+                                 "RayTrophi Player could not open the scene");
+        ImGui::TextUnformatted(title.c_str());
         ImGui::SetWindowFontScale(1.0f);
         ImGui::Separator();
         ImGui::TextWrapped("%s", error.c_str());
+#ifdef __ANDROID__
+        const std::string logTitle = Localization::text(
+            "player.startup_log", "Recent errors and warnings");
+        const auto log = status.find("startup_log");
+        if (log != status.end() && !log->empty() &&
+            ImGui::CollapsingHeader((logTitle + "###player_startup_log").c_str())) {
+            for (const auto& line : *log) {
+                ImGui::TextWrapped("%s", line.get_ref<const std::string&>().c_str());
+            }
+        }
+#endif
     }
     ImGui::End();
+    return true;
 }
 
 void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
@@ -715,7 +742,30 @@ int main(int argc, char* argv[]) {
     AppRuntime::createMainWindow(window_config);
 
     AppRuntime::ImGuiConfig imgui_config;
+#ifdef __ANDROID__
+    // Android has no operator language settings. Use the OS preference list.
+    SDL_Locale* locales = SDL_GetPreferredLocales();
+    for (const SDL_Locale* locale = locales; locale && locale->language; ++locale) {
+        std::string error;
+        if (Localization::setLocale(locale->language, error)) {
+            break;
+        }
+    }
+    SDL_free(locales);
+    // The embedded ImGui font omits several Turkish characters.
+    for (const char* path : {"/system/fonts/Roboto-Regular.ttf",
+                             "/system/fonts/RobotoStatic-Regular.ttf",
+                             "/system/fonts/RobotoFlex-Regular.ttf",
+                             "/system/fonts/NotoSans-Regular.ttf"}) {
+        std::error_code error;
+        if (std::filesystem::is_regular_file(path, error)) {
+            imgui_config.font_path = path;
+            break;
+        }
+    }
+#else
     imgui_config.font_path = "C:\\Windows\\Fonts\\segoeui.ttf";
+#endif
     imgui_config.font_size = 16.0f;
     imgui_config.enable_keyboard_nav = true;
     imgui_config.enable_docking = false;  // game HUD, no editor layout
@@ -797,10 +847,20 @@ int main(int argc, char* argv[]) {
     });
     SDL_Event event;
     AppRuntime::EventInfo event_info;
+#ifdef __ANDROID__
+    AppRuntime::PlayerStartupFailureTouch startupFailureTouch;
+    bool startupNoticeVisible = false;
+#endif
     while (running) {
         frame_cycle.beginIteration();
         const auto iteration_start = Clock::now();
         while (frame_cycle.pollEvent(event, event_info)) {
+#ifdef __ANDROID__
+            if (startupFailureTouch.handle(event, window, startupNoticeVisible)) {
+                frame_cycle.requestRedraw();
+                continue;
+            }
+#endif
             if (event_info.quit_requested) {
                 running = false;  // Player: no save prompt
             }
@@ -929,10 +989,17 @@ int main(int argc, char* argv[]) {
         if (frame_cycle.shouldPresent(image_updated)) {
             const auto present_start = Clock::now();
             frame_cycle.beginUiFrame();
+#ifdef __ANDROID__
+            startupNoticeVisible = drawStartupFailureNotice(*viewer);
+            if (display.hud && !startupNoticeVisible) {
+                drawHud(rtipc::isRunning(), *viewer, display);
+            }
+#else
             if (display.hud) {
                 drawHud(rtipc::isRunning(), *viewer, display);
             }
             drawStartupFailureNotice(*viewer);
+#endif
             AppRuntime::drawPlayerOperator(renderer);
             frame_cycle.endUiFrame();
 

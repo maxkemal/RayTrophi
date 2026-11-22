@@ -6489,13 +6489,17 @@ json dispatchMethod(const std::string& method, const json& params) {
     // simulation's compute backend, which a scene teardown can replace.
     if (method == "perf.gpu_kernel_timings") {
         const bool reset = params.value("reset", false);
-        return enqueueQuery([reset](UIContext&) {
-            const rtapi::GpuKernelTimingReport r = rtapi::gpuKernelTimings(reset);
+        const bool wetPaintFallback = params.value("wet_paint_fallback", false);
+        return enqueueQuery([reset, wetPaintFallback](UIContext&) {
+            const rtapi::GpuKernelTimingReport r =
+                rtapi::gpuKernelTimings(reset, wetPaintFallback);
             json kernels = json::array();
             for (const auto& k : r.kernels) {
-                kernels.push_back(json{{"kernel", k.kernel},
-                                       {"ms", k.ms},
-                                       {"calls", k.calls}});
+                json entry{{"kernel", k.kernel}, {"ms", k.ms}, {"calls", k.calls}};
+                if (!k.samples_ms.empty()) {
+                    entry["samples_ms"] = k.samples_ms;
+                }
+                kernels.push_back(std::move(entry));
             }
             return json{{"supported", r.supported},
                         {"enabled", r.enabled},
@@ -6505,8 +6509,9 @@ json dispatchMethod(const std::string& method, const json& params) {
     }
     if (method == "perf.set_gpu_kernel_timing") {
         const bool enabled = requireBool(params, "enabled");
-        return enqueueResult([enabled](UIContext&) {
-            return rtapi::setGpuKernelTiming(enabled);
+        const bool wetPaintFallback = params.value("wet_paint_fallback", false);
+        return enqueueResult([enabled, wetPaintFallback](UIContext&) {
+            return rtapi::setGpuKernelTiming(enabled, wetPaintFallback);
         });
     }
     if (method == "perf.set_blas_compaction") {
@@ -6636,7 +6641,11 @@ json dispatchMethod(const std::string& method, const json& params) {
                                   {"gpu_p95_ms", s.gpu_p95_ms},
                                   {"frames_ran", s.frames_ran}});
             }
-            return json{
+            json mainSamples = json::array();
+            for (const auto& sample : t.raster_main_gpu_samples) {
+                mainSamples.push_back({{"frame_serial", sample.frame_serial}, {"ms", sample.ms}});
+            }
+            json response{
                 {"available", t.available},
                 {"gpu_supported", t.gpu_supported},
                 {"gpu_unsupported_reason", t.gpu_unsupported_reason},
@@ -6670,6 +6679,10 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"total_instances", t.total_instances},
                     {"draw_calls", t.draw_calls}}},
                 {"warnings", t.warnings}};
+            if (t.gpu_supported) {
+                response["raster_main_gpu_samples"] = std::move(mainSamples);
+            }
+            return response;
         });
     }
     if (method == "viewport.reset_frame_timings") {

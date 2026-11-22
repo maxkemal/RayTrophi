@@ -6,7 +6,7 @@ built by scripts/package_player.ps1. Android does not get a parallel packaging f
 filtered copy of that package:
 
   shaders/**           compiled SPIR-V, verbatim
-  assets/**            AssetRegistry data (i18n, ...)
+  assets/**            AssetRegistry data (i18n refreshed from source)
   scenes/<scene>/**    the chosen scene with its .rtp.bin / sidecars / audio / environment
   player_scenes.json   generated: exactly ONE scene, so the Player opens it at launch
                        (the scene library UI is part of the Windows operator layer)
@@ -18,7 +18,7 @@ Output: android/app/build/rt_assets/ (git-ignored) + rt_asset_manifest.txt whose
 "stamp <sha256 of paths+contents>". Platform::extractBundledAssets (PlatformOs.cpp) copies the
 listed files into the app's internal storage when the stamp changes.
 
-Demo scenes stay local (never committed): this script only reads the local dist folder.
+Demo scenes stay local (never committed) and are read from the local dist folder.
 
 Usage:
   python scripts/stage_player_android_assets.py                     # scene = first in player_scenes.json
@@ -99,7 +99,11 @@ def main() -> None:
     if refreshed:
         print("note: %d packaged shaders differ from x64/Release/shaders; staged the Release copies "
               "(re-run scripts/package_player.ps1 to refresh the Windows package too)" % refreshed)
-    files += collect(os.path.join(DIST, "assets"), "assets/")
+    files += [
+        (full, rel) for full, rel in collect(os.path.join(DIST, "assets"), "assets/")
+        if not rel.startswith("assets/i18n/")
+    ]
+    files += collect(os.path.join(ROOT, "RayTrophiStudio", "assets", "i18n"), "assets/i18n/")
     files += collect(os.path.join(DIST, "scenes", folder), "scenes/%s/" % folder, SCENE_SKIP_SUFFIXES)
     if not any(rel.endswith(".spv") for _, rel in files):
         fail("no .spv shaders in the package")

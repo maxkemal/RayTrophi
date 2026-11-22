@@ -327,6 +327,7 @@ uint32_t requiredCapabilities(const std::string& method) {
     // exception, which covers panel DRAWING only. Nothing here writes to the
     // scene, so Render is the whole requirement — and authorize() is
     // fail-closed, so a namespace missing from this table is silently refused.
+    // This includes the raster main-pass GPU samples in viewport.frame_timings.
     if (method.rfind("viewport.", 0) == 0) return Render;
     // player.* sets and measures the Player's display surface (window mode,
     // render resolution, pacing, frame timing) - the same class as viewport.*.

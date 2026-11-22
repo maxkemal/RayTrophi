@@ -70,6 +70,11 @@ struct RasterAppliedState {
     std::uint32_t draw_calls = 0;
 };
 
+struct RasterMainPassSample {
+    std::uint64_t frame_serial = 0;
+    double ms = 0.0;
+};
+
 struct RasterStageTimings {
     // false = no raster frame has been measured since the last reset. Every
     // number below is ABSENT. This is the state a still camera produces: the
@@ -93,6 +98,7 @@ struct RasterStageTimings {
     double window_wall_ms = 0.0;
 
     std::vector<RasterStageSample> stages;
+    std::vector<RasterMainPassSample> raster_main_gpu_samples;
     RasterAppliedState applied;
 
     // ★★ The instrument's own reasons to distrust it. Empty is the only clean
@@ -117,13 +123,13 @@ public:
     // degil. (Bu satir 2026-09-14'te tam olarak oyle yakalandi.)
     static constexpr std::size_t kStageCount = 16; // RasterStage::Count
 
-    void reset();
+    void reset(std::uint64_t lastRecordedGpuFrame);
     // One frame. `gpuAvailable` false means this frame's marks had not retired
     // yet -- the CPU half is still recorded, and frames_with_gpu stays behind
     // frames, which is normal and reported rather than hidden.
     void record(const double* cpuStageMs, double cpuFrameMs,
                 const double* gpuStageMs, const bool* gpuStageRan,
-                double gpuFrameMs, bool gpuAvailable,
+                double gpuFrameMs, bool gpuAvailable, std::uint64_t gpuFrameSerial,
                 const RasterAppliedState& applied);
 
     RasterStageTimings snapshot(bool gpuSupported,
@@ -138,10 +144,12 @@ private:
         double cpuFrameMs = 0.0;
         double gpuFrameMs = 0.0;
         bool   gpuAvailable = false;
+        RasterMainPassSample mainPass;
     };
     Frame m_frames[kCapacity]{};
     std::size_t m_count = 0;
     std::size_t m_next = 0;
+    std::uint64_t m_lastGpuFrameSerial = 0;
     RasterAppliedState m_applied{};
     bool m_appliedSeen = false;
     bool m_settingsChanged = false;

@@ -2,6 +2,31 @@
 
 > **Durum:** AKTİF — 2026-11-22: A1–A5 emülatörde PASS (sahne, ıslak boya, ses, IPC, dokunma); arm64 gerçek cihazda açılıyor ve desteklenmeyen GPU'yu ekranda söylüyor; Windows regresyon PASS. Sıradaki A6: referans cihaz + performans.
 
+## Android Vulkan viewport hata ekranı (2026-11-22, Codex)
+
+- Kurulum kaydı her Player backend denemesinde yeniden başlar. Cihaz seçimi başarılıysa elenen diğer GPU'ların ret kayıtları temizlenir. Android Player, Vulkan loader/instance, fiziksel ve mantıksal cihaz, command pool ve descriptor pool hatalarını mevcut ret kutusuna iletir. Mantıksal cihazın sade fallback'i RayFusion'ın zorunlu özelliklerini kapatıyorsa ilk `vkCreateDevice` sonucu gösterilir. GPU seçildiyse aygıt adı ve Vulkan'ın ham `driverVersion` değeri eklenir.
+- Player SDL ile sunar. Vulkan swapchain yerine ilk karede kurulan render pass, framebuffer, bellek ve zorunlu shader/pipeline adımlarında tanılama vardır. Vulkan çağrısı sonucu taşınabiliyorsa gerçek VkResult gösterilir. Uygulama denetimi takıldığında ilgili fonksiyon ve doğrulanabilen sebep yazılır.
+- Android kutusundaki katlanabilir bölüm SceneLog'un son 12 ERROR/WARNING girdisini eski → yeni sırayla gösterir. Tanılama dokunması yalnız ret kutusu görünürken ImGui'ye gider. Aynı hata durumu IPC `agent.get_state_summary.runtime`, Python `rt.player.runtime_status()` ve mevcut proje açma hatası üzerinden okunur.
+- `debug.raytrophi.fail_viewport_startup=1`, cihaz seçildikten sonra komut havuzu aşamasında `VK_ERROR_INITIALIZATION_FAILED (-3)` üretir. APK, adb bağlantısı olmayan telefonda gerçek sonucu göstermek için tanılama ayarı gerektirmez. [Kabul listesi](NEXT_BUILD_CHECKS.md#android-vulkan-viewport-hata-ekranı)
+
+- Kabul: Teslim edilen arm64 APK emülatörde zorlanan hatayı GPU ve driver ile gösterdi. Dokunarak açılan log ve IPC aynı dört ERROR/WARNING girdisini verdi. Tanılama kapatılınca yerel x86_64 APK Gizli Renkler'in ilk karesini 27 draw çağrısıyla sundu. Emülatörün ARM çeviri katmanında normal ilk kare 90 saniyelik beklemede doğrulanamadı. Studio ve Player MSVC /Zs, NDK x86_64/arm64-v8a -fsyntax-only ve IPC descriptor denetimi geçti. Teslim: E:/rt_android_build/RayTrophiPlayer-arm64-s24.apk (76.418.059 bayt).
+
+## S24 Ultra / Adreno 750 float atomik devir notu (2026-11-22, Codex)
+
+- PID 24291 için Adreno logunda 14:25:35.376'da `OpAtomicFAddEXT not supported`, 14:25:35.886'da süreç ölümü var. Log kernel adını içermiyor. Paketli Vulkan registry sırasına göre önceki ad kapısını geçen ilk aday `sim_matter_p2g` (seçili alt grup varyantına göre `sim_matter_p2g_clustered.spv`). Aynı açık `sim_matter_stress_p2g`, `sim_matter_occupancy` ve `sim_fluid_granular_stress_p2g` için de vardı. `sim_fluid_surface_combustion.spv` derleniyor fakat bu registry'de kayıtlı değil. Diğer atomik modüllerin normal, clustered ve paylaşımlı bellek varyantları aynı pipeline kurucusundan geçer.
+- Workshop'ta tetikleyici dört `BalloonPaintRed/Blue/Yellow/Green` GPU damla sisteminin ortak Vulkan compute backend'ini hazırlamasıdır. Constructor, genel registry'yi istek gelmeden yükler. Paketli Workshop'ta bu sistemlerin hiçbirinde sıvı domain'i yok. Gaz, VDB, su yüzeyi ve terrain de yok. Damlalar `sim_particle_spawn`, `sim_particle_ballistic`, `sim_particle_collide` kullanır ve çarpışma olayları `paint_wet` ile basılır. Dört SPV'de `AtomicFloat32AddEXT` yok. Bu sahne için CAS varyantı gerekmiyor. İleride görünür etki bir atomik geçişe bağımlı çıkarsa aynı buffer bit düzeni üzerinde atomik yükleme ve `atomicCompSwap` döngüsü adaydır. Uygulamadan önce yerel atomik sürümle sonuç ve çekişme maliyeti karşılaştırılmalı.
+- Registry seçilen SPIR-V'nin capability bildirimi üzerinden `AtomicFloat32AddEXT` ve `Float64` gereksinimlerini Vulkan'a ulaşmadan kontrol eder. Blok P2G ayrıca paylaşımlı float atomic add ister. Atlanan kernel adı, dosya ve VkResult loglanır. Native shader/pipeline oluşturma çağrısı hata döndürürse yalnız o pipeline kurulmaz ve geçici Vulkan nesneleri bırakılır. Çağıran mevcut başarısız dispatch ve CPU fallback yolunu kullanır.
+- Studio ve Windows Player MSVC /Zs, Android NDK x86_64 ve arm64-v8a -fsyntax-only geçti. 20 atomik SPV ve dört oyun SPV'si için statik kabul testi geçti. Canlı emülatör ve S24 Ultra kabulü yeni APK'yı bekliyor.
+- Tanılama Player açılışında okunur. Android `adb shell setprop debug.raytrophi.force_no_atomic_float 1`, Windows `RAYTROPHI_FORCE_NO_ATOMIC_FLOAT=1`. Açıkken cihaz özelliği etkinleştirilmez. Değer kapatıldığında fiziksel cihaz sorgusu geçerlidir. [Cihaz kabulü](NEXT_BUILD_CHECKS.md#player-android--adreno-float-atomik)
+
+## A6a/A6b devir notu (2026-11-22, Codex)
+
+- Android Player adaptör seçiminde descriptor set ve compute aşaması SSBO sınırlarının küçüğünü kullanır. 15'in altında `sim_particle_collide (15)` ve `paint_wet (17)`, 15–16 aralığında `paint_wet (17)` gerekçesi yazılır. Mevcut ret ekranı GPU adını ve teknik metni aynen gösterir. Başlık en/tr kataloğundan gelir. Android tercih listesini SDL'den okur ve genişletilmiş Latin glifleri için sistem fontunu kullanır. Windows mevcut dil tercihinden devam eder.
+- `perf.gpu_kernel_timings` dört compute kernelinin ölçülmüş dispatch örneklerini `samples_ms` ile ekler. `wet_paint_fallback=true` bağımsız boya compute bağlamını seçer. `viewport.frame_timings.raster_main_gpu_samples` tamamlanan ana geçiş örneklerini kare seri numarasıyla verir. IPC ve Studio Python aynı çekirdekten okur.
+- Studio ve Windows Player MSVC /Zs, Android NDK 27.3 x86_64 ve arm64-v8a -fsyntax-only kontrolleri geçti. IPC capability/descriptor denetimi ve örnek IPC yanıtlarıyla PowerShell istatistik kontrolü geçti.
+- Her iki zamanlayıcı Vulkan sayaç genişliğini maskeler ve `ticks × timestampPeriod × 1e-6` ile ms üretir. Raster okuma beklemesizdir. Compute ölçümü mevcut tanılama anahtarının senkron gönderim yolunu kullanır ve kare FPS'ini etkileyebilir. Raster sınırları ana geçişin tamamlanma aralığını, compute örnekleri tekil dispatch sürelerini ifade eder.
+- `Measure-PlayerGpuPasses.ps1` açık sahnede boşta ve elle tetiklenen patlama pencerelerini ölçer. Çalışmamış geçişlerde süre alanları boş kalır. Betik ölçüm sayaçlarını sıfırlar ve kendi etkinleştirdiği compute ölçümünü kapatır. Canlı Windows ve emülatör kabulü yeni derlemeleri bekliyor. [A6 kontrol listesi](NEXT_BUILD_CHECKS.md#player-android-a6a-ve-a6b)
+
 ## A5 devir notu (2026-11-22, Codex)
 
 - Eski APK, `Medium_Phone_API_37.0`: görünür balonda `adb shell input swipe 1725 540 1725 540 1100` sırasında IPC `held=3, owner=mouse`, bırakınca `held=-1` döndürdü. Ölçülen noktada koordinat ve SDL fare sentezi çalışıyor. Bir tap bittikten sonra sorgulanan `held=-1` kısa süreli tutmayı kaçırır.
@@ -15,6 +40,8 @@
 - Windows Studio + Player derlemeleri GEÇTİ (e1cd0506 sonrası), Player'da fareyle balon yakalama doğrulandı.
 - Mevcut x86_64 APK, emülatör `-gpu host` 1600×720: fareyle taşıma ve patlatma çalışıyor. Boşta ~56 FPS, çoklu patlamada 21 FPS,
   sonra yine 56. İç render çözünürlüğü doğrulanmadı. Patlama düşüşü emülatör ölçümü değil; A6b geçiş bazlı GPU zamanıyla gerçek cihazda bakılacak.
+- **Windows Player karşılaştırması (kullanıcı):** Full HD'de patlama anında ANLAMLI düşüş YOK (yalnız birkaç kare). Yani emülatördeki
+  56→21 düşüşü oyunun kendisinden değil, büyük olasılıkla gfxstream'in kısa ömürlü compute/tampon yükünden. Gerçek cihazda yine A6b ile bakılacak.
 - Bekleyen A5 kabulü: yeni x86_64 APK ile dokunarak sürükleme, iki parmakla derinlik, duvarda boya.
 - **A5 emülatör kabulü (Sonnet, aynı akşam):** yeni x86_64 APK (72.8 MiB). Dokunarak sürükleme PASS: `input swipe` sırasında
   `held=1, owner="finger:0"` (mouse DEĞİL → fare sentezi kapalı, çift olay yok), bırakınca `held=-1`. Duvar boyası PASS (IPC pop:

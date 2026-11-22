@@ -558,6 +558,9 @@ RasterTimingInfo rasterTimings() {
             s.frames_ran = stage.frames_ran;
             out.stages.push_back(std::move(s));
         }
+        for (const auto& sample : t.raster_main_gpu_samples) {
+            out.raster_main_gpu_samples.push_back({sample.frame_serial, sample.ms});
+        }
         out.shading = t.applied.shading;
         out.screen_gi = t.applied.screen_gi;
         out.reflection = t.applied.reflection;

@@ -2084,6 +2084,11 @@ struct RasterStageInfo {
     double gpu_mean_ms = 0.0, gpu_p95_ms = 0.0;
     uint32_t frames_ran = 0;
 };
+struct RasterMainPassGpuSample {
+    uint64_t frame_serial = 0;
+    double ms = 0.0;
+};
+
 struct RasterTimingInfo {
     RayFusion::ScreenGiStatus screen_gi;
     RayFusion::ReflectionStatus reflection;
@@ -2095,6 +2100,7 @@ struct RasterTimingInfo {
     double frame_gpu_mean_ms = 0.0, frame_gpu_p95_ms = 0.0;
     double window_wall_ms = 0.0;
     std::vector<RasterStageInfo> stages;
+    std::vector<RasterMainPassGpuSample> raster_main_gpu_samples;
     // What the frames actually did, not what a panel asked for.
     std::string shading, quality_preset, lighting_preset;
     uint32_t width = 0, height = 0;
@@ -2613,6 +2619,7 @@ struct GpuKernelTime {
     std::string kernel;
     double   ms = 0.0;      // total device time since the last reset
     uint32_t calls = 0;     // dispatches that produced `ms`
+    std::vector<double> samples_ms; // Bounded samples for Player compute passes.
 };
 struct GpuKernelTimingReport {
     bool supported = false;   // false = the compute queue has no timestamps,
@@ -2621,8 +2628,8 @@ struct GpuKernelTimingReport {
     std::vector<GpuKernelTime> kernels;  // descending by ms
     double total_ms = 0.0;
 };
-GpuKernelTimingReport gpuKernelTimings(bool reset);
-Result setGpuKernelTiming(bool enabled);
+GpuKernelTimingReport gpuKernelTimings(bool reset, bool wetPaintFallback = false);
+Result setGpuKernelTiming(bool enabled, bool wetPaintFallback = false);
 
 // -- GPU memory: who holds the VRAM ------------------------------------------
 //

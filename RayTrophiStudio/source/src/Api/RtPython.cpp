@@ -6660,14 +6660,17 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
        "Also mirror completed sections into the Scene Log. Off by default.");
     perf.def("logging", [] { return rtapi::perfLogging(); },
        "Whether Scene Log mirroring is on.");
-    perf.def("gpu_kernel_timings", [](bool reset) {
-        const rtapi::GpuKernelTimingReport r = rtapi::gpuKernelTimings(reset);
+    perf.def("gpu_kernel_timings", [](bool reset, bool wetPaintFallback) {
+        const rtapi::GpuKernelTimingReport r = rtapi::gpuKernelTimings(reset, wetPaintFallback);
         py::list kernels;
         for (const auto& k : r.kernels) {
             py::dict kd;
             kd["kernel"] = k.kernel;
             kd["ms"] = k.ms;
             kd["calls"] = k.calls;
+            if (!k.samples_ms.empty()) {
+                kd["samples_ms"] = k.samples_ms;
+            }
             kernels.append(kd);
         }
         py::dict out;
@@ -6679,12 +6682,11 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         out["total_ms"] = r.total_ms;
         out["kernels"] = kernels;
         return out;
-    }, py::arg("reset") = false,
-       "Device time per compute kernel since the last reset, descending. Unlike "
-       "the CPU stage rows this stays true when stages stop synchronizing.");
-    perf.def("set_gpu_kernel_timing", [](bool enabled) {
-        requireResult(rtapi::setGpuKernelTiming(enabled));
-    }, py::arg("enabled"),
+    }, py::arg("reset") = false, py::arg("wet_paint_fallback") = false,
+       "Device time per kernel. wet_paint_fallback selects the independent paint context.");
+    perf.def("set_gpu_kernel_timing", [](bool enabled, bool wetPaintFallback) {
+        requireResult(rtapi::setGpuKernelTiming(enabled, wetPaintFallback));
+    }, py::arg("enabled"), py::arg("wet_paint_fallback") = false,
        "Make the simulation compute backend write timestamps around each "
        "dispatch. Off by default.");
     perf.def("get_gpu_memory", [] {
@@ -7413,6 +7415,13 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
 
     viewport.def("frame_timings", []() {
         const rtapi::RasterTimingInfo t = rtapi::rasterTimings();
+        py::list mainSamples;
+        for (const auto& sample : t.raster_main_gpu_samples) {
+            py::dict entry;
+            entry["frame_serial"] = sample.frame_serial;
+            entry["ms"] = sample.ms;
+            mainSamples.append(entry);
+        }
         py::list stages;
         for (const auto& s : t.stages) {
             py::dict d;
@@ -7447,6 +7456,9 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         applied["reflection"] = reflectionDictionary<py::dict>(t.reflection);
         py::dict d;
         d["available"] = t.available;
+        if (t.gpu_supported) {
+            d["raster_main_gpu_samples"] = mainSamples;
+        }
         d["gpu_supported"] = t.gpu_supported;
         d["gpu_unsupported_reason"] = t.gpu_unsupported_reason;
         d["frames"] = t.frames;
