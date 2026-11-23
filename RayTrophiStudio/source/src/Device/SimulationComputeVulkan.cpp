@@ -392,8 +392,13 @@ public:
         info.buffer = it->second.buffer;
 #if defined(__ANDROID__)
         // libvulkan.so for API 29 does not export Vulkan 1.2 core entry points; resolve through the device.
-        const auto fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
+        // A Vulkan 1.1 device (Mali-G76) only has the VK_KHR_buffer_device_address name.
+        auto fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
             vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
+        if (!fpGetAddress) {
+            fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
+                vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddressKHR"));
+        }
         if (!fpGetAddress) return 0;
         return static_cast<uint64_t>(fpGetAddress(m_device, &info));
 #else

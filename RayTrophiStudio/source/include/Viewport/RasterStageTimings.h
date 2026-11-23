@@ -68,6 +68,17 @@ struct RasterAppliedState {
     std::uint64_t visible_triangles = 0;
     std::uint32_t total_instances = 0;
     std::uint32_t draw_calls = 0;
+    // Material-shader scene-feature specialization (O3). `active` false means
+    // the pipeline was built without spec constants (full shader).
+    bool material_spec_active = false;
+    bool material_spec_terrain = true;
+    bool material_spec_graph = true;
+    bool material_spec_weather = true;
+    std::uint32_t material_spec_rebuilds = 0;
+    // Tile-based deferred GPU (ARM Mali, Qualcomm Adreno, Imagination, Apple):
+    // timestamps written INSIDE a render pass do not split it. The whole pass
+    // lands on its first mark, so `sky` carries the main pass there.
+    bool tiled_gpu = false;
 };
 
 struct RasterMainPassSample {

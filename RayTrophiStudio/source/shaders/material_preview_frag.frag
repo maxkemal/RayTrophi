@@ -1,8 +1,17 @@
 #version 450
-#extension GL_EXT_nonuniform_qualifier : enable
 #ifdef PREVIEW_COVERED_SHADING
 layout(early_fragment_tests) in;
 #endif
+// Scene feature specialization (PLAYER_ANDROID_PERF_PLAN O3). The host sets
+// each one to false only when NO material / scene state can reach that
+// branch, so the driver drops it at pipeline creation. Default true: a
+// pipeline created without specialization info is the full shader.
+// Measured with malioc on Mali-G52 2026-11-23: these three branches hold
+// most of the per-thread stack (1600 B -> ~740 B when all three are off).
+// Host mirror: Viewport/MaterialPreviewCoverage.cpp (kMpSpec* ids).
+layout(constant_id = 0) const bool RT_SPEC_TERRAIN = true;
+layout(constant_id = 1) const bool RT_SPEC_GRAPH   = true;
+layout(constant_id = 2) const bool RT_SPEC_WEATHER = true;
 #include "procedural_detail.glsl"
 #include "pbr_texture_policy.glsl"
 // ★★★ Goruntuleme donusumu artik BURADA TANIMLI DEGIL: tek tanim
@@ -51,15 +60,18 @@ layout(set = 0, binding = 4, std430) readonly buffer MaterialExtBuffer {
 };
 #define matx materialsExt[materialIndex]
 
-// Texture array — same slots as RT pipeline binding 6
-// Access guarded by albedo_tex/normal_tex > 0 checks.
-layout(set = 0, binding = 1) uniform sampler2D textures[];
+// Each viewport material texture reference selects a page and layer.
+#define MATERIAL_TEXTURE_FRAGMENT
+#define MATERIAL_TEXTURE_BINDING 1
+#define MATERIAL_TEXTURE_REF_BINDING 29
+#include "material_texture_arrays.glsl"
+#undef MATERIAL_TEXTURE_BINDING
+#undef MATERIAL_TEXTURE_REF_BINDING
 
 // The compiled Material Graph VM is shared with Vulkan RT. Only the binding
 // number differs in this smaller descriptor set; the bytecode and evaluator
-// are the same source. Texture ops use the preview's same bindless array.
+// are shared. Texture ops read the preview's material texture pages.
 #define MATERIAL_PROGRAM_BINDING 16
-#define materialTextures textures
 #include "material_program.glsl"
 #include "material_preview_transmission.glsl"
 #include "material_preview_screen_gi.glsl"
@@ -231,7 +243,7 @@ layout(set = 0, binding = 27, std430) readonly buffer CloudShadowFrame {
     CloudFlashLightG flash[4];   // lit cloud bases (Backend::CloudRasterFrameGPU)
 } cloudShadowFrame;
 #define WEATHER_DATA cloudShadowFrame.weatherEffects
-#define WEATHER_SURFACE_AVAILABLE ((sceneFlags & 64u) != 0u)
+#define WEATHER_SURFACE_AVAILABLE (RT_SPEC_WEATHER && (sceneFlags & 64u) != 0u)
 #include "weather_surface.glsl"
 const float CLOUD_SHADOW_EXTENT_M = 32000.0;   // cloud_shadow.comp
 
@@ -240,7 +252,7 @@ const float CLOUD_SHADOW_EXTENT_M = 32000.0;   // cloud_shadow.comp
 // RT's cloud-coverage gate (no cloud field bound): a flash the CPU placed in a
 // clear patch of the storm footprint still lights the ground in RayFusion.
 vec3 previewLightningIrradiance(vec3 P, vec3 N) {
-    if ((sceneFlags & 64u) == 0u) return vec3(0.0);
+    if (!RT_SPEC_WEATHER || (sceneFlags & 64u) == 0u) return vec3(0.0);
     vec3 E = vec3(0.0);
     for (int i = 0; i < 4; ++i) {
         vec3 wi;
@@ -250,7 +262,7 @@ vec3 previewLightningIrradiance(vec3 P, vec3 N) {
 }
 
 float previewCloudShadow(vec3 P) {
-    if ((sceneFlags & 64u) == 0u) return 1.0;
+    if (!RT_SPEC_WEATHER || (sceneFlags & 64u) == 0u) return 1.0;
     vec3 s = normalize(cloudShadowFrame.sunDir);
     if (s.y <= 0.02) return 1.0;
     // Where this point's sun ray crosses y = 0 (the map's plane).
@@ -348,8 +360,7 @@ vec3 samplePhysicalSkyFiltered(vec3 axis, float roughness) {
 }
 
 bool validTexture(uint textureId) {
-    uint textureCount = max(pc.materialMeta.w, 1u);
-    return textureId > 0u && textureId < textureCount;
+    return materialTextureValid(textureId);
 }
 
 // ── Helpers ──
@@ -680,7 +691,20 @@ void main() {
     GpuMaterial mat = materials[materialIndex];
 
     uint drawPhase = previewDrawPhase();
-    uint graphOffset = matProgramOffset(materialIndex);
+    uint graphOffset = RT_SPEC_GRAPH ? matProgramOffset(materialIndex) : MATPROG_NONE;
+    vec2 uv = applyUVTransform(vTexCoord, mat);
+
+    // ── Procedural tile-break (independent slider, applied before texture sampling) ──
+    // Breaks visible UV tiling seams. Separate from dirt/roughness so albedo maps
+    // that shouldn't be warped can leave this at 0.
+    if (mat.tile_break_strength > 0.0 &&
+        (validTexture(mat.albedo_tex) || validTexture(mat.roughness_tex) || validTexture(mat.normal_tex))) {
+        uv = pd_tileBreak(uv, vWorldPos, mat.tile_break_strength);
+    }
+
+    vec2 uvDx = dFdx(uv);
+    vec2 uvDy = dFdy(uv);
+
     // Reject provably opaque replay fragments before terrain, textures and
     // graph evaluation. Maps are authoritative and graphs may write transmission
     // or opacity; partial opacity also becomes legacy glass below. All of those
@@ -694,20 +718,10 @@ void main() {
         discard;
     }
 
-    vec2 uv = applyUVTransform(vTexCoord, mat);
-
-    // ── Procedural tile-break (independent slider, applied before texture sampling) ──
-    // Breaks visible UV tiling seams. Separate from dirt/roughness so albedo maps
-    // that shouldn't be warped can leave this at 0.
-    if (mat.tile_break_strength > 0.0 &&
-        (validTexture(mat.albedo_tex) || validTexture(mat.roughness_tex) || validTexture(mat.normal_tex))) {
-        uv = pd_tileBreak(uv, vWorldPos, mat.tile_break_strength);
-    }
-
     // Coverage first: transparent needle/card pixels must not fetch normal,
     // roughness, terrain layers, or evaluate lighting before being discarded.
     // A graph may REPLACE opacity, so only its final output may reject it.
-    float opacity = previewSurfaceOpacity(mat, uv, isImpostor);
+    float opacity = previewSurfaceOpacity(mat, uv, uvDx, uvDy, isImpostor);
     if (graphOffset == MATPROG_NONE) {
         if (opacity == 0.0) discard;
         // Once opacity is sampled, opaque texels of a mixed card can also
@@ -724,12 +738,12 @@ void main() {
     // splat map, then overrides albedo / roughness / metallic / normal before the
     // standard per-material texture sampling below.
     const uint FLAG_TERRAIN = (1u << 16);
-    if ((mat.flags & FLAG_TERRAIN) != 0u) {
+    if (RT_SPEC_TERRAIN && (mat.flags & FLAG_TERRAIN) != 0u) {
         uint layerIdx = mat._terrain_layer_idx;
         TerrainLayerData tl = terrainLayers[layerIdx];
         if (validTexture(tl.splat_map_tex) && tl.layer_count > 0u) {
             // R=layer0, G=layer1, B=layer2, A=layer3
-            vec4 splatW = texture(textures[nonuniformEXT(tl.splat_map_tex)], uv);
+            vec4 splatW = sampleMaterialTextureGrad(tl.splat_map_tex, uv, uvDx, uvDy);
             float weights[4];
             weights[0] = splatW.r;
             weights[1] = splatW.g;
@@ -755,25 +769,28 @@ void main() {
                 float lsy = (lm.uv_scale_y != 0.0) ? lm.uv_scale_y : 1.0;
                 layerUV *= vec2(lsx, lsy);
                 layerUV += vec2(lm.uv_offset_x, lm.uv_offset_y);
+                vec2 layerScale = tl.layer_uv_scale[k] * vec2(lsx, lsy);
+                vec2 layerDx = uvDx * layerScale;
+                vec2 layerDy = uvDy * layerScale;
 
                 vec3 lAlbedo = max(vec3(lm.albedo_r, lm.albedo_g, lm.albedo_b), vec3(0.0));
                 if (validTexture(lm.albedo_tex))
-                    lAlbedo = texture(textures[nonuniformEXT(lm.albedo_tex)], layerUV).rgb;
+                    lAlbedo = sampleMaterialTextureGrad(lm.albedo_tex, layerUV, layerDx, layerDy).rgb;
                 blendAlbedo += weights[k] * lAlbedo;
 
                 float lRough = clamp(lm.roughness, 0.0, 1.0);
                 if (validTexture(lm.roughness_tex))
-                    lRough = texture(textures[nonuniformEXT(lm.roughness_tex)], layerUV).g;
+                    lRough = sampleMaterialTextureGrad(lm.roughness_tex, layerUV, layerDx, layerDy).g;
                 blendRoughness += weights[k] * lRough;
 
                 float lMetal = clamp(lm.metallic, 0.0, 1.0);
                 if (validTexture(lm.metallic_tex))
-                    lMetal = texture(textures[nonuniformEXT(lm.metallic_tex)], layerUV).b;
+                    lMetal = sampleMaterialTextureGrad(lm.metallic_tex, layerUV, layerDx, layerDy).b;
                 blendMetallic += weights[k] * lMetal;
 
                 if (validTexture(lm.normal_tex)) {
                     vec3 ns = decodeNormalMapSample(
-                        texture(textures[nonuniformEXT(lm.normal_tex)], layerUV).rgb,
+                        sampleMaterialTextureGrad(lm.normal_tex, layerUV, layerDx, layerDy).rgb,
                         lm.flags);
                     ns.xy *= max(lm.normal_strength, 0.0);
                     blendNormal_ts += weights[k] * ns;
@@ -785,12 +802,12 @@ void main() {
 
             // Macro Color Map (SatMap) blending
             if (validTexture(tl.macro_color_tex) && tl.macro_color_strength > 0.0) {
-                vec4 mColor = texture(textures[nonuniformEXT(tl.macro_color_tex)], uv);
+                vec4 mColor = sampleMaterialTextureGrad(tl.macro_color_tex, uv, uvDx, uvDy);
                 blendAlbedo = mix(blendAlbedo, mColor.rgb, clamp(tl.macro_color_strength, 0.0, 1.0));
             }
 
             if (validTexture(tl.semantic_map_tex)) {
-                vec4 semantic = texture(textures[nonuniformEXT(tl.semantic_map_tex)], uv);
+                vec4 semantic = sampleMaterialTextureGrad(tl.semantic_map_tex, uv, uvDx, uvDy);
                 // Snow burial, matching the ray-traced paths: a semantic value
                 // is a measurement, its coverage is a visibility decision.
                 // Flow reads 0.9 under two metres of snow and must not be
@@ -835,7 +852,7 @@ void main() {
             // Override albedo/roughness/metallic — skip per-material texture sections below
             mat.albedo_r = blendAlbedo.r; mat.albedo_g = blendAlbedo.g; mat.albedo_b = blendAlbedo.b;
             mat.roughness = blendRoughness; mat.metallic = blendMetallic;
-            mat.albedo_tex = 0u; mat.roughness_tex = 0u; mat.metallic_tex = 0u; mat.normal_tex = 0u;
+            mat.albedo_tex = 0xffffffffu; mat.roughness_tex = 0xffffffffu; mat.metallic_tex = 0xffffffffu; mat.normal_tex = 0xffffffffu;
         }
     }
 
@@ -843,7 +860,7 @@ void main() {
     vec3 albedo = vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b);
     vec4 albedoTexel = vec4(1.0);
     if (validTexture(mat.albedo_tex)) {
-        vec4 texAlbedo = texture(textures[nonuniformEXT(mat.albedo_tex)], uv);
+        vec4 texAlbedo = sampleMaterialTextureGrad(mat.albedo_tex, uv, uvDx, uvDy);
         albedoTexel = texAlbedo;
         // Vulkan RT contract: a bound Base Color texture is authoritative.
         // Its sampled colour also becomes the depthless glass Beer tint.
@@ -855,7 +872,7 @@ void main() {
 
     // ── Normal map ──
     if (validTexture(mat.normal_tex)) {
-        vec3 nmSample = texture(textures[nonuniformEXT(mat.normal_tex)], uv).rgb;
+        vec3 nmSample = sampleMaterialTextureGrad(mat.normal_tex, uv, uvDx, uvDy).rgb;
         float strength = (mat.normal_strength > 0.0) ? mat.normal_strength : 1.0;
         N = applyNormalMap(N, vWorldPos, uv, nmSample, strength, mat.flags);
     }
@@ -868,20 +885,20 @@ void main() {
     float materialIor = max(mat.ior, 1.0001);
     if (validTexture(mat.roughness_tex)) {
         roughness = samplePackedRoughness(
-            texture(textures[nonuniformEXT(mat.roughness_tex)], uv), 0.04, mat.flags);
+            sampleMaterialTextureGrad(mat.roughness_tex, uv, uvDx, uvDy), 0.04, mat.flags);
     }
     if (validTexture(mat.metallic_tex)) {
         metallic = samplePackedMetallic(
-            texture(textures[nonuniformEXT(mat.metallic_tex)], uv), mat.flags);
+            sampleMaterialTextureGrad(mat.metallic_tex, uv, uvDx, uvDy), mat.flags);
     }
     if (validTexture(mat.specular_tex)) {
-        specular = clamp(texture(textures[nonuniformEXT(mat.specular_tex)], uv).r * specular, 0.0, 1.0);
+        specular = clamp(sampleMaterialTextureGrad(mat.specular_tex, uv, uvDx, uvDy).r * specular, 0.0, 1.0);
     }
     if (validTexture(mat.transmission_tex)) {
         // RT contract: the map is authoritative, not multiplied by the scalar.
         // A graph Transmission output below intentionally overrides this fetch.
         transmission = clamp(
-            texture(textures[nonuniformEXT(mat.transmission_tex)], uv).r, 0.0, 1.0);
+            sampleMaterialTextureGrad(mat.transmission_tex, uv, uvDx, uvDy).r, 0.0, 1.0);
     }
 
     // Per-pixel Material Graph program. Vulkan RT and Realtime consume the
@@ -1037,7 +1054,7 @@ void main() {
         emissionStrength = max(graphOut.emissionStrength, 0.0);
     if (validTexture(mat.emission_tex) &&
         (graphWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
-        emissionColor = texture(textures[nonuniformEXT(mat.emission_tex)], uv).rgb;
+        emissionColor = sampleMaterialTextureGrad(mat.emission_tex, uv, uvDx, uvDy).rgb;
     }
     vec3 emission = emissionColor * emissionStrength;
 
@@ -1495,8 +1512,19 @@ void main() {
     // Match scatterGlass: spectral dispersion belongs only to thin/ordinary
     // glass. Authored resin depth is a coat/base path and deliberately keeps a
     // single IOR so inclusions and the base do not split into false RGB layers.
-    vec3 transmittedWorld;
-    if (!bubbleSurface && interiorDepth <= 1e-4 && mat.dispersion > 1e-3) {
+    // Only fragments that can transmit pay for the refracted environment,
+    // the resin interior and the glass tint. Outside this gate every consumer
+    // below is multiplied by zero or sits behind `transmission > 0.001`
+    // (transmissionLit, resinBaseWeight, dielectricPass), so the result is
+    // bit-identical -- but an opaque wall used to evaluate 5-9 environment
+    // taps and an FBM per pixel and then throw them away (measured with malioc,
+    // PLAYER_ANDROID_PERF_PLAN B8). The transmission phase is unaffected: it
+    // discards non-transmissive fragments before this point.
+    bool glassPath = bubbleSurface || transmission > 0.0 || interiorDepth > 1e-4;
+    vec3 transmittedWorld = vec3(0.0);
+    if (!glassPath) {
+        // Opaque surface: nothing below reads the refracted radiance.
+    } else if (!bubbleSurface && interiorDepth <= 1e-4 && mat.dispersion > 1e-3) {
         bool spectralTir = false;
         transmittedWorld = sampleDispersedTransmission(
             incoming, N, effectiveIor, mat.dispersion, roughness,
@@ -1526,7 +1554,10 @@ void main() {
     vec3 interiorDirection = resinObjectSpace
         ? normalize(worldToObject * refractedDir)
         : refractedDir;
-    PreviewInteriorSample interior = previewResinInterior(
+    PreviewInteriorSample interior;
+    interior.transmittance = vec3(1.0);
+    interior.scatter = vec3(0.0);
+    if (glassPath) interior = previewResinInterior(
         interiorOrigin, interiorDirection, pathLength, extinction,
         matx.resin_inclusion, matx.resin_dirt, matx.resin_shard,
         matx.resin_inclusion_scale,
@@ -1542,7 +1573,7 @@ void main() {
     // so a closed shell can use its measured front/back thickness; open/thin
     // geometry retains the RT fallback distance. Once Interior Depth is
     // authored, Interior Color remains the sole absorption tint by contract.
-    if (interiorDepth <= 1e-4 && !bubbleSurface) {
+    if (glassPath && interiorDepth <= 1e-4 && !bubbleSurface) {
         vec3 glassTint = clamp(albedo, vec3(0.0), vec3(1.0));
         // scatterGlass attenuates at entry and exit using a 0.65 fallback per
         // interface. This replay composites both at once, hence the 1.30 floor.

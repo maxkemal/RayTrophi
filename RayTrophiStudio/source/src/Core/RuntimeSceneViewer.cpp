@@ -164,10 +164,15 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
         return rtapi::Result::fail("a different runtime already owns the Vulkan viewport");
     }
     auto backend = std::make_unique<Backend::VulkanViewportBackend>();
-#ifdef __ANDROID__
+#ifdef RT_PLAYER
     Backend::VulkanStartupDiagnostics startup;
 #endif
-    if (!backend->initialize()) {
+    const bool initialized = backend->initialize();
+#ifdef RT_PLAYER
+    loader_api_ = startup.loaderApi;
+    device_api_ = startup.deviceApi();
+#endif
+    if (!initialized) {
         // Name the GPU and the missing feature: on Android this is the only thing the
         // user can act on (an unsupported device), so it must reach the screen, not the log.
         const std::string rejected = Backend::rayFusionDeviceRejections();
@@ -831,6 +836,10 @@ nlohmann::json RuntimeSceneViewer::status() const {
                           telemetry.available;
     nlohmann::json result = {
         {"host_active", true}, {"host", "player"},
+        {"loader_api", loader_api_ ? nlohmann::json(Backend::vulkanApiString(loader_api_))
+                                   : nlohmann::json(nullptr)},
+        {"device_api", device_api_ ? nlohmann::json(Backend::vulkanApiString(device_api_))
+                                   : nlohmann::json(nullptr)},
         {"stage", "static_scene_viewer"}, {"scene_loading_supported", true},
         {"rendering_supported", true}, {"animation_playback", true},
         {"animation_ticks", animation_ticks_}, {"animation_updates", animation_updates_},

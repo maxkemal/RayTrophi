@@ -1676,6 +1676,8 @@
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureBinding.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureStorage.cpp" />
     <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp" />
     <ClCompile Include="source\src\Backend\VulkanMotionHistory.cpp" />
     <ClCompile Include="source\src\Backend\VulkanRawGuard.cpp" />
@@ -1684,6 +1686,7 @@
     <ClCompile Include="source\src\Backend\VulkanRealtimeDenoiserAdapter.cpp" />
     <ClCompile Include="source\src\Backend\VulkanRTPipelineBuild.cpp" />
     <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanTextureCompaction.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleInputs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
@@ -2330,6 +2333,9 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\UI\PlayerOperatorHiddenUI.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorKidUI.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\UI\PlayerOperatorLibraryUI.cpp">

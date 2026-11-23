@@ -1864,6 +1864,9 @@
     <ClCompile Include="source\src\Backend\VulkanMotionHistory.cpp" />
     <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp" />
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureBinding.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureStorage.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanTextureCompaction.cpp" />
     <ClCompile Include="source\src\Paint\PaintLayerStack.cpp" />
     <ClCompile Include="source\src\Render\HitMaterialResolver.cpp" />
     <ClCompile Include="source\src\Scene\TriangleMesh.cpp" />
@@ -2272,6 +2275,9 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\UI\PlayerOperatorCameraUI.cpp">
+      <ExceptionHandling>Sync</ExceptionHandling>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorKidUI.cpp">
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\UI\PlayerOperatorSettingsUI.cpp">

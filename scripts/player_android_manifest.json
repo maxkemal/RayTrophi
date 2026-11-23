@@ -6,10 +6,8 @@
   ],
   "min_sdk": 29,
   "android_exclude": [
-    "src/Core/PlayerOperator.cpp",
     "src/Core/PlayerCamera.cpp",
-    "src/Api/RtApiPlayerOperator.cpp",
-    "src/UI/PlayerOperator*",
+    "src/UI/PlayerOperatorCameraUI.cpp",
     "src/Api/RtIpcTransportTls.cpp",
     "src/Utils/TextureCompressionCache.cpp",
     "src/Physics/GasSimulator.cpp",
@@ -17,15 +15,13 @@
     "src/Physics/VDBVolumeManager.cpp",
     "src/Physics/VDBVolumeHost.cpp"
   ],
-  "_comment_android_exclude": "Operator/kiosk layer + camera-perception bridge (Windows-only, out of scope for the touch build), the TLS remote IPC transport (Winsock+OpenSSL server), the DirectXTex BC compressor, and legacy OpenVDB simulation and volume I/O. Every excluded file whose symbols are still referenced by kept files has a stub below.",
+  "_comment_android_exclude": "Camera-perception bridge and its UI page (Windows MF + Python worker; the rest of the operator/kiosk layer is shared and built on Android), the TLS remote IPC transport (Winsock+OpenSSL server), the DirectXTex BC compressor, and legacy OpenVDB simulation and volume I/O. Every excluded file whose symbols are still referenced by kept files has a stub below.",
   "android_stubs": [
     {
-      "stub": "src/Platform/Stubs/PlayerOperatorAndroidStub.cpp",
+      "stub": "src/Platform/Stubs/PlayerCameraAndroidStub.cpp",
       "replaces": [
-        "src/Core/PlayerOperator.cpp",
         "src/Core/PlayerCamera.cpp",
-        "src/Api/RtApiPlayerOperator.cpp",
-        "src/UI/PlayerOperator*"
+        "src/UI/PlayerOperatorCameraUI.cpp"
       ]
     },
     {

@@ -663,9 +663,66 @@ void VulkanBackendAdapter::writeParticleLutDescriptor() {
 }
 
 void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUpload& data) {
-    // Also what makes the pull descriptor rewrites below legal: no frame that
-    // uses those sets is in flight after this.
-    drainInteractiveViewportInFlight();
+    // The drain is what makes the buffer uploads and descriptor rewrites below
+    // legal: no frame that uses them is in flight after it. It is paid ONLY
+    // when one of them will actually happen. The Player calls this every
+    // iteration while a particle system exists; an unconditional drain there
+    // serialized CPU and GPU on every frame even with nothing to write
+    // (measured 2026-11-23, RTX 3060 1080p: advance 15.5 ms that scaled with
+    // render resolution, i.e. a GPU wait). The remaining per-frame case is a
+    // live CPU-quad group, which still drains (see PLAYER_ANDROID_PERF_PLAN O11b).
+    // True when this upload will write a buffer or a descriptor set that an
+    // in-flight frame may still read.
+    const auto writesDeviceState = [&]() -> bool {
+        const auto& iv = m_interactiveViewport;
+        // CPU quads face the camera: any non-empty group is rewritten.
+        if (!data.additive.empty() || !data.alpha.empty()) return true;
+        if (data.spheres.size() != iv.sphereImpostorsUploaded.size() ||
+            (!data.spheres.empty() && std::memcmp(data.spheres.data(),
+                iv.sphereImpostorsUploaded.data(),
+                data.spheres.size() * sizeof(SphereImpostorInstance)) != 0)) {
+            return true;
+        }
+        if ((!data.lut.empty() && data.lut != iv.particleLutUploaded) ||
+            (!data.row_lookup.empty() && data.row_lookup != iv.particleRowLookupUploaded)) {
+            return true;
+        }
+        if (iv.particleLutDescriptorStale && iv.particleDescSet != VK_NULL_HANDLE &&
+            iv.particleLutBuffer.buffer && iv.particleRowLookupBuffer.buffer) {
+            return true;
+        }
+        if (!data.pulled.empty() && iv.particlePullDescLayout != VK_NULL_HANDLE) {
+            if (data.pulled.size() > iv.particlePullDescCapacity) return true;
+            const std::size_t n = std::min(data.pulled.size(), iv.particlePullSlots.size());
+            for (std::size_t i = 0; i < n; ++i) {
+                if (std::memcmp(iv.particlePullSlots[i].buffers, data.pulled[i].buffers,
+                                sizeof(iv.particlePullSlots[i].buffers)) != 0) {
+                    return true;
+                }
+            }
+        }
+        if (!data.fluid_sphere_proxies.empty() &&
+            iv.fluidSphereProxyDescLayout != VK_NULL_HANDLE) {
+            if (data.fluid_sphere_proxies.size() > iv.fluidSphereProxyDescCapacity) return true;
+            const std::size_t n = std::min(data.fluid_sphere_proxies.size(),
+                                           iv.fluidSphereProxySlots.size());
+            for (std::size_t i = 0; i < n; ++i) {
+                const auto& slot = iv.fluidSphereProxySlots[i];
+                const uint64_t buffer = data.fluid_sphere_proxies[i].position_buffer;
+                if (slot.set && buffer != 0 && slot.positionBuffer != buffer) return true;
+            }
+        }
+        return false;
+    };
+    bool writes = false;
+    {
+        std::lock_guard<std::recursive_mutex> lock(m_mutex);
+        if (!m_device) return;
+        writes = writesDeviceState();
+    }
+    if (writes) {
+        drainInteractiveViewportInFlight();
+    }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
     if (!m_device) return;
     auto& iv = m_interactiveViewport;

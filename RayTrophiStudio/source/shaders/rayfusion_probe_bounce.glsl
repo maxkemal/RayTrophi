@@ -52,10 +52,14 @@ layout(set=0, binding=6, std430) readonly buffer RfLightTable { RfBounceLight rf
 struct RfEmissiveTriangle { vec4 v0; vec4 v1; vec4 v2; vec4 radiance; };
 layout(set=0, binding=12, std430) readonly buffer RfEmissiveTable { RfEmissiveTriangle rfEmissives[]; };
 #endif
-// * RT/raster hattinin okudugu AYNI bindless dizi, AYNI slot numaralariyla:
-//   VkGpuMaterial::albedo_tex vb. dogrudan bu diziye indekstir. Ayri bir doku
-//   listesi cikarmak iki dogruluk kaynagi demek olurdu.
-layout(set=0, binding=7) uniform sampler2D rfTextures[];
+// The probe shares material page and layer references with raster and Vulkan RT.
+#define MATERIAL_TEXTURE_BINDING 7
+// Slot->ref table: binding 14 in all three includers (probe trace, reflection,
+// screen GI) - the first number free in every one of their layouts.
+#define MATERIAL_TEXTURE_REF_BINDING 14
+#include "material_texture_arrays.glsl"
+#undef MATERIAL_TEXTURE_BINDING
+#undef MATERIAL_TEXTURE_REF_BINDING
 // *** Bu sayac bu dilimin KABUL ALETI. CPU malzeme sayisi "kac materyal
 //   uygun" der; olcum sorusu ise "kac isin gercekten golgelendi". hits > 0
 //   iken shaded == 0, bounce'un goruntuyu hic degistirmedigi anlamina gelir
@@ -85,7 +89,7 @@ layout(set=0, binding=8, std430) buffer RfBounceCounters {
 #include "pbr_texture_policy.glsl"
 
 const uint RF_MAT_OPACITY_IN_ALPHA = (1u << 8);
-bool rfValidTexture(uint slot) { return slot > 0u && slot < uint(pc.params2.w); }
+bool rfValidTexture(uint ref) { return materialTextureValid(ref); }
 
 uint rfHash(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; return x ^ (x >> 16); }
 
@@ -206,11 +210,10 @@ bool rfCandidateOccludes(uint instance, uint triangle, vec2 bary) {
     uint opacityTex = mat.textures.z;
     // Coverage is independent of whether we can shade the hit's BSDF.
     if (mat.diffuse.w < 0.5 && (mat.textures2.y & MATERIAL_FLAGS_PREVIEW_CUTOUT) == 0u) return true;
-    if (opacityTex == 0u || !uvValid) return materialCoverageOpacity(mat.emission.w, (mat.textures2.y & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u) >= mat.scalars.y;
-    if (!rfValidTexture(opacityTex)) return true;
+    if (!materialTextureValid(uint(opacityTex)) || !uvValid) return materialCoverageOpacity(mat.emission.w, (mat.textures2.y & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u) >= mat.scalars.y;
     RF_BOUNCE_COUNT(rfAlphaTested);
     // textureLod: compute'ta ortulu turev yoktur, ortulu ornekleme tanimsizdir.
-    vec4 texel = textureLod(rfTextures[nonuniformEXT(int(opacityTex))], uv, 0.0);
+    vec4 texel = sampleMaterialTextureLod(uint(opacityTex), uv, 0.0);
     float alpha = ((mat.textures2.y & RF_MAT_OPACITY_IN_ALPHA) != 0u || opacityTex == mat.textures.x) ? texel.a : texel.r;
     bool occludes = materialCoverageOpacity(alpha * mat.emission.w, (mat.textures2.y & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u) >= mat.scalars.y;
     if (occludes) { RF_BOUNCE_COUNT(rfAlphaOccluded); }
@@ -345,10 +348,10 @@ vec3 rfBounceRadiance(uint instance, uint triangle, mat4x3 objectToWorld, vec2 b
     // Only committed, coverage-tested hits reach shading.
     vec3 albedo = m.diffuse.rgb;
     if (rfValidTexture(m.textures.x) && uvValid)
-        albedo *= max(textureLod(rfTextures[nonuniformEXT(int(m.textures.x))], uv, 0.0).rgb, vec3(0));
+        albedo *= max(sampleMaterialTextureLod(uint(m.textures.x), uv, 0.0).rgb, vec3(0));
     vec3 emission = m.emission.rgb;
     if (rfValidTexture(m.textures.y) && uvValid)
-        emission *= max(textureLod(rfTextures[nonuniformEXT(int(m.textures.y))], uv, 0.0).rgb, vec3(0));
+        emission *= max(sampleMaterialTextureLod(uint(m.textures.y), uv, 0.0).rgb, vec3(0));
 
     // * Enerji payi artik BURADA hesaplaniyor, CPU'da degil: metallic bir
     //   dokudan gelebiliyor ve texel basina degisiyor. CPU'da katlanan sabit,
@@ -356,10 +359,10 @@ vec3 rfBounceRadiance(uint instance, uint triangle, mat4x3 objectToWorld, vec2 b
     float metallic = m.uvTiling.w;
     if (rfValidTexture(m.textures.w) && uvValid)
         metallic = samplePackedMetallic(
-            textureLod(rfTextures[nonuniformEXT(int(m.textures.w))], uv, 0.0), m.textures2.y);
+            sampleMaterialTextureLod(uint(m.textures.w), uv, 0.0), m.textures2.y);
     float specular = m.scalars.x;
     if (rfValidTexture(m.textures2.x) && uvValid)
-        specular *= clamp(textureLod(rfTextures[nonuniformEXT(int(m.textures2.x))], uv, 0.0).r, 0.0, 1.0);
+        specular *= clamp(sampleMaterialTextureLod(uint(m.textures2.x), uv, 0.0).r, 0.0, 1.0);
     float f0 = clamp(0.08 * specular, 0.0, 1.0);
     vec3 diffuse = albedo * ((1.0 - clamp(metallic, 0.0, 1.0)) * (1.0 - (f0 + (1.0 - f0) / 21.0)));
     diffuse *= 1.0 - 0.04 * m.scalars.w;

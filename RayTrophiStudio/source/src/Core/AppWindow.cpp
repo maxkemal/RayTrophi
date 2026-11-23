@@ -43,15 +43,24 @@ void createMainWindow(const WindowConfig& config) {
     // manifest's sensorLandscape is overridden (observed: portrait on the emulator).
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
     SDL_SetHintWithPriority(SDL_HINT_TOUCH_MOUSE_EVENTS, "0", SDL_HINT_OVERRIDE);
+    // Back is a key event for the game menu instead of closing the activity.
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
 #endif
 
+#ifdef __ANDROID__
+    // SDLActivity only enters immersive mode (status and navigation bars hidden, swiped back in
+    // transiently) for a fullscreen window: the game owns the whole screen.
+    const Uint32 platform_flags = SDL_WINDOW_FULLSCREEN;
+#else
+    const Uint32 platform_flags = 0;
+#endif
     startupLog(config.startup_log, "[Startup] before SDL_CreateWindow");
     window = SDL_CreateWindow(config.title,
         SDL_WINDOWPOS_CENTERED,
         SDL_WINDOWPOS_CENTERED,
         config.width,
         config.height,
-        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN);
+        SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | platform_flags);
     startupLog(config.startup_log,
                std::string("[Startup] SDL_CreateWindow done, ptr=") + (window ? "valid" : "null"));
 

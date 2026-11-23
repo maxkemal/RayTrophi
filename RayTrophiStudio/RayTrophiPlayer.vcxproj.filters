@@ -1248,6 +1248,12 @@
     <ClCompile Include="source\src\Backend\VulkanLensWeather.cpp">
       <Filter>source\src\Backend</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureBinding.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureStorage.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanMotionAov.cpp">
       <Filter>source\src\Backend</Filter>
     </ClCompile>
@@ -1270,6 +1276,9 @@
       <Filter>source\src\Backend</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanSkinningBatch.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanTextureCompaction.cpp">
       <Filter>source\src\Backend</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp">
@@ -2476,6 +2485,9 @@
       <Filter>source\src\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\PlayerOperatorHiddenUI.cpp">
+      <Filter>source\src\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\UI\PlayerOperatorKidUI.cpp">
       <Filter>source\src\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\UI\PlayerOperatorLibraryUI.cpp">

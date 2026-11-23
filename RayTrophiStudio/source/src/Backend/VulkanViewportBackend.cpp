@@ -1,6 +1,7 @@
 ﻿#include "Backend/VulkanStartupDiagnostics.h"
 #include "Backend/VulkanViewportBackend.h"
 #include "Backend/VulkanFailureReporting.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
 #include "Viewport/RayFusionViewportPasses.h"
 
 #include <stdexcept>
@@ -1537,9 +1538,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                            std::to_string(capabilities.fragmentStoresAndAtomicsEnabled));
 #endif
         std::string unsupportedReason;
-        if (!capabilities.supportsDescriptorIndexing) {
-            unsupportedReason = "descriptor indexing features are disabled";
-        } else if (!capabilities.independentBlendEnabled) {
+        if (!capabilities.independentBlendEnabled) {
             unsupportedReason = "independentBlend is disabled";
         } else if (!capabilities.fragmentStoresAndAtomicsEnabled) {
             unsupportedReason = "fragmentStoresAndAtomics is disabled";
@@ -1602,16 +1601,21 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     //   command-buffer recording) is always valid without those flags.
                     // Binding 2: baked env maps [0]=studio, [1]=outdoor (specular reflection lookup)
                     // Binding 3: terrain layer SSBO (same data as RT binding 12)
-                    const bool hasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
+                    // Partially-bound is only an optional robustness flag for 25-27
+                    // (temporal/cloud inputs written later); the material texture
+                    // pages need no descriptor-indexing feature.
+                    const bool hasDescIdx = m_device &&
+                        m_device->getCapabilities().supportsDescriptorIndexing;
 
-                    VkDescriptorSetLayoutBinding mpDslBindings[29]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[30]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
                     mpDslBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-                    mpDslBindings[1].binding = 1;
-                    mpDslBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    mpDslBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // Binding 1: 32 material texture pages (sampler2DArray);
+                    // binding 29: their slot->ref table (VulkanMaterialTextureBinding.h).
+                    mpDslBindings[1] = Backend::MaterialTextureBinding::pagesBinding(
+                        1, VK_SHADER_STAGE_FRAGMENT_BIT);
                     mpDslBindings[2].binding = 2;
                     mpDslBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     mpDslBindings[2].descriptorCount = 2; // [0]=studio, [1]=outdoor
@@ -1711,38 +1715,32 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpDslBindings[28] = {kRayFusionFrameUniformBinding,
                         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 
-                    const uint32_t mpTextureArrayLen = rayFusionMaterialTextureCapacity(
-                        mpDevProps.limits, mpDslBindings, 29,
-                        static_cast<uint32_t>(VULKAN_TEXTURE_CAPACITY));
-                    mpDslBindings[1].descriptorCount = mpTextureArrayLen;
+                    mpDslBindings[29] = Backend::MaterialTextureBinding::refTableBinding(
+                        29, VK_SHADER_STAGE_FRAGMENT_BIT);
+                    // The page count is fixed; only check that the whole layout fits
+                    // the device limits (0 = it does not).
+                    const uint32_t mpFit = rayFusionMaterialTextureCapacity(
+                        mpDevProps.limits, mpDslBindings, 30,
+                        Backend::MaterialTextureBinding::kPageCount);
+                    const uint32_t mpTextureArrayLen =
+                        (mpFit >= Backend::MaterialTextureBinding::kPageCount)
+                            ? Backend::MaterialTextureBinding::kPageCount : 0u;
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 29;
+                    mpDslci.bindingCount = 30;
                     mpDslci.pBindings = mpDslBindings;
 
-                    // Binding 1 is a sparse sampler2D array: only the slots whose texture IDs
-                    // were actually uploaded get written. Without PARTIALLY_BOUND, unwritten
-                    // slots are "undefined" per spec and stricter drivers (non-RT Intel/AMD
-                    // ICDs observed crashing in vkCmdBindDescriptorSets/first draw) dereference
-                    // them unconditionally. PARTIALLY_BOUND is core in Vulkan 1.2 and only
-                    // requires VK_EXT_descriptor_indexing — already gated by `hasDescIdx`.
-                    VkDescriptorBindingFlags mpBindingFlags[29] = {
-                        0,
-                        hasDescIdx ? VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT : VkDescriptorBindingFlags{0},
-                        0,
-                        0,
-                        0,
-                        0,
-                        0
-                    };
+                    // Binding 1 (pages) is always fully written: dummy page for unused
+                    // slots, so it needs no flag.
+                    VkDescriptorBindingFlags mpBindingFlags[30] = {};
                     mpBindingFlags[25] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     mpBindingFlags[26] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     mpBindingFlags[27] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 29;
+                    mpBindingFlagsCI.bindingCount = 30;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     if (hasDescIdx) {
                         mpDslci.pNext = &mpBindingFlagsCI;
@@ -1773,10 +1771,10 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
                     // + 7 (shadow records) + 16 (material graph program)
                     // + 20 (volume table) + 21/22 (RayFusion probe alani + izgara)
-                    mpPoolSizes[0].descriptorCount = 13;
-                    mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    // + 29 (material texture slot->ref table)
+                    mpPoolSizes[0].descriptorCount = 14;
                     // +2 for the 2 env map slots at binding 2
-                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 14u;
+                    mpPoolSizes[1] = Backend::MaterialTextureBinding::pagesPoolSize(14u);
                     mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                     mpPoolSizes[2].descriptorCount = 1;
                     mpPoolSizes[3] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
@@ -1819,6 +1817,14 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpStages[1].module = mpFragModule;
                     mpStages[1].pName = "main";
+                    // Scene-feature specialization (O3): only the branches this
+                    // scene can reach are compiled in. The covered variant copies
+                    // this stage, so it inherits the same constants; a feature that
+                    // appears later rebuilds both (serviceMaterialPreviewFeatureSpec).
+                    MaterialPreviewSpecStorage mpSpec{};
+                    const uint32_t mpSpecMask = materialPreviewSceneFeatureMask();
+                    fillMaterialPreviewSpec(mpSpecMask, mpSpec);
+                    mpStages[1].pSpecializationInfo = &mpSpec.info;
 
                     VkVertexInputBindingDescription mpBindings[6]{};
                     mpBindings[0].binding = 0; mpBindings[0].stride = sizeof(float) * 3;  mpBindings[0].inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
@@ -1945,7 +1951,10 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                             " pool=" + std::to_string((uintptr_t)m_interactiveViewport.materialPreviewDescPool));*/
                         mpResult = safeCreateMaterialPreviewPipeline(vkDevice, &mpPCI,
                                                                      &m_interactiveViewport.materialPreviewPipeline);
-                        if (mpResult == VK_SUCCESS) createMaterialPreviewCoveredPipeline(mpPCI, shaderDir);
+                        if (mpResult == VK_SUCCESS) {
+                            createMaterialPreviewCoveredPipeline(mpPCI, shaderDir);
+                            captureMaterialPreviewSpecRecipe(mpPCI, shaderDir, mpSpecMask);
+                        }
                         if (mpResult != VK_SUCCESS) {
                             SCENE_LOG_WARN("[RayFusion] Material pipeline creation failed, VkResult " +
                                            std::to_string(static_cast<int>(mpResult)));
@@ -2114,40 +2123,15 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                                     m_interactiveViewport.matcapImage = it->second;
                                 }
                             }
-                            if (m_interactiveViewport.matcapImage.view && m_interactiveViewport.matcapImage.sampler) {
-                                VkDescriptorImageInfo dummyInfo{};
-                                dummyInfo.sampler = m_interactiveViewport.matcapImage.sampler;
-                                dummyInfo.imageView = m_interactiveViewport.matcapImage.view;
-                                dummyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                std::vector<VkDescriptorImageInfo> dummyInfos(mpTextureArrayLen, dummyInfo);
-                                VkWriteDescriptorSet dummyWds{};
-                                dummyWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                                dummyWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
-                                dummyWds.dstBinding = 1;
-                                dummyWds.descriptorCount = mpTextureArrayLen;
-                                dummyWds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                                dummyWds.pImageInfo = dummyInfos.data();
-                                vkUpdateDescriptorSets(vkDevice, 1, &dummyWds, 0, nullptr);
-                            }
-
-                            // Populate binding 1 with all textures already uploaded.
-                            // Textures uploaded later are handled by updateMaterialPreviewTextureDescriptor.
-                            for (auto& [texID, texImg] : m_uploadedImages) {
-                                if (texID <= 0 || static_cast<uint32_t>(texID) >= mpTextureArrayLen) continue;
-                                if (!texImg.view || !texImg.sampler) continue;
-                                VkDescriptorImageInfo tii{};
-                                tii.sampler     = texImg.sampler;
-                                tii.imageView   = texImg.view;
-                                tii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                VkWriteDescriptorSet twds{};
-                                twds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                                twds.dstSet          = m_interactiveViewport.materialPreviewDescSet;
-                                twds.dstBinding      = 1;
-                                twds.dstArrayElement = (uint32_t)texID;
-                                twds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                                twds.descriptorCount = 1;
-                                twds.pImageInfo      = &tii;
-                                vkUpdateDescriptorSets(vkDevice, 1, &twds, 0, nullptr);
+                            // Binding 1 (32 pages) + 29 (slot->ref table) from the
+                            // shared texture storage. Textures uploaded after the last
+                            // compaction are not paged yet and read as missing until the
+                            // next one bumps m_textureCacheGeneration.
+                            if (!Backend::MaterialTextureBinding::writeAll(
+                                    *m_device, m_textureStorage,
+                                    m_interactiveViewport.materialPreviewDescSet, 1, 29)) {
+                                SCENE_LOG_WARN("[RayFusion] Material texture pages unavailable; "
+                                               "material preview set left without textures");
                             }
 
                             // ★★★ Damga: binding 1 bu kusagin goruntuleriyle
@@ -3891,6 +3875,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     m_interactiveViewport.materialPreviewBoundMaterialCount =
         m_externalMaterialBuffer ? m_externalMaterialCount
                                  : (m_device ? m_device->m_materialCount : 0u);
+    // May drain and swap the material pipelines: before beginFrame, like the
+    // binding updates below.
+    serviceMaterialPreviewFeatureSpec();
     prepareMaterialPreviewShadowFrame();
     updateMaterialPreviewSceneLightBindings();
     updateMaterialPreviewSdfSurfaceBinding();

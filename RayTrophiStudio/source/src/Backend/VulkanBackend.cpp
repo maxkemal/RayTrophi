@@ -1,3 +1,5 @@
+#include "Backend/VulkanMaterialTextureBinding.h"
+#include "Backend/VulkanMaterialTextureStorage.h"
 #include "Backend/WetPaintTexturePolicy.h"
 #include "Backend/VulkanFsrLoader.h"
 #include "PostProcess/Exposure.h"
@@ -1356,10 +1358,15 @@ bool VulkanDevice::createInstance(bool validationLayers) {
 #ifdef RT_PLAYER
     const VkResult versionResult =
         Backend::selectRayFusionInstanceVersion(pfnGetInstanceProcAddr, appInfo.apiVersion);
+#ifdef __ANDROID__
+    constexpr const char* loaderRequirement = "Vulkan 1.1 loader required";
+#else
+    constexpr const char* loaderRequirement = "Vulkan 1.2 loader required";
+#endif
     if (versionResult != VK_SUCCESS) {
         Backend::vulkanStartupResult("selectRayFusionInstanceVersion", versionResult,
-                                     "Vulkan 1.2 loader required");
-        SCENE_LOG_ERROR("[Player] Vulkan 1.2 loader required, VkResult " +
+                                     loaderRequirement);
+        SCENE_LOG_ERROR(std::string("[Player] ") + loaderRequirement + ", VkResult " +
                         std::to_string(static_cast<int>(versionResult)));
         return false;
     }
@@ -1420,13 +1427,12 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
         vkGetPhysicalDeviceProperties(dev, &props);
 
 #ifdef RT_PLAYER
+        Backend::notePlayerVulkanCandidate(props);
         if (const char* reason = Backend::rayFusionDeviceRejection(dev, props)) {
             SCENE_LOG_WARN(std::string("[Player] Skipping Vulkan adapter ") +
                            props.deviceName + ": " + reason);
 #ifdef __ANDROID__
-            const std::string adapter = std::string(props.deviceName) +
-                " (driver version " + std::to_string(props.driverVersion) + ")";
-            Backend::recordRayFusionDeviceRejection(adapter.c_str(), reason);
+            Backend::recordAndroidRayFusionDeviceRejection(props, reason);
 #else
             Backend::recordRayFusionDeviceRejection(props.deviceName, reason);
 #endif
@@ -1482,10 +1488,8 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
 #ifdef __ANDROID__
     // Rejections of other adapters must not mask a failure on the selected GPU.
     Backend::clearRayFusionDeviceRejections();
-    if (Backend::currentVulkanStartup) {
-        Backend::currentVulkanStartup->setGpu(props);
-    }
 #endif
+    Backend::notePlayerVulkanSelection(props);
 #endif
     VK_INFO() << "[VulkanDevice] Selected: " << props.deviceName << std::endl;
     return true;
@@ -1578,6 +1582,16 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     const bool hasDescIdx = hasDescIdxExtension || hasCoreDescIdx;
     if (hasDescIdxExtension) {
         deviceExtensions.push_back(VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME);
+    }
+
+    // Scalar block layout is core in 1.2 but an extension on a Vulkan 1.1 device
+    // (Mali-G76): enabling the feature bit there without the extension is invalid
+    // and the RayFusion SSBOs need it (vec3 members straddle 16-byte blocks).
+    const bool hasCoreScalarLayout = deviceProperties.apiVersion >= VK_API_VERSION_1_2;
+    const bool hasScalarLayoutExtension =
+        !hasCoreScalarLayout && hasExtension(VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
+    if (hasScalarLayoutExtension) {
+        deviceExtensions.push_back(VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME);
     }
 
     // Shader float atomics (VK_EXT_shader_atomic_float). The fluid P2G scatter
@@ -1852,7 +1866,9 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     scalarFeatures.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES;
     // Match the shaders' required scalar SSBO layout. Do not leave this disabled
     // by a pipeline-build timing bisect: vec3 members may straddle 16-byte blocks.
-    scalarFeatures.scalarBlockLayout = supportedScalarFeatures.scalarBlockLayout;
+    scalarFeatures.scalarBlockLayout =
+        (hasCoreScalarLayout || hasScalarLayoutExtension)
+            ? supportedScalarFeatures.scalarBlockLayout : VK_FALSE;
 
     // Build pNext chain conservatively.
     void** nextLink = &features2.pNext;
@@ -5099,7 +5115,8 @@ void VulkanDevice::removePendingRTTextureDescriptor(const ImageHandle& image) {
             m_pendingTextureDescriptors.end(),
             [&](const std::pair<uint32_t, ImageHandle>& p) {
                 const auto& h = p.second;
-                return h.image == image.image || h.view == image.view || h.sampler == image.sampler;
+                // Match by view first: a shared page image would match every layer's entry.
+                return h.view == image.view || h.sampler == image.sampler;
             }),
         m_pendingTextureDescriptors.end());
 }
@@ -6673,7 +6690,8 @@ ImageHandle VulkanDevice::createImage2DWithMips(uint32_t width, uint32_t height,
 }
 
 void VulkanDevice::generateMipmaps(VkCommandBuffer cmd, VkImage image,
-                                    uint32_t width, uint32_t height, uint32_t mipLevels) {
+                                    uint32_t width, uint32_t height, uint32_t mipLevels,
+                                    uint32_t baseArrayLayer) {
     if (mipLevels <= 1 || !image || cmd == VK_NULL_HANDLE) {
         // Just finalize mip 0 if it was in TRANSFER_DST_OPTIMAL
         if (mipLevels >= 1 && image && cmd != VK_NULL_HANDLE) {
@@ -6684,7 +6702,7 @@ void VulkanDevice::generateMipmaps(VkCommandBuffer cmd, VkImage image,
             b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
             b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, baseArrayLayer, 1};
             b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
             b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(cmd,
@@ -6701,7 +6719,7 @@ void VulkanDevice::generateMipmaps(VkCommandBuffer cmd, VkImage image,
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.baseArrayLayer = baseArrayLayer;
     barrier.subresourceRange.layerCount = 1;
     barrier.subresourceRange.levelCount = 1;
 
@@ -6723,10 +6741,10 @@ void VulkanDevice::generateMipmaps(VkCommandBuffer cmd, VkImage image,
         const int32_t nextH = std::max(1, mipH / 2);
 
         VkImageBlit blit{};
-        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, baseArrayLayer, 1};
         blit.srcOffsets[0] = {0, 0, 0};
         blit.srcOffsets[1] = {mipW, mipH, 1};
-        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, baseArrayLayer, 1};
         blit.dstOffsets[0] = {0, 0, 0};
         blit.dstOffsets[1] = {nextW, nextH, 1};
         vkCmdBlitImage(cmd,
@@ -6763,13 +6781,17 @@ void VulkanDevice::generateMipmaps(VkCommandBuffer cmd, VkImage image,
 void VulkanDevice::destroyImage(ImageHandle& image) {
     if (image.sampler) vkDestroySampler(m_device, image.sampler, nullptr);
     if (image.view) vkDestroyImageView(m_device, image.view, nullptr);
-    if (image.image) vkDestroyImage(m_device, image.image, nullptr);
-    if (image.memory) freeTrackedMemory(image.memory);
+    // Handles that live in a shared texture page do not own image/memory.
+    if (!image.sharedImage) {
+        if (image.image) vkDestroyImage(m_device, image.image, nullptr);
+        if (image.memory) freeTrackedMemory(image.memory);
+    }
     image = {};
 }
 
 void VulkanDevice::transitionImageLayout(VkCommandBuffer cmd, VkImage image,
-                                          VkImageLayout oldLayout, VkImageLayout newLayout) {
+                                          VkImageLayout oldLayout, VkImageLayout newLayout,
+                                          uint32_t baseArrayLayer) {
     VkImageMemoryBarrier barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout = oldLayout;
@@ -6780,7 +6802,7 @@ void VulkanDevice::transitionImageLayout(VkCommandBuffer cmd, VkImage image,
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.baseMipLevel = 0;
     barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.baseArrayLayer = 0;
+    barrier.subresourceRange.baseArrayLayer = baseArrayLayer;
     barrier.subresourceRange.layerCount = 1;
 
     VkPipelineStageFlags srcStage, dstStage;
@@ -7154,7 +7176,7 @@ void VulkanDevice::copyImagesToBuffersBatched(const ImageHandle* srcs, const Buf
     endSingleTimeCommands(cmd);
 }
 
-void VulkanDevice::copyBufferToImage(const BufferHandle& src, const ImageHandle& dst) {
+void VulkanDevice::copyBufferToImage(const BufferHandle& src, const ImageHandle& dst, uint32_t baseArrayLayer) {
     if (!src.buffer || !dst.image || dst.width == 0 || dst.height == 0) {
         VK_ERROR() << "[VulkanDevice] copyBufferToImage skipped: invalid src/dst handle." << std::endl;
         return;
@@ -7168,6 +7190,7 @@ void VulkanDevice::copyBufferToImage(const BufferHandle& src, const ImageHandle&
 
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.baseArrayLayer = baseArrayLayer;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = {dst.width, dst.height, 1};
 
@@ -7178,7 +7201,7 @@ void VulkanDevice::copyBufferToImage(const BufferHandle& src, const ImageHandle&
 
 void VulkanDevice::copyBufferToImageRegion(const BufferHandle& src, const ImageHandle& dst,
                                             int32_t offsetX, int32_t offsetY,
-                                            uint32_t regionW, uint32_t regionH) {
+                                            uint32_t regionW, uint32_t regionH, uint32_t baseArrayLayer) {
     if (!src.buffer || !dst.image || dst.width == 0 || dst.height == 0 || regionW == 0 || regionH == 0) {
         VK_ERROR() << "[VulkanDevice] copyBufferToImageRegion skipped: invalid src/dst handle." << std::endl;
         return;
@@ -7198,6 +7221,7 @@ void VulkanDevice::copyBufferToImageRegion(const BufferHandle& src, const ImageH
 
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.baseArrayLayer = baseArrayLayer;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = { offsetX, offsetY, 0 };
     region.imageExtent = { regionW, regionH, 1 };
@@ -7206,19 +7230,21 @@ void VulkanDevice::copyBufferToImageRegion(const BufferHandle& src, const ImageH
     endSingleTimeCommands(cmd);
 }
 
-void VulkanDevice::recordCopyBufferToImage(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst) {
+void VulkanDevice::recordCopyBufferToImage(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst, uint32_t baseArrayLayer) {
     if (cmd == VK_NULL_HANDLE || !src.buffer || !dst.image || dst.width == 0 || dst.height == 0) return;
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.baseArrayLayer = baseArrayLayer;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = {dst.width, dst.height, 1};
     vkCmdCopyBufferToImage(cmd, src.buffer, dst.image, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
 }
 
-void VulkanDevice::recordCopyBufferToImageDst(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst) {
+void VulkanDevice::recordCopyBufferToImageDst(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst, uint32_t baseArrayLayer) {
     if (cmd == VK_NULL_HANDLE || !src.buffer || !dst.image || dst.width == 0 || dst.height == 0) return;
     VkBufferImageCopy region{};
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.baseArrayLayer = baseArrayLayer;
     region.imageSubresource.layerCount = 1;
     region.imageExtent = {dst.width, dst.height, 1};
     vkCmdCopyBufferToImage(cmd, src.buffer, dst.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -8336,6 +8362,11 @@ void VulkanBackendAdapter::purgeUploadedTextureCacheLocked() {
         if (img.image || img.view || img.memory || img.sampler) {
             m_device->destroyImage(img);
         }
+    }
+    // Pages are owned here, not by the handles above (sharedImage); the device
+    // was idled at the top of this function.
+    if (m_textureStorage) {
+        m_textureStorage->destroyAll(*m_device);
     }
     m_uploadedImages.clear();
     m_uploadedImageIDs.clear();
@@ -13115,6 +13146,9 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             }
         }
         endBatchedTextureUpload();
+        // Single storage: pack the new textures into shared array pages now that
+        // the batch is on the GPU (doku dizisi C modeli).
+        compactMaterialTexturesLocked();
     }
     // ─────────────────────────────────────────────────────────────────────────
 
@@ -14155,6 +14189,54 @@ void VulkanBackendAdapter::endBatchedTextureUpload() {
     m_batchTextureStagingBuffers.clear();
 }
 
+namespace {
+// IEEE 754 binary32 -> binary16, round to nearest even. Finite input only
+// (the caller clamps to the half range and maps NaN/inf first).
+uint16_t floatToHalf(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const uint32_t sign = (bits >> 16) & 0x8000u;
+    int32_t exponent = static_cast<int32_t>((bits >> 23) & 0xFFu) - 127 + 15;
+    uint32_t mantissa = bits & 0x7FFFFFu;
+    if (exponent <= 0) {
+        if (exponent < -10) return static_cast<uint16_t>(sign);
+        mantissa |= 0x800000u;
+        const uint32_t shift = static_cast<uint32_t>(14 - exponent);
+        uint32_t half = mantissa >> shift;
+        const uint32_t rest = mantissa & ((1u << shift) - 1u);
+        const uint32_t halfway = 1u << (shift - 1u);
+        if (rest > halfway || (rest == halfway && (half & 1u))) ++half;
+        return static_cast<uint16_t>(sign | half);
+    }
+    uint32_t half = (static_cast<uint32_t>(exponent) << 10) | (mantissa >> 13);
+    const uint32_t rest = mantissa & 0x1FFFu;
+    if (rest > 0x1000u || (rest == 0x1000u && (half & 1u))) ++half;
+    if (half >= 0x7C00u) half = 0x7BFFu;   // never round up into infinity
+    return static_cast<uint16_t>(sign | half);
+}
+} // namespace
+
+int64_t VulkanBackendAdapter::uploadEnvironmentTexture(const float* rgba, uint32_t width,
+                                                       uint32_t height, uint64_t* clampedTexels) {
+    if (!rgba || !width || !height) return 0;
+    constexpr float kHalfMax = 65504.0f;
+    const std::size_t count = static_cast<std::size_t>(width) * height * 4u;
+    std::vector<uint16_t> half(count);
+    uint64_t clamped = 0;
+    for (std::size_t i = 0; i < count; ++i) {
+        float v = rgba[i];
+        if (!(v == v)) v = 0.0f;                         // NaN
+        if (v > kHalfMax) { v = kHalfMax; ++clamped; }
+        else if (v < -kHalfMax) { v = -kHalfMax; ++clamped; }
+        half[i] = floatToHalf(v);
+    }
+    if (clampedTexels) *clampedTexels = clamped;
+    m_uploadFloatAsHalf = true;
+    const int64_t id = uploadTexture2D(half.data(), width, height, 4, false, true);
+    m_uploadFloatAsHalf = false;
+    return id;
+}
+
 int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool srgb, bool isFloat) {
     if (!m_device || !m_device->isInitialized() || !data) return 0;
     // Staging included: in a batched upload it lives until the batch ends.
@@ -14173,6 +14255,10 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
         if (channels == 1) {
             fmt = VK_FORMAT_R32_SFLOAT;
             bpp = 4;
+        } else if (m_uploadFloatAsHalf && channels == 4) {
+            // Pre-converted by uploadEnvironmentTexture (uint16 halves).
+            fmt = VK_FORMAT_R16G16B16A16_SFLOAT;
+            bpp = 8;
         } else {
             fmt = VK_FORMAT_R32G32B32A32_SFLOAT;
             bpp = 16;
@@ -14236,8 +14322,8 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
             return 0;
         }
         if (m_inBatchedTextureUpload) {
-            m_device->recordCopyBufferToImageDst(m_batchTextureCmd, staging, img);
-            m_device->generateMipmaps(m_batchTextureCmd, img.image, width, height, mipLevels);
+            m_device->recordCopyBufferToImageDst(m_batchTextureCmd, staging, img, img.arrayLayer);
+            m_device->generateMipmaps(m_batchTextureCmd, img.image, width, height, mipLevels, img.arrayLayer);
         } else {
             VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
             if (cmd == VK_NULL_HANDLE) {
@@ -14245,8 +14331,8 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
                 m_device->destroyBuffer(staging);
                 return 0;
             }
-            m_device->recordCopyBufferToImageDst(cmd, staging, img);
-            m_device->generateMipmaps(cmd, img.image, width, height, mipLevels);
+            m_device->recordCopyBufferToImageDst(cmd, staging, img, img.arrayLayer);
+            m_device->generateMipmaps(cmd, img.image, width, height, mipLevels, img.arrayLayer);
             m_device->endSingleTimeCommands(cmd);
         }
     } else {
@@ -14258,18 +14344,18 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
             return 0;
         }
         if (m_inBatchedTextureUpload) {
-            m_device->recordCopyBufferToImage(m_batchTextureCmd, staging, img);
+            m_device->recordCopyBufferToImage(m_batchTextureCmd, staging, img, img.arrayLayer);
             m_device->transitionImageLayout(m_batchTextureCmd, img.image,
-                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+                VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, img.arrayLayer);
         } else {
-            m_device->copyBufferToImage(staging, img);
+            m_device->copyBufferToImage(staging, img, img.arrayLayer);
             VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
             if (cmd == VK_NULL_HANDLE) {
                 m_device->destroyImage(img);
                 m_device->destroyBuffer(staging);
                 return 0;
             }
-            m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, img.arrayLayer);
             m_device->endSingleTimeCommands(cmd);
         }
     }
@@ -14311,7 +14397,8 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
         ++m_textureUploadR8Count;
     } else if (fmt == VK_FORMAT_R8G8_UNORM || fmt == VK_FORMAT_R8G8_SRGB) {
         ++m_textureUploadRG8Count;
-    } else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT || fmt == VK_FORMAT_R32_SFLOAT) {
+    } else if (fmt == VK_FORMAT_R32G32B32A32_SFLOAT || fmt == VK_FORMAT_R32_SFLOAT ||
+               fmt == VK_FORMAT_R16G16B16A16_SFLOAT) {
         ++m_textureUploadFloatCount;
     } else {
         ++m_textureUploadRGBA8Count;
@@ -14322,7 +14409,7 @@ int64_t VulkanBackendAdapter::uploadTexture2D(const void* data, uint32_t width, 
         if (m_device->hasHardwareRT()) {
             m_device->updateRTTextureDescriptor(slot, img);
         }
-        updateMaterialPreviewTextureDescriptor(slot, img);
+        markMaterialPreviewTexturesChanged();
     }
     if (m_inBatchedTextureUpload) {
         m_batchTextureStagingBuffers.push_back(staging);
@@ -14420,18 +14507,19 @@ void VulkanBackendAdapter::registerSceneTextureUpload(TextureHandle sceneHandle,
         auto* imageIDs = &m_uploadedImageIDs;
         auto* idToCacheKey = &m_textureIdToCacheKey;
         const int64_t capturedId = textureHandle;
-        VulkanRT::ImageHandle capturedImg{};
-        {
-            auto it = m_uploadedImages.find(capturedId);
-            if (it != m_uploadedImages.end()) capturedImg = it->second;
-        }
-        backing.destroyFn = [devPtr, alive, images, imageIDs, idToCacheKey, capturedId, capturedImg]() mutable {
+        backing.destroyFn = [devPtr, alive, images, imageIDs, idToCacheKey, capturedId]() mutable {
             // alive is false when the backend was torn down without going through
             // purgeUploadedTextureCacheLocked (e.g. fast mode switch). In that case
             // both the device and the containers are gone — skip everything.
             if (!*alive) return;
-            if (devPtr && (capturedImg.image || capturedImg.view || capturedImg.memory || capturedImg.sampler)) {
-                devPtr->destroyImage(capturedImg);
+            // Resolve the CURRENT handle: texture-page compaction replaces image/view
+            // in place, so a copy captured at registration would name freed objects.
+            auto imgIt = images->find(capturedId);
+            if (devPtr && imgIt != images->end()) {
+                VulkanRT::ImageHandle& img = imgIt->second;
+                if (img.image || img.view || img.memory || img.sampler) {
+                    devPtr->destroyImage(img);
+                }
             }
             images->erase(capturedId);
             auto ckIt = idToCacheKey->find(capturedId);
@@ -14485,18 +14573,18 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
     }
 
     if (m_inBatchedTextureUpload) {
-        m_device->recordCopyBufferToImage(m_batchTextureCmd, staging, img);
+        m_device->recordCopyBufferToImage(m_batchTextureCmd, staging, img, img.arrayLayer);
         m_device->transitionImageLayout(m_batchTextureCmd, img.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, img.arrayLayer);
     } else {
-        m_device->copyBufferToImage(staging, img);
+        m_device->copyBufferToImage(staging, img, img.arrayLayer);
         VkCommandBuffer cmd = m_device->beginSingleTimeCommands();
         if (cmd == VK_NULL_HANDLE) {
             m_device->destroyImage(img);
             m_device->destroyBuffer(staging);
             return 0;
         }
-        m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        m_device->transitionImageLayout(cmd, img.image, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, img.arrayLayer);
         m_device->endSingleTimeCommands(cmd);
     }
 
@@ -14543,7 +14631,7 @@ int64_t VulkanBackendAdapter::uploadCompressedTexture2D(
         if (m_device->hasHardwareRT()) {
             m_device->updateRTTextureDescriptor(slot, img);
         }
-        updateMaterialPreviewTextureDescriptor(slot, img);
+        markMaterialPreviewTexturesChanged();
     }
 
     if (m_inBatchedTextureUpload) {
@@ -14702,7 +14790,7 @@ int64_t VulkanBackendAdapter::uploadTexture3D(const void* data, uint32_t width, 
         if (m_device->hasHardwareRT()) {
             m_device->updateRTTextureDescriptor((uint32_t)id, img);
         }
-        updateMaterialPreviewTextureDescriptor((uint32_t)id, img);
+        markMaterialPreviewTexturesChanged();
     }
     return id;
 }
@@ -14746,7 +14834,7 @@ void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer 
     b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.baseArrayLayer = 0;
+    b.subresourceRange.baseArrayLayer = img.arrayLayer;
     b.subresourceRange.layerCount = 1;
     b.subresourceRange.levelCount = 1;
 
@@ -14780,10 +14868,10 @@ void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer 
         const int32_t nextH = std::max(1, mipH / 2);
 
         VkImageBlit blit{};
-        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, img.arrayLayer, 1};
         blit.srcOffsets[0] = {0, 0, 0};
         blit.srcOffsets[1] = {mipW, mipH, 1};
-        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, img.arrayLayer, 1};
         blit.dstOffsets[0] = {0, 0, 0};
         blit.dstOffsets[1] = {nextW, nextH, 1};
         vkCmdBlitImage(cmd,
@@ -14886,10 +14974,10 @@ bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void*
         return false;
     }
     m_device->transitionImageLayout(cmdPre, img.image,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, img.arrayLayer);
     m_device->endSingleTimeCommands(cmdPre);
 
-    m_device->copyBufferToImage(staging, img);
+    m_device->copyBufferToImage(staging, img, img.arrayLayer);
 
     VkCommandBuffer cmdPost = m_device->beginSingleTimeCommands();
     if (cmdPost == VK_NULL_HANDLE) {
@@ -14907,7 +14995,7 @@ bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void*
         regenerateMipChainAfterPartialUpdate(cmdPost, img);
     } else {
         m_device->transitionImageLayout(cmdPost, img.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, img.arrayLayer);
     }
     m_device->endSingleTimeCommands(cmdPost);
 
@@ -14972,10 +15060,10 @@ bool VulkanBackendAdapter::updateTexture2DRegion(int64_t textureID, const void* 
         return false;
     }
     m_device->transitionImageLayout(cmdPre, img.image,
-        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL);
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL, img.arrayLayer);
     m_device->endSingleTimeCommands(cmdPre);
 
-    m_device->copyBufferToImageRegion(staging, img, offsetX, offsetY, regionW, regionH);
+    m_device->copyBufferToImageRegion(staging, img, offsetX, offsetY, regionW, regionH, img.arrayLayer);
 
     VkCommandBuffer cmdPost = m_device->beginSingleTimeCommands();
     if (cmdPost == VK_NULL_HANDLE) {
@@ -14992,7 +15080,7 @@ bool VulkanBackendAdapter::updateTexture2DRegion(int64_t textureID, const void* 
         regenerateMipChainAfterPartialUpdate(cmdPost, img);
     } else {
         m_device->transitionImageLayout(cmdPost, img.image,
-            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, img.arrayLayer);
     }
     m_device->endSingleTimeCommands(cmdPost);
 
@@ -15054,7 +15142,7 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
     toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toGeneral.image = img.image;
-    toGeneral.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    toGeneral.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, img.arrayLayer, 1};
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &toGeneral);
     VkBufferImageCopy region{};
@@ -15062,6 +15150,7 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
     region.bufferRowLength = bufferRowTexels;
     region.bufferImageHeight = 0;
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.baseArrayLayer = img.arrayLayer;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = { x, y, 0 };
     region.imageExtent = { w, h, 1 };
@@ -17551,14 +17640,15 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                 if (mpVertModule && mpFragModule) {
                     VkPhysicalDeviceProperties mpDevProps{};
                     vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &mpDevProps);
-                    VkDescriptorSetLayoutBinding mpDslBindings[29]{};
+                    VkDescriptorSetLayoutBinding mpDslBindings[30]{};
                     mpDslBindings[0].binding = 0;
                     mpDslBindings[0].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                     mpDslBindings[0].descriptorCount = 1;
                     mpDslBindings[0].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-                    mpDslBindings[1].binding = 1;
-                    mpDslBindings[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    mpDslBindings[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+                    // Binding 1: 32 material texture pages; 29: slot->ref table
+                    // (VulkanMaterialTextureBinding.h, same ABI as VulkanViewportBackend).
+                    mpDslBindings[1] = Backend::MaterialTextureBinding::pagesBinding(
+                        1, VK_SHADER_STAGE_FRAGMENT_BIT);
                     mpDslBindings[2].binding = 2;
                     mpDslBindings[2].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
                     mpDslBindings[2].descriptorCount = 2;
@@ -17656,10 +17746,14 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpDslBindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpDslBindings[28] = {kRayFusionFrameUniformBinding,
                         VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
-                    const uint32_t mpTextureArrayLen = rayFusionMaterialTextureCapacity(
-                        mpDevProps.limits, mpDslBindings, 29,
-                        static_cast<uint32_t>(Backend::VULKAN_TEXTURE_CAPACITY));
-                    mpDslBindings[1].descriptorCount = mpTextureArrayLen;
+                    mpDslBindings[29] = Backend::MaterialTextureBinding::refTableBinding(
+                        29, VK_SHADER_STAGE_FRAGMENT_BIT);
+                    const uint32_t mpFit = rayFusionMaterialTextureCapacity(
+                        mpDevProps.limits, mpDslBindings, 30,
+                        Backend::MaterialTextureBinding::kPageCount);
+                    const uint32_t mpTextureArrayLen =
+                        (mpFit >= Backend::MaterialTextureBinding::kPageCount)
+                            ? Backend::MaterialTextureBinding::kPageCount : 0u;
                     m_interactiveViewport.materialPreviewTextureArrayLen = mpTextureArrayLen;
 
                     // Guard: check device push-constant limit before touching descriptor/pipeline layout.
@@ -17676,21 +17770,17 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
 
                     VkDescriptorSetLayoutCreateInfo mpDslci{};
                     mpDslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-                    mpDslci.bindingCount = 29;
+                    mpDslci.bindingCount = 30;
                     mpDslci.pBindings = mpDslBindings;
-                    VkDescriptorBindingFlags mpBindingFlags[29] = {
-                        0,
-                        VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT,
-                        0,
-                        0,
-                        0
-                    };
+                    // Binding 1 (pages) is always fully written; only 25-27 keep the
+                    // optional partially-bound flag (this path requires indexing anyway).
+                    VkDescriptorBindingFlags mpBindingFlags[30] = {};
                     mpBindingFlags[25] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     mpBindingFlags[26] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     mpBindingFlags[27] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
                     VkDescriptorSetLayoutBindingFlagsCreateInfo mpBindingFlagsCI{};
                     mpBindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-                    mpBindingFlagsCI.bindingCount = 29;
+                    mpBindingFlagsCI.bindingCount = 30;
                     mpBindingFlagsCI.pBindingFlags = mpBindingFlags;
                     mpDslci.pNext = &mpBindingFlagsCI;
                     if (mpPushOk && mpTextureArrayLen > 0) {
@@ -17705,9 +17795,8 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     // + 5 (sahne isiklari) + 6 (onizleme sahne globalleri)
                     // + 7 (shadow records) + 16 (material graph program)
                     // + 20 (volume table) + 21/22 (RayFusion probe alani + izgara)
-                    mpPoolSizes[0].descriptorCount = 13;
-                    mpPoolSizes[1].type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    mpPoolSizes[1].descriptorCount = mpTextureArrayLen + 14u;
+                    mpPoolSizes[0].descriptorCount = 14;   // + slot->ref table (29)
+                    mpPoolSizes[1] = Backend::MaterialTextureBinding::pagesPoolSize(14u);
                     mpPoolSizes[2].type = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
                     mpPoolSizes[2].descriptorCount = 1;
                     mpPoolSizes[3] = {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1};
@@ -17909,47 +17998,13 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                                     m_interactiveViewport.matcapImage = it->second;
                                 }
                             }
-                            if (m_interactiveViewport.matcapImage.view && m_interactiveViewport.matcapImage.sampler) {
-                                VkDescriptorImageInfo dummyInfo{};
-                                dummyInfo.sampler = m_interactiveViewport.matcapImage.sampler;
-                                dummyInfo.imageView = m_interactiveViewport.matcapImage.view;
-                                dummyInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                std::vector<VkDescriptorImageInfo> dummyInfos(
-                                    m_interactiveViewport.materialPreviewTextureArrayLen,
-                                    dummyInfo);
-                                VkWriteDescriptorSet dummyWds{};
-                                dummyWds.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                                dummyWds.dstSet = m_interactiveViewport.materialPreviewDescSet;
-                                dummyWds.dstBinding = 1;
-                                dummyWds.descriptorCount = m_interactiveViewport.materialPreviewTextureArrayLen;
-                                dummyWds.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                                dummyWds.pImageInfo = dummyInfos.data();
-                                vkUpdateDescriptorSets(vkDevice, 1, &dummyWds, 0, nullptr);
-                            }
-
-                            // Backfill binding 1 with all textures already uploaded.
-                            // Without this, when the Vulkan RT backend serves its own
-                            // interactive viewport, Material Preview sees an empty texture
-                            // array (paint strokes look "missing") because textures loaded
-                            // before the descSet existed never reached binding 1.
-                            for (auto& kv : m_uploadedImages) {
-                                const int64_t texID = kv.first;
-                                if (texID <= 0 || static_cast<uint32_t>(texID) >= m_interactiveViewport.materialPreviewTextureArrayLen) continue;
-                                const VulkanRT::ImageHandle& texImg = kv.second;
-                                if (!texImg.view || !texImg.sampler) continue;
-                                VkDescriptorImageInfo tii{};
-                                tii.sampler     = texImg.sampler;
-                                tii.imageView   = texImg.view;
-                                tii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                                VkWriteDescriptorSet twds{};
-                                twds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                                twds.dstSet          = m_interactiveViewport.materialPreviewDescSet;
-                                twds.dstBinding      = 1;
-                                twds.dstArrayElement = static_cast<uint32_t>(texID);
-                                twds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                                twds.descriptorCount = 1;
-                                twds.pImageInfo      = &tii;
-                                vkUpdateDescriptorSets(vkDevice, 1, &twds, 0, nullptr);
+                            // Binding 1 (32 pages) + 29 (slot->ref table) from the
+                            // shared texture storage (same as VulkanViewportBackend).
+                            if (!Backend::MaterialTextureBinding::writeAll(
+                                    *m_device, m_textureStorage,
+                                    m_interactiveViewport.materialPreviewDescSet, 1, 29)) {
+                                SCENE_LOG_WARN("[Vulkan] Material texture pages unavailable; "
+                                               "material preview set left without textures");
                             }
 
                             if (m_interactiveViewport.matcapImage.view && m_interactiveViewport.matcapImage.sampler) {

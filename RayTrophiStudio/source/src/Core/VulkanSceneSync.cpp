@@ -13,6 +13,7 @@
 #include "Atmosphere/AtmosphereLocalWeather.h"
 #include "Atmosphere/LightningStrikeResolver.h"
 
+#include <chrono>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -43,7 +44,7 @@ void syncVulkanWorld(Backend::VulkanBackendAdapter* vulkanBackend, World& world,
         auto& cache = s_vulkanEnvCache[envCacheKey];
         VulkanRT::ImageHandle existingEnvImage{};
         const VkFormat expectedFormat = (texture->is_hdr && !texture->float_pixels.empty())
-            ? VK_FORMAT_R32G32B32A32_SFLOAT
+            ? VK_FORMAT_R16G16B16A16_SFLOAT   // uploadEnvironmentTexture
             : VK_FORMAT_R8G8B8A8_UNORM;
         const bool cacheValid =
             cache.texture == texture &&
@@ -57,15 +58,15 @@ void syncVulkanWorld(Backend::VulkanBackendAdapter* vulkanBackend, World& world,
             return cache.handle;
         }
 
+        const auto uploadStart = std::chrono::steady_clock::now();
         int64_t envHandle = 0;
+        uint64_t clampedTexels = 0;
         if (texture->is_hdr && !texture->float_pixels.empty()) {
-            envHandle = vulkanBackend->uploadTexture2D(
-                texture->float_pixels.data(),
+            envHandle = vulkanBackend->uploadEnvironmentTexture(
+                reinterpret_cast<const float*>(texture->float_pixels.data()),
                 static_cast<uint32_t>(texture->width),
                 static_cast<uint32_t>(texture->height),
-                4,
-                false,
-                true);
+                &clampedTexels);
         } else if (!texture->pixels.empty()) {
             envHandle = vulkanBackend->uploadTexture2D(
                 texture->pixels.data(),
@@ -75,6 +76,14 @@ void syncVulkanWorld(Backend::VulkanBackendAdapter* vulkanBackend, World& world,
                 false,
                 false);
         }
+        const auto uploadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - uploadStart).count();
+        SCENE_LOG_INFO("[World] Vulkan environment upload_ms=" + std::to_string(uploadMs) +
+                       " uploaded=" + std::to_string(envHandle > 0) +
+                       " format=" + std::string(texture->is_hdr ? "rgba16f" : "rgba8") +
+                       " clamped_texels=" + std::to_string(clampedTexels) +
+                       " size=" + std::to_string(texture->width) + "x" +
+                       std::to_string(texture->height));
         cache.texture = texture;
         cache.handle = envHandle;
         cache.textureCacheGeneration = vulkanBackend->textureCacheGeneration();

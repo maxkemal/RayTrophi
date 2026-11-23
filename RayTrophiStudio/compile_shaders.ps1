@@ -1,5 +1,9 @@
 param(
     [switch]$ValidateOnly,
+    # Print the full plan (source, target, flags) as JSON and exit. Used by
+    # scripts/compile_player_android_vk11.py to rebuild the Player set for a
+    # Vulkan 1.1 target without duplicating this file's per-shader flags.
+    [switch]$ListPlan,
     [switch]$VolumeOnly,
     [switch]$SplitVolumeOnly,
     [ValidateSet('Auto', 'Off', 'Full', 'Modular')]
@@ -160,7 +164,9 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
                 'sim_particle_ballistic.comp', 'sim_particle_spawn.comp',
                 'material_preview_ibl.comp', 'material_preview_volume_shadow.comp',
                 'raster_cull.comp', 'raster_taa.comp', 'reflection_trace.comp',
-                'reflection_filter.comp', 'skinning.comp', 'world_sky_capture.comp',
+                'reflection_filter.comp', 'rayfusion_probe_trace_beta.comp',
+                'rayfusion_rt_shadow.comp', 'screen_gi_trace.comp',
+                'skinning.comp', 'world_sky_capture.comp',
                 'atmosphere_lut.comp', 'atmosphere_aerial_froxel.comp',
                 'cloud_noise.comp', 'cloud_sample.comp', 'cloud_cells.comp',
                 'cloud_volume_gen.comp', 'cloud_raster.comp', 'cloud_resolve.comp',
@@ -224,6 +230,12 @@ if ($SplitVolumeOnly) {
             'raygen.spv', 'volume_fog_closesthit.spv', 'volume_surface_closesthit.spv')
     })
     if ($plan.Count -ne 3) { throw 'Expected raygen and both split volume stages.' }
+}
+if ($ListPlan) {
+    @($plan | ForEach-Object {
+        [pscustomobject]@{ Source = $_.Source; Target = $_.Target; Flags = @($_.Flags) }
+    }) | ConvertTo-Json -Depth 4 -Compress
+    exit 0
 }
 if ($ValidateOnly) {
     foreach ($item in $plan) {

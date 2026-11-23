@@ -42,6 +42,9 @@ inline bool supportsMethod(const std::string& method) {
            // Display surface and frame timing (window, render scale, pacing, FPS).
            method == "player.display" || method == "player.set_display" ||
            method == "player.operator" ||
+           // The runtime viewer consumes the shared world dirty flags before rendering.
+           method == "world.get" || method == "world.set_mode" ||
+           method == "world.set_background_color" ||
            // Shared scene grading, consumed by the existing raster post pass.
            method == "post.get" || method == "post.set_exposure" ||
            method == "post.set_gamma" || method == "post.set_saturation" ||
@@ -60,6 +63,19 @@ inline bool supportsMethod(const std::string& method) {
            // (workshop measured 13.4 ms without, 6.3 ms with).
            method == "viewport.raster_depth_prepass" ||
            method == "viewport.set_raster_depth_prepass" ||
+           // Shading cost levers for on-device A/B (PLAYER_ANDROID_PERF_PLAN):
+           // without them every hypothesis on the tablet cost one APK round.
+           // Quality sets the BRDF tier, PCF taps and the shadowed-light budget;
+           // preview lighting the light model; TAA its resolve. Lights: the
+           // Player services g_lights_dirty (RuntimeSceneViewer), so an
+           // intensity of 0 really removes a light from the frame.
+           // viewport.set_shading stays out: Solid/Matcap are not built here.
+           method == "viewport.quality" || method == "viewport.set_quality" ||
+           method == "viewport.preview_lighting" ||
+           method == "viewport.set_preview_lighting" ||
+           method == "viewport.taa" || method == "viewport.set_taa" ||
+           method == "lights.list" || method == "lights.get" ||
+           method == "lights.set_intensity" ||
            // Scene audio state (read-only): the Player ticks audio on its game clock.
            method == "audio.status" || method == "audio.list" ||
            method == "audio.source_runtime" || method == "audio.mixer_get" ||

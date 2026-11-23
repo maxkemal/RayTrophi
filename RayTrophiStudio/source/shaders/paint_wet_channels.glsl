@@ -84,13 +84,19 @@ void channelTile(uint tile_index) {
     if (pc._p0 == 0u) return;
     Tile t = tiles[tile_index];
     Surface s = surfaces[t.surface];
-    bool update = (pc._p1 & 1u) != 0u;
     // The derivative reaches two pixels beyond colour resolve's tile apron.
     // Dispatch after resolve so it reads the final height across workgroups.
-    for (int oy = -2; oy <= 2 && !update; ++oy)
-        for (int ox = -2; ox <= 2; ++ox)
-            update = update || tileActive(s,int(t.tx)+ox,int(t.ty)+oy);
-    if (!update) return;
+    // One thread reads the 5x5 neighbourhood for the whole (single-tile)
+    // workgroup; every thread used to read all 25 flags itself.
+    if (gl_LocalInvocationIndex == 0u) {
+        bool update = (pc._p1 & 1u) != 0u;
+        for (int oy = -2; oy <= 2 && !update; ++oy)
+            for (int ox = -2; ox <= 2 && !update; ++ox)
+                update = tileActive(s,int(t.tx)+ox,int(t.ty)+oy);
+        s_gate = update ? 1u : 0u;
+    }
+    barrier();
+    if (s_gate == 0u) return;
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x,y; tileTexel(t,k,x,y);
         if (!inSurface(s,x,y)) continue;

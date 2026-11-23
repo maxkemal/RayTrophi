@@ -31,7 +31,7 @@ void field(const char *key, const char *title, float low, float high, float fall
            const char *format, const char *explanation) {
     float value = number(key, fallback);
     label(title);
-    ImGui::SetNextItemWidth(std::min(330.0f, ImGui::GetContentRegionAvail().x));
+    ImGui::SetNextItemWidth(std::min(S(330.0f), ImGui::GetContentRegionAvail().x));
     const auto widget_id = std::string("##") + key;
     if (ImGui::SliderFloat(widget_id.c_str(), &value, low, high, format)) {
         change(key, value);
@@ -52,7 +52,7 @@ void timer(const char *key, const char *title, float minimum, float maximum, flo
     }
     ImGui::BeginDisabled(!enabled);
     float seconds = std::max(minimum, number(key, fallback));
-    ImGui::SetNextItemWidth(std::min(330.0f, ImGui::GetContentRegionAvail().x));
+    ImGui::SetNextItemWidth(std::min(S(330.0f), ImGui::GetContentRegionAvail().x));
     if (ImGui::SliderFloat(trId("player.seconds", "Seconds"), &seconds, minimum, maximum,
                            tr("player.1f_s", "%.1f s"))) {
         change(key, enabled ? seconds : 0.0f);
@@ -87,24 +87,24 @@ void presets() {
                            tr("player.an_everyday_balance", "An everyday balance"),
                            tr("player.faster_returns", "Faster returns")};
     const ImU32 tints[] = {mint, violet, IM_COL32(246, 184, 135, 255)};
-    const float width = (ImGui::GetContentRegionAvail().x - 20) / 3;
+    const float width = (ImGui::GetContentRegionAvail().x - S(20)) / 3;
     for (int i = 0; i < 3; ++i) {
         if (i) {
-            ImGui::SameLine(0, 10);
+            ImGui::SameLine(0, S(10));
         }
         ImGui::PushID(names[i]);
         const auto p = ImGui::GetCursorScreenPos();
-        const bool chosen = ImGui::InvisibleButton("mood", ImVec2(width, 106));
+        const bool chosen = ImGui::InvisibleButton("mood", ImVec2(width, S(106)));
         auto *draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(p, add(p, width, 106), panel, 12);
-        draw->AddRect(p, add(p, width, 106), ImGui::IsItemHovered() ? tints[i] : border, 12);
-        draw->AddCircleFilled(add(p, 26, 27), 13, tints[i]);
-        draw->AddCircleFilled(add(p, 22, 23), 3, IM_COL32(255, 255, 255, 100));
-        draw->AddBezierCubic(add(p, 26, 40), add(p, 20, 47), add(p, 31, 49), add(p, 26, 57),
+        draw->AddRectFilled(p, add(p, width, S(106)), panel, 12);
+        draw->AddRect(p, add(p, width, S(106)), ImGui::IsItemHovered() ? tints[i] : border, 12);
+        draw->AddCircleFilled(add(p, S(26), S(27)), S(13), tints[i]);
+        draw->AddCircleFilled(add(p, S(22), S(23)), S(3), IM_COL32(255, 255, 255, 100));
+        draw->AddBezierCubic(add(p, S(26), S(40)), add(p, S(20), S(47)), add(p, S(31), S(49)), add(p, S(26), S(57)),
                              tints[i], 1.2f);
-        draw->PushClipRect(p, add(p, width, 106), true);
-        draw->AddText(add(p, 14, 62), ink, titles[i]);
-        draw->AddText(add(p, 14, 83), muted, notes[i]);
+        draw->PushClipRect(p, add(p, width, S(106)), true);
+        draw->AddText(add(p, S(14), S(62)), ink, titles[i]);
+        draw->AddText(add(p, S(14), S(83)), muted, notes[i]);
         draw->PopClipRect();
         if (chosen) {
             json result;
@@ -200,7 +200,7 @@ void gameSettings() {
         label(tr("player.balloons", "BALLOONS"), violet);
         int count = static_cast<int>(number("balloons", 3));
         label(tr("player.balloon_count", "Balloon count"));
-        ImGui::SetNextItemWidth(std::min(330.0f, ImGui::GetContentRegionAvail().x));
+        ImGui::SetNextItemWidth(std::min(S(330.0f), ImGui::GetContentRegionAvail().x));
         if (ImGui::SliderInt("##balloon_count", &count, 3,
                              std::max(3, status.value("max_balloons", 3)))) {
             change("balloons", count);
@@ -270,7 +270,7 @@ void gameSettings() {
         const auto title =
             current.is_null() ? std::string(tr("player.mixed_surface_sizes", "Mixed surface sizes"))
                               : std::to_string(current.get<int>());
-        ImGui::SetNextItemWidth(240);
+        ImGui::SetNextItemWidth(S(240));
         if (ImGui::BeginCombo(trId("player.texture_resolution", "Texture resolution"),
                               title.c_str())) {
             for (int size : sizes) {

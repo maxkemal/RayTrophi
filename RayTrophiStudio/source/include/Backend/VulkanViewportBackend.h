@@ -63,6 +63,36 @@ private:
     VkBuffer m_externalMaterialBuffer = VK_NULL_HANDLE;
     VkDeviceSize m_externalMaterialBufferSize = 0;
     uint32_t m_externalMaterialCount = 0;
+
+    // ── Material preview scene-feature specialization (O3) ──────────────────
+    // material_preview_frag carries RT_SPEC_TERRAIN / _GRAPH / _WEATHER spec
+    // constants (ids 0..2, default true). The main + covered pipelines are
+    // created with only the features the scene can reach, and rebuilt when a
+    // new one appears. Implementation: Viewport/MaterialPreviewCoverage.cpp.
+public:
+    static constexpr uint32_t kMpSpecTerrain = 1u << 0;
+    static constexpr uint32_t kMpSpecGraph   = 1u << 1;
+    static constexpr uint32_t kMpSpecWeather = 1u << 2;
+    static constexpr uint32_t kMpSpecAll     = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather;
+    struct MaterialPreviewSpecStorage {
+        VkSpecializationMapEntry entries[3]{};
+        VkBool32 values[3]{};
+        VkSpecializationInfo info{};
+    };
+    static void fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out);
+private:
+    struct MaterialPreviewSpecRecipe;
+    std::shared_ptr<MaterialPreviewSpecRecipe> m_mpSpecRecipe;
+    uint32_t m_mpSpecMask = kMpSpecAll;      // what the live pipelines were built with
+    uint32_t m_mpSpecShrinkFrames = 0;       // debounce before dropping a feature
+    uint32_t m_mpSpecRebuilds = 0;
+    bool m_mpSpecFailed = false;
+    uint32_t materialPreviewSceneFeatureMask() const;
+    void captureMaterialPreviewSpecRecipe(const VkGraphicsPipelineCreateInfo& info,
+                                          const std::string& shaderDir, uint32_t mask);
+    void serviceMaterialPreviewFeatureSpec();
+protected:
+    RasterAppliedState sampleRasterAppliedState() const override;
 public:
 
     void renderProgressive(void* outSurface, void* outWindow, void* outRenderer,

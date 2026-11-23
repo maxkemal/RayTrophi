@@ -54,7 +54,7 @@ set(RT_DEP_LIST RT_SDL2_DIR RT_SDL2_IMAGE_DIR)
 set(RT_DEP_RT_SDL2_DIR_TARGET SDL2)
 set(RT_DEP_RT_SDL2_IMAGE_DIR_TARGET SDL2_image)
 
-# Player sources (849, of which 5 are Android stubs).
+# Player sources (860, of which 5 are Android stubs).
 set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/external/imgui-knobs/imgui-knobs.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui.cpp"
@@ -332,6 +332,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Api/RtApiParticle.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiPerf.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiPhaseGrid.cpp"
+    "${RT_PROJECT_DIR}/source/src/Api/RtApiPlayerOperator.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiPost.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiRayFusion.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiRealtimeDenoiser.cpp"
@@ -446,6 +447,8 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanFsrLoader.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanFsrUpscaler.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanLensWeather.cpp"
+    "${RT_PROJECT_DIR}/source/src/Backend/VulkanMaterialTextureBinding.cpp"
+    "${RT_PROJECT_DIR}/source/src/Backend/VulkanMaterialTextureStorage.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanMotionAov.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanMotionHistory.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanRawGuard.cpp"
@@ -454,6 +457,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanRealtimeDenoiserAdapter.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanRTPipelineBuild.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanSkinningBatch.cpp"
+    "${RT_PROJECT_DIR}/source/src/Backend/VulkanTextureCompaction.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanUpscaleAdapter.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanUpscaleInputs.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanViewportBackend.cpp"
@@ -471,6 +475,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Core/PlayerBalloonInput.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/PlayerGameSettings.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/PlayerMain.cpp"
+    "${RT_PROJECT_DIR}/source/src/Core/PlayerOperator.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/ProjectManager.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/ProjectTimelineReset.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/RenderStateManager.cpp"
@@ -730,7 +735,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Physics/WaterSystemHost.cpp"
     "${RT_PROJECT_DIR}/source/src/Platform/PlatformOs.cpp"
     "${RT_PROJECT_DIR}/source/src/Platform/Stubs/GasSimulatorAndroidStub.cpp"
-    "${RT_PROJECT_DIR}/source/src/Platform/Stubs/PlayerOperatorAndroidStub.cpp"
+    "${RT_PROJECT_DIR}/source/src/Platform/Stubs/PlayerCameraAndroidStub.cpp"
     "${RT_PROJECT_DIR}/source/src/Platform/Stubs/RtIpcTransportTlsAndroidStub.cpp"
     "${RT_PROJECT_DIR}/source/src/Platform/Stubs/TextureCompressionCacheAndroidStub.cpp"
     "${RT_PROJECT_DIR}/source/src/Platform/Stubs/VDBVolumeManagerAndroidStub.cpp"
@@ -852,6 +857,12 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Template/TemplateRegistry.cpp"
     "${RT_PROJECT_DIR}/source/src/UI/GizmoOcclusion.cpp"
     "${RT_PROJECT_DIR}/source/src/UI/ParticleBillboardBuilder.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorGameUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorHiddenUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorKidUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorLibraryUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorSettingsUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorUI.cpp"
     "${RT_PROJECT_DIR}/source/src/UI/scene_ui_agent_chat.cpp"
     "${RT_PROJECT_DIR}/source/src/UI/SceneSelection.cpp"
     "${RT_PROJECT_DIR}/source/src/UI/SceneUIStateHost.cpp"
@@ -949,6 +960,7 @@ set(RT_PLAYER_EXCEPTION_SOURCES
     "${RT_PROJECT_DIR}/source/src/Animation/RigWalkRecipe.cpp"
     "${RT_PROJECT_DIR}/source/src/Animation/RigWeights.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiClipBinding.cpp"
+    "${RT_PROJECT_DIR}/source/src/Api/RtApiPlayerOperator.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiRayFusion.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiReflection.cpp"
     "${RT_PROJECT_DIR}/source/src/Api/RtApiRig.cpp"
@@ -992,6 +1004,7 @@ set(RT_PLAYER_EXCEPTION_SOURCES
     "${RT_PROJECT_DIR}/source/src/Core/Localization.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/PlayerBalloonInput.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/PlayerGameSettings.cpp"
+    "${RT_PROJECT_DIR}/source/src/Core/PlayerOperator.cpp"
     "${RT_PROJECT_DIR}/source/src/Import/ModelImport.cpp"
     "${RT_PROJECT_DIR}/source/src/Import/ModelImportScene.cpp"
     "${RT_PROJECT_DIR}/source/src/Import/ObjReader.cpp"
@@ -1072,24 +1085,23 @@ set(RT_PLAYER_EXCEPTION_SOURCES
     "${RT_PROJECT_DIR}/source/src/Scene/PhysicalAudioSchedule.cpp"
     "${RT_PROJECT_DIR}/source/src/Scene/PhysicalAudioSource.cpp"
     "${RT_PROJECT_DIR}/source/src/Scene/PhysicalAudioTimeline.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorGameUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorHiddenUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorKidUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorLibraryUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorSettingsUI.cpp"
+    "${RT_PROJECT_DIR}/source/src/UI/PlayerOperatorUI.cpp"
     "${RT_PROJECT_DIR}/source/src/UV/UvCornerRemap.cpp"
     "${RT_PROJECT_DIR}/source/src/UV/UvGeometryTransaction.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/MaterialPreviewVolumeShadow.cpp"
 )
 
 # Excluded for Android (data: android_exclude in player_android_manifest.json):
-#   src/Api/RtApiPlayerOperator.cpp
 #   src/Api/RtIpcTransportTls.cpp
 #   src/Core/PlayerCamera.cpp
-#   src/Core/PlayerOperator.cpp
 #   src/Physics/GasSimulator.cpp
 #   src/Physics/GasSimulatorHost.cpp
 #   src/Physics/VDBVolumeHost.cpp
 #   src/Physics/VDBVolumeManager.cpp
 #   src/UI/PlayerOperatorCameraUI.cpp
-#   src/UI/PlayerOperatorGameUI.cpp
-#   src/UI/PlayerOperatorHiddenUI.cpp
-#   src/UI/PlayerOperatorLibraryUI.cpp
-#   src/UI/PlayerOperatorSettingsUI.cpp
-#   src/UI/PlayerOperatorUI.cpp
 #   src/Utils/TextureCompressionCache.cpp

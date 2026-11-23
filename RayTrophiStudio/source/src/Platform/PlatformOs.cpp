@@ -18,8 +18,10 @@
 #include <limits>
 #include <unistd.h>
 #ifdef __ANDROID__
-#include <SDL_rwops.h>
 #include <SDL_system.h>
+#include <android/asset_manager.h>
+#include <android/asset_manager_jni.h>
+#include <jni.h>
 #include <iterator>
 #include <set>
 #include <sstream>
@@ -214,21 +216,53 @@ bool secureRandomBytes(void* out, std::size_t size) {
 #ifdef __ANDROID__
 namespace {
 
-// SDL_RWFromFile with a RELATIVE path reads from the APK assets on Android.
+// APK assets are read through AAssetManager, never SDL_RWFromFile: for a relative path SDL2
+// first fopen()s <internal storage>/<path>, which is exactly where extracted copies live. After
+// an app update it would hand back the stale extracted file and copy it onto itself.
+AAssetManager* apkAssetManager() {
+    static AAssetManager* manager = nullptr;
+    static jobject manager_ref = nullptr;   // keeps the Java AssetManager alive for the process
+    if (manager) return manager;
+    auto* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
+    auto activity = static_cast<jobject>(SDL_AndroidGetActivity());
+    if (!env || !activity) return nullptr;
+    jclass activity_class = env->GetObjectClass(activity);
+    jmethodID get_assets =
+        env->GetMethodID(activity_class, "getAssets", "()Landroid/content/res/AssetManager;");
+    jobject assets = get_assets ? env->CallObjectMethod(activity, get_assets) : nullptr;
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    if (assets) {
+        manager_ref = env->NewGlobalRef(assets);
+        manager = AAssetManager_fromJava(env, manager_ref);
+        env->DeleteLocalRef(assets);
+    }
+    env->DeleteLocalRef(activity_class);
+    env->DeleteLocalRef(activity);
+    return manager;
+}
+
+AAsset* openApkAsset(const std::string& path) {
+    AAssetManager* manager = apkAssetManager();
+    return manager ? AAssetManager_open(manager, path.c_str(), AASSET_MODE_STREAMING) : nullptr;
+}
+
 bool readApkAsset(const std::string& path, std::string& out) {
-    SDL_RWops* rw = SDL_RWFromFile(path.c_str(), "rb");
-    if (!rw) return false;
-    const Sint64 size = SDL_RWsize(rw);
-    if (size < 0) { SDL_RWclose(rw); return false; }
-    out.resize(static_cast<std::size_t>(size));
-    const std::size_t got = size > 0 ? SDL_RWread(rw, out.data(), 1, out.size()) : 0;
-    SDL_RWclose(rw);
+    AAsset* asset = openApkAsset(path);
+    if (!asset) return false;
+    out.resize(static_cast<std::size_t>(AAsset_getLength64(asset)));
+    std::size_t got = 0;
+    while (got < out.size()) {
+        const int n = AAsset_read(asset, out.data() + got, out.size() - got);
+        if (n <= 0) break;
+        got += static_cast<std::size_t>(n);
+    }
+    AAsset_close(asset);
     return got == out.size();
 }
 
 bool copyApkAsset(const std::string& relative, const std::filesystem::path& target) {
-    SDL_RWops* rw = SDL_RWFromFile(relative.c_str(), "rb");
-    if (!rw) return false;
+    AAsset* asset = openApkAsset(relative);
+    if (!asset) return false;
     std::error_code error;
     std::filesystem::create_directories(target.parent_path(), error);
     const std::filesystem::path partial = target.string() + ".partial";
@@ -236,12 +270,13 @@ bool copyApkAsset(const std::string& relative, const std::filesystem::path& targ
     bool ok = static_cast<bool>(out);
     std::vector<char> buffer(1 << 20);
     while (ok) {
-        const std::size_t got = SDL_RWread(rw, buffer.data(), 1, buffer.size());
+        const int got = AAsset_read(asset, buffer.data(), buffer.size());
+        if (got < 0) { ok = false; break; }
         if (got == 0) break;
         out.write(buffer.data(), static_cast<std::streamsize>(got));
         ok = static_cast<bool>(out);
     }
-    SDL_RWclose(rw);
+    AAsset_close(asset);
     out.close();
     if (!ok || !out) { std::filesystem::remove(partial, error); return false; }
     std::filesystem::rename(partial, target, error);   // replaces an older copy atomically

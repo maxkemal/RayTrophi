@@ -2,7 +2,6 @@
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_scalar_block_layout : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
-#extension GL_EXT_nonuniform_qualifier : enable
 
 // Realtime SurfaceSDF compositor. The producer and Vulkan RT keep ownership of
 // the field; this pass reads the exact same VkVolumeInstance bytes through a raw
@@ -26,7 +25,12 @@ layout(set = 0, binding = 0, std430) readonly buffer MaterialBuffer {
 layout(set = 0, binding = 4, std430) readonly buffer MaterialExtBuffer {
     MaterialExt materialsExt[];
 };
-layout(set = 0, binding = 1) uniform sampler2D textures[];
+#define MATERIAL_TEXTURE_FRAGMENT
+#define MATERIAL_TEXTURE_BINDING 1
+#define MATERIAL_TEXTURE_REF_BINDING 29
+#include "material_texture_arrays.glsl"
+#undef MATERIAL_TEXTURE_BINDING
+#undef MATERIAL_TEXTURE_REF_BINDING
 layout(set = 0, binding = 2) uniform sampler2D envMaps[2];
 layout(set = 0, binding = 9) uniform sampler2D worldEnvironment;
 layout(set = 0, binding = 13) uniform sampler2D worldIrradiance;
@@ -353,9 +357,9 @@ bool projectOpaqueRefraction(vec3 origin, vec3 direction, float distance,
 vec4 sampleTriplanar(uint textureIndex, vec3 p, vec3 n, vec2 scale, vec2 offset) {
     vec3 w = pow(abs(n), vec3(4.0));
     w /= max(w.x + w.y + w.z, 1e-5);
-    vec4 x = textureLod(textures[nonuniformEXT(textureIndex)], p.zy * scale + offset, 0.0);
-    vec4 y = textureLod(textures[nonuniformEXT(textureIndex)], p.xz * scale + offset, 0.0);
-    vec4 z = textureLod(textures[nonuniformEXT(textureIndex)], p.xy * scale + offset, 0.0);
+    vec4 x = sampleMaterialTextureLod(uint(textureIndex), p.zy * scale + offset, 0.0);
+    vec4 y = sampleMaterialTextureLod(uint(textureIndex), p.xz * scale + offset, 0.0);
+    vec4 z = sampleMaterialTextureLod(uint(textureIndex), p.xy * scale + offset, 0.0);
     return x * w.x + y * w.y + z * w.z;
 }
 
@@ -541,7 +545,7 @@ void main() {
     if (hasMaterial) matx = materialsExt[mi];
     vec3 albedo = hasMaterial ? vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b)
                               : volVec3(nearestVolume, 88u);
-    if (hasMaterial && mat.albedo_tex > 0u) {
+    if (hasMaterial && materialTextureValid(uint(mat.albedo_tex))) {
         albedo = sampleTriplanar(mat.albedo_tex, p, nearestN,
             vec2(mat.uv_scale_x, mat.uv_scale_y),
             vec2(mat.uv_offset_x, mat.uv_offset_y)).rgb;
@@ -555,21 +559,21 @@ void main() {
     if (hasMaterial) {
         vec2 uvScale = vec2(mat.uv_scale_x, mat.uv_scale_y);
         vec2 uvOffset = vec2(mat.uv_offset_x, mat.uv_offset_y);
-        if (mat.roughness_tex > 0u) {
+        if (materialTextureValid(uint(mat.roughness_tex))) {
             roughness = samplePackedRoughness(
                 sampleTriplanar(mat.roughness_tex, p, nearestN, uvScale, uvOffset),
                 roughness, mat.flags);
         }
-        if (mat.metallic_tex > 0u) {
+        if (materialTextureValid(uint(mat.metallic_tex))) {
             metallic = samplePackedMetallic(
                 sampleTriplanar(mat.metallic_tex, p, nearestN, uvScale, uvOffset),
                 mat.flags);
         }
-        if (mat.transmission_tex > 0u) {
+        if (materialTextureValid(uint(mat.transmission_tex))) {
             transmission *= sampleTriplanar(
                 mat.transmission_tex, p, nearestN, uvScale, uvOffset).r;
         }
-        if (mat.specular_tex > 0u) {
+        if (materialTextureValid(uint(mat.specular_tex))) {
             specular *= sampleTriplanar(
                 mat.specular_tex, p, nearestN, uvScale, uvOffset).r;
         }
@@ -668,7 +672,7 @@ void main() {
     vec3 emission = hasMaterial
         ? vec3(mat.emission_r, mat.emission_g, mat.emission_b) * mat.emission_strength
         : volVec3(nearestVolume, 136u) * volFloat(nearestVolume, 148u);
-    if (hasMaterial && mat.emission_tex > 0u) {
+    if (hasMaterial && materialTextureValid(uint(mat.emission_tex))) {
         emission = sampleTriplanar(mat.emission_tex, p, nearestN,
             vec2(mat.uv_scale_x, mat.uv_scale_y),
             vec2(mat.uv_offset_x, mat.uv_offset_y)).rgb * mat.emission_strength;

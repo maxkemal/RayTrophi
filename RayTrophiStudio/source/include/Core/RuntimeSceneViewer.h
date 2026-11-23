@@ -69,6 +69,8 @@ private:
     bool frame_available_ = false;
     bool refresh_requested_ = false;
     bool default_material_used_ = false;
+    uint32_t loader_api_ = 0;
+    uint32_t device_api_ = 0;
     bool material_buffer_ready_ = false;
     bool simulation_stopped_ = false;
     std::string simulation_error_;

@@ -4,7 +4,6 @@
 #extension GL_EXT_buffer_reference_uvec2 : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
 #extension GL_EXT_scalar_block_layout : require
-#extension GL_EXT_nonuniform_qualifier : require
 layout(local_size_x=8, local_size_y=8) in;
 layout(set=0,binding=0) uniform accelerationStructureEXT rfScene;
 layout(set=0,binding=1) uniform sampler2D rfDepth;
@@ -24,7 +23,11 @@ layout(set=0,binding=3,std430) readonly buffer Hits { HitInstance hits[]; };
 #include "material_struct.glsl"
 #include "material_preview_uv.glsl"
 layout(set=0,binding=4,std430) readonly buffer Materials { Material materials[]; };
-layout(set=0,binding=5) uniform sampler2D textures[];
+#define MATERIAL_TEXTURE_BINDING 5
+#define MATERIAL_TEXTURE_REF_BINDING 8
+#include "material_texture_arrays.glsl"
+#undef MATERIAL_TEXTURE_BINDING
+#undef MATERIAL_TEXTURE_REF_BINDING
 #include "surface_sdf_shadow_query.glsl"
 struct ShadowLight { vec4 positionType; vec4 toLight; };
 layout(set = 0, binding = 7, std430) readonly buffer ShadowLights {
@@ -60,16 +63,14 @@ bool occludes(uint instance, uint triangle, vec2 bary) {
     Material mat=materials[id];
     float opacity=clamp(mat.opacity,0.0,1.0);
     if(opacity==0.0)return false;
-    if(mat.opacity_tex==0u || all(equal(hit.uvs,uvec2(0))))return materialCoverageOpacity(opacity,(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>0.0;
-    // Preparation rejects missing/out-of-range texture slots.
-    if(mat.opacity_tex>=pc.flags.x)return true;
+    if(!materialTextureValid(uint(mat.opacity_tex)) || all(equal(hit.uvs,uvec2(0))))return materialCoverageOpacity(opacity,(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>0.0;
     UVs coords=UVs(hit.uvs);
     vec2 a=vec2(coords.uv[corner.x*2u],coords.uv[corner.x*2u+1u]);
     vec2 b=vec2(coords.uv[corner.y*2u],coords.uv[corner.y*2u+1u]);
     vec2 c=vec2(coords.uv[corner.z*2u],coords.uv[corner.z*2u+1u]);
     vec2 uv=a*(1.0-bary.x-bary.y)+b*bary.x+c*bary.y;
     uv.y=1.0-uv.y; // same convention as material_preview_shadow.vert
-    vec4 texel=textureLod(textures[nonuniformEXT(mat.opacity_tex)],applyUVTransform(uv,mat),0.0);
+    vec4 texel=sampleMaterialTextureLod(uint(mat.opacity_tex),applyUVTransform(uv,mat),0.0);
     bool alpha=(mat.flags&256u)!=0u || mat.opacity_tex==mat.albedo_tex;
     return materialCoverageOpacity(opacity*(alpha?texel.a:texel.r),(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>=0.1;
 }

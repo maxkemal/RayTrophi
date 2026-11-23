@@ -7445,6 +7445,16 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         applied["rt_shadow_requested"] = t.rt_shadow_requested;
         applied["rt_shadow_ready"] = t.rt_shadow_ready;
         applied["rt_cascades_replaced"] = t.rt_cascades_replaced;
+        applied["tiled_gpu"] = t.tiled_gpu;
+        {
+            py::dict spec;
+            spec["active"] = t.material_spec_active;
+            spec["terrain"] = t.material_spec_terrain;
+            spec["graph"] = t.material_spec_graph;
+            spec["weather"] = t.material_spec_weather;
+            spec["rebuilds"] = t.material_spec_rebuilds;
+            applied["feature_spec"] = spec;
+        }
         applied["directional_cascades"] = t.directional_cascades;
         applied["shadowed_lights"] = t.shadowed_lights;
         applied["scene_lights"] = t.scene_lights;

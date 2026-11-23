@@ -837,7 +837,7 @@ float isoPoreOffset(VkVolumeInstance vol, vec3 worldPos) {
 float isoAlphaOffset(VkVolumeInstance vol, vec3 worldPos) {
     if (vol.iso_material_index <= 0.5) return 0.0;          // no bound material
     Material am = materials.m[uint(vol.iso_material_index - 1.0)];
-    if (am.opacity_tex == 0u) return 0.0;                   // off: not one fetch
+    if (materialTextureMissing(am.opacity_tex)) return 0.0; // off: not one fetch
 
     // Tri-planar with EQUAL weights, not the sharpened-normal blend the albedo
     // path uses. There is no normal available here and there cannot be: this
@@ -852,9 +852,9 @@ float isoAlphaOffset(VkVolumeInstance vol, vec3 worldPos) {
     vec2 sc = vec2(abs(am.uv_scale_x) > 1e-6 ? am.uv_scale_x : 1.0,
                    abs(am.uv_scale_y) > 1e-6 ? am.uv_scale_y : 1.0);
     vec2 of = vec2(am.uv_offset_x, am.uv_offset_y);
-    vec4 tx = textureLod(materialTextures[nonuniformEXT(am.opacity_tex)], p.zy * sc + of, 0.0)
-            + textureLod(materialTextures[nonuniformEXT(am.opacity_tex)], p.xz * sc + of, 0.0)
-            + textureLod(materialTextures[nonuniformEXT(am.opacity_tex)], p.xy * sc + of, 0.0);
+    vec4 tx = sampleMaterialTextureLod(am.opacity_tex, p.zy * sc + of, 0.0)
+            + sampleMaterialTextureLod(am.opacity_tex, p.xz * sc + of, 0.0)
+            + sampleMaterialTextureLod(am.opacity_tex, p.xy * sc + of, 0.0);
     tx *= (1.0 / 3.0);
 
     float mask = ((am.flags & MAT_FLAG_OPACITY_RGBA) != 0u) ? tx.a : tx.r;

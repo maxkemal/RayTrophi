@@ -1,4 +1,5 @@
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
 #include "globals.h"
 #include <algorithm>
 #include <fstream>
@@ -83,8 +84,8 @@ public:
 RayFusion::ScreenGiStatus VulkanBackendAdapter::screenGiStatus() const {
     RayFusion::ScreenGiStatus out;out.settings=m_screenGiSettings;
     out.supported=m_device && m_device->isInitialized() &&
-        m_device->getCapabilities().supportsRayQuery && m_device->getCapabilities().supportsDescriptorIndexing;
-    if (!out.supported) out.reason="hardware ray query and descriptor indexing required";
+        m_device->getCapabilities().supportsRayQuery;
+    if (!out.supported) out.reason="hardware ray query required";
     else if (!out.settings.enabled) out.reason="disabled";
     else if (m_viewportMode!=ViewportMode::MaterialPreview ||
         ::render_settings.material_preview_lighting_preset!=MaterialPreviewLightingPreset::Scene)
@@ -199,33 +200,29 @@ void VulkanBackendAdapter::prepareScreenGiFrame() {
     const auto device=m_device->getDevice();
     VkPhysicalDeviceProperties props{};vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(),&props);
     if (!s.setLayout) {
-        s.textureCount=(std::min)(uint32_t(VULKAN_TEXTURE_CAPACITY),
-            props.limits.maxPerStageDescriptorSampledImages>2?props.limits.maxPerStageDescriptorSampledImages-2:1u);
+        s.textureCount=Backend::MaterialTextureBinding::kPageCount;
         // No sampled material slot may silently turn into a placeholder or scalar.
         if (props.limits.maxPushConstantsSize<sizeof(GiPush)) {s.reason="screen GI push constants unsupported";return;}
         // ★ 13 binding: 12 = emissive ucgen tablosu. `rfEmissives` statik olarak
         //   kullanilan bir kaynak, yani BEYAN eden gecis onu BAGLAMAK zorunda.
-        VkDescriptorSetLayoutBinding bindings[13]{};
+        VkDescriptorSetLayoutBinding bindings[14]{};
         for (uint32_t i=0;i<13;++i) {
             bindings[i].binding=i;bindings[i].descriptorCount=1;
             bindings[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
             bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         }
         bindings[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (auto i:{2u,3u,7u}) bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[7].descriptorCount=s.textureCount;
+        for (auto i:{2u,3u}) bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[7]=Backend::MaterialTextureBinding::pagesBinding(7,VK_SHADER_STAGE_COMPUTE_BIT);
+        bindings[13]=Backend::MaterialTextureBinding::refTableBinding(14,VK_SHADER_STAGE_COMPUTE_BIT);
         VkDescriptorSetLayoutCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        ci.bindingCount=13;ci.pBindings=bindings;
+        ci.bindingCount=14;ci.pBindings=bindings;
         if (vkCreateDescriptorSetLayout(device,&ci,nullptr,&s.setLayout)!=VK_SUCCESS) {s.reason="screen GI descriptor layout failed";return;}
     }
-    for (const auto& m:m_cachedGpuMaterials) {
-        for (uint32_t slot:{m.albedo_tex,m.emission_tex,m.opacity_tex,m.metallic_tex,m.specular_tex}) {
-            if (slot>=s.textureCount) {s.reason="material texture exceeds screen GI descriptor capacity";return;}
-        }
-    }
+    // Material slots reach the shader through the slot->ref table (binding 14).
     if (!s.pool) {
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,10},{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,s.textureCount+2}};
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,11},Backend::MaterialTextureBinding::pagesPoolSize(2u)};
         VkDescriptorPoolCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         ci.maxSets=1;ci.poolSizeCount=3;ci.pPoolSizes=sizes;
         if (vkCreateDescriptorPool(device,&ci,nullptr,&s.pool)!=VK_SUCCESS) {s.reason="screen GI descriptor pool failed";return;}
@@ -266,10 +263,9 @@ void VulkanBackendAdapter::prepareScreenGiFrame() {
     if (!s.stats.buffer) {s.reason="screen GI stats allocation failed";return;}
     VkDescriptorImageInfo env{envSampler,envView,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     VkDescriptorImageInfo depth{m_interactiveViewport.postSampler,m_interactiveViewport.depthImage.view,VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL};
-    std::vector<VkDescriptorImageInfo> textures(s.textureCount,env);
-    for (const auto& entry:m_uploadedImages) {
-        if (entry.first>0 && uint64_t(entry.first)<s.textureCount && entry.second.view && entry.second.sampler)
-            textures[size_t(entry.first)]={entry.second.sampler,entry.second.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    Backend::MaterialTextureBinding::Descriptors textures;
+    if (!Backend::MaterialTextureBinding::collect(*m_device,m_textureStorage,textures)) {
+        s.reason="material texture pages unavailable";return;
     }
     const VkAccelerationStructureKHR tlas=m_device->getTLASHandle();
     VkWriteDescriptorSetAccelerationStructureKHR as{};as.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR;
@@ -278,7 +274,7 @@ void VulkanBackendAdapter::prepareScreenGiFrame() {
         {bounce[1].buffer,0,VK_WHOLE_SIZE},{bounce[2].buffer,0,VK_WHOLE_SIZE},
         {s.counters.buffer,0,VK_WHOLE_SIZE},{s.output.buffer,0,VK_WHOLE_SIZE},
         {bounce[3].buffer,0,VK_WHOLE_SIZE},{}};
-    VkWriteDescriptorSet writes[13]{};
+    VkWriteDescriptorSet writes[14]{};
     for (uint32_t i=0;i<13;++i) {
         writes[i].sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;writes[i].dstSet=s.set;
         writes[i].dstBinding=i;writes[i].descriptorCount=1;writes[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -288,7 +284,12 @@ void VulkanBackendAdapter::prepareScreenGiFrame() {
     writes[2].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[2].pImageInfo=&env;
     writes[3].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[3].pImageInfo=&depth;
     for (uint32_t i=0;i<3;++i) writes[i+4].pBufferInfo=&bufferInfos[i+1];
-    writes[7].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[7].descriptorCount=s.textureCount;writes[7].pImageInfo=textures.data();
+    {
+        VkWriteDescriptorSet textureWrites[2];
+        Backend::MaterialTextureBinding::makeWrites(s.set,7,14,textures,textureWrites);
+        writes[7]=textureWrites[0];
+        writes[13]=textureWrites[1];
+    }
     writes[8].pBufferInfo=&bufferInfos[4];writes[9].pBufferInfo=&bufferInfos[5];
     // 10 ve 11 bu gecisin shader'inda YOK; kullanilmayan bir binding'i gecerli
     // bir tamponla doldurmak, layout'u tek sayi degistirmekten daha guvenli.
@@ -305,7 +306,7 @@ void VulkanBackendAdapter::prepareScreenGiFrame() {
     //   yok, dogrulama katmani kapaliysa uyari yok, yalnizca eksik isik --
     //   ve eksik dolayli isik, ambient'in fazla baskin gorunmesinin
     //   sebeplerinden biridir.
-    vkUpdateDescriptorSets(device,13,writes,0,nullptr);
+    vkUpdateDescriptorSets(device,14,writes,0,nullptr);
     s.prepared=true;
     s.reason="same-frame diffuse GI; geometric depth normals; scene point/directional bounce only; unsupported hits fall back";
 }

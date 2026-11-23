@@ -1,4 +1,5 @@
 #include "Core/PlayerOperator.h"
+#include "UI/PlayerKidLauncher.h"
 #include "Core/PlayerSceneLoad.h"
 #include "Core/Localization.h"
 #include "Core/PlayerCamera.h"
@@ -6,6 +7,7 @@
 #include "Paint/HiddenGameObjects.h"
 #include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiPlayerOperator.h"
+#include "UI/PlayerOperatorUI.h"
 #include "Api/RtApiBodyPose.h"
 #include "Api/RtApiExternalBody.h"
 #include "Api/RtApiGame.h"
@@ -217,6 +219,7 @@ struct State {
     std::string error;
     bool display_restored = false;
     bool loaded = false;
+    bool saved_locale = false;
     bool camera_was_active = false;
     bool camera_owns_card = false;
     std::string audio_project;
@@ -236,6 +239,7 @@ struct State {
                                          "avatar_assignments", "display", "audio", "monitor", "locale"}) {
                     if (saved.contains(name) && saved[name].type() == preferences[name].type()) {
                         preferences[name] = saved[name];
+                        saved_locale |= std::string(name) == "locale";
                     }
                 }
                 if (saved.contains("camera") && saved["camera"].is_object()) {
@@ -256,7 +260,13 @@ struct State {
                 std::string("Operator settings were invalid; defaults loaded: ") + exception.what();
         }
         std::string language_error;
+#ifdef __ANDROID__
+        // Without a saved choice the OS language list (applied at startup) stays in force.
+        if (saved_locale &&
+            !Localization::setLocale(preferences.value("locale", std::string("en")), language_error)) {
+#else
         if (!Localization::setLocale(preferences.value("locale", std::string("en")), language_error)) {
+#endif
             const auto unavailable = language_error;
             std::string ignored;
             Localization::setLocale("en", ignored);
@@ -406,6 +416,13 @@ void tickPlayerOperator() {
             if (s.launch_display.contains("width") || s.launch_display.contains("height")) {
                 patch.erase("fullscreen");
             }
+#ifdef __ANDROID__
+            // First launch on a phone: start at the cheapest picture level. A saved choice (or an
+            // explicit --render-scale) always wins; the kid launcher's quality button persists it.
+            if (!patch.contains("render_scale") && !s.launch_display.contains("render_scale")) {
+                patch["render_scale"] = 0.5;
+            }
+#endif
             if (!patch.empty()) {
                 const auto restored = setRuntimeDisplay(patch);
                 require(restored.ok, restored.error);
@@ -456,6 +473,56 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
         s.context = &context;
         if (!context.active_model_path.empty()) {
             s.current_project = pathKey(projectPathFromUtf8(context.active_model_path));
+        }
+        if (operation == "console.open" || operation == "console.close" ||
+            operation == "console.status") {
+            // The menu is a window onto this service, not a second authority: scripts and tests
+            // open and read it the same way a finger does.
+            if (operation == "console.open") {
+                keys(config, {"page"});
+                const auto page = config.value("page", std::string("games"));
+                require(page == "games" || page == "settings" || page == "display" ||
+                            page == "audio" || page == "camera" || page == "players",
+                        "Unknown console page");
+                showPlayerOperator(page);
+            } else {
+                keys(config, {});
+                if (operation == "console.close") {
+                    closePlayerOperator();
+                }
+            }
+            output = {{"open", playerConsoleOpen()}, {"page", playerOperatorPage()}};
+            return rtapi::Result::success();
+        }
+        if (operation == "launcher.status" || operation == "launcher.show" ||
+            operation == "launcher.select" || operation == "launcher.exit") {
+            // Android kid launcher (library / loading / pause): screen state as values, the same
+            // state a finger changes. Other platforms have no launcher.
+#ifdef __ANDROID__
+            std::string launcher_error;
+            if (operation == "launcher.status") {
+                keys(config, {});
+            } else if (operation == "launcher.exit") {
+                keys(config, {});
+                kidLauncherExit();
+            } else if (operation == "launcher.show") {
+                keys(config, {"screen"});
+                if (!kidLauncherShow(text(config, "screen"), launcher_error)) {
+                    return rtapi::Result::fail(launcher_error);
+                }
+            } else {
+                keys(config, {"index"});
+                require(config.contains("index") && config["index"].is_number_integer(),
+                        "index must be an integer");
+                if (!kidLauncherSelect(config["index"].get<int>(), launcher_error)) {
+                    return rtapi::Result::fail(launcher_error);
+                }
+            }
+            output = kidLauncherStatus();
+            return rtapi::Result::success();
+#else
+            return rtapi::Result::fail("The kid launcher exists only in the Android Player");
+#endif
         }
         if (operation == "language.status") {
             keys(config, {});

@@ -25,6 +25,14 @@
 #ifndef MATERIAL_PROGRAM_GLSL
 #define MATERIAL_PROGRAM_GLSL
 
+// Raster entry points select their array binding before including the VM.
+// RT entry points already declare the bindless sampler table themselves.
+#ifndef MATERIAL_TEXTURE_ARRAYS_GLSL
+#define MATERIAL_TEXTURE_BINDLESS
+#include "material_texture_arrays.glsl"
+#undef MATERIAL_TEXTURE_BINDLESS
+#endif
+
 #ifndef MATERIAL_PROGRAM_BINDING
 #define MATERIAL_PROGRAM_BINDING 23
 #endif
@@ -368,16 +376,16 @@ MatProgOut evalMaterialProgramWithObjectRandom(
             // sees identical inputs on CPU and GPU.
             vec3 t = regs[in0];
             uint texID = aux;
-            if (texID != 0u) {
-                r = texture(materialTextures[nonuniformEXT(texID)], vec2(t.x, 1.0 - t.y)).rgb;
+            if (materialTextureValid(texID)) {
+                r = sampleMaterialTexture(texID, vec2(t.x, 1.0 - t.y)).rgb;
             } else {
                 r = vec3(0.8, 0.0, 0.8);
             }
         } else if (op == 4u) {     // TexAlpha
             vec3 t = regs[in0];
             uint texID = aux;
-            if (texID != 0u) {
-                r = vec3(texture(materialTextures[nonuniformEXT(texID)], vec2(t.x, 1.0 - t.y)).a);
+            if (materialTextureValid(texID)) {
+                r = vec3(sampleMaterialTexture(texID, vec2(t.x, 1.0 - t.y)).a);
             } else {
                 r = vec3(1.0);
             }

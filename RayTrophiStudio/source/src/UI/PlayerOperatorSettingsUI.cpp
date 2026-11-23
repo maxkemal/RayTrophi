@@ -21,7 +21,7 @@ void players() {
     label(tr("player.3d_avatars", "3D AVATARS"), violet);
     const auto characters = ui.status.value("characters", json::array());
     if (characters.empty()) {
-        ImGui::TextWrapped(tr("player.this_scene_has_no_character_prepare_a_rigged_character_in_"
+        wrapped(tr("player.this_scene_has_no_character_prepare_a_rigged_character_in_"
                               "studio_and_save_t_5b1f2051",
                               "This scene has no character. Prepare a rigged character in Studio "
                               "and save the scene to use avatar mode."));
@@ -40,9 +40,9 @@ void players() {
         }
         ImGui::PopID();
     }
-    ImGui::SetNextItemWidth(160);
+    ImGui::SetNextItemWidth(S(160));
     ImGui::InputInt(trId("player.tracked_person_id", "Tracked person ID"), &ui.person_id);
-    ImGui::TextWrapped(tr("player.person_ids_appear_in_the_live_tracking_check_below_each_avatar_"
+    wrapped(tr("player.person_ids_appear_in_the_live_tracking_check_below_each_avatar_"
                           "binds_to_one_42cbe919",
                           "Person IDs appear in the live tracking check below. Each avatar binds "
                           "to one person; it is not copied for every player."));
@@ -86,7 +86,7 @@ void players() {
                     person["id"].get<int>(), person["confidence"].get<double>() * 100);
     }
     if (persons.empty()) {
-        ImGui::TextWrapped(
+        wrapped(
             tr("player.start_tracking_in_camera_room_then_stand_inside_the_calibrated_floor_area",
                "Start tracking in Camera & room, then stand inside the calibrated floor area."));
     }
@@ -125,7 +125,7 @@ void display() {
     const auto size = status.value("render_base", json::array({0, 0}));
     const auto title =
         std::to_string(size[0].get<int>()) + " x " + std::to_string(size[1].get<int>());
-    ImGui::SetNextItemWidth(260);
+    ImGui::SetNextItemWidth(S(260));
     if (ImGui::BeginCombo(trId("player.game_resolution", "Game resolution"), title.c_str())) {
         for (const auto &mode : status.value("resolutions", json::array())) {
             const auto name =
@@ -137,12 +137,12 @@ void display() {
         ImGui::EndCombo();
     }
     float scale = status.value("render_scale", 1.0f);
-    ImGui::SetNextItemWidth(260);
+    ImGui::SetNextItemWidth(S(260));
     if (ImGui::SliderFloat(trId("player.render_scale", "Render scale"), &scale, .25f, 1, "%.2f")) {
         call("display.configure", {{"render_scale", scale}});
     }
     const int pacing = status.value("pacing_hz", 60);
-    ImGui::SetNextItemWidth(260);
+    ImGui::SetNextItemWidth(S(260));
     if (ImGui::BeginCombo(trId("player.frame_pacing", "Frame pacing"),
                           pacing ? (std::to_string(pacing) + " Hz").c_str()
                                  : tr("player.uncapped", "Uncapped"))) {
@@ -178,7 +178,7 @@ void audio() {
         }
         float gain = bus.value("gain", 1.0f);
         bool muted = bus.value("muted", false);
-        ImGui::SetNextItemWidth(320);
+        ImGui::SetNextItemWidth(S(320));
         if (ImGui::SliderFloat(trId("player.master_volume", "Master volume"), &gain, 0, 1,
                                "%.2f")) {
             call("audio.configure", {{"gain", gain}});
@@ -188,9 +188,16 @@ void audio() {
         }
     }
     ImGui::Spacing();
+#ifdef _WIN32
     label(tr("player.output_device_windows_default", "Output device: Windows default"), mint);
-    ImGui::TextWrapped(
+    wrapped(
         tr("player.select_speakers_or_hdmi_audio_in_windows_player_uses_the_shared_audio_service",
            "Select speakers or HDMI audio in Windows. Player uses the shared audio service."));
+#else
+    label(tr("player.output_device_android_default", "Output device: system default"), mint);
+    ImGui::TextWrapped("%s", tr("player.select_output_in_android",
+                                "Choose speakers or headphones with the device volume controls. "
+                                "Player uses the shared audio service."));
+#endif
 }
 } // namespace PlayerConsole

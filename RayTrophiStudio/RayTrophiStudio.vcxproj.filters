@@ -2845,6 +2845,15 @@
     <ClCompile Include="source\src\Backend\VulkanViewportBackend.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureBinding.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanMaterialTextureStorage.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanTextureCompaction.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanViewportParticles.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>

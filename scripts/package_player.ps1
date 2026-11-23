@@ -34,7 +34,7 @@ param(
         'RayTrophiStudio\assets\scenes\kids-play-room\kids-play-room.rtp'
     ),
     # Display names for the F6 list, same order as -Scenes. Empty = file name.
-    [string[]]$SceneNames = @('Gizli Renkler', 'Pastel Oyun Odası'),
+    [string[]]$SceneNames = @('Gizli Oyuncaklar', 'Pastel Oyun Odası'),
     # Canonical shared output. Use other destinations only for explicit diagnostics.
     [string]$OutDir = 'dist\RayTrophiPlayer',
     [switch]$Zip,

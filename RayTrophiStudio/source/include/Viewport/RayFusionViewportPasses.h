@@ -25,6 +25,10 @@ const char* rayFusionDeviceRejection(
 // "; ". Empty when nothing was rejected. Lets the Player say WHY it has no viewport on screen
 // instead of only in the log (Android A6a: no silent black screen on an unsupported GPU).
 void recordRayFusionDeviceRejection(const char* adapter, const char* reason);
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+void recordAndroidRayFusionDeviceRejection(const VkPhysicalDeviceProperties& props,
+                                          const char* reason);
+#endif
 void clearRayFusionDeviceRejections();
 std::string rayFusionDeviceRejections();
 void logRayFusionDeviceLimits(

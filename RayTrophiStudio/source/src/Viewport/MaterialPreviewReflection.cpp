@@ -1,5 +1,7 @@
 ﻿#include "Backend/VulkanTlasGeneration.h"
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
+#include "Backend/VulkanMaterialTextureStorage.h"
 #include "globals.h"
 #include <algorithm>
 #include <cstring>
@@ -165,10 +167,9 @@ RayFusion::ReflectionStatus VulkanBackendAdapter::reflectionStatus() const {
     out.followedQualityPreset = m_reflectionSettings.followQualityPreset;
     out.qualityPreset = presetName(preset);
     out.supported = m_device && m_device->isInitialized() &&
-                    m_device->getCapabilities().supportsRayQuery &&
-                    m_device->getCapabilities().supportsDescriptorIndexing;
+                    m_device->getCapabilities().supportsRayQuery;
     if (!out.supported) {
-        out.reason = "hardware ray query and descriptor indexing required";
+        out.reason = "hardware ray query required";
     } else if (!out.settings.enabled) {
         out.reason = "disabled";
     } else if (m_viewportMode != ViewportMode::MaterialPreview ||
@@ -298,17 +299,14 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
     vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &props);
 
     if (!s.setLayout) {
-        s.textureCount = (std::min)(
-            uint32_t(VULKAN_TEXTURE_CAPACITY),
-            props.limits.maxPerStageDescriptorSampledImages > 4
-                ? props.limits.maxPerStageDescriptorSampledImages - 4 : 1u);
+        s.textureCount = Backend::MaterialTextureBinding::kPageCount;
         if (props.limits.maxPushConstantsSize < sizeof(ReflectionPush)) {
             s.reason = "reflection push constants unsupported";
             return;
         }
         // ★ 13 binding: 12 = emissive ucgen tablosu. `rfEmissives` statik olarak
         //   kullanilan bir kaynak, yani BEYAN eden gecis onu BAGLAMAK zorunda.
-        VkDescriptorSetLayoutBinding bindings[14]{};
+        VkDescriptorSetLayoutBinding bindings[15]{};
         for (uint32_t i = 0; i < 14; ++i) {
             bindings[i].binding = i;
             bindings[i].descriptorCount = 1;
@@ -316,13 +314,14 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         }
         bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-        for (auto i : {2u, 3u, 7u, 9u, 10u})
+        for (auto i : {2u, 3u, 9u, 10u})
             bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        bindings[7].descriptorCount = s.textureCount;
+        bindings[7] = Backend::MaterialTextureBinding::pagesBinding(7, VK_SHADER_STAGE_COMPUTE_BIT);
+        bindings[14] = Backend::MaterialTextureBinding::refTableBinding(14, VK_SHADER_STAGE_COMPUTE_BIT);
         bindings[11].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
         VkDescriptorSetLayoutCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        ci.bindingCount = 14;  // 13 = delta buffer (trace writes, filter reads)
+        ci.bindingCount = 15;  // 13 = delta buffer, 14 = material texture slot->ref table
         ci.pBindings = bindings;
         if (vkCreateDescriptorSetLayout(device, &ci, nullptr, &s.setLayout) != VK_SUCCESS) {
             s.reason = "reflection descriptor layout failed";
@@ -330,22 +329,13 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
         }
     }
 
-    // Hicbir malzeme doku slotu sessizce placeholder'a ya da skalara donusmesin.
-    for (const auto& m : m_cachedGpuMaterials) {
-        for (uint32_t slot : {m.albedo_tex, m.emission_tex, m.opacity_tex,
-                              m.metallic_tex, m.specular_tex}) {
-            if (slot >= s.textureCount) {
-                s.reason = "material texture exceeds reflection descriptor capacity";
-                return;
-            }
-        }
-    }
-
+    // Material slots reach the shader through the slot->ref table; a texture
+    // that is not paged reads as missing there (counted by texture_arrays).
     if (!s.pool) {
         VkDescriptorPoolSize sizes[] = {
             {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 10},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, s.textureCount + 4},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 11},   // +1 slot->ref table
+            Backend::MaterialTextureBinding::pagesPoolSize(4u),
             {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1}};
         VkDescriptorPoolCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -433,12 +423,10 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
                                      VK_IMAGE_LAYOUT_GENERAL};
     VkDescriptorImageInfo hdr{VK_NULL_HANDLE, m_interactiveViewport.hdrColorImage.view,
                               VK_IMAGE_LAYOUT_GENERAL};
-    std::vector<VkDescriptorImageInfo> textures(s.textureCount, env);
-    for (const auto& entry : m_uploadedImages) {
-        if (entry.first > 0 && uint64_t(entry.first) < s.textureCount &&
-            entry.second.view && entry.second.sampler)
-            textures[size_t(entry.first)] = {entry.second.sampler, entry.second.view,
-                                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    Backend::MaterialTextureBinding::Descriptors textures;
+    if (!Backend::MaterialTextureBinding::collect(*m_device, m_textureStorage, textures)) {
+        s.reason = "material texture pages unavailable";
+        return;
     }
 
     const VkAccelerationStructureKHR tlas = m_device->getTLASHandle();
@@ -460,7 +448,7 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
         {bounce[3].buffer, 0, VK_WHOLE_SIZE},    // 12 emissive ucgenler
         {s.deltas.buffer, 0, VK_WHOLE_SIZE}};   // 13 yansima deltalari
 
-    VkWriteDescriptorSet writes[14]{};
+    VkWriteDescriptorSet writes[15]{};
     for (uint32_t i = 0; i < 14; ++i) {
         writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[i].dstSet = s.set;
@@ -478,9 +466,12 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
     writes[4].pBufferInfo = &bufferInfos[1];
     writes[5].pBufferInfo = &bufferInfos[2];
     writes[6].pBufferInfo = &bufferInfos[3];
-    writes[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[7].descriptorCount = s.textureCount;
-    writes[7].pImageInfo = textures.data();
+    {
+        VkWriteDescriptorSet textureWrites[2];
+        Backend::MaterialTextureBinding::makeWrites(s.set, 7, 14, textures, textureWrites);
+        writes[7] = textureWrites[0];
+        writes[14] = textureWrites[1];
+    }
     writes[8].pBufferInfo = &bufferInfos[4];
     writes[9].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     writes[9].pImageInfo = &gbNormal;
@@ -510,11 +501,12 @@ void VulkanBackendAdapter::prepareReflectionFrame() {
     mix(uint64_t(s.counters.buffer));
     mix(uint64_t(s.deltas.buffer));
     for (int i = 0; i < 4; ++i) mix(uint64_t(bounce[i].buffer));
-    for (const auto& texture : textures) mix(uint64_t(texture.imageView));
-    mix(uint64_t(s.textureCount));
+    for (const auto& page : textures.pages) mix(uint64_t(page.imageView));
+    mix(uint64_t(textures.refTable.buffer));
+    mix(textureCacheGeneration());
     if (s.descriptorSignature != signature) {
         drainInteractiveViewportInFlight();
-        vkUpdateDescriptorSets(device, 14, writes, 0, nullptr);
+        vkUpdateDescriptorSets(device, 15, writes, 0, nullptr);
         s.descriptorSignature = signature;
     }
 

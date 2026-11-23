@@ -1,6 +1,8 @@
 // Same-frame per-light shadow service. Flat TLAS hit data, shared raster UV policy.
 #include "Backend/VulkanTlasGeneration.h"
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
+#include "Backend/VulkanMaterialTextureStorage.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "RayFusion/ProbeBounce.h"
 #include "globals.h"
@@ -103,29 +105,28 @@ bool VulkanBackendAdapter::ensureRtShadowResources(uint32_t width, uint32_t heig
     if (s.pipeline) return true;
     VkPhysicalDeviceProperties props{};
     vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(),&props);
-    s.textureCount=(std::min)(uint32_t(VULKAN_TEXTURE_CAPACITY),
-        props.limits.maxPerStageDescriptorSampledImages>1u?
-        props.limits.maxPerStageDescriptorSampledImages-1u:1u);
-    VkDescriptorSetLayoutBinding bindings[8]{};
+    s.textureCount=Backend::MaterialTextureBinding::kPageCount;
+    VkDescriptorSetLayoutBinding bindings[9]{};
     for(uint32_t i=0;i<8;++i) {
         bindings[i].binding=i; bindings[i].descriptorCount=1;
         bindings[i].stageFlags=VK_SHADER_STAGE_COMPUTE_BIT;
         bindings[i].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     }
     bindings[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
-    bindings[1].descriptorType=bindings[5].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    bindings[5].descriptorCount=s.textureCount;
+    bindings[1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    bindings[5]=Backend::MaterialTextureBinding::pagesBinding(5,VK_SHADER_STAGE_COMPUTE_BIT);
+    bindings[8]=Backend::MaterialTextureBinding::refTableBinding(8,VK_SHADER_STAGE_COMPUTE_BIT);
     if (!s.setLayout) {
         VkDescriptorSetLayoutCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        ci.bindingCount=8;ci.pBindings=bindings;
+        ci.bindingCount=9;ci.pBindings=bindings;
         if(vkCreateDescriptorSetLayout(vk,&ci,nullptr,&s.setLayout)!=VK_SUCCESS) {
             s.reason="shadow descriptor layout failed";return false;
         }
     }
     if(!s.pool) {
         VkDescriptorPoolSize sizes[]={{VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,1},
-            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,5},
-            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,s.textureCount+1u}};
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,6},   // +1 slot->ref table
+            Backend::MaterialTextureBinding::pagesPoolSize(1u)};
         VkDescriptorPoolCreateInfo ci{};ci.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         ci.maxSets=1;ci.poolSizeCount=3;ci.pPoolSizes=sizes;
         if(vkCreateDescriptorPool(vk,&ci,nullptr,&s.pool)!=VK_SUCCESS) {
@@ -179,7 +180,7 @@ bool VulkanBackendAdapter::rtShadowCoveredLight(RtShadowCoverage& coverage,
     if(!m_rtShadowAllowed){reason="disabled";return false;}
     if(!m_device || !m_device->isInitialized()){reason="no device";return false;}
     const auto& caps=m_device->getCapabilities();
-    if(!caps.supportsRayQuery || !caps.supportsDescriptorIndexing) {
+    if(!caps.supportsRayQuery) {
         reason="ray query and descriptor indexing are required";return false;
     }
     if(m_viewportMode!=ViewportMode::MaterialPreview) {
@@ -280,7 +281,7 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     // below are rewritten, and the ring drained, only when their content
     // changed; see the table signature.
     const auto& caps=m_device->getCapabilities();
-    if(!caps.supportsRayQuery || !caps.supportsDescriptorIndexing) {
+    if(!caps.supportsRayQuery) {
         s.reason="ray query and descriptor indexing are required";
         bindConsumer();clearHeader();return false;
     }
@@ -310,8 +311,11 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
         VulkanRT::VkGpuMaterialCore core{};VulkanRT::VkGpuMaterialExt ext{};
         VulkanRT::splitGpuMaterial(material,core,ext);materials.push_back(core);
         const auto id=core.opacity_tex;
-        if(id && (id>=s.textureCount || m_uploadedImages.find(id)==m_uploadedImages.end() ||
-            !m_uploadedImages.at(id).view || !m_uploadedImages.at(id).sampler)) {
+        // The shader reads opacity through the page arrays: a texture that is not
+        // paged (uploaded after the last compaction) would read as missing.
+        const auto texIt=id ? m_uploadedImages.find(id) : m_uploadedImages.end();
+        if(id && (texIt==m_uploadedImages.end() || !m_textureStorage ||
+            m_textureStorage->refFor(texIt->second)==Backend::MaterialTexturePages::kNoTexture)) {
             s.reason="opacity texture unavailable; using cascades";return false;
         }
     }
@@ -378,6 +382,8 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     tableSignature = rtShadowHashMix(tableSignature,
         reinterpret_cast<uint64_t>(m_interactiveViewport.postSampler));
     tableSignature = rtShadowHashMix(tableSignature, uint64_t(s.textureCount));
+    // Page set and slot->ref table change together with the texture generation.
+    tableSignature = rtShadowHashMix(tableSignature, textureCacheGeneration());
     for(const auto& entry:m_uploadedImages) {
         tableSignature = rtShadowHashMix(tableSignature, uint64_t(entry.first));
         tableSignature = rtShadowHashMix(tableSignature, reinterpret_cast<uint64_t>(entry.second.view));
@@ -410,12 +416,9 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     s.instanceCount=static_cast<uint32_t>(hits.size());
     VkDescriptorImageInfo depth{};depth.sampler=m_interactiveViewport.postSampler;
     depth.imageView=m_interactiveViewport.depthImage.view;depth.imageLayout=VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL;
-    // All slots are initialized. Unused slots use the valid depth descriptor;
-    // CPU validation above guarantees no opacity texture reads those slots.
-    std::vector<VkDescriptorImageInfo> textures(s.textureCount,depth);
-    for(const auto& entry:m_uploadedImages) {
-        if(entry.first<=0 || uint64_t(entry.first)>=s.textureCount || !entry.second.view || !entry.second.sampler)continue;
-        textures[size_t(entry.first)]={entry.second.sampler,entry.second.view,VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    Backend::MaterialTextureBinding::Descriptors textures;
+    if(!Backend::MaterialTextureBinding::collect(*m_device,m_textureStorage,textures)) {
+        s.reason="material texture pages unavailable";return false;
     }
     VkDescriptorBufferInfo buffers[]={{s.mask.buffer,0,VK_WHOLE_SIZE},
         {s.hits.buffer,0,VK_WHOLE_SIZE},{s.materials.buffer,0,VK_WHOLE_SIZE}};
@@ -435,13 +438,15 @@ bool VulkanBackendAdapter::prepareRtShadowFrame(VkCommandBuffer cmd,uint32_t wid
     writes[0].descriptorType=VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;writes[0].pNext=&acceleration;
     writes[1].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;writes[1].pImageInfo=&depth;
     for(uint32_t i=0;i<3;++i)writes[i+2].pBufferInfo=&buffers[i];
-    writes[5].descriptorType=VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    writes[5].descriptorCount=s.textureCount;writes[5].pImageInfo=textures.data();
+    VkWriteDescriptorSet textureWrites[2];
+    Backend::MaterialTextureBinding::makeWrites(s.set,5,8,textures,textureWrites);
+    writes[5]=textureWrites[0];
     writes[6].descriptorType=VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
     writes[6].pBufferInfo=&volumeInfo;
     VkDescriptorBufferInfo lightInfo{s.lights.buffer, 0, VK_WHOLE_SIZE};
     writes[7].pBufferInfo = &lightInfo;
     vkUpdateDescriptorSets(m_device->getDevice(),8,writes,0,nullptr);
+    vkUpdateDescriptorSets(m_device->getDevice(),1,&textureWrites[1],0,nullptr);
     s.tableSignature=tableSignature;s.contentSignature=contentSignature;s.tableSignatureValid=true;
     s.reason.clear();s.prepared=true;m_rtShadowCoveredLastFrame=true;
     prepareScreenGiFrame();
@@ -521,8 +526,7 @@ bool VulkanBackendAdapter::setRtShadow(bool enabled) {
 bool VulkanBackendAdapter::getRtShadowStatus(bool& supported,bool& ready,uint32_t& rays,
                                              uint32_t& cascadesReplaced,std::string& reason) const {
     cascadesReplaced=m_rtShadowCascadesReplaced;
-    supported=m_device && m_device->isInitialized() && m_device->getCapabilities().supportsRayQuery &&
-        m_device->getCapabilities().supportsDescriptorIndexing;
+    supported=m_device && m_device->isInitialized() && m_device->getCapabilities().supportsRayQuery;
     ready=false;rays=0;
     if(!m_rtShadowAllowed){reason="disabled";return supported;}
     if(m_viewportMode!=ViewportMode::MaterialPreview){reason="material preview viewport is not active";return supported;}

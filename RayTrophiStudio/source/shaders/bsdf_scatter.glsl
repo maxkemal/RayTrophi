@@ -1774,13 +1774,14 @@ void scatterWater(vec3 hitPos, vec3 geoNormal, vec3 carrierNormal, vec3 rayDir,
         // against the bank instead of carrying full channel waves.
         riverStrength *= mix(0.45, 1.0, shorePresence);
     }
-    bool useFFTOcean = !isRiver && fft_height_tex > 0u && fft_normal_tex > 0u && fft_ocean_size > 0.001;
+    bool useFFTOcean = !isRiver && materialTextureFftValid(fft_height_tex) &&
+        materialTextureFftValid(fft_normal_tex) && fft_ocean_size > 0.001;
     vec3  waveNormal;
     float foam;
     if (useFFTOcean) {
         vec2 fftUV = fract(vec2(hitPos.x / fft_ocean_size, hitPos.z / fft_ocean_size));
-        float fftHeight = texture(materialTextures[nonuniformEXT(int(fft_height_tex))], fftUV).r;
-        vec2 fftSlopeXZ = texture(materialTextures[nonuniformEXT(int(fft_normal_tex))], fftUV).xy;
+        float fftHeight = sampleMaterialTexture(int(fft_height_tex), fftUV).r;
+        vec2 fftSlopeXZ = sampleMaterialTexture(int(fft_normal_tex), fftUV).xy;
         fftSlopeXZ *= 1.35;
         float slopeLen = length(fftSlopeXZ);
         if (slopeLen > 0.999) {

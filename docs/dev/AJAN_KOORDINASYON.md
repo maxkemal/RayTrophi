@@ -35,6 +35,32 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
 
+- 2026-11-23 Claude T1 ★ TAM DERLEME: `RasterAppliedState` +7 alan (material_spec_*, tiled_gpu), `rtapi::RasterTimingInfo` +6, `VulkanBackendAdapter::sampleRasterAppliedState` artık virtual (VulkanViewportBackend override). `uploadEnvironmentTexture` (HDRI RGBA16F) + `m_uploadFloatAsHalf`. `paint_wet.comp`'a `shared uint s_gate` eklendi; binding ve push AYNI. Player IPC politikasına viewport.quality/set_quality/preview_lighting/set_preview_lighting/taa/set_taa + lights.list/get/set_intensity eklendi.
+
+- 2026-11-23 Codex: Player IPC, Studio ve Python ile ortak dünya işlemlerinden `world.get`, `world.set_mode` ve `world.set_background_color` çağrılarına izin veriyor. Parametreler ve shader ABI aynı.
+
+- 2026-11-22 Claude ★ VIEWPORT DOKU ABI (DAĞITILDI): `material_texture_arrays.glsl` dizi yolu artık SLOT alır ve `MATERIAL_TEXTURE_REF_BINDING` SSBO'sundan (slot→`page<<16|layer`) ref çözer. Binding'ler: preview set 1=32 sayfa, 29=ref tablosu; rt_shadow 5/8; prob izi, yansıma, ekran GI 7/14. Host: `VulkanMaterialTextureBinding.h` (tek yer) + `VulkanMaterialTextureStorage` (sayfalar, dummy, tablo). Viewport descriptor indexing İSTEMEZ; RT render (binding 6) bindless, RT shader'ları HEAD ile aynı. Codex'in shader görevi bitti, satırı kaldırıldı.
+
+- 2026-11-22 Claude ★ YAYGIN STRUCT: `VulkanRT::ImageHandle` += `arrayLayer`, `sharedImage` → TAM DERLEME. `destroyImage` sharedImage ise yalnız view+sampler siler. Doku yazıcıları (`generateMipmaps`, `transitionImageLayout`, 4×`copyBufferToImage*`) sonda `baseArrayLayer=0` parametresi aldı. Doku handle'ını DEĞER olarak saklamayın: sahne batch'i sonunda `compactMaterialTexturesLocked` image/view'ı yerinde değiştirir; id'den yeniden çözün.
+
+- 2026-11-22 Claude doku dizisi ADIM 1 (refactor, ABI AYNI): viewport doku descriptor noktaları yeni `Backend/VulkanMaterialTextureBinding.h/.cpp`'ye toplandı (VulkanViewportBackend, RayFusionProbeTrace, MaterialPreviewRtShadow/Reflection, ScreenGi, RayFusionViewportPasses ret dalı). Studio vcxproj + Player vcxproj/Android cmake yeniden üretildi. RT backend dokunulmadı. Adım 2 (diziye geçiş) bu tek dosyada yapılacak — viewport doku descriptor'ı için oraya yaz, dosyalara dağıtma.
+
+- 2026-11-22 Codex: Shader kaynak ABI'sinde set 0 binding 1/5/6/7, 32 `sampler2DArray` öğesi kullanır. Referans üst 16 bit sayfa, alt 16 bit katmandır. Push constant düzeni aynı. `FramePublication::publish` eski katmanı başka bir sayfadan emekli edebilir. Host layout, descriptor yazımı ve frame zamanlayıcısı geçişi açık. SPIR-V dağıtımı host geçişine bağlı.
+
+- 2026-11-22 Codex atomik doku yayını: tek sayfa için `FramePublication::publish` katman geçişini de commit eder. Etkin veya uçuşta olan descriptor set hazırlığa kabul edilmez. Katman emekliliğinde son gönderilen okuyucu serial'i kullanılır. MSVC x64 ve NDK x86_64/arm64 sözdizimi kontrolü geçti. Canlı bağlantı bekliyor, shader ve push ABI aynı.
+
+- 2026-11-22 Codex doku dizisi transfer ve frame yayını çekirdeği: `submitLayers` bariyerli kopyayı kaydediyor, aday çiftin yayını ayrı okuyucu fence'iyle kaynak tutuyor. Taslak IPC alanları `pending_uploads`, `completed_upload_serial`, `upload_not_ready_rejections`. Renderer ve canlı IPC bağlantısı açık. Descriptor/push ABI değişmedi.
+
+- 2026-11-22 Codex Vulkan malzeme dizi shader kaynak ABI: set 0 preview/gölge binding 1, ray-query gölge 5, RT 6, probe/reflection/screen GI 7 artık 32 sampler2DArray öğesi ve 16+16 sayfa/katman ref ister. Push düzeni değişmedi. Host henüz eski ABI kullanıyor. Geçiş tamamlanmadan toplu shader derleyip runtime üzerine yazmayın.
+
+- 2026-11-22 Codex doku dizisi IPC sözleşmesi (canlı bağlantı bekliyor): texture_arrays.image_format_queries profil/format/usage_flags/create_flags/vk_result/properties taşır. Reddedilen doku kNoTexture alır ve warnings ve rejected_textures içinde profil indeksiyle görünür. Bilinen profilde rejected_textures format/usage_flags/vk_result da taşır. Katman tanısı layers_used/layers_capacity/layers_valid alanlarını taşır. Yayın reddi descriptor_publications_rejected ve last_descriptor_rejection alanlarını ekler. Descriptor veya push ABI değişmedi.
+
+- 2026-11-22 Codex Vulkan sürüm kapısı: Android Player loader 1.1 ile 1.2 instance ister. Cihaz sınırı 1.2. IPC runtime ve Python durumuna `loader_api` / `device_api` (major.minor dizesi veya null) eklendi. `RuntimeSceneViewer` iki sürümü saklıyor. Android GPU ret ekranı görünürken çocuk başlatıcısının ön plan çizimi duruyor.
+
+- 2026-11-22 Claude Android çocuk başlatıcısı: `player.operator` + `launcher.status/show/select` (Android'de gerçek, Windows'ta hata). `PlayerOperatorUI.h`: `playerOperatorMenuButtonHit` SİLİNDİ, `playerConsoleOpen()` eklendi; Android'de `playerOperatorOpen()` başlatıcı etkinken de true. Yeni `src/UI/PlayerOperatorKidUI.cpp` Studio vcxproj'una eklendi (Player vcxproj + Android cmake yeniden üretildi). `Console::start_when_ready` silindi. Android'de HUD varsayılan kapalı. `PlayerConsole::artwork(renderer,path,max_dim)` eklendi. i18n `kid.*` anahtarları.
+
+- 2026-11-22 Claude Android menü: `player.operator` operasyonları `console.open {page}`/`console.close`/`console.status` eklendi (alan adı/anlam değişmedi). `PlayerOperatorUI.h` +3 fonksiyon (ölçek, menü düğmesi hit, sayfa). Android manifest: `android_exclude` yalnız PlayerCamera.cpp + PlayerOperatorCameraUI.cpp; stub `PlayerCameraAndroidStub.cpp` (eski `PlayerOperatorAndroidStub.cpp` silindi). Android'de Geri tuşu `SDL_HINT_ANDROID_TRAP_BACK_BUTTON=1`. `Console::open` Android'de varsayılan false. Windows davranışı aynı. `stage_player_android_assets.py --scenes/--all`.
+
 - 2026-11-22 Codex viewport startup: Android Player reports startup stage, VkResult, GPU and driver version. Existing runtime IPC snapshot adds startup_log during failure; Python binds the same host status. No shader or shared layout change.
 
 - 2026-11-22 Codex Adreno: Vulkan simulation pipeline registration now checks actual SPIR-V Float64 and AtomicFloat32AddEXT capabilities before the driver. The Player startup override disables float atomic add at device creation. Registry rows, shader ABI and IPC contracts are unchanged.
@@ -707,6 +733,24 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
+- 2026-11-23 Claude T1: TAM Studio+Player derlemesi (yukarıdaki header'lar). O3 + Vulkan 1.1 + O10/O11 aynı derlemede. paint_wet.spv dağıtıldı. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-23 Claude Vulkan 1.1: kapı 1.1+scalar+BDA eklentisi (`RayFusionViewportPasses.cpp`), `VulkanBackend.cpp` scalar eklentisi, `SimulationComputeVulkan.cpp` KHR BDA. ★ ANDROID SHADER SETİ ARTIK `x64/Release/shaders_vk11` (SPIR-V 1.3): `compile_player_android_vk11.py` + staging bunu tercih ediyor, `Build-PlayerApk.ps1` önce derliyor. `compile_shaders.ps1 -ListPlan` eklendi. Artımlı derleme + APK. /Zs + NDK arm64 PASS.
+
+- 2026-11-23 Claude perf O3: `material_preview_frag` 3 specialization sabiti (constant_id 0 terrain, 1 graph, 2 hava; varsayılan true = eski davranış). SPV DAĞITILDI. Host: `VulkanViewportBackend.h` (7 içerici, TAM DERLEME DEĞİL) + `VulkanViewportBackend.cpp` + `Viewport/MaterialPreviewCoverage.cpp`. /Zs Studio+Player PASS (7 içerici dahil). ★ Material preview frag'ına yeni constant_id eklerken 3+ kullan.
+
+- 2026-11-23 Claude perf O10+O11: `material_preview_frag`/`_covered` SPV DAĞITILDI (ABI aynı, cam bloğu kapısı; PC canlı: main_pass 8,65→7,38 ms). `VulkanViewportParticles.cpp` (yalnız .cpp, header YOK) artımlı Studio/Player derlemesi bekliyor: parçacık yüklemesi drain'i yalnız gerçek yazımda yapıyor. /Zs Studio+Player PASS. Android APK yeniden paketlenirse iki değişiklik de girer. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-23 Codex: Tek sahneli Android APK mevcut launcher yükleme ekranını otomatik kullanacak. Paket sahnesi kütüphane taraması tamamlanınca yol anahtarıyla seçiliyor. Artımlı ARM64 Release APK ve soğuk başlangıç testi bekliyor. IPC alanları aynı.
+
+- 2026-11-23 Codex: ARM64 Release tek sahne APK `E:\rt_android_build\RayTrophiPlayer-arm64-release-workshop-2026-11-23.apk` Lenovo'ya kuruldu. İlk kare 63,8 s ve canlı HDRI/düz renk A/B tamam. Windows Player derlemesi ve HDR'siz proje kopyasıyla açılış A/B bekleniyor. Sonuçlar NEXT_BUILD_CHECKS başında.
+
+- 2026-11-22 Codex: Malzeme doku dizileri TAM Studio/Player ve iki ABI Android paket derlemesi gerektirecek. Renderer geçişi ve shader dağıtımı bekleniyor. Kabul sırası NEXT_BUILD_CHECKS.md başında.
+
+- 2026-11-22 Codex Android 512 staging: iki sahne için staging manifest, doku ID/ofset ve damga doğrulaması geçti. x86_64 APK yeniden paketleme ve iki sahnenin emülatörde açılışı bekliyor. Vulkan dizi ABI uygulaması bu staging partisinde yok.
+
+- 2026-11-22 Codex Vulkan sürüm kapısı: İki oyunlu arm64 APK derlendi ve E:/rt_android_build/RayTrophiPlayer-arm64-2026-11-22.apk olarak doğrulandı (127.865.988 bayt). Studio/Windows Player artımlı derleme, telefon ve x86_64 emülatör kabulü bekliyor. Studio/Player MSVC /Zs ve NDK x86_64/arm64-v8a -fsyntax-only geçti. APK hedefi ve iki emülatör senaryosu NEXT_BUILD_CHECKS.md'de.
+
 - 2026-11-22 Codex viewport startup: arm64 APK built and copied to E:/rt_android_build/RayTrophiPlayer-arm64-s24.apk. Studio/Player /Zs, Android x86_64/arm64 syntax-only, arm64 forced error on emulator and x86_64 normal first frame passed. ADB-less phone diagnostic pending. See NEXT_BUILD_CHECKS.md.
 
 - 2026-11-22 Codex Adreno: Incremental Studio/Player build and new x86_64/arm64 APKs pending. Studio/Player MSVC /Zs, NDK x86_64 and arm64 syntax-only, and compile-time admission assertions for the 20 atomic and four game SPVs passed. Live forced-off emulator paint and natural Adreno acceptance pending. See NEXT_BUILD_CHECKS.md.
@@ -1282,6 +1326,7 @@ sürükleme kontrolü bekliyor; kaynak/width sınır kontrolü geçti, canlı UI
 
 | Ajan | Parti | Derleme | Kontrol listesi |
 |---|---|---|---|
+| Codex | RayFusionViewportPasses.h/.cpp, VulkanBackend.cpp, VulkanStartupDiagnostics.h, RuntimeSceneViewer.h/.cpp, Android port ve kabul notları | Vulkan sürüm kapısı ve tanılama | 2026-11-22 |
 | Claude | MPM P2G birleşik + var_sv* geri alma DERLENDİ (15:07), canlı PASS; bekleyen parti yok | — | `NEXT_BUILD_CHECKS.md` başı |
 | Codex | DEM compaction canlı PASS; Apply reset kabulü FAIL | Reset çalışan build/yol incelemesi bekliyor; bu ölçümde kaynak değişmedi | `DEM_BOND_COST_LIVE.json`, `NEXT_BUILD_CHECKS.md` |
 

@@ -25,6 +25,18 @@ Jolt, ozz-animation, imgui, miniz and xatlas are compiled from `RayTrophiStudio/
 
 ## Build
 
+**One command (use this):** `scripts/Build-PlayerApk.ps1` stages assets, builds, copies the APK to
+`E:/rt_android_build/RayTrophiPlayer-<abi>-<date>.apk` and optionally installs it. adb does not
+need to be on PATH (it is taken from the SDK).
+
+```powershell
+.\scripts\Build-PlayerApk.ps1                      # arm64 (phones/tablets), all scenes
+.\scripts\Build-PlayerApk.ps1 -Abi x86_64 -Install # emulator
+.\scripts\Build-PlayerApk.ps1 -Abi both -Install -Device <serial>
+```
+
+Manual steps, for reference:
+
 ```
 python scripts/gen_player_android_cmake.py          # regenerate android/app/src/main/cpp/player_sources.cmake
 python scripts/gen_player_android_cmake.py --check  # staleness check

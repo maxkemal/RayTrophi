@@ -2,6 +2,7 @@
 #include "AtmosphereLUT.h"
 #include <cmath>
 #include <algorithm>
+#include <chrono>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846f
@@ -392,7 +393,12 @@ void World::setHDRI(const std::string& path) {
     // though Texture class sRGB logic mainly affects Albedo.
     // Ideally we want Linear loading check.
     hdri_path = path;
+    const auto loadStart = std::chrono::steady_clock::now();
     hdri_texture = new Texture(path, TextureType::Emission);
+    const auto loadMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - loadStart).count();
+    SCENE_LOG_INFO("[World] HDRI read_decode_ms=" + std::to_string(loadMs) +
+                   " loaded=" + std::to_string(hdri_texture->is_loaded()) + " path=" + path);
     
     if (hdri_texture->is_loaded()) {
         // Log HDR status

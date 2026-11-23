@@ -1,6 +1,7 @@
 #include "Viewport/RayFusionViewportPasses.h"
 #include "Backend/VulkanStartupDiagnostics.h"
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -97,16 +98,35 @@ std::string resolveRayFusionShaderDirectory() {
 }
 
 VkResult selectRayFusionInstanceVersion(PFN_vkGetInstanceProcAddr getProc, uint32_t& version) {
-    const auto enumerate = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
-        getProc(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+    const auto enumerate = getProc ? reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+        getProc(VK_NULL_HANDLE, "vkEnumerateInstanceVersion")) : nullptr;
     if (!enumerate) {
+#ifdef RT_PLAYER
+        if (currentVulkanStartup && getProc) {
+            currentVulkanStartup->loaderApi = VK_API_VERSION_1_0;
+        }
+#endif
         return VK_ERROR_INCOMPATIBLE_DRIVER;
     }
-    uint32_t loaderVersion = 0;
-    const VkResult result = enumerate(&loaderVersion);
+    uint32_t reportedVersion = 0;
+    const VkResult result = enumerate(&reportedVersion);
     if (result != VK_SUCCESS) {
         return result;
     }
+    const uint32_t loaderVersion = androidDiagnosticVulkanApi(
+        reportedVersion, "debug.raytrophi.force_loader_api");
+#ifdef RT_PLAYER
+    if (currentVulkanStartup) {
+        currentVulkanStartup->loaderApi = loaderVersion;
+    }
+#endif
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+    if (loaderVersion >= VK_API_VERSION_1_1 && loaderVersion < VK_API_VERSION_1_2) {
+        // Physical-device commands needed before vkCreateDevice are core 1.1 or older.
+        version = VK_API_VERSION_1_2;
+        return VK_SUCCESS;
+    }
+#endif
     if (loaderVersion < VK_API_VERSION_1_2) {
         return VK_ERROR_INCOMPATIBLE_DRIVER;
     }
@@ -125,6 +145,20 @@ void recordRayFusionDeviceRejection(const char* adapter, const char* reason) {
     g_rejections += std::string(adapter ? adapter : "?") + ": " + (reason ? reason : "?");
 }
 
+#if defined(__ANDROID__) && defined(RT_PLAYER)
+void recordAndroidRayFusionDeviceRejection(const VkPhysicalDeviceProperties& props,
+                                          const char* reason) {
+    const std::string adapter = std::string(props.deviceName) + " (driver version " +
+                                std::to_string(props.driverVersion) + ")";
+    const uint32_t loader = currentVulkanStartup ? currentVulkanStartup->loaderApi : 0;
+    const std::string detail = std::string(reason) + " — Vulkan " +
+        vulkanApiString(props.apiVersion) + ", 1.1 + scalar block layout + buffer device address "
+        "required (loader " +
+        vulkanApiString(loader) + ", device " + vulkanApiString(props.apiVersion) + ")";
+    recordRayFusionDeviceRejection(adapter.c_str(), detail.c_str());
+}
+#endif
+
 void clearRayFusionDeviceRejections() {
     std::lock_guard<std::mutex> lock(g_rejection_mutex);
     g_rejections.clear();
@@ -137,8 +171,31 @@ std::string rayFusionDeviceRejections() {
 
 const char* rayFusionDeviceRejection(
     VkPhysicalDevice device, const VkPhysicalDeviceProperties& properties) {
+    // Vulkan 1.1 devices (Mali-G76 Omix X700, Adreno 610) are accepted when the
+    // two 1.2-core features the Player shaders rely on exist as extensions:
+    // scalar block layout (every RayFusion SSBO) and buffer device address
+    // (SDF surface / volume / NanoVDB). Android ships SPIR-V 1.3 for this
+    // (scripts/compile_player_android_vk11.py); descriptor indexing is no
+    // longer needed (texture arrays). Nothing else from 1.2 core is called.
+    if (properties.apiVersion < VK_API_VERSION_1_1) {
+        return "device API below Vulkan 1.1";
+    }
     if (properties.apiVersion < VK_API_VERSION_1_2) {
-        return "device API below Vulkan 1.2";
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> extensions(extensionCount);
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &extensionCount, extensions.data());
+        const auto has = [&](const char* name) {
+            for (const auto& e : extensions)
+                if (std::strcmp(e.extensionName, name) == 0) return true;
+            return false;
+        };
+        if (!has(VK_EXT_SCALAR_BLOCK_LAYOUT_EXTENSION_NAME)) {
+            return "Vulkan 1.1 device without VK_EXT_scalar_block_layout";
+        }
+        if (!has(VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME)) {
+            return "Vulkan 1.1 device without VK_KHR_buffer_device_address";
+        }
     }
 
 #if defined(__ANDROID__) && defined(RT_PLAYER)
@@ -153,17 +210,11 @@ const char* rayFusionDeviceRejection(
     }
 #endif
 
-    VkPhysicalDeviceDescriptorIndexingFeatures indexing{
-        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES};
-    VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
-    features.pNext = &indexing;
-    vkGetPhysicalDeviceFeatures2(device, &features);
-    if (!indexing.runtimeDescriptorArray ||
-        !indexing.shaderSampledImageArrayNonUniformIndexing ||
-        !indexing.descriptorBindingPartiallyBound) {
-        return "required descriptor indexing features unavailable";
-    }
-    if (!features.features.independentBlend || !features.features.fragmentStoresAndAtomics) {
+    // Material textures use 32 sampler2DArray pages with constant indices: no
+    // descriptor indexing feature is required (Mali-G52 / Lenovo TB330FU).
+    VkPhysicalDeviceFeatures coreFeatures{};
+    Backend::MaterialTextureBinding::queryCoreFeatures(device, coreFeatures);
+    if (!coreFeatures.independentBlend || !coreFeatures.fragmentStoresAndAtomics) {
         return "independentBlend or fragmentStoresAndAtomics unavailable";
     }
 

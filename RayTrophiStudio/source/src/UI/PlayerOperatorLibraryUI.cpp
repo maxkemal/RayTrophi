@@ -16,15 +16,20 @@
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "gdi32.lib")
 #pragma comment(lib, "user32.lib")
+#else
+#include <SDL_image.h>
 #endif
 
 namespace PlayerConsole {
 namespace {
 SDL_Texture *logo = nullptr;
+#ifndef _WIN32
+bool logo_failed = false;
+#endif
 std::map<std::string, SDL_Texture *> thumbnails;
 
-std::string browseFolder() {
 #ifdef _WIN32
+std::string browseFolder() {
     using Microsoft::WRL::ComPtr;
     const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     ComPtr<IFileOpenDialog> dialog;
@@ -56,15 +61,14 @@ std::string browseFolder() {
         CoUninitialize();
     }
     return result;
-#else
-    return {};
-#endif
 }
-SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path) {
+#endif
+SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path, int max_dim = 512) {
     if (path.empty()) {
         return nullptr;
     }
-    const auto found = thumbnails.find(path);
+    const std::string cache_key = path + "#" + std::to_string(max_dim);
+    const auto found = thumbnails.find(cache_key);
     if (found != thumbnails.end()) {
         return found->second;
     }
@@ -72,7 +76,7 @@ SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path) {
         return nullptr;
     }
     // Cache failed loads too, so a broken artwork file is not decoded every frame.
-    thumbnails.emplace(path, nullptr);
+    thumbnails.emplace(cache_key, nullptr);
     std::ifstream stream(AppRuntime::projectPathFromUtf8(path), std::ios::binary | std::ios::ate);
     if (!stream || stream.tellg() <= 0 || stream.tellg() > 16 * 1024 * 1024) {
         return nullptr;
@@ -93,7 +97,7 @@ SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path) {
     }
     auto *source = SDL_CreateRGBSurfaceWithFormatFrom(pixels, width, height, 32, width * 4,
                                                       SDL_PIXELFORMAT_RGBA32);
-    const float scale = std::min(1.0f, 512.0f / static_cast<float>(std::max(width, height)));
+    const float scale = std::min(1.0f, static_cast<float>(max_dim) / static_cast<float>(std::max(width, height)));
     auto *reduced = SDL_CreateRGBSurfaceWithFormat(0, std::max(1, static_cast<int>(width * scale)),
                                                    std::max(1, static_cast<int>(height * scale)),
                                                    32, SDL_PIXELFORMAT_RGBA32);
@@ -105,6 +109,7 @@ SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path) {
         texture = SDL_CreateTextureFromSurface(renderer, reduced);
         if (texture) {
             SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
+            SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
         }
     }
     if (source) {
@@ -115,7 +120,7 @@ SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path) {
     }
     stbi_image_free(pixels);
 
-    thumbnails[path] = texture;
+    thumbnails[cache_key] = texture;
     return texture;
 }
 std::string lower(std::string value) {
@@ -125,6 +130,9 @@ std::string lower(std::string value) {
 }
 } // namespace
 
+SDL_Texture *artwork(SDL_Renderer *renderer, const std::string &path, int max_dim) {
+    return thumbnail(renderer, path, max_dim);
+}
 SDL_Texture *brand(SDL_Renderer *renderer) {
 #ifdef _WIN32
     if (logo) {
@@ -164,6 +172,21 @@ SDL_Texture *brand(SDL_Renderer *renderer) {
         DeleteObject(bitmap);
     }
     DestroyIcon(source);
+#else
+    // No Win32 resource icon: the packaged APK ships the same artwork as assets/player_icon.png
+    // (largest .ico frame, converted by scripts/stage_player_android_assets.py).
+    if (logo || logo_failed) {
+        return logo;
+    }
+    logo_failed = true;
+    auto *surface = IMG_Load("assets/player_icon.png");
+    if (surface) {
+        logo = SDL_CreateTextureFromSurface(renderer, surface);
+        if (logo) {
+            SDL_SetTextureBlendMode(logo, SDL_BLENDMODE_BLEND);
+        }
+        SDL_FreeSurface(surface);
+    }
 #endif
     return logo;
 }
@@ -178,15 +201,24 @@ void releaseArtwork() {
         SDL_DestroyTexture(logo);
         logo = nullptr;
     }
+#ifndef _WIN32
+    logo_failed = false;
+#endif
 }
 void games(SDL_Renderer *renderer) {
     heading(tr("player.game_library", "Game library"),
             tr("player.pick_an_experience_for_the_room_or_drop_an_rtp_project_into_player",
                "Pick an experience for the room, or drop an .rtp project into Player."));
+#ifdef _WIN32
     ImGui::SetNextItemWidth(std::max(100.0f, ImGui::GetContentRegionAvail().x - 220));
+#else
+    // No native folder picker on Android: library roots come from the bundled scenes folder.
+    ImGui::SetNextItemWidth(std::max(100.0f, ImGui::GetContentRegionAvail().x - S(110)));
+#endif
     ImGui::InputTextWithHint("##search", tr("player.search_your_games", "Search your games"),
                              ui.search, sizeof(ui.search));
     ImGui::SameLine();
+#ifdef _WIN32
     if (action(trId("player.add_folder", "Add folder"), ImVec2(106, 32))) {
         const auto folder = browseFolder();
         if (!folder.empty()) {
@@ -194,6 +226,7 @@ void games(SDL_Renderer *renderer) {
         }
     }
     ImGui::SameLine();
+#endif
     ImGui::BeginDisabled(ui.status.value("scanning", false));
     if (action(trId("player.refresh", "Refresh"), ImVec2(88, 32))) {
         call("library.refresh");
@@ -219,6 +252,7 @@ void games(SDL_Renderer *renderer) {
     const auto selected = std::find_if(entries.begin(), entries.end(), [](const json& game) {
         return game.value("key", "") == ui.selected_scene;
     });
+#ifndef __ANDROID__
     ImGui::BeginDisabled(loading || selected == entries.end() || ui.selected_scene == current);
     if (action(trId("player.load_selected_scene", "Load selected scene"), ImVec2(0, 34), true)) {
         call("library.open", {{"path", (*selected)["path"]}});
@@ -229,9 +263,10 @@ void games(SDL_Renderer *renderer) {
         const auto name = selected->value("name", "");
         label(name.c_str(), muted);
     }
+#endif
     const float available = ImGui::GetContentRegionAvail().x;
-    const int columns = std::max(1, std::min(3, static_cast<int>((available + 14) / 230)));
-    const float width = (available - (columns - 1) * 14) / columns;
+    const int columns = std::max(1, std::min(3, static_cast<int>((available + S(14)) / S(230))));
+    const float width = (available - (columns - 1) * S(14)) / columns;
     int shown = 0;
     const auto search = lower(ui.search);
     for (const auto &game : entries) {
@@ -245,64 +280,64 @@ void games(SDL_Renderer *renderer) {
             continue;
         }
         if (shown % columns) {
-            ImGui::SameLine(0, 14);
+            ImGui::SameLine(0, S(14));
         }
         ImGui::PushID(game["path"].get<std::string>().c_str());
         ImGui::BeginGroup();
         const auto p = ImGui::GetCursorScreenPos();
-        const bool clicked = ImGui::InvisibleButton("card", ImVec2(width, 190)) && !loading;
+        const bool clicked = ImGui::InvisibleButton("card", ImVec2(width, S(190))) && !loading;
         const bool hovered = ImGui::IsItemHovered();
         auto *draw = ImGui::GetWindowDrawList();
-        draw->AddRectFilled(p, add(p, width, 190),
+        draw->AddRectFilled(p, add(p, width, S(190)),
                             (chosen || hovered) ? IM_COL32(37, 49, 71, 255) : panel, 13);
-        draw->AddRect(p, add(p, width, 190),
+        draw->AddRect(p, add(p, width, S(190)),
                       (active || card_loading) ? mint : (chosen ? violet : border), 13, 0, 1);
         if (auto *image = thumbnail(renderer, game.value("thumbnail", ""))) {
             draw->AddImageRounded(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(image)),
-                                  add(p, 8, 8), add(p, width - 8, 120), ImVec2(0, 0), ImVec2(1, 1),
+                                  add(p, S(8), S(8)), add(p, width - S(8), S(120)), ImVec2(0, 0), ImVec2(1, 1),
                                   IM_COL32_WHITE, 9);
         } else {
-            draw->PushClipRect(add(p, 1, 1), add(p, width - 1, 120), true);
-            draw->AddRectFilled(add(p, 8, 8), add(p, width - 8, 120), IM_COL32(36, 43, 69, 255), 9);
+            draw->PushClipRect(add(p, 1, 1), add(p, width - 1, S(120)), true);
+            draw->AddRectFilled(add(p, S(8), S(8)), add(p, width - S(8), S(120)), IM_COL32(36, 43, 69, 255), 9);
             const auto category = lower(title);
             if (category.find("paint") != std::string::npos ||
                 category.find("balloon") != std::string::npos ||
                 category.find("pastel") != std::string::npos) {
                 const ImU32 colors[] = {violet, mint, IM_COL32(246, 184, 135, 255)};
                 for (int i = 0; i < 3; ++i) {
-                    const auto center = add(p, width * (.25f + i * .25f), 50 + (i % 2) * 18.0f);
-                    draw->AddCircleFilled(center, 22, colors[i]);
-                    draw->AddCircleFilled(add(center, -6, -7), 5, IM_COL32(255, 255, 255, 85));
-                    draw->AddBezierCubic(add(center, 0, 22), add(center, -8, 36),
-                                         add(center, 8, 44), add(center, 0, 58), colors[i], 1.3f);
+                    const auto center = add(p, width * (.25f + i * .25f), S(50 + (i % 2) * 18.0f));
+                    draw->AddCircleFilled(center, S(22), colors[i]);
+                    draw->AddCircleFilled(add(center, S(-6), S(-7)), S(5), IM_COL32(255, 255, 255, 85));
+                    draw->AddBezierCubic(add(center, 0, S(22)), add(center, S(-8), S(36)),
+                                         add(center, S(8), S(44)), add(center, 0, S(58)), colors[i], 1.3f);
                 }
             } else {
-                draw->AddCircleFilled(add(p, width * .5f, 63), 45, IM_COL32(43, 64, 79, 255));
-                icon(draw, add(p, width * .5f, 63), "games", mint, 26);
-                draw->AddCircleFilled(add(p, width * .22f, 34), 6, violet);
-                draw->AddCircleFilled(add(p, width * .78f, 93), 4, violet);
+                draw->AddCircleFilled(add(p, width * .5f, S(63)), S(45), IM_COL32(43, 64, 79, 255));
+                icon(draw, add(p, width * .5f, S(63)), "games", mint, S(26));
+                draw->AddCircleFilled(add(p, width * .22f, S(34)), S(6), violet);
+                draw->AddCircleFilled(add(p, width * .78f, S(93)), S(4), violet);
             }
             draw->PopClipRect();
         }
-        draw->PushClipRect(add(p, 14, 130), add(p, width - 10, 180), true);
-        draw->AddText(add(p, 14, 132), ink, title.c_str());
+        draw->PushClipRect(add(p, S(14), S(130)), add(p, width - S(10), S(180)), true);
+        draw->AddText(add(p, S(14), S(132)), ink, title.c_str());
         if (card_loading) {
             const auto progress = load.value("progress", 0);
             const auto text = tr("player.scene_loading", "Loading scene");
             const auto stage = load.value("stage", "");
             const auto phase = Localization::text("player.load_stage." + stage, text);
-            draw->AddText(add(p, 14, 155), mint, phase);
-            const float track = std::max(0.0f, width - 28);
-            draw->AddRectFilled(add(p, 14, 174), add(p, 14 + track, 178), border, 2);
-            draw->AddRectFilled(add(p, 14, 174), add(p, 14 + track * progress / 100.0f, 178),
+            draw->AddText(add(p, S(14), S(155)), mint, phase);
+            const float track = std::max(0.0f, width - S(28));
+            draw->AddRectFilled(add(p, S(14), S(174)), add(p, S(14) + track, S(178)), border, 2);
+            draw->AddRectFilled(add(p, S(14), S(174)), add(p, S(14) + track * progress / 100.0f, S(178)),
                                 mint, 2);
         } else if (failed) {
-            draw->AddText(add(p, 14, 160), IM_COL32(255, 173, 133, 255),
+            draw->AddText(add(p, S(14), S(160)), IM_COL32(255, 173, 133, 255),
                           tr("player.scene_load_failed", "Load failed"));
         } else if (active) {
-            draw->AddText(add(p, 14, 160), mint, tr("player.current_scene", "Current scene"));
+            draw->AddText(add(p, S(14), S(160)), mint, tr("player.current_scene", "Current scene"));
         } else {
-            draw->AddText(add(p, 14, 160), chosen ? violet : muted,
+            draw->AddText(add(p, S(14), S(160)), chosen ? violet : muted,
                           chosen ? tr("player.selected_scene", "Selected") :
                           (game.value("packaged", false)
                               ? tr("player.raytrophi_experience", "RAYTROPHI EXPERIENCE")
@@ -316,6 +351,12 @@ void games(SDL_Renderer *renderer) {
         }
         if (clicked) {
             ui.selected_scene = key;
+#ifdef __ANDROID__
+            // IPC-only console on Android (the kid launcher is the visible library): a tap loads.
+            if (!active) {
+                call("library.open", {{"path", game["path"]}});
+            }
+#endif
         }
         ImGui::EndGroup();
         ImGui::PopID();
@@ -326,7 +367,7 @@ void games(SDL_Renderer *renderer) {
                   ? tr("player.finding_your_games", "Finding your games...")
                   : tr("player.your_next_game_starts_here", "Your next game starts here."),
               mint);
-        ImGui::TextWrapped(
+        wrapped(
             tr("player.add_a_folder_containing_rtp_projects_scanning_never_opens_a_project",
                "Add a folder containing .rtp projects. Scanning never opens a project."));
     }
@@ -340,7 +381,7 @@ void games(SDL_Renderer *renderer) {
         }
         for (const auto &folder : ui.status["preferences"]["roots"]) {
             ImGui::PushID(folder.get<std::string>().c_str());
-            if (ImGui::SmallButton(trId("player.remove", "Remove"))) {
+            if (smallAction(trId("player.remove", "Remove"))) {
                 call("library.remove", {{"path", folder}});
             }
             ImGui::SameLine();

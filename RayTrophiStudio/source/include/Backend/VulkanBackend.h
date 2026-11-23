@@ -74,6 +74,8 @@ class Texture;
 #include <array>
 #include <chrono>
 
+namespace Backend::MaterialTextureStorage { class Storage; }
+
 namespace VulkanRT {
 
 // ============================================================================
@@ -531,6 +533,8 @@ struct ImageHandle {
     uint32_t width = 0, height = 0;
     uint32_t mipLevels = 1;
     VkFormat format = VK_FORMAT_UNDEFINED;
+    uint32_t arrayLayer = 0;   // layer inside `image` (shared 2D-array page) - view is a 2D view of this layer
+    bool sharedImage = false;  // image+memory are owned by a texture page, not by this handle
 };
 
 // ============================================================================
@@ -1120,7 +1124,8 @@ public:
                                                                 VK_IMAGE_USAGE_TRANSFER_SRC_BIT);
     // Records blit-based mip generation into cmd. Assumes mip 0 is in TRANSFER_DST_OPTIMAL.
     // All mip levels are transitioned to SHADER_READ_ONLY_OPTIMAL on completion.
-    void generateMipmaps(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height, uint32_t mipLevels);
+    void generateMipmaps(VkCommandBuffer cmd, VkImage image, uint32_t width, uint32_t height, uint32_t mipLevels,
+                       uint32_t baseArrayLayer = 0);
     void destroyImage(ImageHandle& image);
 
     void copyImageToBuffer(const ImageHandle& src, const BufferHandle& dst);
@@ -1145,19 +1150,20 @@ public:
     // buffers or the cmd pool. Safe to call when nothing is in flight.
     void drainDenoiserCopy();
 
-    void copyBufferToImage(const BufferHandle& src, const ImageHandle& dst);
+    void copyBufferToImage(const BufferHandle& src, const ImageHandle& dst, uint32_t baseArrayLayer = 0);
     // Copies a sub-rectangle from `src` into the existing `dst` VkImage. Used
     // by the paint pipeline so that a brush-sized dab does not need a full
     // image stage+copy. Image must already be in VK_IMAGE_LAYOUT_GENERAL.
     void copyBufferToImageRegion(const BufferHandle& src, const ImageHandle& dst,
                                  int32_t offsetX, int32_t offsetY,
-                                 uint32_t regionW, uint32_t regionH);
-    void recordCopyBufferToImage(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst);
+                                 uint32_t regionW, uint32_t regionH, uint32_t baseArrayLayer = 0);
+    void recordCopyBufferToImage(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst, uint32_t baseArrayLayer = 0);
     // Like recordCopyBufferToImage but assumes the image is in TRANSFER_DST_OPTIMAL (used for mip uploads).
-    void recordCopyBufferToImageDst(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst);
+    void recordCopyBufferToImageDst(VkCommandBuffer cmd, const BufferHandle& src, const ImageHandle& dst, uint32_t baseArrayLayer = 0);
 
     void transitionImageLayout(VkCommandBuffer cmd, VkImage image,
-                               VkImageLayout oldLayout, VkImageLayout newLayout);
+                               VkImageLayout oldLayout, VkImageLayout newLayout,
+                               uint32_t baseArrayLayer = 0);
     
     // ========================================================================
     // Synchronization
@@ -2253,6 +2259,13 @@ public:
     void uploadHairMaterials(const std::vector<HairMaterialData>& materials) override;
     void uploadTerrainLayerMaterials(const std::vector<TerrainLayerData>& layers) override;
     int64_t uploadTexture2D(const void* data, uint32_t width, uint32_t height, uint32_t channels, bool sRGB, bool isFloat = false) override;
+    // World environment (HDRI): RGBA float stored as R16G16B16A16_SFLOAT. Half
+    // the bandwidth of RGBA32F, and 16F linear filtering is mandatory in Vulkan
+    // while 32F filtering is optional (Mali). Values above 65504 are clamped;
+    // `clampedTexels` reports how many. Other float uploads keep 32F: data
+    // textures need the precision.
+    int64_t uploadEnvironmentTexture(const float* rgba, uint32_t width, uint32_t height,
+                                     uint64_t* clampedTexels = nullptr);
     int64_t uploadTexture3D(const void* data, uint32_t width, uint32_t height, uint32_t depth, uint32_t channels, bool isFloat = false) override;
     void destroyTexture(int64_t textureHandle) override;
     uint32_t resolveTextureHandle(int64_t texturePtr, int textureType = 0, bool forceLinear = false, bool preferSingleChannel = false) override;
@@ -2887,40 +2900,12 @@ protected:
                                int width, int height, void* outFramebuffer, void* outTexture);
     virtual void setInteractiveViewportMatcapImpl(int64_t textureID);
     virtual void setInteractiveViewportMatcapPresetImpl(int preset);
-    // Write a single texture slot into the material-preview descriptor set (binding 1).
-    // Called from texture-upload paths so the viewport sees textures as they arrive.
-    void updateMaterialPreviewTextureDescriptor(uint32_t slot, const VulkanRT::ImageHandle& img) {
-        const uint32_t textureArrayLen = (m_interactiveViewport.materialPreviewTextureArrayLen > 0u)
-            ? m_interactiveViewport.materialPreviewTextureArrayLen
-            : static_cast<uint32_t>(VULKAN_TEXTURE_CAPACITY);
-        if (slot == 0 || slot >= textureArrayLen) return;
-        const bool hasDescIdx = m_device && m_device->getCapabilities().supportsDescriptorIndexing;
-        if (!hasDescIdx) return;
-
-        const VkDescriptorSet ds = m_interactiveViewport.materialPreviewDescSet;
-        if (ds == VK_NULL_HANDLE || !img.view || !img.sampler) return;
-        VkDevice vkDev = m_device ? m_device->getDevice() : VK_NULL_HANDLE;
-        if (!vkDev) return;
-        VkDescriptorImageInfo imgInfo{};
-        imgInfo.sampler     = img.sampler;
-        imgInfo.imageView   = img.view;
-        imgInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        VkWriteDescriptorSet wds{};
-        wds.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        wds.dstSet          = ds;
-        wds.dstBinding      = 1;
-        wds.dstArrayElement = slot;
-        wds.descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        wds.descriptorCount = 1;
-        wds.pImageInfo      = &imgInfo;
-        vkUpdateDescriptorSets(vkDev, 1, &wds, 0, nullptr);
-        // Descriptor updates can happen while the viewport is otherwise idle
-        // (first texture assign, live paint, project load restore). Force the
-        // interactive viewport to redraw immediately instead of waiting for
-        // camera motion or a material re-selection.
+    // A texture upload changed what the viewport may show. Viewport material
+    // textures are paged (32 sampler2DArray pages): a new texture becomes visible
+    // at the next compaction, which rewrites the descriptor sets. Only redraw here.
+    void markMaterialPreviewTexturesChanged() {
         m_currentSamples = 0;
         m_interactiveViewport.dirty = true;
-        m_forceClearOnNextPresent = true;
     }
 
     struct InteractiveViewportState {
@@ -3194,6 +3179,10 @@ protected:
     void destroyInteractiveViewportResources(bool keepPipeline = false);
     void renderInteractiveViewport(void* outSurface, int width, int height, void* outFramebuffer, void* outTexture);
     void purgeUploadedTextureCacheLocked();
+    // Packs every 2D material texture into shared 2D-array pages (single storage
+    // for RT bindless views and the viewport's page arrays). Waits for the device.
+    // Called at the end of a scene texture batch. See VulkanTextureCompaction.cpp.
+    void compactMaterialTexturesLocked();
     int64_t uploadCompressedTexture2D(const void* data, uint64_t dataSize, uint32_t width, uint32_t height, VkFormat format);
 
     std::unique_ptr<VulkanRT::VulkanDevice> m_device;
@@ -3562,6 +3551,8 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     // buffer recreate + descriptor rewrite on the overwhelmingly common no-op.
     bool refreshMaterialStateFieldInstances();
     std::unordered_map<int64_t, VulkanRT::ImageHandle> m_uploadedImages;
+    // Owns the texture pages that m_uploadedImages entries alias (sharedImage).
+    std::unique_ptr<Backend::MaterialTextureStorage::Storage> m_textureStorage;
     mutable std::recursive_mutex m_mutex;
     std::shared_ptr<SceneTextureManager> m_sceneTextureManager;
     struct RasterMeshBuffer {
@@ -3671,6 +3662,7 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     std::unordered_map<std::string, RasterMeshBuffer> m_rasterMeshes;
     std::vector<RasterInstance> m_rasterInstances;
     std::vector<VulkanRT::VkGpuMaterial> m_cachedGpuMaterials;
+    bool m_uploadFloatAsHalf = false;   // set only around uploadEnvironmentTexture
     // CPU-side cache of hair materials for RayFusion bounce table builder.
     // Populated by uploadHairMaterials(); consumed by prepareRayFusionBounce().
     std::vector<VulkanRT::HairGpuMaterial> m_cachedHairGpuMaterials;
@@ -3798,7 +3790,8 @@ protected:   // 1951 satirindaki bolge PROTECTED idi; blok ayni belirtecle kapan
     void beginRasterStageTimings(VkCommandBuffer cmd);
     void publishRasterStageTimings(VkCommandBuffer cmd, double frameCpuMs,
                                    uint64_t visibleTriangles, uint32_t drawCalls);
-    RasterAppliedState sampleRasterAppliedState() const;
+    // Virtual: the viewport backend adds what only it owns (material spec).
+    virtual RasterAppliedState sampleRasterAppliedState() const;
     // ★ Deliberately left in this `protected:` section, like getRtShadowStatus
     //   above it. These override PUBLIC virtuals on IBackend, and callers reach
     //   them through that base -- so narrowing the access here costs nothing and

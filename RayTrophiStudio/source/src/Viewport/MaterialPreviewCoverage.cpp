@@ -1,8 +1,14 @@
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanViewportBackend.h"
+#include "PerfProfile.h"
 #include "globals.h"
 #include <array>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <string>
+#include <vector>
 
 namespace Backend {
 void VulkanBackendAdapter::createMaterialPreviewCoveredPipeline(
@@ -46,6 +52,304 @@ void VulkanBackendAdapter::destroyMaterialPreviewCoveredPipeline() {
     auto& pipeline = m_interactiveViewport.materialPreviewCoveredPipeline;
     if (pipeline) vkDestroyPipeline(m_device->getDevice(), pipeline, nullptr);
     pipeline = VK_NULL_HANDLE;
+}
+
+// ── Scene-feature specialization (PLAYER_ANDROID_PERF_PLAN O3) ──────────────
+// Mirror of material_preview_frag.frag: constant_id 0 = RT_SPEC_TERRAIN,
+// 1 = RT_SPEC_GRAPH, 2 = RT_SPEC_WEATHER. A bit that is OFF removes a branch
+// the driver would otherwise allocate registers/stack for on every fragment
+// (malioc, Mali-G52: 1664 B -> 704 B stack, LS 988 -> 332 cycles, all off).
+// ★★★ Correctness rule: a bit may be off ONLY when no fragment can take that
+//   branch. Each test below is the shader's own gate, evaluated over every
+//   bound material; when the CPU copy cannot prove it (external material
+//   buffer, short cache) the bit stays on.
+void VulkanViewportBackend::fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out) {
+    const uint32_t bits[3] = {kMpSpecTerrain, kMpSpecGraph, kMpSpecWeather};
+    for (uint32_t i = 0; i < 3; ++i) {
+        out.values[i] = (mask & bits[i]) ? VK_TRUE : VK_FALSE;
+        out.entries[i].constantID = i;
+        out.entries[i].offset = static_cast<uint32_t>(i * sizeof(VkBool32));
+        out.entries[i].size = sizeof(VkBool32);
+    }
+    out.info.mapEntryCount = 3;
+    out.info.pMapEntries = out.entries;
+    out.info.dataSize = sizeof(out.values);
+    out.info.pData = out.values;
+}
+
+uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
+    uint32_t mask = 0;
+    const bool external = m_externalMaterialBuffer != VK_NULL_HANDLE;
+    const uint32_t count = external ? m_externalMaterialCount
+                                    : (m_device ? m_device->m_materialCount : 0u);
+    // Shader: (mat.flags & FLAG_TERRAIN) for the fragment's material.
+    if (external || m_cachedGpuMaterials.size() < count) {
+        mask |= kMpSpecTerrain;
+    } else {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (m_cachedGpuMaterials[i].flags & (1u << 16)) { mask |= kMpSpecTerrain; break; }
+        }
+    }
+    // Shader: matProgramOffset(materialIndex) != MATPROG_NONE. Same table the
+    // covered-pipeline proof reads; an unparsable stream answers "has program".
+    if (external) {
+        mask |= kMpSpecGraph;
+    } else {
+        for (uint32_t i = 0; i < count; ++i) {
+            if (m_rasterMaterialPrograms.hasProgram(i)) { mask |= kMpSpecGraph; break; }
+        }
+    }
+    // Shader: sceneFlags bit 64 (weather surface, cloud shadow, lightning).
+    // The globals writer sets it from these two plus a descriptor-set match,
+    // so this is a superset of the bit.
+    if (m_cloudShadowBound && m_cloudRtRendering) mask |= kMpSpecWeather;
+    return mask;
+}
+
+struct VulkanViewportBackend::MaterialPreviewSpecRecipe {
+    std::string shaderDir;
+    VkPipeline pipeline = VK_NULL_HANDLE;   // the main pipeline this recipe built/captured
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    std::vector<VkVertexInputBindingDescription> bindings;
+    std::vector<VkVertexInputAttributeDescription> attributes;
+    VkPipelineInputAssemblyStateCreateInfo inputAssembly{};
+    VkPipelineViewportStateCreateInfo viewport{};
+    VkPipelineRasterizationStateCreateInfo rasterization{};
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    VkPipelineDepthStencilStateCreateInfo depthStencil{};
+    VkPipelineColorBlendStateCreateInfo colorBlend{};
+    std::vector<VkPipelineColorBlendAttachmentState> blendAttachments;
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    std::vector<VkDynamicState> dynamicStates;
+    VkGraphicsPipelineCreateInfo info{};
+
+    void link() {
+        vertexInput.pVertexBindingDescriptions = bindings.data();
+        vertexInput.pVertexAttributeDescriptions = attributes.data();
+        colorBlend.pAttachments = blendAttachments.data();
+        dynamic.pDynamicStates = dynamicStates.data();
+        info.pVertexInputState = &vertexInput;
+        info.pInputAssemblyState = &inputAssembly;
+        info.pViewportState = &viewport;
+        info.pRasterizationState = &rasterization;
+        info.pMultisampleState = &multisample;
+        info.pDepthStencilState = &depthStencil;
+        info.pColorBlendState = &colorBlend;
+        info.pDynamicState = &dynamic;
+        info.pTessellationState = nullptr;
+        info.pStages = nullptr;
+        info.stageCount = 0;
+    }
+};
+
+void VulkanViewportBackend::captureMaterialPreviewSpecRecipe(
+    const VkGraphicsPipelineCreateInfo& base, const std::string& shaderDir, uint32_t mask) {
+    m_mpSpecRecipe.reset();
+    m_mpSpecMask = mask;
+    m_mpSpecShrinkFrames = 0;
+    // Deep copy of the state blocks the material pipeline is built from. Any
+    // extension chain or pointer this copy does not own disables the rebuild
+    // path (the pipeline then keeps the mask it was born with, which is
+    // correct only until a new feature appears -- so it falls back to ALL).
+    const bool plain = base.stageCount == 2 && base.pNext == nullptr &&
+        base.pVertexInputState && !base.pVertexInputState->pNext &&
+        base.pInputAssemblyState && !base.pInputAssemblyState->pNext &&
+        base.pViewportState && !base.pViewportState->pNext &&
+        !base.pViewportState->pViewports && !base.pViewportState->pScissors &&
+        base.pRasterizationState && !base.pRasterizationState->pNext &&
+        base.pMultisampleState && !base.pMultisampleState->pNext &&
+        !base.pMultisampleState->pSampleMask &&
+        base.pDepthStencilState && !base.pDepthStencilState->pNext &&
+        base.pColorBlendState && !base.pColorBlendState->pNext &&
+        base.pDynamicState && !base.pDynamicState->pNext &&
+        !base.pTessellationState;
+    if (!plain) {
+        m_mpSpecFailed = true;
+        SCENE_LOG_WARN("[MaterialSpec] Pipeline state not capturable; feature specialization off.");
+        return;
+    }
+    auto recipe = std::make_shared<MaterialPreviewSpecRecipe>();
+    recipe->shaderDir = shaderDir;
+    recipe->pipeline = m_interactiveViewport.materialPreviewPipeline;
+    recipe->vertexInput = *base.pVertexInputState;
+    recipe->bindings.assign(base.pVertexInputState->pVertexBindingDescriptions,
+        base.pVertexInputState->pVertexBindingDescriptions +
+            base.pVertexInputState->vertexBindingDescriptionCount);
+    recipe->attributes.assign(base.pVertexInputState->pVertexAttributeDescriptions,
+        base.pVertexInputState->pVertexAttributeDescriptions +
+            base.pVertexInputState->vertexAttributeDescriptionCount);
+    recipe->inputAssembly = *base.pInputAssemblyState;
+    recipe->viewport = *base.pViewportState;
+    recipe->rasterization = *base.pRasterizationState;
+    recipe->multisample = *base.pMultisampleState;
+    recipe->depthStencil = *base.pDepthStencilState;
+    recipe->colorBlend = *base.pColorBlendState;
+    recipe->blendAttachments.assign(base.pColorBlendState->pAttachments,
+        base.pColorBlendState->pAttachments + base.pColorBlendState->attachmentCount);
+    recipe->dynamic = *base.pDynamicState;
+    recipe->dynamicStates.assign(base.pDynamicState->pDynamicStates,
+        base.pDynamicState->pDynamicStates + base.pDynamicState->dynamicStateCount);
+    recipe->info = base;
+    recipe->link();
+    m_mpSpecRecipe = std::move(recipe);
+    m_mpSpecFailed = false;
+    SCENE_LOG_INFO("[MaterialSpec] material pipeline built with terrain=" +
+                   std::to_string((mask & kMpSpecTerrain) != 0) +
+                   " graph=" + std::to_string((mask & kMpSpecGraph) != 0) +
+                   " weather=" + std::to_string((mask & kMpSpecWeather) != 0));
+}
+
+namespace {
+bool readSpirv(const std::filesystem::path& path, std::vector<uint32_t>& words) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    const auto length = file.tellg();
+    if (length <= 0 || static_cast<std::size_t>(length) % sizeof(uint32_t)) return false;
+    words.resize(static_cast<std::size_t>(length) / sizeof(uint32_t));
+    file.seekg(0);
+    return static_cast<bool>(
+        file.read(reinterpret_cast<char*>(words.data()), static_cast<std::streamsize>(length)));
+}
+
+std::string specMaskName(uint32_t mask) {
+    std::string name;
+    if (mask & Backend::VulkanViewportBackend::kMpSpecTerrain) name += "terrain+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecGraph) name += "graph+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecWeather) name += "weather+";
+    if (name.empty()) return "none";
+    name.pop_back();
+    return name;
+}
+} // namespace
+
+void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
+    auto& iv = m_interactiveViewport;
+    if (!m_mpSpecRecipe || m_mpSpecFailed || !m_device) return;
+    // A teardown/recreate (resize with !keepPipeline, device rebuild) replaced
+    // the pipeline: the captured layout/render pass are no longer ours. The
+    // next init captures a fresh recipe.
+    if (iv.materialPreviewPipeline == VK_NULL_HANDLE ||
+        iv.materialPreviewPipeline != m_mpSpecRecipe->pipeline) {
+        m_mpSpecRecipe.reset();
+        return;
+    }
+    const uint32_t want = materialPreviewSceneFeatureMask();
+    uint32_t next = m_mpSpecMask;
+    if (want & ~m_mpSpecMask) {
+        // A branch the live pipeline lacks is reachable NOW: rebuild before
+        // this frame records, never draw it with the old pipeline.
+        next = m_mpSpecMask | want;
+        m_mpSpecShrinkFrames = 0;
+    } else if (want != m_mpSpecMask) {
+        // Dropping a feature only saves time; wait until the scene settles so
+        // a slider crossing zero does not recompile every frame.
+        if (++m_mpSpecShrinkFrames < 240u) return;
+        next = want;
+        m_mpSpecShrinkFrames = 0;
+    } else {
+        m_mpSpecShrinkFrames = 0;
+        return;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    MaterialPreviewSpecRecipe& recipe = *m_mpSpecRecipe;
+    const std::filesystem::path dir(recipe.shaderDir);
+    std::vector<uint32_t> vertWords, fragWords;
+    VkDevice device = m_device->getDevice();
+    if (!readSpirv(dir / "material_preview.spv", vertWords) ||
+        !readSpirv(dir / "material_preview_frag.spv", fragWords)) {
+        m_mpSpecFailed = true;
+        SCENE_LOG_ERROR("[MaterialSpec] material_preview SPIR-V unreadable; cannot rebuild for " +
+                        specMaskName(next) + ". Material shading may miss a feature.");
+        return;
+    }
+    auto makeModule = [&](const std::vector<uint32_t>& words) {
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = words.size() * sizeof(uint32_t);
+        ci.pCode = words.data();
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device, &ci, nullptr, &module) != VK_SUCCESS) return VkShaderModule(VK_NULL_HANDLE);
+        return module;
+    };
+    VkShaderModule vert = makeModule(vertWords);
+    VkShaderModule frag = makeModule(fragWords);
+
+    auto build = [&](uint32_t mask, VkPipeline& out) -> VkResult {
+        MaterialPreviewSpecStorage spec{};
+        fillMaterialPreviewSpec(mask, spec);
+        VkPipelineShaderStageCreateInfo stages[2]{};
+        stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+        stages[0].module = vert;
+        stages[0].pName = "main";
+        stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+        stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+        stages[1].module = frag;
+        stages[1].pName = "main";
+        stages[1].pSpecializationInfo = &spec.info;
+        VkGraphicsPipelineCreateInfo info = recipe.info;
+        info.stageCount = 2;
+        info.pStages = stages;
+        const VkResult result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &out);
+        if (result == VK_SUCCESS) {
+            // The in-flight frames still read the old pipelines.
+            drainInteractiveViewportInFlight();
+            if (iv.materialPreviewPipeline) vkDestroyPipeline(device, iv.materialPreviewPipeline, nullptr);
+            destroyMaterialPreviewCoveredPipeline();
+            iv.materialPreviewPipeline = out;
+            recipe.pipeline = out;
+            // Copies stages[1] (and with it the specialization) into the
+            // EQUAL / early-tests variant.
+            createMaterialPreviewCoveredPipeline(info, recipe.shaderDir);
+        }
+        return result;
+    };
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkResult result = (vert && frag) ? build(next, pipeline) : VK_ERROR_INITIALIZATION_FAILED;
+    if (result != VK_SUCCESS && next != kMpSpecAll && vert && frag) {
+        // The full shader is what the session ran before O3; prefer it over a
+        // pipeline that lacks a reachable branch.
+        next = kMpSpecAll;
+        result = build(next, pipeline);
+    }
+    if (vert) vkDestroyShaderModule(device, vert, nullptr);
+    if (frag) vkDestroyShaderModule(device, frag, nullptr);
+    const double ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - started).count();
+    if (result != VK_SUCCESS) {
+        m_mpSpecFailed = true;
+        SCENE_LOG_ERROR("[MaterialSpec] Rebuild failed (VkResult " +
+                        std::to_string(static_cast<int>(result)) +
+                        "); material shading keeps " + specMaskName(m_mpSpecMask) +
+                        " and may miss " + specMaskName(want & ~m_mpSpecMask) + ".");
+        return;
+    }
+    m_mpSpecMask = next;
+    ++m_mpSpecRebuilds;
+    iv.dirty = true;
+    m_currentSamples = 0;
+    // IPC surface until the frame-timing `applied` block carries it (that is a
+    // shared-header change, held for the next full rebuild): perf.list shows
+    // each rebuild's cost, and the entry with the highest `seq` among
+    // "viewport.material_spec.mask.*" is the live mask.
+    rtperf::recordFast("viewport.material_spec.rebuild", ms);
+    rtperf::recordFast("viewport.material_spec.mask." + specMaskName(next), 0.0);
+    SCENE_LOG_INFO("[MaterialSpec] material pipeline rebuilt for " + specMaskName(next) +
+                   " in " + std::to_string(static_cast<int>(ms)) + " ms (rebuild #" +
+                   std::to_string(m_mpSpecRebuilds) + ")");
+}
+
+RasterAppliedState VulkanViewportBackend::sampleRasterAppliedState() const {
+    RasterAppliedState out = VulkanBackendAdapter::sampleRasterAppliedState();
+    const bool active = m_mpSpecRecipe != nullptr && !m_mpSpecFailed;
+    out.material_spec_active = active;
+    const uint32_t mask = active ? m_mpSpecMask : kMpSpecAll;
+    out.material_spec_terrain = (mask & kMpSpecTerrain) != 0;
+    out.material_spec_graph = (mask & kMpSpecGraph) != 0;
+    out.material_spec_weather = (mask & kMpSpecWeather) != 0;
+    out.material_spec_rebuilds = m_mpSpecRebuilds;
+    return out;
 }
 
 VkPipeline VulkanBackendAdapter::materialPreviewShadingPipeline(

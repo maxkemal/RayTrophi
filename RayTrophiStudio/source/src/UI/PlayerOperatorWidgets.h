@@ -34,7 +34,11 @@ inline constexpr ImU32 panel = IM_COL32(24, 32, 49, 255);
 inline constexpr ImU32 border = IM_COL32(49, 62, 84, 255);
 
 struct Console {
+#ifdef __ANDROID__
+    bool open = false; // the operator console is not shown on Android unless opened over IPC
+#else
     bool open = true;
+#endif
     bool game_settings_dirty = false;
     std::string page = "games";
     std::string error;
@@ -53,8 +57,16 @@ struct Console {
     std::vector<ImVec2> corners;
     float room[2] = {4.0f, 3.0f};
     float angles[3]{};
+    // Layout scale for touch screens (1 on Windows, so every S() below is the identity there).
+    // touch_min is the smallest finger target in pixels (48 dp), 0 when there is no touch UI.
+    float scale = 1.0f;
+    float touch_min = 0.0f;
 };
 extern Console ui;
+
+inline float S(float value) {
+    return value * ui.scale;
+}
 
 inline ImVec2 add(ImVec2 p, float x, float y) {
     return ImVec2(p.x + x, p.y + y);
@@ -89,11 +101,26 @@ inline bool action(const char *text, ImVec2 size = ImVec2(0, 38), bool primary =
                           primary ? ImVec4(.31f, .77f, .65f, 1) : ImVec4(.21f, .28f, .39f, 1));
     ImGui::PushStyleColor(ImGuiCol_Text, primary ? ImVec4(.04f, .10f, .12f, 1) : color(ink));
     if (size.x > 0) {
-        size.x = std::max(size.x, ImGui::CalcTextSize(text, nullptr, true).x + 24.0f);
+        size.x = std::max(S(size.x), ImGui::CalcTextSize(text, nullptr, true).x + 24.0f * ui.scale);
+    }
+    if (size.y > 0) {
+        size.y = std::max(S(size.y), ui.touch_min);
+    } else if (size.y == 0 && ui.touch_min > 0) {
+        size.y = ui.touch_min;
     }
     const bool clicked = ImGui::Button(text, size);
     ImGui::PopStyleColor(3);
     return clicked;
+}
+// Small inline buttons (Remove) become finger-sized where there is a touch UI.
+inline bool smallAction(const char *text) {
+    return ui.touch_min > 0 ? action(text, ImVec2(1, 0)) : ImGui::SmallButton(text);
+}
+inline void wrapped(const char *text) {
+    ImGui::TextWrapped("%s", text);
+}
+inline void tooltipText(const char *text) {
+    ImGui::SetTooltip("%s", text);
 }
 inline bool call(const std::string &operation, const json &config = json::object()) {
     if (AppRuntime::playerSceneLoad().presenting()) {
@@ -176,4 +203,6 @@ void display();
 void audio();
 void releaseArtwork();
 SDL_Texture *brand(SDL_Renderer *renderer);
+// Decoded cover image, cached per path and size cap (failed loads are cached too).
+SDL_Texture *artwork(SDL_Renderer *renderer, const std::string &path, int max_dim = 512);
 } // namespace PlayerConsole

@@ -13,6 +13,7 @@
 // kaynak almak iki kez integre etmek olurdu.
 
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
 #include "RayFusion/ProbeField.h"
 #include "globals.h"
 
@@ -83,7 +84,7 @@ public:
     // Doku descriptor'larinin hangi kusakta yazildigi. Kusak degismedikce
     // yeniden yazmak, her senkron dispatch'e bir descriptor turu eklerdi.
     uint64_t textureGeneration = 0;
-    size_t textureCount = 0;
+
     RayFusion::BounceCounters lastCounters{};
     bool ready = false;
     // Ölçüm yüzeyi.
@@ -136,22 +137,11 @@ bool VulkanBackendAdapter::ensureRayFusionProbeTraceResources(uint32_t capacity)
 
     VkDevice device = m_device->getDevice();
 
-    // * Dizi uzunlugu CIHAZ LIMITINDEN turetilir, VULKAN_TEXTURE_CAPACITY'den
-    //   degil. Bazi ICD'ler descriptor indexing bildirir ama UPDATE_AFTER_BIND
-    //   olmayan sampled-image dizisini cok daha dusuk bir sayida keser; fazlasi
-    //   layout olusturmadan GECER ve pipeline olustururken surucu icinde coker.
-    //   Material preview ayni hesabi yapiyor; ikisi ayrisirsa bu shader onun
-    //   yazamadigi bir slotu okur.
-    {
-        VkPhysicalDeviceProperties props{};
-        vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &props);
-        const uint32_t limit = props.limits.maxPerStageDescriptorSampledImages;
-        const uint32_t want = static_cast<uint32_t>(VULKAN_TEXTURE_CAPACITY);
-        // 1 slot ortam isimasi (binding 2) icin ayrili, 3 slot pay birakildi.
-        state->textureArrayLen = (limit > 4u) ? (std::min)(want, limit - 4u) : 1u;
-    }
+    // Material textures: 32 sampler2DArray pages (binding 7) + slot->ref table
+    // (binding 14), the shared viewport ABI (VulkanMaterialTextureBinding.h).
+    state->textureArrayLen = Backend::MaterialTextureBinding::kPageCount;
 
-    VkDescriptorSetLayoutBinding bindings[9]{};
+    VkDescriptorSetLayoutBinding bindings[10]{};
     bindings[0].binding = 0;
     bindings[0].descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR;
     bindings[1].binding = 1;
@@ -166,7 +156,6 @@ bool VulkanBackendAdapter::ensureRayFusionProbeTraceResources(uint32_t capacity)
     }
     // binding 7: RT/raster hattinin okudugu AYNI bindless doku dizisi.
     bindings[7].binding = 7;
-    bindings[7].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     // binding 8: BounceCounters -- bu dilimin KABUL ALETI.
     bindings[8].binding = 8;
     bindings[8].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -174,34 +163,13 @@ bool VulkanBackendAdapter::ensureRayFusionProbeTraceResources(uint32_t capacity)
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
     }
-    bindings[7].descriptorCount = state->textureArrayLen;
-
-    // Seyrek dizi: yalniz gercekten yuklenmis doku ID'lerinin slotu yazilir.
-    // PARTIALLY_BOUND olmadan yazilmamis slot spec'e gore TANIMSIZDIR ve bazi
-    // suruculer onu kosulsuz dereference eder. Yine de asagida her slot bir yer
-    // tutucu ile dolduruluyor: tanimsiz bir descriptor'i yalnizca bir bayraga
-    // guvenerek birakmak, bu depoda bir kez cihaz kaybina donustu.
-    const bool hasDescIdx = m_device->getCapabilities().supportsDescriptorIndexing;
-    if (!hasDescIdx) {
-        // Tek slot ile bir malzeme dokusu dizisi taklit etmek, HER dokuyu
-        // 0 numarali slota okumak olurdu -- sessizce yanlis bir goruntu.
-        // Dilim burada durur ve gerekcesini soyler.
-        state->inactiveReason =
-            "device reports no descriptor indexing; the bounce cannot read material textures";
-        return false;
-    }
-    VkDescriptorBindingFlags bindingFlags[9]{};
-    bindingFlags[7] = VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT;
-    VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlagsCI{};
-    bindingFlagsCI.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
-    bindingFlagsCI.bindingCount = 9;
-    bindingFlagsCI.pBindingFlags = bindingFlags;
+    bindings[7] = Backend::MaterialTextureBinding::pagesBinding(7, VK_SHADER_STAGE_COMPUTE_BIT);
+    bindings[9] = Backend::MaterialTextureBinding::refTableBinding(14, VK_SHADER_STAGE_COMPUTE_BIT);
 
     VkDescriptorSetLayoutCreateInfo dlci{};
     dlci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-    dlci.bindingCount = 9;
+    dlci.bindingCount = 10;
     dlci.pBindings = bindings;
-    dlci.pNext = &bindingFlagsCI;
     if (vkCreateDescriptorSetLayout(device, &dlci, nullptr, &state->layout) != VK_SUCCESS) {
         state->inactiveReason = "descriptor set layout creation failed";
         return false;
@@ -249,8 +217,8 @@ bool VulkanBackendAdapter::ensureRayFusionProbeTraceResources(uint32_t capacity)
 
     VkDescriptorPoolSize poolSizes[3] = {
         {VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1u},
-        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 6u},
-        {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, state->textureArrayLen + 1u}
+        {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 7u},   // +1 slot->ref table
+        Backend::MaterialTextureBinding::pagesPoolSize(1u)
     };
     VkDescriptorPoolCreateInfo dpci{};
     dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -397,48 +365,14 @@ bool VulkanBackendAdapter::traceRayFusionProbes(const float* origins, uint32_t p
         }
         vkUpdateDescriptorSets(device, 8, writes, 0, nullptr);
 
-        // ** Bindless doku dizisi: RT/raster ile AYNI slot numaralari.
-        //   Yalniz kusak degistiginde yeniden yazilir -- her senkron dispatch'te
-        //   binlerce descriptor yazmak, olculen trace_ms'i descriptor maliyeti
-        //   ile kirletirdi ve o kirlilik "isin izleme pahaliymis" diye okunurdu.
+        // Material texture pages + slot->ref table. Rewritten only when the
+        // texture generation moves (compaction bumps it) - writing them on every
+        // synchronous dispatch would pollute the measured trace_ms.
         const uint64_t texGeneration = textureCacheGeneration();
-        if (texGeneration != state->textureGeneration ||
-            m_uploadedImages.size() != state->textureCount) {
-            VkDescriptorImageInfo placeholder{};
-            for (const auto& entry : m_uploadedImages) {
-                if (entry.second.view && entry.second.sampler) {
-                    placeholder.sampler = entry.second.sampler;
-                    placeholder.imageView = entry.second.view;
-                    placeholder.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                    break;
-                }
-            }
-            if (placeholder.imageView) {
-                // Once HER slot gecerli bir goruntu ile doldurulur. Bir slotu
-                // "nasilsa okunmaz" diye bos birakmak, malzeme tablosu ile
-                // yuklenmis doku kumesinin bir kare bile ayrismasi durumunda
-                // tanimsiz bir descriptor okumak demektir.
-                std::vector<VkDescriptorImageInfo> infos(state->textureArrayLen, placeholder);
-                for (const auto& entry : m_uploadedImages) {
-                    if (entry.first <= 0 ||
-                        static_cast<uint32_t>(entry.first) >= state->textureArrayLen) continue;
-                    if (!entry.second.view || !entry.second.sampler) continue;
-                    auto& slot = infos[static_cast<size_t>(entry.first)];
-                    slot.sampler = entry.second.sampler;
-                    slot.imageView = entry.second.view;
-                    slot.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-                }
-                VkWriteDescriptorSet texWrite{};
-                texWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                texWrite.dstSet = state->set;
-                texWrite.dstBinding = 7;
-                texWrite.dstArrayElement = 0;
-                texWrite.descriptorCount = state->textureArrayLen;
-                texWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                texWrite.pImageInfo = infos.data();
-                vkUpdateDescriptorSets(device, 1, &texWrite, 0, nullptr);
+        if (texGeneration != state->textureGeneration) {
+            if (Backend::MaterialTextureBinding::writeAll(*m_device, m_textureStorage,
+                                                          state->set, 7, 14)) {
                 state->textureGeneration = texGeneration;
-                state->textureCount = m_uploadedImages.size();
             }
         }
     }

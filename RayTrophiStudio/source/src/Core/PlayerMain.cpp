@@ -26,7 +26,9 @@
 #include "Core/PlayerSceneLoad.h"
 #include "Core/PlayerBalloonInput.h"
 #include "PlayerStartupFailureTouch.h"
+#include "PlayerOperatorTouch.h"
 #include "UI/PlayerOperatorUI.h"
+#include "UI/PlayerKidLauncher.h"
 #include "Api/RtApiPlayerOperator.h"
 
 #include "globals.h"
@@ -229,7 +231,11 @@ public:
     float render_scale = 1.0f;     // fraction of the explicitly selected render resolution
     int pacing_hz = 60;            // 0 = uncapped (measure the real frame cost)
     bool continuous = false;       // render every iteration, even a settled scene
+#ifdef __ANDROID__
+    bool hud = false;  // consumer app: no diagnostics overlay unless asked (display.hud / F1)
+#else
     bool hud = true;
+#endif
     bool targets_dirty = true;     // presentation targets must be rebuilt
     bool resolution_menu = false;
 
@@ -484,6 +490,17 @@ public:
                 }
                 if (fullscreen) { applyFullscreen(false); return true; }
                 return false;
+#ifdef __ANDROID__
+            case SDLK_AC_BACK:
+                // Android Back: closes an IPC-opened console, otherwise play <-> pause (the
+                // kid launcher ignores it on the library and loading screens).
+                if (AppRuntime::playerConsoleOpen()) {
+                    AppRuntime::closePlayerOperator();
+                } else {
+                    AppRuntime::kidLauncherBack();
+                }
+                return true;
+#endif
             case SDLK_F1: hud = !hud; return true;
             case SDLK_F2:
                 if (AppRuntime::playerOperatorOpen()) {
@@ -536,14 +553,17 @@ private:
 // No scene and a viewer error (e.g. an unsupported GPU): say so in the middle of the
 // screen whether or not the debug HUD is on. A black screen with the reason only in the
 // log is the failure mode this exists to prevent (Android A6a).
-bool drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
-    if (viewer.hasScene()) return false;
+enum class StartupNotice { None, SceneError, UnsupportedGpu };
+
+StartupNotice drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
+    if (viewer.hasScene()) return StartupNotice::None;
     const auto status = viewer.status();
     // Backend initialization runs inside the project open, so its failure arrives as
     // last_open_error; a later runtime fault arrives as error.
     std::string error = status.value("error", "");
     if (error.empty()) error = status.value("last_open_error", "");
-    if (error.empty()) return false;
+    if (error.empty()) return StartupNotice::None;
+    const bool unsupported_gpu = error.rfind("This device's GPU is not supported", 0) == 0;
     const ImGuiViewport* view = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(view->WorkPos.x + view->WorkSize.x * 0.5f,
                                    view->WorkPos.y + view->WorkSize.y * 0.5f),
@@ -564,7 +584,6 @@ bool drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
 #endif
     if (ImGui::Begin("##player_startup_failure", nullptr, flags)) {
         ImGui::SetWindowFontScale(1.6f);
-        const bool unsupported_gpu = error.rfind("This device's GPU is not supported", 0) == 0;
         const std::string title = unsupported_gpu
             ? Localization::text("player.startup_unsupported_gpu",
                                  "RayTrophi Player cannot run on this device")
@@ -587,7 +606,7 @@ bool drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
 #endif
     }
     ImGui::End();
-    return true;
+    return unsupported_gpu ? StartupNotice::UnsupportedGpu : StartupNotice::SceneError;
 }
 
 void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
@@ -723,13 +742,16 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // An explicit project bypasses the library. A single-scene package can
-    // launch directly, while multiple bundled games need a selection first.
+    // An explicit project bypasses the library. Multiple bundled games need
+    // a selection first.
     const std::vector<PlayerSceneEntry> packaged_scenes = loadPackagedSceneList();
     const bool open_library = launch_project.empty() && packaged_scenes.size() > 1;
-    if (launch_project.empty() && packaged_scenes.size() == 1) {
+    const bool auto_open_packaged_scene = launch_project.empty() && packaged_scenes.size() == 1;
+#ifndef __ANDROID__
+    if (auto_open_packaged_scene) {
         launch_project = packaged_scenes.front().path_utf8;
     }
+#endif
 
     if (!AppRuntime::initPlatform(nullptr)) {
         return 1;
@@ -812,9 +834,27 @@ int main(int argc, char* argv[]) {
     }
 
     AppRuntime::setPlayerOperatorLaunchOverrides(launch_display);
+#ifdef __ANDROID__
+    {
+        // Binds the operator service to this context so saved game settings and the display
+        // restore run even while the menu is closed (on Windows the open console does this).
+        nlohmann::json ignored;
+        rtapi::playerOperator("language.status", nlohmann::json::object(), ignored);
+    }
+#endif
+#ifdef __ANDROID__
+    if (auto_open_packaged_scene) {
+        AppRuntime::kidLauncherAutoOpen(AppRuntime::playerScenePathKey(
+            AppRuntime::projectPathFromUtf8(packaged_scenes.front().path_utf8)));
+    } else if (open_library) {
+        std::string launcher_error;
+        AppRuntime::kidLauncherShow("library", launcher_error);
+    }
+#else
     if (open_library) {
         AppRuntime::showPlayerOperator("games");
     }
+#endif
 
     bool running = true;
     bool debug_camera = false;
@@ -849,14 +889,22 @@ int main(int argc, char* argv[]) {
     AppRuntime::EventInfo event_info;
 #ifdef __ANDROID__
     AppRuntime::PlayerStartupFailureTouch startupFailureTouch;
-    bool startupNoticeVisible = false;
+    AppRuntime::PlayerOperatorTouch operatorTouch;
+    StartupNotice startupNotice = StartupNotice::None;
 #endif
     while (running) {
         frame_cycle.beginIteration();
         const auto iteration_start = Clock::now();
         while (frame_cycle.pollEvent(event, event_info)) {
 #ifdef __ANDROID__
-            if (startupFailureTouch.handle(event, window, startupNoticeVisible)) {
+            if (startupNotice != StartupNotice::UnsupportedGpu) {
+                AppRuntime::kidLauncherEvent(event);
+            }
+            if (startupFailureTouch.handle(event, window, startupNotice != StartupNotice::None)) {
+                frame_cycle.requestRedraw();
+                continue;
+            }
+            if (operatorTouch.handle(event, window)) {
                 frame_cycle.requestRedraw();
                 continue;
             }
@@ -882,7 +930,8 @@ int main(int argc, char* argv[]) {
                 (!ImGui::GetIO().WantCaptureKeyboard ||
                  ((display.resolution_menu || AppRuntime::playerOperatorOpen()) &&
                   (event.key.keysym.sym == SDLK_F2 || event.key.keysym.sym == SDLK_F6 ||
-                   event.key.keysym.sym == SDLK_F8 || event.key.keysym.sym == SDLK_ESCAPE))) &&
+                   event.key.keysym.sym == SDLK_F8 || event.key.keysym.sym == SDLK_ESCAPE ||
+                   event.key.keysym.sym == SDLK_AC_BACK))) &&
                 display.handleKey(event.key)) {
                 frame_cycle.requestRedraw();
             }
@@ -963,7 +1012,14 @@ int main(int argc, char* argv[]) {
             static_cast<double>(SDL_GetPerformanceFrequency()));
         previous_tick = now_tick;
         const auto advance_start = Clock::now();
+#ifdef __ANDROID__
+        // The pause screen and the library freeze the game clock (kid launcher).
+        if (!AppRuntime::kidLauncherPaused()) {
+            viewer->advanceRuntime(dt_seconds);
+        }
+#else
         viewer->advanceRuntime(dt_seconds);
+#endif
         display.recordIteration(millisecondsBetween(advance_start, Clock::now()));
         if (display.continuous) {
             viewer->forceRedraw();
@@ -990,17 +1046,20 @@ int main(int argc, char* argv[]) {
             const auto present_start = Clock::now();
             frame_cycle.beginUiFrame();
 #ifdef __ANDROID__
-            startupNoticeVisible = drawStartupFailureNotice(*viewer);
-            if (display.hud && !startupNoticeVisible) {
+            startupNotice = drawStartupFailureNotice(*viewer);
+            if (display.hud && startupNotice == StartupNotice::None) {
                 drawHud(rtipc::isRunning(), *viewer, display);
+            }
+            if (startupNotice != StartupNotice::UnsupportedGpu) {
+                AppRuntime::drawPlayerOperator(renderer);
             }
 #else
             if (display.hud) {
                 drawHud(rtipc::isRunning(), *viewer, display);
             }
             drawStartupFailureNotice(*viewer);
-#endif
             AppRuntime::drawPlayerOperator(renderer);
+#endif
             frame_cycle.endUiFrame();
 
             SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);

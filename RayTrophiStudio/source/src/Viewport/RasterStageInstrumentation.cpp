@@ -91,6 +91,11 @@ RasterAppliedState VulkanBackendAdapter::sampleRasterAppliedState() const {
     out.scene_lights = m_device ? m_device->m_lightCount : 0u;
     out.volume_count = m_device ? m_device->m_volumeCount : 0u;
     out.total_instances = static_cast<std::uint32_t>(m_rasterInstances.size());
+    if (m_device) {
+        const VulkanRT::GPUVendor vendor = m_device->getCapabilities().vendor;
+        out.tiled_gpu = vendor == VulkanRT::GPUVendor::ARM_MALI || vendor == VulkanRT::GPUVendor::QUALCOMM ||
+                        vendor == VulkanRT::GPUVendor::APPLE;
+    }
     return out;
 }
 

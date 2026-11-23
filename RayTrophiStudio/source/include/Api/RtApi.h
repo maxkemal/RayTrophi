@@ -2110,6 +2110,10 @@ struct RasterTimingInfo {
     uint32_t shadowed_lights = 0, scene_lights = 0, volume_count = 0;
     uint64_t visible_triangles = 0;
     uint32_t total_instances = 0, draw_calls = 0;
+    bool material_spec_active = false;
+    bool material_spec_terrain = true, material_spec_graph = true, material_spec_weather = true;
+    uint32_t material_spec_rebuilds = 0;
+    bool tiled_gpu = false;
     std::vector<std::string> warnings;
 };
 RasterTimingInfo rasterTimings();

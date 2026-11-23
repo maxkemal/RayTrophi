@@ -6677,7 +6677,14 @@ json dispatchMethod(const std::string& method, const json& params) {
                     {"volume_count", t.volume_count},
                     {"visible_triangles", t.visible_triangles},
                     {"total_instances", t.total_instances},
-                    {"draw_calls", t.draw_calls}}},
+                    {"draw_calls", t.draw_calls},
+                    {"tiled_gpu", t.tiled_gpu},
+                    {"feature_spec", json{
+                        {"active", t.material_spec_active},
+                        {"terrain", t.material_spec_terrain},
+                        {"graph", t.material_spec_graph},
+                        {"weather", t.material_spec_weather},
+                        {"rebuilds", t.material_spec_rebuilds}}}}},
                 {"warnings", t.warnings}};
             if (t.gpu_supported) {
                 response["raster_main_gpu_samples"] = std::move(mainSamples);

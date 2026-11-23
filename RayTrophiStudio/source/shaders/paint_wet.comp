@@ -257,6 +257,12 @@ shared uint s_list[MAX_TILE_SOURCES];
 shared uint s_count;
 shared uint s_flag;
 shared uint s_sum[4];
+// Workgroup-uniform activity gate (one tile per workgroup). See
+// workgroupDilatedActive: the neighbourhood flags are read ONCE per tile, not
+// once per thread. Idle tiles were the bulk of paint_wet's cost: every mode
+// launches one workgroup per tile of all surfaces (8 x 1024^2 -> 32768 groups),
+// and each of the 256 threads re-read 9 (tick/resolve) or 25 (channels) flags.
+shared uint s_gate;
 
 // ── Event splat shape (2026-11-18) ──────────────────────────────────────────
 // A drop hitting a wall is not a disc. sim_particle_collide.comp packs the
@@ -557,6 +563,14 @@ bool dilatedActive(Tile t, Surface s) {
             if (tileActive(s, int(t.tx) + ox, int(t.ty) + oy)) return true;
     return false;
 }
+// Same answer as dilatedActive for every thread of the workgroup. Must be
+// reached in uniform control flow (all callers only return on tile-uniform
+// conditions before it).
+bool workgroupDilatedActive(Tile t, Surface s) {
+    if (gl_LocalInvocationIndex == 0u) s_gate = dilatedActive(t, s) ? 1u : 0u;
+    barrier();
+    return s_gate != 0u;
+}
 
 // What one texel's flow does this step, from the previous step only. Used for
 // the texel itself and for the upstream texel of the transport gather.
@@ -746,7 +760,7 @@ void tickTile(uint tile_index) {
     Tile t = tiles[tile_index];
     if (t.valid_texels == 0u) return;
     Surface s = surfaces[t.surface];
-    if (!dilatedActive(t, s)) return;
+    if (!workgroupDilatedActive(t, s)) return;
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x, y; tileTexel(t, k, x, y);
         if (!inSurface(s, x, y)) continue;
@@ -783,7 +797,7 @@ void resolveTile(uint tile_index) {
     Tile t = tiles[tile_index];
     if (t.valid_texels == 0u) return;
     Surface s = surfaces[t.surface];
-    if (!dilatedActive(t, s)) return;
+    if (!workgroupDilatedActive(t, s)) return;
     uint lid = gl_LocalInvocationIndex;
     if (lid == 0u) s_flag = 0u;
     barrier();

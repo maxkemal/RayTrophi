@@ -581,7 +581,19 @@ RasterTimingInfo rasterTimings() {
         out.visible_triangles = t.applied.visible_triangles;
         out.total_instances = t.applied.total_instances;
         out.draw_calls = t.applied.draw_calls;
+        out.material_spec_active = t.applied.material_spec_active;
+        out.material_spec_terrain = t.applied.material_spec_terrain;
+        out.material_spec_graph = t.applied.material_spec_graph;
+        out.material_spec_weather = t.applied.material_spec_weather;
+        out.material_spec_rebuilds = t.applied.material_spec_rebuilds;
+        out.tiled_gpu = t.applied.tiled_gpu;
         out.warnings = t.warnings;
+        if (t.applied.tiled_gpu) {
+            out.warnings.push_back(
+                "tiled GPU: timestamps inside a render pass do not split it; the whole "
+                "HDR pass lands on its first mark, so 'sky' carries the main pass and "
+                "'main_pass' reads near zero. Compare sky+main_pass as one number.");
+        }
     });
     if (!found)
         out.warnings.push_back("no viewport backend owns a raster timing window");
