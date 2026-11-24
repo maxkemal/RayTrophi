@@ -6359,11 +6359,16 @@ void ParticleSimulationSystem::releaseComputeResources(SimulationComputeContext&
 }
 
 std::size_t ParticleSimulationSystem::spawn(const ParticleSpawnDesc& desc) {
+    return spawnFrom(desc, 0);
+}
+
+std::size_t ParticleSimulationSystem::spawnFrom(const ParticleSpawnDesc& desc,
+                                                std::size_t first_slot) {
     if (!finiteParticleDesc(desc) || desc.lifetime_seconds <= 0.0f) {
         return kInvalidParticle;
     }
 
-    std::size_t index = findDeadSlot();
+    std::size_t index = findDeadSlot(first_slot);
     if (index == kInvalidParticle) {
         index = buffers_.alive.size();
         resizeStorage(index + 1);
@@ -10343,8 +10348,8 @@ void ParticleSimulationSystem::resizeStorage(std::size_t capacity) {
     ++data_version_;
 }
 
-std::size_t ParticleSimulationSystem::findDeadSlot() const {
-    for (std::size_t i = 0; i < buffers_.alive.size(); ++i) {
+std::size_t ParticleSimulationSystem::findDeadSlot(std::size_t first_slot) const {
+    for (std::size_t i = first_slot; i < buffers_.alive.size(); ++i) {
         if (buffers_.alive[i] == 0u) {
             return i;
         }

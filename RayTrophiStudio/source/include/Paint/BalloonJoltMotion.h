@@ -394,7 +394,7 @@ inline std::unique_ptr<BalloonJoltMotion> prepareBalloonJoltMotion(
     excluded_visuals.insert(excluded_visuals.end(), visuals.begin(), visuals.end());
     const auto surfaces = config.value("surfaces", std::vector<std::string>{});
     return std::make_unique<BalloonJoltMotion>(
-        balloonRoomTriangles(scene, excluded_visuals), visuals.size(),
+        balloonRoomTriangles(scene, excluded_visuals), config.at("balloons").get<size_t>(),
                                               config.value("impact_soft_body", true),
                                               config.value("wind_strength", defaultBalloonWindStrength),
                                               balloonPaintRoomFront(scene, surfaces));

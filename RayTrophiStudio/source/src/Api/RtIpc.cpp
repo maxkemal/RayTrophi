@@ -6649,6 +6649,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                 {"available", t.available},
                 {"gpu_supported", t.gpu_supported},
                 {"gpu_unsupported_reason", t.gpu_unsupported_reason},
+                {"present_path", t.present_path},
                 {"frames", t.frames},
                 {"frames_with_gpu", t.frames_with_gpu},
                 {"frame_cpu_mean_ms", t.frame_cpu_mean_ms},
@@ -6684,6 +6685,7 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"terrain", t.material_spec_terrain},
                         {"graph", t.material_spec_graph},
                         {"weather", t.material_spec_weather},
+                        {"glass", t.material_spec_glass},
                         {"rebuilds", t.material_spec_rebuilds}}}}},
                 {"warnings", t.warnings}};
             if (t.gpu_supported) {

@@ -545,6 +545,7 @@
     <ClInclude Include="source\include\Viewport\RasterGpuCull.h" />
     <ClInclude Include="source\include\Viewport\RasterInstanceUpload.h" />
     <ClInclude Include="source\include\Viewport\RasterViewportFrameRing.h" />
+    <ClInclude Include="source\include\Viewport\PlayerSwapchainPresenter.h" />
     <ClInclude Include="source\include\Viewport\RealtimeRenderSettings.h" />
     <ClInclude Include="source\include\Viewport\ViewportSceneSync.h" />
     <ClInclude Include="source\include\stb_image_write.h" />
@@ -554,6 +555,7 @@
     <ClInclude Include="external\imgui\imgui.h" />
     <ClInclude Include="external\imgui\imgui_impl_sdl2.h" />
     <ClInclude Include="external\imgui\imgui_impl_sdlrenderer2.h" />
+    <ClInclude Include="external\imgui\imgui_impl_vulkan.h" />
     <ClInclude Include="external\imgui\imgui_internal.h" />
     <ClInclude Include="external\xatlas\xatlas.h" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
     <ClInclude Include="external\xatlas\source\xatlas\xatlas.h" Condition="'$(RayTrophiHasXatlas)'=='true' and !Exists('$(ProjectDir)external\xatlas\xatlas.h')" />
@@ -1963,6 +1965,7 @@
     <ClCompile Include="source\src\Viewport\MaterialPreviewVolume.cpp" />
     <ClCompile Include="source\src\Viewport\RasterInstanceUpload.cpp" />
     <ClCompile Include="source\src\Viewport\RasterViewportFrameRing.cpp" />
+    <ClCompile Include="source\src\Viewport\PlayerSwapchainPresenter.cpp" />
     <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
     <ClCompile Include="source\src\Render\AtmosphereLUTCuda.cpp" />
@@ -2726,6 +2729,7 @@
     <ClCompile Include="external\imgui\imgui_draw.cpp" />
     <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp" />
     <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp" />
+    <ClCompile Include="external\imgui\imgui_impl_vulkan.cpp" />
     <ClCompile Include="external\imgui\imgui_tables.cpp" />
     <ClCompile Include="external\imgui\imgui_widgets.cpp" />
     <ClCompile Include="external\xatlas\xatlas.cpp" Condition="Exists('$(ProjectDir)external\xatlas\xatlas.cpp')" />
@@ -3666,6 +3670,7 @@
   <ItemGroup>
     <ClCompile Include="source\src\Backend\VulkanFsrLoader.cpp" />
     <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanGpuBreadcrumbs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleInputs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp" />
     <ClCompile Include="source\src\Api\RtApiUpscale.cpp" />
@@ -3675,6 +3680,7 @@
     <ClInclude Include="source\include\Backend\UpscaleTypes.h" />
     <ClInclude Include="source\include\Backend\VulkanFsrLoader.h" />
     <ClInclude Include="source\include\Backend\VulkanFsrUpscaler.h" />
+    <ClInclude Include="source\include\Backend\VulkanGpuBreadcrumbs.h" />
     <ClInclude Include="source\include\Backend\VulkanUpscaleInputs.h" />
     <ClInclude Include="source\include\Api\RtApiUpscale.h" />
     <ClInclude Include="source\src\Api\RtIpcUpscale.h" />

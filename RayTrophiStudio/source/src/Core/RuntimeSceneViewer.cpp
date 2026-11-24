@@ -1,4 +1,7 @@
 #include "Backend/VulkanStartupDiagnostics.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include <sstream>
 #include "Core/RuntimeSceneViewer.h"
 #include "Viewport/RayFusionViewportPasses.h"
@@ -26,6 +29,7 @@
 #include "Renderer.h"
 #include "scene_data.h"
 #include "ParticleSimulation.h"
+#include "PerfProfile.h"
 #include "TriangleMesh.h"
 #include "HittableInstance.h"
 #include "Camera.h"
@@ -187,6 +191,11 @@ rtapi::Result RuntimeSceneViewer::initializeBackend() {
         return rtapi::Result::fail("Player Vulkan viewport initialization failed");
 #endif
     }
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (!PlayerSwapchainPresenter::instance().attach(*backend->getVulkanDevice())) {
+        return rtapi::Result::fail("Player Vulkan swapchain initialization failed");
+    }
+#endif
     backend->setViewportMode(Backend::ViewportMode::MaterialPreview);
     // Match Studio: capture opts into synchronous readback; ordinary display
     // uses the backend's frame ring and its initial blocking seed.
@@ -459,6 +468,10 @@ bool RuntimeSceneViewer::needsFrame() const {
             (rtapi::viewportCaptureEnabled() && !rtapi::viewportStatus().frame_available));
 }
 
+bool RuntimeSceneViewer::deviceLost() const {
+    return g_vulkan_device_lost;
+}
+
 void RuntimeSceneViewer::requestFrame() {
     refresh_requested_ = true;
     frame_available_ = false;
@@ -501,10 +514,13 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
     scene.setDeformRefitActive(true);
 
     // A game runs the simulation as a free-running clock: no timeline cache, no
-    // scrubbing. The raster viewport never samples simulation device buffers, so
-    // there is no RT backend to fence (Studio passes null for it too).
+    // scrubbing. No RT backend to fence (Studio passes null for it too). The
+    // raster viewport does read simulation buffers (vertex-pulled particles, wet
+    // paint atlas) and orders that with a barrier at the start of its frame, so
+    // the tick submits its compute work once, asynchronously.
     SimulationClockInput input;
     input.dt_seconds = dt_seconds;
+    input.defer_compute_submit = true;
     // `playing` means TIMELINE playback. updateSimulationTimeline free-runs only
     // for live_mode && !playing; playing=true takes the timeline-bake path, and
     // with a playhead parked at 0 that path never steps (first live test: the
@@ -522,7 +538,10 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         ++animation_updates_;
         g_gpu_refit_pending = true;
     }
-    const SimulationClockResult clock = simulationClock().tick(scene, input);
+    const SimulationClockResult clock = [&] {
+        RTPERF_FRAME_SCOPE("player.advance.simulation_tick");
+        return simulationClock().tick(scene, input);
+    }();
     if (load.busy() && load.stage() == "game_design" && !Paint::gameDesignPending()) {
         load.checkpoint(97, "first_frame", Paint::gameDesignStatus());
         refresh_requested_ = true;
@@ -667,7 +686,12 @@ void RuntimeSceneViewer::forceRedraw() {
 }
 
 bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    (void)texture;
+    if (!scene_ready_ || !backend_ || !surface) {
+#else
     if (!scene_ready_ || !backend_ || !surface || !texture) {
+#endif
         return false;
     }
     try {
@@ -709,14 +733,28 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
         // Also cover the first frame after project.open, before the next tick.
         rtpost::syncDisplay(context_.color_processor, context_.scene.camera.get(), false);
         const auto render_start = std::chrono::steady_clock::now();
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        const auto before = PlayerSwapchainPresenter::instance().frameSerial();
+        const bool hadFrame = frame_available_ && frame_scene_revision_ == scene_revision_;
+#endif
         backend_->renderProgressive(surface, nullptr, nullptr, width_, height_,
                                      &framebuffer_, nullptr);
         const auto upload_start = std::chrono::steady_clock::now();
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        const bool upload_failed = g_vulkan_device_lost;
+#else
         const bool upload_failed = g_vulkan_device_lost ||
             SDL_UpdateTexture(texture, nullptr, surface->pixels, surface->pitch) != 0;
+#endif
+#if !defined(RT_PLAYER) || !(defined(_WIN32) || defined(__ANDROID__))
         const auto upload_end = std::chrono::steady_clock::now();
+#endif
         last_render_ms_ = std::chrono::duration<double, std::milli>(upload_start - render_start).count();
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        last_upload_ms_ = 0.0;
+#else
         last_upload_ms_ = std::chrono::duration<double, std::milli>(upload_end - upload_start).count();
+#endif
         if (!backend_->getInteractiveViewportFrameTelemetry(last_telemetry_)) {
             last_telemetry_ = Backend::RasterFrameTelemetry{};
         }
@@ -733,6 +771,11 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
         }
         ++frames_rendered_;
         refresh_requested_ = false;
+        const bool capture_enabled = rtapi::viewportCaptureEnabled();
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        const bool rasterSubmitted = PlayerSwapchainPresenter::instance().frameSerial() != before;
+        frame_available_ = rasterSubmitted || hadFrame;
+#else
         Backend::RasterFrameTelemetry telemetry;
         const bool measured = backend_->getInteractiveViewportFrameTelemetry(telemetry) &&
                               telemetry.available && telemetry.width == width_ &&
@@ -744,6 +787,7 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
             ((telemetry.frames_consumed > 0 &&
               (telemetry.frames_consumed != consumed_baseline_ || settled)) ||
              (!telemetry.async_present && telemetry.draw_calls > 0 && settled));
+#endif
         const bool firstSceneFrame = frame_available_ && frame_scene_revision_ != scene_revision_;
         if (frame_available_) {
             frame_scene_revision_ = scene_revision_;
@@ -752,6 +796,12 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
                 load.finish();
             }
         }
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (!capture_enabled || !rasterSubmitted) {
+            return rasterSubmitted;
+        }
+        const auto& telemetry = last_telemetry_;
+#endif
         // Cheap signature for camera/reload acceptance, not a second image render.
         const auto* bytes = static_cast<const unsigned char*>(surface->pixels);
         pixel_signature_ = 1469598103934665603ull;
@@ -776,7 +826,6 @@ bool RuntimeSceneViewer::render(SDL_Surface* surface, SDL_Texture* texture) {
                            " draws=" + std::to_string(telemetry.draw_calls) +
                            " nonzero_rgb_samples=" + std::to_string(nonzeroSamples));
         }
-        const bool capture_enabled = rtapi::viewportCaptureEnabled();
         if (capture_enabled && frame_available_) {
             rtapi::publishViewportFrame(surface->pixels, width_, height_, surface->pitch);
         }
@@ -870,7 +919,10 @@ nlohmann::json RuntimeSceneViewer::status() const {
         {"loop", loop_status_}
     };
 #ifdef __ANDROID__
-    if (!scene_ready_ && (!last_open_error_.empty() || !error_.empty())) {
+    if (deviceLost()) {
+        result["device_lost_reason"] = g_vulkan_device_lost_msg;
+    }
+    if (deviceLost() || (!scene_ready_ && (!last_open_error_.empty() || !error_.empty()))) {
         std::vector<LogEntry> lines;
         g_sceneLog.getLines(lines);
         std::vector<std::string> recent;

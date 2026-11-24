@@ -29,7 +29,8 @@ constexpr float kFullHeightContribution = 0.625f;
 constexpr const char *demo_fields[] = {
     "autostart",    "balloons",           "respawn_seconds",      "birth_seconds", "interval_min",
     "interval_max", "idle_reset_seconds", "finale_reset_seconds", "room_goal",
-    "interaction_mode", "body_controls", "wind_strength", "jolt_motion", "impact_soft_body"};
+    "interaction_mode", "body_controls", "wind_strength", "jolt_motion", "impact_soft_body",
+    "opaque_balloons"};
 struct Session {
     std::string project;
     std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
@@ -226,7 +227,7 @@ void validate(const json &patch, const json &current) {
     if (patch.contains("autostart")) {
         require(patch["autostart"].is_boolean(), "autostart must be boolean");
     }
-    for (const auto* key : {"jolt_motion", "impact_soft_body"}) {
+    for (const auto* key : {"jolt_motion", "impact_soft_body", "opaque_balloons"}) {
         if (patch.contains(key)) {
             require(patch[key].is_boolean(), std::string(key) + " must be boolean");
         }
@@ -283,12 +284,6 @@ json apply(const json &patch) {
             rebuild_demo = rebuild_demo || (field != "interaction_mode" &&
                                             field != "body_controls" && field != "wind_strength");
         }
-    }
-    if (rebuild_demo && config.contains("visual_nodes")) {
-        auto nodes = session.authored_demo["visual_nodes"];
-        const auto count = config["balloons"].get<size_t>();
-        nodes.erase(nodes.begin() + static_cast<std::ptrdiff_t>(count), nodes.end());
-        config["visual_nodes"] = std::move(nodes);
     }
     rtapi::WetPaintStatusInfo paint;
     check(rtapi::getWetPaintStatus(paint));

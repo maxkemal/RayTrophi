@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Core/PlayerBodyOverlay.h"
+#if defined(RT_PLAYER) && defined(_WIN32)
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "Paint/HiddenGameObjects.h"
 
 #include <SDL.h>
@@ -23,7 +26,11 @@ public:
     }
 
     bool poll(bool enabled, SDL_Renderer* renderer) {
+#if defined(RT_PLAYER) && defined(_WIN32)
+        if (!enabled) {
+#else
         if (!enabled || !renderer) {
+#endif
             closeMapping();
             return hide();
         }
@@ -59,7 +66,11 @@ public:
         if (projection.project(anchor + projection.up * shown_.height - half_width, top_left) &&
             projection.project(anchor + half_width, bottom_right)) {
             ImGui::GetBackgroundDrawList()->AddImage(
+#if defined(RT_PLAYER) && defined(_WIN32)
+                texture_->GetTexRef(), top_left, bottom_right,
+#else
                 (ImTextureID)(std::intptr_t)texture_, top_left, bottom_right,
+#endif
                 ImVec2(0.5f / kMaxSide, 0.5f / kMaxSide),
                 ImVec2((shown_.width_px - 0.5f) / kMaxSide,
                        (shown_.height_px - 0.5f) / kMaxSide));
@@ -114,7 +125,11 @@ private:
         if (!texture_) {
             return false;
         }
+#if defined(RT_PLAYER) && defined(_WIN32)
+        PlayerSwapchainPresenter::instance().destroyUiTexture(texture_);
+#else
         SDL_DestroyTexture(texture_);
+#endif
         texture_ = nullptr;
         shown_ = {};
         return true;
@@ -132,6 +147,15 @@ private:
         if (texture_ && shown_.serial == frame.serial) {
             return false;
         }
+#if defined(RT_PLAYER) && defined(_WIN32)
+        (void)renderer;
+        auto& presenter = PlayerSwapchainPresenter::instance();
+        if (!texture_) {
+            texture_ = presenter.createUiTexture(kMaxSide, kMaxSide);
+        }
+        presenter.updateUiTexture(*texture_, pixels_ + sizeof(Frame), frame.width_px,
+                                  frame.height_px, frame.width_px * 4);
+#else
         if (!texture_) {
             texture_ = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
                                          SDL_TEXTUREACCESS_STREAMING,
@@ -150,6 +174,7 @@ private:
                               static_cast<int>(frame.width_px * 4)) != 0) {
             return hide();
         }
+#endif
         shown_ = frame;
         return true;
     }
@@ -158,7 +183,11 @@ private:
     HANDLE lock_ = nullptr;
     const unsigned char* pixels_ = nullptr;
     std::uint64_t retry_at_ = 0;
+#if defined(RT_PLAYER) && defined(_WIN32)
+    ImTextureData* texture_ = nullptr;
+#else
     SDL_Texture* texture_ = nullptr;
+#endif
     Frame shown_{};
 };
 #else

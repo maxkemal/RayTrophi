@@ -9,6 +9,7 @@
 #include "scene_data.h"
 #include "globals.h"
 #include "UI/ParticleBillboardBuilder.h"
+#include "PerfProfile.h"
 #include "VolumetricRenderer.h"
 #include "Atmosphere/AtmosphereLocalWeather.h"
 #include "Atmosphere/LightningStrikeResolver.h"
@@ -203,10 +204,14 @@ std::size_t uploadParticleBillboards(Backend::VulkanBackendAdapter& viewport,
     if (auto* device = viewport.getVulkanDevice()) {
         viewport_device = static_cast<void*>(device->getDevice());
     }
-    ParticleBillboardBuilder::build(scene, viewport_device, upload);
+    {
+        RTPERF_FRAME_SCOPE("viewport.particle_billboards.build");
+        ParticleBillboardBuilder::build(scene, viewport_device, upload);
+    }
+    const std::size_t count = upload.additive.size() + upload.alpha.size() +
+        upload.spheres.size() + upload.pulled.size();
     viewport.uploadParticleBillboards(upload);
-    return upload.additive.size() + upload.alpha.size() + upload.spheres.size() +
-           upload.pulled.size();
+    return count;
 }
 
 void publishVolumes(SceneData& scene, Renderer& renderer, Backend::IBackend* render_backend,

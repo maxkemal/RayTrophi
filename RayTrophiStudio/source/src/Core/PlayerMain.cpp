@@ -16,6 +16,9 @@
 // never-drawn SceneUI as a state carrier. See UI/SceneUIStateHost.cpp.
 
 #include "Core/AppWindow.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "Core/AppFrame.h"
 #include "Core/RuntimeSceneViewer.h"
 #include "Core/RuntimeProjectHost.h"
@@ -50,6 +53,12 @@
 
 #include <SDL.h>
 #include <SDL_main.h>
+#ifdef __ANDROID__
+#include <android/log.h>
+#endif
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include <SDL_vulkan.h>
+#endif
 #include "imgui.h"
 
 #include <algorithm>
@@ -77,6 +86,19 @@ extern std::string active_model_path;
 extern SceneUI ui;
 
 namespace {
+
+#ifdef __ANDROID__
+constexpr const char* kAndroidStartupLogTag = "RayTrophiStartup";
+
+void logAndroidStartup(const std::string& message) {
+    __android_log_write(ANDROID_LOG_INFO, kAndroidStartupLogTag, message.c_str());
+}
+
+void logAndroidStartupError(const char* stage, const char* error) {
+    __android_log_print(ANDROID_LOG_ERROR, kAndroidStartupLogTag, "%s: %s", stage,
+                        error && *error ? error : "No error detail");
+}
+#endif
 
 struct PlayerState {
     SceneData scene;
@@ -106,8 +128,9 @@ struct PlayerState {
     };
 };
 
-// Crash capture for the Player: without it a startup fault leaves nothing
-// behind (StartupCrashStack.txt next to the exe, same writer Studio uses).
+#ifndef __ANDROID__
+// Android's debuggerd captures native faults. The desktop writer would
+// turn a fatal signal into EXIT_SELF without a trace on Android.
 void playerSignalHandler(int sig) {
     writeFatalSignalTrace(sig);
     std::_Exit(EXIT_FAILURE);
@@ -137,6 +160,7 @@ void installPlayerCrashHandlers() {
     std::signal(SIGFPE, playerSignalHandler);
     std::signal(SIGILL, playerSignalHandler);
 }
+#endif
 
 bool setWorkingDirectoryToExe(char* argv0) {
 #if defined(__ANDROID__)
@@ -147,7 +171,9 @@ bool setWorkingDirectoryToExe(char* argv0) {
         std::filesystem::current_path(directory, error);
     }
     if (directory.empty() || error) {
-        SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "Cannot open the Player internal data directory");
+        const std::string detail = directory.empty() ? "Internal data directory is unavailable"
+                                                     : error.message();
+        logAndroidStartupError("Player working directory", detail.c_str());
         return false;
     }
 #elif defined(_WIN32)
@@ -286,6 +312,23 @@ public:
         }
         last_present_ = now;
     }
+    // Where ONE loop iteration went. Averages hide a single long frame (a
+    // balloon pop: 18-29 ms with every simulation part under 7 ms, 2026-11-24),
+    // so the window keeps the breakdown of its longest iteration.
+    struct IterationBreakdown {
+        double total_ms = 0.0;     // iteration start .. after pacing
+        double input_ms = 0.0;     // event poll, balloon input flush, operator, targets
+        double pump_ms = 0.0;      // main-thread work queue (IPC requests run here)
+        double advance_ms = 0.0;   // game clock: simulation, wet paint, demo
+        double render_ms = 0.0;    // viewer->render incl. its upload
+        double present_ms = 0.0;   // UI frame + present
+        double sleep_ms = 0.0;     // pacing / idle yield
+        double backend_record_ms = 0.0, backend_slot_wait_ms = 0.0, backend_submit_ms = 0.0;
+        bool rendered = false;
+    };
+    void recordIterationBreakdown(const IterationBreakdown& b) {
+        if (b.total_ms > worst_.total_ms) worst_ = b;
+    }
     // Publishes a one-second window; returns true when a new snapshot exists.
     bool publish(Clock::time_point now) {
         if (window_start_.time_since_epoch().count() == 0) {
@@ -330,6 +373,24 @@ public:
         }
         snapshot_["cost_age_s"] = last_cost_time_.time_since_epoch().count() == 0
             ? -1.0 : millisecondsBetween(last_cost_time_, now) / 1000.0;
+        // The window's longest iteration, stage by stage. "unaccounted_ms" is
+        // the loop's own glue (HUD status, device checks); a large value there
+        // means a stage is missing from this breakdown.
+        {
+            const auto& w = worst_;
+            const double accounted = w.input_ms + w.pump_ms + w.advance_ms + w.render_ms +
+                                     w.present_ms + w.sleep_ms;
+            snapshot_["worst_iteration"] = {
+                {"total_ms", w.total_ms}, {"input_ms", w.input_ms}, {"pump_ms", w.pump_ms},
+                {"advance_ms", w.advance_ms}, {"render_ms", w.render_ms},
+                {"present_ms", w.present_ms}, {"sleep_ms", w.sleep_ms},
+                {"unaccounted_ms", std::max(0.0, w.total_ms - accounted)},
+                {"rendered", w.rendered},
+                {"backend_record_ms", w.backend_record_ms},
+                {"backend_slot_wait_ms", w.backend_slot_wait_ms},
+                {"backend_submit_ms", w.backend_submit_ms}};
+            worst_ = IterationBreakdown{};
+        }
         window_start_ = now;
         iterations_ = renders_ = presents_ = intervals_ = backend_samples_ = 0;
         advance_ms_ = render_ms_ = upload_ms_ = present_ms_ = interval_sum_ = interval_max_ = 0.0;
@@ -342,7 +403,13 @@ public:
     nlohmann::json displayStatus() const override {
         int window_w = 0, window_h = 0, output_w = 0, output_h = 0;
         if (window) SDL_GetWindowSize(window, &window_w, &window_h);
-        if (renderer) SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (window) SDL_Vulkan_GetDrawableSize(window, &output_w, &output_h);
+#else
+        if (auto* outputRenderer = renderer) {
+            SDL_GetRendererOutputSize(outputRenderer, &output_w, &output_h);
+        }
+#endif
         auto result = AppRuntime::playerResolutionChoices(window).status();
         result.update(nlohmann::json{
             {"fullscreen", fullscreen}, {"render_scale", render_scale},
@@ -454,9 +521,13 @@ public:
     }
 
     // Only an explicit resolution/render-scale change rebuilds the render surface.
-    // SDL_RenderCopy scales that fixed texture to the current window output.
+    // The presentation path scales the fixed render extent to the current window output.
     bool applyTargets(UIContext& context, AppRuntime::RuntimeSceneViewer& viewer) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (!targets_dirty || !window) return false;
+#else
         if (!targets_dirty || !renderer) return false;
+#endif
         const auto extent = render_extent.scaled(render_scale);
         const int w = extent.first;
         const int h = extent.second;
@@ -546,24 +617,101 @@ private:
     Clock::time_point last_cost_time_{};
     double advance_ms_ = 0.0, render_ms_ = 0.0, upload_ms_ = 0.0, present_ms_ = 0.0;
     double interval_sum_ = 0.0, interval_max_ = 0.0;
+    IterationBreakdown worst_;
     Clock::time_point window_start_{}, last_present_{};
     nlohmann::json snapshot_ = nlohmann::json::object();
 };
 
-// No scene and a viewer error (e.g. an unsupported GPU): say so in the middle of the
-// screen whether or not the debug HUD is on. A black screen with the reason only in the
-// log is the failure mode this exists to prevent (Android A6a).
-enum class StartupNotice { None, SceneError, UnsupportedGpu };
+// Keep startup errors and Android device loss readable with the debug HUD off.
+enum class StartupNotice { None, SceneError, UnsupportedGpu, DeviceLost };
 
-StartupNotice drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
-    if (viewer.hasScene()) return StartupNotice::None;
+// Everything a startup/failure notice says, independent of how it is shown: the ImGui
+// overlay draws it, and on Android a fatal one is also shown as a native dialog.
+struct StartupNoticeInfo {
+    StartupNotice kind = StartupNotice::None;
+    std::string title;
+    std::string headline;            // device lost: VK_ERROR_DEVICE_LOST; otherwise the error text
+    std::string detail;              // device lost: reason + restart hint
+    std::string log_title;
+    std::vector<std::string> log;    // recent errors and warnings, newest last
+};
+
+StartupNoticeInfo classifyStartupNotice(const AppRuntime::RuntimeSceneViewer& viewer) {
+    StartupNoticeInfo info;
+#ifdef __ANDROID__
+    const bool device_lost = viewer.deviceLost();
+#else
+    constexpr bool device_lost = false;
+#endif
+    if (viewer.hasScene() && !device_lost) return info;
     const auto status = viewer.status();
     // Backend initialization runs inside the project open, so its failure arrives as
     // last_open_error; a later runtime fault arrives as error.
     std::string error = status.value("error", "");
     if (error.empty()) error = status.value("last_open_error", "");
-    if (error.empty()) return StartupNotice::None;
+    if (error.empty() && !device_lost) return info;
     const bool unsupported_gpu = error.rfind("This device's GPU is not supported", 0) == 0;
+    info.title = device_lost
+        ? Localization::text("player.startup_device_lost", "Vulkan device lost")
+        : unsupported_gpu
+        ? Localization::text("player.startup_unsupported_gpu",
+                             "RayTrophi Player cannot run on this device")
+        : Localization::text("player.startup_scene_failed",
+                             "RayTrophi Player could not open the scene");
+    if (device_lost) {
+        info.headline = "VK_ERROR_DEVICE_LOST";
+        info.detail = status.value("device_lost_reason", "");
+        if (!info.detail.empty()) info.detail += "\n";
+        info.detail += Localization::text(
+            "player.startup_device_lost_restart", "Close and reopen RayTrophi Player.");
+    } else {
+        info.headline = error;
+    }
+    info.log_title = Localization::text("player.startup_log", "Recent errors and warnings");
+    const auto log = status.find("startup_log");
+    if (log != status.end() && log->is_array()) {
+        for (const auto& line : *log) {
+            if (line.is_string()) info.log.push_back(line.get<std::string>());
+        }
+    }
+    info.kind = device_lost ? StartupNotice::DeviceLost
+        : unsupported_gpu ? StartupNotice::UnsupportedGpu : StartupNotice::SceneError;
+    return info;
+}
+
+#ifdef __ANDROID__
+// The Vulkan swapchain cannot show anything without a device (or after it is lost), so a
+// fatal notice is a native dialog: the same headline, reason and recent log lines the
+// overlay lists (newest last, capped), then the app quits.
+bool isFatalStartupNotice(StartupNotice kind) {
+    return kind == StartupNotice::UnsupportedGpu || kind == StartupNotice::DeviceLost;
+}
+
+void showFatalStartupDialog(const StartupNoticeInfo& info) {
+    logAndroidStartupError(info.headline.c_str(), info.detail.c_str());
+    std::string body = info.headline;
+    if (!info.detail.empty()) body += "\n" + info.detail;
+    if (!info.log.empty()) {
+        constexpr size_t kMaxLines = 20;
+        body += "\n\n" + info.log_title + ":";
+        const size_t first = info.log.size() > kMaxLines ? info.log.size() - kMaxLines : 0;
+        for (size_t i = first; i < info.log.size(); ++i) {
+            body += "\n" + info.log[i];
+        }
+    }
+    SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, info.title.c_str(), body.c_str(), window);
+    SDL_Event quit{};
+    quit.type = SDL_QUIT;
+    SDL_PushEvent(&quit);
+}
+#endif
+
+void drawStartupFailureNotice(const StartupNoticeInfo& info) {
+    if (info.kind == StartupNotice::None) return;
+#ifdef __ANDROID__
+    // Fatal notices are native dialogs; the presenter may not even have a device.
+    if (isFatalStartupNotice(info.kind)) return;
+#endif
     const ImGuiViewport* view = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(ImVec2(view->WorkPos.x + view->WorkSize.x * 0.5f,
                                    view->WorkPos.y + view->WorkSize.y * 0.5f),
@@ -584,29 +732,23 @@ StartupNotice drawStartupFailureNotice(const AppRuntime::RuntimeSceneViewer& vie
 #endif
     if (ImGui::Begin("##player_startup_failure", nullptr, flags)) {
         ImGui::SetWindowFontScale(1.6f);
-        const std::string title = unsupported_gpu
-            ? Localization::text("player.startup_unsupported_gpu",
-                                 "RayTrophi Player cannot run on this device")
-            : Localization::text("player.startup_scene_failed",
-                                 "RayTrophi Player could not open the scene");
-        ImGui::TextUnformatted(title.c_str());
+        ImGui::TextUnformatted(info.title.c_str());
         ImGui::SetWindowFontScale(1.0f);
         ImGui::Separator();
-        ImGui::TextWrapped("%s", error.c_str());
+        ImGui::TextWrapped("%s", info.headline.c_str());
+        if (!info.detail.empty()) {
+            ImGui::TextWrapped("%s", info.detail.c_str());
+        }
 #ifdef __ANDROID__
-        const std::string logTitle = Localization::text(
-            "player.startup_log", "Recent errors and warnings");
-        const auto log = status.find("startup_log");
-        if (log != status.end() && !log->empty() &&
-            ImGui::CollapsingHeader((logTitle + "###player_startup_log").c_str())) {
-            for (const auto& line : *log) {
-                ImGui::TextWrapped("%s", line.get_ref<const std::string&>().c_str());
+        if (!info.log.empty() &&
+            ImGui::CollapsingHeader((info.log_title + "###player_startup_log").c_str())) {
+            for (const auto& line : info.log) {
+                ImGui::TextWrapped("%s", line.c_str());
             }
         }
 #endif
     }
     ImGui::End();
-    return unsupported_gpu ? StartupNotice::UnsupportedGpu : StartupNotice::SceneError;
 }
 
 void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
@@ -669,7 +811,13 @@ void drawHud(bool ipc_running, const AppRuntime::RuntimeSceneViewer& viewer,
         const int render_h = original_surface ? original_surface->h : 0;
         // Report render and output separately: resizing only scales presentation.
         int output_w = 0, output_h = 0;
-        if (renderer) SDL_GetRendererOutputSize(renderer, &output_w, &output_h);
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (window) SDL_Vulkan_GetDrawableSize(window, &output_w, &output_h);
+#else
+        if (auto* outputRenderer = renderer) {
+            SDL_GetRendererOutputSize(outputRenderer, &output_w, &output_h);
+        }
+#endif
         ImGui::Text("render %dx%d -> output %dx%d  scale %.2f  %s", render_w, render_h, output_w,
                     output_h, display.render_scale,
                     display.fullscreen ? "fullscreen" : "windowed");
@@ -720,7 +868,15 @@ int main(int argc, char* argv[]) {
             std::filesystem::absolute(AppRuntime::projectPathFromUtf8(launch_project)));
     }
     g_main_thread_id = std::this_thread::get_id();
+#ifndef __ANDROID__
     installPlayerCrashHandlers();
+#endif
+#ifdef __ANDROID__
+    constexpr AppRuntime::StartupLogFn startup_log = &logAndroidStartup;
+    logAndroidStartup("Player native entry started");
+#else
+    constexpr AppRuntime::StartupLogFn startup_log = nullptr;
+#endif
     if (!setWorkingDirectoryToExe(argc > 0 ? argv[0] : nullptr)) {
         return 1;
     }
@@ -740,6 +896,10 @@ int main(int argc, char* argv[]) {
             if (assets_ok) SCENE_LOG_INFO("[Player Startup] " + asset_report);
             else SCENE_LOG_ERROR("[Player Startup] Bundled assets: " + asset_report);
         }
+#ifdef __ANDROID__
+        if (assets_ok) logAndroidStartup("Bundled assets ready");
+        else logAndroidStartupError("Bundled assets", asset_report.c_str());
+#endif
     }
 
     // An explicit project bypasses the library. Multiple bundled games need
@@ -753,7 +913,10 @@ int main(int argc, char* argv[]) {
     }
 #endif
 
-    if (!AppRuntime::initPlatform(nullptr)) {
+    if (!AppRuntime::initPlatform(startup_log)) {
+#ifdef __ANDROID__
+        logAndroidStartupError("SDL_Init", SDL_GetError());
+#endif
         return 1;
     }
 
@@ -761,7 +924,18 @@ int main(int argc, char* argv[]) {
     window_config.title = "RayTrophi Player";
     window_config.width = launch_width >= 320 ? launch_width : image_width;
     window_config.height = launch_height >= 240 ? launch_height : image_height;
+    window_config.startup_log = startup_log;
     AppRuntime::createMainWindow(window_config);
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (!window) {
+#ifdef __ANDROID__
+        logAndroidStartupError("SDL_CreateWindow (Vulkan)", SDL_GetError());
+#endif
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RayTrophi Player", SDL_GetError(), nullptr);
+        AppRuntime::shutdownPlatform();
+        return 1;
+    }
+#endif
 
     AppRuntime::ImGuiConfig imgui_config;
 #ifdef __ANDROID__
@@ -791,6 +965,7 @@ int main(int argc, char* argv[]) {
     imgui_config.font_size = 16.0f;
     imgui_config.enable_keyboard_nav = true;
     imgui_config.enable_docking = false;  // game HUD, no editor layout
+    imgui_config.startup_log = startup_log;
     AppRuntime::initImGui(imgui_config);
     AppRuntime::loadPlayerOperatorFonts();
 
@@ -810,6 +985,26 @@ int main(int argc, char* argv[]) {
     // the window as not responding while the scene is read.
     SDL_ShowWindow(window);
     SDL_PumpEvents();
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    // The launcher produces UI frames before any project is opened.
+    const auto startup = viewer->initializeBackend();
+    if (!startup.ok) {
+#ifdef __ANDROID__
+        logAndroidStartupError("Player Vulkan backend", startup.error.c_str());
+#endif
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RayTrophi Player",
+                                 startup.error.c_str(), window);
+        viewer.reset();
+        rtapi::unbind();
+        state.reset();
+        AppRuntime::destroyMainWindowAndImGui();
+        AppRuntime::shutdownPlatform();
+        return 1;
+    }
+#ifdef __ANDROID__
+    logAndroidStartup("Player Vulkan backend initialized");
+#endif
+#endif
     if (!launch_project.empty()) {
         SCENE_LOG_INFO("[Player] Window shown, opening project");
         const auto loaded = rtapi::openProject(launch_project);
@@ -821,8 +1016,14 @@ int main(int argc, char* argv[]) {
     std::string ipc_error;
     if (rtipc::start(ipc_error)) {
         SCENE_LOG_INFO("[Player] IPC server started");
+#ifdef __ANDROID__
+        logAndroidStartup("Player IPC server started");
+#endif
     } else {
         SCENE_LOG_WARN("[Player] IPC server failed to start: " + ipc_error);
+#ifdef __ANDROID__
+        logAndroidStartupError("Player IPC server", ipc_error.c_str());
+#endif
     }
 
     PlayerDisplay display;
@@ -835,12 +1036,14 @@ int main(int argc, char* argv[]) {
 
     AppRuntime::setPlayerOperatorLaunchOverrides(launch_display);
 #ifdef __ANDROID__
+    logAndroidStartup("Player display overrides applied");
     {
         // Binds the operator service to this context so saved game settings and the display
         // restore run even while the menu is closed (on Windows the open console does this).
         nlohmann::json ignored;
         rtapi::playerOperator("language.status", nlohmann::json::object(), ignored);
     }
+    logAndroidStartup("Player operator preferences loaded");
 #endif
 #ifdef __ANDROID__
     if (auto_open_packaged_scene) {
@@ -850,6 +1053,7 @@ int main(int argc, char* argv[]) {
         std::string launcher_error;
         AppRuntime::kidLauncherShow("library", launcher_error);
     }
+    logAndroidStartup("Player launcher configured");
 #else
     if (open_library) {
         AppRuntime::showPlayerOperator("games");
@@ -863,7 +1067,16 @@ int main(int argc, char* argv[]) {
     int debug_wheel = 0;
     Uint64 previous_tick = SDL_GetPerformanceCounter();
     AppRuntime::FrameCycle frame_cycle;
-    AppRuntime::playerSceneLoad().setPresenter([&frame_cycle, last = Clock::time_point{}]() mutable {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    bool reportedPresentationFailure = false;
+#endif
+    AppRuntime::playerSceneLoad().setPresenter([&frame_cycle, &viewer,
+                                               last = Clock::time_point{}]() mutable {
+#ifdef __ANDROID__
+        if (viewer->deviceLost()) {
+            return;  // no device to draw with; the main loop shows the native dialog
+        }
+#endif
         if (!AppRuntime::playerOperatorOpen()) {
             return;
         }
@@ -874,15 +1087,14 @@ int main(int argc, char* argv[]) {
         }
         last = now;
         SDL_PumpEvents();
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (!AppRuntime::PlayerSwapchainPresenter::instance().prepareUiFrame()) {
+            return;
+        }
+#endif
         frame_cycle.beginUiFrame(false);
         AppRuntime::drawPlayerOperator(renderer);
         frame_cycle.endUiFrame();
-        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-        SDL_RenderClear(renderer);
-        if (raytrace_texture) {
-            SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
-        }
-        frame_cycle.drawUi();
         frame_cycle.present();
     });
     SDL_Event event;
@@ -897,13 +1109,22 @@ int main(int argc, char* argv[]) {
         const auto iteration_start = Clock::now();
         while (frame_cycle.pollEvent(event, event_info)) {
 #ifdef __ANDROID__
-            if (startupNotice != StartupNotice::UnsupportedGpu) {
-                AppRuntime::kidLauncherEvent(event);
-            }
             if (startupFailureTouch.handle(event, window, startupNotice != StartupNotice::None)) {
                 frame_cycle.requestRedraw();
                 continue;
             }
+            const bool fatal_notice = viewer->deviceLost() ||
+                                      startupNotice == StartupNotice::UnsupportedGpu;
+            if (fatal_notice) {
+                if (event_info.quit_requested) {
+                    running = false;
+                }
+                if (event.type == SDL_DROPFILE) {
+                    SDL_free(event.drop.file);
+                }
+                continue;
+            }
+            AppRuntime::kidLauncherEvent(event);
             if (operatorTouch.handle(event, window)) {
                 frame_cycle.requestRedraw();
                 continue;
@@ -1001,7 +1222,11 @@ int main(int argc, char* argv[]) {
         if (!running) {
             break;
         }
+        PlayerDisplay::IterationBreakdown breakdown;
+        const auto pump_start = Clock::now();
+        breakdown.input_ms = millisecondsBetween(iteration_start, pump_start);
         frame_cycle.pumpMainThreadWork();
+        breakdown.pump_ms = millisecondsBetween(pump_start, Clock::now());
 
         // Game clock: the shared simulation clock advances on wall time whether
         // or not the window is focused (a kiosk keeps playing); rendering below
@@ -1020,7 +1245,8 @@ int main(int argc, char* argv[]) {
 #else
         viewer->advanceRuntime(dt_seconds);
 #endif
-        display.recordIteration(millisecondsBetween(advance_start, Clock::now()));
+        breakdown.advance_ms = millisecondsBetween(advance_start, Clock::now());
+        display.recordIteration(breakdown.advance_ms);
         if (display.continuous) {
             viewer->forceRedraw();
         }
@@ -1037,41 +1263,98 @@ int main(int argc, char* argv[]) {
         if (render_requested &&
             (frame_cycle.isForeground() || capture_requested || display.continuous ||
              AppRuntime::playerSceneLoad().busy())) {
+            const auto render_start = Clock::now();
             image_updated = viewer->render(original_surface, raytrace_texture);
-            display.recordRender(viewer->lastRenderMs(), viewer->lastUploadMs(),
-                                 viewer->lastTelemetry());
+            breakdown.render_ms = millisecondsBetween(render_start, Clock::now());
+            breakdown.rendered = true;
+            const auto& telemetry = viewer->lastTelemetry();
+            if (telemetry.available) {
+                breakdown.backend_record_ms = telemetry.cpu_record_ms;
+                breakdown.backend_slot_wait_ms = telemetry.slot_wait_ms;
+                breakdown.backend_submit_ms = telemetry.submit_ms;
+            }
+            display.recordRender(viewer->lastRenderMs(), viewer->lastUploadMs(), telemetry);
             frame_cycle.requestRedraw();
         }
-        if (frame_cycle.shouldPresent(image_updated)) {
+#ifdef __ANDROID__
+        // A fatal notice (unsupported GPU, device lost) cannot be drawn through the swapchain:
+        // show ONE native dialog, then quit. The status read is throttled; a lost device is
+        // checked every iteration (cheap flag).
+        if (!reportedPresentationFailure) {
+            static auto last_check = Clock::time_point{};
+            const auto check_now = Clock::now();
+            if (viewer->deviceLost() ||
+                millisecondsBetween(last_check, check_now) >= 250.0) {
+                last_check = check_now;
+                const StartupNoticeInfo fatal = classifyStartupNotice(*viewer);
+                if (isFatalStartupNotice(fatal.kind)) {
+                    reportedPresentationFailure = true;  // one dialog only
+                    startupNotice = fatal.kind;
+                    showFatalStartupDialog(fatal);
+                }
+            }
+        }
+        const bool present_blocked =
+            isFatalStartupNotice(startupNotice) || viewer->deviceLost();
+#else
+        constexpr bool present_blocked = false;
+#endif
+        if (!present_blocked && frame_cycle.shouldPresent(image_updated)
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+            && AppRuntime::PlayerSwapchainPresenter::instance().prepareUiFrame()
+#endif
+        ) {
             const auto present_start = Clock::now();
             frame_cycle.beginUiFrame();
 #ifdef __ANDROID__
-            startupNotice = drawStartupFailureNotice(*viewer);
+            const StartupNoticeInfo notice = classifyStartupNotice(*viewer);
+            startupNotice = notice.kind;
             if (display.hud && startupNotice == StartupNotice::None) {
                 drawHud(rtipc::isRunning(), *viewer, display);
             }
-            if (startupNotice != StartupNotice::UnsupportedGpu) {
+            drawStartupFailureNotice(notice);
+            if (!isFatalStartupNotice(startupNotice)) {
                 AppRuntime::drawPlayerOperator(renderer);
             }
 #else
             if (display.hud) {
                 drawHud(rtipc::isRunning(), *viewer, display);
             }
-            drawStartupFailureNotice(*viewer);
+            drawStartupFailureNotice(classifyStartupNotice(*viewer));
             AppRuntime::drawPlayerOperator(renderer);
 #endif
             frame_cycle.endUiFrame();
 
-            SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
-            SDL_RenderClear(renderer);
-            if (viewer->hasFrame()) {
-                SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
+            if (frame_cycle.present()) {
+                const auto present_end = Clock::now();
+                display.recordPresent(present_end, millisecondsBetween(present_start, present_end));
             }
-            frame_cycle.drawUi();
-            frame_cycle.present();
-            const auto present_end = Clock::now();
-            display.recordPresent(present_end, millisecondsBetween(present_start, present_end));
+            breakdown.present_ms = millisecondsBetween(present_start, Clock::now());
         }
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#ifdef __ANDROID__
+        // Device loss is the fatal dialog above; this covers a swapchain that failed alone.
+        if (!reportedPresentationFailure &&
+            AppRuntime::PlayerSwapchainPresenter::instance().failed()) {
+            reportedPresentationFailure = true;
+            logAndroidStartupError("Vulkan presentation", "Swapchain presenter failed");
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RayTrophi Player",
+                                     "Vulkan presentation failed. See the Player log.", window);
+            SDL_Event quit{};
+            quit.type = SDL_QUIT;
+            SDL_PushEvent(&quit);
+        }
+#else
+        if (!reportedPresentationFailure &&
+            (viewer->deviceLost() || AppRuntime::PlayerSwapchainPresenter::instance().failed())) {
+            reportedPresentationFailure = true;
+            const auto message = viewer->deviceLost()
+                ? g_vulkan_device_lost_msg : "Vulkan presentation failed. See the Player log.";
+            SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "RayTrophi Player",
+                                     message.c_str(), window);
+        }
+#endif
+#endif
         if (display.publish(Clock::now())) {
             viewer->setLoopStatus(display.displayStatus());
             if (display.hud) {
@@ -1084,6 +1367,7 @@ int main(int argc, char* argv[]) {
         // yields 1 ms so a settled scene does not spin a core. Background: the
         // old 20 Hz IPC/event pump - except in continuous (measurement) mode,
         // where a background window would silently cap the result at 20.
+        const auto sleep_start = Clock::now();
         if (!frame_cycle.isForeground() && !display.continuous) {
             std::this_thread::sleep_until(iteration_start + std::chrono::milliseconds(50));
         } else if (display.pacing_hz > 0) {
@@ -1092,6 +1376,10 @@ int main(int argc, char* argv[]) {
         } else if (!image_updated) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
+        const auto iteration_end = Clock::now();
+        breakdown.sleep_ms = millisecondsBetween(sleep_start, iteration_end);
+        breakdown.total_ms = millisecondsBetween(iteration_start, iteration_end);
+        display.recordIterationBreakdown(breakdown);
     }
 
     // Same order as Studio: IPC stops before the facade it enqueues into.

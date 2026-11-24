@@ -123,9 +123,9 @@ def source_set(studio: str, manifest: dict, android: dict):
     kept = []
     removed = []
     for path, raw in items:
-        if path.startswith(g.SRC_PREFIX) and any(
-                fnmatch.fnmatch(g.manifest_rel(path), pat) for pat in excludes):
-            removed.append(g.manifest_rel(path))
+        rel = g.manifest_rel(path) if path.startswith(g.SRC_PREFIX) else path.replace("\\", "/")
+        if any(fnmatch.fnmatch(rel, pat) for pat in excludes):
+            removed.append(rel)
             continue
         kept.append((path, raw))
 

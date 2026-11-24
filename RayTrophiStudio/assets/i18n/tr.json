@@ -1,5 +1,7 @@
 {
   "player.startup_log": "Son hatalar ve uyarılar",
+  "player.startup_device_lost": "Vulkan aygıtı bağlantısı kesildi",
+  "player.startup_device_lost_restart": "RayTrophi Player’ı kapatıp yeniden açın.",
   "player.startup_scene_failed": "RayTrophi Player sahneyi açamadı",
   "player.startup_unsupported_gpu": "RayTrophi Player bu cihazda çalışamıyor",
   "common.language": "Dil / Language",
@@ -214,6 +216,7 @@
   "player.wind_strength": "Rüzgâr şiddeti",
   "player.wind_strength_hint": "Hava akımını durdurmak için 0'a ayarlayın.",
   "player.balloon_physics": "Balon fiziği",
+  "player.opaque_balloons": "Opak balonlar",
   "player.jolt_motion": "Jolt fiziği",
   "player.impact_soft_body": "Soft-body çarpışmaları",
   "player.paint_thickness_hint": "Yeni boyanın tüm boyanabilir yüzeylerde ulaşabileceği kabarıklık sınırını ayarlar.",

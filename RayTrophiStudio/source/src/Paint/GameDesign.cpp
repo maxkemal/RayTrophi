@@ -2,6 +2,7 @@
 #include "Paint/HiddenGameObjects.h"
 
 #include "Paint/BalloonPaintDemo.h"
+#include "Paint/BalloonPlayerDefaults.h"
 #include "Paint/WetPaintGpu.h"
 #include "Paint/MeshPaintAdapter.h"
 #include "TriangleMesh.h"
@@ -224,7 +225,10 @@ void tickPendingDemo(SceneData& scene) {
         pending_demo = json();
         return;
     }
-    const json config = std::move(pending_demo);
+    json config = std::move(pending_demo);
+#ifdef RT_PLAYER
+    applyBalloonPlayerDefaults(config);
+#endif
     pending_demo = json();
     json output;
     std::string error;

@@ -7452,6 +7452,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
             spec["terrain"] = t.material_spec_terrain;
             spec["graph"] = t.material_spec_graph;
             spec["weather"] = t.material_spec_weather;
+            spec["glass"] = t.material_spec_glass;
             spec["rebuilds"] = t.material_spec_rebuilds;
             applied["feature_spec"] = spec;
         }
@@ -7471,6 +7472,7 @@ PYBIND11_EMBEDDED_MODULE(rt, module) {
         }
         d["gpu_supported"] = t.gpu_supported;
         d["gpu_unsupported_reason"] = t.gpu_unsupported_reason;
+        d["present_path"] = t.present_path;
         d["frames"] = t.frames;
         d["frames_with_gpu"] = t.frames_with_gpu;
         d["frame_cpu_mean_ms"] = t.frame_cpu_mean_ms;

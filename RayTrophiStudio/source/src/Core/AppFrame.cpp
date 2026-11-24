@@ -1,4 +1,8 @@
 #include "Core/AppFrame.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#include "globals.h"
+#endif
 
 #include "Api/RtApi.h"
 #include "Api/RtIpc.h"
@@ -97,7 +101,11 @@ void FrameCycle::requestRedraw() {
 }
 
 void FrameCycle::beginUiFrame(bool draw_runtime_overlays) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    PlayerSwapchainPresenter::instance().newFrame();
+#else
     ImGui_ImplSDLRenderer2_NewFrame();
+#endif
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 #ifdef RT_PLAYER
@@ -119,12 +127,26 @@ void FrameCycle::endUiFrame() {
 }
 
 void FrameCycle::drawUi() {
+#if !defined(RT_PLAYER) || !(defined(_WIN32) || defined(__ANDROID__))
     ImGui_ImplSDLRenderer2_RenderDrawData(ImGui::GetDrawData(), renderer);
+#endif
 }
 
-void FrameCycle::present() {
+bool FrameCycle::present() {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    auto& presenter = PlayerSwapchainPresenter::instance();
+    const bool presented = presenter.present();
+    redraw_requested_ = presenter.needsRedraw() ||
+        (presenter.active() && !presenter.failed() && !presented);
+    if (g_vulkan_device_lost) {
+        redraw_requested_ = false;
+    }
+    return presented;
+#else
     SDL_RenderPresent(renderer);
     redraw_requested_ = false;
+    return true;
+#endif
 }
 
 void FrameCycle::waitForNextIteration() const {

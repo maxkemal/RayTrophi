@@ -7,6 +7,7 @@
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/GameDesign.h"
 #include "Game/GameRuntime.h"
+#include "PerfProfile.h"
 #include "scene_data.h"
 
 #include <algorithm>
@@ -28,6 +29,7 @@ namespace {
 bool tickWetPaint(SceneData& scene, float dt) {
     Paint::WetPaintGpu& paint = Paint::wetPaintGpu();
     if (paint.empty()) return false;
+    RTPERF_FRAME_SCOPE("simulation.wet_paint");
     if (!paint.tick(scene, dt)) return false;
     const Paint::WetPaintStats& st = paint.stats();
     return st.stamped_texels > 0 || st.ticked_tiles > 0;
@@ -67,6 +69,7 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
         Game::tickRuntime(scene, input.dt_seconds);
     }
     if (input.live_mode && !input.ui_editing) {
+        RTPERF_FRAME_SCOPE("simulation.balloon_demo");
         Paint::tickBalloonPaintDemo(scene, input.dt_seconds);
     }
     if (!scene.anySimulationRuntimeEnabled()) {
@@ -113,8 +116,17 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
     // Timeline mode (Studio default): play bakes into the cache, scrub restores, a
     // stopped timeline stays frozen. Live mode: continuous free-run. ui_editing
     // defers cache invalidation until a dragged widget settles.
-    scene.updateSimulationTimeline(input.timeline_frame, input.playing, dt, 24.0f,
-                                   input.live_mode, input.ui_editing);
+    // Deferred frame submit: the simulation step leaves its recording open,
+    // wet paint below records into the same command buffer, and the tick ends
+    // with ONE async submission. The context is re-read after the step because
+    // the world may switch its backend during it (CPU <-> Vulkan).
+    const bool defer_submit = input.defer_compute_submit;
+    if (defer_submit) scene.getSimulationWorld().compute().setDeferFrameSubmit(true);
+    {
+        RTPERF_FRAME_SCOPE("simulation.timeline");
+        scene.updateSimulationTimeline(input.timeline_frame, input.playing, dt, 24.0f,
+                                       input.live_mode, input.ui_editing);
+    }
     result.drove = true;
     ++stats_.driven_ticks;
     stats_.driven_seconds += dt;
@@ -147,6 +159,12 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
     // After the particle step, so this frame's contact events are stamped.
     if (tickWetPaint(scene, dt)) {
         result.render_updated = true;
+    }
+    if (defer_submit) {
+        RTPERF_FRAME_SCOPE("simulation.compute_submit");
+        auto& compute = scene.getSimulationWorld().compute();
+        compute.submitAsync();             // no-op when wet paint already submitted
+        compute.setDeferFrameSubmit(false); // never leaks into a non-owner caller
     }
     if (result.render_updated) {
         ++stats_.render_updates;

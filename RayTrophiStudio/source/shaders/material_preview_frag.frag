@@ -12,6 +12,12 @@ layout(early_fragment_tests) in;
 layout(constant_id = 0) const bool RT_SPEC_TERRAIN = true;
 layout(constant_id = 1) const bool RT_SPEC_GRAPH   = true;
 layout(constant_id = 2) const bool RT_SPEC_WEATHER = true;
+// Glass / resin / bubble surface (T2 remaining-spill item, 56 B on Mali-G52).
+// Off only when no bound material can end up with transmission > 0, a bubble
+// flag or an Interior Depth: then those three are exactly 0 / false here and
+// forcing them is bit-identical, while the compiler drops the refraction,
+// dispersion, resin-interior and screen-refraction code.
+layout(constant_id = 3) const bool RT_SPEC_GLASS   = true;
 #include "procedural_detail.glsl"
 #include "pbr_texture_policy.glsl"
 // ★★★ Goruntuleme donusumu artik BURADA TANIMLI DEGIL: tek tanim
@@ -483,11 +489,9 @@ vec3 samplePreviewEnvironment(vec3 dir, uint lightingPreset) {
     return sampleStudioEnvironment(dir);
 }
 
-// Raster equivalent of the RT glass continuation lobe. RT samples one GGX
-// microfacet direction per path; preview integrates a small deterministic cone
-// so rough glass converges immediately and quality changes sample count, not
-// lobe energy. Physical Sky/HDRI use the canonical world reader while the two
-// studio presets keep their analytical environments.
+// Approximate the rough glass continuation with the HDRI's GGX prefilter.
+// The deterministic cone covers unfiltered environments and Physical Sky,
+// whose IBL bake omits the sun disc present in transmission.
 vec3 sampleTransmissionEnvironment(vec3 axis, float roughness,
                                    uint lightingPreset) {
     axis = normalize(axis);
@@ -495,6 +499,13 @@ vec3 sampleTransmissionEnvironment(vec3 axis, float roughness,
     if (roughness <= 0.001)
         return canonical ? sampleCanonicalWorld(axis)
                          : samplePreviewEnvironment(axis, lightingPreset);
+
+    const uint hdriAndIblReady = 2u | 32u;
+    if (canonical && worldMode == 1u &&
+        (sceneFlags & hdriAndIblReady) == hdriAndIblReady) {
+        return textureLod(worldPrefiltered, worldDirToUV(axis), roughness * 8.0).rgb *
+               max(worldParams.y, 0.0);
+    }
 
     vec3 helper = abs(axis.y) < 0.95 ? vec3(0.0, 1.0, 0.0)
                                       : vec3(1.0, 0.0, 0.0);
@@ -532,14 +543,20 @@ vec3 sampleDispersedTransmission(vec3 incoming, vec3 normal, float ior,
     vec3 spectral = vec3(0.0);
     allTir = true;
     for (int channel = 0; channel < 3; ++channel) {
-        vec3 direction = refract(incoming, normal, 1.0 / channelIor[channel]);
+        // Constant-select instead of channelIor[channel] / spectral[channel]:
+        // dynamic vector indexing forces the vectors into stack memory on Mali.
+        float chIor = channel == 0 ? channelIor.x : (channel == 1 ? channelIor.y : channelIor.z);
+        vec3 direction = refract(incoming, normal, 1.0 / chIor);
         bool tir = dot(direction, direction) < 1e-8;
         allTir = allTir && tir;
         if (tir)
             direction = reflect(incoming, normal);
         vec3 sampleValue = sampleTransmissionEnvironment(
             normalize(direction), roughness, lightingPreset);
-        spectral[channel] = sampleValue[channel];
+        float sv = channel == 0 ? sampleValue.x : (channel == 1 ? sampleValue.y : sampleValue.z);
+        spectral = vec3(channel == 0 ? sv : spectral.x,
+                        channel == 1 ? sv : spectral.y,
+                        channel == 2 ? sv : spectral.z);
     }
     return spectral;
 }
@@ -668,6 +685,35 @@ vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strengt
 
 #include "raster_material_policy.h"
 #include "material_preview_opacity.glsl"
+
+
+// Studio/matcap rig lights, evaluated on demand (no local arrays: a local
+// array indexed by the loop counter becomes a Mali stack alloca).
+vec4 previewRigRim() { return previewDrawPhase() == 2u ? vec4(0.0) : rayFusionFrame.lightDir2; }
+vec3 previewRigDir(uint preset, int i) {
+    if (preset == 0u) {
+        if (i == 0) return normalize(pc.lightDir0.xyz);
+        if (i == 1) return normalize(pc.lightDir1.xyz);
+        return normalize(previewRigRim().xyz);
+    } else if (preset == 2u) {
+        if (i == 0) return normalize(vec3(0.35, 0.84, 0.42));
+        if (i == 1) return normalize(vec3(-0.46, 0.58, 0.67));
+        return normalize(vec3(-0.10, 0.22, -0.97));
+    }
+    if (i == 0) return normalize(vec3(0.60, 0.52, 0.61));
+    if (i == 1) return normalize(vec3(-0.54, 0.34, 0.77));
+    return normalize(vec3(-0.16, 0.28, -0.95));
+}
+float previewRigIntensity(uint preset, int i) {
+    if (preset == 0u) return i == 0 ? pc.lightDir0.w : (i == 1 ? pc.lightDir1.w : previewRigRim().w);
+    if (preset == 2u) return i == 0 ? 1.20 : (i == 1 ? 0.30 : 0.14);
+    return i == 0 ? 0.95 : (i == 1 ? 0.48 : 0.32);
+}
+vec3 previewRigColor(uint preset, int i) {
+    if (preset == 0u) return i == 0 ? vec3(1.0, 0.98, 0.95) : (i == 1 ? vec3(0.75, 0.82, 0.95) : vec3(0.90, 0.90, 0.95));
+    if (preset == 2u) return i == 0 ? vec3(1.0, 0.96, 0.88) : (i == 1 ? vec3(0.64, 0.76, 0.95) : vec3(0.88, 0.92, 1.0));
+    return i == 0 ? vec3(1.0, 0.98, 0.95) : (i == 1 ? vec3(0.76, 0.82, 0.94) : vec3(0.95, 0.96, 1.0));
+}
 
 void main() {
     outPreviousClip = vPreviousClip.w > 1e-9 ?
@@ -965,13 +1011,15 @@ void main() {
     // non-metal becomes transmission when no explicit transmission is authored.
     if (!isImpostor && opacity < 0.99 && metallic < 0.1 && transmission < 0.01)
         transmission = 1.0 - opacity;
+    if (!RT_SPEC_GLASS) transmission = 0.0;
 
     // Replay retains only meshes that MAY transmit. Final classification stays
     // per-fragment for opacity/transmission maps and Material Graph outputs.
     // Phase 0 preserves combined rendering until snapshot descriptors are
     // valid, avoiding a half-wired frame during resize/reload.
     bool transmissiveFragment = !isImpostor &&
-        (transmission > 0.001 || (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u);
+        (transmission > 0.001 ||
+         (RT_SPEC_GLASS && (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u));
     if (drawPhase == PREVIEW_PHASE_OPAQUE && transmissiveFragment) {
         // Capture the farthest back-facing surface in view-distance units.
         // Positive IEEE float bits preserve ordering for atomicMax. This image
@@ -986,15 +1034,19 @@ void main() {
     if (drawPhase == PREVIEW_PHASE_TRANSMISSION && !transmissiveFragment) {
         discard;
     }
+    // With glass specialized off no fragment is transmissive, so the line
+    // above already discarded the whole transmission replay. Spelling that out
+    // lets the compiler fold the screen-space refraction/reflection below.
+    bool transmissionPhase = RT_SPEC_GLASS && drawPhase == PREVIEW_PHASE_TRANSMISSION;
 
     // scatterGlass() derives a transmitting interface from IOR, not from the
     // ordinary opaque Spec control. Blend the two F0 values by Transmission so
     // partial materials remain continuous while full glass loses the broad
     // white opaque-specular coat.
-    bool bubbleSurface = (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u;
+    bool bubbleSurface = RT_SPEC_GLASS && (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u;
     float effectiveIor = bubbleSurface && matx.bubble_ior > 1.0001
         ? matx.bubble_ior : materialIor;
-    float interiorDepth = max(matx.transmission_density, 0.0);
+    float interiorDepth = RT_SPEC_GLASS ? max(matx.transmission_density, 0.0) : 0.0;
     bool resinSurface = interiorDepth > 1e-4;
 
     if (WEATHER_SURFACE_AVAILABLE) {
@@ -1071,43 +1123,6 @@ void main() {
     float specExp = max(2.0, (1.0 - directSpecularRoughness) *
                                   (1.0 - directSpecularRoughness) * 128.0);
 
-    vec3 lightDirs[3];
-    float lightIntensities[3];
-    vec3 lightColors[3];
-
-    if (lightingPreset == 0u) {
-        lightDirs[0] = normalize(pc.lightDir0.xyz);
-        lightDirs[1] = normalize(pc.lightDir1.xyz);
-        vec4 rimLight = previewDrawPhase() == 2u ? vec4(0.0) : rayFusionFrame.lightDir2;
-        lightDirs[2] = normalize(rimLight.xyz);
-        lightIntensities[0] = pc.lightDir0.w;
-        lightIntensities[1] = pc.lightDir1.w;
-        lightIntensities[2] = rimLight.w;
-        lightColors[0] = vec3(1.0, 0.98, 0.95);
-        lightColors[1] = vec3(0.75, 0.82, 0.95);
-        lightColors[2] = vec3(0.90, 0.90, 0.95);
-    } else if (lightingPreset == 2u) {
-        lightDirs[0] = normalize(vec3(0.35, 0.84, 0.42));
-        lightDirs[1] = normalize(vec3(-0.46, 0.58, 0.67));
-        lightDirs[2] = normalize(vec3(-0.10, 0.22, -0.97));
-        lightIntensities[0] = 1.20;
-        lightIntensities[1] = 0.30;
-        lightIntensities[2] = 0.14;
-        lightColors[0] = vec3(1.0, 0.96, 0.88);
-        lightColors[1] = vec3(0.64, 0.76, 0.95);
-        lightColors[2] = vec3(0.88, 0.92, 1.0);
-    } else {
-        lightDirs[0] = normalize(vec3(0.60, 0.52, 0.61));
-        lightDirs[1] = normalize(vec3(-0.54, 0.34, 0.77));
-        lightDirs[2] = normalize(vec3(-0.16, 0.28, -0.95));
-        lightIntensities[0] = 0.95;
-        lightIntensities[1] = 0.48;
-        lightIntensities[2] = 0.32;
-        lightColors[0] = vec3(1.0, 0.98, 0.95);
-        lightColors[1] = vec3(0.76, 0.82, 0.94);
-        lightColors[2] = vec3(0.95, 0.96, 1.0);
-    }
-
     // ── Sheen / SSS material params ──
     float sheenWeight    = clamp(matx.sheen, 0.0, 1.0);
     vec3  sheenColor     = mix(vec3(1.0), albedo, clamp(matx.sheen_tint, 0.0, 1.0)) * sheenWeight;
@@ -1175,8 +1190,8 @@ void main() {
             if (!evalSceneLight(uint(i), vWorldPos, L, radiance)) continue;
             radiance *= evaluatePreviewShadow(uint(i), vWorldPos, N, L);
         } else {
-            L        = lightDirs[i];
-            radiance = lightColors[i] * lightIntensities[i];
+            L        = previewRigDir(lightingPreset, i);
+            radiance = previewRigColor(lightingPreset, i) * previewRigIntensity(lightingPreset, i);
         }
 
         // ── Subsurface scattering: wrapped diffuse (Jensen 2001 approximation) ──
@@ -1520,7 +1535,8 @@ void main() {
     // taps and an FBM per pixel and then throw them away (measured with malioc,
     // PLAYER_ANDROID_PERF_PLAN B8). The transmission phase is unaffected: it
     // discards non-transmissive fragments before this point.
-    bool glassPath = bubbleSurface || transmission > 0.0 || interiorDepth > 1e-4;
+    bool glassPath = RT_SPEC_GLASS &&
+        (bubbleSurface || transmission > 0.0 || interiorDepth > 1e-4);
     vec3 transmittedWorld = vec3(0.0);
     if (!glassPath) {
         // Opaque surface: nothing below reads the refracted radiance.
@@ -1536,7 +1552,7 @@ void main() {
     }
     vec3 extinction = previewBeerExtinction(resinTint);
     float frontViewDistance = max(-(rayFusionFrame.view * vec4(vWorldPos, 1.0)).z, 0.0);
-    uint backBits = drawPhase != PREVIEW_PHASE_COMBINED
+    uint backBits = RT_SPEC_GLASS && drawPhase != PREVIEW_PHASE_COMBINED
         ? imageLoad(previewTransmissionBackDepth, ivec2(gl_FragCoord.xy)).r
         : 0u;
     float backViewDistance = uintBitsToFloat(backBits);
@@ -1585,7 +1601,7 @@ void main() {
 
     vec3 sceneThrough = vec3(0.0);
     bool sceneRefractionValid = false;
-    if (drawPhase == PREVIEW_PHASE_TRANSMISSION && !bubbleSurface) {
+    if (transmissionPhase && !bubbleSurface) {
         // RT's depthless glass shell uses 0.65 for its bounded interior march.
         // Authored Interior Depth takes precedence. Front/back geometric depth
         // will replace only this distance source; Snell/dispersion/composite
@@ -1599,7 +1615,8 @@ void main() {
                                        effectiveIor + spread), vec3(1.0001));
             sceneRefractionValid = true;
             for (int channel = 0; channel < 3; ++channel) {
-                vec3 d = refract(incoming, N, 1.0 / channelIor[channel]);
+                float chIor = channel == 0 ? channelIor.x : (channel == 1 ? channelIor.y : channelIor.z);
+                vec3 d = refract(incoming, N, 1.0 / chIor);
                 if (dot(d, d) < 1e-8) {
                     sceneRefractionValid = false;
                     break;
@@ -1611,8 +1628,11 @@ void main() {
                     sceneRefractionValid = false;
                     break;
                 }
-                sceneThrough[channel] = sampleOpaqueSceneRough(
-                    channelUv, roughness)[channel];
+                vec3 rough = sampleOpaqueSceneRough(channelUv, roughness);
+                float sv = channel == 0 ? rough.x : (channel == 1 ? rough.y : rough.z);
+                sceneThrough = vec3(channel == 0 ? sv : sceneThrough.x,
+                                    channel == 1 ? sv : sceneThrough.y,
+                                    channel == 2 ? sv : sceneThrough.z);
             }
         } else {
             vec2 sceneUv;
@@ -1643,7 +1663,7 @@ void main() {
 
     vec3 sceneReflection = vec3(0.0);
     bool sceneReflectionValid = false;
-    if (drawPhase == PREVIEW_PHASE_TRANSMISSION) {
+    if (transmissionPhase) {
         vec2 reflectionUv;
         vec3 reflectionDir = normalize(reflect(incoming, N));
         float reflectionReach = max(frontViewDistance * 2.0, 4.0);
@@ -1730,7 +1750,7 @@ void main() {
     // refraction weight as well applied absorption twice and washed out tint.
     float outputOpacity = clamp(
         opacity * (1.0 - dielectricPass * interiorPass), 0.015, 1.0);
-    if (drawPhase == PREVIEW_PHASE_TRANSMISSION) {
+    if (transmissionPhase) {
         if (sceneRefractionValid) {
             // * Anlik goruntu ARTIK O DA scene-linear: ayni uzayda
             //   topluyoruz, "iki kez tonemap" tehlikesi yok -- zincir bu
@@ -1762,7 +1782,7 @@ void main() {
     //   degil. Kapiyi roughness'a kurmak temizlenmis her texel'i (gokyuzu
     //   dahil) "mukemmel ayna" ilan etmek olurdu.
     vec3 rfWeight = rfEnvSpecularWeight;
-    if (drawPhase == PREVIEW_PHASE_TRANSMISSION || sceneReflectionValid)
+    if (transmissionPhase || sceneReflectionValid)
         rfWeight = vec3(0.0);
     // ★★★★ DORDUNCU durum ve en sinsisi: YARISAYDAM fragment. Yansima gecisi
     //   `agirlik * (izlenen - env)` ekliyor, yani fragment shader'in env

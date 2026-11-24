@@ -161,7 +161,7 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
                 'material_preview_sky_vert.vert', 'raster_post.comp',
                 'particle_viewport.vert', 'particle_viewport_pull.vert', 'particle_viewport_frag.frag',
                 'player_depth_card.vert', 'player_depth_card_frag.frag',
-                'sim_particle_ballistic.comp', 'sim_particle_spawn.comp',
+                'sim_particle_ballistic.comp', 'sim_particle_spawn.comp', 'paint_wet.comp',
                 'material_preview_ibl.comp', 'material_preview_volume_shadow.comp',
                 'raster_cull.comp', 'raster_taa.comp', 'reflection_trace.comp',
                 'reflection_filter.comp', 'rayfusion_probe_trace_beta.comp',

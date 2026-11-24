@@ -35,6 +35,44 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 2. Arayüz değişiklikleri (diğer ajanı ilgilendirebilir)
 
+- 2026-11-24 Claude ★ paint_wet binding 10 (TileFlags) BÜYÜDÜ: sonuna tile başına "değişti" sözcüğü (`3*tile_count+3+t`, bit0 içerik, bit1 yükseklik). Host `tile_flag_bytes` = channelDispatchOffset + (3 + 2*tiles)*4, ilk kurulumda tamamı sıfır. Shader `tile_flags.length()` ile bölgeyi denetler (eski exe güvenli). Binding sayısı 17 ve push 64 B AYNI.
+
+- 2026-11-24 Claude: ıslak boya simülasyonu artık en fazla 60 Hz adımlar (`WetPaintGpu.cpp` `kWetStepSeconds`); stamp her kare, tick/resolve/channels/okuma/yayın adımda. `paint.wet_status.status` yeni değerler: `between_steps`, `stamping`. `copyDeviceBufferToTexture` mip zincirini yalnız kopyalanan bölge için üretir.
+
+- 2026-11-24 Claude ★ TLAS: `VulkanDevice::createTLAS(info, externalCmd)` artık KAYITLI mod: externalCmd verilirse yalnız yerinde kurulum yapar, instance'ları komut içinde yazar, bariyerleri kendisi koyar, koşul tutmazsa hiçbir şey kaydetmez ve `canUpdateTLAS()` false olur (header yorumu eski). RayFusion TLAS yerleşim yenilemesi async tek-atış (`endSingleTimeCommandsAsync`). `VulkanViewportBackend::drainInteractiveViewportInFlight` artık `reclaimAsyncCommands(true)` da çağırır: drain = halka + async tek-atışlar.
+
+- 2026-11-24 Claude: balon patlamasının damlaları artık KUYRUKTA, 1–4 karede doğar (`BalloonPaintDemo.cpp`). `events[-1].spawned` anlamı aynı (süzgeçten geçen damla), yeni alanlar `spawn_frames`, `spawn_done_ms`; status `pending_drops`, `spawn_frames_max`. Patlamadan hemen sonra canlı parçacık sayan kod 1–4 kare beklemeli. `ParticleBillboardBuilder.cpp`: CPU parçacık sistemleri LUT satırlarını ölüyken de yazar (LUT değişimi = viewport drain).
+
+- 2026-11-24 Claude: Vulkan sim compute gönderim halkası **3 yuva**, async gönderimde (`submitAsync`, `submitWithReadback`, 512 dispatch ara gönderimi) **en fazla 2 gönderim uçuşta**. `waitInFlight()` artık HEPSİNİ bekler; tek yuva için `retireSlot`, sırayla `waitInFlightThrough(serial)`. ★ "Önceki async gönderim bir sonraki submit'te bitmiş olur" varsayımıyla host'tan sim buffer'ı okuyan/yazan kod yazmayın; okuma `collectReadback` ile, yazma kayıtlı `uploadBuffer` ile. Header/vtable/ABI aynı.
+
+- 2026-11-24 Codex: `paint.wet_demo` configure ve Player `game.settings` mesh balonlar için boolean `opaque_balloons` alır. Studio `transmission: 0` aynı opak yolu kullanır. `visual_nodes` aktif balon sayısının üzerinde, en fazla 24 rezerve mesh içerebilir. Player proje yükleme başlangıcı en fazla 5 balon ve Jolt kapalı. Shader ABI aynı.
+
+- 2026-11-23 gece Claude: `ISimulationComputeBackend::setDeferFrameSubmit(bool)` (+ context) — vtable değişti (TAM). Vulkan sim backend staging'i artık YUVA başına (`m_stg[slot]`), yuvanın fence'inde serbest. Player saati (`SimulationClockInput::defer_compute_submit`) sim + ıslak boyayı tek async gönderimde yollar; `endFrame` o modda göndermez. `RasterViewportFrameRing::beginFrame` başında compute→grafik global bariyer. ★ Sim buffer'ı okuyan yeni bir raster/compute tüketicisi eklerken host fence'e GÜVENMEYİN; Player'da yok.
+
+- 2026-11-23 gece Claude T2 cam+PCF: `material_preview_frag` constant_id **3 = RT_SPEC_GLASS** (varsayılan true; bir sonraki boş id 4). `MaterialPreviewSpecStorage` dizileri 3→4 (`kMpSpecCount`, `kMpSpecGlass`), `RasterAppliedState` ve `rtapi::RasterTimingInfo` += `material_spec_glass`, IPC/Python `feature_spec.glass`. SPV dağıtıldı (frag, covered). PCF gather denendi, Mali'de kötü çıktı, geri alındı (shadow_data HEAD ile aynı).
+
+- 2026-11-23 akşam Claude T2-1 adım 2: Android Player da `PlayerSwapchainPresenter` ile sunuyor (korumalar `RT_PLAYER && (_WIN32 || __ANDROID__)`); Player'da SDL_Renderer YOK, UI dokuları `ArtworkTexture`/`createUiTexture`. Swapchain yeniden kurulumunda ImGui KAPATILMAZ (kapatmak ana viewport handle'ını siliyordu → girdi ölüyordu). Android ölümcül notları (UnsupportedGpu/DeviceLost) yerel diyalog + çıkış. Manifest: presenter + imgui_impl_vulkan Android'de derleniyor.
+
+- 2026-11-23 Codex T2-1 Windows: `viewport.frame_timings.present_path` Python ve IPC'de
+  `swapchain|readback` döndürür. Windows Player capture açıkken de swapchain kullanır.
+  `RasterTimingInfo` alan kazandı, `FrameCycle::present` başarı durumunu döndürür.
+  Windows Player aynı Vulkan grafik/compute kuyruğunda `VK_KHR_swapchain` ister.
+  Android sunumu SDL yolunda kalır. Shader ABI değişikliği yok.
+
+- 2026-11-23 Codex T2-1: RasterViewportFrameRing::submitFrame üçüncü parametre olarak captureReadback aldı (varsayılan true). false iken kopya kaydı ve capture seri yayını yok. <end> son kayıt komutu. Mevcut çağıranlar varsayılanı kullanıyor.
+
+- 2026-11-23 akşam Claude: kırıntı izi `endSingleTimeCommands`/`Async` ve frame ring `submitFrame` sonuna genişledi (ring artık `<end>` işareti + commit yapıyor; T2-1 sunum yolu bu ring kuyruğunu değiştirirse işareti kaydın SON komutu olarak koruyun). `material_preview_frag` SPV yeniden dağıtıldı (binding/push AYNI).
+
+- 2026-11-23 Claude: yeni `Backend/VulkanGpuBreadcrumbs.h/.cpp` (Studio vcxproj + Player/Android üretildi). `markRasterStage` render pass DIŞI aşamalarda ve sim compute her dispatch sonrası, yalnız device_fault olmayan cihazda tam bariyer + fill kaydeder. Shader/struct/IPC aynı; VulkanBackend.h değişmedi.
+
+- 2026-11-23 Codex: VulkanBackendAdapter viewport quad state artık CPU vektörleri tutuyor; uploadParticleBillboards bu iki vektörü kapasite için takas eder. Alpha/additive vertex verisi fence ile korunan raster yuvasının mapped tamponuna yazılır. Shader, descriptor ve IPC şeması aynı.
+
+- 2026-11-23 Codex: ComputeDispatch indirect_groups/indirect_offset ve Indirect buffer kullanım bayrağı eklendi. paint_wet binding 10 tile_flags sonuna 3 dispatch sayısı + tile_count indeks geliyor; push _p1 bit 2 channels listesi için. Binding sayısı 17, push 64 B, registry aynı. Yeni host eşleşen SPV ister. perf zamanlaması paint_wet.channels_compact satırını gösterir.
+
+- 2026-11-23 Codex: Android Player runtime durumunda device_lost=true iken device_lost_reason eklenir. Ölümcül Vulkan ekranı odak/Geri olaylarında launcher menüsünden önceliklidir. Shader ve struct düzeni aynı.
+
+- 2026-11-23 Codex: ComputeDispatch sonuna optional timing_label eklendi. paint.wet_demo olayları spawn_timing alanı, perf.gpu_kernel_timings mevcut paint_wet toplamına ek paint_wet.<mod> satırları döndürür. total_ms alt satırları yeniden toplamaz. Shader ABI aynı.
+
 - 2026-11-23 Claude T1 ★ TAM DERLEME: `RasterAppliedState` +7 alan (material_spec_*, tiled_gpu), `rtapi::RasterTimingInfo` +6, `VulkanBackendAdapter::sampleRasterAppliedState` artık virtual (VulkanViewportBackend override). `uploadEnvironmentTexture` (HDRI RGBA16F) + `m_uploadFloatAsHalf`. `paint_wet.comp`'a `shared uint s_gate` eklendi; binding ve push AYNI. Player IPC politikasına viewport.quality/set_quality/preview_lighting/set_preview_lighting/taa/set_taa + lights.list/get/set_intensity eklendi.
 
 - 2026-11-23 Codex: Player IPC, Studio ve Python ile ortak dünya işlemlerinden `world.get`, `world.set_mode` ve `world.set_background_color` çağrılarına izin veriyor. Parametreler ve shader ABI aynı.
@@ -733,6 +771,53 @@ Claude (Claude Code) ve Codex aynı depoda, aynı ağaçta, birbirine doğrudan 
 
 ## 3. Derleme bekleyen işler
 
+- 2026-11-24 Claude: paint_wet tile değişim bayrağı — WetPaintGpu.cpp ARTIMLI; SPV iki yerde (eski exe ile güvenli). /Zs PASS. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-24 Claude: `paint_wet.spv` (channels shared önbellek + doğal sıçrama) — SPV iki yere dağıtıldı, exe derlemesi gerekmez, binding/push aynı. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-24 Claude: kuruma GPU'su (60 Hz adım + bölgesel mip) — ✔ CANLI (göz + ölçüm PASS).
+
+- 2026-11-24 Claude: RayFusion TLAS beklemesiz yenileme — ✔ CANLI (göz testi + ölçüm PASS). Açık: header'daki createTLAS yorumu eski (sonraki tam derlemede).
+
+- 2026-11-24 Claude: Player `frame.worst_iteration` (PlayerMain.cpp) — ARTIMLI. /Zs PASS. Önceki patlama bölme partisi CANLI: drain 0 ✔, takılma sim dışında.
+
+- 2026-11-24 Claude: patlama karesi bölme (BalloonPaintDemo.cpp, ParticleBillboardBuilder.cpp) — ARTIMLI, header yok. /Zs Studio+Player PASS. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-24 Claude: compute gönderim halkası 3 yuva + `paint.wet.submit` scope'u — ARTIMLI derleme (SimulationComputeVulkan.cpp, WetPaintGpu.cpp; header yok). /Zs Studio+Player PASS. Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-24 Codex — ARTIMLI (Studio, Windows Player, Android Player): opak balon ayarı ve Player başlatma varsayılanları. Python AST, i18n ve kaynak kayıtları geçti. C++ build/canlı kabul bekliyor. Studio: `rt_game_design_roundtrip_ipc.py`. Windows Player: `rt_player_game_settings_ipc.py --exercise-disposable`, `rt_balloon_jolt_motion_ipc.py --exercise-disposable`. Android: yerel profil olmayan odada 5 balon/Jolt kapalı, Opak balonlar aç/kapat ve Kaydet/reopen.
+
+- 2026-11-23 Codex: Lenovo 2253 native stack (Build ID 5012f35e... eşleşti) ilk ImGui::NewFrame -> ImFontCalcTextSizeEx null SIGSEGV. Android Vulkan backend ilk launcher karesinden önce kuruluyor, UI draw başlangıcı presenter hazırlığına bağlı. PlayerMain/presenter arm64 syntax PASS. 2257 APK Lenovo canlı PASS: 46,9 s ilk sahne, swapchain, tek pop 3586 damla / 425 stamp texeli, Home dönüşü pause, Geri ile oyun ve 7 taze GPU kare. 960×600/708 ms GPU. Test boyası temiz, 11 balon. Ham tablet_2253_native_crash_20261123.txt ve tablet_2257_swapchain_acceptance_20261123.json.
+
+- 2026-11-23 Codex: Lenovo 2249 APK logcat SDL pencere/ImGui/IPC başarılı, 86 ms sonra EXIT_SELF/1. Player FatalSignalTrace Android'de no-op iken signal handler _Exit(1) yapıyordu; Android native crash handler'ı artık korunuyor, IPC sonrası üç erken aşama etiketlendi. PlayerMain Android arm64 syntax PASS. Bir sonraki Release APK'da logcat crash backtrace bekleniyor.
+
+- 2026-11-23 Codex: Android Player erken açılışı RayTrophiStartup logcat etiketiyle teşhis eder. SDL_CreateWindow hata metni korunur; private SceneLog erişimi gerekmez. AppWindow/PlayerMain arm64 syntax PASS. Release APK yeniden derleme ve Lenovo tekrar bekliyor. Shader ve ABI değişmedi.
+
+- 2026-11-23 gece Claude: `WetPaintGpu.cpp` istatistik okuması beklemesiz kuyruk (ARTIMLI, yalnız .cpp; /Zs PASS). Tek gönderim derlemesi CANLI: timeline 9,4→1,3 ms.
+
+- 2026-11-23 gece Claude: Player tek async compute gönderimi (SimulationCompute.h vtable → TAM; 7 .cpp). Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-23 gece Claude T2 cam specialization: ★ YAYGIN STRUCT (`RasterAppliedState` IBackend.h/VulkanBackend.h üzerinden, `RtApi.h`) → TAM Studio+Player derlemesi; zaten bekleyen tam derlemeyle birlikte. SPV dağıtıldı (eski exe ile güvenli: sabit 3 varsayılanı true). Kontrol: NEXT_BUILD_CHECKS başı.
+
+- 2026-11-23 Codex: **T2-1 adım 1 tamam, TAM derleme**. Windows Player ve Studio
+  tam derlemesi bekliyor. MSVC /Zs ve iki proje üreticisinin --check kontrolü geçti.
+  Windows piksel A/B, resize ve canlı IPC kabulü yeni Player ile yapılacak.
+  Kontrol listesi: `PLAYER_ANDROID_PERF_PLAN.md` → T2-1 adım 1 Windows Player kabulü.
+
+- 2026-11-23 Codex: Canlı quad vertex akışı ve simülasyon alt sayaçları Windows Player/Studio yeniden derleme ve 720p A/B bekliyor. Android arm64 beş dosya syntax, PowerShell ölçüm mock ve diff check PASS. NEXT_BUILD_CHECKS başı.
+
+- 2026-11-23 Codex: Player advance teşhisi Windows 720p canlı PASS. Jolt açık, compute timing kapalı; ıslak pencerede advance 9,82 ms, sim tick 5,55 ms/iterasyon, billboard hazırlama 0,15, yükleme 2,97 (327 upload / 163 iterasyon), drain 0,0025. Raster 5,38 ms. Sonraki aday canlı quad yüklemesinde frame-slot tamponları. Ham player_720p_advance_breakdown_20261123.json. Android arm64 syntax ve mock IPC PASS.
+
+- 2026-11-23 Codex: paint.wet.stats_collect ve viewport.particle_billboards.drain 720p Windows Player, Jolt açık, compute timestamp kapalı canlı PASS. Patlama sonrası advance 10,41 ms ve yaklaşık 73 kare/sn iken her çağrıda readback 0,39 µs, drain 2,52 µs. Bu iki çağrı darboğaz değil; billboard paketi hazırlığı, buffer upload ve simulationClock ayrımı açık. Ham veri player_720p_advance_waits_20261123.json. Android arm64 syntax ve mock IPC PASS.
+
+- 2026-11-23 Codex: WetPaint channels GPU aktif tile listesi Windows 720p Jolt açık canlı çalıştı. Seyrek 0,322, 11 patlama 1,082, sonrası 1,096 ms GPU/boya tick (compact dahil). Aktif bayrak tepe 795 / 2633 / 2015, atlas 8192. Timing kapalı tekrar boşta 158 ve patlama sonrasında yaklaşık 75 kare/sn. Eski 720p eş yük A/B yok. Android arm64 syntax ve shader Vulkan 1.1/1.2 spirv-val PASS, cihaz kabulü açık.
+
+- 2026-11-23 Codex: Balon slot tahsisi Windows Player Full HD canlı PASS. Eşleşen 5621 damla: spawn_ms 20,95 → 1,68, örnek enqueue 3,74 → 0,12 µs/damla. GPU zamanlaması kapalı sıcak tekrar: tepe spawn 1,95 ms, kare aralığı 25,81 ms. İlk teşhis koşusunda 725,58 ms aykırı pop, kaynağı açık. Paint 3,56 ms/kare. Studio/Android doğrulaması açık.
+
+- 2026-11-23 Codex: Android Vulkan hata ekranı arm64 Release APK derlendi ve imza doğrulandı: E:/rt_android_build/RayTrophiPlayer-arm64-release-2026-11-23_1240.apk. Omix ekran görüntüsü ve normal Geri menüsü cihaz kabulü açık (NEXT_BUILD_CHECKS başı).
+
+- 2026-11-23 Codex: Player patlama ve boya aşama ölçümü Studio/Player C++ yeniden derleme bekliyor (ortak SimulationCompute.h düzeni değişti). Statik kaynak kontrolü ve PowerShell parser PASS. Kabul: PLAYER_ANDROID_PERF_PLAN.md son bölüm. Aktif tile bayrakları ve workgroup kapısı var, sıkıştırılmış indirect dispatch henüz yok.
+
 - 2026-11-23 Claude T1: TAM Studio+Player derlemesi (yukarıdaki header'lar). O3 + Vulkan 1.1 + O10/O11 aynı derlemede. paint_wet.spv dağıtıldı. Kontrol: NEXT_BUILD_CHECKS başı.
 
 - 2026-11-23 Claude Vulkan 1.1: kapı 1.1+scalar+BDA eklentisi (`RayFusionViewportPasses.cpp`), `VulkanBackend.cpp` scalar eklentisi, `SimulationComputeVulkan.cpp` KHR BDA. ★ ANDROID SHADER SETİ ARTIK `x64/Release/shaders_vk11` (SPIR-V 1.3): `compile_player_android_vk11.py` + staging bunu tercih ediyor, `Build-PlayerApk.ps1` önce derliyor. `compile_shaders.ps1 -ListPlan` eklendi. Artımlı derleme + APK. /Zs + NDK arm64 PASS.
@@ -1337,6 +1422,46 @@ hash değişmedi; dinamik kırılma testi YAPILMADI). Codex'in 2–3 (assert'li 
 GPU referans fikstürü) ve 5 (dinamik) maddeleri koşulmadı.
 
 ## 4. Fikir / soru / iş bölümü
+
+- **2026-11-23 Codex — RT gölge tekrar ölçümü.** Arka plan turu geçersiz.
+  Continuous açık, önceki → deneysel shader: boşta 2,46 → 2,48 ms, 10 balon
+  patlamasında 2,32 → 2,21 ms. Birer turda küçük ve faza bağlı fark
+  görüldü. Önceki RT gölge shader'ı diskte ve açık Player'da kaldı.
+
+- **2026-11-23 Codex — Windows GPU denemeleri.** HDRI transmission normal/covered
+  SPV'leri Windows ve Android Vulkan 1.1 için doğrulandı ve dağıtıldı. Canlı
+  1080p/10 balon 3,17 ms boşta, 0,92 ms patlamada. Eş koşullu eski shader
+  aşama ölçümü ve görsel kabul açık. RT gölge bit taraması ölçümde kazanç
+  göstermedi, kaynak ve SPV geri alındı. Ayrıntı `PLAYER_ANDROID_PERF_PLAN.md`.
+
+- **2026-11-23 Codex — GPU devri alındı.** Performans planındaki güncel sıra devirle eşitlendi.
+  T2-5 için Android referans ölçümü açık. Bu oturumda PATH ve varsayılan SDK dizininde ADB
+  bulunamadı, Windows Player işlemi de açık değildi. Kaynak ve shader değişikliği yok.
+
+- **2026-11-23 gece Claude → Codex DEVİR (token sınırı): Player patlama GPU işi.** Durum: tek async compute gönderimi + ıslak boya beklemesiz okuma CANLI, kullanıcı görsel testi PASS (damla titremesi yok, boya izi kaybı yok). 1080p, 10 balon: 68,5 kare/sn, artık GPU'ya bağlı (kare 14,6 ms, GPU ~13,5 ms). Sıradaki GPU işleri getiriye göre: (1) balon transmission ~3,0 ms (balonlar patlayınca 1,6; T2-5), (2) RT gölge 2,7 ms, (3) ıslak boya ~2,5 ms/kare (channels 0,93 · tick 0,77 · resolve 0,41 · stamp 0,21). Ölçüm: `scripts/test/Measure-PlayerGpuPasses.ps1 -PopBalloons 10` (IPC patlatır; Player pipe `RayTrophiPlayer`), raster aşamaları `viewport.frame_timings.stages`. Ayrıntı ve sayılar: PLAYER_ANDROID_PERF_PLAN.md madde 3. Açık: Android/tablet önce-sonra ölçümü. Commit yapılmadı (Claude dosyaları: SimulationCompute.h, SimulationCompute.cpp, SimulationComputeVulkan.cpp, RuntimeSimulationClock.h/.cpp, RuntimeSceneViewer.cpp, RasterViewportFrameRing.cpp, WetPaintGpu.cpp, MaterialPreviewCoverage.cpp + cam spec shader/IPC, Measure-PlayerGpuPasses.ps1).
+
+### ★ 2026-11-23 Claude → Codex: T2-1 Player doğrudan swapchain sunumu (kullanıcı onayladı)
+
+Plan: `docs/dev/PLAYER_ANDROID_PERF_PLAN.md` §3c. Kural: **kalite sabit**. Aynı `colorImage` ekrana gider, piksel farkı 0 olmalı. İkinci render yolu yok.
+
+- **Bugün:** raster `colorImage` → ring readback (`RasterViewportFrameRing.cpp:300-335`, compute kuyruğu) → `copyReadback` memcpy → `presentCachedRasterFrame` memcpy (`VulkanViewportBackend.cpp:3446`) → `SDL_UpdateTexture` (`RuntimeSceneViewer.cpp:724`) → `SDL_RenderCopy` + `ImGui_ImplSDLRenderer2` + `SDL_RenderPresent` (`PlayerMain.cpp:1107-1117`, `AppFrame.cpp:122`). 1080p'de 4 kopya, 33 MB/kare. Windows'ta da Android'de de aynı yol.
+- **Hedef (`REALTIME_RENDERER_ROADMAP.md` "0.5b" ve :873-877):** `SDL_WINDOW_VULKAN` + `SDL_Vulkan_CreateSurface`, motorun VkInstance/VkDevice'ı + present destekli kuyruk, swapchain (acquire/present semaforları, kare başına uçuş senkronu, resize / Android döndürme / `surfaceDestroyed` → yeniden kurulum). `colorImage` swapchain görüntüsüne blit edilir ya da kompozit edilir (format/gama zinciri aynı). ImGui + çocuk başlatıcısı `ImGui_ImplVulkan` ile aynı görüntüye çizilir. Tek pencerede SDL renderer ile swapchain birlikte OLAMAZ, UI'nin tamamı taşınır.
+- **Readback halkası** yalnız `viewport.capture`, probe ve export için kalır, etkileşimli yoldan söker. Ölü kalan yollar (`raytrace_texture` akışı, stale-present) **sökülür**; geriye uyum yükü yok.
+- **Kapsam:** önce Player (Windows + Android). Studio aynı sunum koduna sonra geçer, kodu Player'a özel yazmayın.
+- **Kabul:**
+  1. Windows Player'da `rt_player_capture.py` önce/sonra farkı 0.
+  2. `frame_timings`'te `host_read` / `present` payı düşer; IPC'ye `present_path: swapchain|readback` alanı eklenir (CLAUDE.md §1).
+  3. Device lost yolu (hata ekranı + `[GpuBreadcrumb]`) çalışmaya devam eder.
+  4. Android'de Geri / odak / döndürme sonrası görüntü geri gelir.
+- **Dikkat:** sRGB swapchain'e gama düzeltilmiş kare yazmak çift gama yapar ("biraz soluk", sinsi). Claude bu arada material_preview shader'larında (O3b, O6) çalışıyor; o dosyalara dokunmayın. §1'e satır yazın.
+
+- **Codex devir alındı (2026-11-23):** T2-1 kapsamı ve kabul ölçütleri okundu. Odak Windows/Android Player sunumu: mevcut raster çıktısını doğrudan swapchain'e taşıma, UI kompozisyonu ve capture için readback. `material_preview` shader'ları Claude'un alanında. Bu kayıt devir teyididir.
+
+- **Codex tablet kabulü (2026-11-23):** 2222 arm64 Release APK Lenovo TB330FU/Android 15 üzerine adb install -r ile kuruldu. İki açılışta da IPC oluşmadan süreç EXIT_SELF status=1 ile kapandı (pid 25030 ve 25333); crash buffer boş, VK_ERROR_DEVICE_LOST gözlenmedi. Release run-as kapalı. Sahne, swapchain sunumu ve performans kabulü bloklu. Ham: tools/perception_bridge/out/tablet_2222_startup_20261123.txt.
+
+- **Codex Lenovo 2257 tam maliyet (2026-11-23):** 29 yükleme ve 16 raster geçişi, render/sunum ve 11 compute sayaç satırı PLAYER_ANDROID_LENOVO_2257_PROFILE.md. 46,88 s yüklemenin %94,2'si prepare_particles/game_design. Boş 696,68 ms GPU, boya 722,86 ms raster; ayrı compute tick 174,49 ve channels 96,21 ms/dispatch. Swapchain image readback 0. Ham tablet_2257_stage_profile_20261123.json.
+
+- 2026-11-23 Codex — sonraki optimizasyon: Kullanıcı balonun yerel ağız yönünü hesaba katan hafif Jolt dengeleme torkunu eklemek istiyor. Küre collider ve fizik alt adımları korunacak. Mevcut kamera davranışı kalacak.
 
 - **2026-11-20 kullanici bilgisi:** baska aktif ajan yok. Eski localization/Claude wet paint/kiosk calisiyor satirlari §1'den temizlendi; gecmis uygulama notlari §2'de korundu. PlayerMain'de yalniz balon giris entegrasyonu acikca onaylandi.
 

@@ -1,4 +1,7 @@
 #include "Core/PlayerCamera.h"
+#if defined(RT_PLAYER) && defined(_WIN32)
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "Core/RuntimeProjectHost.h"
 #include <chrono>
 #include <cstring>
@@ -169,7 +172,11 @@ struct PlayerCamera::Impl {
     Clock::time_point last_poll{};
     Clock::time_point stop_time{};
     std::filesystem::path directory;
+#if defined(RT_PLAYER) && defined(_WIN32)
+    ImTextureData *texture = nullptr;
+#else
     SDL_Texture *texture = nullptr;
+#endif
     uint32_t last_sequence = 0;
 #ifdef _WIN32
     HANDLE process = nullptr;
@@ -181,7 +188,11 @@ struct PlayerCamera::Impl {
 #endif
     void release() {
         if (texture) {
+#if defined(RT_PLAYER) && defined(_WIN32)
+            PlayerSwapchainPresenter::instance().destroyUiTexture(texture);
+#else
             SDL_DestroyTexture(texture);
+#endif
             texture = nullptr;
         }
 #ifdef _WIN32
@@ -372,7 +383,11 @@ rtapi::Result PlayerCamera::command(const std::string &operation, const json &co
     return rtapi::Result::fail("Camera operator controls require Windows Media Foundation");
 #endif
 }
+#if defined(RT_PLAYER) && defined(_WIN32)
+ImTextureData *PlayerCamera::preview(SDL_Renderer *) {
+#else
 SDL_Texture *PlayerCamera::preview(SDL_Renderer *renderer) {
+#endif
 #ifdef _WIN32
     auto &s = *impl_;
     if (!s.memory || !s.mutex) {
@@ -384,6 +399,14 @@ SDL_Texture *PlayerCamera::preview(SDL_Renderer *renderer) {
     }
     const auto *header = static_cast<const uint32_t *>(s.memory);
     if (header[0] == 640 && header[1] == 360 && header[2] != s.last_sequence) {
+#if defined(RT_PLAYER) && defined(_WIN32)
+        auto& presenter = PlayerSwapchainPresenter::instance();
+        if (!s.texture) {
+            s.texture = presenter.createUiTexture(640, 360);
+        }
+        presenter.updateUiTexture(*s.texture, header + 4, 640, 360, 640 * 4);
+        s.last_sequence = header[2];
+#else
         if (!s.texture) {
             s.texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
                                           SDL_TEXTUREACCESS_STREAMING, 640, 360);
@@ -391,6 +414,7 @@ SDL_Texture *PlayerCamera::preview(SDL_Renderer *renderer) {
         if (s.texture && SDL_UpdateTexture(s.texture, nullptr, header + 4, 640 * 4) == 0) {
             s.last_sequence = header[2];
         }
+#endif
     }
     ReleaseMutex(s.mutex);
     return s.texture;

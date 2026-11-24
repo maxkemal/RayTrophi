@@ -202,7 +202,19 @@ void players();
 void display();
 void audio();
 void releaseArtwork();
-SDL_Texture *brand(SDL_Renderer *renderer);
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+using ArtworkTexture = ImTextureData;
+#else
+using ArtworkTexture = SDL_Texture;
+#endif
+inline ImTextureRef artworkRef(ArtworkTexture* texture) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    return texture->GetTexRef();
+#else
+    return static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture));
+#endif
+}
+ArtworkTexture *brand(SDL_Renderer *renderer);
 // Decoded cover image, cached per path and size cap (failed loads are cached too).
-SDL_Texture *artwork(SDL_Renderer *renderer, const std::string &path, int max_dim = 512);
+ArtworkTexture *artwork(SDL_Renderer *renderer, const std::string &path, int max_dim = 512);
 } // namespace PlayerConsole

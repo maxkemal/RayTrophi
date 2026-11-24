@@ -198,7 +198,7 @@ void gameSettings() {
                 "One hand touches to pop. Two hands hold and carry; separate to release. "
                 "Lost tracking cancels without popping."));
         label(tr("player.balloons", "BALLOONS"), violet);
-        int count = static_cast<int>(number("balloons", 3));
+        int count = static_cast<int>(number("balloons", 5));
         label(tr("player.balloon_count", "Balloon count"));
         ImGui::SetNextItemWidth(std::min(S(330.0f), ImGui::GetContentRegionAvail().x));
         if (ImGui::SliderInt("##balloon_count", &count, 3,
@@ -207,8 +207,14 @@ void gameSettings() {
         }
         hint(tr("player.limited_by_the_scene_s_prepared_balloon_meshes_and_particle_budget",
                 "Limited by the scene's prepared balloon meshes and particle budget."));
+        if (status.value("supports_carry", false)) {
+            bool opaque = draft.values.value("opaque_balloons", false);
+            if (ImGui::Checkbox(trId("player.opaque_balloons", "Opaque balloons"), &opaque)) {
+                change("opaque_balloons", opaque);
+            }
+        }
         if (draft.values.contains("wind_strength")) {
-            const bool jolt = draft.values.value("jolt_motion", true);
+            const bool jolt = draft.values.value("jolt_motion", false);
             ImGui::BeginDisabled(!jolt);
             field("wind_strength", tr("player.wind_strength", "Wind strength"),
                   0.0f, 1.0f, 0.25f, "%.2f",

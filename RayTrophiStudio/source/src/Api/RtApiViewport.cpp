@@ -1,4 +1,7 @@
 #include "Viewport/MaterialPreviewVolumeShadow.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "Api/RtApiRasterDiagnostics.h"
 /*
  * =========================================================================
@@ -532,6 +535,11 @@ RtShadowInfo rtShadow() {
 
 RasterTimingInfo rasterTimings() {
     RasterTimingInfo out;
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (AppRuntime::PlayerSwapchainPresenter::instance().active()) {
+        out.present_path = "swapchain";
+    }
+#endif
     bool found = false;
     forEachViewportBackend([&out, &found](Backend::IBackend& b) {
         if (found) return; // first viewport backend owns the window
@@ -585,6 +593,7 @@ RasterTimingInfo rasterTimings() {
         out.material_spec_terrain = t.applied.material_spec_terrain;
         out.material_spec_graph = t.applied.material_spec_graph;
         out.material_spec_weather = t.applied.material_spec_weather;
+        out.material_spec_glass = t.applied.material_spec_glass;
         out.material_spec_rebuilds = t.applied.material_spec_rebuilds;
         out.tiled_gpu = t.applied.tiled_gpu;
         out.warnings = t.warnings;

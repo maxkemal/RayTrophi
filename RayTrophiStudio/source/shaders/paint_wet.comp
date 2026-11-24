@@ -45,6 +45,9 @@ const uint MODE_COVERAGE = 5u;
 const uint MODE_RESET = 6u;
 const uint MODE_CHANNELS = 7u;
 const uint MODE_SEED_HEIGHT = 8u;
+const uint MODE_COMPACT_CHANNELS = 9u;
+const uint MODE_CHANNELS_LIST = 10u;
+const uint COMPACT_CHANNELS = 4u; // pc._p1 bit 2
 
 const uint SOURCE_DABS = 0u;
 const uint SOURCE_EVENTS = 1u;
@@ -117,7 +120,8 @@ layout(set=0, binding=6) buffer State { vec4 state[]; };                   // we
 layout(set=0, binding=7) buffer ColorScratch { uint color_scratch[]; };
 layout(set=0, binding=8) buffer StateScratch { vec4 state_scratch[]; };
 layout(set=0, binding=9) buffer Output { uint out_color[]; };
-layout(set=0, binding=10) buffer TileFlags { uint tile_flags[]; };         // [2t] active, [2t+1] next
+// [2t] active, [2t+1] next, then three indirect counts and tile_count list entries.
+layout(set=0, binding=10) buffer TileFlags { uint tile_flags[]; };
 layout(set=0, binding=11) buffer Stats { uint stats[]; };
 layout(set=0, binding=12, std430) readonly buffer Dabs { Dab dabs[]; };
 layout(set=0, binding=13, std430) readonly buffer Events { CollisionEvent events[]; };
@@ -199,6 +203,25 @@ void tileTexel(Tile t, uint k, out int x, out int y) {
     y = int(t.ty * TILE + (i / TILE));
 }
 
+// Per-tile "changed this step" bits (2026-11-24), after the channel list in
+// binding 10: [3*tile_count + 3 + t]. Set by STAMP (both), RESOLVE (by
+// comparing old/new) and RESET (both); read by the channel gate; cleared by
+// ROTATE. CONTENT: colour or wetness changed (the tile's own roughness/colour
+// planes). HEIGHT: thickness or coverage changed (normals read 2 texels, so
+// the 3x3 tile neighbourhood). Replaces the 5x5 ACTIVE dilation, which redid
+// every plane of ~25 tiles per wet tile whether anything changed or not.
+const uint CHANGED_CONTENT = 1u;
+const uint CHANGED_HEIGHT = 2u;
+uint tileChangedIndex(uint tile_index) { return 3u * pc.tile_count + 3u + tile_index; }
+// ★ An exe from before 2026-11-24 allocates binding 10 WITHOUT the changed
+//   region: writing it would run off the buffer (device loss). Such a host
+//   gets no changed bits and the channel gate falls back to the old 5x5
+//   ACTIVE dilation, so this SPIR-V is safe with either build.
+bool changedBitsAvailable() { return uint(tile_flags.length()) >= 4u * pc.tile_count + 3u; }
+void markTileChanged(uint tile_index, uint bits) {
+    if (changedBitsAvailable()) atomicOr(tile_flags[tileChangedIndex(tile_index)], bits);
+}
+
 bool inSurface(Surface s, int x, int y) {
     return x >= 0 && y >= 0 && x < int(s.width) && y < int(s.height);
 }
@@ -272,8 +295,10 @@ shared uint s_gate;
 //     leaves a wet, heavy centre that the TICK's runoff carries down a little,
 //     a small one dries in place;
 //   * a grazing hit stretches the splat along the wall and shifts it forward;
-//   * the rim is a few random low lobes plus sharp spikes that grow with the
-//     impact speed, and satellite droplets sit just outside the rim.
+//   * the rim is a few random low lobes plus 3..8 tapering fingers ending in a
+//     bead (more and longer with impact speed; 2026-11-24 - the old sharp
+//     14-fold spikes read as ice crystals), and teardrop satellite droplets
+//     sit just outside the rim.
 // Everything is seeded per event (particle slot + position), so it costs a few
 // ALU ops per texel-source pair and no memory.
 uint hashU(uint x) {
@@ -353,19 +378,55 @@ float eventSplatWeight(CollisionEvent e, vec3 tp, float falloff, out float load)
     float th = rho > 1e-5 ? atan(y, x) : 0.0;
     vec4 ph = vec4(hash01(seed + 1u), hash01(seed + 2u), hash01(seed + 3u), hash01(seed + 4u)) * 6.2831853;
     float jag = clamp(0.25 + 0.03 * e.speed, 0.25, 0.7) * (0.7 + 0.6 * hash01(seed + 5u));
-    float rim = 1.0 + 0.16 * sin(3.0 * th + ph.x) + 0.10 * sin(5.0 * th + ph.y) +
-                0.06 * sin(9.0 * th + ph.z) + jag * pow(max(0.0, sin(14.0 * th + ph.w)), 8.0);
+    // ★ Splatter, not a snowflake (2026-11-24). The rim used to add
+    //   pow(sin(14 th), 8): fourteen evenly spaced needle spikes, which read as
+    //   hard ice crystals on the wall. Paint throws a FEW irregular fingers
+    //   instead - thick at the root, tapering, each ending in a round bead -
+    //   around a softly lobed body. The body keeps the low lobes (3/5/7 th,
+    //   random phases); the fingers are tapered capsules from the centre.
+    float rim = 1.0 + 0.14 * sin(3.0 * th + ph.x) + 0.09 * sin(5.0 * th + ph.y) +
+                0.05 * sin(7.0 * th + ph.z);
     float weight = brushWeight(rho / max(0.4, rim), 2.0, falloff);
-    // One candidate satellite per angular sector (11 sectors), centred well
-    // inside its sector so a texel only ever needs its own sector's.
+    // Fingers: 3..8, more with a faster hit; angles evenly spread then jittered
+    // (never a regular star), and a grazing hit pulls them forward (+x, the
+    // direction the drop was travelling) and makes the forward ones longer.
+    // Length <= 1.85 core radii + bead: inside the 2.1 reject radius above.
+    int fingers = min(8, 3 + int(floor(hash01(seed + 9u) * (1.0 + 7.0 * jag))));
+    vec2 q2 = vec2(x, y);
+    for (int i = 0; i < 8; ++i) {
+        if (i >= fingers) break;
+        uint fs = hashU(seed ^ (uint(i + 1) * 0x9E3779B9u));
+        float ang = (float(i) + 0.2 + 0.6 * hash01(fs)) / float(fingers) * 6.2831853 + ph.w;
+        ang = atan(sin(ang), cos(ang)) * (1.0 - 0.55 * g);
+        vec2 dir = vec2(cos(ang), sin(ang));
+        float len = min(1.85, 1.1 + (0.3 + 0.55 * jag) * hash01(fs + 1u) + 0.35 * g * max(0.0, dir.x));
+        float root = 0.17 + 0.12 * hash01(fs + 2u);           // half-width at the body
+        float t = clamp(dot(q2, dir), 0.0, len);
+        float half_w = mix(root, root * 0.4, t / len);          // tapering
+        float wf = brushWeight(length(vec3(q2 - dir * t, h)) / half_w, 2.0, falloff);
+        // The bead: paint runs to the tip of a finger and collects there.
+        float bead_r = root * (0.55 + 0.35 * hash01(fs + 3u));
+        float wb = brushWeight(length(vec3(q2 - dir * len, h)) / bead_r, 2.0, falloff);
+        float wfinger = max(wf, wb);
+        if (wfinger > weight) { weight = wfinger; load *= (wb > wf ? 0.85 : 0.6); }
+    }
+    // Satellites: one candidate per angular sector (11 sectors), centred well
+    // inside its sector so a texel only ever needs its own sector's. Flung
+    // droplets are teardrops stretched ALONG their flight (radially), of
+    // mixed sizes, and not perfect dots.
     const float K = 11.0;
     float sector = clamp(floor((th + 3.14159265) / 6.2831853 * K), 0.0, K - 1.0);
     uint sh = hashU(seed ^ (uint(sector) * 2654435761u));
     if (hash01(sh) < clamp(jag * 0.9, 0.2, 0.6)) {
         float tc = (sector + 0.25 + 0.5 * hash01(sh + 1u)) / K * 6.2831853 - 3.14159265;
-        float rc = 1.2 + 0.6 * hash01(sh + 2u);
-        float sr = 0.07 + 0.08 * hash01(sh + 3u);
-        float ds = length(vec3(vec2(x, y) - rc * vec2(cos(tc), sin(tc)), h)) / sr;
+        float rc = 1.25 + 0.55 * hash01(sh + 2u);
+        float sr = 0.05 + 0.10 * hash01(sh + 3u) * hash01(sh + 4u);   // mostly small, a few larger
+        vec2 radial = vec2(cos(tc), sin(tc));
+        vec2 rel = q2 - rc * radial;
+        float along = dot(rel, radial);
+        float across = dot(rel, vec2(-radial.y, radial.x));
+        float stretch = 1.4 + 0.8 * hash01(sh + 5u);
+        float ds = length(vec3(along / stretch, across, h)) / sr;
         float ws = brushWeight(ds, 2.0, falloff) * 0.9;
         if (ws > weight) { weight = ws; load *= 0.5; }
     }
@@ -548,6 +609,10 @@ void stampTile(uint tile_index) {
     if (touched > 0u) {
         atomicAdd(stats[t.surface * STATS_STRIDE + ST_STAMPED_TEXELS], touched);
         tile_flags[2u * tile_index] = 1u;
+        // Stamps write colour/state directly, before the step's RESOLVE
+        // compares old with new: without this a fresh splat on a still tile
+        // would never get its roughness/normal planes.
+        markTileChanged(tile_index, CHANGED_CONTENT | CHANGED_HEIGHT);
     }
 }
 
@@ -802,21 +867,31 @@ void resolveTile(uint tile_index) {
     if (lid == 0u) s_flag = 0u;
     barrier();
     bool wet = false;
+    uint changed = 0u;
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x, y; tileTexel(t, k, x, y);
         if (!inSurface(s, x, y)) continue;
         uint ti = texelIndex(s, x, y);
         vec4 st = cleanState(state_scratch[ti]);
         uint c = color_scratch[ti];
+        // What the channel planes read: colour + wetness (own tile), and
+        // thickness + coverage (normals of the neighbourhood).
+        vec4 old_st = state[ti];
+        uint old_c = color[ti];
+        if (c != old_c || st.x != old_st.x) changed |= CHANGED_CONTENT;
+        if (st.z != old_st.z || (c >> 24u) != (old_c >> 24u)) changed |= CHANGED_HEIGHT;
         state[ti] = st;
         color[ti] = c;
         out_color[ti] = composite(base_color[ti], unpackColor(c));
         if (st.x > 0.001) wet = true;
     }
     if (wet) atomicOr(s_flag, 1u);
+    if (changed != 0u) atomicOr(s_flag, changed << 1u);
     barrier();
     if (lid == 0u) {
-        if (s_flag != 0u) tile_flags[2u * tile_index + 1u] = 1u;
+        if ((s_flag & 1u) != 0u) tile_flags[2u * tile_index + 1u] = 1u;
+        uint bits = s_flag >> 1u;
+        if (bits != 0u) markTileChanged(tile_index, bits);
         markDirty(t);
     }
 }
@@ -830,6 +905,9 @@ void rotateTile(uint tile_index) {
     uint next = tile_flags[2u * tile_index + 1u];
     tile_flags[2u * tile_index] = next;
     tile_flags[2u * tile_index + 1u] = 0u;
+    // After CHANNELS read them; stamps of the frames until the next step set
+    // them again.
+    if (changedBitsAvailable()) tile_flags[tileChangedIndex(tile_index)] = 0u;
     if (next != 0u) {
         atomicAdd(stats[tiles[tile_index].surface * STATS_STRIDE + ST_ACTIVE_TILES], 1u);
     }
@@ -909,12 +987,19 @@ void resetTile(uint tile_index) {
     if (gl_LocalInvocationIndex == 0u) {
         tile_flags[2u * tile_index] = 0u;
         tile_flags[2u * tile_index + 1u] = 0u;
+        // Its own planes are written above; the neighbours' normals read its
+        // (now flat) height across the edge.
+        markTileChanged(tile_index, CHANGED_CONTENT | CHANGED_HEIGHT);
         markDirty(t);
     }
 }
 
 void main() {
     uint wg = gl_WorkGroupID.x;
+    if (pc.mode == MODE_COMPACT_CHANNELS) {
+        compactChannelTiles();
+        return;
+    }
     if (pc.mode == MODE_ROTATE) { rotateTile(gl_GlobalInvocationID.x); return; }
     if (pc.mode == MODE_CONSUME) {
         if (gl_GlobalInvocationID.x == 0u) { counter[0] = 0u; counter[1] = 0u; }
@@ -933,8 +1018,17 @@ void main() {
     if (wg >= pc.tile_count) return;
     if (pc.mode == MODE_STAMP) stampTile(wg);
     else if (pc.mode == MODE_TICK) tickTile(wg);
-    else if (pc.mode == MODE_RESOLVE) resolveTile(wg);
+    else if (pc.mode == MODE_RESOLVE) {
+        if ((pc._p1 & COMPACT_CHANNELS) != 0u && gl_GlobalInvocationID.x == 0u) {
+            resetChannelList();
+        }
+        resolveTile(wg);
+    }
     else if (pc.mode == MODE_COVERAGE) coverageTile(wg);
-    else if (pc.mode == MODE_CHANNELS) channelTile(wg);
+    else if (pc.mode == MODE_CHANNELS || pc.mode == MODE_CHANNELS_LIST) {
+        bool listed = pc.mode == MODE_CHANNELS_LIST;
+        uint tile_index = listed ? tile_flags[channelListBase() + wg] : wg;
+        channelTile(tile_index, listed);
+    }
     else if (pc.mode == MODE_SEED_HEIGHT) seedHeightTile(wg);
 }

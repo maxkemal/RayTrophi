@@ -11,6 +11,7 @@
 // set at all, and drew colours the CPU had already lerped.
 
 #include "Backend/VulkanViewportBackend.h"
+#include "PerfProfile.h"
 #include "globals.h"
 #include "Viewport/SphereImpostorAvailability.h"
 
@@ -415,7 +416,8 @@ void VulkanViewportBackend::ensureParticleBillboardPipelines(const std::string& 
 
 void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
                                                      const float viewProjGL[16],
-                                                     const float viewGL[16]) {
+                                                     const float viewGL[16],
+                                                     bool usingFrameRing) {
     auto& iv = m_interactiveViewport;
     m_sphereImpostorsDrawn = 0;
     if (iv.fluidSphereProxyPipeline && iv.fluidSphereProxyPipelineLayout &&
@@ -492,9 +494,18 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
     pc.cameraUp[1] = viewGL[5];
     pc.cameraUp[2] = viewGL[9];
 
-    auto drawQuads = [&](VkPipeline pipeline, const VulkanRT::BufferHandle& vbuf,
-                         uint32_t vcount) {
-        if (pipeline == VK_NULL_HANDLE || !vbuf.buffer || vcount == 0) {
+    VkBuffer quad_vertices = VK_NULL_HANDLE;
+    if (!iv.particleAlphaVertices.empty() || !iv.particleAddVertices.empty()) {
+        auto* vertices = usingFrameRing ? m_rasterFrameRing->recordingBillboards(cmd)
+                                        : &m_syncBillboardVertices;
+        if (vertices) {
+            RTPERF_FRAME_SCOPE("viewport.particle_billboards.vertex_write");
+            quad_vertices = vertices->write(*m_device, iv.particleAlphaVertices,
+                                            iv.particleAddVertices);
+        }
+    }
+    auto drawQuads = [&](VkPipeline pipeline, VkDeviceSize offset, uint32_t vcount) {
+        if (pipeline == VK_NULL_HANDLE || !quad_vertices || vcount == 0) {
             return;
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -503,9 +514,7 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
         pc.draw[0] = pc.draw[1] = pc.draw[2] = pc.draw[3] = 0u;
         vkCmdPushConstants(cmd, iv.particlePipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                            sizeof(ParticlePushConstants), &pc);
-        VkBuffer b = vbuf.buffer;
-        VkDeviceSize offset = 0;
-        vkCmdBindVertexBuffers(cmd, 0, 1, &b, &offset);
+        vkCmdBindVertexBuffers(cmd, 0, 1, &quad_vertices, &offset);
         vkCmdDraw(cmd, vcount, 1, 0, 0);
     };
     auto drawPulled = [&](VkPipeline pipeline, bool alphaPass) {
@@ -537,9 +546,11 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
         }
     };
     // Alpha first, additive on top.
-    drawQuads(iv.particleAlphaPipeline, iv.particleAlphaVertexBuffer, iv.particleAlphaVertexCount);
+    drawQuads(iv.particleAlphaPipeline, 0, static_cast<uint32_t>(iv.particleAlphaVertices.size()));
     drawPulled(iv.particlePullAlphaPipeline, /*alphaPass=*/true);
-    drawQuads(iv.particleAddPipeline, iv.particleAddVertexBuffer, iv.particleAddVertexCount);
+    drawQuads(iv.particleAddPipeline,
+              ParticleBillboardFrameBuffer::byteSize(iv.particleAlphaVertices.size()),
+              static_cast<uint32_t>(iv.particleAddVertices.size()));
     drawPulled(iv.particlePullAddPipeline, /*alphaPass=*/false);
 }
 
@@ -616,14 +627,9 @@ void VulkanViewportBackend::destroyParticleBillboardResources(bool keepPipeline)
     // the next upload re-states it.
     iv.particlePulledDraws.clear();
     iv.fluidSphereProxyDraws.clear();
-    if (iv.particleAddVertexBuffer.buffer) {
-        m_device->destroyBuffer(iv.particleAddVertexBuffer);
-    }
-    iv.particleAddVertexCount = 0;
-    if (iv.particleAlphaVertexBuffer.buffer) {
-        m_device->destroyBuffer(iv.particleAlphaVertexBuffer);
-    }
-    iv.particleAlphaVertexCount = 0;
+    iv.particleAddVertices.clear();
+    iv.particleAlphaVertices.clear();
+    m_syncBillboardVertices.release(*m_device);
     if (iv.particleLutBuffer.buffer) {
         m_device->destroyBuffer(iv.particleLutBuffer);
     }
@@ -662,21 +668,18 @@ void VulkanBackendAdapter::writeParticleLutDescriptor() {
     iv.particleLutDescriptorStale = false;
 }
 
-void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUpload& data) {
+void VulkanBackendAdapter::uploadParticleBillboards(ParticleBillboardUpload& data) {
     // The drain is what makes the buffer uploads and descriptor rewrites below
     // legal: no frame that uses them is in flight after it. It is paid ONLY
     // when one of them will actually happen. The Player calls this every
     // iteration while a particle system exists; an unconditional drain there
-    // serialized CPU and GPU on every frame even with nothing to write
-    // (measured 2026-11-23, RTX 3060 1080p: advance 15.5 ms that scaled with
-    // render resolution, i.e. a GPU wait). The remaining per-frame case is a
-    // live CPU-quad group, which still drains (see PLAYER_ANDROID_PERF_PLAN O11b).
+    // serialized CPU and GPU on every frame even with nothing to write.
+    // CPU quads now write the acquired frame slot during command recording,
+    // so only shared sphere buffers and descriptor changes need this drain.
     // True when this upload will write a buffer or a descriptor set that an
     // in-flight frame may still read.
     const auto writesDeviceState = [&]() -> bool {
         const auto& iv = m_interactiveViewport;
-        // CPU quads face the camera: any non-empty group is rewritten.
-        if (!data.additive.empty() || !data.alpha.empty()) return true;
         if (data.spheres.size() != iv.sphereImpostorsUploaded.size() ||
             (!data.spheres.empty() && std::memcmp(data.spheres.data(),
                 iv.sphereImpostorsUploaded.data(),
@@ -721,6 +724,7 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
         writes = writesDeviceState();
     }
     if (writes) {
+        RTPERF_FRAME_SCOPE("viewport.particle_billboards.drain");
         drainInteractiveViewportInFlight();
     }
     std::lock_guard<std::recursive_mutex> lock(m_mutex);
@@ -745,23 +749,11 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
         return true;
     };
 
-    auto uploadGroup = [&](const std::vector<ParticleBillboardVertex>& verts,
-                           VulkanRT::BufferHandle& buffer, uint32_t& countOut) {
-        if (verts.empty()) {
-            countOut = 0;
-            return;
-        }
-        const uint64_t bytes = verts.size() * sizeof(ParticleBillboardVertex);
-        ensureBuffer(buffer, bytes, VulkanRT::BufferUsage::VERTEX);
-        if (buffer.buffer) {
-            m_device->uploadBuffer(buffer, verts.data(), bytes, 0);
-            countOut = static_cast<uint32_t>(verts.size());
-        } else {
-            countOut = 0;
-        }
+    const auto uploadBuffer = [&](const VulkanRT::BufferHandle& buffer,
+                                  const void* source, uint64_t bytes) {
+        RTPERF_FRAME_SCOPE("viewport.particle_billboards.upload");
+        m_device->uploadBuffer(buffer, source, bytes, 0);
     };
-
-    const uint32_t prevAdd = iv.particleAddVertexCount;
     const bool spheresChanged = data.spheres.size() != iv.sphereImpostorsUploaded.size() ||
         (!data.spheres.empty() && std::memcmp(data.spheres.data(),
             iv.sphereImpostorsUploaded.data(),
@@ -772,7 +764,7 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
             const uint64_t bytes = data.spheres.size() * sizeof(SphereImpostorInstance);
             ensureBuffer(iv.sphereImpostorBuffer, bytes, VulkanRT::BufferUsage::VERTEX);
             if (iv.sphereImpostorBuffer.buffer) {
-                m_device->uploadBuffer(iv.sphereImpostorBuffer, data.spheres.data(), bytes, 0);
+                uploadBuffer(iv.sphereImpostorBuffer, data.spheres.data(), bytes);
                 iv.sphereImpostorsUploaded = data.spheres;
             } else {
                 g_sphere_impostor_ready = false;
@@ -859,9 +851,9 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
             slot.positionBuffer = buffer;
         }
     }
-    const uint32_t prevAlpha = iv.particleAlphaVertexCount;
-    uploadGroup(data.additive, iv.particleAddVertexBuffer, iv.particleAddVertexCount);
-    uploadGroup(data.alpha, iv.particleAlphaVertexBuffer, iv.particleAlphaVertexCount);
+    const bool had_quads = !iv.particleAddVertices.empty() || !iv.particleAlphaVertices.empty();
+    iv.particleAddVertices.swap(data.additive);
+    iv.particleAlphaVertices.swap(data.alpha);
 
     // The LUT and the row lookup change only when a profile is edited (or
     // systems come and go): re-upload on content change, not every frame.
@@ -874,7 +866,7 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
             iv.particleLutDescriptorStale = true;
         }
         if (buffer.buffer) {
-            m_device->uploadBuffer(buffer, content.data(), bytes, 0);
+            uploadBuffer(buffer, content.data(), bytes);
             uploaded = content;
         }
     };
@@ -951,7 +943,7 @@ void VulkanBackendAdapter::uploadParticleBillboards(const ParticleBillboardUploa
     }
 
     // Re-render only when there is something to show or something just cleared.
-    if (iv.particleAddVertexCount || iv.particleAlphaVertexCount || prevAdd || prevAlpha ||
+    if (!iv.particleAddVertices.empty() || !iv.particleAlphaVertices.empty() || had_quads ||
         pulledChanged || spheresChanged || fluidProxyChanged) {
         iv.dirty = true;
         m_currentSamples = 0;

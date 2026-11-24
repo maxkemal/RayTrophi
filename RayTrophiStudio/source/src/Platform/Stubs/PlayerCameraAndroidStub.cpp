@@ -21,7 +21,7 @@ nlohmann::json PlayerCamera::status() {
             {"catalog", {{"devices", nlohmann::json::array()}}}};
 }
 void PlayerCamera::tick() {}
-SDL_Texture *PlayerCamera::preview(SDL_Renderer *) {
+ImTextureData *PlayerCamera::preview(SDL_Renderer *) {
     return nullptr;
 }
 } // namespace AppRuntime

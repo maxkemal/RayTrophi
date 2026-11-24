@@ -6,6 +6,9 @@
 #include "imgui.h"
 #include "imgui_impl_sdl2.h"
 #include "imgui_impl_sdlrenderer2.h"
+#if defined(RT_PLAYER) && defined(__ANDROID__)
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 
 // Main window state shared by the runtime loop and (in Studio) editor panels.
 SDL_Window* window = nullptr;
@@ -47,10 +50,15 @@ void createMainWindow(const WindowConfig& config) {
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
 #endif
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) && defined(RT_PLAYER)
     // SDLActivity only enters immersive mode (status and navigation bars hidden, swiped back in
-    // transiently) for a fullscreen window: the game owns the whole screen.
+    // transiently) for a fullscreen window: the game owns the whole screen. The Player presents
+    // through its own Vulkan swapchain, so the window needs the Vulkan flag as well.
+    const Uint32 platform_flags = SDL_WINDOW_FULLSCREEN | SDL_WINDOW_VULKAN;
+#elif defined(__ANDROID__)
     const Uint32 platform_flags = SDL_WINDOW_FULLSCREEN;
+#elif defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    const Uint32 platform_flags = SDL_WINDOW_VULKAN;
 #else
     const Uint32 platform_flags = 0;
 #endif
@@ -61,6 +69,12 @@ void createMainWindow(const WindowConfig& config) {
         config.width,
         config.height,
         SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIDDEN | platform_flags);
+#if defined(RT_PLAYER) && defined(__ANDROID__)
+    if (!window) {
+        // Leave SDL's window error intact for the startup log and native dialog.
+        return;
+    }
+#endif
     startupLog(config.startup_log,
                std::string("[Startup] SDL_CreateWindow done, ptr=") + (window ? "valid" : "null"));
 
@@ -70,9 +84,11 @@ void createMainWindow(const WindowConfig& config) {
     // starts text input again only while a text field is active.
     SDL_StopTextInput();
 #endif
+#if !defined(RT_PLAYER) || !(defined(_WIN32) || defined(__ANDROID__))
     renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
     startupLog(config.startup_log,
                std::string("[Startup] SDL_CreateRenderer done, ptr=") + (renderer ? "valid" : "null"));
+#endif
 
     surface = SDL_CreateRGBSurfaceWithFormat(0, config.width, config.height, 32, SDL_PIXELFORMAT_RGBA32);
     original_surface = SDL_CreateRGBSurfaceWithFormat(0, config.width, config.height, 32, SDL_PIXELFORMAT_RGBA32);
@@ -81,6 +97,7 @@ void createMainWindow(const WindowConfig& config) {
     if (original_surface) SDL_FillRect(original_surface, nullptr, SDL_MapRGBA(original_surface->format, 0, 0, 0, 255));
     startupLog(config.startup_log, "[Startup] SDL_CreateRGBSurfaceWithFormat done");
 
+#if !defined(RT_PLAYER) || !(defined(_WIN32) || defined(__ANDROID__))
     raytrace_texture = SDL_CreateTexture(renderer, SDL_PIXELFORMAT_RGBA32,
                                          SDL_TEXTUREACCESS_STREAMING, config.width, config.height);
     startupLog(config.startup_log,
@@ -88,6 +105,7 @@ void createMainWindow(const WindowConfig& config) {
 
     SDL_SetTextureBlendMode(raytrace_texture, SDL_BLENDMODE_NONE);
     startupLog(config.startup_log, "[Startup] SDL_SetTextureBlendMode done");
+#endif
     // Ensure SDL_TEXTINPUT events are enabled so ImGui_ImplSDL2 can receive UTF-8 characters.
     // Not on Android: there it opens the on-screen keyboard over the game for the whole session.
     // The touch game has no text fields; one that needs typing must start input itself.
@@ -123,8 +141,12 @@ void initImGui(const ImGuiConfig& config) {
     if (config.enable_docking) {
         io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
     }
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    ImGui_ImplSDL2_InitForVulkan(window);
+#else
     ImGui_ImplSDL2_InitForSDLRenderer(window, renderer);
     ImGui_ImplSDLRenderer2_Init(renderer);
+#endif
     startupLog(config.startup_log, "[Startup] ImGui SDL init done");
 }
 
@@ -137,6 +159,15 @@ bool pollEvent(SDL_Event& event, EventInfo& info) {
     if (event.type == SDL_QUIT) {
         info.quit_requested = true;
     }
+#if defined(RT_PLAYER) && defined(__ANDROID__)
+    // The activity's native window dies while paused; a resumed activity has a
+    // new one. The presenter drops its swapchain and recreates the VkSurface.
+    if (event.type == SDL_APP_WILLENTERBACKGROUND || event.type == SDL_APP_DIDENTERBACKGROUND) {
+        PlayerSwapchainPresenter::instance().onBackground();
+    } else if (event.type == SDL_APP_DIDENTERFOREGROUND) {
+        PlayerSwapchainPresenter::instance().onForeground();
+    }
+#endif
     if (event.type == SDL_WINDOWEVENT &&
         event.window.event == SDL_WINDOWEVENT_FOCUS_GAINED) {
         info.focus_gained = true;
@@ -145,6 +176,16 @@ bool pollEvent(SDL_Event& event, EventInfo& info) {
 }
 
 bool recreatePresentationTargets(int w, int h) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    auto* next = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!next) {
+        return false;
+    }
+    SDL_FillRect(next, nullptr, SDL_MapRGBA(next->format, 0, 0, 0, 255));
+    SDL_FreeSurface(original_surface);
+    original_surface = next;
+    return true;
+#else
     if (raytrace_texture) SDL_DestroyTexture(raytrace_texture);
     if (surface) SDL_FreeSurface(surface);
     if (original_surface) SDL_FreeSurface(original_surface);
@@ -167,20 +208,28 @@ bool recreatePresentationTargets(int w, int h) {
     SDL_RenderCopy(renderer, raytrace_texture, nullptr, nullptr);
     SDL_RenderPresent(renderer);
     return true;
+#endif
 }
 
 void destroyMainWindowAndImGui() {
-    SDL_DestroyTexture(raytrace_texture);
-    raytrace_texture = nullptr;
+    // The presenter path has no SDL_Renderer and no streaming texture.
+    if (raytrace_texture) {
+        SDL_DestroyTexture(raytrace_texture);
+        raytrace_texture = nullptr;
+    }
+#if !defined(RT_PLAYER) || !(defined(_WIN32) || defined(__ANDROID__))
     ImGui_ImplSDLRenderer2_Shutdown();
+#endif
     ImGui_ImplSDL2_Shutdown();
     ImGui::DestroyContext();
     SDL_FreeSurface(surface);
     surface = nullptr;
     SDL_FreeSurface(original_surface);
     original_surface = nullptr;
-    SDL_DestroyRenderer(renderer);
-    renderer = nullptr;
+    if (renderer) {
+        SDL_DestroyRenderer(renderer);
+        renderer = nullptr;
+    }
     SDL_DestroyWindow(window);
     window = nullptr;
 }

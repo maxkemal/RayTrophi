@@ -102,6 +102,12 @@ and `impact_soft_body`. Wind updates the live simulation without renewing
 balloons or resetting paint. The physics toggles rebuild the balloon demo and
 are also saved in the local per-scene Player profile.
 
+**Opaque balloons** is available under Game Settings on desktop and Android.
+`game.settings.apply` and `game.settings.save` accept the mesh-only boolean
+`opaque_balloons`. When enabled, it takes precedence over authored balloon
+transmission. The Player starts with up to five active balloons and Jolt off
+before applying any saved per-game settings.
+
 `player.operator(status)` also includes `game_settings`. Direct
 `paint.wet_demo(configure)` accepts `respawn_seconds`; direct
 `paint.wet_demo(reset_balloons)` and `rt.paint.wet_demo("reset_balloons")` call the same

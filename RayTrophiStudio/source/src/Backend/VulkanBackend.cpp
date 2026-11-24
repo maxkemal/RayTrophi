@@ -1,4 +1,7 @@
 #include "Backend/VulkanMaterialTextureBinding.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "Backend/VulkanMaterialTextureStorage.h"
 #include "Backend/WetPaintTexturePolicy.h"
 #include "Backend/VulkanFsrLoader.h"
@@ -20,6 +23,7 @@
 #include "Backend/VulkanVolumePipelineProbe.h"
 #include "Backend/VulkanVolumeStageSplit.h"
 #include "Backend/VulkanFailureReporting.h"
+#include "Backend/VulkanGpuBreadcrumbs.h"
 #include "Backend/VulkanBufferAddressLedger.h"
 #include "Backend/VulkanTlasGeneration.h"
 #include "Backend/VulkanTransitionDiagnostics.h"
@@ -67,6 +71,9 @@
 #include "VDBVolumeManager.h"
 #include "GpuVolumeTypes.h"
 #include <SDL.h>
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+extern SDL_Window* window;
+#endif
 #include "stb_image_write.h"
 #include "Texture.h"
 #include "TextureCompression.h"
@@ -825,8 +832,48 @@ void unregisterFaultDevice(VkDevice device) {
 }
 } // namespace
 
+namespace {
+// One-shot submissions (uploads, mip chains, IBL prefilter, compaction, ...):
+// one trail per device, labelled by the CALLER of endSingleTimeCommands so the
+// ~160 call sites stay untouched. 2026-11-23 Omix: the raster and sim trails
+// both retired every mark, so the loss came from a submission neither covered.
+std::mutex g_oneShotTrailsMutex;
+std::vector<std::pair<VkDevice, std::unique_ptr<GpuBreadcrumbTrail>>> g_oneShotTrails;
+
+void markOneShotBreadcrumb(VkPhysicalDevice physical, VkDevice device,
+                           VkCommandBuffer cmd, void* caller) {
+    GpuBreadcrumbTrail* trail = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_oneShotTrailsMutex);
+        for (auto& entry : g_oneShotTrails)
+            if (entry.first == device) trail = entry.second.get();
+        if (!trail) {
+            g_oneShotTrails.emplace_back(device,
+                std::make_unique<GpuBreadcrumbTrail>("one_shot", 64));
+            trail = g_oneShotTrails.back().second.get();
+        }
+    }
+    if (!trail->ensure(physical, device)) return;
+    trail->markOneShot(cmd, describeCodeAddress(caller));
+}
+
+void dropOneShotBreadcrumbs(VkDevice device) {
+    std::lock_guard<std::mutex> lock(g_oneShotTrailsMutex);
+    g_oneShotTrails.erase(std::remove_if(g_oneShotTrails.begin(), g_oneShotTrails.end(),
+        [device](const auto& entry) { return entry.first == device; }), g_oneShotTrails.end());
+}
+} // namespace
+
+bool vulkanDeviceHasFaultReporting(VkDevice device) {
+    std::lock_guard<std::mutex> lock(g_faultDevicesMutex);
+    return std::find(g_faultDevices.begin(), g_faultDevices.end(), device) != g_faultDevices.end();
+}
+
 void logVulkanDeviceFaultInfo() {
     if (g_faultInfoLogged.exchange(true)) return;
+    // Breadcrumbs first: on a device without VK_EXT_device_fault they are the
+    // only record of WHERE the GPU stopped (Backend/VulkanGpuBreadcrumbs.h).
+    logGpuBreadcrumbs();
     std::vector<VkDevice> devices;
     {
         std::lock_guard<std::mutex> lock(g_faultDevicesMutex);
@@ -941,6 +988,14 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
         Backend::recordVulkanStartupFailure("VulkanDevice::createInstance returned false");
         return false;
     }
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (window && (SDL_GetWindowFlags(window) & SDL_WINDOW_VULKAN) &&
+        !AppRuntime::PlayerSwapchainPresenter::instance().active() &&
+        !AppRuntime::PlayerSwapchainPresenter::instance().createSurface(m_instance)) {
+        Backend::recordVulkanStartupFailure("SDL_Vulkan_CreateSurface", SDL_GetError());
+        return false;
+    }
+#endif
     if (validationLayers) setupDebugMessenger();
     if (!selectPhysicalDevice(preferHardwareRT)) {
         Backend::recordVulkanStartupFailure("VulkanDevice::selectPhysicalDevice returned false");
@@ -1007,6 +1062,9 @@ bool VulkanDevice::initialize(bool preferHardwareRT, bool validationLayers) {
 }
 
 void VulkanDevice::shutdown() {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    AppRuntime::PlayerSwapchainPresenter::instance().release(m_instance);
+#endif
     if (m_device) {
         // First: a compile worker still uses the device, the layouts and the cache.
         shutdownRTPipelineBuild();
@@ -1246,6 +1304,8 @@ void VulkanDevice::shutdown() {
         m_pendingCompactions.clear();
         if (m_rayGpuTiming) m_rayGpuTiming->destroy();
         unregisterFaultDevice(m_device);
+        releaseGpuBreadcrumbs(m_device);
+        dropOneShotBreadcrumbs(m_device);
         BufferLedger::forgetDevice(m_device);
         vkDestroyDevice(m_device, nullptr);
         m_device = VK_NULL_HANDLE;
@@ -1320,6 +1380,14 @@ bool VulkanDevice::createInstance(bool validationLayers) {
     }
 
     std::vector<const char*> extensions;
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (window && (SDL_GetWindowFlags(window) & SDL_WINDOW_VULKAN) &&
+        !AppRuntime::PlayerSwapchainPresenter::instance().active() &&
+        !AppRuntime::PlayerSwapchainPresenter::instance().appendInstanceExtensions(window, extensions)) {
+        Backend::recordVulkanStartupFailure("SDL_Vulkan_GetInstanceExtensions", SDL_GetError());
+        return false;
+    }
+#endif
     if (validationLayers) {
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
@@ -1439,6 +1507,14 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
             continue;
         }
 #endif
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (AppRuntime::PlayerSwapchainPresenter::instance().owns(m_instance) &&
+            !AppRuntime::PlayerSwapchainPresenter::instance().supportsDevice(dev)) {
+            Backend::recordRayFusionDeviceRejection(props.deviceName,
+                                                     "No graphics/compute present queue");
+            continue;
+        }
+#endif
         int score = 0;
         if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) score += 1000;
         else if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU) score += 100;
@@ -1511,6 +1587,13 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     uint32_t computeOnlyFamily = UINT32_MAX;
     for (uint32_t i = 0; i < queueFamilyCount; i++) {
         if (!(queueFamilies[i].queueFlags & VK_QUEUE_COMPUTE_BIT)) continue;
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        if (AppRuntime::PlayerSwapchainPresenter::instance().owns(m_instance) &&
+            (!(queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) ||
+             !AppRuntime::PlayerSwapchainPresenter::instance().supportsPresent(m_physicalDevice, i))) {
+            continue;
+        }
+#endif
         if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
             if (graphicsComputeFamily == UINT32_MAX) graphicsComputeFamily = i;
         } else if (computeOnlyFamily == UINT32_MAX) {
@@ -1562,6 +1645,11 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
     };
 
     std::vector<const char*> deviceExtensions;
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (AppRuntime::PlayerSwapchainPresenter::instance().owns(m_instance)) {
+        deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
+#endif
 
     // Buffer device address is also the zero-copy NanoVDB addressing layer for
     // raster Solid/Matcap. Vulkan 1.2 promotes it to core, independently of RT.
@@ -1949,6 +2037,13 @@ bool VulkanDevice::createLogicalDevice(bool preferHardwareRT) {
         deviceCreateInfo.enabledExtensionCount = 0;
         deviceCreateInfo.ppEnabledExtensionNames = nullptr;
         deviceCreateInfo.pNext = nullptr;
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        constexpr const char* wsiExtension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+        if (AppRuntime::PlayerSwapchainPresenter::instance().owns(m_instance)) {
+            deviceCreateInfo.enabledExtensionCount = 1;
+            deviceCreateInfo.ppEnabledExtensionNames = &wsiExtension;
+        }
+#endif
 
         VkResult fallback = vkCreateDevice(m_physicalDevice, &deviceCreateInfo, nullptr, &m_device);
         if (fallback != VK_SUCCESS) {
@@ -2906,6 +3001,7 @@ VkCommandBuffer VulkanDevice::beginSingleTimeCommands() {
 void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmdBuf) {
     if (cmdBuf == VK_NULL_HANDLE || !m_device || !m_computeQueue) return;
 
+    markOneShotBreadcrumb(m_physicalDevice, m_device, cmdBuf, RT_BREADCRUMB_CALLER());
     vkEndCommandBuffer(cmdBuf);
 
     VkSubmitInfo submitInfo{};
@@ -2947,6 +3043,7 @@ void VulkanDevice::endSingleTimeCommands(VkCommandBuffer cmdBuf) {
 bool VulkanDevice::endSingleTimeCommandsAsync(VkCommandBuffer cmdBuf) {
     if (cmdBuf == VK_NULL_HANDLE || !m_device || !m_computeQueue) return false;
     reclaimAsyncCommands(false);
+    markOneShotBreadcrumb(m_physicalDevice, m_device, cmdBuf, RT_BREADCRUMB_CALLER());
     vkEndCommandBuffer(cmdBuf);
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
@@ -3798,6 +3895,45 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     // forced a fresh build. A TLAS build over instances is small next to tracing a
     // degraded tree every sample (unmeasured here: see NEXT_BUILD_CHECKS); BLASes
     // still refit.
+    // ★★★ RECORDED mode (externalCmd given), 2026-11-24. The caller hands a
+    //   command buffer it submits WITHOUT a host wait on this device's single
+    //   queue (RayFusion: one async one-shot per placement change, which before
+    //   was a viewport drain + a synchronous build ~30 times a second while
+    //   balloons drift - 4-5 ms idle, 12-17 ms per frame during a pop). Frames
+    //   still in flight may be tracing this TLAS, so this mode:
+    //     - ONLY rebuilds in place (same object, handle and address): nothing is
+    //       destroyed, (re)allocated or rewritten in a descriptor;
+    //     - writes the instance array INSIDE the command buffer (vkCmdUpdateBuffer)
+    //       instead of a host memcpy into a buffer an earlier queued build may
+    //       still be reading;
+    //     - orders itself with barriers: every earlier command on the queue
+    //       (traces of in-flight frames, earlier builds sharing the scratch)
+    //       before the write/build, the build before every later command.
+    //   When any of that cannot hold it records NOTHING and clears
+    //   m_tlasSupportsUpdate, so canUpdateTLAS() turns false and the caller
+    //   takes its drained synchronous path. (The header comment about "hair
+    //   ping-pong" and inline host work describes the old, unused contract.)
+    const bool recorded = externalCmd != VK_NULL_HANDLE;
+    const auto refuseRecorded = [&](const char* why) {
+        static std::string reported;
+        if (reported != why) {
+            reported = why;
+            VK_WARN() << "[VulkanDevice] createTLAS recorded refresh refused: " << why
+                      << "; caller falls back to a synchronous build." << std::endl;
+        }
+        m_tlasSupportsUpdate = false;
+    };
+    constexpr uint32_t kRecordedTlasMaxInstances = 4096;   // 256 KB of vkCmdUpdateBuffer data
+    if (recorded && !(m_tlas.accel && m_tlasSupportsUpdate && info.allowUpdate &&
+                      instanceCount == m_tlasInstanceCount)) {
+        refuseRecorded("not an in-place rebuild (no object, no ALLOW_UPDATE or count changed)");
+        return;
+    }
+    if (recorded && instanceCount > kRecordedTlasMaxInstances) {
+        refuseRecorded("instance count above the recorded-upload limit");
+        return;
+    }
+
     bool performUpdate = false;
     if (m_tlas.accel && m_tlasSupportsUpdate && info.allowUpdate && instanceCount == m_tlasInstanceCount) {
         performUpdate = true;
@@ -3871,6 +4007,20 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     }
     // The build range must count what was uploaded, not what was requested.
     instanceCount = (uint32_t)vkInstances.size();
+    if (recorded && instanceCount != m_tlasInstanceCount) {
+        refuseRecorded("instances dropped (invalid BLAS index): count no longer matches");
+        return;
+    }
+    if (recorded && !(m_tlasInstanceBuffer.buffer != VK_NULL_HANDLE &&
+                      m_tlasInstanceBuffer.memory != VK_NULL_HANDLE &&
+                      m_tlasInstanceBuffer.size >= (std::max)(
+                          (VkDeviceSize)vkInstances.size() * sizeof(VkAccelerationStructureInstanceKHR),
+                          (VkDeviceSize)sizeof(VkAccelerationStructureInstanceKHR)))) {
+        // (Always a transfer destination: it is only ever created below, with
+        // TRANSFER_DST, so vkCmdUpdateBuffer is legal on it.)
+        refuseRecorded("instance buffer too small");
+        return;
+    }
 
     // Motion AOV: the previous build's array becomes "previous transforms" when
     // the instance order can be trusted (same count, same CPU build path). It is
@@ -3902,7 +4052,37 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     // instance-data device address.
     const VkDeviceSize allocInstBytes =
         (std::max)(neededInstBytes, (VkDeviceSize)sizeof(VkAccelerationStructureInstanceKHR));
-    if (m_tlasInstanceBuffer.buffer != VK_NULL_HANDLE &&
+    if (recorded) {
+        // In-command upload (checked above: the buffer is large enough).
+        // Earlier commands on the queue first: traces of frames in flight read
+        // the TLAS, an earlier build reads this instance array and writes the
+        // shared scratch.
+        VkMemoryBarrier before{};
+        before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        before.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                               VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT |
+                               VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR |
+                               VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR |
+                               VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(externalCmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT |
+                                 VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             0, 1, &before, 0, nullptr, 0, nullptr);
+        constexpr VkDeviceSize kUpdateChunk = 65536;   // vkCmdUpdateBuffer limit
+        const auto* bytes = reinterpret_cast<const uint8_t*>(vkInstances.data());
+        for (VkDeviceSize offset = 0; offset < neededInstBytes; offset += kUpdateChunk) {
+            const VkDeviceSize chunk = (std::min)(kUpdateChunk, neededInstBytes - offset);
+            vkCmdUpdateBuffer(externalCmd, m_tlasInstanceBuffer.buffer, offset, chunk, bytes + offset);
+        }
+        VkMemoryBarrier uploaded{};
+        uploaded.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        uploaded.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        uploaded.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        vkCmdPipelineBarrier(externalCmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             0, 1, &uploaded, 0, nullptr, 0, nullptr);
+    } else if (m_tlasInstanceBuffer.buffer != VK_NULL_HANDLE &&
         m_tlasInstanceBuffer.memory != VK_NULL_HANDLE &&
         m_tlasInstanceBuffer.size >= allocInstBytes) {
         if (neededInstBytes > 0)
@@ -3912,7 +4092,9 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
         if (m_tlasInstanceBuffer.buffer) destroyBuffer(m_tlasInstanceBuffer);
         BufferCreateInfo instBufInfo;
         instBufInfo.size = allocInstBytes;
-        instBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE;
+        // TRANSFER_DST: the recorded refresh writes it with vkCmdUpdateBuffer.
+        instBufInfo.usage = BufferUsage::ACCELERATION | BufferUsage::STORAGE |
+                            BufferUsage::TRANSFER_DST;
         instBufInfo.location = MemoryLocation::CPU_TO_GPU;
         instBufInfo.initialData = nullptr;
         instBufInfo.category = VramCategory::AccelStruct;
@@ -3961,6 +4143,12 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
 
     // Same count and flags give the same size, but an in-place build into a
     // smaller object would be undefined; fall back to a fresh object instead.
+    if (recorded && m_tlas.buffer.size < sizeInfo.accelerationStructureSize) {
+        // The instance array is already written into externalCmd; the caller's
+        // synchronous fallback rebuilds over it in queue order.
+        refuseRecorded("existing TLAS object smaller than the build needs");
+        return;
+    }
     if (performUpdate && m_tlas.buffer.size < sizeInfo.accelerationStructureSize) {
         fpDestroyAccelerationStructureKHR(m_device, m_tlas.accel, nullptr);
         destroyBuffer(m_tlas.buffer);
@@ -3999,6 +4187,11 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     uint64_t scratchSize = sizeInfo.buildScratchSize;
     uint64_t alignedScratchSize = (scratchSize + scratchAlignment - 1) & ~(scratchAlignment - 1);
 
+    if (recorded && (m_tlasScratchBuffer.buffer == VK_NULL_HANDLE ||
+                     m_tlasScratchBuffer.size < alignedScratchSize)) {
+        refuseRecorded("scratch buffer would have to grow while builds are queued");
+        return;
+    }
     if (m_tlasScratchBuffer.buffer == VK_NULL_HANDLE || m_tlasScratchBuffer.size < alignedScratchSize) {
         if (m_tlasScratchBuffer.buffer) destroyBuffer(m_tlasScratchBuffer);
         BufferCreateInfo scratchBufInfo;
@@ -4021,9 +4214,15 @@ void VulkanDevice::createTLAS(const TLASCreateInfo& info, VkCommandBuffer extern
     const VkAccelerationStructureBuildRangeInfoKHR* pRangeInfo = &rangeInfo;
 
     if (externalCmd != VK_NULL_HANDLE) {
-        // Ping-pong prepass: record into the trace command buffer; the caller submits and
-        // owns the AS→raygen barrier. No self-contained submit/wait here.
+        // Recorded mode: the caller submits. The new TLAS before every later
+        // command on the queue (this frame's and later frames' ray queries).
         fpCmdBuildAccelerationStructuresKHR(externalCmd, 1, &buildInfo, &pRangeInfo);
+        VkMemoryBarrier built{};
+        built.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        built.srcAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        built.dstAccessMask = VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(externalCmd, VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+                             VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &built, 0, nullptr, 0, nullptr);
     } else {
         VkCommandBuffer cmd = beginSingleTimeCommands();
         if (cmd == VK_NULL_HANDLE) {
@@ -14824,8 +15023,19 @@ void VulkanBackendAdapter::destroyTexture(int64_t texID) {
     }
 }
 
-void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd,
-                                                                 const VulkanRT::ImageHandle& img) {
+namespace {
+// Rebuilds the mip chain of ONE array layer after mip 0 changed inside
+// [x, x+w) x [y, y+h). Only the region each level actually depends on is
+// blitted (2026-11-24): wet paint publishes a dirty rectangle of up to 7
+// surfaces x 5 planes per tick, and the full-chain blit of a 1024^2 page per
+// copy was the largest unmeasured GPU cost of a multi-balloon pop. With an
+// exact 2:1 step a LINEAR blit samples each 2x2 source block at its centre,
+// so a rectangle aligned to even texels reproduces the full blit's texels
+// exactly; a level with an odd extent (non-power-of-two image, or the 1-texel
+// tail) is blitted whole from there on, as before. Layout transitions stay
+// whole-level (a layout belongs to the subresource, not to a region).
+void regenerateMipChainRegion(VkCommandBuffer cmd, const VulkanRT::ImageHandle& img,
+                              int32_t x, int32_t y, int32_t w, int32_t h) {
     if (cmd == VK_NULL_HANDLE || !img.image || img.mipLevels <= 1) return;
 
     VkImageMemoryBarrier b{};
@@ -14851,6 +15061,10 @@ void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer 
 
     int32_t mipW = static_cast<int32_t>(img.width);
     int32_t mipH = static_cast<int32_t>(img.height);
+    // Region on the current SOURCE level, half-open.
+    int32_t rx0 = std::clamp(x, 0, mipW), ry0 = std::clamp(y, 0, mipH);
+    int32_t rx1 = std::clamp(x + w, rx0, mipW), ry1 = std::clamp(y + h, ry0, mipH);
+    bool wholeLevels = false;
 
     for (uint32_t i = 1; i < img.mipLevels; ++i) {
         // Step 2a: mip i SHADER_READ_ONLY -> TRANSFER_DST_OPTIMAL (blit dst).
@@ -14866,18 +15080,30 @@ void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer 
 
         const int32_t nextW = std::max(1, mipW / 2);
         const int32_t nextH = std::max(1, mipH / 2);
+        // Exact 2:1 only on even extents; anything else is blitted whole.
+        if ((mipW & 1) || (mipH & 1)) wholeLevels = true;
+        int32_t sx0 = 0, sy0 = 0, sx1 = mipW, sy1 = mipH;
+        int32_t dx0 = 0, dy0 = 0, dx1 = nextW, dy1 = nextH;
+        if (!wholeLevels) {
+            sx0 = rx0 & ~1; sy0 = ry0 & ~1;
+            sx1 = std::min(mipW, (rx1 + 1) & ~1); sy1 = std::min(mipH, (ry1 + 1) & ~1);
+            dx0 = sx0 / 2; dy0 = sy0 / 2; dx1 = sx1 / 2; dy1 = sy1 / 2;
+        }
 
-        VkImageBlit blit{};
-        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, img.arrayLayer, 1};
-        blit.srcOffsets[0] = {0, 0, 0};
-        blit.srcOffsets[1] = {mipW, mipH, 1};
-        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, img.arrayLayer, 1};
-        blit.dstOffsets[0] = {0, 0, 0};
-        blit.dstOffsets[1] = {nextW, nextH, 1};
-        vkCmdBlitImage(cmd,
-            img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-            img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            1, &blit, VK_FILTER_LINEAR);
+        if (sx1 > sx0 && sy1 > sy0) {
+            VkImageBlit blit{};
+            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, img.arrayLayer, 1};
+            blit.srcOffsets[0] = {sx0, sy0, 0};
+            blit.srcOffsets[1] = {sx1, sy1, 1};
+            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, img.arrayLayer, 1};
+            blit.dstOffsets[0] = {dx0, dy0, 0};
+            blit.dstOffsets[1] = {dx1, dy1, 1};
+            vkCmdBlitImage(cmd,
+                img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                1, &blit, VK_FILTER_LINEAR);
+        }
+        rx0 = dx0; ry0 = dy0; rx1 = dx1; ry1 = dy1;
 
         // Step 2b: mip i TRANSFER_DST -> TRANSFER_SRC (next iteration's
         // source) for non-final levels; final level goes straight to
@@ -14921,6 +15147,13 @@ void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer 
         VK_PIPELINE_STAGE_TRANSFER_BIT,
         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
         0, 0, nullptr, 0, nullptr, 1, &b);
+}
+} // namespace
+
+void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd,
+                                                                 const VulkanRT::ImageHandle& img) {
+    regenerateMipChainRegion(cmd, img, 0, 0, static_cast<int32_t>(img.width),
+                             static_cast<int32_t>(img.height));
 }
 
 bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void* data,
@@ -15157,8 +15390,9 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
     vkCmdCopyBufferToImage(cmd, static_cast<VkBuffer>(vkBuffer), img.image,
                            VK_IMAGE_LAYOUT_GENERAL, 1, &region);
     if (img.mipLevels > 1) {
-        // Same reason as updateTexture2DRegion: upper mips would keep the old fill.
-        regenerateMipChainAfterPartialUpdate(cmd, img);
+        // Same reason as updateTexture2DRegion: upper mips would keep the old
+        // fill. Only the copied rectangle's footprint in each level.
+        regenerateMipChainRegion(cmd, img, x, y, static_cast<int32_t>(w), static_cast<int32_t>(h));
     } else {
         // Explicit stages: transitionImageLayout(GENERAL -> ...) assumes a
         // COMPUTE writer, and this one is the TRANSFER above.

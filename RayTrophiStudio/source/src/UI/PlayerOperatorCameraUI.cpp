@@ -77,8 +77,12 @@ void preview(SDL_Renderer *renderer, const json &settings, const json &camera) {
     const auto start = ImGui::GetCursorScreenPos();
     auto *texture = AppRuntime::playerOperatorPreview(renderer);
     if (texture) {
+#if defined(RT_PLAYER) && defined(_WIN32)
+        ImGui::Image(texture->GetTexRef(), ImVec2(width, height));
+#else
         ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture)),
                      ImVec2(width, height));
+#endif
     } else {
         ImGui::InvisibleButton("preview", ImVec2(width, height));
         auto *draw = ImGui::GetWindowDrawList();

@@ -1,7 +1,9 @@
 #include "Viewport/RasterViewportFrameRing.h"
+#include "Backend/VulkanGpuBreadcrumbs.h"
 
 #include "Backend/VulkanBackend.h"
 #include "Backend/VulkanFailureReporting.h"
+#include "Viewport/ParticleBillboardFrameBuffer.h"
 
 #include <array>
 #include <chrono>
@@ -20,6 +22,7 @@ struct RasterViewportFrameRing::Impl {
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
         VulkanRT::BufferHandle readback;
+        ParticleBillboardFrameBuffer billboards;
         void* mapped = nullptr;
         std::uint64_t serial = 0;
         bool inFlight = false;
@@ -95,6 +98,7 @@ struct RasterViewportFrameRing::Impl {
             if (slot.readback.buffer) {
                 device->destroyBuffer(slot.readback);
             }
+            slot.billboards.release(*device);
             if (slot.fence != VK_NULL_HANDLE) {
                 if (device->acousticPass) device->acousticPass->retireFence(slot.fence);
                 vkDestroyFence(vkDevice, slot.fence, nullptr);
@@ -268,13 +272,44 @@ VkCommandBuffer RasterViewportFrameRing::beginFrame(double* slotWaitMs) {
         impl_->lastResult = beginResult;
         return VK_NULL_HANDLE;
     }
+    // This frame reads simulation compute results: vertex-pulled GPU particles,
+    // the wet-paint atlas, indirect counts. The Player submits that compute work
+    // asynchronously on this same queue (no host fence any more), so order it
+    // here: every earlier compute/transfer write is visible to every stage of
+    // this frame. One global barrier covers every earlier submission on the queue.
+    {
+        VkMemoryBarrier simReads{};
+        simReads.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        simReads.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        simReads.dstAccessMask = VK_ACCESS_INDIRECT_COMMAND_READ_BIT |
+                                 VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT |
+                                 VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                                 VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(slot.commandBuffer,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT |
+                                 VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, 1, &simReads, 0, nullptr, 0, nullptr);
+    }
 
     impl_->activeSlot = impl_->submitSlot;
     return slot.commandBuffer;
 }
 
+ParticleBillboardFrameBuffer* RasterViewportFrameRing::recordingBillboards(
+    VkCommandBuffer commands) {
+    if (impl_->activeSlot == kNoSlot) {
+        return nullptr;
+    }
+    auto& slot = impl_->slots[impl_->activeSlot];
+    return slot.commandBuffer == commands ? &slot.billboards : nullptr;
+}
+
 bool RasterViewportFrameRing::submitFrame(const VulkanRT::ImageHandle& colorImage,
-                                          double* submitMs) {
+                                          double* submitMs,
+                                          bool captureReadback) {
     if (submitMs) *submitMs = 0.0;
     impl_->lastResult = VK_SUCCESS;
     if (!impl_->device || impl_->activeSlot == kNoSlot || !colorImage.image) {
@@ -285,55 +320,63 @@ bool RasterViewportFrameRing::submitFrame(const VulkanRT::ImageHandle& colorImag
     Impl::Slot& slot = impl_->slots[impl_->activeSlot];
     VkCommandBuffer cmd = slot.commandBuffer;
 
-    VkImageMemoryBarrier toTransfer{};
-    toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                               VK_ACCESS_SHADER_WRITE_BIT;
-    toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toTransfer.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toTransfer.image = colorImage.image;
-    toTransfer.subresourceRange = {
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
-    };
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &toTransfer);
+    if (captureReadback) {
+        VkImageMemoryBarrier toTransfer{};
+        toTransfer.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toTransfer.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                   VK_ACCESS_SHADER_WRITE_BIT;
+        toTransfer.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toTransfer.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toTransfer.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toTransfer.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransfer.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toTransfer.image = colorImage.image;
+        toTransfer.subresourceRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+        };
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toTransfer);
 
-    VkBufferImageCopy copy{};
-    copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    copy.imageSubresource.mipLevel = 0;
-    copy.imageSubresource.baseArrayLayer = 0;
-    copy.imageSubresource.layerCount = 1;
-    copy.imageExtent = {colorImage.width, colorImage.height, 1};
-    vkCmdCopyImageToBuffer(cmd, colorImage.image,
-                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                           slot.readback.buffer, 1, &copy);
+        VkBufferImageCopy copy{};
+        copy.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        copy.imageSubresource.mipLevel = 0;
+        copy.imageSubresource.baseArrayLayer = 0;
+        copy.imageSubresource.layerCount = 1;
+        copy.imageExtent = {colorImage.width, colorImage.height, 1};
+        vkCmdCopyImageToBuffer(cmd, colorImage.image,
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               slot.readback.buffer, 1, &copy);
 
-    VkImageMemoryBarrier toGeneral{};
-    toGeneral.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    toGeneral.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                              VK_ACCESS_SHADER_READ_BIT;
-    toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
-    toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toGeneral.image = colorImage.image;
-    toGeneral.subresourceRange = {
-        VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
-    };
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+        VkImageMemoryBarrier toGeneral{};
+        toGeneral.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        toGeneral.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        toGeneral.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                  VK_ACCESS_SHADER_READ_BIT;
+        toGeneral.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        toGeneral.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        toGeneral.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        toGeneral.image = colorImage.image;
+        toGeneral.subresourceRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1
+        };
+        vkCmdPipelineBarrier(cmd,
+            VK_PIPELINE_STAGE_TRANSFER_BIT,
+            VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            0, 0, nullptr, 0, nullptr, 1, &toGeneral);
+    }
 
     if (impl_->device->acousticPass) impl_->device->acousticPass->record(cmd, slot.fence);
+    {
+        VulkanRT::GpuBreadcrumbTrail& crumbs = VulkanRT::rasterFrameBreadcrumbs();
+        const char* stage = captureReadback ? "readback_copy " : "raster_frame ";
+        crumbs.mark(cmd, std::string(stage) + VulkanRT::kEndOfCommandBuffer);
+        crumbs.commitSubmit();
+    }
     const VkResult endResult = vkEndCommandBuffer(cmd);
     if (endResult != VK_SUCCESS) {
         if (impl_->device->acousticPass) {
@@ -365,7 +408,8 @@ bool RasterViewportFrameRing::submitFrame(const VulkanRT::ImageHandle& colorImag
         return false;
     }
 
-    slot.serial = impl_->nextSerial++;
+    slot.serial = captureReadback ? impl_->nextSerial : 0;
+    ++impl_->nextSerial;
     slot.inFlight = true;
     ++impl_->stats.framesSubmitted;
     impl_->submitSlot = (impl_->activeSlot + 1u) % kSlotCount;

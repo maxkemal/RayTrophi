@@ -31,6 +31,7 @@ public:
     std::uint64_t aliveParticles() const;
     static std::uint64_t scatterInstanceCount();
     bool needsFrame() const;
+    bool deviceLost() const;
     void requestFrame();
     // Measurement mode: make the backend record and submit a real frame. A plain
     // requestFrame() on a converged raster frame returns without recording
@@ -57,8 +58,9 @@ public:
         return scene_ready_ && frame_available_;
     }
 
-private:
     rtapi::Result initializeBackend();
+
+private:
     rtapi::Result prepareScene();
     void releaseBackend() noexcept;
 

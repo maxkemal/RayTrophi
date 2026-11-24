@@ -1,6 +1,9 @@
 #include "Paint/BalloonPaintDemo.h"
+#include "Paint/BalloonPopTiming.h"
 #include "Paint/BalloonBirthAnimation.h"
 #include "Paint/BalloonInteraction.h"
+#include "Paint/BalloonOpaqueMaterials.h"
+#include "Paint/BalloonPlayerDefaults.h"
 #include "Paint/BalloonJoltMotion.h"
 #include "Paint/BalloonSoftBody.h"
 #include "Paint/BalloonBodyInteraction.h"
@@ -20,6 +23,7 @@
 #include "Paint/WetPaintGpu.h"
 #include "ParticleAppearanceProfile.h"
 #include "ParticleSimulation.h"
+#include "ParticleSpawnSequence.h"
 #include "SimulationWorld.h"
 #include "SceneCommand.h"
 #include "TriangleMesh.h"
@@ -33,6 +37,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cmath>
+#include <deque>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -62,6 +67,18 @@ constexpr std::array<const char*, 4> kSystems = {
 // Paint/BalloonEffects; this file decides when they fire.
 const Vec3 kGold(1.0f, 0.62f, 0.08f);
 constexpr int kConfettiPerSurprise = 220;
+// A pop's drops are queued and enqueued over the next frames (2026-11-24):
+// 5-9k drops (+ their launch effects) in the pop frame were ~1.2-2.4 ms of CPU
+// on a desktop, several times that on a phone, all on the frame the child is
+// watching. Each frame spends at least the budget below (or a fraction of the
+// last frame, whichever is larger), and a burst is always done within
+// kPopSpawnMaxFrames frames so the paint never trickles out visibly.
+constexpr double kPopSpawnBudgetMs = 0.6;
+constexpr double kPopSpawnFrameShare = 0.1;
+constexpr size_t kPopSpawnMaxFrames = 4;
+// Queue order: every kPopSpawnStride-th drop first, so any prefix of the
+// queue is a sparse copy of the WHOLE burst (all jets start together).
+constexpr size_t kPopSpawnStride = 4;
 
 // Default palette (config "colors" overrides it, 2..8 entries). LINEAR colour,
 // as material base_color and particle profiles read it. Secondary channels are
@@ -94,6 +111,25 @@ struct Balloon {
     bool birth_settled = true;
 };
 
+// One queued drop of a pop (see kPopSpawnBudgetMs).
+struct PendingDrop {
+    ParticleSpawnDesc desc;
+    uint8_t system_index = 0;
+    int color = 0;
+};
+
+// One popBalloons call's drops still to enqueue; its event gets the timing
+// once the last drop is out.
+struct PendingBurst {
+    uint64_t event_id = 0;
+    size_t remaining = 0;
+    size_t per_frame_min = 0;   // finishes within kPopSpawnMaxFrames
+    double queued_at = 0.0;     // state.seconds at the pop
+    Clock::time_point queued_clock;
+    uint32_t frames = 0;
+    BalloonPopTiming timing;
+};
+
 struct State {
     std::unique_ptr<BalloonJoltMotion> jolt_motion;
     std::unique_ptr<BalloonSoftBody> soft_body;
@@ -110,6 +146,7 @@ struct State {
     std::vector<uint32_t> drop_profiles;     // per palette colour, in kSystems[c % 4]
     uint32_t gold_visual_profile = 0;        // particle-mode surprise balloon
     std::vector<float> visual_transmission; // ordinary balloon's authored value
+    BalloonOpaqueMaterials opaque_materials;
     uint64_t surprise_pops = 0;
     // Shared room goal: the children fill the room together. room_progress is
     // painted coverage / room_goal, milestones 1..4 = 25/50/75/100 %.
@@ -148,6 +185,13 @@ struct State {
     uint64_t pop_sounds_played = 0;
     uint64_t pop_sounds_dropped = 0;
     std::string pop_sound_error;   // last failure; a pop never fails on its sound
+    // Pops' drops not yet enqueued (emitPendingDrops), in burst order.
+    std::vector<PendingDrop> pending_drops;
+    size_t pending_cursor = 0;
+    std::deque<PendingBurst> pending_bursts;
+    std::array<RayTrophiSim::ParticleSpawnSequence, kSystems.size()> spawn_sequences;
+    double last_dt = 1.0 / 60.0;   // frame share of the spawn budget outside a tick
+    uint64_t spawn_frames_max = 0; // longest burst spread so far (status)
 };
 
 State state;
@@ -177,8 +221,8 @@ void validateMeshVisuals(SceneData& scene, const json& config) {
         return;
     }
     const auto& nodes = config["visual_nodes"];
-    if (!nodes.is_array() || nodes.size() != config["balloons"].get<size_t>()) {
-        throw std::runtime_error("visual_nodes must name one flat mesh per balloon");
+    if (!nodes.is_array() || nodes.size() > 24 || nodes.size() < config["balloons"].get<size_t>()) {
+        throw std::runtime_error("visual_nodes must cover every active balloon, with up to 24 meshes");
     }
     auto* context = rtapi::boundContext();
     if (!context || &context->scene != &scene) {
@@ -324,7 +368,8 @@ void updateMeshVisual(SceneData& scene, size_t index, const Balloon& balloon, bo
         }
         {
             const float authored = state.visual_transmission.at(index);
-            const float wanted = balloon.surprise ? 0.0f :
+            const float wanted = balloon.surprise || state.config.value("opaque_balloons", false)
+                ? 0.0f :
                 state.config.value("transmission", authored);
             rtapi::MaterialParamValue current;
             // Written only when it differs: every write is an undo record.
@@ -444,7 +489,7 @@ json validatedConfig(const json& input, SceneData& scene) {
         "size_min", "size_max", "idle_reset_seconds", "colors",
         "surprise_chance", "surprise_sound", "room_goal", "celebrate_sound",
         "finale_reset_seconds", "spawn_min", "spawn_max", "float_amplitude", "drift_speed",
-        "transmission", "sparkles", "sparkle_trails", "drop_sparks", "drop_trails",
+        "transmission", "opaque_balloons", "sparkles", "sparkle_trails", "drop_sparks", "drop_trails",
         "burst_clumpiness", "burst_jets_max", "soft_body", "jolt_motion", "impact_soft_body",
         "wind_strength"
     };
@@ -453,7 +498,7 @@ json validatedConfig(const json& input, SceneData& scene) {
             throw std::runtime_error("unknown config field: " + it.key());
         }
     }
-    json c = {{"resolution", 1024}, {"seed", 417}, {"balloons", 12},
+    json c = {{"resolution", 1024}, {"seed", 417}, {"balloons", defaultBalloonCount},
               {"particles_per_balloon", 1800}, {"interval_min", 2.5},
               {"interval_max", 5.0}, {"autostart", true}, {"respawn_seconds", 3.5},
               {"birth_seconds", 0.75}, {"body_controls", false},
@@ -465,11 +510,16 @@ json validatedConfig(const json& input, SceneData& scene) {
               {"burst_clumpiness", 0.7}, {"burst_jets_max", 10}};
     c.update(input);
     if (c.contains("visual_nodes")) {
-        c["jolt_motion"] = input.value("jolt_motion", json(true));
+        c["jolt_motion"] = input.value("jolt_motion", json(false));
+        c["opaque_balloons"] = input.value("opaque_balloons", json(false));
         c["impact_soft_body"] = input.value("impact_soft_body", json(true));
         c["wind_strength"] = input.value("wind_strength", json(defaultBalloonWindStrength));
     }
     validateBalloonJoltMotion(c);
+    if (c.contains("opaque_balloons") && (!c["opaque_balloons"].is_boolean() ||
+        (c["opaque_balloons"] == true && !c.contains("visual_nodes")))) {
+        throw std::runtime_error("opaque_balloons must be a boolean and true requires mesh visuals");
+    }
     if (!c["interaction_mode"].is_string() ||
         (c["interaction_mode"] != "pop" && c["interaction_mode"] != "carry")) {
         throw std::runtime_error("interaction_mode must be pop|carry");
@@ -1048,6 +1098,82 @@ void celebrate(SceneData& scene, int level) {
     }
 }
 
+void clearPendingDrops() {
+    state.pending_drops.clear();
+    state.pending_cursor = 0;
+    state.pending_bursts.clear();
+    state.spawn_sequences = {};
+}
+
+// A burst's last drop is out: its event gets the spread and the timing.
+void finishPendingBurst(const PendingBurst& burst) {
+    state.spawn_frames_max = std::max<uint64_t>(state.spawn_frames_max, burst.frames);
+    for (auto it = state.events.rbegin(); it != state.events.rend(); ++it) {
+        if ((*it)["id"].get<uint64_t>() != burst.event_id) continue;
+        (*it)["spawn_frames"] = burst.frames;
+        (*it)["spawn_done_ms"] = elapsedMs(burst.queued_clock);
+        (*it)["spawn_timing"] = burst.timing.report();
+        break;
+    }
+}
+
+// Enqueue queued pop drops for this frame: at least the time budget (or the
+// frame share), and at least the burst's per-frame minimum so it finishes
+// within kPopSpawnMaxFrames. A drop born late starts where it would be by now
+// (straight-line, its lifetime shortened by the same delay): the delay is a
+// few frames, gravity over it is under a centimetre.
+void emitPendingDrops(SceneData& scene) {
+    if (state.pending_cursor >= state.pending_drops.size()) {
+        return;
+    }
+    std::array<RayTrophiSim::ParticleSimulationSystem*, kSystems.size()> droplet_systems{};
+    for (std::size_t i = 0; i < kSystems.size(); ++i) {
+        droplet_systems[i] = system(scene, kSystems[i]);
+        if (!droplet_systems[i]) {
+            clearPendingDrops();   // the tick reports the removed system
+            return;
+        }
+    }
+    const auto start = Clock::now();
+    const double budget_ms = std::max(kPopSpawnBudgetMs, kPopSpawnFrameShare * state.last_dt * 1000.0);
+    const PendingBurst* counted = nullptr;
+    size_t emitted = 0;
+    size_t minimum = 0;
+    while (state.pending_cursor < state.pending_drops.size() && !state.pending_bursts.empty()) {
+        PendingBurst& burst = state.pending_bursts.front();
+        if (&burst != counted) {
+            ++burst.frames;
+            counted = &burst;
+            minimum += burst.per_frame_min;
+        }
+        const PendingDrop& pending = state.pending_drops[state.pending_cursor++];
+        ParticleSpawnDesc drop = pending.desc;
+        const float delay = static_cast<float>(std::max(0.0, state.seconds - burst.queued_at));
+        if (delay > 0.0f) {
+            drop.position = drop.position + drop.velocity * delay;
+            drop.lifetime_seconds = std::max(0.05f, drop.lifetime_seconds - delay);
+        }
+        burst.timing.measureDrop([&] {
+            state.spawn_sequences[pending.system_index].spawn(*droplet_systems[pending.system_index], drop);
+        }, [&] {
+            balloonDropLaunched(scene, drop.position, drop.velocity, pending.color, drop.size_scale,
+                                drop.lifetime_seconds);
+        });
+        ++emitted;
+        if (--burst.remaining == 0) {
+            finishPendingBurst(burst);
+            state.pending_bursts.pop_front();
+            counted = nullptr;
+        }
+        if ((emitted & 63u) == 0 && emitted >= minimum && elapsedMs(start) >= budget_ms) {
+            break;
+        }
+    }
+    if (state.pending_cursor >= state.pending_drops.size()) {
+        clearPendingDrops();
+    }
+}
+
 void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
     validateMeshVisuals(scene, state.config);
     const int count = static_cast<int>(available.size());
@@ -1055,6 +1181,8 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         return;
     }
     const auto start = Clock::now();
+    Paint::BalloonPopTiming timing;
+    const size_t first_queued = state.pending_drops.size();
     json popped = json::array();
     int spawned = 0;
     for (int b = 0; b < count; ++b) {
@@ -1063,12 +1191,13 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
             cancelBalloonInteraction();
         }
         // Colours share the four droplet systems; a system carries several profiles.
-        auto* runtime = system(scene, kSystems[balloon.color % kSystems.size()]);
         if (balloon.surprise) {
             ++state.surprise_pops;
-            balloonConfettiBurst(scene, balloon.position, 0.3f * balloon.size, kConfettiPerSurprise,
-                                 1.5f, 3.5f);
-            balloonSparkles(scene, balloon.position, 0.25f * balloon.size);
+            timing.measure(timing.burst_effects, [&] {
+                balloonConfettiBurst(scene, balloon.position, 0.3f * balloon.size,
+                                     kConfettiPerSurprise, 1.5f, 3.5f);
+                balloonSparkles(scene, balloon.position, 0.25f * balloon.size);
+            });
         }
         updateMeshVisual(scene, available[b], balloon, false);
         if (state.jolt_motion) state.jolt_motion->remove(available[b]);
@@ -1082,36 +1211,45 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         shape.clumpiness = state.config["burst_clumpiness"].get<float>();
         shape.jets_max = state.config["burst_jets_max"].get<int>();
         std::vector<BalloonBurstDrop> pattern;
-        const BalloonBurstSummary burst =
-            balloonBurstPattern(state.random, particles, balloon.size, shape, pattern);
+        BalloonBurstSummary burst;
+        timing.measure(timing.pattern, [&] {
+            burst = balloonBurstPattern(state.random, particles, balloon.size, shape, pattern);
+        });
         // A rainbow surprise colours a whole clump alike: it lands as one splat.
+        // Colours are drawn in pattern order (clumps are consecutive), then the
+        // drops are queued strided so the queue's every prefix spans the burst.
         const HiddenPaintSpawnGuard spawn_guard(scene);
         int color = balloon.color;
+        std::vector<int> colors(pattern.size(), balloon.color);
         for (size_t i = 0; i < pattern.size(); ++i) {
-            const BalloonBurstDrop& p = pattern[i];
-            ParticleSpawnDesc drop;
-            drop.position = balloon.position + p.offset;
-            if (!spawn_guard.allows(drop.position)) {
-                continue;
-            }
-            drop.velocity = p.velocity;
-            drop.lifetime_seconds = 2.8f;
-            drop.mass = 0.001f;
-            if (balloon.surprise && (i == 0 || p.clump != pattern[i - 1].clump)) {
+            if (balloon.surprise && (i == 0 || pattern[i].clump != pattern[i - 1].clump)) {
                 color = std::uniform_int_distribution<int>(
                     0, static_cast<int>(state.palette.size()) - 1)(state.random);
             }
-            drop.appearance_profile_id = state.drop_profiles[color];
-            drop.size_scale = p.size_scale;
-            // A profile id belongs to one system: a rainbow drop goes to the
-            // system that holds its colour's profile.
-            auto* target = color == balloon.color ? runtime
-                                                  : system(scene, kSystems[color % kSystems.size()]);
-            target->spawn(drop);
-            ++emitted;
-            ++spawned;
-            balloonDropLaunched(scene, drop.position, drop.velocity, color, drop.size_scale,
-                                drop.lifetime_seconds);
+            colors[i] = color;
+        }
+        for (size_t lane = 0; lane < kPopSpawnStride; ++lane) {
+            for (size_t i = lane; i < pattern.size(); i += kPopSpawnStride) {
+                const BalloonBurstDrop& p = pattern[i];
+                PendingDrop pending;
+                ParticleSpawnDesc& drop = pending.desc;
+                drop.position = balloon.position + p.offset;
+                if (!spawn_guard.allows(drop.position)) {
+                    continue;
+                }
+                drop.velocity = p.velocity;
+                drop.lifetime_seconds = 2.8f;
+                drop.mass = 0.001f;
+                pending.color = colors[i];
+                drop.appearance_profile_id = state.drop_profiles[pending.color];
+                drop.size_scale = p.size_scale;
+                // A profile id belongs to one system: a rainbow drop goes to the
+                // system that holds its colour's profile.
+                pending.system_index = static_cast<uint8_t>(pending.color % kSystems.size());
+                state.pending_drops.push_back(pending);
+                ++emitted;
+                ++spawned;
+            }
         }
         playPopSound(scene, balloon.position, balloon.size, balloon.surprise);
         popped.push_back({{"balloon", available[b]}, {"color", balloon.color},
@@ -1124,15 +1262,35 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
                                      {"heaviest_jet_share", burst.heaviest_jet_share},
                                      {"tear", {burst.tear.x, burst.tear.y, burst.tear.z}}}}});
     }
-    state.events.push_back({{"id", ++state.event_serial}, {"time_s", state.seconds},
+    // "spawned" = drops accepted for this pop (as before; they are queued now).
+    // spawn_ms is the pop frame's own cost (pattern, effects, queueing, its
+    // first share of drops); "spawn_frames", "spawn_done_ms" and the per-drop
+    // "spawn_timing" land when the last queued drop is out (finishPendingBurst).
+    const uint64_t event_id = ++state.event_serial;
+    state.events.push_back({{"id", event_id}, {"time_s", state.seconds},
                             {"simultaneous", count}, {"spawned", spawned},
                             {"spawn_ms", elapsedMs(start)}, {"frames", 0},
+                            {"spawn_frames", 0},
+                            {"spawn_timing", timing.report()},
                             {"simulation_ms_max", 0.0}, {"paint_ms_max", 0.0},
                             {"frame_interval_ms_max", 0.0},
                             {"sources_dropped_start", wetPaintGpu().stats().sources_dropped},
                             {"sources_dropped", 0}, {"balloons", popped}});
     if (state.events.size() > 128) {
         state.events.erase(state.events.begin());
+    }
+    const size_t queued = state.pending_drops.size() - first_queued;
+    if (queued > 0) {
+        PendingBurst burst;
+        burst.event_id = event_id;
+        burst.remaining = queued;
+        burst.per_frame_min = (queued + kPopSpawnMaxFrames - 1) / kPopSpawnMaxFrames;
+        burst.queued_at = state.seconds;
+        burst.queued_clock = start;
+        burst.timing = timing;   // pattern + surprise effects of the pop frame
+        state.pending_bursts.push_back(std::move(burst));
+        // The pop frame takes its share now; the rest follows in the next ticks.
+        emitPendingDrops(scene);
     }
 }
 
@@ -1141,6 +1299,7 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
 // paint is cleared once more 3 s later.
 void resetRoom(SceneData& scene) {
     std::string placement_error;
+    clearPendingDrops();   // queued drops are in flight too: they never land
     clearBalloonPaintInFlight(scene);
     resetHiddenGameObjects(scene, placement_error);
     cancelBalloonInteraction();
@@ -1262,6 +1421,8 @@ json status() {
             {"resets", state.resets}, {"dirty", state.dirty}, {"surprise_pops", state.surprise_pops},
             {"room_progress", state.room_progress}, {"milestones", state.milestones},
             {"shows", state.shows}, {"finale_cascade_left", state.cascade.size()},
+            {"pending_drops", state.pending_drops.size() - state.pending_cursor},
+            {"spawn_frames_max", state.spawn_frames_max},
             {"spawn_min", {state.spawn_min.x, state.spawn_min.y, state.spawn_min.z}},
             {"spawn_max", {state.spawn_max.x, state.spawn_max.y, state.spawn_max.z}},
             {"spawn_auto", state.spawn_auto}, {"motion_ms_max", state.motion_ms_max},
@@ -1285,18 +1446,23 @@ json status() {
 
 void prepare(SceneData& scene, const json& config) {
     const auto start = Clock::now();
+    clearPendingDrops();   // queued for the previous systems
     auto jolt_motion = prepareBalloonJoltMotion(scene, config, state.scene == &scene
         ? state.config.value("visual_nodes", std::vector<std::string>{})
         : std::vector<std::string>{});
     auto soft_body = config.value("soft_body", false) ?
         std::make_unique<BalloonSoftBody>() : nullptr;
-    std::map<std::string, float> previous_gold_transmission;
+    std::map<std::string, float> previous_transmission;
     if (state.scene == &scene && state.config.contains("visual_nodes")) {
+        if (auto* context = rtapi::boundContext(); context && &context->scene == &scene) {
+            state.opaque_materials.restore(*context);
+        }
         const auto& nodes = state.config["visual_nodes"];
         for (size_t i = 0; i < state.balloons.size() &&
              i < state.visual_transmission.size() && i < nodes.size(); ++i) {
-            if (state.balloons[i].surprise) {
-                previous_gold_transmission[nodes[i].get<std::string>()] =
+            if (state.balloons[i].surprise || state.config.contains("transmission") ||
+                state.config.value("opaque_balloons", false)) {
+                previous_transmission[nodes[i].get<std::string>()] =
                     state.visual_transmission[i];
             }
         }
@@ -1486,6 +1652,12 @@ void prepare(SceneData& scene, const json& config) {
         for (const auto& node : config["visual_nodes"]) {
             const std::string name = node.get<std::string>();
             auto* mesh = scene.getFlatNodeMesh(name);
+            if (state.visual_base.size() >= state.balloons.size() && mesh->visible) {
+                const auto hide = rtapi::setObjectVisible(name, false);
+                if (!hide.ok) {
+                    throw std::runtime_error(hide.error);
+                }
+            }
             Matrix4x4 base = mesh && mesh->transform ? mesh->transform->base : Matrix4x4();
             // Keep the rotation, drop the scale: a balloon's size is its mesh
             // geometry times `size`. A project saved after play holds the last
@@ -1505,9 +1677,12 @@ void prepare(SceneData& scene, const json& config) {
             if (!read.ok) {
                 throw std::runtime_error(read.error);
             }
-            const auto previous = previous_gold_transmission.find(name);
-            state.visual_transmission.push_back(previous != previous_gold_transmission.end()
+            const auto previous = previous_transmission.find(name);
+            state.visual_transmission.push_back(previous != previous_transmission.end()
                 ? previous->second : transmission.scalar);
+        }
+        if (config.value("opaque_balloons", false) || config.value("transmission", 1.0f) == 0.0f) {
+            state.opaque_materials.apply(*rtapi::boundContext(), config["visual_nodes"]);
         }
     }
     for (auto& balloon : state.balloons) {
@@ -1756,6 +1931,9 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
         // Validation failures leave a running demo intact. Preparation failures
         // stop a partially constructed demo instead of continuing with stale handles.
         if (operation == "configure" && !state.prepared) {
+            if (auto* context = rtapi::boundContext(); context && &context->scene == state.scene) {
+                state.opaque_materials.restore(*context);
+            }
             state.running = false;
             state.error = error;
         }
@@ -1882,7 +2060,10 @@ bool loadBalloonPaintProject(SceneData& scene, const std::string& project_path,
     }
     try {
         std::ifstream stream(path);
-        const json config = json::parse(stream);
+        json config = json::parse(stream);
+#ifdef RT_PLAYER
+        applyBalloonPlayerDefaults(config);
+#endif
         json output;
         return balloonPaintCommand(scene, "configure", config, output, error);
     } catch (const std::exception& e) {
@@ -1932,6 +2113,9 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
     }
     try {
         state.seconds += std::min(dt, 0.25f);
+        state.last_dt = std::min(dt, 0.25f);
+        // Earlier pops' queued drops, before this frame's particle step.
+        emitPendingDrops(scene);
         if (state.config.value("body_controls", false)) {
             tickBalloonBodyInteraction(scene, true, interactionTargets());
         }

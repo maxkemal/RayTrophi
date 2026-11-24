@@ -263,9 +263,12 @@ void appendParticleSystems(const SceneData& scene, void* viewport_device,
         if (runtime.kinematicResidency() != RayTrophiSim::ParticleKinematicResidency::Host) {
             runtime.syncHostState("foreign_device");
         }
-        if (runtime.aliveCount() == 0) {
-            continue;
-        }
+        // ★ Rows BEFORE the alive check (2026-11-24): a dead system keeps its
+        // LUT rows. Skipping them made the LUT's content follow which effect
+        // systems were alive, and every change of the LUT is a viewport drain
+        // (uploadParticleBillboards waits for every in-flight frame). A balloon
+        // pop starts and ends trails/sparkles/confetti: ~5 drains of 1-2.4 ms
+        // per pop, on the frames the child watches.
         rows.clear();
         for (const auto& profile : runtime.appearanceProfiles()) {
             RowInfo info;
@@ -274,6 +277,9 @@ void appendParticleSystems(const SceneData& scene, void* viewport_device,
             appendRow(out.lut, runtime.appearanceLutRow(profile.id));
             markParticleRow(out.lut, info.row, shading, lights, system.name, profile);
             rows[profile.id] = info;
+        }
+        if (runtime.aliveCount() == 0) {
+            continue;
         }
 
         const auto& buf = runtime.buffers();

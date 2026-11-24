@@ -22,7 +22,7 @@ public:
     void beginUiFrame(bool draw_runtime_overlays = true);
     void endUiFrame();
     void drawUi();
-    void present();
+    bool present();
 
     // Player bootstrap pacing only. Studio keeps its existing idle/render policy.
     // Sleep covers the remainder of the frame, including time spent in present.

@@ -74,6 +74,7 @@ struct RasterAppliedState {
     bool material_spec_terrain = true;
     bool material_spec_graph = true;
     bool material_spec_weather = true;
+    bool material_spec_glass = true;
     std::uint32_t material_spec_rebuilds = 0;
     // Tile-based deferred GPU (ARM Mali, Qualcomm Adreno, Imagination, Apple):
     // timestamps written INSIDE a render pass do not split it. The whole pass

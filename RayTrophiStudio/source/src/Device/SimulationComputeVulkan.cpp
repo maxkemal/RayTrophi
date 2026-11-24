@@ -16,8 +16,9 @@
  *
  * Dispatch model: Commands are recorded into a single command buffer.
  *   dispatch() records; synchronize() submits + waits then resets. Every 512
- *   dispatches the recording is submitted WITHOUT waiting and the other of two
- *   slots records on (one in flight at most); synchronize() waits both.
+ *   dispatches (and once per Player frame, submitAsync) the recording is
+ *   submitted WITHOUT waiting and the next slot of a three-slot ring records
+ *   on (two in flight at most); synchronize() waits them all.
  *
  * Descriptor strategy: One descriptor set layout per buffer count (1..9).
  *   A large descriptor pool is reset each synchronize() call.
@@ -31,7 +32,9 @@
  */
 
 #include "SimulationGpuPassSamples.h"
+#include "SimulationIndirectDispatch.h"
 #include "Backend/VulkanFailureReporting.h"
+#include "Backend/VulkanGpuBreadcrumbs.h"
 #include "SimulationCompute.h"
 #include "SimulationComputeVulkanContext.h"
 #include "SimulationPipelineTrace.h"
@@ -123,9 +126,11 @@ public:
         for (VkDescriptorPool pool : m_descPools)
             if (pool) vkDestroyDescriptorPool(m_device, pool, nullptr);
         if (m_queryPool) vkDestroyQueryPool(m_device, m_queryPool, nullptr);
-        destroyStaging(m_stagingUp);
-        destroyStaging(m_stagingDown);
-        for (auto& s : m_retiredStaging) destroyStaging(s);
+        for (auto& slot : m_stg) {
+            destroyStaging(slot.up);
+            destroyStaging(slot.down);
+            for (auto& s : slot.retired) destroyStaging(s);
+        }
         for (auto& r : m_readbacks) destroyStaging(r.staging);
         if (m_copyCmdBuf) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
         for (VkCommandBuffer cb : m_cmdBufs)
@@ -167,7 +172,7 @@ public:
         // Turning instrumentation on or off mid-command-buffer would leave the
         // pool half reset and the label list out of step with the slots. Close
         // the submission first, then flip.
-        if (m_recording || m_inFlight) synchronize();
+        if (m_recording || inFlight()) synchronize();
         m_timestampsEnabled = enabled;
         m_tsCursor = 0;
         m_tsOverflowed = false;
@@ -208,6 +213,9 @@ public:
         bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                     VK_BUFFER_USAGE_TRANSFER_SRC_BIT   |
                     VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if (hasComputeBufferUsage(desc.usage, ComputeBufferUsage::Indirect)) {
+            bci.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+        }
         if (accelInput) {
             bci.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
@@ -330,7 +338,7 @@ public:
         // next submit touch a destroyed handle — adaptive domains hit exactly
         // this by resizing buffers between steps. Flush first (and drain a
         // submission still in flight, which may read it too).
-        if (m_recording || m_inFlight) synchronize();
+        if (m_recording || inFlight()) synchronize();
         // synchronize() fences only this compute queue. Live Gas fields may
         // also be referenced by Vulkan RT on another queue of the same device.
         // Destruction/resizing is a rare structural operation, so use a full
@@ -350,7 +358,7 @@ public:
         // adaptive-domain growth.
         const ComputeBufferUsage old_usage = it->second.usage;
         const std::string old_name = it->second.debug_name;
-        if (m_recording || m_inFlight) synchronize(); // see destroyBuffer — same stale-handle window
+        if (m_recording || inFlight()) synchronize(); // see destroyBuffer — same stale-handle window
         vkDeviceWaitIdle(m_device);      // also covers external RT/viewport queues
         if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
         if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
@@ -421,7 +429,7 @@ public:
         // submitted; stage later uploads in command order instead.
         // A submission still in flight counts as queued work: it may read the
         // old contents.
-        if (it->second.mapped && !m_recording && !m_inFlight) {
+        if (it->second.mapped && !m_recording && !inFlight()) {
             std::memcpy(static_cast<uint8_t*>(it->second.mapped) + dst_offset,
                         data, size_bytes);
             return true;
@@ -436,11 +444,11 @@ public:
         // recorded stream must be preserved). Host data is captured into
         // staging immediately, so the caller may reuse its buffer right away;
         // the GPU copy lands with the next synchronize().
-        if (m_batchActive || m_recording || m_inFlight || m_stagingUpCursor > 0) {
+        if (m_batchActive || m_recording || inFlight() || m_stg[m_slot].upCursor > 0) {
             const std::size_t off =
-                stagingReserve(m_stagingUp, m_stagingUpCursor, size_bytes, /*for_download=*/false);
+                stagingReserve(m_stg[m_slot].up, m_stg[m_slot].upCursor, size_bytes, /*for_download=*/false);
             if (off == SIZE_MAX || !ensureRecording()) return false;
-            std::memcpy(static_cast<uint8_t*>(m_stagingUp.mapped) + off, data, size_bytes);
+            std::memcpy(static_cast<uint8_t*>(m_stg[m_slot].up.mapped) + off, data, size_bytes);
             // WAR: a dispatch recorded earlier in THIS command buffer may still
             // be reading the destination. The barrier after each dispatch is
             // compute->compute only and does not order a TRANSFER write, so
@@ -459,7 +467,7 @@ public:
                 m_dispatchSinceUploadBarrier = false;
             }
             VkBufferCopy region{ off, dst_offset, static_cast<VkDeviceSize>(size_bytes) };
-            vkCmdCopyBuffer(m_cmdBuf, m_stagingUp.buf, it->second.buffer, 1, &region);
+            vkCmdCopyBuffer(m_cmdBuf, m_stg[m_slot].up.buf, it->second.buffer, 1, &region);
             if (m_batchActive) m_batchHasUploads = true; // one barrier at endTransferBatch
             else               recordUploadBarrier();
             return true;
@@ -469,11 +477,11 @@ public:
         // reserved staging region is rolled back after the fence — the wait
         // guarantees it is reusable.
         const std::size_t off =
-            stagingReserve(m_stagingUp, m_stagingUpCursor, size_bytes, /*for_download=*/false);
+            stagingReserve(m_stg[m_slot].up, m_stg[m_slot].upCursor, size_bytes, /*for_download=*/false);
         if (off == SIZE_MAX) return false;
-        std::memcpy(static_cast<uint8_t*>(m_stagingUp.mapped) + off, data, size_bytes);
-        submitCopyImmediate(m_stagingUp.buf, it->second.buffer, size_bytes, off, dst_offset);
-        m_stagingUpCursor = off;
+        std::memcpy(static_cast<uint8_t*>(m_stg[m_slot].up.mapped) + off, data, size_bytes);
+        submitCopyImmediate(m_stg[m_slot].up.buf, it->second.buffer, size_bytes, off, dst_offset);
+        m_stg[m_slot].upCursor = off;
         return true;
     }
 
@@ -493,7 +501,7 @@ public:
             // endTransferBatch() triggers. `data` is valid when
             // endTransferBatch() returns.
             const std::size_t off =
-                self->stagingReserve(self->m_stagingDown, self->m_stagingDownCursor,
+                self->stagingReserve(self->m_stg[m_slot].down, self->m_stg[m_slot].downCursor,
                                      size_bytes, /*for_download=*/true);
             if (off == SIZE_MAX || !self->ensureRecording()) return false;
             if (!self->m_batchDownBarrierDone) {
@@ -501,23 +509,23 @@ public:
                 self->m_batchDownBarrierDone = true;
             }
             VkBufferCopy region{ src_offset, off, static_cast<VkDeviceSize>(size_bytes) };
-            vkCmdCopyBuffer(self->m_cmdBuf, it->second.buffer, self->m_stagingDown.buf, 1, &region);
+            vkCmdCopyBuffer(self->m_cmdBuf, it->second.buffer, self->m_stg[m_slot].down.buf, 1, &region);
             // Capture the mapping NOW: if a later reserve grows/retires this
             // staging buffer, the retired mapping stays valid until the fence.
-            self->m_pendingDownloads.push_back(
-                { data, static_cast<const uint8_t*>(self->m_stagingDown.mapped) + off, size_bytes });
+            self->m_stg[m_slot].pending.push_back(
+                { data, static_cast<const uint8_t*>(self->m_stg[m_slot].down.mapped) + off, size_bytes });
             return true;
         }
         // The immediate copy has no barrier against a submission still in
         // flight: drain it first.
         self->waitInFlight();
         const std::size_t off =
-            self->stagingReserve(self->m_stagingDown, self->m_stagingDownCursor,
+            self->stagingReserve(self->m_stg[m_slot].down, self->m_stg[m_slot].downCursor,
                                  size_bytes, /*for_download=*/true);
         if (off == SIZE_MAX) return false;
-        self->submitCopyImmediate(it->second.buffer, m_stagingDown.buf, size_bytes, src_offset, off);
-        std::memcpy(data, static_cast<const uint8_t*>(m_stagingDown.mapped) + off, size_bytes);
-        self->m_stagingDownCursor = off;
+        self->submitCopyImmediate(it->second.buffer, m_stg[m_slot].down.buf, size_bytes, src_offset, off);
+        std::memcpy(data, static_cast<const uint8_t*>(m_stg[m_slot].down.mapped) + off, size_bytes);
+        self->m_stg[m_slot].downCursor = off;
         return true;
     }
 
@@ -596,11 +604,15 @@ public:
         }
         if (!slot) return false;
         if (slot->serial > m_completedSerial) {
-            // Only one submission is ever in flight, and this serial was
-            // submitted: it is that one.
-            if (!m_inFlight) return false;
-            if (!wait && vkGetFenceStatus(m_device, m_fences[m_inFlightSlot]) != VK_SUCCESS) return false;
-            waitInFlight();
+            // This serial was submitted asynchronously and is one of the
+            // in-flight slots. Retire what already finished; block (oldest
+            // first, up to this serial) only when asked to.
+            if (!inFlight()) return false;
+            retireCompletedInFlight();
+            if (slot->serial > m_completedSerial) {
+                if (!wait) return false;
+                waitInFlightThrough(slot->serial);
+            }
             releaseStagingIfIdle();
             if (slot->serial > m_completedSerial) return false;
         }
@@ -627,8 +639,8 @@ public:
             recordUploadBarrier();
             m_batchHasUploads = false;
         }
-        if (!m_pendingDownloads.empty()) {
-            synchronize(); // one submit+fence; flushes m_pendingDownloads
+        if (!m_stg[m_slot].pending.empty()) {
+            synchronize(); // one submit+fence; flushes the slot's pending downloads
         }
         m_batchDownBarrierDone = false;
         return true;
@@ -649,22 +661,38 @@ public:
         // already synchronize through their download batches, so this is a cheap
         // no-op there; it only closes upload/dispatch-only tails that previously
         // escaped the frame.
+        //
+        // Exception: a frame owner (Player clock) that submits the whole frame
+        // itself right after (setDeferFrameSubmit). The recording stays open for
+        // the wet paint that follows and goes out in that one async submission;
+        // the lifetime hazard above is still closed because destroyBuffer /
+        // resizeBuffer flush recorded + in-flight work before touching a buffer.
+        // Measured 2026-11-23 (Player 1080p, 10 balloon pops): this fence was
+        // ~9 ms of a 16 ms frame because on the single queue it also waited for
+        // the render frame queued ahead of it, and the GPU then idled while the
+        // CPU finished the frame.
+        if (m_deferFrameSubmit && !m_batchActive) return;
         synchronize();
     }
 
+    void setDeferFrameSubmit(bool defer) override { m_deferFrameSubmit = defer; }
+
     void synchronize() override {
-        if (!m_recording && !m_inFlight) return;
+        if (!m_recording && !inFlight()) return;
         if (!m_recording) {
             // Only the async submission is left: wait for it, then fall
             // through to the host-side flush below.
             waitInFlight();
         } else {
+            if (m_breadcrumbs.enabled())
+                m_breadcrumbs.mark(m_cmdBuf, std::string("sync_tail ") + VulkanRT::kEndOfCommandBuffer);
             vkEndCommandBuffer(m_cmdBuf);
 
             VkSubmitInfo si{};
             si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
             si.commandBufferCount   = 1;
             si.pCommandBuffers      = &m_cmdBuf;
+            m_breadcrumbs.commitSubmit();
             vkQueueSubmit(m_queue, 1, &si, m_fence);
             const uint64_t serial = ++m_submitSerial;
             // The earlier slot was submitted first on the same queue; waiting
@@ -686,15 +714,10 @@ public:
             m_recording = false;
         }
 
-        // Recorded transfers are now complete: flush deferred download
-        // memcpys, release retired staging buffers, rewind the cursors.
-        for (const auto& pd : m_pendingDownloads)
-            std::memcpy(pd.host, pd.src, pd.size);
-        m_pendingDownloads.clear();
-        for (auto& s : m_retiredStaging) destroyStaging(s);
-        m_retiredStaging.clear();
-        m_stagingUpCursor = 0;
-        m_stagingDownCursor = 0;
+        // Recorded transfers are now complete (nothing recorded, nothing in
+        // flight): flush deferred download memcpys, release retired staging
+        // buffers, rewind every slot's cursors.
+        for (int s = 0; s < kSlots; ++s) releaseSlotStaging(s);
     }
 
     // ── Dispatch ──────────────────────────────────────────────────────────────
@@ -726,6 +749,8 @@ public:
     bool dispatch(const ComputeDispatch& cmd) override {
         if (!m_ready || !cmd.constants || cmd.constants_size == 0) return false;
         if (cmd.buffer_count > MAX_BINDINGS) return false;
+        VkBuffer indirect = VK_NULL_HANDLE;
+        if (!resolveIndirectDispatchBuffer(cmd, m_buffers, indirect)) return false;
 
         const std::string kernel(cmd.kernel ? cmd.kernel : "");
         auto pit = m_pipelines.find(kernel);
@@ -811,7 +836,9 @@ public:
         // so by the time this one starts recording the previous kernel has
         // already drained. TOP_OF_PIPE here therefore marks this dispatch's
         // start rather than an overlapped predecessor's.
-        const bool ts_this_dispatch = beginKernelTimestamp(kernel);
+        const auto timing_label = cmd.timing_label
+            ? std::string_view(cmd.timing_label) : std::string_view(kernel);
+        const bool ts_this_dispatch = beginKernelTimestamp(timing_label);
 
         // Record pipeline bind + descriptor bind + push constants + dispatch.
         vkCmdBindPipeline(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pe.pipeline);
@@ -823,7 +850,11 @@ public:
         uint32_t gx = cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1;
         uint32_t gy = cmd.groups.groups_y > 0 ? cmd.groups.groups_y : 1;
         uint32_t gz = cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1;
-        vkCmdDispatch(m_cmdBuf, gx, gy, gz);
+        if (indirect) {
+            recordIndirectDispatch(m_cmdBuf, indirect, cmd.indirect_offset);
+        } else {
+            vkCmdDispatch(m_cmdBuf, gx, gy, gz);
+        }
         m_dispatchSinceUploadBarrier = true;   // see the recorded upload path
 
         // Pipeline barrier: SHADER_WRITE → SHADER_READ so the next kernel
@@ -841,6 +872,7 @@ public:
         // is part of what this dispatch costs the chain, and leaving it out
         // would hide it in nobody's row.
         if (ts_this_dispatch) endKernelTimestamp();
+        if (m_breadcrumbs.enabled()) m_breadcrumbs.mark(m_cmdBuf, std::string(timing_label));
         return true;
     }
 
@@ -878,6 +910,9 @@ private:
 
     VkDevice         m_device     = VK_NULL_HANDLE;
     VkPhysicalDevice m_physDevice = VK_NULL_HANDLE;
+    // Last retired dispatch per submission, read only after a device loss
+    // (Backend/VulkanGpuBreadcrumbs.h). Off on devices with VK_EXT_device_fault.
+    VulkanRT::GpuBreadcrumbTrail m_breadcrumbs{"sim_compute"};
 #ifdef RT_PLAYER
     uint32_t m_maxSpirvVersion = 0;
     uint32_t m_maxPushConstantSize = 0;
@@ -886,16 +921,24 @@ private:
     uint32_t         m_queueFamily = 0;
 
     VkCommandPool    m_cmdPool  = VK_NULL_HANDLE;
-    // Two recording slots (command buffer + descriptor pool + fence). At most
-    // one is in flight (submitted, not yet waited) while the other records;
-    // m_cmdBuf / m_descPool / m_fence name the recording slot.
-    static constexpr int kSlots = 2;
+    // Recording slots (command buffer + descriptor pool + fence) used as a
+    // ring. Up to kSlots-1 are in flight (submitted, not yet waited) while one
+    // records; m_cmdBuf / m_descPool / m_fence name the recording slot.
+    // m_slotSerial holds each in-flight slot's submission serial (0 = free).
+    // ★ 2026-11-24: with two slots every async submit waited for the previous
+    // frame's submission, which on the single queue sits behind the render
+    // frame queued ahead of it. The Player then paid CPU + GPU serially
+    // (balloon pop, 1280x720: simulation.wet_paint 1.77 ms/frame of CPU wait,
+    // loop 555 -> 298 Hz, GPU idle ~45%). Three slots let the host record one
+    // frame ahead; the submit waits only for the one two frames back.
+    static constexpr int kSlots = 3;
     std::array<VkCommandBuffer, kSlots>  m_cmdBufs{};
     std::array<VkDescriptorPool, kSlots> m_descPools{};
     std::array<VkFence, kSlots>          m_fences{};
+    std::array<uint64_t, kSlots>         m_slotSerial{};
     int              m_slot = 0;
-    bool             m_inFlight = false;
-    int              m_inFlightSlot = 0;
+    int              m_inFlightCount = 0;
+    bool inFlight() const { return m_inFlightCount > 0; }
     VkCommandBuffer  m_cmdBuf   = VK_NULL_HANDLE;
     VkFence          m_fence    = VK_NULL_HANDLE;
     VkDescriptorPool m_descPool = VK_NULL_HANDLE;
@@ -954,8 +997,6 @@ private:
         std::size_t    cap    = 0;
         void*          mapped = nullptr;
     };
-    Staging         m_stagingUp;
-    Staging         m_stagingDown;
     VkCommandBuffer m_copyCmdBuf    = VK_NULL_HANDLE;
 
     // Submission serials: every vkQueueSubmit takes the next one; a fence wait
@@ -978,14 +1019,10 @@ private:
 
     // Transfer batch state (beginTransferBatch/endTransferBatch).
     bool m_batchActive          = false;
+    bool m_deferFrameSubmit     = false; // see endFrame()
     bool m_batchHasUploads      = false; // batch records copies; one barrier at end
     bool m_dispatchSinceUploadBarrier = false; // a recorded upload must wait for it (WAR)
     bool m_batchDownBarrierDone = false; // COMPUTE→TRANSFER barrier once per batch
-    // Staging cursors persist across batches until synchronize(): recorded
-    // copies reference their staging regions until the fence. Reset in
-    // synchronize().
-    std::size_t m_stagingUpCursor = 0;
-    std::size_t m_stagingDownCursor = 0;
     // Downloads recorded into the command buffer; the host memcpy happens
     // after the fence in synchronize(). `src` points into a staging mapping
     // (possibly of a retired buffer — kept alive until that same fence).
@@ -994,10 +1031,23 @@ private:
         const void* src;
         std::size_t size;
     };
-    std::vector<PendingDownload> m_pendingDownloads;
-    // Staging buffers replaced (grown) while recorded copies still reference
-    // them — destroyed after the next fence.
-    std::vector<Staging> m_retiredStaging;
+    // Staging belongs to a recording SLOT. Recorded copies reference their
+    // region until that slot's fence, so each slot's cursors rewind when ITS
+    // submission completes (waitInFlight / synchronize). One shared cursor
+    // could only rewind when nothing at all was recorded or in flight, which a
+    // continuous async frame loop (one submission per frame, Player) never
+    // reaches: the cursor grew until the next full synchronize().
+    struct SlotStaging {
+        Staging     up;
+        Staging     down;
+        std::size_t upCursor = 0;
+        std::size_t downCursor = 0;
+        std::vector<PendingDownload> pending;
+        // Replaced (grown) while recorded copies still reference them —
+        // destroyed after this slot's fence.
+        std::vector<Staging> retired;
+    };
+    std::array<SlotStaging, kSlots> m_stg{};
 
     // ── Initialization ────────────────────────────────────────────────────────
 
@@ -1795,7 +1845,7 @@ private:
         if (s.buf == VK_NULL_HANDLE || cursor + aligned > s.cap) {
             const std::size_t cap = std::max<std::size_t>({ aligned, s.cap * 2, 1u << 20 });
             if (s.buf != VK_NULL_HANDLE && cursor > 0) {
-                m_retiredStaging.push_back(s);
+                m_stg[m_slot].retired.push_back(s);
                 s = {};
             } else {
                 destroyStaging(s);
@@ -1878,7 +1928,7 @@ private:
     // close it). Silently stops instrumenting once the pool is full rather than
     // writing past it — an overflow must not corrupt the numbers that were
     // already valid, and `m_tsOverflowed` records that the table is partial.
-    bool beginKernelTimestamp(const std::string& kernel) {
+    bool beginKernelTimestamp(std::string_view kernel) {
         if (!m_timestampsEnabled || !m_queryPool) return false;
         if (m_tsCursor + 2 > kTimestampSlots) {
             m_tsOverflowed = true;
@@ -1886,7 +1936,7 @@ private:
         }
         vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                             m_queryPool, m_tsCursor);
-        m_tsLabels.push_back(kernel);
+        m_tsLabels.emplace_back(kernel);
         m_tsCursor += 2;
         return true;
     }
@@ -1927,29 +1977,36 @@ private:
                 acc.ms += ms;
                 acc.calls += 1u;
                 recordPlayerGpuPassSample(kernel, ms, acc.samplesMs);
+                recordWetPaintAggregate(m_kernelTimes, kernel, ms);
             }
         }
         m_tsCursor = 0;
         m_tsLabels.clear();
     }
 
-    // Submit the recording slot without waiting and switch to the other one.
-    // Staging cursors, pending downloads and retired staging are NOT touched:
-    // the in-flight buffer still reads/writes them, and only the full
-    // synchronize() (which waits both slots) releases them.
+    // Submit the recording slot without waiting and move to the next slot of
+    // the ring. The submitted slot keeps its staging (the in-flight copies
+    // read it); retireSlot() releases it once its fence has passed.
     void submitRecordingAsync() {
         if (!m_recording) return;
-        waitInFlight();  // at most one in flight: the other slot must be free
+        if (m_breadcrumbs.enabled())
+            m_breadcrumbs.mark(m_cmdBuf, std::string("async_tail ") + VulkanRT::kEndOfCommandBuffer);
         vkEndCommandBuffer(m_cmdBuf);
         VkSubmitInfo si{};
         si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
         si.pCommandBuffers    = &m_cmdBuf;
+        m_breadcrumbs.commitSubmit();
         vkQueueSubmit(m_queue, 1, &si, m_fence);
         m_inFlightSerial = ++m_submitSerial;
-        m_inFlight = true;
-        m_inFlightSlot = m_slot;
-        m_slot = 1 - m_slot;
+        m_slotSerial[m_slot] = m_inFlightSerial;
+        ++m_inFlightCount;
+        // The next slot records next. If it is still in flight it is the
+        // OLDEST submission (kSlots-1 back): only that one is waited for, after
+        // this submit so the GPU already has the new work queued.
+        const int next = (m_slot + 1) % kSlots;
+        if (m_slotSerial[next] != 0) retireSlot(next);
+        m_slot = next;
         m_cmdBuf   = m_cmdBufs[m_slot];
         m_descPool = m_descPools[m_slot];
         m_fence    = m_fences[m_slot];
@@ -1958,29 +2015,71 @@ private:
         m_recording = false;
     }
 
-    // Wait for the in-flight slot and make it reusable.
-    void waitInFlight() {
-        if (!m_inFlight) return;
-        const int slot = m_inFlightSlot;
-        VulkanRT::waitFenceBounded(m_device, m_fences[slot], "SimulationComputeVulkan.cpp:1828");
+    // The in-flight slot with the lowest serial (submitted first), or -1.
+    int oldestInFlightSlot() const {
+        int oldest = -1;
+        for (int s = 0; s < kSlots; ++s) {
+            if (m_slotSerial[s] != 0 && (oldest < 0 || m_slotSerial[s] < m_slotSerial[oldest]))
+                oldest = s;
+        }
+        return oldest;
+    }
+
+    // Wait for one in-flight slot and make it reusable. Slots complete in
+    // submission order (one queue), so callers retire the oldest first.
+    void retireSlot(int slot) {
+        if (m_slotSerial[slot] == 0) return;
+        VulkanRT::waitFenceBounded(m_device, m_fences[slot], "SimulationComputeVulkan.cpp:retireSlot");
         vkResetFences(m_device, 1, &m_fences[slot]);
         vkResetCommandBuffer(m_cmdBufs[slot], 0);
         vkResetDescriptorPool(m_device, m_descPools[slot], 0);
-        m_inFlight = false;
-        m_completedSerial = std::max(m_completedSerial, m_inFlightSerial);
+        m_completedSerial = std::max(m_completedSerial, m_slotSerial[slot]);
+        m_slotSerial[slot] = 0;
+        --m_inFlightCount;
+        // An in-flight slot is never the recording slot, so its staging is
+        // referenced by nothing any more.
+        releaseSlotStaging(slot);
+    }
+
+    // Retire, without blocking, every in-flight slot whose fence has passed.
+    void retireCompletedInFlight() {
+        for (int s = oldestInFlightSlot(); s >= 0; s = oldestInFlightSlot()) {
+            if (vkGetFenceStatus(m_device, m_fences[s]) != VK_SUCCESS) break;
+            retireSlot(s);
+        }
+    }
+
+    // Wait until `serial` has completed, oldest submission first.
+    void waitInFlightThrough(uint64_t serial) {
+        for (int s = oldestInFlightSlot(); s >= 0 && m_completedSerial < serial;
+             s = oldestInFlightSlot()) {
+            retireSlot(s);
+        }
+    }
+
+    // Wait for every in-flight slot and make them reusable.
+    void waitInFlight() {
+        for (int s = oldestInFlightSlot(); s >= 0; s = oldestInFlightSlot()) retireSlot(s);
     }
 
     // Nothing recorded, nothing in flight: every staging region the recorded
     // copies used has been consumed. The delayed-readback path never runs the
     // full synchronize(), so without this the upload cursor only ever grew.
     void releaseStagingIfIdle() {
-        if (m_recording || m_inFlight || m_batchActive) return;
-        for (const auto& pd : m_pendingDownloads) std::memcpy(pd.host, pd.src, pd.size);
-        m_pendingDownloads.clear();
-        for (auto& s : m_retiredStaging) destroyStaging(s);
-        m_retiredStaging.clear();
-        m_stagingUpCursor = 0;
-        m_stagingDownCursor = 0;
+        if (m_recording || inFlight() || m_batchActive) return;
+        for (int s = 0; s < kSlots; ++s) releaseSlotStaging(s);
+    }
+
+    // The slot's submission has completed (fence waited) and nothing records
+    // into it: its copies are done, its staging is free again.
+    void releaseSlotStaging(int slot) {
+        auto& st = m_stg[slot];
+        for (const auto& pd : st.pending) std::memcpy(pd.host, pd.src, pd.size);
+        st.pending.clear();
+        for (auto& s : st.retired) destroyStaging(s);
+        st.retired.clear();
+        st.upCursor = 0;
+        st.downCursor = 0;
     }
 
     bool ensureRecording() {
@@ -1990,7 +2089,24 @@ private:
         bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
         if (vkBeginCommandBuffer(m_cmdBuf, &bi) != VK_SUCCESS) return false;
         m_recording = true;
-        if (m_inFlight) {
+        if (m_breadcrumbs.ensure(m_physDevice, m_device)) m_breadcrumbs.beginSubmit();
+        if (m_deferFrameSubmit) {
+            // Without the per-frame host fence nothing orders this submission
+            // after the render frame queued ahead of it, which still reads
+            // simulation buffers (vertex-pulled particles, wet paint atlas).
+            // A write here must wait for those reads (WAR) and see every earlier
+            // write: one barrier against ALL earlier commands on this queue. It
+            // also subsumes the in-flight barrier below.
+            VkMemoryBarrier mb{};
+            mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+            mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+            vkCmdPipelineBarrier(m_cmdBuf,
+                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+                                 0, 1, &mb, 0, nullptr, 0, nullptr);
+        } else if (inFlight()) {
             // The in-flight buffer ends with a compute->compute barrier, which
             // does not order a TRANSFER here (an upload copy overwriting a
             // buffer a queued dispatch still reads). One full barrier: its

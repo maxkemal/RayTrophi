@@ -28,7 +28,8 @@ enum class ComputeBufferUsage : uint32_t {
     // (vertex/index) on a backend sharing the RT VkDevice. Adds the accel-input +
     // vertex + shader-device-address usages and an address-capable allocation so the
     // RT backend can build a BLAS straight from this buffer (no host round-trip).
-    AccelInput = 1u << 6
+    AccelInput = 1u << 6,
+    Indirect = 1u << 7
 };
 
 ComputeBufferUsage operator|(ComputeBufferUsage lhs, ComputeBufferUsage rhs);
@@ -67,6 +68,11 @@ struct ComputeDispatch {
     std::size_t buffer_count = 0;
     const void* constants = nullptr;
     std::size_t constants_size = 0;
+    // Optional GPU timestamp row. Pipeline lookup still uses kernel.
+    const char* timing_label = nullptr;
+    // When present, three uint32_t group counts replace groups.
+    ComputeBufferHandle indirect_groups;
+    std::size_t indirect_offset = 0;
 };
 
 // ── GPU kernel timing (timestamp queries) ───────────────────────────────────
@@ -137,6 +143,12 @@ public:
 
     virtual void beginFrame(uint64_t frame_index) { (void)frame_index; }
     virtual void endFrame() {}
+    // A frame owner that submits once at the end of ITS frame (submitAsync)
+    // asks endFrame() to leave the recording open, so the simulation step and
+    // the work recorded after it (wet paint) go out as ONE submission. On a
+    // single queue a second submission's host wait would sit behind the render
+    // frame queued ahead of it. Default: no-op (endFrame keeps its behaviour).
+    virtual void setDeferFrameSubmit(bool defer) { (void)defer; }
     virtual void synchronize() {}
 
     // Transfer batching. Between begin/end, uploadBuffer/downloadBuffer MAY be
@@ -280,6 +292,8 @@ public:
 
     void beginFrame(uint64_t frame_index);
     void endFrame();
+    // See ISimulationComputeBackend::setDeferFrameSubmit.
+    void setDeferFrameSubmit(bool defer);
     void synchronize();
     void beginTransferBatch();
     bool endTransferBatch();

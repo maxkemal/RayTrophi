@@ -460,8 +460,12 @@ void shutdownPlayerOperator() {
     resetPlayerGameSettings();
     instance.reset();
 }
-// UI preview is a borrowed SDL texture; the camera service remains its sole owner.
+// UI preview is a borrowed texture; the camera service remains its sole owner.
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+ImTextureData *playerOperatorPreview(SDL_Renderer *renderer) {
+#else
 SDL_Texture *playerOperatorPreview(SDL_Renderer *renderer) {
+#endif
     return state().camera.preview(renderer);
 }
 

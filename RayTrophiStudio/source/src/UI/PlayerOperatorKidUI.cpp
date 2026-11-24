@@ -517,9 +517,9 @@ void drawShadow(ImDrawList *d, const Rect &r, float rounding, float strength, fl
     }
 }
 // Crop-to-fill UVs: the cover covers the rect, extra pixels are cut on the longer side.
-void coverUv(SDL_Texture *texture, const Rect &r, ImVec2 &uv0, ImVec2 &uv1) {
-    int tw = 0, th = 0;
-    SDL_QueryTexture(texture, nullptr, nullptr, &tw, &th);
+void coverUv(PlayerConsole::ArtworkTexture *texture, const Rect &r, ImVec2 &uv0, ImVec2 &uv1) {
+    const int tw = texture ? texture->Width : 0;
+    const int th = texture ? texture->Height : 0;
     uv0 = V(0, 0);
     uv1 = V(1, 1);
     if (tw <= 0 || th <= 0 || r.w() <= 0 || r.h() <= 0) {
@@ -537,15 +537,15 @@ void coverUv(SDL_Texture *texture, const Rect &r, ImVec2 &uv0, ImVec2 &uv1) {
         uv1.y = uv0.y + keep;
     }
 }
-SDL_Texture *coverTexture(SDL_Renderer *renderer, const Game &game) {
+PlayerConsole::ArtworkTexture *coverTexture(SDL_Renderer *renderer, const Game &game) {
     return PlayerConsole::artwork(renderer, game.thumbnail, 1024);
 }
-void drawImageCover(ImDrawList *d, SDL_Texture *texture, const Rect &r, float rounding,
+void drawImageCover(ImDrawList *d, PlayerConsole::ArtworkTexture *texture, const Rect &r, float rounding,
                     ImU32 tint = IM_COL32_WHITE) {
     ImVec2 uv0, uv1;
     coverUv(texture, r, uv0, uv1);
     const ImU32 col = (tint & 0x00FFFFFFu) | (static_cast<ImU32>(clamp01(g_alpha) * 255.0f) << 24);
-    d->AddImageRounded(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture)), r.a, r.b,
+    d->AddImageRounded(PlayerConsole::artworkRef(texture), r.a, r.b,
                        uv0, uv1, col, rounding);
 }
 void drawPlaceholder(ImDrawList *d, const Rect &r, float rounding, int index,
@@ -651,7 +651,7 @@ void drawLibrary(ImDrawList *d, SDL_Renderer *renderer, const Layout &l) {
     // Top bar: logo + app name.
     const float logo = dp(40), pad = dp(24), top = dp(14);
     if (auto *texture = PlayerConsole::brand(renderer)) {
-        d->AddImageRounded(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(texture)),
+        d->AddImageRounded(PlayerConsole::artworkRef(texture),
                            V(pad, top), V(pad + logo, top + logo), V(0, 0), V(1, 1),
                            IM_COL32_WHITE, dp(14));
     } else {

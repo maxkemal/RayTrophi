@@ -740,6 +740,9 @@
     <ClInclude Include="external\imgui\imgui_impl_sdlrenderer2.h">
       <Filter>Kaynak Dosyalar\imgui</Filter>
     </ClInclude>
+    <ClInclude Include="external\imgui\imgui_impl_vulkan.h">
+      <Filter>Kaynak Dosyalar\imgui</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\stb_image_write.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -2768,6 +2771,9 @@
     <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
+    <ClCompile Include="external\imgui\imgui_impl_vulkan.cpp">
+      <Filter>Kaynak Dosyalar</Filter>
+    </ClCompile>
     <ClCompile Include="external\imgui\imgui_tables.cpp">
       <Filter>Kaynak Dosyalar</Filter>
     </ClCompile>
@@ -3017,6 +3023,9 @@
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\RasterViewportFrameRing.cpp">
+      <Filter>Kaynak Dosyalar\UI</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\PlayerSwapchainPresenter.cpp">
       <Filter>Kaynak Dosyalar\UI</Filter>
     </ClCompile>
     <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
@@ -4200,6 +4209,9 @@
     <ClInclude Include="source\include\Viewport\RasterViewportFrameRing.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
+    <ClInclude Include="source\include\Viewport\PlayerSwapchainPresenter.h">
+      <Filter>Kaynak Dosyalar\header_file</Filter>
+    </ClInclude>
     <ClInclude Include="source\include\Viewport\RealtimeRenderSettings.h">
       <Filter>Kaynak Dosyalar\header_file</Filter>
     </ClInclude>
@@ -4498,6 +4510,7 @@
   <ItemGroup>
     <ClCompile Include="source\src\Backend\VulkanFsrLoader.cpp" />
     <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanGpuBreadcrumbs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleInputs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp" />
     <ClCompile Include="source\src\Api\RtApiUpscale.cpp" />
@@ -4507,6 +4520,7 @@
     <ClInclude Include="source\include\Backend\UpscaleTypes.h" />
     <ClInclude Include="source\include\Backend\VulkanFsrLoader.h" />
     <ClInclude Include="source\include\Backend\VulkanFsrUpscaler.h" />
+    <ClInclude Include="source\include\Backend\VulkanGpuBreadcrumbs.h" />
     <ClInclude Include="source\include\Backend\VulkanUpscaleInputs.h" />
     <ClInclude Include="source\include\Api\RtApiUpscale.h" />
     <ClInclude Include="source\src\Api\RtIpcUpscale.h" />

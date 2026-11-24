@@ -173,7 +173,7 @@ void drawPlayerOperator(SDL_Renderer *renderer) {
     const float foot = actions ? std::max(S(44), ui.touch_min) + S(26) : S(14);
     ImGui::SetCursorPos(ImVec2(S(24), touch ? S(12) : S(20)));
     if (auto *logo = brand(renderer)) {
-        ImGui::Image(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(logo)), ImVec2(S(42), S(42)));
+        ImGui::Image(artworkRef(logo), ImVec2(S(42), S(42)));
         ImGui::SameLine();
     }
     ImGui::BeginGroup();

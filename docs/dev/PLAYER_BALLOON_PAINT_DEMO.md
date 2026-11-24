@@ -202,8 +202,8 @@ kare süresini gerçek bir `arm64-v8a` cihazda ölçün.
 
 ## Tüm balonlarla Jolt hareket testi
 
-Mesh balon demolarında Jolt hareketi ve çarpışma kabukları varsayılan olarak
-açıktır. `"jolt_motion": false` ile önceki hareketi seçebilirsiniz. Python
+Mesh balon demolarında Jolt hareketi varsayılan olarak kapalıdır.
+`"jolt_motion": true` küresel gövdeleri ve varsayılan çarpışma kabuklarını açar. Python
 `rt.paint.wet_demo` ve IPC `paint.wet_demo` aynı ayar ve durum alanlarını
 kullanır. `soft_body` açıkken eldeki balonun duvar sıkışması da birlikte çalışır.
 
@@ -239,6 +239,19 @@ oranını gösterir.
 `{"wind_strength": 0.5}` gibi bir ayarı mevcut balonları yenilemeden uygular.
 Player Oyun Kontrolleri aynı ayarı kullanır. Balon Fiziği bölümünde Jolt ve
 çarpışma kabukları ayrı ayrı açılıp kapatılabilir.
+
+Yeni demo yapılandırmasında `balloons` varsayılanı 5'tir. Masaüstü ve Android
+Player, kaydedilmiş yerel oyun ayarları yoksa projeyi en fazla 5 aktif balonla
+ve Jolt kapalı açar. `visual_nodes` aktif sayıyı karşılamalıdır ve 24'e kadar mesh
+içerebilir. Artan mesh'ler ayarlardan balon sayısı yükseltilene kadar gizlidir.
+
+Mesh balonlar için `opaque_balloons: true` veya Studio'da ortak
+`transmission: 0` balonu tamamen opak yapar. Oyun, malzemenin opaklık ve
+transmission dokularını, kabarcık ve reçine içini, ayrıca Material Graph'ın
+opaklık ve transmission çıkışlarını bu modda devre dışı bırakır. Ayarı aynı
+oturumda geri alırken malzemelerin önceki görünüm girdileri geri yüklenir.
+`opaque_balloons` yalnızca boolean kabul eder ve true değeri mesh görselleri
+gerektirir. Python ve IPC aynı `paint.wet_demo` yapılandırmasını kullanır.
 
 Üç duvarlı odalarda ön sınır yan duvarların bitiminden 25 cm öteye kurulur.
 Oda geometrisinden hesaplandığı için kamera hareket ettiğinde yer değiştirmez.

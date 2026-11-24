@@ -1,4 +1,7 @@
 ﻿#include "Backend/VulkanStartupDiagnostics.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "Backend/VulkanViewportBackend.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanMaterialTextureBinding.h"
@@ -273,6 +276,7 @@ static std::vector<float> bakeEnvMap(bool outdoor) {
 } // namespace
 
 VulkanViewportBackend::~VulkanViewportBackend() {
+    if (m_device) m_syncBillboardVertices.release(*m_device);
 #ifdef RT_PLAYER
     drainInteractiveViewportInFlight();
     m_playerDepthCard.reset();
@@ -285,9 +289,20 @@ void VulkanViewportBackend::drainInteractiveViewportInFlight() {
     // frame count, some edit path is mutating a buffer every frame and the
     // frame ring is producing no parallelism at all.
     if (m_rasterFrameRing) m_rasterFrameRing->waitAll(true);
+    // ★ Async one-shots too (2026-11-24): the RayFusion TLAS refresh is now
+    //   recorded and submitted without a host wait (createTLAS recorded mode),
+    //   like the wet-paint texture copies. Every caller of this drain means
+    //   "nothing queued still touches what I am about to destroy/rewrite" -
+    //   BLAS teardown and refit read by an in-flight TLAS build included.
+    if (m_device) m_device->reclaimAsyncCommands(true);
 }
 
 void VulkanViewportBackend::setInteractiveViewportSynchronousPresent(bool enabled) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (enabled && !m_rasterSynchronousPresent && AppRuntime::PlayerSwapchainPresenter::instance().active()) {
+        m_interactiveViewport.dirty = true;
+    }
+#endif
     m_rasterSynchronousPresent = enabled;
 }
 
@@ -928,6 +943,9 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         m_interactiveViewport.reflectionSpecularImage = {};
     }
     if (m_interactiveViewport.colorImage.image) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        AppRuntime::PlayerSwapchainPresenter::instance().discard(m_interactiveViewport.colorImage.image);
+#endif
         m_device->destroyImage(m_interactiveViewport.colorImage);
     }
     if (m_interactiveViewport.depthImage.image) {
@@ -3355,8 +3373,15 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // ★★★ "Bu KAREDE hic yeni piksel tuketebildik mi" — stale sayacinin olcmesi
     //   gereken sey budur. Bkz. asagidaki noteStalePresent cagrisi.
     bool consumedAnyFrameThisPass = false;
+    const bool captureReadback =
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        !AppRuntime::PlayerSwapchainPresenter::instance().active() || m_rasterSynchronousPresent;
+#else
+        true;
+#endif
+
     auto consumeReadyRasterFrame = [&]() -> bool {
-        if (!frameRingReady || framebuffer->empty()) return false;
+        if (!captureReadback || !frameRingReady || framebuffer->empty()) return false;
         if (!m_rasterFrameRing->consumeNewestReady(
                 framebuffer->data(), pixelCount * sizeof(uint32_t))) {
             return false;
@@ -3443,7 +3468,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // dogrula. Iki yer birden yazarsa hangisinin kazandigi kare sirasina
     // kalir ve bu ekran goruntusunde DOGRU gorunur.
     auto presentCachedRasterFrame = [&]() {
-        if (!m_hasRasterPresentedFrame || framebuffer->empty()) return;
+        if (!captureReadback || !m_hasRasterPresentedFrame || framebuffer->empty()) return;
         if (s) {
             SDL_Surface* outSurf = static_cast<SDL_Surface*>(s);
             if (outSurf->pixels && outSurf->w == width && outSurf->h == height) {
@@ -4931,7 +4956,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
 #ifdef RT_PLAYER
         m_playerDepthCard.draw(cmd, particleViewProj, particleView);
 #endif
-        recordParticleBillboards(cmd, particleViewProj, particleView);
+        recordParticleBillboards(cmd, particleViewProj, particleView, usingFrameRing);
     }
 
 #ifndef RT_PLAYER
@@ -5101,7 +5126,7 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         // The render and image-to-buffer copy share one submission. submitFrame
         // only queues work; it never waits for the current frame.
         const bool submitted = m_rasterFrameRing->submitFrame(
-            m_interactiveViewport.colorImage, &submitMs);
+            m_interactiveViewport.colorImage, &submitMs, captureReadback);
         if (!submitted) {
             const VkResult ringFailure = m_rasterFrameRing->lastResult();
             if (ringFailure == VK_ERROR_DEVICE_LOST) {
@@ -5136,44 +5161,50 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             return;
         }
         m_rasterFrameRingFailureCount = 0;
-        // submitFrame is intentionally non-blocking. Keep the main-loop pump
-        // awake until consumeNewestReady publishes this exact scene revision;
-        // otherwise a one-shot selection/add/delete frame can remain hidden
-        // behind the cached image until camera motion requests another call.
-        m_interactiveViewport.presentationPending = true;
-
-        // Two reasons to block on purpose, and they are NOT the same reason:
-        //  * no frame has ever been published (mode switch / resize), and
-        //    Main.cpp treats a successful renderProgressive as having produced
-        //    valid surface pixels;
-        //  * viewport capture is on, so a probe must read the frame that was
-        //    just recorded rather than an older completed one.
-        // Steady-state interactive frames block for neither.
-        if (!m_hasRasterPresentedFrame || m_rasterSynchronousPresent) {
-            m_rasterFrameRing->waitAll(false);
+        if (!captureReadback) {
+            m_hasRasterPresentedFrame = true;
+            m_interactiveViewport.presentationPending = false;
         }
+        if (captureReadback) {
+            // submitFrame is intentionally non-blocking. Keep the main-loop pump
+            // awake until consumeNewestReady publishes this exact scene revision;
+            // otherwise a one-shot selection/add/delete frame can remain hidden
+            // behind the cached image until camera motion requests another call.
+            m_interactiveViewport.presentationPending = true;
 
-        const auto hostReadStart = std::chrono::steady_clock::now();
-        // ★★★ Bu ikinci tuketim FIRSATCIDIR: mikrosaniyeler once gonderilmis
-        //   karenin bitmis olmasi beklenmez. Basarisizligini "stale" saymak,
-        //   asenkron modda HER KARE artan ve "halka kalici olarak geride" diye
-        //   okunan bir sayac uretiyordu -- oysa karenin pikselleri bu gecisin
-        //   BASINDAKI tuketimde (yukarida) zaten alinmisti; bir karelik gecikme
-        //   halkanin ARIZASI degil, satin aldigi seyin ta kendisidir.
-        //   Gercek stale olayi: bu gecis boyunca HIC yeni kare tuketilemedi.
-        consumeReadyRasterFrame();
-        if (!consumedAnyFrameThisPass) m_rasterFrameRing->noteStalePresent();
-        const auto hostReadEnd = std::chrono::steady_clock::now();
-        // += : gecisin basindaki GERCEK okuma zaten iceride. Atama yapmak onu
-        // silerdi -- alanin surekli 0.00 okunmasinin sebebi tam olarak buydu.
-        hostReadMs += std::chrono::duration<double, std::milli>(
-            hostReadEnd - hostReadStart).count();
+            // Two reasons to block on purpose, and they are NOT the same reason:
+            //  * no frame has ever been published (mode switch / resize), and
+            //    Main.cpp treats a successful renderProgressive as having produced
+            //    valid surface pixels;
+            //  * viewport capture is on, so a probe must read the frame that was
+            //    just recorded rather than an older completed one.
+            // Steady-state interactive frames block for neither.
+            if (!m_hasRasterPresentedFrame || m_rasterSynchronousPresent) {
+                m_rasterFrameRing->waitAll(false);
+            }
 
-        const auto presentStart = std::chrono::steady_clock::now();
-        presentCachedRasterFrame();
-        const auto presentEnd = std::chrono::steady_clock::now();
-        presentMs = std::chrono::duration<double, std::milli>(
-            presentEnd - presentStart).count();
+            const auto hostReadStart = std::chrono::steady_clock::now();
+            // ★★★ Bu ikinci tuketim FIRSATCIDIR: mikrosaniyeler once gonderilmis
+            //   karenin bitmis olmasi beklenmez. Basarisizligini "stale" saymak,
+            //   asenkron modda HER KARE artan ve "halka kalici olarak geride" diye
+            //   okunan bir sayac uretiyordu -- oysa karenin pikselleri bu gecisin
+            //   BASINDAKI tuketimde (yukarida) zaten alinmisti; bir karelik gecikme
+            //   halkanin ARIZASI degil, satin aldigi seyin ta kendisidir.
+            //   Gercek stale olayi: bu gecis boyunca HIC yeni kare tuketilemedi.
+            consumeReadyRasterFrame();
+            if (!consumedAnyFrameThisPass) m_rasterFrameRing->noteStalePresent();
+            const auto hostReadEnd = std::chrono::steady_clock::now();
+            // += : gecisin basindaki GERCEK okuma zaten iceride. Atama yapmak onu
+            // silerdi -- alanin surekli 0.00 okunmasinin sebebi tam olarak buydu.
+            hostReadMs += std::chrono::duration<double, std::milli>(
+                hostReadEnd - hostReadStart).count();
+
+            const auto presentStart = std::chrono::steady_clock::now();
+            presentCachedRasterFrame();
+            const auto presentEnd = std::chrono::steady_clock::now();
+            presentMs = std::chrono::duration<double, std::milli>(
+                presentEnd - presentStart).count();
+        }
     } else {
         // Deterministic compatibility path for devices that reject persistent
         // frame resources. This retains the old synchronous behaviour.
@@ -5183,30 +5214,39 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         submitMs = std::chrono::duration<double, std::milli>(
             submitEnd - submitStart).count();
 
-        const auto imageReadbackStart = std::chrono::steady_clock::now();
-        m_device->copyImageToBuffer(m_interactiveViewport.colorImage,
-                                    m_interactiveViewport.stagingBuffer);
-        const auto imageReadbackEnd = std::chrono::steady_clock::now();
-        imageReadbackMs = std::chrono::duration<double, std::milli>(
-            imageReadbackEnd - imageReadbackStart).count();
+        if (captureReadback) {
+            const auto imageReadbackStart = std::chrono::steady_clock::now();
+            m_device->copyImageToBuffer(m_interactiveViewport.colorImage,
+                                        m_interactiveViewport.stagingBuffer);
+            const auto imageReadbackEnd = std::chrono::steady_clock::now();
+            imageReadbackMs = std::chrono::duration<double, std::milli>(
+                imageReadbackEnd - imageReadbackStart).count();
 
-        const auto hostReadStart = std::chrono::steady_clock::now();
-        m_device->downloadBuffer(m_interactiveViewport.stagingBuffer,
-                                 framebuffer->data(),
-                                 pixelCount * sizeof(uint32_t));
-        const auto hostReadEnd = std::chrono::steady_clock::now();
-        // += : halka kurulu olmasa da gecisin basindaki tuketim denenmis olur.
-        hostReadMs += std::chrono::duration<double, std::milli>(
-            hostReadEnd - hostReadStart).count();
-        m_hasRasterPresentedFrame = true;
+            const auto hostReadStart = std::chrono::steady_clock::now();
+            m_device->downloadBuffer(m_interactiveViewport.stagingBuffer,
+                                     framebuffer->data(),
+                                     pixelCount * sizeof(uint32_t));
+            const auto hostReadEnd = std::chrono::steady_clock::now();
+            // += : halka kurulu olmasa da gecisin basindaki tuketim denenmis olur.
+            hostReadMs += std::chrono::duration<double, std::milli>(
+                hostReadEnd - hostReadStart).count();
+            m_hasRasterPresentedFrame = true;
 
-        const auto presentStart = std::chrono::steady_clock::now();
-        presentCachedRasterFrame();
-        const auto presentEnd = std::chrono::steady_clock::now();
-        presentMs = std::chrono::duration<double, std::milli>(
-            presentEnd - presentStart).count();
+            const auto presentStart = std::chrono::steady_clock::now();
+            presentCachedRasterFrame();
+            const auto presentEnd = std::chrono::steady_clock::now();
+            presentMs = std::chrono::duration<double, std::milli>(
+                presentEnd - presentStart).count();
+        }
     }
 
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+    if (AppRuntime::PlayerSwapchainPresenter::instance().active() && !g_vulkan_device_lost) {
+        AppRuntime::PlayerSwapchainPresenter::instance().publish(m_interactiveViewport.colorImage);
+        m_hasRasterPresentedFrame = true;
+    }
+
+#endif
     // ── Geometri olcumunu yayinla ───────────────────────────────────────────
     // Bu kare gercekten cizdi, yani olcum GECERLI. Temiz-sahne erken cikisinda
     // buraya hic gelinmez ve son gecerli olcum korunur.

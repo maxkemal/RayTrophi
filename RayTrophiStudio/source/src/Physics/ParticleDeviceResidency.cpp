@@ -18,6 +18,7 @@
 // this one: a system is either resident or runs the CPU reference end to end.
 
 #include "ParticleSimulation.h"
+#include "PerfProfile.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -391,6 +392,7 @@ bool ParticleSimulationSystem::stepDeviceResident(const SimulationContext& conte
     const std::size_t n = buffers_.alive.size();
     resident_records_.clear();
     if (!resident_pending_slots_.empty()) {
+        RTPERF_FRAME_SCOPE("particle.resident_spawn.pack");
         resident_slot_mask_.assign(n, 0u);
         for (auto it = resident_pending_slots_.rbegin(); it != resident_pending_slots_.rend();
              ++it) {
@@ -434,10 +436,14 @@ bool ParticleSimulationSystem::stepDeviceResident(const SimulationContext& conte
             resident_buffers_.record_capacity =
                 resident_buffers_.slot_records.valid() ? need : 0;
         }
-        dispatched = resident_buffers_.slot_records.valid() &&
-                     compute.uploadBuffer(resident_buffers_.slot_records, resident_records_.data(),
-                                          resident_records_.size() *
-                                              sizeof(ParticleResidentSlotRecord));
+        {
+            RTPERF_FRAME_SCOPE("particle.resident_spawn.stage");
+            dispatched = resident_buffers_.slot_records.valid() &&
+                         compute.uploadBuffer(resident_buffers_.slot_records,
+                                              resident_records_.data(),
+                                              resident_records_.size() *
+                                                  sizeof(ParticleResidentSlotRecord));
+        }
         if (dispatched) {
             ParticleSpawnGpuConstants constants;
             constants.record_count = static_cast<uint32_t>(resident_records_.size());

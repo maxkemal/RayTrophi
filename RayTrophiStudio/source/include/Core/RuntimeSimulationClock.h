@@ -24,8 +24,15 @@ struct SimulationClockInput {
     bool ui_editing = false;       // Studio: a widget is being dragged, defer cache invalidation
     bool render_owns_sim = false;  // a sequence-render worker is the sole stepper
     // Vulkan RT backend that may still read simulation device buffers. Null for a
-    // raster-only viewport, which never samples them.
+    // raster-only viewport. (The raster viewport DOES read them: GPU particles are
+    // vertex-pulled from the simulation buffers and the wet-paint atlas is
+    // sampled. It orders itself with a barrier at the start of its frame.)
     Backend::IBackend* render_backend = nullptr;
+    // One async compute submission per tick instead of a host fence after the
+    // simulation step plus a second submission for wet paint. Player only: on
+    // its single graphics+compute queue that fence also waited for the render
+    // frame queued ahead (PLAYER_ANDROID_PERF_PLAN, 2026-11-23 burst cost).
+    bool defer_compute_submit = false;
 };
 
 struct SimulationClockResult {

@@ -2431,6 +2431,8 @@ struct ParticleSimulationRuntimeState {
     uint32_t emitter_spawn_serial = 1;
 };
 
+class ParticleSpawnSequence;
+
 class ParticleSimulationSystem final : public ISimulationSystem {
 public:
     const char* name() const override { return "Particles"; }
@@ -2865,7 +2867,9 @@ private:
     // Gives an emitter with no (or an unresolvable) profile id a profile of its
     // own carrying the old default look.
     void ensureEmitterAppearanceProfile(ParticleEmitterDesc& emitter);
-    std::size_t findDeadSlot() const;
+    friend class ParticleSpawnSequence;
+    std::size_t spawnFrom(const ParticleSpawnDesc& desc, std::size_t first_slot);
+    std::size_t findDeadSlot(std::size_t first_slot) const;
     bool hasActiveEmitters() const;
     bool hasActiveGridSimulation() const;
     void emitFromEmitters(const SimulationContext& context);

@@ -56,7 +56,7 @@ void VulkanBackendAdapter::destroyMaterialPreviewCoveredPipeline() {
 
 // ── Scene-feature specialization (PLAYER_ANDROID_PERF_PLAN O3) ──────────────
 // Mirror of material_preview_frag.frag: constant_id 0 = RT_SPEC_TERRAIN,
-// 1 = RT_SPEC_GRAPH, 2 = RT_SPEC_WEATHER. A bit that is OFF removes a branch
+// 1 = RT_SPEC_GRAPH, 2 = RT_SPEC_WEATHER, 3 = RT_SPEC_GLASS. A bit that is OFF removes a branch
 // the driver would otherwise allocate registers/stack for on every fragment
 // (malioc, Mali-G52: 1664 B -> 704 B stack, LS 988 -> 332 cycles, all off).
 // ★★★ Correctness rule: a bit may be off ONLY when no fragment can take that
@@ -64,14 +64,15 @@ void VulkanBackendAdapter::destroyMaterialPreviewCoveredPipeline() {
 //   bound material; when the CPU copy cannot prove it (external material
 //   buffer, short cache) the bit stays on.
 void VulkanViewportBackend::fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out) {
-    const uint32_t bits[3] = {kMpSpecTerrain, kMpSpecGraph, kMpSpecWeather};
-    for (uint32_t i = 0; i < 3; ++i) {
+    const uint32_t bits[kMpSpecCount] = {kMpSpecTerrain, kMpSpecGraph, kMpSpecWeather,
+                                         kMpSpecGlass};
+    for (uint32_t i = 0; i < kMpSpecCount; ++i) {
         out.values[i] = (mask & bits[i]) ? VK_TRUE : VK_FALSE;
         out.entries[i].constantID = i;
         out.entries[i].offset = static_cast<uint32_t>(i * sizeof(VkBool32));
         out.entries[i].size = sizeof(VkBool32);
     }
-    out.info.mapEntryCount = 3;
+    out.info.mapEntryCount = kMpSpecCount;
     out.info.pMapEntries = out.entries;
     out.info.dataSize = sizeof(out.values);
     out.info.pData = out.values;
@@ -103,6 +104,32 @@ uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
     // The globals writer sets it from these two plus a descriptor-set match,
     // so this is a superset of the bit.
     if (m_cloudShadowBound && m_cloudRtRendering) mask |= kMpSpecWeather;
+    // Shader: glassPath / transmissiveFragment / bubbleSurface / interiorDepth.
+    // With the bit off the shader FORCES transmission = 0, bubble = false and
+    // Interior Depth = 0, so the proof must show each is already exactly that
+    // for every bound material:
+    //   transmission scalar <= 0 (the glass gate is `> 0.0`, NOT the 0.001
+    //     replay threshold), no transmission map, no graph (it may write
+    //     transmission or opacity), no bubble flag, no legacy partial opacity
+    //     (opacity map or scalar < 0.99 on a non-cutout material becomes
+    //     transmission), and transmission_density <= 0.
+    // Negated comparisons keep NaN on the "glass" side.
+    if (external || m_cachedGpuMaterials.size() < count) {
+        mask |= kMpSpecGlass;
+    } else {
+        for (uint32_t i = 0; i < count; ++i) {
+            const auto& m = m_cachedGpuMaterials[i];
+            const bool cutout = (m.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u;
+            if (!(m.transmission <= 0.0f) || m.transmission_tex != 0u ||
+                m_rasterMaterialPrograms.hasProgram(i) ||
+                (m.flags & (1u << 19u)) != 0u ||
+                (!cutout && (m.opacity_tex != 0u || !(m.opacity >= 0.99f))) ||
+                !(m.transmission_density <= 0.0f)) {
+                mask |= kMpSpecGlass;
+                break;
+            }
+        }
+    }
     return mask;
 }
 
@@ -196,7 +223,8 @@ void VulkanViewportBackend::captureMaterialPreviewSpecRecipe(
     SCENE_LOG_INFO("[MaterialSpec] material pipeline built with terrain=" +
                    std::to_string((mask & kMpSpecTerrain) != 0) +
                    " graph=" + std::to_string((mask & kMpSpecGraph) != 0) +
-                   " weather=" + std::to_string((mask & kMpSpecWeather) != 0));
+                   " weather=" + std::to_string((mask & kMpSpecWeather) != 0) +
+                   " glass=" + std::to_string((mask & kMpSpecGlass) != 0));
 }
 
 namespace {
@@ -216,6 +244,7 @@ std::string specMaskName(uint32_t mask) {
     if (mask & Backend::VulkanViewportBackend::kMpSpecTerrain) name += "terrain+";
     if (mask & Backend::VulkanViewportBackend::kMpSpecGraph) name += "graph+";
     if (mask & Backend::VulkanViewportBackend::kMpSpecWeather) name += "weather+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecGlass) name += "glass+";
     if (name.empty()) return "none";
     name.pop_back();
     return name;
@@ -348,6 +377,7 @@ RasterAppliedState VulkanViewportBackend::sampleRasterAppliedState() const {
     out.material_spec_terrain = (mask & kMpSpecTerrain) != 0;
     out.material_spec_graph = (mask & kMpSpecGraph) != 0;
     out.material_spec_weather = (mask & kMpSpecWeather) != 0;
+    out.material_spec_glass = (mask & kMpSpecGlass) != 0;
     out.material_spec_rebuilds = m_mpSpecRebuilds;
     return out;
 }

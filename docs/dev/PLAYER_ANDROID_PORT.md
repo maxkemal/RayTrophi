@@ -2,6 +2,10 @@
 
 > **Durum:** AKTİF — 2026-11-22: A1–A5 emülatörde PASS (sahne, ıslak boya, ses, IPC, dokunma); arm64 gerçek cihazda açılıyor ve desteklenmeyen GPU'yu ekranda söylüyor; Windows regresyon PASS. Sıradaki A6: referans cihaz + performans.
 
+## Omix X700 device lost → GPU kırıntı izi (2026-11-23 akşam, Claude) — derleme + APK bekliyor
+
+13:01 APK Omix'te 1.1 kapısını geçti, sonra `VK_ERROR_DEVICE_LOST` (fark eden: RasterViewportFrameRing fence beklemesi). Ekranda MPVolume/SurfaceSDF pipeline=0 → atlandı (suçlu değil). Codex'in indirect dispatch + billboard işleri bu APK'da YOK (14:00 sonrası). Mali'de device_fault olmadığı için sebep kayıtsızdı; `VulkanGpuBreadcrumbs` eklendi, kabul NEXT_BUILD_CHECKS "Omix X700 device lost". Sonraki APK'nın hata ekranı hangi geçişte durduğunu söyleyecek.
+
 ## Vulkan 1.1 cihazlar açıldı (2026-11-23, Claude) — derleme + cihaz testi bekliyor
 
 Kapı artık **1.1 + `VK_EXT_scalar_block_layout` + `VK_KHR_buffer_device_address`** istiyor (`RayFusionViewportPasses.cpp`). Taramada kodda 1.2 çekirdek komutu olarak yalnız `vkGetBufferDeviceAddress` çıktı; KHR adına düşüyor. 1.2'ye özgü özellik yapısı (Vulkan12Features, timeline vb.) kullanılmıyor. 1.1 cihazda scalar eklentisi isteniyor. Android bütün cihazlarda **SPIR-V 1.3** setini kullanıyor (`scripts/compile_player_android_vk11.py` → `x64/Release/shaders_vk11`, 346 shader hatasız). 12 ışın izleme aşaması 1.4 istediği için 1.2 kopyasıyla kalıyor (1.1 cihaz yüklemez). dist paketinde kaynağı ve referansı olmayan 9 ölü SPV var (`sim_matter_grain_*`, `sim_msf_wet` vb.). Omix'te float atomik yok, bu yüzden ıslak boya fallback'e düşer. Kabul: NEXT_BUILD_CHECKS "Vulkan 1.1 cihaz desteği".

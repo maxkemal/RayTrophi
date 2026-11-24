@@ -30,6 +30,10 @@ def main():
     for key in ("jolt_motion", "impact_soft_body", "wind_strength"):
         config.pop(key, None)
     try:
+        default = demo("configure", **config)
+        assert default["config"]["jolt_motion"] is False
+        assert not default["jolt_motion"]["enabled"]
+        config["jolt_motion"] = True
         ready = demo("configure", **config)
         status = ready["jolt_motion"]
         assert status["enabled"] and status["bodies"] == ready["config"]["balloons"], status

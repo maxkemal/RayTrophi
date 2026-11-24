@@ -2,6 +2,7 @@
 
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterViewportFrameRing.h"
+#include "Viewport/ParticleBillboardFrameBuffer.h"
 #ifdef RT_PLAYER
 #include "Viewport/PlayerDepthCard.h"
 #endif
@@ -35,8 +36,9 @@ private:
     // Particle billboards (VulkanViewportParticles.cpp).
     void ensureParticleBillboardPipelines(const std::string& shaderDir);
     void recordParticleBillboards(VkCommandBuffer cmd, const float viewProjGL[16],
-                                  const float viewGL[16]);
+                                  const float viewGL[16], bool usingFrameRing);
     void destroyParticleBillboardResources(bool keepPipeline);
+    ParticleBillboardFrameBuffer m_syncBillboardVertices;
     std::unique_ptr<RasterViewportFrameRing> m_rasterFrameRing;
     // A failed ring uses synchronous presentation only for a bounded recovery
     // window. A transient queue/fence collision must not penalize the session
@@ -65,18 +67,21 @@ private:
     uint32_t m_externalMaterialCount = 0;
 
     // ── Material preview scene-feature specialization (O3) ──────────────────
-    // material_preview_frag carries RT_SPEC_TERRAIN / _GRAPH / _WEATHER spec
-    // constants (ids 0..2, default true). The main + covered pipelines are
+    // material_preview_frag carries RT_SPEC_TERRAIN / _GRAPH / _WEATHER / _GLASS
+    // spec constants (ids 0..3, default true). The main + covered pipelines are
     // created with only the features the scene can reach, and rebuilt when a
     // new one appears. Implementation: Viewport/MaterialPreviewCoverage.cpp.
 public:
     static constexpr uint32_t kMpSpecTerrain = 1u << 0;
     static constexpr uint32_t kMpSpecGraph   = 1u << 1;
     static constexpr uint32_t kMpSpecWeather = 1u << 2;
-    static constexpr uint32_t kMpSpecAll     = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather;
+    static constexpr uint32_t kMpSpecGlass   = 1u << 3;
+    static constexpr uint32_t kMpSpecAll     = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather |
+                                               kMpSpecGlass;
+    static constexpr uint32_t kMpSpecCount   = 4;
     struct MaterialPreviewSpecStorage {
-        VkSpecializationMapEntry entries[3]{};
-        VkBool32 values[3]{};
+        VkSpecializationMapEntry entries[kMpSpecCount]{};
+        VkBool32 values[kMpSpecCount]{};
         VkSpecializationInfo info{};
     };
     static void fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out);

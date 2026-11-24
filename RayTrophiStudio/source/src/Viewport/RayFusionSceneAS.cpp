@@ -1,4 +1,5 @@
 #include "Backend/VulkanBackend.h"
+#include "PerfProfile.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -439,6 +440,12 @@ public:
     double lastSkinTlasMs = 0.0;        // top-level refresh (drains again)
     double lastSignatureMs = 0.0;
     uint64_t tlasOnlyRefreshes = 0;
+    // How each TLAS (re)build went out (rebuildRayFusionTLAS): recorded =
+    // in place, async, no host wait; sync = drained + synchronous (first build,
+    // instance count change, or a refused recording). A sync count that tracks
+    // placement changes means the no-wait path is not being taken.
+    uint64_t tlasRecordedRefreshes = 0;
+    uint64_t tlasSyncRebuilds = 0;
     uint32_t instancesHidden = 0;
     uint64_t builtGeometryGeneration = UINT64_MAX;
     uint32_t blasCount = 0;
@@ -875,10 +882,40 @@ bool VulkanBackendAdapter::rebuildRayFusionTLAS() {
         return false;
     }
 
-    // The TLAS a queued frame may be tracing is replaced here, so the same
-    // drain the BLAS teardown needs applies.
-    drainInteractiveViewportInFlight();
-    m_device->createTLAS(tlasInfo, VK_NULL_HANDLE);
+    // ★★★ Placement-only refresh WITHOUT a host wait (2026-11-24). Drifting
+    //   balloon meshes change placements ~30 times a second; each refresh used
+    //   to drain every in-flight frame, destroy the TLAS and build a new one
+    //   with a synchronous submit: the Player's longest frame was that drain,
+    //   4-5 ms idle and 12-17 ms while a pop's simulation filled the queue.
+    //   Same instance count: rebuild the SAME object in place, recorded into an
+    //   async one-shot on the viewport's single queue (createTLAS recorded mode
+    //   orders it after in-flight traces and before later frames with barriers
+    //   and writes the instance array inside the command buffer). Anything
+    //   else - first build, count change, refused recording - is the old
+    //   drained synchronous path, which also re-arms ALLOW_UPDATE.
+    tlasInfo.allowUpdate = true;
+    const uint32_t wanted = static_cast<uint32_t>(tlasInfo.instances.size());
+    // perf.list: "rayfusion.tlas.recorded_refresh" vs "rayfusion.tlas.sync_rebuild"
+    // (count = how often, total_ms = host cost; the sync one includes its drain).
+    bool recordedRefresh = false;
+    if (m_device->canUpdateTLAS(wanted)) {
+        RTPERF_FRAME_SCOPE("rayfusion.tlas.recorded_refresh");
+        if (VkCommandBuffer cmd = m_device->beginSingleTimeCommands()) {
+            m_device->createTLAS(tlasInfo, cmd);
+            const bool accepted = m_device->canUpdateTLAS(wanted);   // false = refused, nothing built
+            recordedRefresh = m_device->endSingleTimeCommandsAsync(cmd) && accepted;
+        }
+    }
+    if (recordedRefresh) {
+        ++state->tlasRecordedRefreshes;
+    } else {
+        RTPERF_FRAME_SCOPE("rayfusion.tlas.sync_rebuild");
+        // The TLAS a queued frame may be tracing is replaced here, so the same
+        // drain the BLAS teardown needs applies (it waits async one-shots too).
+        drainInteractiveViewportInFlight();
+        m_device->createTLAS(tlasInfo, VK_NULL_HANDLE);
+        ++state->tlasSyncRebuilds;
+    }
     if (m_device->getTLASHandle() == VK_NULL_HANDLE) {
         state->inactiveReason = "TLAS creation did not produce a handle";
         return false;

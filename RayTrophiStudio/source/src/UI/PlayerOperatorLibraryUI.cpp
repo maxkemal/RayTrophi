@@ -1,4 +1,7 @@
 #include "PlayerOperatorWidgets.h"
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+#include "Viewport/PlayerSwapchainPresenter.h"
+#endif
 #include "stb_image.h"
 #include <algorithm>
 #include <cctype>
@@ -22,11 +25,11 @@
 
 namespace PlayerConsole {
 namespace {
-SDL_Texture *logo = nullptr;
+ArtworkTexture *logo = nullptr;
 #ifndef _WIN32
 bool logo_failed = false;
 #endif
-std::map<std::string, SDL_Texture *> thumbnails;
+std::map<std::string, ArtworkTexture *> thumbnails;
 
 #ifdef _WIN32
 std::string browseFolder() {
@@ -63,7 +66,7 @@ std::string browseFolder() {
     return result;
 }
 #endif
-SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path, int max_dim = 512) {
+ArtworkTexture *thumbnail(SDL_Renderer *renderer, const std::string &path, int max_dim = 512) {
     if (path.empty()) {
         return nullptr;
     }
@@ -101,16 +104,24 @@ SDL_Texture *thumbnail(SDL_Renderer *renderer, const std::string &path, int max_
     auto *reduced = SDL_CreateRGBSurfaceWithFormat(0, std::max(1, static_cast<int>(width * scale)),
                                                    std::max(1, static_cast<int>(height * scale)),
                                                    32, SDL_PIXELFORMAT_RGBA32);
-    SDL_Texture *texture = nullptr;
+    ArtworkTexture *texture = nullptr;
     if (source) {
         SDL_SetSurfaceBlendMode(source, SDL_BLENDMODE_NONE);
     }
     if (source && reduced && SDL_BlitScaled(source, nullptr, reduced, nullptr) == 0) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        (void)renderer;
+        auto& presenter = AppRuntime::PlayerSwapchainPresenter::instance();
+        texture = presenter.createUiTexture(reduced->w, reduced->h);
+        presenter.updateUiTexture(*texture, reduced->pixels, reduced->w, reduced->h,
+                                  reduced->pitch);
+#else
         texture = SDL_CreateTextureFromSurface(renderer, reduced);
         if (texture) {
             SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
             SDL_SetTextureScaleMode(texture, SDL_ScaleModeLinear);
         }
+#endif
     }
     if (source) {
         SDL_FreeSurface(source);
@@ -130,10 +141,10 @@ std::string lower(std::string value) {
 }
 } // namespace
 
-SDL_Texture *artwork(SDL_Renderer *renderer, const std::string &path, int max_dim) {
+ArtworkTexture *artwork(SDL_Renderer *renderer, const std::string &path, int max_dim) {
     return thumbnail(renderer, path, max_dim);
 }
-SDL_Texture *brand(SDL_Renderer *renderer) {
+ArtworkTexture *brand(SDL_Renderer *renderer) {
 #ifdef _WIN32
     if (logo) {
         return logo;
@@ -157,12 +168,28 @@ SDL_Texture *brand(SDL_Renderer *renderer) {
         const auto previous = SelectObject(dc, bitmap);
         std::memset(pixels, 0, 64 * 64 * 4);
         DrawIconEx(dc, 0, 0, source, 64, 64, 0, nullptr, DI_NORMAL);
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        (void)renderer;
+        auto* iconSurface = SDL_CreateRGBSurfaceWithFormatFrom(
+            pixels, 64, 64, 32, 64 * 4, SDL_PIXELFORMAT_BGRA32);
+        if (iconSurface) {
+            auto* rgba = SDL_ConvertSurfaceFormat(iconSurface, SDL_PIXELFORMAT_RGBA32, 0);
+            if (rgba) {
+                auto& presenter = AppRuntime::PlayerSwapchainPresenter::instance();
+                logo = presenter.createUiTexture(64, 64);
+                presenter.updateUiTexture(*logo, rgba->pixels, 64, 64, rgba->pitch);
+                SDL_FreeSurface(rgba);
+            }
+            SDL_FreeSurface(iconSurface);
+        }
+#else
         logo =
             SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STATIC, 64, 64);
         if (logo) {
             SDL_UpdateTexture(logo, nullptr, pixels, 64 * 4);
             SDL_SetTextureBlendMode(logo, SDL_BLENDMODE_BLEND);
         }
+#endif
         SelectObject(dc, previous);
     }
     if (dc) {
@@ -179,11 +206,17 @@ SDL_Texture *brand(SDL_Renderer *renderer) {
         return logo;
     }
     logo_failed = true;
+    (void)renderer;
     auto *surface = IMG_Load("assets/player_icon.png");
     if (surface) {
-        logo = SDL_CreateTextureFromSurface(renderer, surface);
-        if (logo) {
-            SDL_SetTextureBlendMode(logo, SDL_BLENDMODE_BLEND);
+        auto *rgba = SDL_ConvertSurfaceFormat(surface, SDL_PIXELFORMAT_RGBA32, 0);
+        if (rgba) {
+            auto& presenter = AppRuntime::PlayerSwapchainPresenter::instance();
+            logo = presenter.createUiTexture(rgba->w, rgba->h);
+            if (logo) {
+                presenter.updateUiTexture(*logo, rgba->pixels, rgba->w, rgba->h, rgba->pitch);
+            }
+            SDL_FreeSurface(rgba);
         }
         SDL_FreeSurface(surface);
     }
@@ -193,12 +226,20 @@ SDL_Texture *brand(SDL_Renderer *renderer) {
 void releaseArtwork() {
     for (const auto &entry : thumbnails) {
         if (entry.second) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+            AppRuntime::PlayerSwapchainPresenter::instance().destroyUiTexture(entry.second);
+#else
             SDL_DestroyTexture(entry.second);
+#endif
         }
     }
     thumbnails.clear();
     if (logo) {
+#if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
+        AppRuntime::PlayerSwapchainPresenter::instance().destroyUiTexture(logo);
+#else
         SDL_DestroyTexture(logo);
+#endif
         logo = nullptr;
     }
 #ifndef _WIN32
@@ -293,7 +334,7 @@ void games(SDL_Renderer *renderer) {
         draw->AddRect(p, add(p, width, S(190)),
                       (active || card_loading) ? mint : (chosen ? violet : border), 13, 0, 1);
         if (auto *image = thumbnail(renderer, game.value("thumbnail", ""))) {
-            draw->AddImageRounded(static_cast<ImTextureID>(reinterpret_cast<intptr_t>(image)),
+            draw->AddImageRounded(artworkRef(image),
                                   add(p, S(8), S(8)), add(p, width - S(8), S(120)), ImVec2(0, 0), ImVec2(1, 1),
                                   IM_COL32_WHITE, 9);
         } else {

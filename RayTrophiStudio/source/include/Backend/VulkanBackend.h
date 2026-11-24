@@ -2168,7 +2168,8 @@ public:
     // shader expands quads and reads the appearance LUT. Two groups by the
     // profile's blend: additive and alpha. `pulled` systems are drawn from the
     // simulation's own buffers; the caller guarantees they are on this device.
-    void uploadParticleBillboards(const ParticleBillboardUpload& data);
+    // Exchanges the CPU quad vectors with the previous frame to reuse capacity.
+    void uploadParticleBillboards(ParticleBillboardUpload& data);
     // Points the billboard descriptor set at the LUT + row-lookup buffers when
     // stale. Safe only while no frame using the set is in flight.
     void writeParticleLutDescriptor();
@@ -3089,7 +3090,7 @@ protected:
         VulkanRT::BufferHandle particleRowLookupBuffer;
         std::vector<uint32_t> particleRowLookupUploaded;
         bool particleLutDescriptorStale = true;
-        VulkanRT::BufferHandle particleAddVertexBuffer;
+        std::vector<ParticleBillboardVertex> particleAddVertices;
         VkPipeline sphereImpostorPipeline = VK_NULL_HANDLE;
         VulkanRT::BufferHandle sphereImpostorBuffer;
         std::vector<SphereImpostorInstance> sphereImpostorsUploaded;
@@ -3104,9 +3105,7 @@ protected:
         };
         std::vector<FluidSphereProxySlot> fluidSphereProxySlots;
         std::vector<FluidSphereProxyDraw> fluidSphereProxyDraws;
-        uint32_t particleAddVertexCount = 0;
-        VulkanRT::BufferHandle particleAlphaVertexBuffer;
-        uint32_t particleAlphaVertexCount = 0;
+        std::vector<ParticleBillboardVertex> particleAlphaVertices;
         // Vertex pulling of device-resident systems: set 1 = the simulation's
         // own storage buffers, one descriptor set per pulled system.
         VkPipeline particlePullAddPipeline = VK_NULL_HANDLE;

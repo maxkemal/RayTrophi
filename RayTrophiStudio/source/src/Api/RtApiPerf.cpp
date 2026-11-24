@@ -107,7 +107,10 @@ GpuKernelTimingReport gpuKernelTimings(bool reset, bool wetPaintFallback) {
     out.kernels.reserve(timings.size());
     for (const auto& t : timings) {
         out.kernels.push_back(GpuKernelTime{t.kernel, t.ms, t.calls, t.samples_ms});
-        out.total_ms += t.ms;
+        // The paint_wet row already includes its per-mode breakdown.
+        if (t.kernel.rfind("paint_wet.", 0) != 0) {
+            out.total_ms += t.ms;
+        }
     }
     return out;
 }

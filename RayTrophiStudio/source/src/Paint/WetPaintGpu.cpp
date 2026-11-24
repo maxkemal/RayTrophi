@@ -12,6 +12,7 @@
 #include "Material.h"
 #include "PrincipledBSDF.h"
 #include "ParticleSimulation.h"
+#include "PerfProfile.h"
 #include "SimulationComputeVulkanContext.h"
 #include "SimulationWorld.h"
 #include "SurfaceFlowField.h"
@@ -26,6 +27,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <limits>
 #include <optional>
 #include <tuple>
@@ -43,6 +45,16 @@ using RayTrophiSim::SimulationComputeContext;
 namespace {
 
 constexpr uint32_t kTile = 32u;
+// The drying/runoff simulation steps at most this often (2026-11-24). The
+// kernel's rates are written per 60 Hz frame (pc.dt * 60), so a 60 Hz step is
+// its reference cadence, not an approximation. Before, it stepped every
+// rendered frame: 300-500 Hz on a desktop, where tick+resolve+channels (+ a
+// texture publish per dirty plane) cost 0.6 ms per frame for one pop and
+// 1.6 ms for four - for changes no one can see between two 60 Hz steps.
+// STAMP and CONSUME still run every frame (contact events must not pile up);
+// a stamp shows at the next step, at most one 60 Hz step later. Below 60 fps
+// every frame is a step, exactly as before.
+constexpr double kWetStepSeconds = 1.0 / 60.0;
 constexpr uint32_t kStatsStride = 16u;
 constexpr uint32_t kBindingCount = 17u;
 constexpr int kGutterTexels = 2;
@@ -54,7 +66,19 @@ enum WetPaintMode : uint32_t {
     kModeStamp = 0, kModeTick = 1, kModeResolve = 2, kModeRotate = 3,
     kModeConsume = 4, kModeCoverage = 5, kModeReset = 6,
     kModeChannels = 7, kModeSeedHeight = 8,
+    kModeCompactChannels = 9, kModeChannelsList = 10,
 };
+constexpr const char* kWetPaintTimingLabels[] = {
+    "paint_wet.stamp", "paint_wet.tick", "paint_wet.resolve", "paint_wet.rotate",
+    "paint_wet.consume", "paint_wet.coverage", "paint_wet.reset",
+    "paint_wet.channels", "paint_wet.seed_height", "paint_wet.channels_compact",
+    "paint_wet.channels",
+};
+constexpr uint32_t kCompactChannels = 4u;
+constexpr std::size_t kIndirectGroupCountWords = 3u;
+constexpr std::size_t channelDispatchOffset(uint32_t tiles) {
+    return static_cast<std::size_t>(tiles) * 2u * sizeof(uint32_t);
+}
 enum WetPaintSource : uint32_t { kSourceDabs = 0, kSourceEvents = 1 };
 enum StatsSlot : uint32_t {
     kStActiveTiles = 0, kStDirtyMinX = 1, kStDirtyMinY = 2, kStDirtyMaxX = 3, kStDirtyMaxY = 4,
@@ -310,16 +334,26 @@ struct WetPaintGpu::Device {
     bool channels_allocated = false;
     bool reveal_allocated = false;
     bool channels_force = false;
-    // The stats of the last dispatching tick, read one tick later
-    // (SimulationComputeContext::submitWithReadback), with what that tick knew.
-    uint64_t stats_ticket = 0;
-    uint32_t stats_surfaces = 0;
-    bool stats_force = false;      // channels_force at that dispatch
-    bool stats_coverage = false;   // that tick measured coverage
-    uint64_t stats_serial = 0;     // paint_serial_ of that tick
+    // Stats of dispatching ticks, read back later
+    // (SimulationComputeContext::submitWithReadback), each with what its tick
+    // knew. Oldest first; collected without waiting while they are not ready.
+    struct PendingStats {
+        uint64_t ticket = 0;
+        uint32_t surfaces = 0;
+        bool force = false;        // channels_force at that dispatch
+        bool coverage = false;     // that tick measured coverage
+        uint64_t serial = 0;       // paint_serial_ of that tick
+    };
+    std::deque<PendingStats> stats_pending;
+    // Fixed-rate simulation (2026-11-24, see kWetStepSeconds): wall time not
+    // yet simulated, and whether the stats slots must be zeroed before the
+    // next dispatch (once per readback window, NOT per frame: stamp-only
+    // frames add their counters into the window the next step reads back).
+    double step_clock = 0.0;
+    bool stats_reset_needed = true;
 
     void release() {
-        stats_ticket = 0;   // a dropped ticket's slot is reused by the backend
+        stats_pending.clear();   // a dropped ticket's slot is reused by the backend
         if (compute) {
             for (auto& entry : appearance_tables) {
                 entry.second.release(*compute);
@@ -872,6 +906,10 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
         return handle.valid();
     };
     const std::size_t n = surfaces_.size();
+    // [active, next] per tile | 3 indirect counts | channel list (tiles) |
+    // changed bits (tiles, paint_wet.comp tileChangedIndex, 2026-11-24).
+    const std::size_t tile_flag_bytes = channelDispatchOffset(tiles) +
+        (kIndirectGroupCountWords + 2u * static_cast<std::size_t>(tiles)) * sizeof(uint32_t);
     bool ok = makeBuffer(d.surfaces, n * sizeof(GpuSurface), "WetPaintSurfaces", ro) &&
               makeBuffer(d.tiles, static_cast<std::size_t>(tiles) * sizeof(GpuTile), "WetPaintTiles", ro) &&
               makeBuffer(d.pos_valid, static_cast<std::size_t>(texels) * 16, "WetPaintPosValid", ro) &&
@@ -882,7 +920,8 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
               makeBuffer(d.color_scratch, static_cast<std::size_t>(texels) * 4, "WetPaintColorScratch", rw) &&
               makeBuffer(d.state_scratch, static_cast<std::size_t>(texels) * 16, "WetPaintStateScratch", rw) &&
               makeBuffer(d.output, static_cast<std::size_t>(texels) * 4, "WetPaintOutput", rw) &&
-              makeBuffer(d.tile_flags, static_cast<std::size_t>(tiles) * 8, "WetPaintTileFlags", rw) &&
+              makeBuffer(d.tile_flags, tile_flag_bytes, "WetPaintTileFlags",
+                         rw | ComputeBufferUsage::Indirect) &&
               makeBuffer(d.stats, n * kStatsStride * 4, "WetPaintStats", rw) &&
               makeBuffer(d.dummy_events, 48, "WetPaintNoEvents", rw) &&
               makeBuffer(d.dummy_counter, 16, "WetPaintNoCounter", rw);
@@ -912,7 +951,9 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
     }
     zero_u.assign(texels, 0u);
     zero_f.assign(static_cast<std::size_t>(texels) * 4, 0.0f);
-    std::vector<uint32_t> zero_flags(static_cast<std::size_t>(tiles) * 2, 0u);
+    // Whole buffer, changed bits included (a stale bit only costs one extra
+    // channel pass, but a garbage one would be read before any ROTATE).
+    std::vector<uint32_t> zero_flags(tile_flag_bytes / sizeof(uint32_t), 0u);
     std::vector<uint32_t> zero_events(12, 0u), zero_counter(4, 0u);
     ok = ok && c.uploadBuffer(d.tiles, all_tiles.data(), all_tiles.size() * sizeof(GpuTile)) &&
          c.uploadBuffer(d.color, zero_u.data(), zero_u.size() * 4) &&
@@ -1397,29 +1438,56 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     stats_.tiles = d.tile_count;
     const uint32_t n = static_cast<uint32_t>(surfaces_.size());
 
-    // The previous dispatching tick's stats (dirty rectangles, active tiles,
-    // coverage). One frame later its submission has long finished, so this
-    // wait is ~free; before 2026-11-18 the tick synchronized at its end, and on
-    // the single queue that waited for the render frame queued ahead of it.
-    if (d.stats_ticket != 0) {
-        std::vector<uint32_t> prev(static_cast<std::size_t>(d.stats_surfaces) * kStatsStride, 0u);
-        const bool got = c.collectReadback(d.stats_ticket, prev.data(), prev.size() * 4, /*wait=*/true);
-        d.stats_ticket = 0;
-        if (got && d.stats_surfaces == n) {
-            applyStats(prev, d.stats_force, d.stats_coverage, d.stats_serial);
-        } else {
-            ++stats_.stats_readbacks_lost;
+    // Earlier dispatching ticks' stats (dirty rectangles, active tiles,
+    // coverage). applyStats MERGES dirty rectangles into the pending uploads, so
+    // a late readback loses nothing; it only arrives a frame later.
+    // ★ Do not wait for the newest one. Since the Player submits its whole
+    // compute tick once, asynchronously (RuntimeSimulationClock
+    // defer_compute_submit), last tick's submission sits behind the render
+    // frame queued ahead of it on the single queue; a blocking collect here was
+    // 4.3 ms of a 14.7 ms burst frame (2026-11-23, 1080p, 10 pops) -- the same
+    // stall the per-frame fence used to be. Only a full queue waits (oldest).
+    // Three pending match the backend's submission ring (two in flight): the
+    // oldest is already complete when it is waited for (2026-11-24).
+    {
+        RTPERF_FRAME_SCOPE("paint.wet.stats_collect");
+        constexpr std::size_t kMaxPendingStats = 3;   // backend keeps 4 readback slots
+        while (!d.stats_pending.empty()) {
+            const auto p = d.stats_pending.front();
+            std::vector<uint32_t> prev(static_cast<std::size_t>(p.surfaces) * kStatsStride, 0u);
+            const bool must_wait = d.stats_pending.size() >= kMaxPendingStats;
+            if (!c.collectReadback(p.ticket, prev.data(),
+                                   prev.size() * sizeof(uint32_t), must_wait)) {
+                if (!must_wait) break;               // not ready yet: next tick
+                d.stats_pending.pop_front();         // waited and still failed
+                ++stats_.stats_readbacks_lost;
+                continue;
+            }
+            d.stats_pending.pop_front();
+            if (p.surfaces == n) {
+                applyStats(prev, p.force, p.coverage, p.serial);
+            } else {
+                ++stats_.stats_readbacks_lost;
+            }
         }
     }
 
-    dt = dt > 0.0f ? std::min(dt, 2.5f / 60.0f) : (1.0f / 60.0f);
+    // Wall time to simulate; the step's dt is decided below (kWetStepSeconds).
+    const double frame_dt = dt > 0.0f ? static_cast<double>(dt) : 0.0;
 
     WetPaintGpuConstants k;
+    const bool run_channels = d.channels_allocated &&
+        (d.channels_force || std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
+            return s->settings.roughness_channel || s->settings.height_normal_channel ||
+                   s->settings.reveal_opacity;
+        }));
+    const bool compact_channels = run_channels && !d.channels_force;
     k.surface_count = n;
     k.tile_count = d.tile_count;
     k._p0 = d.channels_allocated ? d.texel_count : 0u;
-    k._p1 = (d.channels_force ? 1u : 0u) | (d.reveal_allocated ? 2u : 0u);
-    k.dt = dt;
+    k._p1 = (d.channels_force ? 1u : 0u) | (d.reveal_allocated ? 2u : 0u) |
+            (compact_channels ? kCompactChannels : 0u);
+    k.dt = 1.0f / 60.0f;   // stamp does not read it; the step sets its own below
     k.splat_radius = std::max(0.0f, splat_.radius);
     k.splat_amount = std::clamp(splat_.amount, 0.0f, 1.0f);
     k.splat_min_speed = std::max(0.0f, splat_.min_speed);
@@ -1433,15 +1501,20 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         d.dummy_counter /*lookup*/,
     };
     bool ok = true;
-    const auto run = [&](uint32_t mode, uint32_t groups) {
+    const auto run = [&](WetPaintMode mode, uint32_t groups) {
         k.mode = mode;
         ComputeDispatch cmd;
         cmd.kernel = "paint_wet";
+        cmd.timing_label = kWetPaintTimingLabels[mode];
         cmd.buffers = bindings;
         cmd.buffer_count = kBindingCount;
         cmd.constants = &k;
         cmd.constants_size = sizeof(k);
         cmd.groups.groups_x = std::max<uint32_t>(1u, groups);
+        if (mode == kModeChannelsList) {
+            cmd.indirect_groups = d.tile_flags;
+            cmd.indirect_offset = channelDispatchOffset(d.tile_count);
+        }
         ok = c.dispatch(cmd) && ok;
     };
     const auto ensure = [&](ComputeBufferHandle& h, std::size_t& cap, std::size_t needed,
@@ -1539,17 +1612,40 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         stats_.event_sources = 0;
         stats_.ticked_tiles = stats_.stamped_texels = 0;
         stats_.last_tick_ms = msSince(t0);
+        d.step_clock = 0.0;   // a new stain starts a fresh cadence
+        return true;
+    }
+    // Step decision (kWetStepSeconds). Resets, a fresh layout and a forced
+    // channel pass are one-shot work that must not wait for the cadence.
+    d.step_clock += frame_dt;
+    const bool force_step = layout_fresh || reset_requested_ || !base_resets.empty() ||
+                            d.channels_force;
+    const bool step = force_step || d.step_clock >= kWetStepSeconds - 1e-6;
+    // The step simulates all the time since the last one (rates are per
+    // second), clamped as before so a stall cannot launch a huge step.
+    const float step_dt = static_cast<float>(
+        d.step_clock > 0.0 ? std::min(d.step_clock, 2.5 / 60.0) : 1.0 / 60.0);
+    if (step) d.step_clock = 0.0;
+    if (!step && dabs.empty() && device_sources.empty()) {
+        // Drying between two steps: nothing to stamp, nothing to simulate yet.
+        stats_.status = "between_steps";
+        stats_.last_tick_ms = msSince(t0);
         return true;
     }
     ++paint_serial_;   // this tick dispatches: coverage() must measure again
     stats_.event_sources = static_cast<uint32_t>(device_sources.size());
-    // Per-tick stat slots: dirty bbox min = max uint, the rest zero.
-    std::vector<uint32_t> stats_init(static_cast<std::size_t>(n) * kStatsStride, 0u);
-    for (uint32_t si = 0; si < n; ++si) {
-        stats_init[si * kStatsStride + kStDirtyMinX] = 0xFFFFFFFFu;
-        stats_init[si * kStatsStride + kStDirtyMinY] = 0xFFFFFFFFu;
+    // Stat slots: dirty bbox min = max uint, the rest zero. Once per readback
+    // window - a stamp-only frame adds its counters (sources dropped, stamped
+    // texels) into the window the next step reads back.
+    if (d.stats_reset_needed) {
+        std::vector<uint32_t> stats_init(static_cast<std::size_t>(n) * kStatsStride, 0u);
+        for (uint32_t si = 0; si < n; ++si) {
+            stats_init[si * kStatsStride + kStDirtyMinX] = 0xFFFFFFFFu;
+            stats_init[si * kStatsStride + kStDirtyMinY] = 0xFFFFFFFFu;
+        }
+        c.uploadBuffer(d.stats, stats_init.data(), stats_init.size() * 4);
+        d.stats_reset_needed = false;
     }
-    c.uploadBuffer(d.stats, stats_init.data(), stats_init.size() * 4);
     // MODE_RESET reads source_count as its first tile (paint_wet.comp).
     const bool clearing_paint = reset_requested_;
     if (reset_requested_) {
@@ -1628,18 +1724,33 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         bindings[16] = d.dummy_counter;
     }
 
+    if (!step) {
+        // Stamp-only frame: the stamps (and consumed events) are recorded; the
+        // next step simulates and publishes them. No readback - its counters
+        // stay in the current stats window.
+        if (!ok) {
+            c.submitAsync();
+            stats_.status = "dispatch_failed";
+            stats_.last_tick_ms = msSince(t0);
+            return false;
+        }
+        c.submitAsync();   // no-op inside the Player's deferred frame submit
+        stats_.status = "stamping";
+        stats_.last_tick_ms = msSince(t0);
+        return true;
+    }
+    k.dt = step_dt;
     run(kModeTick, d.tile_count);
     run(kModeResolve, d.tile_count);
-    if (d.channels_allocated) {
-        if (d.channels_force) run(kModeSeedHeight, d.tile_count);
-        const bool enabled = std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
-            return s->settings.roughness_channel || s->settings.height_normal_channel ||
-                   s->settings.reveal_opacity;
-        });
-        if (enabled || d.channels_force) {
+    if (run_channels) {
+        if (compact_channels) {
+            run(kModeCompactChannels, (d.tile_count + 255u) / 256u);
+            if (ok) run(kModeChannelsList, 0);
+        } else {
+            run(kModeSeedHeight, d.tile_count);
             run(kModeChannels, d.tile_count);
-            ++stats_.pbr_dispatches;
         }
+        ++stats_.pbr_dispatches;
     }
     run(kModeRotate, (d.tile_count + 255u) / 256u);
     // A periodic reader got a stale coverage: measure it here, after this
@@ -1660,13 +1771,23 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         return false;
     }
     const std::size_t stats_bytes = static_cast<std::size_t>(n) * kStatsStride * 4;
-    const uint64_t ticket = c.submitWithReadback(d.stats, stats_bytes, 0);
+    uint64_t ticket = 0;
+    {
+        // The tick's one submission. Its wall time is the host waiting for the
+        // backend's submission ring (should be ~0 when the CPU runs ahead).
+        RTPERF_FRAME_SCOPE("paint.wet.submit");
+        ticket = c.submitWithReadback(d.stats, stats_bytes, 0);
+    }
+    // This window is read back (delayed or below): the next dispatch starts a new one.
+    d.stats_reset_needed = true;
     if (ticket != 0) {
-        d.stats_ticket = ticket;
-        d.stats_surfaces = n;
-        d.stats_force = force;
-        d.stats_coverage = measure_coverage;
-        d.stats_serial = paint_serial_;
+        Device::PendingStats pending;
+        pending.ticket = ticket;
+        pending.surfaces = n;
+        pending.force = force;
+        pending.coverage = measure_coverage;
+        pending.serial = paint_serial_;
+        d.stats_pending.push_back(pending);
         if (measure_coverage) coverage_requested_ = false;   // its answer is on the way
         ++stats_.stats_delayed;
     } else {
@@ -1682,8 +1803,8 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         }
         applyStats(st, force, measure_coverage, paint_serial_);
     }
-    ++stats_.ticks;
-    stats_.last_dt = dt;
+    ++stats_.ticks;   // simulation steps (at most 1 / kWetStepSeconds per second)
+    stats_.last_dt = step_dt;
     stats_.status = "running";
     stats_.last_tick_ms = msSince(t0);
     return true;
@@ -1934,6 +2055,7 @@ bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out, bool allow_s
     k._p0 = d.channels_allocated ? d.texel_count : 0u;
     ComputeDispatch cmd;
     cmd.kernel = "paint_wet";
+    cmd.timing_label = kWetPaintTimingLabels[kModeCoverage];
     cmd.buffers = bindings;
     cmd.buffer_count = kBindingCount;
     cmd.constants = &k;

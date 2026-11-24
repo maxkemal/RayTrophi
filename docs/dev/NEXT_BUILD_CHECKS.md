@@ -1,5 +1,465 @@
 # Sıradaki derleme kontrolleri — Player Android A1 (2026-11-22)
 
+## ★★★ paint_wet channels: tile DEĞİŞİM bayrağı (2026-11-24, Claude) — ✔ CANLI: göz testi PASS; 4 balon channels 0,76 → 0,69 ms/adım, channels/tick 1,63 → 1,15; resolve 0,26 → 0,44 (karşılaştırma okumaları) → adım toplamı ~%11 net düşüş (sürekli yeni damga olan pencerede; kurumada daha büyük olmalı)
+
+★★ ÇÖZÜLDÜ (2026-11-24): kök = VERİ, `PaintRight` normali Studio'da da dışa bakıyordu; kullanıcı Studio'da Normals → Flip + kaydet → Player'da boya tutuyor. Açık kalan: Flip Normals'ın IPC'si yok (§1) ve yüz yönü reddi için sayaç yok (sessiz arıza). Eski not: SAĞ DUVAR (`PaintRight`) boyayı tutmuyor. IPC deneyi: `paint.wet_set_splat facing_min=-1` ile 3 balon sağ duvara +0,34 kaplama, `facing_min=0` ile ~0 → damga YÜZ YÖNÜ testinde eleniyor (kıvılcım = çarpışma olayı var). `PaintRight` = sol duvarın Y etrafında 180° döndürülmüşü (det +1); sol/arka birim dönüşüm ve sorunsuz. Aday 1: Player'daki dünya normali (`N`) odanın dışına bakıyor (kullanıcı: bazı nesnelerde normal Player'da Studio'nun tersi). Aday 2: ince OBB'de `resolveAABB` en yakın yüze iter (geliş yönüne bakmaz) → arka yüz normali. Sol duvar aynı OBB/hızla çalıştığı için aday 1 daha olası. Kod okumasında kayıt (N_orig yerel) ve yükleme (getNormalTransform) doğru görünüyor. Player'da normal okuyan IPC yok (scene.object_info/raycast unsupported_in_player).
+
+Önceki ölçüm: channels'ın asıl maliyeti tile sayısı (aktif tile'ın 5×5'i, her düzlem her adım). Şimdi binding 10 sonuna
+tile başına "değişti" sözcüğü (`3*tc+3+t`): bit0 içerik (renk/ıslaklık → kendi pürüzlülük/renk düzlemi), bit1 yükseklik
+(kalınlık/kaplama → 3×3 komşu normalleri). STAMP ve RESET iki biti koyar, RESOLVE eski/yeni karşılaştırır, ROTATE
+temizler. Channels yalnız gereken tile'ları işler; normal + yükseklik önbelleği yalnız yakında yükseklik değiştiyse.
+★ SPV eski exe ile GÜVENLİ: `tile_flags.length()` bölgeyi görmezse yazmaz ve eski 5×5 kapısına düşer (yani yeni exe
+derlenene kadar kazanç yok, risk de yok). /Zs PASS.
+
+1. **Kazanç (bağımsız):** 4 balon → `paint_wet.channels` adım başına 0,76 ms'den belirgin aşağı; channels/tick oranı
+   1,6'dan düşük. Kuruma ortasında (akış durmuş) channels çok ucuzlamalı (yalnız pürüzlülük).
+2. ★★ **SİNSİ — eksik düzlem:** yeni damganın kabartması (normal) ve ıslak parlaklığı GELMELİ; kuruyan lekenin
+   parlaklığı zamanla matlaşmalı. Leke rengi var ama kabartma/parlaklık yoksa ya da tile kenarında kabartma yarım
+   kalıyorsa bir değişim bayrağı eksik (stamp/reset/resolve). Akan damlanın izi boyunca kabartma da akmalı.
+3. **Sıfırlama:** oda sıfırlanınca kabartma ve parlaklık da temizlenmeli (RESET iki bit).
+4. Proje açılışı / yüzey ekleme (atlas yeniden kurulumu, zorunlu channels) sonrası tüm düzlemler doğru.
+
+## ★★ paint_wet: channels tile önbelleği + doğal sıçrama şekli (2026-11-24, Claude) — YALNIZ SHADER — CANLI ölçüldü (RTX 3060, 4 balon): channels 0,92 → 0,76 ms/adım ama tick de 0,62 → 0,47 düştü (bu turda ıslak alan küçük); channels/tick oranı 1,48 → 1,63 = RTX'te önbellek KAZANÇ GETİRMEDİ (okumalar zaten L1/L2'de). Asıl maliyet 5×5 tile genişlemesi (tick 3×3) + 4 düzlem yazımı. Mali'de ölçülmedi. stamp 0,117 → 0,106 ms (parmaklar ek maliyet getirmedi). Görsel kabul bekliyor
+
+`paint_wet.spv` derlendi, iki yere dağıtıldı (binding/push AYNI, mevcut exe ile uyumlu; Player'ı yeniden başlatmak
+yeter). Android vk11 seti `Build-PlayerApk.ps1` ile yeniden üretilir.
+- `paint_wet_channels.glsl`: normal gradyanı `addedHeight`'ı texel başına 8 kez (~40 global okuma) çağırıyordu;
+  artık tile + 2 kenar (36×36) shared önbellekten okur (texel başına ~6 okuma). Sonuç bit-aynı.
+- `paint_wet.comp` `eventSplatWeight`: 14 eşit sivri ışın (`pow(sin(14θ),8)`, "buz kristali") KALDIRILDI; yerine
+  3–8 düzensiz, kökte kalın/uca incelen, ucunda boncuk toplanan parmak (hız ↑ → çok/uzun; sıyırmada ileri toplanır);
+  uydu damlacıklar uçuş yönünde uzamış gözyaşı, karışık boy.
+
+1. **channels maliyeti (bağımsız):** `Measure-PlayerGpuPasses.ps1 -PopBalloons 4` → `paint_wet.channels` adım başına
+   0,92 ms'den belirgin aşağı (beklenti ~yarısı ya da daha az). tick/resolve değişmemeli.
+2. ★★ **SİNSİ — normal haritası:** kuru boya kabartması ve ıslak parlaklık ÖNCEKİYLE aynı görünmeli (bit-aynı
+   tasarım). Tile sınırlarında (32 texel ızgarası) çizgi/dikiş ya da kabartmanın tile kenarında kopması = önbellek
+   indeksi kaymış.
+3. **Sıçrama şekli (göz):** yıldız/kristal yerine birkaç düzensiz parmak + uçta boncuk + gözyaşı damlacıklar.
+   Kenarlarda kesik/kare kesilmiş parmak varsa sınır yarıçapı (2,1) yetmiyor.
+4. `sources_dropped` / `stamped_texels` benzer kalmalı; stamp süresi (`paint_wet.stamp`) en çok biraz artabilir
+   (texel-kaynak başına ≤8 parmak döngüsü).
+
+## ★★★ Kuruma GPU'su: ıslak boya 60 Hz adım + mip yalnız kirli bölge (2026-11-24, Claude) — ✔ CANLI: göz testi PASS (kullanıcı, uzak/eğik dahil); 4 balon: en düşük döngü 122 → 273 Hz, 4 sn ortalama 158 → 329 Hz; tick 55/s (önce kare başına); boya GPU 266 → 150 ms/s; paint.wet.submit 1,1 → 0,04 ms; sources_dropped 65k → 13k
+
+Ölçüm (Windows Player 1280×720, 4 balon art arda, biri sürpriz): döngü **122 Hz**, GPU dolu (slot_wait ~4 ms,
+`paint.wet.submit` 1,1 ms = halka GPU'yu bekliyor). Aktif kare başına boya GPU: channels 0,73 · tick 0,52 · resolve 0,29
+· stamp 0,11 ms, raster 1,46 ms; ~150 Hz'de saniyede ~530 ms GPU ÖLÇÜLMÜYORDU → her doku kopyası (7 yüzey × 5 düzlem)
+1024² sayfanın TÜM mip zincirini blit ediyordu. Değişen:
+- `VulkanBackend.cpp`: `regenerateMipChainRegion` (.cpp içi) — kopya yolu yalnız kopyalanan dikdörtgenin her
+  seviyedeki izini blit eder (çift hizalı, 2:1 kutu → tam blit ile aynı texeller; tek kenarlı seviye bütün).
+  Diğer çağıranlar (`regenerateMipChainAfterPartialUpdate`) tam görüntüyle aynı yardımcıyı çağırır, davranış aynı.
+- `WetPaintGpu.cpp`: `kWetStepSeconds = 1/60`. Stamp+consume her kare; tick/resolve/channels/rotate/coverage +
+  okuma + yayın yalnız adımda (dt = son adımdan beri geçen, 2,5/60 sınırı aynı). İstatistik penceresi okuma başına bir
+  kez sıfırlanır (damga-yalnız karelerin sayaçları kaybolmaz). 60 fps altında her kare adım = eskisiyle aynı.
+/Zs Studio+Player PASS.
+
+1. **Ölçüm (bağımsız):** aynı 4 balon senaryosu → döngü 122 Hz'den belirgin yukarı; `Measure-PlayerGpuPasses.ps1`
+   `paint_wet.tick` örnek sayısı saniyede ≤60. `paint.wet_status.status` kuruma sırasında `between_steps`/`stamping`/
+   `running` arasında gidip gelir.
+2. ★★ **SİNSİ — mip:** boyalı duvara UZAKTAN ve eğik açıyla bak (üst mip'ler okunur). Boya uzakta da yakındaki gibi
+   görünmeli; kirli bölgenin kenarında **kare kare yama / eski boya izi / dikiş** varsa bölge hizalaması yanlış.
+   Islak→kuru geçişte uzaktaki renk yakındakiyle aynı anda değişmeli.
+3. ★ **SİNSİ — akış hızı:** damlaların akma/kuruma hızı ÖNCEKİYLE aynı görünmeli (formüller 60 Hz'e kalibre). Masaüstünde
+   yüksek FPS'te akış önceden FARKLIYSA (çok ince adımlar) şimdi tasarlanan hıza döner — gözle farkı not et.
+4. **Damga gecikmesi:** damla duvara değdiği an ile lekenin görünmesi arası en çok bir 60 Hz adımı; fark edilmemeli.
+   `sources_dropped` ve `stamped_texels` sayaçları azalmamalı (pencere birikimi).
+5. **Studio fırça boyaması:** fırça darbesi gecikmesiz görünmeli; sıfırlama (reset) anında temizlemeli (zorunlu adım).
+
+## ★★★★ RayFusion TLAS yerleşim yenilemesi BEKLEMESİZ (2026-11-24, Claude) — ✔ CANLI: göz testi PASS (kullanıcı); recorded_refresh 28,9/s (host 0,074 ms), sync_rebuild 0, resource_drains 14 sn'de 1 (önce ~30/s); boşta en uzun kare 5–6 → 2,4–2,5 ms, döngü 465 → 517 Hz; patlamada en uzun kare 15–21 → 4–8,6 ms (artık GPU'ya bağlı: slot_wait 3–4,6 ms)
+
+Kök (canlı ölçüm, `frame.worst_iteration`): her saniyenin en uzun karesi boşta 5–6 ms, patlamada 15–21 ms, neredeyse
+tamamı `render_ms`; `resource_drains` ≈ 30/s. `rebuildRayFusionTLAS` her yerleşim değişiminde (30 Hz balon hareketi)
+drain + TLAS destroy/recreate + senkron build yapıyordu. Değişen:
+- `VulkanBackend.cpp` `createTLAS` KAYITLI mod (externalCmd): yalnız yerinde kurulum; instance dizisi
+  `vkCmdUpdateBuffer` ile komut içinde; önce/ara/sonra bariyerleri; koşul tutmazsa HİÇBİR ŞEY kaydetmez,
+  `m_tlasSupportsUpdate=false` yapar (çağıran senkron yola düşer). Instance buffer artık `TRANSFER_DST`.
+- `RayFusionSceneAS.cpp`: aynı instance sayısında async tek-atış (bekleme yok), yoksa eski drain+senkron yol;
+  `allowUpdate=true`. perf.list: `rayfusion.tlas.recorded_refresh` / `rayfusion.tlas.sync_rebuild`.
+- `VulkanViewportBackend.cpp` `drainInteractiveViewportInFlight` artık async tek-atışları da bekler
+  (`reclaimAsyncCommands(true)`): BLAS silme/refit uçuştaki TLAS kurulumuyla yarışmasın.
+/Zs Studio+Player PASS. ★ Header yorumu (`createTLAS` "hair ping-pong, host işi inline") ESKİ; header'a
+dokunmamak için düzeltilmedi, bir sonraki tam derlemede güncellenmeli.
+
+1. **Yol alınıyor mu (bağımsız, hızlı):** balonlar süzülürken `perf.list` → `rayfusion.tlas.recorded_refresh`
+   saniyede ~30 artmalı, `sync_rebuild` yalnız açılışta/görünürlük değişiminde. `sync_rebuild` 30/s artıyorsa
+   kayıt reddediliyor: log'da `createTLAS recorded refresh refused: <sebep>` satırı (bir kez) sebebi söyler.
+2. **Drain gitti mi:** `viewport.frame_telemetry.resource_drains` artık ~30/s ARTMAMALI.
+3. **Takılma:** `player.display` → `frame.worst_iteration.total_ms` boşta ~5–6 → **~2 ms**, patlamada 15–21 →
+   belirgin düşüş; `render_ms` artık büyük pay olmamalı. Döngü boşta 465 → daha yüksek.
+4. ★★ **SİNSİ — gölge/izleme doğruluğu:** RT gölgesi balonla birlikte hareket etmeli (bir kare gecikme bile
+   olmamalı; kurulum bu karenin kayıtlarından ÖNCE kuyrukta). Gölge balonun eski yerinde kalıyor/titriyorsa
+   bariyer ya da sıralama yanlış. Balon patlayınca (küçültülür, sayı aynı) gölgesi de kaybolmalı.
+5. **Dayanıklılık:** 3–5 dk patlat (Debug + validation varsa `SYNC-HAZARD` aranır). Device lost ya da
+   `VUID-vkCmdUpdateBuffer` = instance buffer'ın usage'ı ya da bariyer. Proje değiştir / sahne aç-kapa:
+   BLAS silme yolları artık async'i bekliyor, cihaz kaybı olmamalı.
+6. **Studio:** Material Preview'da hareketli nesne (gizmo ile sürükle) aynı yoldan geçer: sürükleme akıcı,
+   gölge takip eder. Rendered modda RT render yolu (externalCmd'siz) DEĞİŞMEDİ.
+
+## ★★ Player en uzun iterasyon dökümü (2026-11-24, Claude) — artımlı (yalnız PlayerMain.cpp)
+
+Önceki parti CANLI ölçüldü (11:31 exe, kullanıcının 14 elle patlaması, IPC'siz): drain toplamı **0,0 ms** ✔,
+`spawn_ms` 0,7–1,4 ms, masaüstünde çoğu 1 karede (sürpriz 10 728 damla → 3 kare) ✔. AMA `frame_interval_ms_max`
+hâlâ **18–29 ms** (sessiz anda sürpriz 14,2); o pencerelerde sim ≤7, boya ≤5, efekt ≤3, spawn ~1 ms → takılma
+simülasyon DIŞINDA. Yeni: `player.display` → `frame.worst_iteration` = 1 sn penceresinin en uzun iterasyonu,
+aşama aşama (`input_ms` [dokunmatik patlatma burada çalışır], `pump_ms` [IPC], `advance_ms`, `render_ms` +
+backend record/slot_wait/submit, `present_ms` [UI dahil], `sleep_ms`, `unaccounted_ms`). /Zs Player PASS.
+
+1. **Alan var mı:** `player.display` → `frame.worst_iteration.total_ms` ≈ boşta 2 ms civarı, `unaccounted_ms` ~0.
+   Büyükse dökümde bir aşama eksik.
+2. **Takılmanın yeri:** elle patlat, 1 sn içinde `player.display` oku (IPC pop KULLANMA: kendi 27 ms'si `pump_ms`'e
+   düşer). 18–29 ms'nin hangi aşamada olduğu görülmeli. ★ SİNSİ: `sleep_ms` büyükse takılma değil pacing'dir
+   (pacing_hz>0); ölçümü pacing 0 ile yap.
+
+## ★★★ Patlama karesi bölündü: LUT drain'i + damla kuyruğu (2026-11-24, Claude) — artımlı (2 .cpp)
+
+Değişen: `UI/ParticleBillboardBuilder.cpp` (CPU efekt sistemleri LUT satırlarını ÖLÜYKEN de yazar → LUT
+patlamada değişmez → `viewport.particle_billboards.drain` tetiklenmez), `Paint/BalloonPaintDemo.cpp`
+(patlamanın damlaları kuyruğa, kare başına bütçe: max(0,6 ms, karenin %10'u), en geç 4 karede biter; kuyruk
+aralıklı sıralı, geç doğan damla gecikme kadar ileri konur, ömrü kısalır). Header yok. /Zs Studio+Player PASS.
+Ölçüm öncesi (1280×720, IPC pop): takılma karesi normal 15,0 / sürpriz 18,7 ms; kullanıcı patlamalarında 18–25 ms;
+drain patlama başına ~5 kez, çağrı başına 1,1–2,4 ms; pop karesinde damla üretimi 1,2–2,4 ms.
+★ Ölçüm: IPC `pop` yanıtı demonun bütün `status()`'unu döndürür (round-trip ~27 ms, ana iş parçacığında);
+takılmayı ŞİŞİRİR. Sıkı `perf.list` yoklaması da döngüyü ~60 Hz'e indirir. Takılma için IPC'siz bak: elle
+patlat, sonra `paint.wet_demo` `events[-1]` oku.
+
+1. **Drain gitti mi (bağımsız, hızlı):** birkaç balon patlat, `perf.list` → `viewport.particle_billboards.drain`
+   sayısı patlama başına **0** olmalı (önce ~5). Artıyorsa LUT başka bir sebeple değişiyor (profil ekleme,
+   ışık) ya da pulled buffer'ları yeniden ayrılıyor; `upload` sayacına bak.
+2. **Damla yayılımı:** `paint.wet_demo` `events[-1]`: `spawn_frames` **1–4**, `spawn_done_ms` birkaç kare,
+   `spawn_ms` (pop karesinin kendi maliyeti) öncekinin (1,2–2,4) **altında**; status `pending_drops` patlamadan
+   kısa süre sonra **0**. `spawn_frames` hep 1 ise bütçe hepsini ilk karede bitiriyor (masaüstünde olabilir,
+   sorun değil); 4'ü geçemez.
+3. **Takılma:** elle normal ve sürpriz patlat, `events[-1].frame_interval_ms_max`. Beklenen: 15–25 ms'den belirgin
+   düşüş. Hâlâ ~15 ms ise kalan iş başka yerde (pop karesindeki ses, mesh küçültme / TLAS, wet paint ilk stamp);
+   bir sonraki adım kare kayıt cihazı (en kötü karenin bölüm dökümü).
+4. ★ **SİNSİ — görüntü:** patlama şekli aynı görünmeli: jetler aynı anda çıkar, damla yoğunluğu 1–4 karede dolar.
+   Jetlerden biri belirgin geç çıkıyorsa kuyruk aralıklama bozuk. Boya izi miktarı aynı kalmalı
+   (`spawned` aynı anlamda: süzgeçten geçen damla). Sürpriz balonda gökkuşağı topakları tek renk kalmalı.
+5. **Testler:** `rt_player_balloon_pop_ipc.py`, `rt_balloon_reset_size_ipc.py` `spawned` alanını okur (anlam
+   değişmedi). Patlamadan HEMEN sonra canlı parçacık sayan bir test varsa 1–4 kare beklemeli.
+   Oda sıfırlama (`reset`) kuyruktaki damlaları da atar: sıfırlamadan sonra boya gelmemeli.
+
+## ★★★ Compute gönderim HALKASI 3 yuva (2026-11-24, Claude) — artımlı derleme (yalnız 2 .cpp)
+
+Değişen: `Device/SimulationComputeVulkan.cpp` (`kSlots` 2 → 3, uçuşta en fazla 2 gönderim; submit yalnız iki
+kare önceki yuvayı bekler), `Paint/WetPaintGpu.cpp` (`kMaxPendingStats` 2 → 3, yeni `paint.wet.submit` scope'u).
+Header/struct değişmedi. /Zs Studio+Player PASS. Sebep (canlı ölçüm, 1280×720, opak balon, tek directional,
+1 balon): boşta 555 Hz, patlama+kurumada **298 Hz**; `simulation.wet_paint` CPU **1,77 ms/kare**, ama boya GPU işi
+~0,14–0,5 ms, raster değişmiyor (1,29 ms). Her async submit bir önceki karenin compute gönderimini bekliyordu
+(tek kuyrukta render karesinin arkasında) → kare = CPU + GPU, GPU ~%45 boş.
+
+1. **Ölçüm (bağımsız, hızlı):** aynı sahne, timing KAPALI, 1 balon patlat ve `perf.list` farkı al
+   (`Measure-PlayerGpuPasses.ps1` timing'i açar ve açıkken her submit SENKRON olur, bu madde için kullanma).
+   Görmen gereken: `paint.wet.submit` ≈ 0,0x ms, `simulation.wet_paint` 1,77 → **< 0,2 ms**, döngü 298 →
+   **~450+ Hz**. `paint.wet.submit` hâlâ ~1,5 ms ise bekleme halkada değil, `vkQueueSubmit`'in kendisinde
+   (WDDM) demektir.
+2. **Bekleme başka yere taşındı mı:** `player.display` → `slot_wait_ms_avg` artabilir (render halkası GPU'yu
+   bekler). Bu beklenen ve doğru: artık GPU'ya bağlıyız. Döngü düşmüyorsa sorun yok.
+3. **10 balon art arda** (`-PopBalloons 10`): `wet_paint.stats.stats_readbacks_lost` **0** kalmalı. Artıyorsa
+   4 okuma yuvası yetmiyor (3 bekleyen + 1 yeni).
+4. ★ **SİNSİ:** boya izleri artık en fazla **iki kare geç** görünebilir (öncesi bir). Gözle fark edilmemeli.
+   Bir darbenin hiç görünmemesi ya da yalnız bir sonraki darbeyle görünmesi = son bilet toplanmıyor.
+   Ayrıca damla titremesi / boya izi kaybı (dünkü görsel PASS'in tekrarı) ve **Studio**'da sıvı/kar
+   sahnesinde 512 dispatch'lik ara gönderimli (MAX_DESC_SETS) bir sim: davranış değişmemeli. Bozukluk
+   = cihaz kaybı ya da titreyen alan → WAR bariyerini (`ensureRecording`) şüphelen, iki uçuşta gönderim
+   artık mümkün.
+
+## Android erken açılış logcat kaydı (2026-11-23)
+
+Lenovo TB330FU'da 2222 Release APK sahne ve IPC açılmadan `EXIT_SELF`,
+durum 1 ile kapanıyor. Yeni APK'yı kurup Player'ı yeniden açın. Sonra
+`adb -s HVA751MH logcat -d -t 5000 -s RayTrophiStartup:I` çıktısını alın.
+Etiket native giriş, asset hazırlığı, SDL başlatma, Vulkan pencere oluşturma,
+ImGui ve IPC başlangıcını gösterir. SDL pencere hatasının metni diğer SDL
+çağrılarından önce korunur. Özel uygulama dizini veya debug APK gerekmez.
+
+2249 APK bu adımların tamamını geçip IPC başladıktan sonra kapandı.
+Sonraki APK Android'in native sinyal yakalayıcısını korur. Yeniden üretimde
+`adb -s HVA751MH logcat -b crash -d` ile signal, Build ID ve backtrace
+alın. Release sembollerini APK ile aynı derlemeden eşleyin.
+
+2253 APK'da Build ID eşleşmesi ilk ImGui karesindeki font SIGSEGV'ini
+doğruladı. Bir sonraki APK'da Vulkan backend, Android'de de launcher
+karesinden önce başlar. Lenovo'da tek sahneli otomatik açılışı, yükleme
+ekranını ve ilk oyun karesini doğrulayın. Ardından uygulamayı arka plana
+alıp geri açın ve Geri menüsünü kontrol edin. GPU başlatma hatasında
+yerel diyalog ve `RayTrophiStartup` hata satırı görünmeli.
+
+## ★★★ Islak boya istatistik okuması BEKLEMESİZ (2026-11-23 gece, Claude) — ✔ ÖLÇÜM CANLI (22:03 exe): stats_collect 0,005 ms, 68,5 kare/sn, artık GPU'ya bağlı; görsel PASS (kullanıcı)
+
+Tek gönderim derlemesi canlı ölçüldü (1080p, IPC 10 balon): `simulation.timeline` **9,4 → 1,3 ms** ✔, ama bekleme bir
+sonraki senkron noktaya taşındı: `paint.wet.stats_collect` **0 → 4,3 ms** (önceki tick'in okumasını `wait=true` bekliyordu,
+o gönderim de artık raster karesinin arkasında). 64,5 → 68 kare/sn. Düzeltme: biletler kuyruğa (en fazla 2), hazır olanlar
+beklemeden toplanır; kuyruk doluysa en eskisi beklenir. `applyStats` kirli dikdörtgenleri BİRLEŞTİRİR, geç gelen okuma
+bir şey kaybettirmez, yalnız bir kare gecikir. /Zs Studio+Player PASS.
+
+1. **Ölçüm:** aynı test. Beklenen: `stats_collect` ~0, bekleme raster `slot_wait`'e taşınır. GPU bütçesi (raster 10,3 +
+   boya ~2,5 ms) sınırı ~78 kare/sn; oraya yaklaşmalı. Hâlâ ~68 ise sıradaki senkron noktası başka yerde (perf.list'te
+   en büyük ms/s satırı).
+2. ★ **SİNSİ:** boya izleri **bir kare geç** belirir (gözle fark edilmemeli). Bir fırça darbesinin hiç görünmemesi ya da
+   ancak bir sonraki darbede görünmesi = son bilet toplanmıyor (boşta çıkış). `wet_paint.stats.stats_readbacks_lost`
+   artıyorsa okuma slotları yetmiyor.
+
+## ★★★ Player: kare başına TEK async compute gönderimi (2026-11-23 gece, Claude) — TAM derlemeyle birlikte
+
+Kök (canlı ölçüm, 1080p, IPC ile 10 balon): patlamada `simulation_tick` 12 ms'nin ~9'u, `endFrame()` → `synchronize()`
+host fence'iydi. Tek kuyrukta önündeki raster karesini de bekliyordu; sonrasında CPU kareyi bitirirken GPU boş kalıyordu.
+Değişiklik (Player'a özel, `SimulationClockInput::defer_compute_submit`; Studio aynı):
+sim adımı kaydı açık bırakır → ıslak boya aynı tampona yazar → tick sonunda `submitAsync()` (`simulation.compute_submit`).
+Staging artık yuva başına ve fence'te geri sarılıyor. İki bariyer: sim kaydının başında `ALL_COMMANDS` (raster okumalarına
+karşı WAR), raster karesinin başında compute/transfer → grafik okuma.
+Dokunulan: `SimulationCompute.h` (yeni sanal metot → TAM), `SimulationCompute.cpp`, `SimulationComputeVulkan.cpp`,
+`RuntimeSimulationClock.h/.cpp`, `RuntimeSceneViewer.cpp`, `RasterViewportFrameRing.cpp`.
+
+1. **Ölçüm (önce, bağımsız):** Player balon sahnesi, 1080p:
+   `scripts/test/Measure-PlayerGpuPasses.ps1 -PopBalloons 10 -SkipComputeTiming` (IPC patlatır, insan gerekmez).
+   Önce: patlama ~63 kare/sn, `simulation.timeline` ~9,4 ms, `simulation_tick` ~12 ms. Beklenen: timeline 1–2 ms'ye
+   düşer, bekleme raster `slot_wait`'e taşınır, kare/sn ~75–85. Değişmediyse: kare içinde başka bir `synchronize()`
+   var (bak: `endTransferBatch` downloads, `paint.wet.coverage` ~2/sn).
+2. **Görüntü:** balon patlarken damlalar titremeden, bir kare geriden değil aynı anda görünür. Islak boya izleri yerinde.
+   ★ **SİNSİ:** bariyer eksikse damlalar tek tek karelerde yanlış yerde (yarı yazılmış konum) çakar; ekran görüntüsünde
+   değil, hareket halinde görülür. Kayıt al, kare kare bak. Sync validation açıksa 0 hazard olmalı.
+3. **Uzun koşu (10 dk otomatik patlatma):** `perf.list`'te bellek sabit. Staging artık fence'te geri sarılıyor;
+   büyüme varsa yuva imleci serbest bırakılmıyor demektir. Device lost OLMAMALI (kırıntı izi açık).
+4. **Studio aynı davranmalı** (bayrak kapalı): sıvı/gaz sahnesi, pause/play kenarı, önbellek geri yükleme.
+5. **Android (APK):** tablet/telefon patlama kare/sn önce/sonra. TBDR'de kazanç PC'den büyük beklenir (host fence boru
+   hattını boşaltıyordu); ölçülmeden sayı yok.
+
+## ★★★ T2 cam specialization (2026-11-23 gece, Claude) — TAM DERLEME
+
+⚠ **YAYGIN STRUCT DEĞİŞTİ:** `RasterAppliedState` (+`material_spec_glass`; IBackend.h/VulkanBackend.h üzerinden her yerde)
+ve `rtapi::RasterTimingInfo` (RtApi.h). Artımlı derleme eski .obj bırakırsa `frame_timings` okumasında erişim ihlali
+kod hatası gibi görünür → **TAM** Studio + Player derlemesi (zaten bekleyen tam derlemeyle aynı seferde).
+`material_preview_frag`/`_covered` SPV dağıtıldı (`sdf_surface`/`volume` aynı kaynaktan yeniden derlendi, içerik
+değişmedi). Eski exe ile güvenli: host 3 sabit gönderir, cam sabiti (id 3) varsayılan `true` kalır.
+malioc Mali-G52, workshop spec (terrain/graph/hava kapalı): cam açık 432 B stack · A 403 · LS 322 · T 302 →
+cam kapalı **336 B · A 242 · LS 209 · T 236**. Tam açık 1376 B (değişmedi).
+PCF `textureGather` (T2-3) denendi ve GERİ ALINDI: Mali'de +224 B stack, LS +24, bit-aynı da değil (plan notu).
+
+1. **Önce: piksel kapısı (Windows Player, TAA kapalı, `three_point` ve `scene`, camsız sahne).** Önce/sonra karesi
+   bit-aynı olmalı (fark 0): cam kapalıyken shader transmission/kabarcık/Interior Depth'i zaten 0 olan değerlere
+   zorluyor. Fark varsa maske kanıtı ile shader kapısı ayrışmış demektir; önce `feature_spec.glass` değerine bak.
+2. **`viewport.frame_timings` → `applied.feature_spec.glass`.** Camsız sahnede (`workshop`) `false`. Studio'da bir
+   malzemeye `transmission>0` verince bir sonraki karede `true`, `rebuilds` +1, log
+   `[MaterialSpec] material pipeline rebuilt for ...glass`. Alan yoksa → eski exe/eski obj.
+3. **Cam açılınca görüntü, altı giriş ayrı ayrı:** transmission skaler, transmission dokusu, opaklık<0.99 (eski cam),
+   kabarcık (`bubble`), Interior Depth (`transmission_density`), Material Graph. Her biri ilk karede cam çizmeli.
+   ★ **SİNSİ:** maske birini kaçırırsa o malzeme hatasız **opak** çizilir ve "makul" görünür. Kaçmaya en yatkın
+   ikisi: yalnız opaklığı düşük eski cam ve yalnız Interior Depth girilmiş reçine.
+4. **Camı kaldır → ~240 kare sonra** `glass=false` ve bir rebuild daha. Hemen düşmemesi doğru (debounce).
+5. **Lenovo/Mali (APK, sonra):** camsız `workshop`'ta `main_pass` ms önce/sonra.
+
+## ★★ T2-1 adım 2: Android swapchain sunumu (2026-11-23 akşam, Claude + Sonnet alt ajan) — Windows ARTIMLI + APK
+
+Android Player artık Windows ile aynı yoldan sunuyor: `PlayerSwapchainPresenter` (Vulkan swapchain + ImGui_ImplVulkan),
+SDL_Renderer yok, kare başına 4 kopya yok. Android'e özgü kısım:
+(a) `preTransform=IDENTITY`. Telefonun doğal yönü dikey olduğundan döndürmeyi compositor yapıyor; bu yüzden gelen
+`VK_SUBOPTIMAL_KHR` yeniden kurulum TETİKLEMEZ.
+(b) FIFO.
+(c) `SDL_APP_*BACKGROUND` → swapchain bırakılır; `DIDENTERFOREGROUND` → yeni native window için VkSurface yeniden
+kurulur.
+(d) "GPU desteklenmiyor" ve device lost artık yerel diyalog; son 20 hata/uyarı satırını (kırıntı izi dahil) içerir.
+Diyalog kapanınca uygulama çıkar.
+NDK arm64 -fsyntax-only: değişen 13 dosya PASS. MSVC /Zs: 10 dosya PASS, VulkanBackend.cpp kontrol ortamında
+ffx başlık yolu yüzünden koşmadı (yalnız koruma satırları değişti).
+
+1. **Windows Player artımlı derle (önce).** Açılış, F2 tıklama, F11, boyutlandırma: bir önceki partiyle aynı davranmalı.
+   Değişen Windows kodu: PlayerMain'in başlangıç-notu sınıflandırması (`classifyStartupNotice`). Bozuksa: Windows'ta
+   sahne hatası notu görünmüyor ya da çift görünüyor.
+2. **APK (`-Scenes pastel-paint-workshop`) → Lenovo tablet.** Oyun açılır, görüntü eskisiyle aynı. Kütüphane küçük resimleri,
+   logo, çocuk başlatıcısı görünür; dokunma çalışır. `viewport.frame_timings.present_path=swapchain`,
+   `frame_telemetry.host_read_ms≈0`. Ana ekrana çık + geri dön, ekranı kapat + aç: görüntü geri gelmeli (yüzey
+   yeniden kurulumu). Bozuksa (siyah ekran, ses devam ediyor): `onForeground` sonrası yüzey kurulamıyor → logcat
+   "Player swapchain" / "surface".
+3. **Telefonda (doğal yönü dikey) döndürme.** Görüntü yatay ve doğru yönde olmalı, ters ya da yan değil.
+   LandscapeLeft ↔ Right çevir. FPS düşmemeli: her kare yeniden kurulum olursa takılır (SUBOPTIMAL kapısı).
+4. **Omix.** Device lost tekrarlarsa artık ImGui ekranı değil, yerel diyalog çıkar. Diyalogdaki `[GpuBreadcrumb]`
+   satırlarının ekran görüntüsünü iste (`one_shot ... FIRST UNRETIRED` satırı asıl hedef).
+
+★ En sinsi: tablette (doğal yönü yatay) her şey doğru görünür, telefonda döndürme yanlış ya da kare başına yeniden
+kurulum çıkar. 2 ve 3 AYRI cihazlarda doğrulanmalı. Tablet PASS'i telefonu kanıtlamaz.
+★ Android'de readback yalnız capture için; `viewport.get_screenshot` hâlâ çalışmalı (A6 ölçüm betikleri buna bağlı).
+
+## ★ T2-1 Windows: F2 konsolu girdi almıyor — DÜZELTİLDİ (2026-11-23 akşam, Claude) — ARTIMLI (tek .cpp)
+
+Belirti (kullanıcı + canlı tekrar): F2 konsolu görünüyor ama tıklama ve üzerine gelme çalışmıyor; önce tam ekranda,
+sonra pencere modunda da. Canlı ölçüm: `console.status` tıklamadan önce de sonra da `page=games`; düğme rengi
+üzerine gelince değişmiyor; ekran güncelleniyor (sunum çalışıyor).
+Kök: `PlayerSwapchainPresenter::clearSwapchain()` her swapchain yeniden kurulumunda `ImGui_ImplVulkan_Shutdown()`
+çağırıyordu. Bu ImGui'de (docking) Shutdown → `DestroyPlatformWindows()` ana viewport'un `PlatformHandle`'ını NULL
+yapıyor. `imgui_impl_sdl2` her olayı pencere kimliğiyle `FindViewportByPlatformHandle` üzerinden arıyor, bulamayınca
+olayı atıyor. İlk boyut / tam ekran / küçültme değişiminden sonra girdi kalıcı olarak ölüyordu.
+Düzeltme: ImGui arka ucu ve UI render pass'i swapchain yeniden kurulumunda KORUNUYOR, yalnız yüzey biçimi değişirse
+yeniden kuruluyor. O yolda ve kapanışta (`releaseUiRenderer`) ana viewport handle'ı geri yazılıyor. MSVC /Zs PASS.
+
+1. **Player'ı artımlı derle → aç → F2 → bir düğmeye tıkla.** Çalışmalı.
+2. **F11 tam ekran ↔ pencere, pencereyi boyutlandır, küçült/geri aç → F2'de tekrar tıkla.** Her adımdan sonra çalışmalı.
+   Bozuksa: yeniden kurulumda ImGui yine kapanıyor (log'da "Player UI render pass" tekrarları).
+3. **Kütüphane küçük resimleri ve logo** yeniden kurulumdan sonra da görünmeli (eskiden ImGui ile birlikte yok oluyordu).
+
+★ Sinsi: konsol GÖRÜNÜR olduğu için "donmuş" sanılır; asıl ölçüt `player.operator console.status` sayfasının tıklamayla
+değişmesidir.
+
+**Ayrı gözlem (kullanıcı, iş açılmadı):** 720p tam ekranda boşta ~170 FPS (CPU kare yuvası bekliyor); boyama
+başlayınca bekleme kayboluyor ve FPS ~80'e iniyor. Yani boyama sırasında darboğaz CPU. Codex'in ölçümü:
+`advance` ~10 ms = sim tick 5,5 + billboard yükleme ~3 ms. Sıradaki optimizasyon adayı.
+
+## ★ Omix 2. tur: kırıntı izi genişletildi + Mali stack düzeltmesi (2026-11-23 akşam, Claude) — ARTIMLI derleme
+
+**Omix sonucu (1. iz):** `raster_frame` 2. karenin 8/8 aşamasını, `sim_compute` 21. submit'in 20/20 dispatch'ini
+bitirmiş. İzlenen işlerin HİÇBİRİ asılmadı. Kayıp ya tampon kuyruklarında (raster readback kopyası, sim indirmeleri)
+ya da izlenmeyen bir submit'te. Akustik geçiş elendi (TLAS ister, Mali'de yok).
+**Eklenen:** (a) `one_shot` izi: `endSingleTimeCommands`/`Async` (~160 çağrı yeri: yükleme, mip, IBL, sıkıştırma),
+etiket = çağıran fonksiyonun adı (Android `dladdr`+demangle; Windows'ta adres). (b) Raster ve sim tamponlarının
+SONUNA `<end>` işareti: "o submit BİTTİ" ile "kuyruğu bilinmiyor" artık ayrılıyor. (c) Rapor ilk bitmemiş
+submit'in etiketini basar (`FIRST UNRETIRED`). NDK arm64 -fsyntax-only PASS (5 dosya). MSVC /Zs çalıştırılmadı.
+
+**Shader (aynı APK'ya girer):** `material_preview_frag` + `_covered`, Mali stack. Workshop yapılandırmasında
+704 → 432 B (spill 424 → 376, alloca 280 → 56); tam yapılandırmada 1664 → 1376 B. Değişiklik iki parça:
+- Stüdyo/matcap ışık dizileri (`lightDirs[3]` …) yardımcı fonksiyonlara alındı.
+- Dispersiyonda dinamik vektör indeksi yerine seçim (`channel==0 ? v.x : …`) kullanıldı.
+
+Formüller aynı. SPV üç yere dağıtıldı (source, x64/Release/shaders, shaders_vk11).
+
+1. ✔ **PASS (2026-11-23, Claude, workshop 1280×720, TAA kapalı).** `three_point`: eski ve yeni SPV aynı anda alınan kare **921.600/921.600 piksel bit-aynı**. `scene`: sahne canlı (aynı çalışmada 1 sn arayla kare farkı ort. 13). İki çalışmada da hareketsiz kalan 489 bin pikselin 25'i en fazla 2 seviye farklı; kümeler boya/parçacık bölgesinde. Dispersiyon yolu bu sahnede çalışmıyor (`dispersion` alanı yok), doğruluğu kod okumasına dayanıyor. Eski metin:
+   **Windows piksel kapısı (en önce, C++ derlemesi gerektirmez).** Player'ı kapatıp eski SPV ile bir kare,
+   yeni SPV ile aynı kare alın (`git stash` gerekmez: eski SPV = HEAD'deki `material_preview_frag.spv`).
+   `lighting_preset` 0 (stüdyo) ve 2/diğer (matcap) ile ayrı ayrı alın, çünkü değişen kod yalnız bu ön ayarlarda çalışıyor.
+   Beklenen: fark 0. Fark varsa yalnız ışık yönünde olur: `normalize(sabit)` derleme anı ile çalışma anı farkı. SPV'yi geri alın, söyleyin.
+2. **Windows regresyon.** Studio + Player açılır, logda `[GpuBreadcrumb]` YOK (NVIDIA device_fault'lu).
+   ✔ **PASS Player (2026-11-23, Claude, 16:06 exe, RTX 3060, workshop 1280×720, 10 sn pencere):** normal çalışmada
+   `[GpuBreadcrumb]` satırı yok, ERROR 0. `RAYTROPHI_GPU_BREADCRUMBS=1` ile üç iz açılıyor (`one_shot`, `sim_compute`,
+   `raster_frame`), ERROR 0. İz maliyeti: raster GPU ort. 6,82 → 6,95 ms (+0,13 ms, ~%2), p95 7,90 → 8,05 ms.
+   Aşamalar: main_pass 2,45, transmission 2,54, rt_shadow 1,10 ms. Studio açılmadı.
+3. **Omix APK.** `-Scenes pastel-paint-workshop` ile paketle, gönder. Kayıpta beklenen satırlar:
+   `raster_frame ... 'readback_copy <end>'; that submission FINISHED` (veya kuyrukta takıldı),
+   `sim_compute ... '<end>'`, ve asıl yeni satır `one_shot: ... FIRST UNRETIRED submission N '<fonksiyon adı> <end>'`.
+   O fonksiyon adı suçlu submit'i söyler (ör. `VulkanRT::VulkanDevice::generateMipmaps`, IBL ön süzme).
+
+★ En sinsi: üç iz de "FINISHED" derse kayıp izlenmeyen kalan yoldadır: `submitDenoiserCopyAsync`,
+`submitTraceTonemapAsync`, bulut parametre submit'i, sim kopya submit'i. "İz temiz, sorun yok" diye okumayın.
+
+## ★ Omix X700 device lost: GPU kırıntı izi (2026-11-23, Claude) — ARTIMLI derleme
+
+Belirti: Omix X700 (Mali-G76, Vulkan 1.1) 13:01 APK'sında `VK_ERROR_DEVICE_LOST`, "observed at
+RasterViewportFrameRing.cpp:489". Bu yalnız kaybı FARK EDEN fence beklemesi; sebep değil. Mali'de
+`VK_EXT_device_fault` yok. Yeni `Backend/VulkanGpuBreadcrumbs` her geçiş sınırında tam bariyer +
+`vkCmdFillBuffer` ile host-coherent bir sözcüğe "buraya kadar bitti" yazar; kayıpta hata ekranına
+`[GpuBreadcrumb] raster_frame: ... STUCK IN the work between 'X' and 'Y'` ve aynısını `sim_compute`
+(dispatch etiketiyle) için basar. Yalnız device_fault OLMAYAN cihazda açılır (RTX'te kapalı);
+`RAYTROPHI_GPU_BREADCRUMBS=1/0` zorlar. Yeni .cpp: Studio vcxproj + Player/Android üretildi.
+NDK arm64 -fsyntax-only PASS (4 dosya).
+
+1. **Windows regresyon (en hızlı).** Studio + Player normal açılmalı; logda `[GpuBreadcrumb]` satırı
+   OLMAMALI (NVIDIA device_fault'lu). Varsa kapı yanlış: cihaz fault kaydına girmemiş.
+2. **Windows zorlamalı.** `$env:RAYTROPHI_GPU_BREADCRUMBS=1` ile Player'ı aç: logda iki `trail on`
+   (raster_frame, sim_compute), görüntü ve boya aynı. Bozuksa (siyah/titreme) bariyer bir render pass
+   içinde kaydediliyor demektir — validation'da `vkCmdFillBuffer ... inside render pass` arayın.
+3. **Lenovo Mali (device_fault yok → iz AÇIK).** Kare süresi önceki ölçüme göre belirgin artmamalı
+   (raster ~10 bariyer/kare, sim dispatch başına 1). Belirgin artış = izin maliyeti; ölçün, söyleyin.
+4. **Omix APK (asıl hedef).** `.\scripts\Build-PlayerApk.ps1 -Abi arm64`, arkadaşa gönder. Kayıp
+   tekrarlarsa ekran görüntüsündeki `[GpuBreadcrumb]` iki satırı sebebi daraltır:
+   - `raster_frame ... between 'frame_start' and ...` → o karenin ilk işi; `never reached its first mark`
+     → kareden ÖNCEKİ iş (çoğunlukla sim_compute satırına bakın).
+   - `between 'TransmissionPrep' (veya 'ScreenGiFilter') and ...` → HDR sahne render pass'i
+     (sky/depth/main/volume) — en olası aday ana malzeme shader'ı.
+   - `sim_compute ... between 'A' and 'B'` → B etiketli compute çekirdeği.
+
+★ En sinsi: iz satırı HİÇ çıkmazsa (yalnız eski `[DeviceFault] no device ...` satırı) APK eski
+derlemedir ya da iz açılamadı (`trail off` uyarısına bakın) — "kırıntı boş" diye OKUMAYIN.
+
+## Canlı billboard vertex tamponları (2026-11-23)
+
+1. Ortak Vulkan başlığı değiştiği için Windows Player ve Studio'yu yeniden
+   derleyin. Aynı 1280×720 Jolt açık sahnede compute timestamp kapalıyken
+   11 patlama ve ıslak duvar penceresini tekrar ölçün.
+2. `viewport.particle_billboards.vertex_write` kare yuvasına yazılan CPU
+   quad verisinin duvar saati süresini verir. Önceki yoğun pencerede
+   `viewport.particle_billboards.upload` 327 çağrı / 163 iterasyonda
+   2,97 ms/iterasyondu. Yeni `upload` sayacı küre ve LUT gibi paylaşılan
+   tamponları kapsar. Kare kaydı maliyetine taşınan `vertex_write` süresini
+   karşılaştırmaya dahil edin.
+3. Alpha ve additive efektlerin birlikte görünmesini, son efekt söndüğünde
+   kadrajda eski quad kalmamasını ve yeni patlamada kapasite artışını kontrol
+   edin. Pencereyi yeniden boyutlandırın, başka sahne açın ve canlı efekt
+   varken capture ile senkron sunumu deneyin. Studio Solid/Matcap'te küre
+   impostor ve device-pulled parçacıkların görünümünü de kontrol edin.
+4. `player.advance.simulation_tick` içinde `simulation.balloon_demo`,
+   `simulation.timeline` ve `simulation.wet_paint` CPU sürelerini ayrı
+   okuyun. Bunlar tick toplamına dahildir. `paint.wet.stats_collect`
+   ise `simulation.wet_paint` içinde gerçekleşir.
+
+## Islak boya ve billboard bekleme ölçümü (2026-11-23)
+
+1. Kullanıcı Player Release x64 artımlı derlemesinden sonra Gizli Renkler'i
+   1280×720'de açın. Jolt ayarını sabit tutun ve FPS sınırını kapatın.
+2. `scripts/test/Measure-PlayerGpuPasses.ps1 -SkipComputeTiming` ile boşta
+   ve arka arkaya 11 patlamada ölçün. Bir sonraki pencerede patlatmadan,
+   duvarlar hâlâ ıslakken aynı ölçümü alın.
+3. `player.advance.simulation_tick` ortak simülasyon tick'inin CPU duvar
+   saatini ölçer. `viewport.particle_billboards.build` CPU'da çizim
+   verisinin hazırlığını, `viewport.particle_billboards.upload` gerçek
+   tampon yükleme çağrılarını ölçer. Bir karede birden fazla yükleme
+   olabildiği için `TotalMs` üzerinden karşılaştırın.
+4. `paint.wet.stats_collect` önceki boya istatistiklerinin fence beklemesi
+   ve hosta kopyasını, `viewport.particle_billboards.drain` billboard
+   tamponu veya descriptor yazımından önce uçuşta olan render işini
+   boşaltma süresini ölçer. `perf.list` ve `rt.perf.list()` aynı
+   kayıtları verir. Betikte `Samples` ve `TotalMs` pencere farkıdır.
+   CPU sayaçları oturum boyunca biriktiğinden pencere p95/tepe alanları boştur.
+5. `paint.wet.stats_collect` simülasyon tick'inin içindedir. İkisini toplamayın.
+   Boşta sayaçlar hiç çağrılmadıysa boş değer beklenir. CPU duvar saati
+   sürelerini GPU timestamp süreleriyle toplamayın. GPU çekirdek tablosu
+   için betiği `-SkipComputeTiming` olmadan ayrı çalıştırın.
+
+## Islak boya channels aktif tile listesi (2026-11-23)
+
+1. Ortak `ComputeDispatch` düzeni değiştiği için Studio/Player'ı yeniden
+   derleyin. Vulkan 1.2 shader source ve Release dizinlerinde, Vulkan 1.1
+   shader Android staging dizininde hazır. Android APK'yı güncellerken
+   staging'i çalıştırın.
+2. 1280×720'de aynı kamera, Jolt ve boya ayarlarıyla az boyalı ve çoğu
+   duvarı hâlâ ıslak sahneleri ayrı ölçün.
+   `scripts/test/Measure-PlayerGpuPasses.ps1` çıktısında
+   `paint_wet.channels_compact` + `paint_wet.channels` toplamını önceki
+   `paint_wet.channels` ile karşılaştırın. Yalnız `channels` satırına
+   bakmak liste hazırlama maliyetini gizler.
+3. Damlalar tile kenarını geçerken roughness, normal, kabartı ve opaklığı
+   gözleyin. Boyayı temizleyip yeniden patlatın. Sonra boya dururken height
+   veya normal kanalını değiştirin. Zorunlu kanal yenilemesi tüm atlası
+   güncellemeli. Hatada `dispatch_failed` ve `device_lost` durumuna bakın.
+
+## Balon patlamasında damla slotları (2026-11-23)
+
+1. Güncel Player ile Gizli Renkler sahnesinde önce tek balon, sonra ısınmış
+   sahnede yaklaşık 300 ms arayla 11 balon patlatın. Full HD karşılaştırmasında
+   `spawn_ms`, `spawn_timing.particle_enqueue_sample_ms / sampled_drops` ve
+   en uzun kare aralığını izleyin. Önceki ısınmış tepe 20,95 ms ve bu olayın
+   örneklenen damla başına CPU kuyruğa ekleme süresi 3,74 µs idi.
+2. Sürpriz balonda çoklu renkleri, peş peşe patlamada damla sayısını ve
+   damlalar kaybolduktan sonra yeniden patlatıldığında boya ve efektleri
+   kontrol edin. Slot sırası, CPU doğrulaması ve GPU resident yazıları
+   standart tekli spawn yoluyla aynı olmalı.
+3. Yalnız Gizli Renkler içeren imzalı APK için
+   `scripts/Build-PlayerApk.ps1 -Scenes pastel-paint-workshop` çalıştırın.
+   Tek sahne seçimi APK varlık listesini ve sahne manifestini birlikte üretir.
+
+## Android Vulkan hata ekranı ve ekran görüntüsü (2026-11-23)
+
+1. Omix X700’da yeni APK ile aynı sahneyi açın. Vulkan aygıtı kaybolursa HUD
+   kapalıyken de `VK_ERROR_DEVICE_LOST` ve sürücünün hata döndürdüğü işlem
+   ekranda görünmeli. İşlem bilgisi varsa mevcut Player runtime durumunda
+   `device_lost_reason` olarak da okunur.
+2. Hata ekranında ekran görüntüsü tuşlarını kullanın. Uygulama odağı geçici
+   kaybolup geri geldiğinde duraklatma menüsü ekranı örtmemeli. Android Geri
+   tuşu hata ekranının üstüne oyun menüsünü açmamalı.
+3. Sağlıklı bir sahnede Geri ile menüyü açın ve Devam ile oyuna dönün.
+   Desteklenmeyen GPU’da ret mesajının ve dokunarak açılan log bölümünün
+   okunabildiğini kontrol edin.
+
+Bu kabul, Vulkan aygıt kaybının altında yatan sürücü veya GPU sorunundan
+bağımsız olarak hata ekranını sınar.
+
 > **★ TAM DERLEME ŞART (2026-11-22, Claude) — ve ESKİ EXE'Yİ ÇALIŞTIRMA.**
 > `ImageHandle` düzeni değişti (`arrayLayer`, `sharedImage`; `VulkanBackend.h` her yerde) →
 > Rebuild, artımlı değil. **Viewport SPIR-V'si yeni ABI ile DAĞITILDI** (8 modül, iki yerde):

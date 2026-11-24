@@ -15,6 +15,8 @@ struct ImageHandle;
 
 namespace Backend {
 
+class ParticleBillboardFrameBuffer;
+
 // Two-slot raster presentation scheduler. It mirrors the proven Vulkan RT
 // submit/consume ownership model without coupling raster recording to RT passes:
 // GPU writes slot N while the host consumes the newest completed older slot.
@@ -53,12 +55,13 @@ public:
     // Returns an already-begun persistent command buffer. slotWaitMs measures
     // the bounded wait needed only when both GPU slots are still occupied.
     VkCommandBuffer beginFrame(double* slotWaitMs = nullptr);
+    ParticleBillboardFrameBuffer* recordingBillboards(VkCommandBuffer commands);
 
-    // Appends GENERAL -> TRANSFER_SRC -> readback -> GENERAL to the same command
-    // buffer as raster rendering, then submits without a host wait. submitMs
-    // measures the vkQueueSubmit itself, which must NOT include a fence wait.
+    // Optionally captures the raster output in the same command buffer,
+    // restoring GENERAL before submission. submitMs measures only vkQueueSubmit.
     bool submitFrame(const VulkanRT::ImageHandle& colorImage,
-                     double* submitMs = nullptr);
+                     double* submitMs = nullptr,
+                     bool captureReadback = true);
     bool submitAcousticOnly();
 
     // Copies the newest completed, not-yet-consumed slot to dst. Never waits.

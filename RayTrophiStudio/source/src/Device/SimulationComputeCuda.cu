@@ -1866,7 +1866,7 @@ public:
     bool supportsDispatch() const override { return true; }
 
     bool dispatch(const ComputeDispatch& cmd) override {
-        if (!cmd.kernel) return false;
+        if (!cmd.kernel || cmd.indirect_groups.valid()) return false;
         const std::string kernel = cmd.kernel;
 
         if (kernel == "sim_grid_advect_scalar") {

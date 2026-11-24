@@ -84,6 +84,9 @@
     <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp">
       <Filter>external\imgui</Filter>
     </ClCompile>
+    <ClCompile Include="external\imgui\imgui_impl_vulkan.cpp">
+      <Filter>external\imgui</Filter>
+    </ClCompile>
     <ClCompile Include="external\imgui\imgui_tables.cpp">
       <Filter>external\imgui</Filter>
     </ClCompile>
@@ -1243,6 +1246,9 @@
       <Filter>source\src\Backend</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp">
+      <Filter>source\src\Backend</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Backend\VulkanGpuBreadcrumbs.cpp">
       <Filter>source\src\Backend</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Backend\VulkanLensWeather.cpp">
@@ -2605,6 +2611,9 @@
       <Filter>source\src\Viewport</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\ObjectPick.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\PlayerSwapchainPresenter.cpp">
       <Filter>source\src\Viewport</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\RasterGpuCull.cpp">

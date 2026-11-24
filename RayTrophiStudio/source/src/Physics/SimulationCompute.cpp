@@ -247,6 +247,10 @@ void SimulationComputeContext::endFrame() {
     backend_->endFrame();
 }
 
+void SimulationComputeContext::setDeferFrameSubmit(bool defer) {
+    backend_->setDeferFrameSubmit(defer);
+}
+
 void SimulationComputeContext::synchronize() {
     if (!transfer_probe_) {
         backend_->synchronize();

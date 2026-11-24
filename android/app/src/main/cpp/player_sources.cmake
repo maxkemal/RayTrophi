@@ -54,13 +54,14 @@ set(RT_DEP_LIST RT_SDL2_DIR RT_SDL2_IMAGE_DIR)
 set(RT_DEP_RT_SDL2_DIR_TARGET SDL2)
 set(RT_DEP_RT_SDL2_IMAGE_DIR_TARGET SDL2_image)
 
-# Player sources (860, of which 5 are Android stubs).
+# Player sources (863, of which 5 are Android stubs).
 set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/external/imgui-knobs/imgui-knobs.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui_draw.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui_impl_sdl2.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui_impl_sdlrenderer2.cpp"
+    "${RT_PROJECT_DIR}/external/imgui/imgui_impl_vulkan.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui_tables.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui_widgets.cpp"
     "${RT_PROJECT_DIR}/external/JoltPhysics/Jolt/AABBTree/AABBTreeBuilder.cpp"
@@ -446,6 +447,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanDevicePipelines.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanFsrLoader.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanFsrUpscaler.cpp"
+    "${RT_PROJECT_DIR}/source/src/Backend/VulkanGpuBreadcrumbs.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanLensWeather.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanMaterialTextureBinding.cpp"
     "${RT_PROJECT_DIR}/source/src/Backend/VulkanMaterialTextureStorage.cpp"
@@ -898,6 +900,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Viewport/MaterialPreviewVolume.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/MaterialPreviewVolumeShadow.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/ObjectPick.cpp"
+    "${RT_PROJECT_DIR}/source/src/Viewport/PlayerSwapchainPresenter.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/RasterGpuCull.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/RasterGpuTimers.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/RasterInstanceUpload.cpp"

@@ -8,6 +8,7 @@
 //   other, and nobody would report that as a bug.
 
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanGpuBreadcrumbs.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -15,9 +16,48 @@
 
 namespace Backend {
 
+namespace {
+// One raster viewport per process. Not a member of the adapter so a
+// diagnostic does not change VulkanBackend.h (a full rebuild). Freed per device
+// by releaseGpuBreadcrumbs() before vkDestroyDevice.
+VulkanRT::GpuBreadcrumbTrail& g_rasterBreadcrumbs = VulkanRT::rasterFrameBreadcrumbs();
+
+// vkCmdFillBuffer is illegal inside a render pass, and these are the stage
+// boundaries that sit OUTSIDE one on every path. Sky, DepthPrepass, MainPass
+// and VolumeSdf are inside render passes, so "stuck between TransmissionPrep
+// (or ScreenGiFilter) and the next mark" means the HDR scene pass itself.
+bool rasterStageMarkIsOutsideRenderPass(RasterStage stage) {
+    switch (stage) {
+        case RasterStage::GpuCull:
+        case RasterStage::ShadowAtlas:
+        case RasterStage::TransmissionPrep:
+        // Compute dispatches between the depth prepass and the main pass:
+        // marked by their own recorders right after vkCmdDispatch.
+        case RasterStage::RtShadow:
+        case RasterStage::ScreenGiTrace:
+        case RasterStage::ScreenGiFilter:
+        case RasterStage::Reflection:
+        case RasterStage::ReflectionFilter:
+        case RasterStage::Transmission:
+        case RasterStage::Taa:
+        case RasterStage::Post:
+        case RasterStage::Overlay:
+            return true;
+        default:
+            return false;
+    }
+}
+} // namespace
+
 void VulkanBackendAdapter::beginRasterStageTimings(VkCommandBuffer cmd) {
     m_rasterCpuStageMs.fill(0.0);
     if (!m_device || cmd == VK_NULL_HANDLE) return;
+    if (g_rasterBreadcrumbs.ensure(m_device->getPhysicalDevice(), m_device->getDevice())) {
+        g_rasterBreadcrumbs.beginSubmit();
+        // "Everything queued before this frame retired" -- a loss that never
+        // gets past this mark was caused by earlier work on the queue.
+        g_rasterBreadcrumbs.mark(cmd, "frame_start");
+    }
     m_rasterGpuTimers.ensure(*m_device);
     m_rasterGpuTimers.beginFrame(cmd);
     m_rasterStageClock = std::chrono::steady_clock::now();
@@ -38,6 +78,8 @@ void VulkanBackendAdapter::markRasterStage(VkCommandBuffer cmd, RasterStage stag
     }
     m_rasterStageClock = now;
     m_rasterGpuTimers.mark(cmd, stage, ran);
+    if (ran && rasterStageMarkIsOutsideRenderPass(stage))
+        g_rasterBreadcrumbs.mark(cmd, rasterStageName(stage));
 }
 
 RasterAppliedState VulkanBackendAdapter::sampleRasterAppliedState() const {
@@ -114,6 +156,9 @@ void VulkanBackendAdapter::publishRasterStageTimings(VkCommandBuffer cmd,
     // Close the recording slot after reading retired slots. Its GPU reset
     // has not executed yet, so reading it now could return an older frame.
     m_rasterGpuTimers.endFrame(cmd);
+    // The <end> mark and the commit are the frame ring's (after its readback
+    // copy, right before vkQueueSubmit): "all stages retired" alone could not
+    // tell the readback tail from a finished frame.
 
     RasterAppliedState applied = sampleRasterAppliedState();
     applied.visible_triangles = visibleTriangles;

@@ -384,6 +384,7 @@
     <ClCompile Include="external\imgui\imgui_draw.cpp" />
     <ClCompile Include="external\imgui\imgui_impl_sdl2.cpp" />
     <ClCompile Include="external\imgui\imgui_impl_sdlrenderer2.cpp" />
+    <ClCompile Include="external\imgui\imgui_impl_vulkan.cpp" />
     <ClCompile Include="external\imgui\imgui_tables.cpp" />
     <ClCompile Include="external\imgui\imgui_widgets.cpp" />
     <ClCompile Include="external\JoltPhysics\Jolt\AABBTree\AABBTreeBuilder.cpp">
@@ -1672,6 +1673,7 @@
     <ClCompile Include="source\src\Backend\VulkanDevicePipelines.cpp" />
     <ClCompile Include="source\src\Backend\VulkanFsrLoader.cpp" />
     <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp" />
+    <ClCompile Include="source\src\Backend\VulkanGpuBreadcrumbs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanLensWeather.cpp">
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <ExceptionHandling>Sync</ExceptionHandling>
@@ -2401,6 +2403,7 @@
       <ExceptionHandling>Sync</ExceptionHandling>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\ObjectPick.cpp" />
+    <ClCompile Include="source\src\Viewport\PlayerSwapchainPresenter.cpp" />
     <ClCompile Include="source\src\Viewport\RasterGpuCull.cpp" />
     <ClCompile Include="source\src\Viewport\RasterGpuTimers.cpp" />
     <ClCompile Include="source\src\Viewport\RasterInstanceUpload.cpp" />
