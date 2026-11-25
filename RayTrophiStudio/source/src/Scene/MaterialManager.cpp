@@ -5,6 +5,7 @@
 #include "material_gpu.h"
 #include "globals.h"
 #include "ProjectManager.h"
+#include "Paint/WetPaintGpu.h"
 #include <iostream>
 #include <chrono>
 #include <filesystem>
@@ -512,8 +513,23 @@ json MaterialManager::serialize(const std::string& sceneDir) const {
         if (mat->type() == MaterialType::PrincipledBSDF) {
             PrincipledBSDF* pbsdf = dynamic_cast<PrincipledBSDF*>(mat.get());
             if (pbsdf) {
-                // Properties with textures
-                matJson["albedoProperty"] = serializeProperty(pbsdf->albedoProperty, sceneDir);
+                // Properties with textures.
+                // Wet paint surfaces (overlay over a tiled base, or "@base"
+                // hidden picture / live splats): save the clean base texture
+                // instead of the transient canvas so reopening never loses or
+                // white-washes the wall texture.
+                std::shared_ptr<Texture> cleanAlbedo =
+                    Paint::wetPaintGpu().cleanBaseTextureForSave(static_cast<uint16_t>(i));
+                if (!cleanAlbedo && pbsdf->paintBaseTexture) {
+                    cleanAlbedo = pbsdf->paintBaseTexture;
+                }
+                if (cleanAlbedo) {
+                    MaterialProperty baseProp = pbsdf->albedoProperty;
+                    baseProp.texture = cleanAlbedo;
+                    matJson["albedoProperty"] = serializeProperty(baseProp, sceneDir);
+                } else {
+                    matJson["albedoProperty"] = serializeProperty(pbsdf->albedoProperty, sceneDir);
+                }
                 matJson["roughnessProperty"] = serializeProperty(pbsdf->roughnessProperty, sceneDir);
                 matJson["metallicProperty"] = serializeProperty(pbsdf->metallicProperty, sceneDir);
                 matJson["specularProperty"] = serializeProperty(pbsdf->specularProperty, sceneDir);

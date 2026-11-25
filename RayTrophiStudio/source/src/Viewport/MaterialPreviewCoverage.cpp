@@ -1,4 +1,5 @@
 #include "Backend/VulkanBackend.h"
+#include "Viewport/ViewportPipelineCache.h"
 #include "Backend/VulkanViewportBackend.h"
 #include "PerfProfile.h"
 #include "globals.h"
@@ -37,7 +38,9 @@ void VulkanBackendAdapter::createMaterialPreviewCoveredPipeline(
     info.pStages = stages.data();
     info.pDepthStencilState = &depth;
     VkPipeline pipeline = VK_NULL_HANDLE;
-    if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) == VK_SUCCESS) {
+    if (vkCreateGraphicsPipelines(device, Backend::currentViewportPipelineCache(device),
+                                  1, &info, nullptr, &pipeline) == VK_SUCCESS) {
+        Backend::markViewportPipelineCacheDirty(device);
         m_interactiveViewport.materialPreviewCoveredPipeline = pipeline;
         SCENE_LOG_INFO("[Coverage] EQUAL / early-tests material pipeline ready.");
     } else {
@@ -64,8 +67,11 @@ void VulkanBackendAdapter::destroyMaterialPreviewCoveredPipeline() {
 //   bound material; when the CPU copy cannot prove it (external material
 //   buffer, short cache) the bit stays on.
 void VulkanViewportBackend::fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out) {
-    const uint32_t bits[kMpSpecCount] = {kMpSpecTerrain, kMpSpecGraph, kMpSpecWeather,
-                                         kMpSpecGlass};
+    const uint32_t bits[kMpSpecCount] = {
+        kMpSpecTerrain, kMpSpecGraph, kMpSpecWeather, kMpSpecGlass,
+        kMpSpecExtLobes, kMpSpecAltLighting, kMpSpecFallbackSky, kMpSpecRayFusionGi,
+        kMpSpecOptTex, kMpSpecClearcoat
+    };
     for (uint32_t i = 0; i < kMpSpecCount; ++i) {
         out.values[i] = (mask & bits[i]) ? VK_TRUE : VK_FALSE;
         out.entries[i].constantID = i;
@@ -115,20 +121,89 @@ uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
     //     transmission), and transmission_density <= 0.
     // Negated comparisons keep NaN on the "glass" side.
     if (external || m_cachedGpuMaterials.size() < count) {
-        mask |= kMpSpecGlass;
-    } else {
-        for (uint32_t i = 0; i < count; ++i) {
+        mask |= kMpSpecGlass | kMpSpecExtLobes | kMpSpecOptTex | kMpSpecClearcoat;
+    } else if (count > 0u) {
+        auto materialNeedsGlass = [&](uint32_t i) -> bool {
             const auto& m = m_cachedGpuMaterials[i];
             const bool cutout = (m.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u;
-            if (!(m.transmission <= 0.0f) || m.transmission_tex != 0u ||
-                m_rasterMaterialPrograms.hasProgram(i) ||
-                (m.flags & (1u << 19u)) != 0u ||
-                (!cutout && (m.opacity_tex != 0u || !(m.opacity >= 0.99f))) ||
-                !(m.transmission_density <= 0.0f)) {
-                mask |= kMpSpecGlass;
-                break;
+            return !(m.transmission <= 0.0f) || m.transmission_tex != 0u ||
+                   m_rasterMaterialPrograms.hasProgram(i) ||
+                   (m.flags & (1u << 19u)) != 0u ||
+                   (!cutout && (m.opacity_tex != 0u || !(m.opacity >= 0.99f))) ||
+                   !(m.transmission_density <= 0.0f);
+        };
+        auto materialNeedsExtLobes = [&](uint32_t i) -> bool {
+            const auto& m = m_cachedGpuMaterials[i];
+            return !(m.sheen <= 0.0f) ||
+                   !(m.subsurface_amount <= 0.0f) ||
+                   !(m.translucent <= 0.0f) ||
+                   !(m.micro_detail_strength <= 0.0f) ||
+                   !(m.tile_break_strength <= 0.0f) ||
+                   m_rasterMaterialPrograms.hasProgram(i);
+        };
+        auto materialNeedsClearcoat = [&](uint32_t i) -> bool {
+            const auto& m = m_cachedGpuMaterials[i];
+            return !(m.clearcoat <= 0.001f) || m_rasterMaterialPrograms.hasProgram(i);
+        };
+        auto materialNeedsOptTex = [&](uint32_t i) -> bool {
+            const auto& m = m_cachedGpuMaterials[i];
+            return m.metallic_tex != 0u || m.specular_tex != 0u ||
+                   m.emission_tex != 0u || m_rasterMaterialPrograms.hasProgram(i);
+        };
+        constexpr uint32_t kAllMatBits =
+            kMpSpecGlass | kMpSpecExtLobes | kMpSpecOptTex | kMpSpecClearcoat;
+        if (m_rasterMeshes.empty()) {
+            for (uint32_t i = 0; i < count; ++i) {
+                if (materialNeedsGlass(i)) mask |= kMpSpecGlass;
+                if (materialNeedsExtLobes(i)) mask |= kMpSpecExtLobes;
+                if (materialNeedsClearcoat(i)) mask |= kMpSpecClearcoat;
+                if (materialNeedsOptTex(i)) mask |= kMpSpecOptTex;
+                if ((mask & kAllMatBits) == kAllMatBits) {
+                    break;
+                }
+            }
+        } else {
+            // Check only materials referenced by raster meshes so orphan/unused
+            // materials in the table do not force optional branches on Mali-G52.
+            for (const auto& [key, mesh] : m_rasterMeshes) {
+                (void)key;
+                if (mesh.vertexCount == 0u) continue;
+                if (mesh.cpuMatIds.size() < mesh.vertexCount) {
+                    mask |= kAllMatBits;
+                    break;
+                }
+                for (uint32_t encoded : mesh.materialUsage.ids(mesh.cpuMatIds)) {
+                    if ((encoded & 0x80000000u) != 0u) continue;
+                    const uint32_t id = (std::min)(encoded & 0x7fffffffu, count - 1u);
+                    if (materialNeedsGlass(id)) mask |= kMpSpecGlass;
+                    if (materialNeedsExtLobes(id)) mask |= kMpSpecExtLobes;
+                    if (materialNeedsClearcoat(id)) mask |= kMpSpecClearcoat;
+                    if (materialNeedsOptTex(id)) mask |= kMpSpecOptTex;
+                    if ((mask & kAllMatBits) == kAllMatBits) {
+                        break;
+                    }
+                }
+                if ((mask & kAllMatBits) == kAllMatBits) {
+                    break;
+                }
             }
         }
+    }
+    // Alt lighting rigs (three-point, studio, outdoor): off when in Scene lighting (3).
+    if (static_cast<uint32_t>(::render_settings.material_preview_lighting_preset) != 3u) {
+        mask |= kMpSpecAltLighting;
+    }
+    // Unfiltered sky fallback: off once prefiltered IBL is ready for the active world.
+    MaterialPreviewIblStatus iblStatus{};
+    if (!getMaterialPreviewIblStatus(iblStatus) || !iblStatus.ready) {
+        mask |= kMpSpecFallbackSky;
+    }
+    // RayFusion GI / probe visibility / RT screen shadow / volume deep shadow:
+    // off only when the device has no ray query AND the scene has no volumes.
+    const bool hasRayQuery = m_device && m_device->getCapabilities().supportsRayQuery;
+    const bool hasVolumes = m_device && m_device->m_volumeCount > 0u;
+    if (hasRayQuery || hasVolumes) {
+        mask |= kMpSpecRayFusionGi;
     }
     return mask;
 }
@@ -224,7 +299,13 @@ void VulkanViewportBackend::captureMaterialPreviewSpecRecipe(
                    std::to_string((mask & kMpSpecTerrain) != 0) +
                    " graph=" + std::to_string((mask & kMpSpecGraph) != 0) +
                    " weather=" + std::to_string((mask & kMpSpecWeather) != 0) +
-                   " glass=" + std::to_string((mask & kMpSpecGlass) != 0));
+                   " glass=" + std::to_string((mask & kMpSpecGlass) != 0) +
+                   " ext=" + std::to_string((mask & kMpSpecExtLobes) != 0) +
+                   " alt_light=" + std::to_string((mask & kMpSpecAltLighting) != 0) +
+                   " fb_sky=" + std::to_string((mask & kMpSpecFallbackSky) != 0) +
+                   " rf_gi=" + std::to_string((mask & kMpSpecRayFusionGi) != 0) +
+                   " opt_tex=" + std::to_string((mask & kMpSpecOptTex) != 0) +
+                   " cc=" + std::to_string((mask & kMpSpecClearcoat) != 0));
 }
 
 namespace {
@@ -245,6 +326,12 @@ std::string specMaskName(uint32_t mask) {
     if (mask & Backend::VulkanViewportBackend::kMpSpecGraph) name += "graph+";
     if (mask & Backend::VulkanViewportBackend::kMpSpecWeather) name += "weather+";
     if (mask & Backend::VulkanViewportBackend::kMpSpecGlass) name += "glass+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecExtLobes) name += "ext+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecAltLighting) name += "alt_light+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecFallbackSky) name += "fb_sky+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecRayFusionGi) name += "rf_gi+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecOptTex) name += "opt_tex+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecClearcoat) name += "cc+";
     if (name.empty()) return "none";
     name.pop_back();
     return name;
@@ -271,8 +358,13 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
         m_mpSpecShrinkFrames = 0;
     } else if (want != m_mpSpecMask) {
         // Dropping a feature only saves time; wait until the scene settles so
-        // a slider crossing zero does not recompile every frame.
-        if (++m_mpSpecShrinkFrames < 240u) return;
+        // a slider crossing zero does not recompile every frame. Exception:
+        // initial IBL readiness (kMpSpecFallbackSky) is a one-time startup
+        // transition and should take effect immediately rather than waiting 240 frames.
+        const uint32_t dropped = m_mpSpecMask & ~want;
+        const uint32_t shrinkDelay =
+            (m_mpSpecRebuilds == 0u && dropped == kMpSpecFallbackSky) ? 0u : 240u;
+        if (++m_mpSpecShrinkFrames < shrinkDelay) return;
         next = want;
         m_mpSpecShrinkFrames = 0;
     } else {
@@ -319,8 +411,10 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
         VkGraphicsPipelineCreateInfo info = recipe.info;
         info.stageCount = 2;
         info.pStages = stages;
-        const VkResult result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &info, nullptr, &out);
+        const VkResult result = vkCreateGraphicsPipelines(
+            device, Backend::currentViewportPipelineCache(device), 1, &info, nullptr, &out);
         if (result == VK_SUCCESS) {
+            Backend::markViewportPipelineCacheDirty(device);
             // The in-flight frames still read the old pipelines.
             drainInteractiveViewportInFlight();
             if (iv.materialPreviewPipeline) vkDestroyPipeline(device, iv.materialPreviewPipeline, nullptr);
@@ -330,6 +424,7 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
             // Copies stages[1] (and with it the specialization) into the
             // EQUAL / early-tests variant.
             createMaterialPreviewCoveredPipeline(info, recipe.shaderDir);
+            Backend::saveViewportPipelineCache(device);
         }
         return result;
     };

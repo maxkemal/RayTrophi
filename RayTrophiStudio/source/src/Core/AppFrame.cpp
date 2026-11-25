@@ -92,6 +92,14 @@ bool FrameCycle::isForeground() const {
            (flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) == 0;
 }
 
+bool FrameCycle::isMinimized() const {
+    if (!window) {
+        return true;
+    }
+    const Uint32 flags = SDL_GetWindowFlags(window);
+    return (flags & (SDL_WINDOW_MINIMIZED | SDL_WINDOW_HIDDEN)) != 0;
+}
+
 bool FrameCycle::shouldPresent(bool continuous) const {
     return isForeground() && (continuous || redraw_requested_);
 }

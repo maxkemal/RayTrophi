@@ -7973,6 +7973,7 @@ void Renderer::updateBackendMaterials(SceneData& scene, Backend::IBackend* targe
                 data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
                 data.opacityTexture = getH(pbsdf->opacityProperty.texture);
                 data.heightTexture = getH(pbsdf->heightProperty.texture);
+                data.paintBaseTexture = getH(pbsdf->paintBaseTexture);
                 data.metallicTexChannel  = pbsdf->metallic_tex_channel;
                 data.roughnessTexChannel = pbsdf->roughness_tex_channel;
                 progPtr = pbsdf->proceduralProgram.get();
@@ -8184,6 +8185,7 @@ void Renderer::updateBackendMaterial(SceneData& scene, uint16_t material_id, Bac
         data.transmissionTexture = getH(pbsdf->transmissionProperty.texture);
         data.opacityTexture = getH(pbsdf->opacityProperty.texture);
         data.heightTexture = getH(pbsdf->heightProperty.texture);
+        data.paintBaseTexture = getH(pbsdf->paintBaseTexture);
         data.metallicTexChannel  = pbsdf->metallic_tex_channel;
         data.roughnessTexChannel = pbsdf->roughness_tex_channel;
     }

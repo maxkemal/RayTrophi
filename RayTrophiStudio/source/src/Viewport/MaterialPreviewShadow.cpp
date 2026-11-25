@@ -1,5 +1,6 @@
 #include "Viewport/RayFusionViewportPasses.h"
 #include "Backend/VulkanBackend.h"
+#include "Viewport/ViewportPipelineCache.h"
 #include "Viewport/RasterGpuCull.h"
 #include "Viewport/RasterInstanceUpload.h"
 #include "Viewport/MaterialPreviewVolumeShadow.h"
@@ -421,7 +422,10 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
         pci.pColorBlendState = &cb; pci.pDynamicState = &dyn;
         pci.layout = m_interactiveViewport.materialPreviewPipelineLayout;
         pci.renderPass = state->renderPass;
-        return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pci, nullptr, &output) == VK_SUCCESS;
+        const bool ok = vkCreateGraphicsPipelines(
+            device, Backend::currentViewportPipelineCache(device), 1, &pci, nullptr, &output) == VK_SUCCESS;
+        if (ok) Backend::markViewportPipelineCacheDirty(device);
+        return ok;
     };
 
     const bool pipelinesOk = createPipeline(false, state->opaquePipeline) &&
@@ -501,8 +505,11 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
         pci.renderPass = m_interactiveViewport.hdrRenderPass != VK_NULL_HANDLE
                        ? m_interactiveViewport.hdrRenderPass
                        : m_interactiveViewport.renderPass;
-        return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pci, nullptr,
-                                         &state->skyPipeline) == VK_SUCCESS;
+        const bool ok = vkCreateGraphicsPipelines(
+            device, Backend::currentViewportPipelineCache(device), 1, &pci, nullptr,
+            &state->skyPipeline) == VK_SUCCESS;
+        if (ok) Backend::markViewportPipelineCacheDirty(device);
+        return ok;
     };
     const bool skyPipelineOk = pipelinesOk && createSkyPipeline();
     if (opaqueVert) vkDestroyShaderModule(device, opaqueVert, nullptr);

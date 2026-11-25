@@ -78,7 +78,12 @@ json settingsJson(const rtapi::WetPaintSurfaceSettingsInfo& s) {
                 {"reveal_opacity", s.reveal_opacity},
                 {"wet_roughness", s.wet_roughness}, {"dry_roughness", s.dry_roughness},
                 {"height_contribution", s.height_contribution},
-                {"normal_strength", s.normal_strength}};
+                {"normal_strength", s.normal_strength},
+                {"reveal_picture", s.reveal_picture},
+                {"picture_tolerance", s.picture_tolerance},
+                {"picture_hint", s.picture_hint},
+                {"picture_outline", s.picture_outline},
+                {"picture_blank", json::array({s.picture_blank[0], s.picture_blank[1], s.picture_blank[2]})}};
 }
 
 json surfaceJson(const rtapi::WetPaintSurfaceRuntimeInfo& s) {
@@ -88,6 +93,8 @@ json surfaceJson(const rtapi::WetPaintSurfaceRuntimeInfo& s) {
                 {"triangles", s.triangles}, {"active_tiles", s.active_tiles},
                 {"ticked_tiles", s.ticked_tiles}, {"stamped_texels", s.stamped_texels},
                 {"sources_dropped", s.sources_dropped}, {"texture", s.texture},
+                {"canvas_mode", s.canvas_overlay ? "overlay" : "composite"},
+                {"base_texture", s.base_texture},
                 {"settings", settingsJson(s.settings)}};
 }
 
@@ -254,6 +261,28 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
         const float height_contribution = optionalFloat(params, "height_contribution", 0.35f);
         const bool has_normal_strength = params.contains("normal_strength");
         const float normal_strength = optionalFloat(params, "normal_strength", 0.5f);
+        const bool has_reveal_picture = params.contains("reveal_picture");
+        const std::string reveal_picture = optionalString(params, "reveal_picture", "");
+        const bool has_picture_tolerance = params.contains("picture_tolerance");
+        const float picture_tolerance = optionalFloat(params, "picture_tolerance", 30.0f);
+        const bool has_picture_hint = params.contains("picture_hint");
+        const float picture_hint = optionalFloat(params, "picture_hint", 0.0f);
+        const bool has_picture_outline = params.contains("picture_outline");
+        const float picture_outline = optionalFloat(params, "picture_outline", 1.0f);
+        const bool has_picture_blank = params.contains("picture_blank");
+        float picture_blank[3] = {1.0f, 1.0f, 1.0f};
+        if (has_picture_blank) {
+            const auto& pb = params["picture_blank"];
+            bool ok = pb.is_array() && pb.size() == 3;
+            for (size_t i = 0; ok && i < 3; ++i) {
+                ok = pb[i].is_number();
+                if (ok) picture_blank[i] = pb[i].get<float>();
+            }
+            if (!ok) {
+                out_result = json{{"__error", "picture_blank must be an array of 3 numbers in [0, 1]"}};
+                return true;
+            }
+        }
         out_result = enqueue([=](UIContext&) {
             rtapi::WetPaintSurfaceSettingsInfo s;
             const rtapi::Result read = rtapi::getWetPaintSurfaceSettings(object, material_id, s);
@@ -277,6 +306,13 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
             if (has_dry_roughness) s.dry_roughness = dry_roughness;
             if (has_height_contribution) s.height_contribution = height_contribution;
             if (has_normal_strength) s.normal_strength = normal_strength;
+            if (has_reveal_picture) s.reveal_picture = reveal_picture;
+            if (has_picture_tolerance) s.picture_tolerance = picture_tolerance;
+            if (has_picture_hint) s.picture_hint = picture_hint;
+            if (has_picture_outline) s.picture_outline = picture_outline;
+            if (has_picture_blank) {
+                for (int i = 0; i < 3; ++i) s.picture_blank[i] = picture_blank[i];
+            }
             return resultToJson(rtapi::setWetPaintSurfaceSettings(object, material_id, s));
         });
         return true;
@@ -358,6 +394,9 @@ bool dispatchPaintWetIpc(const std::string& method, const json& params,
                                     {"valid_texels", s.valid_texels},
                                     {"wet_texels", s.wet_texels}, {"roughness_texels", s.roughness_texels},
                                          {"normal_texels", s.normal_texels}, {"ratio", s.ratio},
+                                    {"picture_texels", s.picture_texels},
+                                    {"picture_revealed_texels", s.picture_revealed_texels},
+                                    {"picture_ratio", s.picture_ratio},
                                     {"mean_color", {s.mean_color[0], s.mean_color[1], s.mean_color[2]}}});
             }
             return json{{"covered_texels", c.covered_texels}, {"valid_texels", c.valid_texels},

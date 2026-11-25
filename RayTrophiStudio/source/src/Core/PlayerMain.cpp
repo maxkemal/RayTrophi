@@ -25,6 +25,7 @@
 #include "Core/PlayerRenderExtent.h"
 #include "Core/PlayerResolutionMenu.h"
 #include "Core/PlayerOperator.h"
+#include "Core/PlayerGameSettings.h"
 #include "Core/Localization.h"
 #include "Core/PlayerSceneLoad.h"
 #include "Core/PlayerBalloonInput.h"
@@ -694,9 +695,26 @@ void showFatalStartupDialog(const StartupNoticeInfo& info) {
     if (!info.log.empty()) {
         constexpr size_t kMaxLines = 20;
         body += "\n\n" + info.log_title + ":";
-        const size_t first = info.log.size() > kMaxLines ? info.log.size() - kMaxLines : 0;
-        for (size_t i = first; i < info.log.size(); ++i) {
-            body += "\n" + info.log[i];
+        // Print newest lines first (and errors before warnings) so small phone
+        // AlertDialogs immediately show [GpuBreadcrumb] / [Vulkan] errors at the
+        // top instead of burying them under earlier [MatUpload] warnings.
+        std::vector<std::string> errors;
+        std::vector<std::string> warnings;
+        for (auto it = info.log.rbegin(); it != info.log.rend(); ++it) {
+            if (it->rfind("[ERROR]", 0) == 0) {
+                errors.push_back(*it);
+            } else {
+                warnings.push_back(*it);
+            }
+        }
+        size_t shown = 0;
+        for (const std::string& line : errors) {
+            if (shown++ >= kMaxLines) break;
+            body += "\n" + line;
+        }
+        for (const std::string& line : warnings) {
+            if (shown++ >= kMaxLines) break;
+            body += "\n" + line;
         }
     }
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, info.title.c_str(), body.c_str(), window);
@@ -1245,6 +1263,12 @@ int main(int argc, char* argv[]) {
 #else
         viewer->advanceRuntime(dt_seconds);
 #endif
+        if (AppRuntime::playerSceneLoad().busy() &&
+            AppRuntime::playerSceneLoad().stage() == "first_frame") {
+            // Apply saved gameplay settings before
+            // Frame 0 renders so material_preview builds once without glass.
+            AppRuntime::tickPlayerGameSettings(state->ctx);
+        }
         breakdown.advance_ms = millisecondsBetween(advance_start, Clock::now());
         display.recordIteration(breakdown.advance_ms);
         if (display.continuous) {
@@ -1259,8 +1283,12 @@ int main(int argc, char* argv[]) {
         // "unaccounted host time" instead of the normal asynchronous cost.
         const bool render_requested = viewer->needsFrame();
         const bool capture_requested = rtapi::viewportCaptureEnabled();
+        const bool minimized = frame_cycle.isMinimized();
+        const bool game_design_loading =
+            AppRuntime::playerSceneLoad().busy() &&
+            AppRuntime::playerSceneLoad().stage() == "game_design";
         bool image_updated = false;
-        if (render_requested &&
+        if (render_requested && !game_design_loading && (!minimized || capture_requested) &&
             (frame_cycle.isForeground() || capture_requested || display.continuous ||
              AppRuntime::playerSceneLoad().busy())) {
             const auto render_start = Clock::now();
@@ -1274,6 +1302,10 @@ int main(int argc, char* argv[]) {
                 breakdown.backend_submit_ms = telemetry.submit_ms;
             }
             display.recordRender(viewer->lastRenderMs(), viewer->lastUploadMs(), telemetry);
+            frame_cycle.requestRedraw();
+        } else if (game_design_loading) {
+            // While game_design waits for collider SDF bakes, keep the loading
+            // overlay animating without submitting occluded 3D raster frames.
             frame_cycle.requestRedraw();
         }
 #ifdef __ANDROID__
@@ -1368,7 +1400,8 @@ int main(int argc, char* argv[]) {
         // old 20 Hz IPC/event pump - except in continuous (measurement) mode,
         // where a background window would silently cap the result at 20.
         const auto sleep_start = Clock::now();
-        if (!frame_cycle.isForeground() && !display.continuous) {
+        if ((minimized && !capture_requested) ||
+            (!frame_cycle.isForeground() && !display.continuous)) {
             std::this_thread::sleep_until(iteration_start + std::chrono::milliseconds(50));
         } else if (display.pacing_hz > 0) {
             std::this_thread::sleep_until(iteration_start +

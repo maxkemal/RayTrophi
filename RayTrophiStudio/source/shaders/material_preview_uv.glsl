@@ -27,4 +27,12 @@ vec2 applyUVTransform(vec2 originalUV, const GpuMaterial mat) {
     return uv;
 }
 
+// UV of the material's texture SLOTS. A wet paint canvas material
+// (paint_base_tex != 0, docs/dev/WET_PAINT_CANVAS_UV.md) keeps its slots at the
+// raw mesh UV: they are paint canvas pages laid out on the mesh's own unwrap,
+// and the UV transform belongs to the tiled base under them.
+vec2 materialSlotUV(vec2 originalUV, const GpuMaterial mat) {
+    return mat.paint_base_tex != 0u ? originalUV : applyUVTransform(originalUV, mat);
+}
+
 #endif

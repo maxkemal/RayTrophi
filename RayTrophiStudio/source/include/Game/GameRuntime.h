@@ -20,6 +20,7 @@ struct PlaytestState {
     bool previous_timeline_mode = true;   // restored by stop
     bool started_demo = false;            // the play test started the balloon demo
     double started_seconds = 0.0;         // steady clock, for status
+    bool restore_rendered_shading = false;
 };
 PlaytestState &playtest();
 inline bool playtestActive() { return playtest().active; }

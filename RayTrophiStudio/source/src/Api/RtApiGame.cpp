@@ -3,6 +3,9 @@
 #include "Game/GameSession.h"
 #include "RtApiInternal.h"
 #include "Paint/BalloonPaintDemo.h"
+#ifndef RT_PLAYER
+#include "Core/StudioPlayPaint.h"
+#endif
 #include "UI/SimulationTransport.h"
 #include "globals.h"
 #include "scene_ui.h"
@@ -88,6 +91,14 @@ Result gamePlaytest(const std::string &operation, nlohmann::json &output) {
         return Result::fail("scene is locked by the final render job");
     }
     if (operation == "start" && !p.active) {
+#ifndef RT_PLAYER
+        void* paint_device = Paint::wetPaintGpu().publicationDevice();
+        if (paint_device && g_viewport_backend &&
+            !AppRuntime::usesPaintDevice(g_viewport_backend.get(), paint_device)) {
+            return Result::fail(
+                "Wet paint is on a different Vulkan device. Reopen the scene before starting Play.");
+        }
+#endif
         p = Game::PlaytestState{};
         p.previous_timeline_mode = g_sim_timeline_mode;
         SimulationTransport::setTimelineMode(*g_ctx, false);
@@ -111,6 +122,10 @@ Result gamePlaytest(const std::string &operation, nlohmann::json &output) {
             Paint::balloonPaintCommand(g_ctx->scene, "stop", nlohmann::json::object(), ignored, error);
         }
         SimulationTransport::setTimelineMode(*g_ctx, p.previous_timeline_mode);
+        if (p.restore_rendered_shading && g_ctx->scene_ui_ptr &&
+            g_ctx->scene_ui_ptr->viewport_settings.shading_mode == 1) {
+            g_ctx->scene_ui_ptr->viewport_settings.shading_mode = 2;
+        }
         p = Game::PlaytestState{};
         g_ctx->start_render = true;
     }

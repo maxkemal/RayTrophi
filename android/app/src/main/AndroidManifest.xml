@@ -10,7 +10,8 @@
 
     <application
         android:allowBackup="false"
-        android:label="RayTrophi Player"
+        android:label="Gizli Renkler"
+        android:icon="@mipmap/ic_launcher"
         android:hasCode="true"
         android:extractNativeLibs="true"
         android:theme="@android:style/Theme.NoTitleBar.Fullscreen">

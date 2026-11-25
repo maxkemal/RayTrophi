@@ -24,6 +24,9 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <mutex>
+#include <unordered_map>
+#include <utility>
 
 namespace RayTrophiSim {
 namespace {
@@ -116,6 +119,35 @@ bool ensureBuffer(SimulationComputeContext& compute, ComputeBufferHandle& handle
     handle = compute.createBuffer(desc);
     if (!handle.valid()) return false;
     capacity = std::max<std::size_t>(needed, 1);
+    return true;
+}
+
+uint64_t hashPackedColliders(const std::vector<ParticleGpuCollider>& packed) {
+    uint64_t h = 14695981039346656037ull;
+    const auto* bytes = reinterpret_cast<const uint8_t*>(packed.data());
+    const std::size_t n = packed.size() * sizeof(ParticleGpuCollider);
+    for (std::size_t i = 0; i < n; ++i) {
+        h ^= static_cast<uint64_t>(bytes[i]);
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+bool colliderUploadNeeded(uint64_t buffer_id, uint64_t prev_buffer_id,
+                          std::size_t byte_size, uint64_t hash) {
+    static std::mutex cache_mutex;
+    static std::unordered_map<uint64_t, std::pair<std::size_t, uint64_t>> uploaded;
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    if (buffer_id == prev_buffer_id) {
+        auto it = uploaded.find(buffer_id);
+        if (it != uploaded.end() && it->second.first == byte_size && it->second.second == hash) {
+            return false;
+        }
+    }
+    if (uploaded.size() > 256u) {
+        uploaded.clear();
+    }
+    uploaded[buffer_id] = {byte_size, hash};
     return true;
 }
 
@@ -254,15 +286,20 @@ bool ParticleSimulationSystem::stepDeviceCollisions(SimulationComputeContext& co
     const ComputeBufferUsage upload_usage = ComputeBufferUsage::Storage |
                                             ComputeBufferUsage::Upload |
                                             ComputeBufferUsage::ReadOnly;
+    const uint64_t prev_collider_id = resident_buffers_.colliders.id;
     if (!ensureBuffer(compute, resident_buffers_.colliders, resident_buffers_.collider_capacity,
                       roundUpPow2(std::max<std::size_t>(packed.size(), 1), 8),
                       sizeof(ParticleGpuCollider), "ParticleGpuColliders", upload_usage)) {
         return false;
     }
-    if (!packed.empty() &&
-        !compute.uploadBuffer(resident_buffers_.colliders, packed.data(),
-                              packed.size() * sizeof(ParticleGpuCollider))) {
-        return false;
+    if (!packed.empty()) {
+        const std::size_t packed_bytes = packed.size() * sizeof(ParticleGpuCollider);
+        const uint64_t packed_hash = hashPackedColliders(packed);
+        if (colliderUploadNeeded(resident_buffers_.colliders.id, prev_collider_id,
+                                 packed_bytes, packed_hash) &&
+            !compute.uploadBuffer(resident_buffers_.colliders, packed.data(), packed_bytes)) {
+            return false;
+        }
     }
     // Cooked grids move only when a collider is re-cooked: upload on change.
     if (sdf_floats > 0 && sdf_signature != resident_buffers_.sdf_signature) {

@@ -2,6 +2,7 @@
 #include "Fluid/DomainVisualService.h"
 #include "Fluid/DomainWallGpuConstants.h"
 #include "ParticleSimulation.h"
+#include "Physics/ParticleColliderCache.h"
 #include "Fluid/FluidSeedBox.h"
 #include "Fluid/MatterMpmSoftening.h"
 #include "Fluid/MatterPhaseConfig.h"
@@ -5755,6 +5756,19 @@ bool resolveSweptOBBCollision(const ParticleColliderDesc& collider,
 }
 
 
+thread_local const std::vector<RayTrophiSim::CachedColliderTransform>*
+    t_active_collider_cache = nullptr;
+
+struct ScopedActiveColliderCache {
+    const std::vector<RayTrophiSim::CachedColliderTransform>* prev = nullptr;
+    explicit ScopedActiveColliderCache(
+        const std::vector<RayTrophiSim::CachedColliderTransform>* next)
+        : prev(t_active_collider_cache) {
+        t_active_collider_cache = next;
+    }
+    ~ScopedActiveColliderCache() { t_active_collider_cache = prev; }
+};
+
 void resolveSDFCollision(const ParticleColliderDesc& collider,
                           const ParticleColliderOBB& obb,
                           float particle_radius,
@@ -9545,11 +9559,10 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     stats_.emit_ms = elapsedMilliseconds(emit_start, emit_end);
 
     if (alive_count_ == 0) {
-        // Pure grid/fluid sims (no global particles) still need the mesh-collider
-        // caches (triangles / convex octants / BVH) refreshed before voxelization —
-        // the integrate path below builds them, but this early-out skips it. The
-        // call is version-gated, so it's a no-op once the caches are warm.
-        refreshResolvedColliders(std::max(0.0f, physics_settings_.particle_radius));
+        // Effect systems without grid domains need no collider refresh when dead.
+        if (!grid_domains_.empty()) {
+            refreshResolvedColliders(std::max(0.0f, physics_settings_.particle_radius));
+        }
         const auto grid_start = SimulationClock::now();
         stepGridDomains(context);
         const auto grid_end = SimulationClock::now();
@@ -9605,11 +9618,17 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
     const bool track_contacts =
         physics_settings_.collision_response == ParticleCollisionResponse::Die ||
         physics_settings_.record_collision_events;
-    refreshResolvedColliders(std::max(0.0f, physics_settings_.particle_radius));
+    const float particle_radius = std::max(0.0f, physics_settings_.particle_radius);
+    refreshResolvedColliders(particle_radius);
+    thread_local std::vector<CachedColliderTransform> cached_collider_transforms;
+    prepareColliderTransforms(resolved_colliders_, particle_radius, cached_collider_transforms);
+    ScopedActiveColliderCache collider_cache_scope(&cached_collider_transforms);
+    std::size_t remaining_alive = alive_count_;
     for (std::size_t i = 0; i < buffers_.alive.size(); ++i) {
         if (buffers_.alive[i] == 0u) {
             continue;
         }
+        const bool last_alive = (--remaining_alive == 0);
 
         buffers_.age_seconds[i] += dt;
         if (buffers_.age_seconds[i] >= buffers_.lifetime_seconds[i]) {
@@ -9617,6 +9636,7 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
             if (alive_count_ > 0) {
                 --alive_count_;
             }
+            if (last_alive) break;
             continue;
         }
 
@@ -9661,6 +9681,7 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
         // Colour / size / opacity are no longer written here: consumers
         // evaluate the appearance profile at age / lifetime (sampleAppearance).
         buffers_.rotation[i] += buffers_.angular_velocity[i] * dt;
+        if (last_alive) break;
     }
     const auto integrate_end = SimulationClock::now();
     stats_.integrate_ms = elapsedMilliseconds(integrate_start, integrate_end);
@@ -9865,8 +9886,18 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity,
                 case ParticleColliderSourceMode::ObjectAABB:
                 case ParticleColliderSourceMode::ObjectOBB: {
                     const bool obb = d.source_mode == ParticleColliderSourceMode::ObjectOBB;
-                    const Vec3 lp = obb ? rc->obb.local_to_world.inverse().transform_point(position)
-                                        : position;
+                    const std::size_t idx =
+                        rc ? static_cast<std::size_t>(rc - resolved_colliders_.data()) : 0u;
+                    const CachedColliderTransform* cached =
+                        (obb && rc && t_active_collider_cache &&
+                         idx < t_active_collider_cache->size() &&
+                         (*t_active_collider_cache)[idx].valid)
+                            ? &(*t_active_collider_cache)[idx]
+                            : nullptr;
+                    const Vec3 lp = obb
+                        ? (cached ? cached->world_to_local.transform_point(position)
+                                  : rc->obb.local_to_world.inverse().transform_point(position))
+                        : position;
                     const Vec3 lo = obb ? rc->obb.local_bounds_min : d.bounds_min;
                     const Vec3 hi = obb ? rc->obb.local_bounds_max : d.bounds_max;
                     const Vec3 mn = Vec3::min(lo, hi) - d.thickness;
@@ -9964,16 +9995,58 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity,
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectOBB) {
-            if (previous_position && !resolveSweptOBBCollision(collider, resolved_collider.obb, *previous_position, position, velocity)) {
-                resolveOBBCollision(collider, resolved_collider.obb, position, velocity);
-            } else if (!previous_position) {
-                resolveOBBCollision(collider, resolved_collider.obb, position, velocity);
+            const std::size_t idx =
+                static_cast<std::size_t>(&resolved_collider - resolved_colliders_.data());
+            const CachedColliderTransform* cached =
+                (t_active_collider_cache && idx < t_active_collider_cache->size() &&
+                 (*t_active_collider_cache)[idx].valid)
+                    ? &(*t_active_collider_cache)[idx]
+                    : nullptr;
+            if (cached) {
+                const auto resolveAabb = [](const ParticleColliderDesc& c, Vec3& p, Vec3& v) {
+                    resolveAABBCollision(c, p, v);
+                };
+                const auto resolveSweptAabb = [](const ParticleColliderDesc& c, const Vec3& prev,
+                                                 Vec3& p, Vec3& v) {
+                    return resolveSweptAABBCollision(c, prev, p, v);
+                };
+                if (previous_position &&
+                    !resolveSweptOBBCollisionCached(collider, resolved_collider.obb, *cached,
+                                                    *previous_position, position, velocity,
+                                                    resolveSweptAabb)) {
+                    resolveOBBCollisionCached(collider, resolved_collider.obb, *cached,
+                                              position, velocity, resolveAabb);
+                } else if (!previous_position) {
+                    resolveOBBCollisionCached(collider, resolved_collider.obb, *cached,
+                                              position, velocity, resolveAabb);
+                }
+            } else {
+                if (previous_position && !resolveSweptOBBCollision(collider, resolved_collider.obb, *previous_position, position, velocity)) {
+                    resolveOBBCollision(collider, resolved_collider.obb, position, velocity);
+                } else if (!previous_position) {
+                    resolveOBBCollision(collider, resolved_collider.obb, position, velocity);
+                }
             }
             return;
         }
 
         if (collider.source_mode == ParticleColliderSourceMode::ObjectMeshSDF) {
-            resolveSDFCollision(collider, resolved_collider.obb, particle_radius, position, velocity);
+            const std::size_t idx =
+                static_cast<std::size_t>(&resolved_collider - resolved_colliders_.data());
+            const CachedColliderTransform* cached =
+                (t_active_collider_cache && idx < t_active_collider_cache->size() &&
+                 (*t_active_collider_cache)[idx].valid)
+                    ? &(*t_active_collider_cache)[idx]
+                    : nullptr;
+            if (cached) {
+                const auto resolveVel = [](const ParticleColliderDesc& c, const Vec3& n, Vec3& v) {
+                    resolveVelocityAgainstNormal(c, n, v);
+                };
+                resolveSDFCollisionCached(collider, resolved_collider.obb, *cached,
+                                          position, velocity, resolveVel);
+            } else {
+                resolveSDFCollision(collider, resolved_collider.obb, particle_radius, position, velocity);
+            }
             return;
         }
 

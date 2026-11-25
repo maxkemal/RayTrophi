@@ -24,6 +24,9 @@ float rtDeepTexel(ivec2 p,float depth){
     return exp(-mix(a,b,clamp(u-float(hi),0.0,1.0)));
 }
 float rtDeepShadow(vec4 rect,vec2 uv,float depth){
+#ifdef RT_PREVIEW_HAS_RAYFUSION_GI_SPEC
+    if(!RT_SPEC_RAYFUSION_GI)return 1.0;
+#endif
     if(deepMeta.z==0u)return 1.0;
     vec2 p=(rect.xy+uv*rect.zw)*float(deepMeta.x)-0.5;
     ivec2 lo=ivec2(rect.xy*float(deepMeta.x)+0.5);
@@ -38,8 +41,15 @@ float rtPreviewShadow(uint index,vec3 p,vec3 n,vec3 l,vec3 lightPosition,uint qu
     float screenVisibility=1.0;
     bool screenShadow=false;
 #ifdef RT_PREVIEW_SCREEN_SHADOW
+#ifdef RT_PREVIEW_HAS_RAYFUSION_GI_SPEC
+    if(RT_SPEC_RAYFUSION_GI){
+        screenShadow=rtScreenShadow(index,screenVisibility);
+        if(screenShadow && deepMeta.z==0u)return screenVisibility;
+    }
+#else
     screenShadow=rtScreenShadow(index,screenVisibility);
     if(screenShadow && deepMeta.z==0u)return screenVisibility;
+#endif
 #endif
     if(shadowRecords[index].meta.x==0u)return screenShadow?screenVisibility:1.0;
     uint face=0u,count=min(shadowRecords[index].meta.z,6u),type=shadowRecords[index].meta.y;

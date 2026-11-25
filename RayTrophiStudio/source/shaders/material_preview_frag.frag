@@ -17,7 +17,27 @@ layout(constant_id = 2) const bool RT_SPEC_WEATHER = true;
 // flag or an Interior Depth: then those three are exactly 0 / false here and
 // forcing them is bit-identical, while the compiler drops the refraction,
 // dispersion, resin-interior and screen-refraction code.
-layout(constant_id = 3) const bool RT_SPEC_GLASS   = true;
+layout(constant_id = 3) const bool RT_SPEC_GLASS        = true;
+// Extended material lobes (clearcoat, sheen, SSS, translucency, micro-detail,
+// tile-break). Off only when no referenced material uses any of these lobes
+// and no Material Graph is active.
+layout(constant_id = 4) const bool RT_SPEC_EXT_LOBES    = true;
+// Non-scene preview lighting rigs (three-point, studio, outdoor + Blinn-Phong).
+// Off when lightingPreset == 3 (Scene lighting), which is always true in Player.
+layout(constant_id = 5) const bool RT_SPEC_ALT_LIGHTING = true;
+// Unfiltered sky fallback when prefiltered IBL is not ready (sceneFlags bit 32).
+layout(constant_id = 6) const bool RT_SPEC_FALLBACK_SKY = true;
+// RayFusion GI / probe visibility / RT screen shadow / volume deep shadow.
+// Off only on non-ray-query GPUs with no active volumes.
+layout(constant_id = 7) const bool RT_SPEC_RAYFUSION_GI = true;
+#define RT_PREVIEW_HAS_RAYFUSION_GI_SPEC 1
+// Optional PBR textures (metallic, specular, emission). Off when no referenced
+// material binds any of them and no Material Graph is active.
+layout(constant_id = 8) const bool RT_SPEC_OPT_TEX      = true;
+// Clearcoat lobe + film iridescence tint. Separated from RT_SPEC_EXT_LOBES so
+// scenes with clearcoated surfaces (e.g. glossy balloons/toys) do not pay for
+// sheen, subsurface, translucency, or micro/tile-break branches on Mali-G52.
+layout(constant_id = 9) const bool RT_SPEC_CLEARCOAT    = true;
 #include "procedural_detail.glsl"
 #include "pbr_texture_policy.glsl"
 // ★★★ Goruntuleme donusumu artik BURADA TANIMLI DEGIL: tek tanim
@@ -720,7 +740,7 @@ void main() {
         vec4(vPreviousClip.xyz / vPreviousClip.w, 1.0) : vec4(0.0, 0.0, 0.0, -1.0);
     vec3 N = normalize(vWorldNormal);
     uint qualityMode = previewQualityMode();
-    uint lightingPreset = pc.materialMeta.z;
+    uint lightingPreset = RT_SPEC_ALT_LIGHTING ? pc.materialMeta.z : 3u;
 
     uint materialCount = max(pc.materialMeta.x, 1u);
     // ★★★ Materyal ID'sinin 31. biti = IMPOSTOR (scatter proxy seridi).
@@ -738,18 +758,26 @@ void main() {
 
     uint drawPhase = previewDrawPhase();
     uint graphOffset = RT_SPEC_GRAPH ? matProgramOffset(materialIndex) : MATPROG_NONE;
-    vec2 uv = applyUVTransform(vTexCoord, mat);
+    // Wet paint canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md): the
+    // slots are canvas pages at the raw UV, the transform tiles only the base.
+    bool paintCanvas = mat.paint_base_tex != 0u;
+    vec2 paintBaseUV = applyUVTransform(vTexCoord, mat);
+    vec2 uv = paintCanvas ? vTexCoord : paintBaseUV;
 
     // ── Procedural tile-break (independent slider, applied before texture sampling) ──
     // Breaks visible UV tiling seams. Separate from dirt/roughness so albedo maps
     // that shouldn't be warped can leave this at 0.
-    if (mat.tile_break_strength > 0.0 &&
+    if (RT_SPEC_EXT_LOBES && mat.tile_break_strength > 0.0 &&
         (validTexture(mat.albedo_tex) || validTexture(mat.roughness_tex) || validTexture(mat.normal_tex))) {
-        uv = pd_tileBreak(uv, vWorldPos, mat.tile_break_strength);
+        // A paint canvas has no tiling seam; its base does.
+        if (paintCanvas) paintBaseUV = pd_tileBreak(paintBaseUV, vWorldPos, mat.tile_break_strength);
+        else uv = pd_tileBreak(uv, vWorldPos, mat.tile_break_strength);
     }
 
     vec2 uvDx = dFdx(uv);
     vec2 uvDy = dFdy(uv);
+    vec2 paintBaseDx = dFdx(paintBaseUV);
+    vec2 paintBaseDy = dFdy(paintBaseUV);
 
     // Reject provably opaque replay fragments before terrain, textures and
     // graph evaluation. Maps are authoritative and graphs may write transmission
@@ -907,6 +935,12 @@ void main() {
     vec4 albedoTexel = vec4(1.0);
     if (validTexture(mat.albedo_tex)) {
         vec4 texAlbedo = sampleMaterialTextureGrad(mat.albedo_tex, uv, uvDx, uvDy);
+        if (paintCanvas && validTexture(mat.paint_base_tex)) {
+            // Premultiplied canvas over the tiled base; the canvas alpha is
+            // paint coverage, never surface opacity (the base keeps that).
+            vec4 baseTexel = sampleMaterialTextureGrad(mat.paint_base_tex, paintBaseUV, paintBaseDx, paintBaseDy);
+            texAlbedo = vec4(baseTexel.rgb * (1.0 - texAlbedo.a) + texAlbedo.rgb, baseTexel.a);
+        }
         albedoTexel = texAlbedo;
         // Vulkan RT contract: a bound Base Color texture is authoritative.
         // Its sampled colour also becomes the depthless glass Beer tint.
@@ -933,11 +967,11 @@ void main() {
         roughness = samplePackedRoughness(
             sampleMaterialTextureGrad(mat.roughness_tex, uv, uvDx, uvDy), 0.04, mat.flags);
     }
-    if (validTexture(mat.metallic_tex)) {
+    if (RT_SPEC_OPT_TEX && validTexture(mat.metallic_tex)) {
         metallic = samplePackedMetallic(
             sampleMaterialTextureGrad(mat.metallic_tex, uv, uvDx, uvDy), mat.flags);
     }
-    if (validTexture(mat.specular_tex)) {
+    if (RT_SPEC_OPT_TEX && validTexture(mat.specular_tex)) {
         specular = clamp(sampleMaterialTextureGrad(mat.specular_tex, uv, uvDx, uvDy).r * specular, 0.0, 1.0);
     }
     if (validTexture(mat.transmission_tex)) {
@@ -1077,7 +1111,7 @@ void main() {
     // ── Procedural detail: subtle color variation + dirt + roughness ──
     // micro_detail_strength drives all world-space effects without touching UVs.
     // tile_break_strength (above) is separate — warps UV only when needed.
-    if (matx.micro_detail_strength > 0.0) {
+    if (RT_SPEC_EXT_LOBES && matx.micro_detail_strength > 0.0) {
         float sc  = max(matx.micro_detail_scale, 0.5);
         float str = matx.micro_detail_strength;
 
@@ -1104,7 +1138,7 @@ void main() {
         emissionColor = max(graphOut.emissionColor, vec3(0.0));
     if ((graphWritten & MP_SLOT_EMISSIONSTRENGTH) != 0u)
         emissionStrength = max(graphOut.emissionStrength, 0.0);
-    if (validTexture(mat.emission_tex) &&
+    if (RT_SPEC_OPT_TEX && validTexture(mat.emission_tex) &&
         (graphWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
         emissionColor = sampleMaterialTextureGrad(mat.emission_tex, uv, uvDx, uvDy).rgb;
     }
@@ -1124,15 +1158,21 @@ void main() {
                                   (1.0 - directSpecularRoughness) * 128.0);
 
     // ── Sheen / SSS material params ──
-    float sheenWeight    = clamp(matx.sheen, 0.0, 1.0);
-    vec3  sheenColor     = mix(vec3(1.0), albedo, clamp(matx.sheen_tint, 0.0, 1.0)) * sheenWeight;
-    float sssAmount      = clamp(mat.subsurface_amount, 0.0, 1.0);
-    vec3  sssColor       = vec3(matx.subsurface_r, matx.subsurface_g, matx.subsurface_b);
-    vec3  sssRadius      = max(vec3(matx.subsurface_radius_r,
-                                    matx.subsurface_radius_g,
-                                    matx.subsurface_radius_b), vec3(0.001));
-    float sssScale       = max(matx.subsurface_scale, 0.001);
-    float translucency   = clamp(mat.translucent, 0.0, 1.0);
+    float sheenWeight    = RT_SPEC_EXT_LOBES ? clamp(matx.sheen, 0.0, 1.0) : 0.0;
+    vec3  sheenColor     = RT_SPEC_EXT_LOBES
+        ? mix(vec3(1.0), albedo, clamp(matx.sheen_tint, 0.0, 1.0)) * sheenWeight
+        : vec3(0.0);
+    float sssAmount      = RT_SPEC_EXT_LOBES ? clamp(mat.subsurface_amount, 0.0, 1.0) : 0.0;
+    vec3  sssColor       = RT_SPEC_EXT_LOBES
+        ? vec3(matx.subsurface_r, matx.subsurface_g, matx.subsurface_b)
+        : vec3(0.0);
+    vec3  sssRadius      = RT_SPEC_EXT_LOBES
+        ? max(vec3(matx.subsurface_radius_r,
+                   matx.subsurface_radius_g,
+                   matx.subsurface_radius_b), vec3(0.001))
+        : vec3(0.001);
+    float sssScale       = RT_SPEC_EXT_LOBES ? max(matx.subsurface_scale, 0.001) : 0.001;
+    float translucency   = RT_SPEC_EXT_LOBES ? clamp(mat.translucent, 0.0, 1.0) : 0.0;
     // ★★★ RT parity (bsdf_scatter.glsl::scatterSSS). In RT the SSS lobe takes
     //   a share `sssAmount` of the diffuse sub-layer and its random walk
     //   converges to subsurface_color — the MULTI-scatter albedo — not to base
@@ -1148,12 +1188,16 @@ void main() {
     // the same thing on both paths: a 1 cm radius bleeds on a nose, not on a
     // wall. Curvature from screen derivatives of the geometric normal.
     vec3  sssMfp       = sssRadius * sssScale;
-    float sssCurvature = length(fwidth(normalize(vWorldNormal))) /
-                         max(length(fwidth(vWorldPos)), 1e-6);
-    vec3  sssWrap      = clamp(sssMfp * sssCurvature, vec3(0.0), vec3(1.0));
+    float sssCurvature = RT_SPEC_EXT_LOBES
+        ? (length(fwidth(normalize(vWorldNormal))) /
+           max(length(fwidth(vWorldPos)), 1e-6))
+        : 0.0;
+    vec3  sssWrap      = RT_SPEC_EXT_LOBES
+        ? clamp(sssMfp * sssCurvature, vec3(0.0), vec3(1.0))
+        : vec3(0.0);
     // Thin-feature back-lighting: the osculating diameter 2/curvature is the
     // thickness proxy. Per channel, so a long red radius glows red (ears).
-    vec3  sssBackTransmit = sssCurvature > 1e-4
+    vec3  sssBackTransmit = (RT_SPEC_EXT_LOBES && sssCurvature > 1e-4)
         ? exp(-(2.0 / sssCurvature) / max(sssMfp, vec3(1e-5)))
         : vec3(0.0);
 
@@ -1216,12 +1260,15 @@ void main() {
         // energy from the base lobes before its own GGX reflection is added.
         vec3 H = normalize(V + L);
         float VdotH = max(dot(V, H), 0.0);
-        float coatFresnel = mat.clearcoat > 0.001
+        bool hasClearcoat = RT_SPEC_CLEARCOAT && mat.clearcoat > 0.001;
+        float coatFresnel = hasClearcoat
             ? fresnelSchlick(VdotH, vec3(0.04)).r * clamp(mat.clearcoat, 0.0, 1.0)
             : 0.0;
-        vec3 coatTint = clearcoatFilmTint(
-            VdotH, matx.clearcoat_iridescence,
-            matx.clearcoat_film_thickness);
+        vec3 coatTint = hasClearcoat
+            ? clearcoatFilmTint(
+                VdotH, matx.clearcoat_iridescence,
+                matx.clearcoat_film_thickness)
+            : vec3(1.0);
         float baseLayerWeight = 1.0 - coatFresnel;
         diffuseLit += diffuseBrdf * radiance * baseLayerWeight *
                       (diffuseSurface * NdotL + diffuseSubsurface *
@@ -1248,7 +1295,7 @@ void main() {
             float spec   = pow(NdotH, specExp) * pureNdotL;
             specularLit += F0 * radiance * spec *
                            ((specExp + 2.0) / (8.0 * PI)) * baseLayerWeight;
-            if (mat.clearcoat > 0.001) {
+            if (hasClearcoat) {
                 float ccExp = max(2.0, (1.0 - mat.clearcoat_roughness) * (1.0 - mat.clearcoat_roughness) * 128.0);
                 float ccSpec = pow(NdotH, ccExp) * pureNdotL;
                 specularLit += vec3(0.04) * radiance * ccSpec * mat.clearcoat
@@ -1259,7 +1306,7 @@ void main() {
             specularLit += evaluateSpecularGGX(
                                N, V, L, F0, directSpecularRoughness) *
                            radiance * pureNdotL * baseLayerWeight;
-            if (mat.clearcoat > 0.001) {
+            if (hasClearcoat) {
                 specularLit += evaluateSpecularGGX(
                     N, V, L, vec3(0.04), clamp(mat.clearcoat_roughness, 0.02, 1.0)) *
                     radiance * pureNdotL * mat.clearcoat * coatTint;
@@ -1285,14 +1332,17 @@ void main() {
     }
 
     float NdotV_main = max(dot(N, V), 0.0);
-    float coatViewFresnel = mat.clearcoat > 0.001
+    bool hasEnvClearcoat = RT_SPEC_CLEARCOAT && mat.clearcoat > 0.001;
+    float coatViewFresnel = hasEnvClearcoat
         ? fresnelSchlick(NdotV_main, vec3(0.04)).r *
           clamp(mat.clearcoat, 0.0, 1.0)
         : 0.0;
     float ambientBaseWeight = 1.0 - coatViewFresnel;
-    vec3 coatEnvTint = clearcoatFilmTint(
-        NdotV_main, matx.clearcoat_iridescence,
-        matx.clearcoat_film_thickness);
+    vec3 coatEnvTint = hasEnvClearcoat
+        ? clearcoatFilmTint(
+            NdotV_main, matx.clearcoat_iridescence,
+            matx.clearcoat_film_thickness)
+        : vec3(1.0);
 
     vec3 ambient = vec3(0.0);
     vec3 envSpecular = vec3(0.0);
@@ -1316,13 +1366,15 @@ void main() {
         //   depth prepass - ~60 ms of a 102 ms frame. Sky radiance depends only
         //   on direction, so it belongs in a directional cache, and that cache
         //   is the same slot a probe field will later fill.
-        if ((sceneFlags & 32u) != 0u) {
+        if (!RT_SPEC_FALLBACK_SKY || (sceneFlags & 32u) != 0u) {
             // The sky bake already carries its own intensities; only the HDRI
             // path still scales by the environment intensity dial.
             float intensity = worldMode == 1u ? max(worldParams.y, 0.0) : 1.0;
-            vec3 irradiance;
-            float screenGiConfidence;
-            bool screenGiValid = sampleScreenGi(N, irradiance, screenGiConfidence);
+            vec3 irradiance = vec3(0.0);
+            float screenGiConfidence = 0.0;
+            bool screenGiValid = RT_SPEC_RAYFUSION_GI
+                ? sampleScreenGi(N, irradiance, screenGiConfidence)
+                : false;
             // ★★★ RayFusion Adım 1a: AYNI değer, FARKLI boru. Probe alanı bu
             //   pikseli kapsıyorsa ambient oradan okunur. İlk üretici hâlâ aynı
             //   gökyüzü bake'i olduğu için görüntü DEĞİŞMEMELİ; değişen tek şey,
@@ -1356,12 +1408,12 @@ void main() {
                 //      Bu, "olcemedim"in sessizce "gorus acik"a donusmedigi
                 //      TEK yer: ustteki iki kol da olcum YOKLUGUNU ayri bir
                 //      donus degeriyle bildirir, varsayilan bir deger degil.
-                float skyVisibility;
-                if (!sampleScreenGiSkyVisibility(N, skyVisibility))
+                float skyVisibility = 1.0;
+                if (RT_SPEC_RAYFUSION_GI && !sampleScreenGiSkyVisibility(N, skyVisibility))
                     skyVisibility = rfSpecularSkyVisibility(vWorldPos, N, N);
 
                 vec3 fallbackIrradiance = texture(worldIrradiance, worldDirToUV(N)).rgb * intensity;
-                if (rfSampleProbeField(vWorldPos, N, probeIrradiance))
+                if (RT_SPEC_RAYFUSION_GI && rfSampleProbeField(vWorldPos, N, probeIrradiance))
                     fallbackIrradiance = probeIrradiance * intensity;
                 // ★★★★★ GORUNURLUK KAYNAK SECIMINDEN SONRA uygulanir.
                 //
@@ -1406,7 +1458,7 @@ void main() {
                 envSpecular = sampleCanonicalWorld(R) *
                               (F0 * brdf.x + brdf.y) * ambientBaseWeight;
             }
-            if (mat.clearcoat > 0.001) {
+            if (hasEnvClearcoat) {
                 float ccRoughness = clamp(mat.clearcoat_roughness, 0.02, 1.0);
                 vec3 ccEnv = textureLod(worldPrefiltered, worldDirToUV(R),
                                         ccRoughness * 8.0).rgb * intensity;
@@ -1442,7 +1494,7 @@ void main() {
             rfEnvSpecularWeight = fresnelAmb *
                           mix(1.0, 0.18, reflectionRoughness * reflectionRoughness) *
                           ambientBaseWeight;
-            if (mat.clearcoat > 0.001) {
+            if (hasEnvClearcoat) {
                 vec3 ccFresnel = fresnelSchlickRoughness(
                     NdotV_main, vec3(0.04), mat.clearcoat_roughness);
                 envSpecular += envReflection * ccFresnel * mat.clearcoat *
@@ -1480,7 +1532,7 @@ void main() {
                       ambientBaseWeight;
 
         // Clearcoat env reflection
-        if (mat.clearcoat > 0.001) {
+        if (hasEnvClearcoat) {
             vec3 ccFresnel = fresnelSchlickRoughness(NdotV_main, vec3(0.04), mat.clearcoat_roughness);
             envSpecular += envReflection * ccFresnel
                          * mix(0.9, 0.0, mat.clearcoat_roughness)
@@ -1708,7 +1760,7 @@ void main() {
         envSpecular = vec3(0.0);
     }
 
-    if (!sceneReflectionValid && lightingPreset == 3u)
+    if (RT_SPEC_RAYFUSION_GI && !sceneReflectionValid && lightingPreset == 3u)
         envSpecular *= rfSpecularSkyVisibility(vWorldPos, N, reflect(-V, N));
 
     vec3 color = (ambient + diffuseLit + sheenLit) * resinBaseAttenuation

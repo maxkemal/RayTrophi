@@ -31,6 +31,11 @@ py::dict settingsDict(const rtapi::WetPaintSurfaceSettingsInfo& s) {
     d["dry_roughness"] = s.dry_roughness;
     d["height_contribution"] = s.height_contribution;
     d["normal_strength"] = s.normal_strength;
+    d["reveal_picture"] = s.reveal_picture;
+    d["picture_tolerance"] = s.picture_tolerance;
+    d["picture_hint"] = s.picture_hint;
+    d["picture_outline"] = s.picture_outline;
+    d["picture_blank"] = py::make_tuple(s.picture_blank[0], s.picture_blank[1], s.picture_blank[2]);
     return d;
 }
 
@@ -41,6 +46,8 @@ py::dict surfaceDict(const rtapi::WetPaintSurfaceRuntimeInfo& s) {
     d["triangles"] = s.triangles; d["active_tiles"] = s.active_tiles;
     d["ticked_tiles"] = s.ticked_tiles; d["stamped_texels"] = s.stamped_texels;
     d["sources_dropped"] = s.sources_dropped; d["texture"] = s.texture;
+    d["canvas_mode"] = s.canvas_overlay ? "overlay" : "composite";
+    d["base_texture"] = s.base_texture;
     d["settings"] = settingsDict(s.settings);
     return d;
 }
@@ -149,7 +156,8 @@ void registerPaintWetBindings(py::module_& paint) {
             "drip_head", "falloff", "paint_load", "deposit_rate", "pickup_rate",
             "brush_radius", "oil", "roughness_channel", "height_normal_channel",
             "reveal_opacity", "wet_roughness", "dry_roughness", "height_contribution",
-            "normal_strength"
+            "normal_strength", "reveal_picture", "picture_tolerance", "picture_hint",
+            "picture_outline", "picture_blank"
         };
         for (const auto& item : kw) {
             const auto key = py::cast<std::string>(item.first);
@@ -160,6 +168,10 @@ void registerPaintWetBindings(py::module_& paint) {
         if (kw.contains("reveal_opacity") &&
             !py::isinstance<py::bool_>(kw["reveal_opacity"])) {
             throw py::type_error("reveal_opacity must be a bool");
+        }
+        if (kw.contains("reveal_picture") &&
+            !py::isinstance<py::str>(kw["reveal_picture"])) {
+            throw py::type_error("reveal_picture must be a str");
         }
         rtapi::WetPaintSurfaceSettingsInfo s;
         requireResult(rtapi::getWetPaintSurfaceSettings(object, material_id, s));
@@ -177,6 +189,19 @@ void registerPaintWetBindings(py::module_& paint) {
         take(kw, "dry_roughness", s.dry_roughness);
         take(kw, "height_contribution", s.height_contribution);
         take(kw, "normal_strength", s.normal_strength);
+        take(kw, "reveal_picture", s.reveal_picture);
+        take(kw, "picture_tolerance", s.picture_tolerance);
+        take(kw, "picture_hint", s.picture_hint);
+        take(kw, "picture_outline", s.picture_outline);
+        if (kw.contains("picture_blank")) {
+            const py::object value = kw["picture_blank"];
+            if (!py::isinstance<py::sequence>(value) || py::isinstance<py::str>(value) ||
+                py::len(value) != 3) {
+                throw py::type_error("picture_blank must be a sequence of 3 floats");
+            }
+            const py::sequence seq = py::reinterpret_borrow<py::sequence>(value);
+            for (int i = 0; i < 3; ++i) s.picture_blank[i] = py::cast<float>(seq[i]);
+        }
         requireResult(rtapi::setWetPaintSurfaceSettings(object, material_id, s));
     }, py::arg("object"), py::arg("material_id") = -1);
     paint.def("wet_get_splat", [] {
@@ -226,6 +251,9 @@ void registerPaintWetBindings(py::module_& paint) {
             e["wet_texels"] = s.wet_texels; e["ratio"] = s.ratio;
             e["roughness_texels"] = s.roughness_texels;
             e["normal_texels"] = s.normal_texels;
+            e["picture_texels"] = s.picture_texels;
+            e["picture_revealed_texels"] = s.picture_revealed_texels;
+            e["picture_ratio"] = s.picture_ratio;
             e["mean_color"] = py::make_tuple(s.mean_color[0], s.mean_color[1], s.mean_color[2]);
             surfaces.append(std::move(e));
         }

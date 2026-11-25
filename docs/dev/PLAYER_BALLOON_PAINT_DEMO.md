@@ -245,13 +245,12 @@ Player, kaydedilmiş yerel oyun ayarları yoksa projeyi en fazla 5 aktif balonla
 ve Jolt kapalı açar. `visual_nodes` aktif sayıyı karşılamalıdır ve 24'e kadar mesh
 içerebilir. Artan mesh'ler ayarlardan balon sayısı yükseltilene kadar gizlidir.
 
-Mesh balonlar için `opaque_balloons: true` veya Studio'da ortak
-`transmission: 0` balonu tamamen opak yapar. Oyun, malzemenin opaklık ve
-transmission dokularını, kabarcık ve reçine içini, ayrıca Material Graph'ın
-opaklık ve transmission çıkışlarını bu modda devre dışı bırakır. Ayarı aynı
-oturumda geri alırken malzemelerin önceki görünüm girdileri geri yüklenir.
-`opaque_balloons` yalnızca boolean kabul eder ve true değeri mesh görselleri
-gerektirir. Python ve IPC aynı `paint.wet_demo` yapılandırmasını kullanır.
+Mesh balonlar Studio, Windows Player ve Android Player'da opak hazırlanır.
+Oyun, balon malzemesinin opaklık ve transmission dokularını, kabarcık ve reçine
+içini ve Material Graph'ın bu iki çıkışını devre dışı bırakır.
+Eski proje ve `paint.wet_demo` yapılandırmalarındaki `opaque_balloons` ve
+`transmission` alanları okunabilir, ancak uygulanmaz ve yeni yapılandırmaya
+yazılmaz. Python ve IPC aynı hazırlık yolunu kullanır.
 
 Üç duvarlı odalarda ön sınır yan duvarların bitiminden 25 cm öteye kurulur.
 Oda geometrisinden hesaplandığı için kamera hareket ettiğinde yer değiştirmez.

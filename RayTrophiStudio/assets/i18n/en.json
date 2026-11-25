@@ -216,7 +216,6 @@
   "player.wind_strength": "Wind strength",
   "player.wind_strength_hint": "Set to 0 for still air.",
   "player.balloon_physics": "Balloon physics",
-  "player.opaque_balloons": "Opaque balloons",
   "player.jolt_motion": "Jolt physics",
   "player.impact_soft_body": "Soft-body impacts",
   "player.paint_thickness_hint": "Sets the relief limit for new paint on every paintable surface.",

@@ -13173,6 +13173,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             maybeQueue(m.transmissionTexture, TextureType::Transmission, true,  true);
             maybeQueue(m.opacityTexture,      TextureType::Opacity,      true,  true);
             maybeQueue(m.heightTexture,       TextureType::Unknown,      true,  false);
+            maybeQueue(m.paintBaseTexture,    TextureType::Albedo,       false, false);
         }
     }
 
@@ -13349,6 +13350,7 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
         // the batch is on the GPU (doku dizisi C modeli).
         compactMaterialTexturesLocked();
     }
+    const int64_t nextTexIdBeforeMatLoop = m_nextTextureID;
     // ─────────────────────────────────────────────────────────────────────────
 
     // ── Consumer-side tripwire for the interior-volume fields ────────────────
@@ -13580,9 +13582,18 @@ void VulkanBackendAdapter::uploadMaterials(const std::vector<MaterialData>& mate
             }
         }
         gm.height_tex = getTexID(m.heightTexture, TextureType::Unknown, true);
+        gm.paint_base_tex = getTexID(m.paintBaseTexture, TextureType::Albedo, false);
 
         applyAutomaticViewportCutout(gm, ::render_settings.viewport_automatic_cutout);
         gpuMats.push_back(gm);
+    }
+
+    // Textures marked vulkan_dirty (e.g. freshly loaded from the Material Panel)
+    // bypass Phase 1's freshUploads and are uploaded inside getTexID() above as
+    // standalone images. Compact them into the viewport 2D-array pages + refTable
+    // now so RayFusion viewport sees them on the very next frame.
+    if (m_nextTextureID != nextTexIdBeforeMatLoop) {
+        compactMaterialTexturesLocked();
     }
 
     if (gpuMats.empty()) {
@@ -13985,7 +13996,8 @@ bool VulkanBackendAdapter::updateMaterial(uint32_t materialIndex, const Material
         !syncExistingTexture(m.emissionTexture, gm.emission_tex, TextureType::Emission, false) ||
         !syncExistingTexture(m.transmissionTexture, gm.transmission_tex, TextureType::Transmission, true, true) ||
         !syncExistingTexture(m.opacityTexture, gm.opacity_tex, TextureType::Opacity, true, true) ||
-        !syncExistingTexture(m.heightTexture, gm.height_tex, TextureType::Unknown, true)) {
+        !syncExistingTexture(m.heightTexture, gm.height_tex, TextureType::Unknown, true) ||
+        !syncExistingTexture(m.paintBaseTexture, gm.paint_base_tex, TextureType::Albedo, false)) {
         return false;
     }
 

@@ -6,6 +6,7 @@
 #include "Audio/AudioService.h"
 #include "UI/AudioSourceLabel.h"
 #include "UIContext.h"
+#include "scene_ui.h"
 #include "scene_data.h"
 #include "imgui.h"
 #include "json.hpp"
@@ -93,9 +94,6 @@ struct DemoDraft {
     std::string celebrate_sound;
     float float_amplitude = 0.08f;   // m, 0 = still
     float drift_speed = 0.12f;       // m/s, 0 = no wandering
-    bool opaque_balloons = false;
-    bool set_transmission = false;   // off = the balloon materials keep their own value
-    float transmission = 0.6f;
     bool spawn_auto = true;          // from the paint surfaces
     float spawn_min[3] = {-3.0f, 0.8f, -3.0f};
     float spawn_max[3] = {3.0f, 2.8f, 2.8f};
@@ -168,9 +166,6 @@ void syncDraft(const json& config) {
     draft.celebrate_sound = config.value("celebrate_sound", std::string());
     draft.float_amplitude = config.value("float_amplitude", 0.08f);
     draft.drift_speed = config.value("drift_speed", 0.12f);
-    draft.opaque_balloons = config.value("opaque_balloons", false);
-    draft.set_transmission = config.contains("transmission");
-    draft.transmission = config.value("transmission", 0.6f);
     draft.spawn_auto = !config.contains("spawn_min");
     if (!draft.spawn_auto && config["spawn_min"].is_array() && config["spawn_max"].is_array()) {
         for (int k = 0; k < 3; ++k) {
@@ -222,9 +217,6 @@ json draftConfig() {
     }
     config["float_amplitude"] = draft.float_amplitude;
     config["drift_speed"] = draft.drift_speed;
-    if (draft.set_transmission) {
-        config["transmission"] = draft.transmission;
-    }
     if (!draft.spawn_auto) {
         // Keep at least the 0.2 m the core requires on every axis.
         json mn = json::array(), mx = json::array();
@@ -244,7 +236,6 @@ json draftConfig() {
         // One mesh per balloon: the list decides the count.
         config["balloons"] = static_cast<int>(draft.visual_nodes.size());
         config["visual_nodes"] = draft.visual_nodes;   // absent: particle balloons
-        config["opaque_balloons"] = draft.opaque_balloons;
         config["jolt_motion"] = draft.jolt_motion;
         config["impact_soft_body"] = draft.impact_soft_body;
         config["wind_strength"] = draft.wind_strength;
@@ -338,6 +329,15 @@ void drawBalloonMeshes(const std::string& selected_object,
 void drawSurfaceSettings(const rtapi::WetPaintSurfaceRuntimeInfo& surface) {
     rtapi::WetPaintSurfaceSettingsInfo s = surface.settings;
     bool changed = false;
+    // Read-only: the material decides it (base texture + UV tiling), same value
+    // as paint.wet_status surfaces[].canvas_mode. docs/dev/WET_PAINT_CANVAS_UV.md
+    if (surface.canvas_overlay) {
+        ImGui::TextDisabled("Canvas over tiled base: %s", surface.base_texture.c_str());
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("The material's UV tiling repeats only this base texture; paint and the "
+                              "hidden picture cover the surface once. Set the tiling to 1 to go back.");
+        }
+    }
     changed |= ImGui::SliderFloat("Wetness", &s.wetness, 0.0f, 1.0f);
     changed |= ImGui::DragFloat("Open time (s)", &s.lifetime_seconds, 0.1f, 0.05f, 600.0f, "%.2f");
     changed |= ImGui::SliderFloat("Diffusion", &s.diffusion, 0.0f, 2.0f);
@@ -355,6 +355,37 @@ void drawSurfaceSettings(const rtapi::WetPaintSurfaceRuntimeInfo& surface) {
     if (s.reveal_opacity) {
         ImGui::TextWrapped("Unpainted areas are invisible. Clear paint hides the object again. "
                            "This mode replaces the opacity map on solid geometry.");
+    }
+    ImGui::SeparatorText("Hidden picture");
+    {
+        char picture[1024];
+        std::snprintf(picture, sizeof(picture), "%s", s.reveal_picture.c_str());
+        if (ImGui::InputText("Image path (empty: off)", picture, sizeof(picture),
+                             ImGuiInputTextFlags_EnterReturnsTrue)) {
+            s.reveal_picture = picture;
+            changed = true;
+        }
+        if (ImGui::Button("Browse...")) {
+            const std::string chosen = SceneUI::openFileDialogW(
+                L"Images (PNG, JPG, TGA)\0*.png;*.jpg;*.jpeg;*.tga\0All Files\0*.*\0");
+            if (!chosen.empty()) {
+                s.reveal_picture = chosen;
+                changed = true;
+            }
+        }
+        bool use_base = (s.reveal_picture == "@base");
+        if (ImGui::Checkbox("Use wall texture as picture", &use_base)) {
+            s.reveal_picture = use_base ? "@base" : "";
+            changed = true;
+        }
+        if (use_base) {
+            changed |= ImGui::ColorEdit3("Blank wall colour", s.picture_blank);
+        }
+        if (!s.reveal_picture.empty()) {
+            changed |= ImGui::SliderFloat("Hue tolerance (deg)", &s.picture_tolerance, 5.0f, 90.0f);
+            changed |= ImGui::SliderFloat("Hint", &s.picture_hint, 0.0f, 1.0f);
+            changed |= ImGui::SliderFloat("Outline visibility", &s.picture_outline, 0.0f, 1.0f);
+        }
     }
     changed |= ImGui::Checkbox("Roughness while wet", &s.roughness_channel);
     if (s.roughness_channel) {
@@ -444,25 +475,6 @@ void drawPalette(const json& demo_status) {
         if (!draft.colors.empty()) ImGui::SameLine();
         if (ImGui::Button("+##add_colour")) draft.colors.push_back({1.0f, 0.05f, 0.4f});
     }
-    if (!draft.visual_nodes.empty()) {
-        ImGui::Checkbox("Opaque balloons", &draft.opaque_balloons);
-    }
-    ImGui::BeginDisabled(draft.opaque_balloons && !draft.visual_nodes.empty());
-    ImGui::Checkbox("Same translucency for all balloons", &draft.set_transmission);
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Every balloon has its own material (its colour changes), so a\n"
-                          "hand-edited value drifts between them. On: the demo writes this\n"
-                          "transmission on each balloon when it appears.");
-    }
-    if (draft.set_transmission) {
-        ImGui::SliderFloat("Transmission", &draft.transmission, 0.0f, 1.0f, "%.2f");
-        ImGui::TextWrapped("Set Transmission to 0 for fully opaque balloons.");
-    }
-    if (ImGui::IsItemHovered() || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Linear colour (as material base colour). Right-click a colour to remove it.\n"
-                          "Keep other channels near 0 for vivid paint; overlapping splats blend.");
-    }
-    ImGui::EndDisabled();
 }
 
 void drawSoundPicker(const char* label, std::string& selected, const char* none_label) {

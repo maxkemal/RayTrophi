@@ -1,4 +1,4 @@
-﻿#include "Backend/VulkanStartupDiagnostics.h"
+#include "Backend/VulkanStartupDiagnostics.h"
 #if defined(RT_PLAYER) && (defined(_WIN32) || defined(__ANDROID__))
 #include "Viewport/PlayerSwapchainPresenter.h"
 #endif
@@ -6,6 +6,7 @@
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanMaterialTextureBinding.h"
 #include "Viewport/RayFusionViewportPasses.h"
+#include "Viewport/ViewportPipelineCache.h"
 
 #include <stdexcept>
 #ifdef RT_PLAYER
@@ -115,11 +116,15 @@ static VkResult safeCreateMaterialPreviewPipeline(VkDevice device,
                                                   const VkGraphicsPipelineCreateInfo* info,
                                                   VkPipeline* outPipeline) {
     VkResult result = VK_ERROR_INITIALIZATION_FAILED;
+    VkPipelineCache cache = Backend::currentViewportPipelineCache(device);
     __try {
-        result = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, info, nullptr, outPipeline);
+        result = vkCreateGraphicsPipelines(device, cache, 1, info, nullptr, outPipeline);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         if (outPipeline) *outPipeline = VK_NULL_HANDLE;
         result = VK_ERROR_INITIALIZATION_FAILED;
+    }
+    if (result == VK_SUCCESS) {
+        Backend::markViewportPipelineCacheDirty(device);
     }
     return result;
 }
@@ -127,7 +132,12 @@ static VkResult safeCreateMaterialPreviewPipeline(VkDevice device,
 static VkResult safeCreateMaterialPreviewPipeline(VkDevice device,
                                                   const VkGraphicsPipelineCreateInfo* info,
                                                   VkPipeline* outPipeline) {
-    return vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, info, nullptr, outPipeline);
+    const VkResult result = vkCreateGraphicsPipelines(
+        device, Backend::currentViewportPipelineCache(device), 1, info, nullptr, outPipeline);
+    if (result == VK_SUCCESS) {
+        Backend::markViewportPipelineCacheDirty(device);
+    }
+    return result;
 }
 #endif
 
@@ -785,6 +795,9 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         vkDestroyRenderPass(vkDevice, m_interactiveViewport.hdrRenderPass, nullptr);
         m_interactiveViewport.hdrRenderPass = VK_NULL_HANDLE;
     }
+    if (!keepPipeline) {
+        Backend::closeViewportPipelineCache(vkDevice);
+    }
     if (m_interactiveViewport.solidPipelineHdr != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.solidPipelineHdr, nullptr);
         m_interactiveViewport.solidPipelineHdr = VK_NULL_HANDLE;
@@ -1093,11 +1106,14 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     }
 
     VkDevice vkDevice = m_device->getDevice();
+    Backend::acquireViewportPipelineCache(vkDevice, m_device->getPhysicalDevice(), shaderDir);
 
+    const bool storeReflectionGbuffer =
+        m_device && m_device->getCapabilities().supportsRayQuery;
     if (!ensureRayFusionViewportPasses(
             vkDevice, m_interactiveViewport.renderPass,
             m_interactiveViewport.renderPassLoad, m_interactiveViewport.hdrRenderPass,
-            m_interactiveViewport.hdrRenderPassLoad)) {
+            m_interactiveViewport.hdrRenderPassLoad, storeReflectionGbuffer)) {
         return false;
     }
 
@@ -1513,7 +1529,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 cpci.stage = stage;
                 cpci.layout = m_interactiveViewport.postPipelineLayout;
                 ok = Backend::vulkanStartupResult(
-                    "raster_post.spv / vkCreateComputePipelines", vkCreateComputePipelines(vkDevice, VK_NULL_HANDLE, 1, &cpci, nullptr,
+                    "raster_post.spv / vkCreateComputePipelines", vkCreateComputePipelines(vkDevice, Backend::currentViewportPipelineCache(vkDevice), 1, &cpci, nullptr,
                                               &m_interactiveViewport.postPipeline)) == VK_SUCCESS;
             }
             if (postModule != VK_NULL_HANDLE) vkDestroyShaderModule(vkDevice, postModule, nullptr);
@@ -1835,6 +1851,9 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpStages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpStages[1].module = mpFragModule;
                     mpStages[1].pName = "main";
+                    // Build prefiltered IBL before sampling scene features so the first
+                    // pipeline sees fb_sky=0 instead of rebuilding once IBL comes ready.
+                    ensureMaterialPreviewIblResources(shaderDir);
                     // Scene-feature specialization (O3): only the branches this
                     // scene can reach are compiled in. The covered variant copies
                     // this stage, so it inherits the same constants; a feature that
@@ -2989,6 +3008,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
         }
 #endif
     }
+    Backend::saveViewportPipelineCache(vkDevice);
     // NOTE: selection-outline mask resources are intentionally NOT part of
     // this early-return: they are created in the same resize pass as the
     // main framebuffer below, and if their creation ever failed (memory
@@ -3900,13 +3920,13 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     m_interactiveViewport.materialPreviewBoundMaterialCount =
         m_externalMaterialBuffer ? m_externalMaterialCount
                                  : (m_device ? m_device->m_materialCount : 0u);
-    // May drain and swap the material pipelines: before beginFrame, like the
-    // binding updates below.
-    serviceMaterialPreviewFeatureSpec();
     prepareMaterialPreviewShadowFrame();
     updateMaterialPreviewSceneLightBindings();
     updateMaterialPreviewSdfSurfaceBinding();
     updateMaterialPreviewVolumeBinding();
+    // Run after light/IBL binding so RT_SPEC_FALLBACK_SKY sees whether
+    // prefiltered IBL is ready on frame 0 without a follow-up rebuild.
+    serviceMaterialPreviewFeatureSpec();
 
     double frameRingSlotWaitMs = 0.0;
     bool usingFrameRing = frameRingReady;

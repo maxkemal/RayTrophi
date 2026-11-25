@@ -1731,6 +1731,7 @@
     <ClCompile Include="source\src\Core\ThreadLocalRNG.cpp" />
     <ClCompile Include="source\src\Core\VulkanSceneSync.cpp" />
     <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp" />
+    <ClCompile Include="source\src\Device\SimulationPipelineCache.cpp" />
     <ClCompile Include="source\src\Game\GameRules.cpp" />
     <ClCompile Include="source\src\Game\GameRuntime.cpp" />
     <ClCompile Include="source\src\Game\GameSession.cpp" />
@@ -1827,6 +1828,7 @@
     <ClCompile Include="source\src\Paint\PaintModeState.cpp" />
     <ClCompile Include="source\src\Paint\PaintTextureSet.cpp" />
     <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp" />
+    <ClCompile Include="source\src\Paint\WetPaintGeometryBake.cpp" />
     <ClCompile Include="source\src\Paint\WetPaintGpu.cpp" />
     <ClCompile Include="source\src\Physics\AshDebrisSerialization.cpp" />
     <ClCompile Include="source\src\Physics\AshDebrisSystem.cpp" />
@@ -2420,6 +2422,7 @@
     <ClCompile Include="source\src\Viewport\RealtimeRenderSettings.cpp" />
     <ClCompile Include="source\src\Viewport\ScreenGi.cpp" />
     <ClCompile Include="source\src\Viewport\SelectionOutlineUpload.cpp" />
+    <ClCompile Include="source\src\Viewport\ViewportPipelineCache.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportPresentationStats.cpp" />
     <ClCompile Include="source\src\Viewport\ViewportSceneSync.cpp" />
   </ItemGroup>

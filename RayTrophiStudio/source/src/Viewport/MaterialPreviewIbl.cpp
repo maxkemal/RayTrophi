@@ -1,4 +1,5 @@
 #include "Backend/VulkanBackend.h"
+#include "Viewport/ViewportPipelineCache.h"
 #include "globals.h"
 
 #include <algorithm>
@@ -261,7 +262,8 @@ bool VulkanBackendAdapter::ensureMaterialPreviewIblResources(const std::string& 
     cpci.stage.module = module;
     cpci.stage.pName = "main";
     const VkResult pipelineResult = vkCreateComputePipelines(
-        device, VK_NULL_HANDLE, 1, &cpci, nullptr, &state->pipeline);
+        device, Backend::currentViewportPipelineCache(device), 1, &cpci, nullptr, &state->pipeline);
+    if (pipelineResult == VK_SUCCESS) Backend::markViewportPipelineCacheDirty(device);
     vkDestroyShaderModule(device, module, nullptr);
     if (pipelineResult != VK_SUCCESS) {
         destroyMaterialPreviewIblResources();
@@ -468,7 +470,8 @@ bool VulkanBackendAdapter::ensureWorldSkyCaptureResources(const std::string& sha
     cpci.stage.module = module;
     cpci.stage.pName = "main";
     const VkResult pipelineResult = vkCreateComputePipelines(
-        device, VK_NULL_HANDLE, 1, &cpci, nullptr, &state->skyPipeline);
+        device, Backend::currentViewportPipelineCache(device), 1, &cpci, nullptr, &state->skyPipeline);
+    if (pipelineResult == VK_SUCCESS) Backend::markViewportPipelineCacheDirty(device);
     vkDestroyShaderModule(device, module, nullptr);
     if (pipelineResult != VK_SUCCESS) return false;
 

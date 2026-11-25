@@ -29,6 +29,7 @@ public:
     bool busy() const { return state_ == "loading"; }
     bool presenting() const { return presenting_; }
     std::string_view stage() const { return stage_; }
+    void setDetail(std::string detail) { detail_ = std::move(detail); }
     void setPresenter(std::function<void()> presenter) { presenter_ = std::move(presenter); }
 
     void begin(const std::string& path) {

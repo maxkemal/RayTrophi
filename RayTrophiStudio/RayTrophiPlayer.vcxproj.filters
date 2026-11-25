@@ -1374,6 +1374,9 @@
     <ClCompile Include="source\src\Device\SimulationComputeVulkan.cpp">
       <Filter>source\src\Device</Filter>
     </ClCompile>
+    <ClCompile Include="source\src\Device\SimulationPipelineCache.cpp">
+      <Filter>source\src\Device</Filter>
+    </ClCompile>
     <ClCompile Include="source\src\Game\GameRules.cpp">
       <Filter>source\src\Game</Filter>
     </ClCompile>
@@ -1558,6 +1561,9 @@
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\TerrainPaintAdapter.cpp">
+      <Filter>source\src\Paint</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Paint\WetPaintGeometryBake.cpp">
       <Filter>source\src\Paint</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Paint\WetPaintGpu.cpp">
@@ -2662,6 +2668,9 @@
       <Filter>source\src\Viewport</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\SelectionOutlineUpload.cpp">
+      <Filter>source\src\Viewport</Filter>
+    </ClCompile>
+    <ClCompile Include="source\src\Viewport\ViewportPipelineCache.cpp">
       <Filter>source\src\Viewport</Filter>
     </ClCompile>
     <ClCompile Include="source\src\Viewport\ViewportPresentationStats.cpp">

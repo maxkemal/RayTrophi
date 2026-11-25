@@ -16,6 +16,7 @@ public:
     void pumpMainThreadWork(bool scene_ready = true);
 
     bool isForeground() const;
+    bool isMinimized() const;
     bool shouldPresent(bool continuous) const;
     void requestRedraw();
 

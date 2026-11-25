@@ -393,7 +393,9 @@ void main() {
         rawHitUV = hitUV;
         // Vulkan shader coordinate origin differs; flip V to match closesthit / texture upload
         hitUV.y = 1.0 - hitUV.y;
-        hitUV = applyMaterialUVTransform(mat, hitUV);
+        // A wet paint canvas keeps its slots at the raw UV
+        // (docs/dev/WET_PAINT_CANVAS_UV.md).
+        if (mat.paint_base_tex == 0u) hitUV = applyMaterialUVTransform(mat, hitUV);
     }
 
     // --- Transmissive surface (glass/water): coloured PARTIAL shadow ---

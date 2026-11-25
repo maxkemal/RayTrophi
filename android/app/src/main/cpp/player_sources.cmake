@@ -54,7 +54,7 @@ set(RT_DEP_LIST RT_SDL2_DIR RT_SDL2_IMAGE_DIR)
 set(RT_DEP_RT_SDL2_DIR_TARGET SDL2)
 set(RT_DEP_RT_SDL2_IMAGE_DIR_TARGET SDL2_image)
 
-# Player sources (863, of which 5 are Android stubs).
+# Player sources (866, of which 5 are Android stubs).
 set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/external/imgui-knobs/imgui-knobs.cpp"
     "${RT_PROJECT_DIR}/external/imgui/imgui.cpp"
@@ -488,6 +488,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Core/ThreadLocalRNG.cpp"
     "${RT_PROJECT_DIR}/source/src/Core/VulkanSceneSync.cpp"
     "${RT_PROJECT_DIR}/source/src/Device/SimulationComputeVulkan.cpp"
+    "${RT_PROJECT_DIR}/source/src/Device/SimulationPipelineCache.cpp"
     "${RT_PROJECT_DIR}/source/src/Game/GameRules.cpp"
     "${RT_PROJECT_DIR}/source/src/Game/GameRuntime.cpp"
     "${RT_PROJECT_DIR}/source/src/Game/GameSession.cpp"
@@ -550,6 +551,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Paint/PaintModeState.cpp"
     "${RT_PROJECT_DIR}/source/src/Paint/PaintTextureSet.cpp"
     "${RT_PROJECT_DIR}/source/src/Paint/TerrainPaintAdapter.cpp"
+    "${RT_PROJECT_DIR}/source/src/Paint/WetPaintGeometryBake.cpp"
     "${RT_PROJECT_DIR}/source/src/Paint/WetPaintGpu.cpp"
     "${RT_PROJECT_DIR}/source/src/Physics/AshDebrisSerialization.cpp"
     "${RT_PROJECT_DIR}/source/src/Physics/AshDebrisSystem.cpp"
@@ -917,6 +919,7 @@ set(RT_PLAYER_SOURCES
     "${RT_PROJECT_DIR}/source/src/Viewport/RealtimeRenderSettings.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/ScreenGi.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/SelectionOutlineUpload.cpp"
+    "${RT_PROJECT_DIR}/source/src/Viewport/ViewportPipelineCache.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/ViewportPresentationStats.cpp"
     "${RT_PROJECT_DIR}/source/src/Viewport/ViewportSceneSync.cpp"
 )

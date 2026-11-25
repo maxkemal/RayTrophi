@@ -37,6 +37,11 @@ Paint::WetPaintSurfaceSettings toCore(const WetPaintSurfaceSettingsInfo& in) {
     s.dry_roughness = in.dry_roughness;
     s.height_contribution = in.height_contribution;
     s.normal_strength = in.normal_strength;
+    s.reveal_picture = in.reveal_picture;
+    s.picture_tolerance = in.picture_tolerance;
+    s.picture_hint = in.picture_hint;
+    s.picture_outline = in.picture_outline;
+    for (int i = 0; i < 3; ++i) s.picture_blank[i] = in.picture_blank[i];
     return s;
 }
 
@@ -61,6 +66,11 @@ WetPaintSurfaceSettingsInfo fromCore(const Paint::WetPaintSurfaceSettings& s) {
     o.dry_roughness = s.dry_roughness;
     o.height_contribution = s.height_contribution;
     o.normal_strength = s.normal_strength;
+    o.reveal_picture = s.reveal_picture;
+    o.picture_tolerance = s.picture_tolerance;
+    o.picture_hint = s.picture_hint;
+    o.picture_outline = s.picture_outline;
+    for (int i = 0; i < 3; ++i) o.picture_blank[i] = s.picture_blank[i];
     return o;
 }
 
@@ -78,6 +88,8 @@ WetPaintSurfaceRuntimeInfo fromCore(const Paint::WetPaintSurfaceInfo& s) {
     o.stamped_texels = s.stamped_texels;
     o.sources_dropped = s.sources_dropped;
     o.texture = s.texture;
+    o.canvas_overlay = s.canvas_overlay;
+    o.base_texture = s.base_texture;
     o.settings = fromCore(s.settings);
     return o;
 }
@@ -105,6 +117,15 @@ Result validateSettings(const WetPaintSurfaceSettingsInfo& s) {
     if (!std::isfinite(s.normal_strength) || s.normal_strength < 0.0f ||
         s.normal_strength > 8.0f) {
         return Result::fail("normal_strength must be in [0, 8]");
+    }
+    if (!std::isfinite(s.picture_tolerance) || s.picture_tolerance < 5.0f ||
+        s.picture_tolerance > 90.0f) {
+        return Result::fail("picture_tolerance must be in [5, 90] degrees");
+    }
+    if (!finite01(s.picture_hint)) return Result::fail("picture_hint must be in [0, 1]");
+    if (!finite01(s.picture_outline)) return Result::fail("picture_outline must be in [0, 1]");
+    for (int i = 0; i < 3; ++i) {
+        if (!finite01(s.picture_blank[i])) return Result::fail("picture_blank components must be in [0, 1]");
     }
     return Result::success();
 }
@@ -312,6 +333,9 @@ Result getWetPaintCoverage(WetPaintCoverageInfo& out) {
         o.wet_texels = s.wet_texels;
         o.roughness_texels = s.roughness_texels;
         o.normal_texels = s.normal_texels;
+        o.picture_texels = s.picture_texels;
+        o.picture_revealed_texels = s.picture_revealed_texels;
+        o.picture_ratio = s.picture_ratio;
         o.ratio = s.ratio;
         for (int i = 0; i < 3; ++i) o.mean_color[i] = s.mean_color[i];
         out.surfaces.push_back(o);

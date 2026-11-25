@@ -57,8 +57,8 @@ Ortam için önceden süzülmüş harita zaten var ve ambient onu kullanıyor (`
 | **O4** | HDRI: RGBA32F → **RGBA16F + mip zinciri** (B10G11R11 da aday). Linear filtre desteğini `vkGetPhysicalDeviceFormatProperties` ile kontrol et, desteklenmiyorsa açık hata ver | 16F'nin 10 bit mantissası HDR için yeterli, fark görünmez | HDRI payının (≈800 ms) çoğu, bellek ¼ | doğrulama için evet |
 | **O5** | Transmission ortam okumasını önceden süzülmüş haritaya taşı: roughness → mip, kanal başına **1 okuma** (27 yerine 3). Ambient'ın 2026'daki aynı değişikliğinin devamı | ambient ile aynı yaklaşıklık. RT referansına karşı ölçülür | balon pikseli başına ~24 okuma eksik | evet |
 | **O6** | Gölge PCF'sini `textureGather` ile yap. `params.w == 1` iken 3×3 komşu texel 4 gather'la tam kapsanır ve karşılaştırmalar aynıdır | **bit-aynı** | ışık başına 9 → 4 okuma (6 ışıkta 54 → 24) | evet |
-| **O7** | Yükleme ekranı sahneyi kapatırken 3D sahneyi çizme (yalnız başlatıcı). `game_design` tik sayısını `scene_load` ayrıntısına yaz | aynı | `game_design` 39 s → SDF hazırlık süresi | evet |
-| **O8** | Mali'de çalışmayan geçişlerin eklerini (yansıma G-buffer, TAA previousClip) yazma. Önce B7 formatlarını oku | aynı | tile bellek / bant genişliği | evet |
+| **O7** | Yükleme ekranı sahneyi kapatırken 3D sahneyi çizme (yalnız başlatıcı). `game_design` tik sayısını `scene_load` ayrıntısına yaz | aynı | `game_design` 39 s → SDF hazırlık süresi | **O7a+O7b WINDOWS CANLI PASS (2026-11-24, Antigravity)**: `SimulationPipelineCache` 310 KB `cache=hit`, 273→5 kernel **10 ms**, `prepare_particles` **29,5 ms**; `game_design` `sdf_wait_ticks=0` ama hâlâ **2103 ms** PC (tablet ölçümü + `tickGameDesign` içi ayrıştırma sıradaki iş) |
+| **O8** | Mali'de çalışmayan geçişlerin eklerini (yansıma G-buffer, TAA previousClip) yazma. Önce B7 formatlarını oku | aynı | tile bellek / bant genişliği | **✔ LENOVO TB330FU CANLI PASS (2026-11-25, Antigravity)**: O7a–d + O8 + Android 512 + `opaque_balloons` + `glass=False` yetim-materyal filtresi toplamı: `960×600` boşta raster GPU 696,7 → **138,05 ms** (**5,05×**, **6,85 FPS**; `sky+main` 423,7→118,95, `transmission` 222,3→0,00); sıcak açılış 46,9 → **~15,4 s** (`prepare_particles` **173 ms**, `first_frame` sıcak **513 ms**) |
 | **O9** | (Kullanıcı kararı, EN SON) Otomatik iç çözünürlük: GPU süresiyle histerezisli ölçek. Önce testte kendiliğinden oluşan `render_scale=0.25`'in sebebini bul | — | piksele doğrusal | evet |
 
 ★ **CLAUDE.md §1 açığı, O1 ile birlikte kapatılmalı:** Player IPC kalite / ışıklandırma / gölge anahtarlarını `unsupported_in_player` ile reddediyor. Bu yüzden cihazda A/B yalnız yeni APK ile yapılabiliyor. En azından `shadow` (aç/kapa), `lighting_preset` ve `raster_viewport_quality_preset` okunup yazılabilmeli (Codex `world.*` için bunu yaptı). Bu olmadan tablette her hipotez bir APK turuna mal oluyor.
@@ -123,6 +123,28 @@ Artımlı derlemeye sığmayanlar. Hepsi tek tam derlemede toplanacak:
 3. **O3 + O3b**: specialization ile budama ve malzeme struct'ını alan alan okuma. Ana kazanç (~3× LS). Hedef spill = 0, malioc ile doğrulanır.
 4. **O12**: `paint_wet` yalnız aktif tile'larda.
 5. O4–O6, O1, O7 önceki sırada.
+
+## ★ DEVİR 2026-11-25 öğle (Antigravity) — YENİ AJAN BURADAN DEVAM EDEBİLİR
+
+**Tamamlanan ve Windows Player'da canlı doğrulanan (`dist/RayTrophiPlayer`, RTX 3060, `workshop.rtp`, `opaque_balloons=true`, `resolution=1024`):**
+- **Boşta:** **670+ FPS**; **çoklu sürpriz patlama + konfeti tabanı:** **170 → 270 FPS** (+%59).
+- **Tek soğuk `material_preview` kurulumu (0 rebuild):** `RT_SPEC_OPT_TEX` (`id=8`) + `RT_SPEC_CLEARCOAT` (`id=9`) + IBL ön-kurulum + Frame 0 öncesi `tickPlayerGameSettings` → `[MaterialSpec] terrain=0 graph=0 weather=0 glass=0 ext=0 alt_light=0 fb_sky=0 rf_gi=1 opt_tex=0 cc=1`. `malioc` (`Mali-G52` & `Mali-G76`): **A 76,00 · LS 59,20 · V 1,62 · T 163,00 · stack 176 B** (Alloca 36 + Spill 140 B).
+- **Açılış & compute:** `geometry_rebakes=0` (`WetPaintGpu::rebuildDevice` `key[0..7]` senkronu), `SimCompute` 12 kernel ön-ısıtma (`sim_particle_*` 3 + `paint_wet.0/1/2/3/6/7/9/10` + `sim_collider_bvh_query`), `paint_wet` mod specialization (`resolve`/`channels` stack **0 B**), `WetPaintGpu` GPU zero-init + OpenMP bake.
+- **Paket 2 (patlama/konfeti CPU+GPU):** `ParticleColliderCache.h` (`Matrix4x4::inverse()` kare başı önbellek), `SimulationComputeVulkan.cpp` `m_deferFrameSubmit` upload yolu (`submitCopyImmediate()` kalktı), `ParticleDeviceCollision.cpp` 64-bit FNV-1a collider yükleme atlama, `ParticleDeviceResidency.cpp` + `ParticleBillboardBuilder.cpp` canlı sayaç erken çıkışı, `RuntimeSimulationClock.cpp` 3. `syncSimulationWorld` kaldırıldı.
+- **Geri alınan deneme:** `paint_wet.comp` sert-kenar sıkıştırması (`paintDisplayAlpha` + `splat_falloff`) ıslak boyayı düz çıkartma gibi yaptığı için tamamen geri alındı; `paint_wet.spv` SHA-256 `EE130C33...9713` olarak `source/shaders`, `x64/Release/shaders`, `dist/RayTrophiPlayer/shaders` ve `x64/Release/shaders_vk11`'e dağıtıldı.
+- **Android APK komutu (kullanıcı şu an başlattı):** `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ".\scripts\Build-PlayerApk.ps1" -Abi arm64 -Scenes pastel-paint-workshop` (Lenovo TB330FU ölçümü + Omix X700 `[GpuBreadcrumb]` testi bekleniyor).
+
+**Sıradaki hazır iş — Paket 3 (3 okuma alt ajanıyla doğrulandı, tamamen ARTIMLI, bit-aynı):**
+1. **Bölüm A — Kalan CPU patlama bütçesi (`simulation.timeline` 392 ms + `simulation.wet_paint` 237 ms + `billboards.build` 88 ms / 4 s):**
+   - `BalloonEffects.cpp:568-569`: `BalloonSparkleTrails` (3.000 parçacık, 0 collider, yalnız billboard) `ParticleExecutionPolicy::Auto` (GPU-resident + vertex pulling).
+   - `ParticleBillboardBuilder.cpp` (sıfır header değişikliği): `kFallbackRow` tek bake, `LutBuildCache` (ışık + `appearanceRevision()` sabitken sıfır-kopya `out.lut`/`out.row_lookup`, `writesDeviceState()==false` korunur), `unordered_map` → düz dizi, `pushQuad` tek `resize(base+6)`.
+   - `ParticleColliderCache.h` + `ParticleSimulation.cpp`: `world_to_local` öncesi ucuz world-AABB reddi + `Die && !record_collision_events` iken `surfaceNormal` atlama.
+   - `SimulationComputeVulkan.cpp`: `dispatch()` içinde her çağrıda heap tahsisi yapan `std::string`/`std::vector`/`std::map` descriptor lookup'ını sabit önbelleğe alma.
+   - `WetPaintGpu.cpp` + `ParticleDeviceCollision.cpp`: 2 Hz `geometryKey()` için `g_scene_geometry_generation` + transform hızlı yolu; `prev`/`stats_init`/`packed` vektörlerini yeniden kullanma.
+2. **Bölüm B — Mali `material_preview_frag` 176 B stack & `T=163` paketi:**
+   - Shader-only: `coatEnvTint`'i `if (hasEnvClearcoat)` içine alma, `emission`'ı ışık/IBL sonrasına erteleme, base+clearcoat GGX yarım-vektör paylaşımı, kapısız 3 `RT_SPEC_GLASS` satırını (`786-793, 803-807, 977-982`) kapılama.
+   - Yeni spec sabitleri (varsayılan eski exe güvenli): `RT_SPEC_TEX_PAGES` (`constant_id=10`, varsayılan `32u`, 2 sayfada 160→10 statik `textureGrad`), `RT_SPEC_PAINT_CANVAS` (`11`, varsayılan `true`), `RT_SPEC_CLEARCOAT_IRID` (`12`, varsayılan `true`).
+3. **Bekletilen:** `previousClip` (128 bpp) TBDR `DONT_CARE` Android'de TAA varsayılan açık olduğu için tablet ölçümünden sonra değerlendirilecek; `O9` dinamik iç çözünürlük en son.
 
 ## ★ DEVİR 2026-11-24 (Claude) — patlama düşüşü CPU beklemesiydi, halka 3 yuva YAZILDI
 

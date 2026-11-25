@@ -3,6 +3,7 @@
 #include "Core/AppFrame.h"
 #include "Core/VulkanSceneSync.h"
 #include "Paint/WetPaintGpu.h"
+#include "Core/StudioPlayPaint.h"
 #include "PostProcess/PostSurface.h"
 #include "Core/FatalSignalTrace.h"
 #include "Backend/VulkanRecoveryPolicy.h"
@@ -1143,6 +1144,12 @@ static Backend::IViewportBackend* getRasterViewportBackend() {
         return viewportBackend;
     }
     return nullptr;
+}
+
+static bool syncStudioPlayPaintShading(int& shading) {
+    return AppRuntime::studioPlayPaintActive() && AppRuntime::usePaintRasterShading(
+        shading, g_backend.get(), getRasterViewportBackend(),
+        Paint::wetPaintGpu().publicationDevice());
 }
 
 static Backend::IBackend* getActiveViewportBackendForShading(int shadingMode) {
@@ -4125,6 +4132,7 @@ int main(int argc, char* argv[]) try {
         frame_cycle.beginUiFrame();
         ui_ctx.ray_texture = raytrace_texture;
         
+        start_render |= syncStudioPlayPaintShading(ui.viewport_settings.shading_mode);
         ui_ctx.backend_ptr = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
 
         // Sync the backend's viewport mode to the UI shading mode as soon as a backend instance
@@ -4191,6 +4199,7 @@ int main(int argc, char* argv[]) try {
             ImGui::EndFrame();
             continue;
         }
+        start_render |= syncStudioPlayPaintShading(ui.viewport_settings.shading_mode);
 
         // Cloud time (Faz 3) is a function of the CORE timeline frame, derived
         // here -- not in TimelineWidget::draw, which runs only while that panel is
@@ -4210,7 +4219,9 @@ int main(int argc, char* argv[]) try {
                 g_backend.get(), g_viewport_backend.get());
             // GPU wet paint (Paint/WetPaintGpu.h): this frame's dirty tiles into the
             // bound base colour textures, device-to-device. The clock ticked it in ui.draw.
-            const int wetPublished = Paint::wetPaintGpu().publish(g_backend.get(), g_viewport_backend.get());
+            auto* wetViewport = getActiveViewportBackendForShading(ui.viewport_settings.shading_mode);
+            const int wetPublished = AppRuntime::publishStudioPaint(
+                g_backend.get(), g_viewport_backend.get(), wetViewport);
             if (wetPublished & Paint::kWetPaintPublishedHost) {
                 // Host pixels changed (the preview viewport is another VkDevice):
                 // the brush's per-stroke sync - only the painted material's slot
@@ -4221,7 +4232,8 @@ int main(int argc, char* argv[]) try {
             }
             if (wetPublished) {
                 start_render = true;
-                if (g_backend) g_backend->resetAccumulation();
+                auto* resetBackend = AppRuntime::studioPlayPaintActive() ? wetViewport : g_backend.get();
+                if (resetBackend) resetBackend->resetAccumulation();
             }
             // Wake RT here, before rendering, independently of the later playback-frame gate.
             if (cloudsPushed && ui.viewport_settings.shading_mode == 2) {

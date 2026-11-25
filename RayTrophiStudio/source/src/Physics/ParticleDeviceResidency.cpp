@@ -106,15 +106,20 @@ void ParticleSimulationSystem::noteResidentSlotWrite(std::size_t index) {
 void ParticleSimulationSystem::advanceHostLifecycle(float dt) {
     // Same operations, same order as the CPU reference loop in step() and as
     // sim_particle_ballistic.comp: age += dt, kill at age >= lifetime.
+    std::size_t remaining = alive_count_;
+    if (remaining == 0) return;
     for (std::size_t i = 0; i < buffers_.alive.size(); ++i) {
         if (buffers_.alive[i] == 0u) continue;
+        const bool last_alive = (--remaining == 0);
         buffers_.age_seconds[i] += dt;
         if (buffers_.age_seconds[i] >= buffers_.lifetime_seconds[i]) {
             buffers_.alive[i] = 0u;
             if (alive_count_ > 0) --alive_count_;
+            if (last_alive) break;
             continue;
         }
         buffers_.rotation[i] += buffers_.angular_velocity[i] * dt;
+        if (last_alive) break;
     }
 }
 
@@ -390,6 +395,16 @@ bool ParticleSimulationSystem::stepDeviceResident(const SimulationContext& conte
     // Slot records, newest write per slot wins (the scatter runs in parallel,
     // so two records for one slot would race).
     const std::size_t n = buffers_.alive.size();
+    if (alive_count_ == 0 && resident_pending_slots_.empty() &&
+        host_demand_serial_ < resident_step_serial_ &&
+        (!deviceCollisionStageNeeded() || stats_.collision_stage_on_device)) {
+        stats_.slot_records = 0;
+        stats_.gpu_status = "gpu_resident";
+        stats_.device_resident = true;
+        ++resident_step_serial_;
+        stats_.gpu_step_ms = msSince(start);
+        return true;
+    }
     resident_records_.clear();
     if (!resident_pending_slots_.empty()) {
         RTPERF_FRAME_SCOPE("particle.resident_spawn.pack");

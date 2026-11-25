@@ -29,8 +29,7 @@ constexpr float kFullHeightContribution = 0.625f;
 constexpr const char *demo_fields[] = {
     "autostart",    "balloons",           "respawn_seconds",      "birth_seconds", "interval_min",
     "interval_max", "idle_reset_seconds", "finale_reset_seconds", "room_goal",
-    "interaction_mode", "body_controls", "wind_strength", "jolt_motion", "impact_soft_body",
-    "opaque_balloons"};
+    "interaction_mode", "body_controls", "wind_strength", "jolt_motion", "impact_soft_body"};
 struct Session {
     std::string project;
     std::uint64_t revision = std::numeric_limits<std::uint64_t>::max();
@@ -78,6 +77,11 @@ void loadProfiles() {
     auto value = json::parse(stream, nullptr, false);
     if (value.is_object() && value.contains("version") && value["version"] == 1 &&
         value.contains("games") && value["games"].is_object()) {
+        for (auto& game : value["games"]) {
+            if (game.is_object()) {
+                game.erase("opaque_balloons");
+            }
+        }
         profiles = std::move(value);
     } else {
         storage_error = "Saved game settings are invalid; authored settings kept";
@@ -227,7 +231,7 @@ void validate(const json &patch, const json &current) {
     if (patch.contains("autostart")) {
         require(patch["autostart"].is_boolean(), "autostart must be boolean");
     }
-    for (const auto* key : {"jolt_motion", "impact_soft_body", "opaque_balloons"}) {
+    for (const auto* key : {"jolt_motion", "impact_soft_body"}) {
         if (patch.contains(key)) {
             require(patch[key].is_boolean(), std::string(key) + " must be boolean");
         }

@@ -2,6 +2,8 @@
 // See include/Paint/WetPaintGpu.h and shaders/paint_wet.comp.
 
 #include "Paint/WetPaintGpu.h"
+#include "Paint/WetPaintGeometryBake.h"
+#include "WetPaintChannelEdits.h"
 #include "Paint/HiddenGameObjects.h"
 
 #include "Backend/IBackend.h"
@@ -17,6 +19,7 @@
 #include "SimulationWorld.h"
 #include "SurfaceFlowField.h"
 #include "Texture.h"
+#include "ProjectManager.h"
 #include "Triangle.h"
 #include "TriangleMesh.h"
 #include "globals.h"
@@ -28,6 +31,7 @@
 #include <cmath>
 #include <cstring>
 #include <deque>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <tuple>
@@ -55,7 +59,7 @@ constexpr uint32_t kTile = 32u;
 // a stamp shows at the next step, at most one 60 Hz step later. Below 60 fps
 // every frame is a step, exactly as before.
 constexpr double kWetStepSeconds = 1.0 / 60.0;
-constexpr uint32_t kStatsStride = 16u;
+constexpr uint32_t kStatsStride = 18u;
 constexpr uint32_t kBindingCount = 17u;
 constexpr int kGutterTexels = 2;
 // A painted surface's base follows its material colour once that colour has
@@ -75,6 +79,11 @@ constexpr const char* kWetPaintTimingLabels[] = {
     "paint_wet.channels",
 };
 constexpr uint32_t kCompactChannels = 4u;
+constexpr uint32_t kPictureBit = 8u;          // pc._p1: source plane 6 (hidden picture) exists
+constexpr uint32_t kResetInitOnlyBit = 16u;   // pc._p1: MODE_RESET zeroes paint/scratch buffers only
+constexpr uint32_t kSurfacePicture = 16u;     // GpuSurface.flags: this surface has a picture
+constexpr uint32_t kSurfaceOverlay = 32u;     // GpuSurface.flags: premultiplied canvas over a tiled base
+constexpr uint32_t kPicturePlanes = 7u;       // source atlas planes when a picture exists
 constexpr std::size_t kIndirectGroupCountWords = 3u;
 constexpr std::size_t channelDispatchOffset(uint32_t tiles) {
     return static_cast<std::size_t>(tiles) * 2u * sizeof(uint32_t);
@@ -85,6 +94,7 @@ enum StatsSlot : uint32_t {
     kStStampedTexels = 5, kStTickedTiles = 6, kStSourcesDropped = 7, kStCoveredTexels = 8,
     kStValidTexels = 9, kStSumR = 10, kStSumG = 11, kStSumB = 12, kStWetTexels = 13,
     kStRoughnessTexels = 14, kStNormalTexels = 15,
+    kStPictureTexels = 16, kStPictureRevealed = 17,
 };
 
 // Mirrored field for field in paint_wet.comp (std430).
@@ -122,9 +132,115 @@ struct WetPaintGpuConstants {
 static_assert(sizeof(WetPaintGpuConstants) == 64,
               "paint_wet push constants: shader, kernel table (64) and this struct change together");
 
+// Loads a hidden-picture image and resamples it (bilinear, premultiplied-free
+// per channel) to the surface page. Row convention = Surface::base: page row y
+// is texture row y (Texture::pixels is row 0 first, exactly what base copies).
+bool loadPictureImage(const std::string& path, uint32_t width, uint32_t height,
+                      std::vector<uint32_t>& out) {
+    out.clear();
+    if (path.empty() || width == 0 || height == 0) return true;
+    namespace fs = std::filesystem;
+    std::string resolved = path;
+    std::error_code ec;
+    if (!fs::exists(fs::path(path), ec)) {
+        const std::string project = ProjectManager::getInstance().getCurrentFilePath();
+        if (!project.empty() && fs::path(path).is_relative()) {
+            const fs::path candidate = fs::path(project).parent_path() / path;
+            if (fs::exists(candidate, ec)) resolved = candidate.string();
+        }
+    }
+    Texture image(resolved, TextureType::Albedo);
+    if (!image.is_loaded() || image.width <= 0 || image.height <= 0 ||
+        image.pixels.size() != static_cast<size_t>(image.width) * image.height) {
+        return false;
+    }
+    const int sw = image.width, sh = image.height;
+    out.resize(static_cast<size_t>(width) * height);
+    for (uint32_t y = 0; y < height; ++y) {
+        const float fy = std::clamp((static_cast<float>(y) + 0.5f) * sh / height - 0.5f, 0.0f,
+                                    static_cast<float>(sh - 1));
+        const int y0 = static_cast<int>(fy), y1 = std::min(y0 + 1, sh - 1);
+        const float ty = fy - y0;
+        for (uint32_t x = 0; x < width; ++x) {
+            const float fx = std::clamp((static_cast<float>(x) + 0.5f) * sw / width - 0.5f, 0.0f,
+                                        static_cast<float>(sw - 1));
+            const int x0 = static_cast<int>(fx), x1 = std::min(x0 + 1, sw - 1);
+            const float tx = fx - x0;
+            const CompactVec4 p[4] = {image.pixels[static_cast<size_t>(y0) * sw + x0],
+                                      image.pixels[static_cast<size_t>(y0) * sw + x1],
+                                      image.pixels[static_cast<size_t>(y1) * sw + x0],
+                                      image.pixels[static_cast<size_t>(y1) * sw + x1]};
+            const float w[4] = {(1 - tx) * (1 - ty), tx * (1 - ty), (1 - tx) * ty, tx * ty};
+            float c[4] = {0, 0, 0, 0};
+            for (int k = 0; k < 4; ++k) {
+                c[0] += p[k].r * w[k]; c[1] += p[k].g * w[k];
+                c[2] += p[k].b * w[k]; c[3] += p[k].a * w[k];
+            }
+            const auto b = [](float v) {
+                return static_cast<uint8_t>(std::clamp(v + 0.5f, 0.0f, 255.0f));
+            };
+            out[static_cast<size_t>(y) * width + x] =
+                static_cast<uint32_t>(b(c[0])) | (static_cast<uint32_t>(b(c[1])) << 8) |
+                (static_cast<uint32_t>(b(c[2])) << 16) | (static_cast<uint32_t>(b(c[3])) << 24);
+        }
+    }
+    return true;
+}
+
 uint32_t packRgba8(const CompactVec4& c) {
     return static_cast<uint32_t>(c.r) | (static_cast<uint32_t>(c.g) << 8) |
            (static_cast<uint32_t>(c.b) << 16) | (static_cast<uint32_t>(c.a) << 24);
+}
+
+CompactVec4 unpackRgba8(uint32_t c) {
+    return CompactVec4(static_cast<uint8_t>(c & 255u), static_cast<uint8_t>((c >> 8) & 255u),
+                       static_cast<uint8_t>((c >> 16) & 255u), static_cast<uint8_t>(c >> 24));
+}
+
+// A texture transform that maps UV to itself (the wrap mode is irrelevant: a
+// canvas covers 0..1 once either way).
+bool identityTransform(const PrincipledBSDF::TextureTransform& t) {
+    const auto one = [](double v) { return std::abs(v - 1.0) <= 1e-4; };
+    const auto zero = [](double v) { return std::abs(v) <= 1e-4; };
+    return one(t.scale.u) && one(t.scale.v) && one(t.tilingFactor.u) && one(t.tilingFactor.v) &&
+           zero(t.translation.u) && zero(t.translation.v) && zero(t.rotation_degrees);
+}
+
+// `texture` stretched once over a w x h page (the canvas seed's mapping,
+// cloneTextureForPaint), opaque.
+std::vector<uint32_t> stretchedBase(const Texture& texture, uint32_t w, uint32_t h) {
+    std::vector<uint32_t> out(static_cast<std::size_t>(w) * h, packRgba8(CompactVec4(255, 255, 255, 255)));
+    const int sw = texture.width, sh = texture.height;
+    if (sw <= 0 || sh <= 0 || texture.pixels.size() < static_cast<std::size_t>(sw) * sh || w < 2 || h < 2) {
+        return out;
+    }
+    for (uint32_t y = 0; y < h; ++y) {
+        const float fy = static_cast<float>(y) / static_cast<float>(h - 1) * static_cast<float>(sh - 1);
+        const int y0 = std::clamp(static_cast<int>(fy), 0, sh - 1), y1 = std::min(y0 + 1, sh - 1);
+        const float ty = fy - static_cast<float>(y0);
+        for (uint32_t x = 0; x < w; ++x) {
+            const float fx = static_cast<float>(x) / static_cast<float>(w - 1) * static_cast<float>(sw - 1);
+            const int x0 = std::clamp(static_cast<int>(fx), 0, sw - 1), x1 = std::min(x0 + 1, sw - 1);
+            const float tx = fx - static_cast<float>(x0);
+            const CompactVec4& a = texture.pixels[static_cast<std::size_t>(y0) * sw + x0];
+            const CompactVec4& b = texture.pixels[static_cast<std::size_t>(y0) * sw + x1];
+            const CompactVec4& c = texture.pixels[static_cast<std::size_t>(y1) * sw + x0];
+            const CompactVec4& d = texture.pixels[static_cast<std::size_t>(y1) * sw + x1];
+            const auto lerp = [&](uint8_t pa, uint8_t pb, uint8_t pc, uint8_t pd) {
+                const float top = pa + (pb - pa) * tx, bottom = pc + (pd - pc) * tx;
+                return static_cast<uint8_t>(std::clamp(std::lround(top + (bottom - top) * ty), 0L, 255L));
+            };
+            out[static_cast<std::size_t>(y) * w + x] =
+                packRgba8(CompactVec4(lerp(a.r, b.r, c.r, d.r), lerp(a.g, b.g, c.g, d.g),
+                                      lerp(a.b, b.b, c.b, d.b), 255));
+        }
+    }
+    return out;
+}
+
+PrincipledBSDF* paintMaterial(int material_id) {
+    return dynamic_cast<PrincipledBSDF*>(
+        MaterialManager::getInstance().getMaterial(static_cast<uint16_t>(material_id)));
 }
 
 // Octahedral normal, packSnorm2x16 into a float's bits (octDecode in the shader).
@@ -282,6 +398,13 @@ struct WetPaintGpu::Surface {
     std::vector<float> flow_normal;    // 4 per texel
     std::vector<uint32_t> base;        // RGBA8, original base colour
     bool base_from_color = false;      // base = the material colour (no texture under it)
+    // Canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md). The material
+    // keeps its UV transform for base_texture (PrincipledBSDF::paintBaseTexture),
+    // the output page is the premultiplied paint alone, and `base` holds only
+    // the pickup colour (alpha 0). Back in composite mode `base` is
+    // base_texture stretched once over the page, as the canvas was seeded.
+    bool overlay = false;
+    std::shared_ptr<Texture> base_texture;   // the material's own base colour texture
     Vec3 base_linear = Vec3(1.0f);     // that colour when the base was filled
     bool geometry_upload = false; // Same dimensions: patch pages without retiring GPU handles.
     bool base_upload = false;          // base changed on the host: rewrite its device slice
@@ -291,7 +414,15 @@ struct WetPaintGpu::Surface {
     std::array<std::weak_ptr<Texture>, 4> channel_textures;
     std::array<std::vector<uint32_t>, 4> channel_base; // roughness, height, normal, opacity
     std::vector<Vec2> normal_spans;    // same Jacobian metric used by CPU Paint
+    // Hidden picture (RGBA8 sRGB at the page size, empty = none). Source plane 6.
+    std::vector<uint32_t> picture;
+    std::string picture_path_loaded;
+    // "@base" mode: the original base pixels, kept so the wall can be restored.
+    // Non-empty exactly while s.base holds the flat blank colour.
+    std::vector<uint32_t> base_original;
+    bool picture_upload = false;
     bool channels_refresh = false;
+    uint32_t edited_planes = 0;
     std::vector<GpuTile> tiles;        // surface field filled at layout
     uint32_t valid_texels = 0, gutter_texels = 0, triangles = 0;
     WetPaintSurfaceSettings settings;
@@ -333,6 +464,7 @@ struct WetPaintGpu::Device {
     uint32_t texel_count = 0, tile_count = 0;
     bool channels_allocated = false;
     bool reveal_allocated = false;
+    bool picture_allocated = false;
     bool channels_force = false;
     // Stats of dispatching ticks, read back later
     // (SimulationComputeContext::submitWithReadback), each with what its tick
@@ -351,6 +483,7 @@ struct WetPaintGpu::Device {
     // frames add their counters into the window the next step reads back).
     double step_clock = 0.0;
     bool stats_reset_needed = true;
+    bool zero_init_needed = false;
 
     void release() {
         stats_pending.clear();   // a dropped ticket's slot is reused by the backend
@@ -369,7 +502,8 @@ struct WetPaintGpu::Device {
         appearance_tables.clear();
         dab_capacity = 0;
         texel_count = tile_count = 0;
-        channels_allocated = channels_force = reveal_allocated = false;
+        channels_allocated = channels_force = reveal_allocated = picture_allocated = false;
+        zero_init_needed = false;
         compute = nullptr;
     }
 };
@@ -453,139 +587,32 @@ std::array<double, 24> WetPaintGpu::geometryKey(SceneData& scene, const std::str
 // P_orig/N_orig + current instance pose, matching the SDF resolver and renderer.
 // geometryKey reads that same world space to trigger rebaking after a move.
 bool WetPaintGpu::bakeGeometry(SceneData& scene, Surface& s, std::string& error) {
-    const size_t texels = static_cast<size_t>(s.width) * s.height;
-    s.pos_valid.assign(texels * 4, 0.0f);
-    s.flow_normal.assign(texels * 4, 0.0f);
-    s.normal_spans.assign(texels, Vec2(1.0f, 1.0f));
-    s.valid_texels = s.gutter_texels = s.triangles = 0;
     s.geometry_key = geometryKey(scene, s.object);
-    // ── bake: rasterize every triangle of (object, material) into texel space.
-    // Texel (px, py) <-> uv (px / (W-1), 1 - py / (H-1)), the CPU model's map.
     const int uv_set = s.uv_set;
     const auto faces = paintFaces(scene, s.object, s.paint_material, uv_set);
-    const float W1 = static_cast<float>(s.width - 1);
-    const float H1 = static_cast<float>(s.height - 1);
-    const Vec3 gravity(0.0f, -1.0f, 0.0f);
-    for (const auto& tri : faces) {
-        const auto& uv0 = tri.uvs[0];
-        const auto& uv1 = tri.uvs[1];
-        const auto& uv2 = tri.uvs[2];
-        const float x[3] = {uv0.u * W1, uv1.u * W1, uv2.u * W1};
-        const float y[3] = {(1.0f - uv0.v) * H1, (1.0f - uv1.v) * H1, (1.0f - uv2.v) * H1};
-        const float area = (x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]);
-        if (std::abs(area) < 1e-12f) continue;
-        ++s.triangles;
-        const auto& p = tri.positions;
-        Vec3 geom_n = (p[1] - p[0]).cross(p[2] - p[0]);
-        const float gl = geom_n.length();
-        geom_n = gl > 1e-20f ? geom_n / gl : Vec3(0.0f, 1.0f, 0.0f);
-        const auto& n = tri.normals;
-        const Vec2 normal_span = HeightNormalMath::twoTexelWorldSpan(
-            p[0], p[1], p[2], uv0, uv1, uv2, s.width, s.height);
-        RayTrophiSim::SurfaceFlowSample flow;
-        const bool has_flow = RayTrophiSim::SurfaceFlowField::computePixelFlow(
-            p[0], p[1], p[2], uv0, uv1, uv2, static_cast<int>(s.width),
-            static_cast<int>(s.height), flow, gravity) && flow.valid();
-        const int x0 = std::max(0, static_cast<int>(std::floor(std::min({x[0], x[1], x[2]}))));
-        const int x1 = std::min(static_cast<int>(s.width) - 1, static_cast<int>(std::ceil(std::max({x[0], x[1], x[2]}))));
-        const int y0 = std::max(0, static_cast<int>(std::floor(std::min({y[0], y[1], y[2]}))));
-        const int y1 = std::min(static_cast<int>(s.height) - 1, static_cast<int>(std::ceil(std::max({y[0], y[1], y[2]}))));
-        const float inv_area = 1.0f / area;
-        for (int py = y0; py <= y1; ++py) {
-            for (int px = x0; px <= x1; ++px) {
-                const float fx = static_cast<float>(px), fy = static_cast<float>(py);
-                const float w0 = ((x[1] - fx) * (y[2] - fy) - (x[2] - fx) * (y[1] - fy)) * inv_area;
-                const float w1 = ((x[2] - fx) * (y[0] - fy) - (x[0] - fx) * (y[2] - fy)) * inv_area;
-                const float w2 = 1.0f - w0 - w1;
-                if (w0 < -1e-4f || w1 < -1e-4f || w2 < -1e-4f) continue;
-                const size_t ti = static_cast<size_t>(py) * s.width + px;
-                if (s.pos_valid[ti * 4 + 3] > 0.5f) continue;   // first triangle wins
-                const Vec3 wp = p[0] * w0 + p[1] * w1 + p[2] * w2;
-                Vec3 wn = n[0] * w0 + n[1] * w1 + n[2] * w2;
-                const float nl = wn.length();
-                wn = nl > 1e-6f ? wn / nl : geom_n;
-                if (wn.dot(geom_n) < 0.0f && nl <= 1e-6f) wn = geom_n;
-                s.pos_valid[ti * 4 + 0] = wp.x;
-                s.pos_valid[ti * 4 + 1] = wp.y;
-                s.pos_valid[ti * 4 + 2] = wp.z;
-                s.pos_valid[ti * 4 + 3] = 1.0f;
-                s.flow_normal[ti * 4 + 0] = has_flow ? flow.flow_x : 0.0f;
-                s.flow_normal[ti * 4 + 1] = has_flow ? flow.flow_y : 0.0f;
-                s.flow_normal[ti * 4 + 2] = has_flow ? flow.slope : 0.0f;
-                s.flow_normal[ti * 4 + 3] = packOctNormal(wn);
-                s.normal_spans[ti] = normal_span;
-                ++s.valid_texels;
-            }
-        }
+    std::vector<WetPaintBakeFace> bake_faces;
+    bake_faces.reserve(faces.size());
+    for (const auto& f : faces) {
+        bake_faces.push_back({f.positions, f.normals, f.uvs});
     }
-    if (s.valid_texels == 0) {
-        error = "no texel of " + s.object + " is covered by its UVs (uv_set " + std::to_string(uv_set) + ")";
+    WetPaintBakeResult baked;
+    if (!bakeWetPaintGeometry(bake_faces, s.width, s.height, kTile, kGutterTexels,
+                              s.object, uv_set, baked, error)) {
         return false;
     }
-    // Gutter: copy the nearest island texel outward so bilinear reads and
-    // stamping cover the seams (w = 2: stamped, not counted as coverage).
-    for (int pass = 0; pass < kGutterTexels; ++pass) {
-        std::vector<float> pv = s.pos_valid, fn = s.flow_normal;
-        auto spans = s.normal_spans;
-        for (uint32_t py = 0; py < s.height; ++py) {
-            for (uint32_t px = 0; px < s.width; ++px) {
-                const size_t ti = static_cast<size_t>(py) * s.width + px;
-                if (s.pos_valid[ti * 4 + 3] > 0.5f) continue;
-                static constexpr int kN[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-                for (const auto& o : kN) {
-                    const int nx = static_cast<int>(px) + o[0], ny = static_cast<int>(py) + o[1];
-                    if (nx < 0 || ny < 0 || nx >= static_cast<int>(s.width) || ny >= static_cast<int>(s.height)) continue;
-                    const size_t ni = static_cast<size_t>(ny) * s.width + nx;
-                    if (s.pos_valid[ni * 4 + 3] < 0.5f) continue;
-                    for (int c = 0; c < 4; ++c) {
-                        pv[ti * 4 + c] = s.pos_valid[ni * 4 + c];
-                        fn[ti * 4 + c] = s.flow_normal[ni * 4 + c];
-                    }
-                    spans[ti] = s.normal_spans[ni];
-                    pv[ti * 4 + 3] = 2.0f;
-                    ++s.gutter_texels;
-                    break;
-                }
-            }
-        }
-        s.pos_valid.swap(pv);
-        s.flow_normal.swap(fn);
-        s.normal_spans.swap(spans);
+    s.pos_valid = std::move(baked.pos_valid);
+    s.flow_normal = std::move(baked.flow_normal);
+    s.normal_spans = std::move(baked.normal_spans);
+    s.tiles_x = baked.tiles_x;
+    s.tiles_y = baked.tiles_y;
+    s.valid_texels = baked.valid_texels;
+    s.gutter_texels = baked.gutter_texels;
+    s.triangles = baked.triangles;
+    s.tiles.resize(baked.tiles.size());
+    static_assert(sizeof(GpuTile) == sizeof(WetPaintBakeTile), "tile layout must match");
+    if (!baked.tiles.empty()) {
+        std::memcpy(s.tiles.data(), baked.tiles.data(), baked.tiles.size() * sizeof(GpuTile));
     }
-    // Tiles: world AABB of their texels (island + gutter).
-    s.tiles_x = (s.width + kTile - 1) / kTile;
-    s.tiles_y = (s.height + kTile - 1) / kTile;
-    s.tiles.assign(static_cast<size_t>(s.tiles_x) * s.tiles_y, GpuTile{});
-    for (uint32_t ty = 0; ty < s.tiles_y; ++ty) {
-        for (uint32_t tx = 0; tx < s.tiles_x; ++tx) {
-            GpuTile& t = s.tiles[static_cast<size_t>(ty) * s.tiles_x + tx];
-            t.tx = tx;
-            t.ty = ty;
-            float mn[3] = {std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
-                           std::numeric_limits<float>::max()};
-            float mx[3] = {-std::numeric_limits<float>::max(), -std::numeric_limits<float>::max(),
-                           -std::numeric_limits<float>::max()};
-            for (uint32_t ly = 0; ly < kTile; ++ly) {
-                const uint32_t py = ty * kTile + ly;
-                if (py >= s.height) break;
-                for (uint32_t lx = 0; lx < kTile; ++lx) {
-                    const uint32_t px = tx * kTile + lx;
-                    if (px >= s.width) break;
-                    const size_t ti = static_cast<size_t>(py) * s.width + px;
-                    if (s.pos_valid[ti * 4 + 3] < 0.5f) continue;
-                    ++t.valid_texels;
-                    for (int c = 0; c < 3; ++c) {
-                        mn[c] = std::min(mn[c], s.pos_valid[ti * 4 + c]);
-                        mx[c] = std::max(mx[c], s.pos_valid[ti * 4 + c]);
-                    }
-                }
-            }
-            if (t.valid_texels > 0) {
-                for (int c = 0; c < 3; ++c) { t.bmin[c] = mn[c]; t.bmax[c] = mx[c]; }
-            }
-        }
-    }
-
     return true;
 }
 
@@ -644,6 +671,11 @@ bool WetPaintGpu::addSurface(SceneData& scene, const std::string& object, int ma
             return false;
         }
     }
+    // The material's UV transform BEFORE the adapter binds the canvas (binding
+    // resets it to identity): a tiled base keeps it (canvas over a tiled base).
+    PrincipledBSDF* pbsdf = paintMaterial(mat);
+    const std::optional<PrincipledBSDF::TextureTransform> transform_before =
+        pbsdf ? std::optional<PrincipledBSDF::TextureTransform>(pbsdf->textureTransform) : std::nullopt;
     // The same target paint.ensure_target creates, with a base colour texture
     // bound to the material (seeded from the original albedo).
     adapter.ensureTextureSet(resolution);
@@ -673,7 +705,11 @@ bool WetPaintGpu::addSurface(SceneData& scene, const std::string& object, int ma
     s.texture_name = texture->name;
     const size_t texels = static_cast<size_t>(s.width) * s.height;
     s.base.resize(texels);
-    for (size_t i = 0; i < texels; ++i) s.base[i] = packRgba8(texture->pixels[i]);
+    const int64_t texel_count = static_cast<int64_t>(texels);
+    #pragma omp parallel for schedule(static) if(texel_count >= 65536)
+    for (int64_t i = 0; i < texel_count; ++i) {
+        s.base[static_cast<size_t>(i)] = packRgba8(texture->pixels[static_cast<size_t>(i)]);
+    }
     // No texture under the canvas: the base is the material colour and
     // follows it (tick). MeshPaintAdapter seeded the canvas with it.
     s.base_from_color = !set->wasSeededFromExisting(PaintChannel::BaseColor);
@@ -685,6 +721,19 @@ bool WetPaintGpu::addSurface(SceneData& scene, const std::string& object, int ma
     s.paint_material = adapter.getMaterialID();
     if (!bakeGeometry(scene, s, error)) {
         return false;
+    }
+    // A base colour texture under the canvas: the material's own texture, not a
+    // canvas of ours (isGeneratedPaintTexture is refused as a source upstream).
+    s.base_texture = set->getSourceTexture(PaintChannel::BaseColor);
+    if (pbsdf && pbsdf->paintBaseTexture) {
+        // Re-added surface already in overlay: the transform was never reset.
+        s.base_texture = pbsdf->paintBaseTexture;
+    } else if (pbsdf && transform_before && !identityTransform(*transform_before) && s.base_texture) {
+        pbsdf->textureTransform = *transform_before;
+    }
+    if (pbsdf && s.base_texture && !identityTransform(pbsdf->textureTransform) &&
+        s.settings.reveal_picture != "@base") {
+        setCanvasOverlay(s, true);
     }
 
     // Replacing a surface keeps its settings.
@@ -753,11 +802,9 @@ bool WetPaintGpu::setSurfaceSettings(const std::string& object, int material_id,
         const bool changed = previous.roughness_channel != settings.roughness_channel ||
             previous.height_normal_channel != settings.height_normal_channel ||
             previous.reveal_opacity != settings.reveal_opacity ||
-            previous.wet_roughness != settings.wet_roughness ||
-            previous.dry_roughness != settings.dry_roughness ||
-            previous.height_contribution != settings.height_contribution ||
-            previous.normal_strength != settings.normal_strength;
-        s->settings = settings;
+            previous.reveal_picture != settings.reveal_picture;
+        s->edited_planes |= WetPaintChannelEdits::changedPlanes(previous, settings);
+        s->settings = settings;   // the picture file itself is (re)loaded in prepareChannels
         s->channels_refresh = s->channels_refresh || changed;
         channels_dirty_ = channels_dirty_ || changed;
     }
@@ -807,10 +854,45 @@ std::vector<WetPaintSurfaceInfo> WetPaintGpu::surfaces() const {
         info.gutter_texels = s->gutter_texels;
         info.triangles = s->triangles;
         info.texture = s->texture_name;
+        info.canvas_overlay = s->overlay;
+        info.base_texture = s->overlay && s->base_texture ? s->base_texture->name : std::string();
         info.settings = s->settings;
         out.push_back(std::move(info));
     }
     return out;
+}
+
+std::shared_ptr<Texture> WetPaintGpu::cleanBaseTextureForSave(uint16_t material_id) const {
+    for (const auto& sp : surfaces_) {
+        const Surface& s = *sp;
+        if (s.material_id != static_cast<int>(material_id)) continue;
+        // Prefer the real non-generated base texture under the canvas (both
+        // overlay and composite modes).
+        if (s.base_texture && s.base_texture->is_loaded() &&
+            s.base_texture->name.rfind("generated/", 0) != 0) {
+            return s.base_texture;
+        }
+        // For a surface whose texture already lives inside a generated/...
+        // canvas, return a clean copy from s.base_original (while "@base" is
+        // active) or s.base so saving never embeds the white-washed "@base"
+        // blank output or transient wet paint splats.
+        const std::vector<uint32_t>& clean =
+            !s.base_original.empty() ? s.base_original : s.base;
+        const std::size_t expected = static_cast<std::size_t>(s.width) * s.height;
+        if (s.base_from_color || clean.size() != expected || expected == 0) {
+            return nullptr;
+        }
+        auto copy = std::make_shared<Texture>(
+            s.texture_name, static_cast<int>(s.width), static_cast<int>(s.height),
+            TextureType::Albedo);
+        copy->is_srgb = true;
+        for (std::size_t i = 0; i < expected; ++i) {
+            copy->pixels[i] = unpackRgba8(clean[i]);
+        }
+        copy->markSaveDirty();
+        return copy;
+    }
+    return nullptr;
 }
 
 // ── device ──────────────────────────────────────────────────────────────────
@@ -869,13 +951,34 @@ bool WetPaintGpu::ensureCompute(SceneData& scene) {
 }
 
 bool WetPaintGpu::rebuildDevice(SceneData& scene) {
-    (void)scene;
     Device& d = *device_;
     SimulationComputeContext& c = *d.compute;
     SimulationComputeContext* keep = d.compute;
     d.release();
     d.compute = keep;
     d.backend = c.backendType();
+
+    // Sync geometry_key after GameDesign enables hidden-object instance poses;
+    // rebake only when world positions/UVs (key[0..7]) actually changed.
+    for (auto& s : surfaces_) {
+        const auto key = geometryKey(scene, s->object);
+        bool world_changed = false;
+        for (size_t k = 0; k < 8; ++k) {
+            if (std::abs(key[k] - s->geometry_key[k]) >
+                1e-4 * std::max(1.0, std::abs(key[k]))) {
+                world_changed = true;
+                break;
+            }
+        }
+        if (world_changed) {
+            std::string error;
+            if (!bakeGeometry(scene, *s, error)) {
+                s->geometry_key = key;
+            }
+        } else {
+            s->geometry_key = key;
+        }
+    }
 
     uint32_t texels = 0, tiles = 0;
     for (auto& s : surfaces_) {
@@ -906,6 +1009,15 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
         return handle.valid();
     };
     const std::size_t n = surfaces_.size();
+    // prepareChannels() immediately replaces base and output at 6-7x size when
+    // any PBR channel or picture is active; allocate tiny placeholders now to
+    // skip the redundant full-atlas base/output allocation and staging upload.
+    const bool will_use_channels = std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
+        return s->settings.roughness_channel || s->settings.height_normal_channel ||
+               s->settings.reveal_opacity || !s->picture.empty();
+    });
+    const std::size_t base_alloc_bytes = will_use_channels
+        ? 16u : static_cast<std::size_t>(texels) * 4u;
     // [active, next] per tile | 3 indirect counts | channel list (tiles) |
     // changed bits (tiles, paint_wet.comp tileChangedIndex, 2026-11-24).
     const std::size_t tile_flag_bytes = channelDispatchOffset(tiles) +
@@ -914,12 +1026,12 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
               makeBuffer(d.tiles, static_cast<std::size_t>(tiles) * sizeof(GpuTile), "WetPaintTiles", ro) &&
               makeBuffer(d.pos_valid, static_cast<std::size_t>(texels) * 16, "WetPaintPosValid", ro) &&
               makeBuffer(d.flow_normal, static_cast<std::size_t>(texels) * 16, "WetPaintFlowNormal", ro) &&
-              makeBuffer(d.base, static_cast<std::size_t>(texels) * 4, "WetPaintBase", ro) &&
+              makeBuffer(d.base, base_alloc_bytes, "WetPaintBase", ro) &&
               makeBuffer(d.color, static_cast<std::size_t>(texels) * 4, "WetPaintColor", rw) &&
               makeBuffer(d.state, static_cast<std::size_t>(texels) * 16, "WetPaintState", rw) &&
               makeBuffer(d.color_scratch, static_cast<std::size_t>(texels) * 4, "WetPaintColorScratch", rw) &&
               makeBuffer(d.state_scratch, static_cast<std::size_t>(texels) * 16, "WetPaintStateScratch", rw) &&
-              makeBuffer(d.output, static_cast<std::size_t>(texels) * 4, "WetPaintOutput", rw) &&
+              makeBuffer(d.output, base_alloc_bytes, "WetPaintOutput", rw) &&
               makeBuffer(d.tile_flags, tile_flag_bytes, "WetPaintTileFlags",
                          rw | ComputeBufferUsage::Indirect) &&
               makeBuffer(d.stats, n * kStatsStride * 4, "WetPaintStats", rw) &&
@@ -935,7 +1047,6 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
     std::vector<GpuTile> all_tiles;
     all_tiles.reserve(tiles);
     std::vector<uint32_t> zero_u;
-    std::vector<float> zero_f;
     for (uint32_t si = 0; si < n; ++si) {
         Surface& s = *surfaces_[si];
         for (GpuTile t : s.tiles) {
@@ -944,31 +1055,42 @@ bool WetPaintGpu::rebuildDevice(SceneData& scene) {
         }
         const std::size_t off = s.page_offset;
         const std::size_t cnt = static_cast<std::size_t>(s.width) * s.height;
+        c.beginTransferBatch();
         ok = ok && c.uploadBuffer(d.pos_valid, s.pos_valid.data(), cnt * 16, off * 16) &&
-             c.uploadBuffer(d.flow_normal, s.flow_normal.data(), cnt * 16, off * 16) &&
-             c.uploadBuffer(d.base, s.base.data(), cnt * 4, off * 4) &&
-             c.uploadBuffer(d.output, s.base.data(), cnt * 4, off * 4);
+             c.uploadBuffer(d.flow_normal, s.flow_normal.data(), cnt * 16, off * 16);
+        if (!will_use_channels) {
+            ok = ok && c.uploadBuffer(d.base, s.base.data(), cnt * 4, off * 4);
+            if (s.overlay) {
+                // Premultiplied transparent: nothing painted over the tiled base.
+                zero_u.assign(cnt, 0u);
+                ok = ok && c.uploadBuffer(d.output, zero_u.data(), cnt * 4, off * 4);
+            } else {
+                ok = ok && c.uploadBuffer(d.output, s.base.data(), cnt * 4, off * 4);
+            }
+        }
+        c.endTransferBatch();
+        c.synchronize();
     }
-    zero_u.assign(texels, 0u);
-    zero_f.assign(static_cast<std::size_t>(texels) * 4, 0.0f);
-    // Whole buffer, changed bits included (a stale bit only costs one extra
-    // channel pass, but a garbage one would be read before any ROTATE).
+    // Whole tile_flags buffer, changed bits included (a stale bit only costs one
+    // extra channel pass, but a garbage one would be read before any ROTATE).
+    // color/state/scratch buffers are zeroed on GPU via MODE_RESET + kResetInitOnlyBit
+    // on the first tick/coverage, avoiding ~80-320 MB of CPU zero alloc + staging.
     std::vector<uint32_t> zero_flags(tile_flag_bytes / sizeof(uint32_t), 0u);
     std::vector<uint32_t> zero_events(12, 0u), zero_counter(4, 0u);
+    c.beginTransferBatch();
     ok = ok && c.uploadBuffer(d.tiles, all_tiles.data(), all_tiles.size() * sizeof(GpuTile)) &&
-         c.uploadBuffer(d.color, zero_u.data(), zero_u.size() * 4) &&
-         c.uploadBuffer(d.color_scratch, zero_u.data(), zero_u.size() * 4) &&
-         c.uploadBuffer(d.state, zero_f.data(), zero_f.size() * 4) &&
-         c.uploadBuffer(d.state_scratch, zero_f.data(), zero_f.size() * 4) &&
          c.uploadBuffer(d.tile_flags, zero_flags.data(), zero_flags.size() * 4) &&
          c.uploadBuffer(d.dummy_events, zero_events.data(), zero_events.size() * 4) &&
          c.uploadBuffer(d.dummy_counter, zero_counter.data(), zero_counter.size() * 4);
+    c.endTransferBatch();
+    c.synchronize();
     if (!ok) {
         stats_.status = "upload_failed";
         d.release();
         d.compute = keep;
         return false;
     }
+    d.zero_init_needed = true;
     for (auto& surface : surfaces_) surface->geometry_upload = false;
     layout_dirty_ = false;
     settings_dirty_ = true;
@@ -1023,11 +1145,183 @@ bool WetPaintGpu::patchGeometry() {
     return true;
 }
 
+// ── canvas over a tiled base ────────────────────────────────────────────────
+// docs/dev/WET_PAINT_CANVAS_UV.md. Composite mode (the default, and every
+// untiled surface): the output page is base + picture + paint, bound as the
+// material's albedo, sampled through an identity transform. Overlay mode: the
+// material keeps its UV transform and its base colour texture
+// (PrincipledBSDF::paintBaseTexture -> GpuMaterial.paint_base_tex), the
+// renderer samples every slot at the raw UV and puts the premultiplied output
+// page over the tiled base. Switching resets this surface's paint (base slice
+// rewritten + MODE_RESET of its tiles, the base colour edit's path).
+void WetPaintGpu::setCanvasOverlay(Surface& s, bool overlay) {
+    PrincipledBSDF* pbsdf = paintMaterial(s.material_id);
+    auto texture = s.texture.lock();
+    if (overlay && (!pbsdf || !s.base_texture || !texture)) return;
+    const std::size_t texels = static_cast<std::size_t>(s.width) * s.height;
+    if (overlay) {
+        // `base` is only the pickup colour now: the base texture's mean, alpha 0.
+        uint64_t sum[3] = {0, 0, 0};
+        const auto& px = s.base_texture->pixels;
+        for (const auto& p : px) { sum[0] += p.r; sum[1] += p.g; sum[2] += p.b; }
+        const uint64_t n = std::max<uint64_t>(1, px.size());
+        const uint32_t pickup = packRgba8(CompactVec4(static_cast<uint8_t>(sum[0] / n),
+                                                      static_cast<uint8_t>(sum[1] / n),
+                                                      static_cast<uint8_t>(sum[2] / n), 0));
+        s.base.assign(texels, pickup);
+        // The canvas texture's host copy: transparent (premultiplied zero). The
+        // device copy is rewritten by the reset below; this is what any host
+        // re-upload of the canvas shows.
+        texture->pixels.assign(texels, CompactVec4(0, 0, 0, 0));
+        texture->has_alpha = true;
+        pbsdf->paintBaseTexture = s.base_texture;
+    } else {
+        if (s.base_texture) {
+            s.base = stretchedBase(*s.base_texture, s.width, s.height);
+        }
+        if (texture && texture->pixels.size() == texels && s.base.size() == texels) {
+            for (std::size_t i = 0; i < texels; ++i) texture->pixels[i] = unpackRgba8(s.base[i]);
+        }
+        if (pbsdf) {
+            pbsdf->paintBaseTexture.reset();
+            // The canvas is sampled through the material transform again.
+            pbsdf->textureTransform = PrincipledBSDF::TextureTransform(
+                Vec2(1.0, 1.0), 0.0f, Vec2(0.0, 0.0), Vec2(1.0, 1.0), pbsdf->textureTransform.wrapMode);
+        }
+    }
+    s.overlay = overlay;
+    s.base_from_color = false;
+    s.base_upload = true;
+    settings_dirty_ = true;
+    g_materials_dirty = true;
+}
+
+// The material decides the mode: a base colour texture under the canvas AND a
+// non-identity UV transform = overlay. Set after the surface was added (the
+// material panel's tiling field, material.set uv_*) the canvas used to repeat
+// with the wallpaper; now the surface switches. Without a base texture a
+// transform can only tile the canvas itself, so it is undone.
+void WetPaintGpu::updateCanvasModes() {
+    for (auto& surface : surfaces_) {
+        Surface& s = *surface;
+        PrincipledBSDF* pbsdf = paintMaterial(s.material_id);
+        if (!pbsdf) continue;
+        // Detect a material albedo texture swap/clear in the Material Panel (or
+        // via material.set) while this wet paint surface is active. Adopt the
+        // new texture as the surface's base (and recapture "@base" if active),
+        // then re-bind the canvas so live viewport, "@base" picture and project
+        // save all stay in sync with the user's new texture.
+        auto canvas = s.texture.lock();
+        std::shared_ptr<Texture> cur_albedo = pbsdf->albedoProperty.texture;
+        if (canvas && cur_albedo != canvas) {
+            const std::size_t texels = static_cast<std::size_t>(s.width) * s.height;
+            if (cur_albedo && cur_albedo->is_loaded()) {
+                s.base_texture = cur_albedo;
+                s.base_from_color = false;
+                s.base = stretchedBase(*cur_albedo, s.width, s.height);
+                if (canvas->pixels.size() == texels && s.base.size() == texels) {
+                    for (std::size_t i = 0; i < texels; ++i) {
+                        canvas->pixels[i] = unpackRgba8(s.base[i]);
+                    }
+                }
+                canvas->markVulkanDirtyFull();
+                pbsdf->albedoProperty.texture = canvas;
+                if (s.overlay) {
+                    pbsdf->paintBaseTexture = s.base_texture;
+                    setCanvasOverlay(s, true);
+                } else {
+                    s.base_upload = true;
+                    settings_dirty_ = true;
+                    g_materials_dirty = true;
+                }
+                if (s.settings.reveal_picture == "@base") {
+                    s.base_original.clear();
+                }
+                SCENE_LOG_INFO("[WetPaint] '" + s.object + "': adopted new base albedo texture '" +
+                               cur_albedo->name + "'");
+            } else if (!cur_albedo) {
+                s.base_texture.reset();
+                s.base_from_color = true;
+                s.base_linear = pbsdf->albedoProperty.color;
+                const CompactVec4 fill(
+                    static_cast<uint8_t>(std::clamp(std::lround(linearToSrgb01(s.base_linear.x) * 255.0f), 0L, 255L)),
+                    static_cast<uint8_t>(std::clamp(std::lround(linearToSrgb01(s.base_linear.y) * 255.0f), 0L, 255L)),
+                    static_cast<uint8_t>(std::clamp(std::lround(linearToSrgb01(s.base_linear.z) * 255.0f), 0L, 255L)),
+                    255);
+                s.base.assign(texels, packRgba8(fill));
+                canvas->pixels.assign(texels, fill);
+                canvas->markVulkanDirtyFull();
+                pbsdf->albedoProperty.texture = canvas;
+                pbsdf->paintBaseTexture.reset();
+                s.overlay = false;
+                if (s.settings.reveal_picture == "@base") {
+                    s.base_original.clear();
+                }
+                s.base_upload = true;
+                settings_dirty_ = true;
+                g_materials_dirty = true;
+            }
+        }
+        const bool tiled = !identityTransform(pbsdf->textureTransform);
+        // "@base" makes the base itself the hidden picture, laid over the page
+        // once: there is no tiled base to put the canvas over. Left to the
+        // composite path (a transform there tiles the canvas, as before).
+        const bool base_picture = s.settings.reveal_picture == "@base";
+        if (base_picture) {
+            if (s.overlay) {
+                setCanvasOverlay(s, false);
+                SCENE_LOG_INFO("[WetPaint] '" + s.object + "': '@base' picture, canvas back to composite mode");
+            }
+            continue;
+        }
+        if (s.overlay) {
+            if (!tiled) {
+                setCanvasOverlay(s, false);
+                SCENE_LOG_INFO("[WetPaint] '" + s.object + "': UV transform is identity, canvas back to composite mode");
+            }
+        } else if (tiled) {
+            if (s.base_texture) {
+                setCanvasOverlay(s, true);
+                SCENE_LOG_INFO("[WetPaint] '" + s.object + "': tiled base texture, canvas switched to overlay mode");
+            } else {
+                pbsdf->textureTransform = PrincipledBSDF::TextureTransform(
+                    Vec2(1.0, 1.0), 0.0f, Vec2(0.0, 0.0), Vec2(1.0, 1.0), pbsdf->textureTransform.wrapMode);
+                g_materials_dirty = true;
+                SCENE_LOG_WARN("[WetPaint] '" + s.object +
+                               "': UV transform on a canvas without a base texture would tile the paint; reset to identity");
+            }
+        }
+    }
+}
+
 // Channel targets use the existing PaintTextureSet adapter (including its UV
 // bake and source texture bookkeeping). No CPU brush/composite is run per frame.
 bool WetPaintGpu::prepareChannels(SceneData& scene) {
     Device& d = *device_;
-    const bool enabled = std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
+    // Hidden pictures: (re)load whatever file a surface's settings name now.
+    for (auto& surface : surfaces_) {
+        Surface& s = *surface;
+        if (s.settings.reveal_picture == s.picture_path_loaded) continue;
+        if (s.settings.reveal_picture == "@base") continue;   // handled by syncBasePictures in tick
+        s.picture_path_loaded = s.settings.reveal_picture;
+        if (!loadPictureImage(s.settings.reveal_picture, s.width, s.height, s.picture)) {
+            s.picture.clear();
+            stats_.status = "picture_load_failed: " + s.object + ": " + s.settings.reveal_picture;
+            // The status is overwritten by the next tick ("running"); the log
+            // keeps the reason, so a wall with no picture is not a silent mystery.
+            SCENE_LOG_WARN("[WetPaint] hidden picture could not be loaded for '" + s.object +
+                           "': " + s.settings.reveal_picture);
+        }
+        s.picture_upload = true;
+        s.channels_refresh = true;
+        channels_dirty_ = true;
+        settings_dirty_ = true;
+    }
+    const bool picture_atlas = d.picture_allocated ||
+        std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
+            return !s->picture.empty();
+        });
+    const bool enabled = picture_atlas || std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
         return s->settings.roughness_channel || s->settings.height_normal_channel ||
                s->settings.reveal_opacity;
     });
@@ -1040,8 +1334,12 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
         std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
             return s->settings.reveal_opacity;
         });
-    const bool expand = !d.channels_allocated || (reveal_atlas && !d.reveal_allocated);
+    const bool expand = !d.channels_allocated || (reveal_atlas && !d.reveal_allocated) ||
+                        (picture_atlas && !d.picture_allocated);
     bool upload = expand;
+    for (auto& surface : surfaces_) {
+        if (surface->picture_upload) { upload = true; surface->picture_upload = false; }
+    }
     static constexpr PaintChannel channels[4] = {
         PaintChannel::Roughness, PaintChannel::Mask, PaintChannel::Normal, PaintChannel::Opacity
     };
@@ -1115,7 +1413,10 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
             }
             s.channel_textures[ch] = texture;
             s.channel_base[ch].resize(count);
-            for (std::size_t pixel = 0; pixel < count; ++pixel) {
+            const int64_t pixel_count = static_cast<int64_t>(count);
+            #pragma omp parallel for schedule(static) if(pixel_count >= 65536)
+            for (int64_t pi = 0; pi < pixel_count; ++pi) {
+                const std::size_t pixel = static_cast<std::size_t>(pi);
                 CompactVec4 value = texture->pixels[pixel];
                 if (ch == 0) {
                     const uint8_t components[3] = {value.r, value.g, value.b};
@@ -1157,7 +1458,10 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
         for (int ch = 0; ch < 4; ++ch) {
             auto texture = s.channel_textures[ch].lock();
             if (!texture) continue;
-            for (std::size_t pixel = 0; pixel < count; ++pixel) {
+            const int64_t pixel_count = static_cast<int64_t>(count);
+            #pragma omp parallel for schedule(static) if(pixel_count >= 65536)
+            for (int64_t pi = 0; pi < pixel_count; ++pi) {
+                const std::size_t pixel = static_cast<std::size_t>(pi);
                 const uint32_t v = (ch == 3 && s.settings.reveal_opacity)
                     ? 0u : s.channel_base[ch][pixel];
                 texture->pixels[pixel] = CompactVec4(v & 255u, (v >> 8u) & 255u,
@@ -1171,7 +1475,7 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
     auto& compute = *d.compute;
     if (upload) {
         const std::size_t count = d.texel_count;
-        std::vector<uint32_t> original(count * 6, 0u);
+        std::vector<uint32_t> original(count * (picture_atlas ? kPicturePlanes : 6u), 0u);
         for (const auto& surface : surfaces_) {
             const Surface& s = *surface;
             const std::size_t offset = s.page_offset;
@@ -1182,7 +1486,13 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
                               original.begin() + (ch + 1) * count + offset);
                 }
             }
-            for (std::size_t pixel = 0; pixel < s.normal_spans.size(); ++pixel) {
+            if (picture_atlas && !s.picture.empty()) {
+                std::copy(s.picture.begin(), s.picture.end(), original.begin() + 6 * count + offset);
+            }
+            const int64_t span_count = static_cast<int64_t>(s.normal_spans.size());
+            #pragma omp parallel for schedule(static) if(span_count >= 65536)
+            for (int64_t pi = 0; pi < span_count; ++pi) {
+                const std::size_t pixel = static_cast<std::size_t>(pi);
                 std::memcpy(&original[4 * count + offset + pixel], &s.normal_spans[pixel].u, 4);
                 std::memcpy(&original[5 * count + offset + pixel], &s.normal_spans[pixel].v, 4);
             }
@@ -1231,6 +1541,7 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
             d.output = new_output;
             d.channels_allocated = true;
             d.reveal_allocated = reveal_atlas;
+            d.picture_allocated = picture_atlas;
         }
     }
     d.channels_force = true;
@@ -1264,7 +1575,16 @@ void WetPaintGpu::uploadSurfaceTable() {
         g.tiles_x = s.tiles_x;
         g.tiles_y = s.tiles_y;
         g.flags = (w.oil ? 1u : 0u) | (w.roughness_channel ? 2u : 0u) |
-                  (w.height_normal_channel ? 4u : 0u) | (w.reveal_opacity ? 8u : 0u);
+                  (w.height_normal_channel ? 4u : 0u) | (w.reveal_opacity ? 8u : 0u) |
+                  (s.overlay ? kSurfaceOverlay : 0u);
+        if (!s.picture.empty()) {
+            // bit 4 picture; bits 8..15 outline opacity; bits 16..23 hue tolerance (deg/180*255); bits 24..31 hint 0..1
+            const float tolerance = std::clamp(w.picture_tolerance, 5.0f, 90.0f);
+            g.flags |= kSurfacePicture |
+                       (static_cast<uint32_t>(std::clamp(w.picture_outline, 0.0f, 1.0f) * 255.0f + 0.5f) << 8u) |
+                       (static_cast<uint32_t>(tolerance / 180.0f * 255.0f + 0.5f) << 16u) |
+                       (static_cast<uint32_t>(std::clamp(w.picture_hint, 0.0f, 1.0f) * 255.0f + 0.5f) << 24u);
+        }
         const auto unorm = [](float value, uint32_t scale) {
             return static_cast<uint32_t>(std::clamp(value, 0.0f, 1.0f) * scale + 0.5f);
         };
@@ -1303,6 +1623,9 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             ++it;
         }
     }
+    // Canvas mode follows the material every tick (cheap: a lookup per
+    // surface), BEFORE the "@base" picture sync below captures s.base.
+    updateCanvasModes();
     // A surface whose object was moved, scaled or edited since its bake would
     // keep painting where the object USED to be (positions are baked once):
     // the room raised to 4.7 m painted nothing above the old 3.4 m. Checked
@@ -1419,9 +1742,50 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     // only, and a reset of its own tiles below (out = base, paint cleared,
     // tiles marked dirty for publish). A fresh layout already uploaded every
     // base and starts clean.
+    // "@base" hidden pictures: the surface's own base becomes the picture and
+    // the base slice a flat blank colour (restored when the setting leaves @base).
     std::vector<std::pair<uint32_t, uint32_t>> base_resets;   // (first tile, tile count)
     for (auto& sp : surfaces_) {
         Surface& s = *sp;
+        bool blank_edit = false;
+        const bool want = (s.settings.reveal_picture == "@base");
+        if (want) {
+            if (s.base_original.empty()) {
+                s.base_original = s.base;
+                s.picture = s.base_original;
+                s.picture_path_loaded = "@base";
+                s.picture_upload = true;
+                s.channels_refresh = true;
+                channels_dirty_ = true;
+                settings_dirty_ = true;
+            }
+            const auto channel = [](float v) {
+                return static_cast<uint8_t>(std::clamp(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f), 0L, 255L));
+            };
+            const uint32_t blank = packRgba8(CompactVec4(channel(s.settings.picture_blank[0]),
+                channel(s.settings.picture_blank[1]), channel(s.settings.picture_blank[2]), 255));
+            if (!s.base.empty() && (s.base.front() != blank || s.base.back() != blank)) {
+                blank_edit = !s.base_upload && !s.picture_upload &&
+                    (s.edited_planes & WetPaintChannelEdits::Color) != 0;
+                std::fill(s.base.begin(), s.base.end(), blank);
+                s.base_upload = true;
+            }
+        } else if (!s.base_original.empty()) {
+            s.base = s.base_original;
+            s.base_original.clear();
+            s.picture.clear();
+            s.picture_path_loaded.clear();   // a file path in the new setting is loaded by prepareChannels
+            s.picture_upload = true;
+            s.base_upload = true;
+            s.channels_refresh = true;
+            channels_dirty_ = true;
+            settings_dirty_ = true;
+        }
+        const bool picture_changed = !layout_fresh && s.settings.reveal_picture != s.picture_path_loaded &&
+                                     s.settings.reveal_picture != "@base";
+        if (picture_changed && d.texel_count != 0 && !s.tiles.empty()) {
+            base_resets.emplace_back(s.tile_offset, static_cast<uint32_t>(s.tiles.size()));
+        }
         if (!s.base_upload) continue;
         s.base_upload = false;
         if (layout_fresh || d.texel_count == 0 || s.tiles.empty()) continue;
@@ -1430,7 +1794,9 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             layout_dirty_ = true;   // could not patch: fall back to a full rebuild next tick
             continue;
         }
-        base_resets.emplace_back(s.tile_offset, static_cast<uint32_t>(s.tiles.size()));
+        if (!picture_changed && !blank_edit) {
+            base_resets.emplace_back(s.tile_offset, static_cast<uint32_t>(s.tiles.size()));
+        }
     }
     if (!prepareChannels(scene)) return false;
     if (settings_dirty_) uploadSurfaceTable();
@@ -1477,16 +1843,20 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
 
     WetPaintGpuConstants k;
     const bool run_channels = d.channels_allocated &&
-        (d.channels_force || std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
+        (d.channels_force || d.picture_allocated || std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& s) {
             return s->settings.roughness_channel || s->settings.height_normal_channel ||
                    s->settings.reveal_opacity;
         }));
     const bool compact_channels = run_channels && !d.channels_force;
+    const bool edited_channels = d.channels_allocated &&
+        std::any_of(surfaces_.begin(), surfaces_.end(), [](const auto& surface) {
+            return surface->edited_planes != 0;
+        });
     k.surface_count = n;
     k.tile_count = d.tile_count;
     k._p0 = d.channels_allocated ? d.texel_count : 0u;
     k._p1 = (d.channels_force ? 1u : 0u) | (d.reveal_allocated ? 2u : 0u) |
-            (compact_channels ? kCompactChannels : 0u);
+            (compact_channels ? kCompactChannels : 0u) | (d.picture_allocated ? kPictureBit : 0u);
     k.dt = 1.0f / 60.0f;   // stamp does not read it; the step sets its own below
     k.splat_radius = std::max(0.0f, splat_.radius);
     k.splat_amount = std::clamp(splat_.amount, 0.0f, 1.0f);
@@ -1505,7 +1875,9 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         k.mode = mode;
         ComputeDispatch cmd;
         cmd.kernel = "paint_wet";
-        cmd.timing_label = kWetPaintTimingLabels[mode];
+        const bool edited_range = mode == kModeChannels &&
+            (k._p1 & WetPaintChannelEdits::DispatchRange) != 0;
+        cmd.timing_label = edited_range ? "paint_wet.channels_edit" : kWetPaintTimingLabels[mode];
         cmd.buffers = bindings;
         cmd.buffer_count = kBindingCount;
         cmd.constants = &k;
@@ -1605,8 +1977,10 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         }
     }
     // Idle: nothing wet, nothing arriving. No dispatch, no readback.
-    if (dabs.empty() && device_sources.empty() && !reset_requested_ && base_resets.empty() &&
-        stats_.active_tiles == 0 && !layout_fresh && !d.channels_force) {
+    const bool simulation_idle = dabs.empty() && device_sources.empty() &&
+        !reset_requested_ && base_resets.empty() &&
+        stats_.active_tiles == 0 && !layout_fresh && !d.channels_force;
+    if (simulation_idle && !edited_channels) {
         stats_.status = "idle";
         ++stats_.idle_ticks;
         stats_.event_sources = 0;
@@ -1615,11 +1989,14 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         d.step_clock = 0.0;   // a new stain starts a fresh cadence
         return true;
     }
+    // A prior stamp or a readback still in flight can carry simulation work
+    // even when the last collected active-tile counter is zero.
+    const bool edit_only = simulation_idle && d.stats_reset_needed && d.stats_pending.empty();
     // Step decision (kWetStepSeconds). Resets, a fresh layout and a forced
     // channel pass are one-shot work that must not wait for the cadence.
     d.step_clock += frame_dt;
     const bool force_step = layout_fresh || reset_requested_ || !base_resets.empty() ||
-                            d.channels_force;
+                            d.channels_force || edited_channels;
     const bool step = force_step || d.step_clock >= kWetStepSeconds - 1e-6;
     // The step simulates all the time since the last one (rates are per
     // second), clamped as before so a stall cannot launch a huge step.
@@ -1652,7 +2029,15 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         k.source_count = 0;
         run(kModeReset, d.tile_count);
         reset_requested_ = false;
+        d.zero_init_needed = false;
     } else {
+        if (d.zero_init_needed) {
+            k.source_count = 0;
+            k._p1 |= kResetInitOnlyBit;
+            run(kModeReset, d.tile_count);
+            k._p1 &= ~kResetInitOnlyBit;
+            d.zero_init_needed = false;
+        }
         for (const auto& range : base_resets) {
             k.source_count = range.first;
             run(kModeReset, range.second);
@@ -1739,20 +2124,31 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         stats_.last_tick_ms = msSince(t0);
         return true;
     }
-    k.dt = step_dt;
-    run(kModeTick, d.tile_count);
-    run(kModeResolve, d.tile_count);
-    if (run_channels) {
-        if (compact_channels) {
-            run(kModeCompactChannels, (d.tile_count + 255u) / 256u);
-            if (ok) run(kModeChannelsList, 0);
-        } else {
-            run(kModeSeedHeight, d.tile_count);
-            run(kModeChannels, d.tile_count);
+    if (!edit_only) {
+        k.dt = step_dt;
+        run(kModeTick, d.tile_count);
+        run(kModeResolve, d.tile_count);
+        if (run_channels) {
+            if (compact_channels) {
+                run(kModeCompactChannels, (d.tile_count + 255u) / 256u);
+                if (ok) run(kModeChannelsList, 0);
+            } else {
+                run(kModeSeedHeight, d.tile_count);
+                run(kModeChannels, d.tile_count);
+            }
+            ++stats_.pbr_dispatches;
         }
-        ++stats_.pbr_dispatches;
+        run(kModeRotate, (d.tile_count + 255u) / 256u);
     }
-    run(kModeRotate, (d.tile_count + 255u) / 256u);
+    if (edited_channels && !d.channels_force) {
+        WetPaintChannelEdits::dispatchRanges(surfaces_, k, [&](uint32_t count, bool seed_height) {
+            if (seed_height) {
+                run(kModeSeedHeight, count);
+            }
+            run(kModeChannels, count);
+            ++stats_.pbr_dispatches;
+        });
+    }
     // A periodic reader got a stale coverage: measure it here, after this
     // tick's final state, inside the readback this tick pays anyway (the
     // stats_init upload above zeroed the coverage slots too).
@@ -1760,7 +2156,6 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     if (measure_coverage) run(kModeCoverage, d.tile_count);
 
     const bool force = d.channels_force;
-    d.channels_force = false;   // consumed by the dispatches above
     if (!ok) {
         // ★ Still hand the recorded work over: on wet paint's own context
         // nobody else submits it, and a recording left open forever is the
@@ -1802,6 +2197,10 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             return false;
         }
         applyStats(st, force, measure_coverage, paint_serial_);
+    }
+    d.channels_force = false;
+    if (edited_channels) {
+        WetPaintChannelEdits::queuePublication(surfaces_, force);
     }
     ++stats_.ticks;   // simulation steps (at most 1 / kWetStepSeconds per second)
     stats_.last_dt = step_dt;
@@ -1861,7 +2260,14 @@ void WetPaintGpu::applyStats(const std::vector<uint32_t>& st, bool force, bool m
 
 // ── publish ─────────────────────────────────────────────────────────────────
 
-int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* viewport_backend) {
+void* WetPaintGpu::publicationDevice() const {
+    if (!device_ || !device_->compute || layout_dirty_ || surfaces_.empty()) return nullptr;
+    const auto& compute = *device_->compute;
+    return sameCompute(device_->output, compute) ? compute.nativeDevice() : nullptr;
+}
+
+int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* viewport_backend,
+                         bool allow_host_copy) {
     host_materials_.clear();
     if (!device_ || !device_->compute || layout_dirty_ || surfaces_.empty()) return 0;
     Device& d = *device_;
@@ -1873,9 +2279,14 @@ int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* v
     void* vk_buffer = c.nativeBufferPtr(d.output);
     bool any_pending = false;
     for (const auto& s : surfaces_) {
-        any_pending = any_pending || s->pending[0].any || s->pending[1].any;
-        for (const auto& per_backend : s->channel_pending) {
-            for (const auto& r : per_backend) any_pending = any_pending || r.any;
+        for (int b = 0; b < 2; ++b) {
+            if (!allow_host_copy && !targets[b]) {
+                continue;
+            }
+            any_pending = any_pending || s->pending[b].any;
+            for (const auto& r : s->channel_pending[b]) {
+                any_pending = any_pending || r.any;
+            }
         }
     }
     if (!any_pending) return 0;
@@ -1912,7 +2323,10 @@ int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* v
             Surface::Rect& r = *rects[b];
             if (!r.any) continue;
             auto* vk = dynamic_cast<Backend::VulkanBackendAdapter*>(targets[b]);
-            if (!vk) { r = Surface::Rect{}; continue; }   // no Vulkan target in this slot
+            if (!vk) {
+                if (allow_host_copy) r = Surface::Rect{};
+                continue;
+            }
             const int rc = (vk_device && vk_buffer)
                 ? vk->copyDeviceBufferToTexture(tex.get(), vk_device, vk_buffer,
                                                 static_cast<uint64_t>(plane_offset) * 4ull, s.width,
@@ -1925,7 +2339,7 @@ int WetPaintGpu::publish(Backend::IBackend* render_backend, Backend::IBackend* v
                 stats_.publish_mode = "device_copy";
                 changed |= kWetPaintPublishedDevice;
                 r = Surface::Rect{};
-            } else if (rc < 0) {
+            } else if (rc < 0 && allow_host_copy) {
                 host_path = true;
             }
             // rc == 0: the texture is not resident on that backend yet; keep the rectangle.
@@ -2000,6 +2414,10 @@ void WetPaintGpu::readCoverage(const std::vector<uint32_t>& st, WetPaintCoverage
         s.wet_texels = v[kStWetTexels];
         s.roughness_texels = v[kStRoughnessTexels];
         s.normal_texels = v[kStNormalTexels];
+        s.picture_texels = v[kStPictureTexels];
+        s.picture_revealed_texels = v[kStPictureRevealed];
+        s.picture_ratio = s.picture_texels
+            ? static_cast<float>(s.picture_revealed_texels) / static_cast<float>(s.picture_texels) : 0.0f;
         s.ratio = s.valid_texels ? static_cast<float>(s.covered_texels) / static_cast<float>(s.valid_texels) : 0.0f;
         if (s.covered_texels > 0) {
             s.mean_color[0] = static_cast<float>(v[kStSumR]) / (255.0f * s.covered_texels);
@@ -2048,11 +2466,30 @@ bool WetPaintGpu::coverage(SceneData& scene, WetPaintCoverage& out, bool allow_s
         d.color_scratch, d.state_scratch, d.output, d.tile_flags, d.stats,
         d.dummy_events, d.dummy_events, d.dummy_counter, d.dummy_events, d.dummy_counter,
     };
+    if (d.zero_init_needed) {
+        WetPaintGpuConstants reset_k;
+        reset_k.mode = kModeReset;
+        reset_k.surface_count = n;
+        reset_k.tile_count = d.tile_count;
+        reset_k._p0 = d.channels_allocated ? d.texel_count : 0u;
+        reset_k._p1 = kResetInitOnlyBit | (d.picture_allocated ? kPictureBit : 0u);
+        ComputeDispatch reset_cmd;
+        reset_cmd.kernel = "paint_wet";
+        reset_cmd.timing_label = kWetPaintTimingLabels[kModeReset];
+        reset_cmd.buffers = bindings;
+        reset_cmd.buffer_count = kBindingCount;
+        reset_cmd.constants = &reset_k;
+        reset_cmd.constants_size = sizeof(reset_k);
+        reset_cmd.groups.groups_x = std::max<uint32_t>(1u, d.tile_count);
+        if (!c.dispatch(reset_cmd)) return false;
+        d.zero_init_needed = false;
+    }
     WetPaintGpuConstants k;
     k.mode = kModeCoverage;
     k.surface_count = n;
     k.tile_count = d.tile_count;
     k._p0 = d.channels_allocated ? d.texel_count : 0u;
+    k._p1 = d.picture_allocated ? kPictureBit : 0u;
     ComputeDispatch cmd;
     cmd.kernel = "paint_wet";
     cmd.timing_label = kWetPaintTimingLabels[kModeCoverage];

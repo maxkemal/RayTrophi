@@ -216,7 +216,6 @@
   "player.wind_strength": "Rüzgâr şiddeti",
   "player.wind_strength_hint": "Hava akımını durdurmak için 0'a ayarlayın.",
   "player.balloon_physics": "Balon fiziği",
-  "player.opaque_balloons": "Opak balonlar",
   "player.jolt_motion": "Jolt fiziği",
   "player.impact_soft_body": "Soft-body çarpışmaları",
   "player.paint_thickness_hint": "Yeni boyanın tüm boyanabilir yüzeylerde ulaşabileceği kabarıklık sınırını ayarlar.",

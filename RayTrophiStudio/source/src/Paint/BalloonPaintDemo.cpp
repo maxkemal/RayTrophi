@@ -3,6 +3,9 @@
 #include "Paint/BalloonBirthAnimation.h"
 #include "Paint/BalloonInteraction.h"
 #include "Paint/BalloonOpaqueMaterials.h"
+#ifndef RT_PLAYER
+#include "Core/StudioPlayPaint.h"
+#endif
 #include "Paint/BalloonPlayerDefaults.h"
 #include "Paint/BalloonJoltMotion.h"
 #include "Paint/BalloonSoftBody.h"
@@ -41,7 +44,6 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
-#include <map>
 #include <random>
 #include <stdexcept>
 
@@ -145,7 +147,6 @@ struct State {
     std::vector<uint32_t> visual_profiles;   // per palette colour, in the visual system
     std::vector<uint32_t> drop_profiles;     // per palette colour, in kSystems[c % 4]
     uint32_t gold_visual_profile = 0;        // particle-mode surprise balloon
-    std::vector<float> visual_transmission; // ordinary balloon's authored value
     BalloonOpaqueMaterials opaque_materials;
     uint64_t surprise_pops = 0;
     // Shared room goal: the children fill the room together. room_progress is
@@ -366,21 +367,6 @@ void updateMeshVisual(SceneData& scene, size_t index, const Balloon& balloon, bo
         if (!metal.ok) {
             throw std::runtime_error(metal.error);
         }
-        {
-            const float authored = state.visual_transmission.at(index);
-            const float wanted = balloon.surprise || state.config.value("opaque_balloons", false)
-                ? 0.0f :
-                state.config.value("transmission", authored);
-            rtapi::MaterialParamValue current;
-            // Written only when it differs: every write is an undo record.
-            if (!rtapi::getMaterialParam(name, "transmission", current).ok ||
-                std::abs(current.scalar - wanted) > 1e-4f) {
-                const auto clear = rtapi::setMaterialParam(name, "transmission", wanted);
-                if (!clear.ok) {
-                    throw std::runtime_error(clear.error);
-                }
-            }
-        }
         if (!mesh->visible) {
             // Only the first show after prepare changes the instance set.
             const auto result = rtapi::setObjectVisible(name, true);
@@ -509,17 +495,15 @@ json validatedConfig(const json& input, SceneData& scene) {
               {"sparkles", 90}, {"sparkle_trails", true}, {"drop_sparks", 0.25}, {"drop_trails", true},
               {"burst_clumpiness", 0.7}, {"burst_jets_max", 10}};
     c.update(input);
+    // Read old projects and callers, then keep these retired options out of saved configs.
+    c.erase("opaque_balloons");
+    c.erase("transmission");
     if (c.contains("visual_nodes")) {
         c["jolt_motion"] = input.value("jolt_motion", json(false));
-        c["opaque_balloons"] = input.value("opaque_balloons", json(false));
         c["impact_soft_body"] = input.value("impact_soft_body", json(true));
         c["wind_strength"] = input.value("wind_strength", json(defaultBalloonWindStrength));
     }
     validateBalloonJoltMotion(c);
-    if (c.contains("opaque_balloons") && (!c["opaque_balloons"].is_boolean() ||
-        (c["opaque_balloons"] == true && !c.contains("visual_nodes")))) {
-        throw std::runtime_error("opaque_balloons must be a boolean and true requires mesh visuals");
-    }
     if (!c["interaction_mode"].is_string() ||
         (c["interaction_mode"] != "pop" && c["interaction_mode"] != "carry")) {
         throw std::runtime_error("interaction_mode must be pop|carry");
@@ -589,11 +573,6 @@ json validatedConfig(const json& input, SceneData& scene) {
     // balloons are shrunk to nothing and cannot be selected, and measured
     // 2026-11-17 the twelve held 0..1 (one opaque, one fully clear). Absent =
     // the materials are left as authored.
-    if (c.contains("transmission") &&
-        (!c["transmission"].is_number() || !(c["transmission"].get<double>() >= 0.0) ||
-         c["transmission"].get<double>() > 1.0)) {
-        throw std::runtime_error("transmission must be a number in 0..1");
-    }
     const double surprise = c["surprise_chance"].get<double>();
     if (!(surprise >= 0.0 && surprise <= 0.5)) {
         throw std::runtime_error("surprise_chance must be 0..0.5");
@@ -1452,19 +1431,9 @@ void prepare(SceneData& scene, const json& config) {
         : std::vector<std::string>{});
     auto soft_body = config.value("soft_body", false) ?
         std::make_unique<BalloonSoftBody>() : nullptr;
-    std::map<std::string, float> previous_transmission;
     if (state.scene == &scene && state.config.contains("visual_nodes")) {
         if (auto* context = rtapi::boundContext(); context && &context->scene == &scene) {
             state.opaque_materials.restore(*context);
-        }
-        const auto& nodes = state.config["visual_nodes"];
-        for (size_t i = 0; i < state.balloons.size() &&
-             i < state.visual_transmission.size() && i < nodes.size(); ++i) {
-            if (state.balloons[i].surprise || state.config.contains("transmission") ||
-                state.config.value("opaque_balloons", false)) {
-                previous_transmission[nodes[i].get<std::string>()] =
-                    state.visual_transmission[i];
-            }
         }
     }
     hideMeshVisuals();
@@ -1606,6 +1575,9 @@ void prepare(SceneData& scene, const json& config) {
         splat.max_events_per_tick = 65536;
         paint.setSplatSettings(splat);
     }
+#ifndef RT_PLAYER
+    AppRuntime::bindStudioGamePaintDevice(scene);
+#endif
     WetPaintCoverage coverage;
     if (!paint.coverage(scene, coverage)) {
         throw std::runtime_error("could not prepare wet paint GPU atlas");
@@ -1672,18 +1644,8 @@ void prepare(SceneData& scene, const json& config) {
                 }
             }
             state.visual_base.push_back(base);
-            rtapi::MaterialParamValue transmission;
-            const auto read = rtapi::getMaterialParam(name, "transmission", transmission);
-            if (!read.ok) {
-                throw std::runtime_error(read.error);
-            }
-            const auto previous = previous_transmission.find(name);
-            state.visual_transmission.push_back(previous != previous_transmission.end()
-                ? previous->second : transmission.scalar);
         }
-        if (config.value("opaque_balloons", false) || config.value("transmission", 1.0f) == 0.0f) {
-            state.opaque_materials.apply(*rtapi::boundContext(), config["visual_nodes"]);
-        }
+        state.opaque_materials.apply(*rtapi::boundContext(), config["visual_nodes"]);
     }
     for (auto& balloon : state.balloons) {
         inflate(scene, balloon);

@@ -54,11 +54,16 @@ struct Material {
     uint opacity_tex;
     uint transmission_tex;
     uint specular_tex;
-    // Block 10: Tile break + terrain layer + height/FFT texture slot
+    // Block 10: Tile break + terrain layer + height/FFT texture slot + wet paint base
     float tile_break_strength;
     uint  _terrain_layer_idx;
     uint  height_tex;
-    float _core_pad0;
+    // Wet paint canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md).
+    // 0 = ordinary material. Non-zero: every texture slot above is a paint
+    // canvas page sampled at the RAW mesh UV, the UV transform applies ONLY to
+    // this base colour texture, and albedo = base * (1 - canvas.a) + canvas.rgb
+    // (the canvas is premultiplied). Was the float _core_pad0 (same offset).
+    uint  paint_base_tex;
 };
 
 struct MaterialExt {

@@ -33,6 +33,13 @@ struct WetPaintSurfaceSettingsInfo {
     float dry_roughness = 0.30f;
     float height_contribution = 0.35f;
     float normal_strength = 0.5f;
+    // Hidden picture: image path laid over the UV page (empty = off); paint of
+    // matching hue (within picture_tolerance degrees, 5..90) reveals it.
+    std::string reveal_picture;
+    float picture_tolerance = 30.0f;
+    float picture_hint = 0.0f;     // 0..1
+    float picture_outline = 1.0f;  // 0..1 opacity of always-visible picture pixels until revealed
+    float picture_blank[3] = {1.0f, 1.0f, 1.0f};  // sRGB wall colour, used when reveal_picture == "@base"
 };
 
 Result validateWetPaintSurfaceSettings(const WetPaintSurfaceSettingsInfo& settings);
@@ -50,6 +57,11 @@ struct WetPaintSurfaceRuntimeInfo {
     uint32_t stamped_texels = 0;
     uint32_t sources_dropped = 0;
     std::string texture;
+    // Canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md): true when the
+    // material keeps a UV transform for its base colour texture (base_texture)
+    // and the canvas is composited over it at the raw UV.
+    bool canvas_overlay = false;
+    std::string base_texture;
     WetPaintSurfaceSettingsInfo settings;
 };
 
@@ -118,6 +130,9 @@ struct WetPaintCoverageInfo {
         uint32_t wet_texels = 0;
         uint32_t roughness_texels = 0; // output differs from original channel
         uint32_t normal_texels = 0;
+        uint32_t picture_texels = 0;           // colourable picture texels (0 = no picture)
+        uint32_t picture_revealed_texels = 0;
+        float picture_ratio = 0.0f;
         float ratio = 0.0f;
         float mean_color[3] = {0.0f, 0.0f, 0.0f};
     };

@@ -48,6 +48,7 @@ bool ensureRayFusionViewportPasses(
     VkRenderPass& renderPass,
     VkRenderPass& renderPassLoad,
     VkRenderPass& hdrRenderPass,
-    VkRenderPass& hdrRenderPassLoad);
+    VkRenderPass& hdrRenderPassLoad,
+    bool storeReflectionGbuffer = true);
 
 } // namespace Backend

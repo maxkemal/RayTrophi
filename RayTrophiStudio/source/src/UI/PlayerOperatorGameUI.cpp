@@ -207,12 +207,6 @@ void gameSettings() {
         }
         hint(tr("player.limited_by_the_scene_s_prepared_balloon_meshes_and_particle_budget",
                 "Limited by the scene's prepared balloon meshes and particle budget."));
-        if (status.value("supports_carry", false)) {
-            bool opaque = draft.values.value("opaque_balloons", false);
-            if (ImGui::Checkbox(trId("player.opaque_balloons", "Opaque balloons"), &opaque)) {
-                change("opaque_balloons", opaque);
-            }
-        }
         if (draft.values.contains("wind_strength")) {
             const bool jolt = draft.values.value("jolt_motion", false);
             ImGui::BeginDisabled(!jolt);

@@ -1513,6 +1513,11 @@ void shadeSceneHit() {
     float ior         = (mat.ior > 0.01) ? mat.ior : 1.5;
     float transmission = clamp(mat.transmission, 0.0, 1.0);
     vec2 materialUV = applyMaterialUVTransform(mat, hitUV);
+    // Wet paint canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md): the
+    // slots are canvas pages at the raw (V-flipped) UV, the transform tiles
+    // only the base colour texture under them.
+    vec2 paintBaseUV = materialUV;
+    if (mat.paint_base_tex > 0u) materialUV = hitUV;
 
     // ── Faz 2b: per-pixel material program (mirrors the CPU MaterialProgram VM).
     // Overrides the driven slots point-by-point (Noise/Voronoi/Checker/Ramp/Mix
@@ -1575,7 +1580,9 @@ void shadeSceneHit() {
     // Independent slider — set to 0 to keep albedo maps clean.
     if (mat.tile_break_strength > 0.0 &&
         (mat.albedo_tex > 0u || mat.roughness_tex > 0u || mat.normal_tex > 0u)) {
-        materialUV = pd_tileBreak(materialUV, hitPos, mat.tile_break_strength);
+        // A paint canvas has no tiling seam; its base does.
+        if (mat.paint_base_tex > 0u) paintBaseUV = pd_tileBreak(paintBaseUV, hitPos, mat.tile_break_strength);
+        else materialUV = pd_tileBreak(materialUV, hitPos, mat.tile_break_strength);
     }
 
     // ----------------------------------------------------------
@@ -1593,7 +1600,13 @@ void shadeSceneHit() {
     // this the same way: applyProgramSurface runs AFTER the texture fetch and wins.
     int albedoTexID = int(mat.albedo_tex);
     if (albedoTexID > 0 && (mpWritten & MP_SLOT_BASECOLOR) == 0u) {
-        albedo = texture(materialTextures[nonuniformEXT(albedoTexID)], materialUV).rgb;
+        vec4 albedoTexel = texture(materialTextures[nonuniformEXT(albedoTexID)], materialUV);
+        albedo = albedoTexel.rgb;
+        if (mat.paint_base_tex > 0u) {
+            // Premultiplied canvas over the tiled base.
+            vec3 base = texture(materialTextures[nonuniformEXT(int(mat.paint_base_tex))], paintBaseUV).rgb;
+            albedo = base * (1.0 - albedoTexel.a) + albedoTexel.rgb;
+        }
     }
 
     // ── Material State Field: burn / heat ─────────────────────────────────────

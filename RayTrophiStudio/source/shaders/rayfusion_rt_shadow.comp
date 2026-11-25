@@ -70,7 +70,7 @@ bool occludes(uint instance, uint triangle, vec2 bary) {
     vec2 c=vec2(coords.uv[corner.z*2u],coords.uv[corner.z*2u+1u]);
     vec2 uv=a*(1.0-bary.x-bary.y)+b*bary.x+c*bary.y;
     uv.y=1.0-uv.y; // same convention as material_preview_shadow.vert
-    vec4 texel=sampleMaterialTextureLod(uint(mat.opacity_tex),applyUVTransform(uv,mat),0.0);
+    vec4 texel=sampleMaterialTextureLod(uint(mat.opacity_tex),materialSlotUV(uv,mat),0.0);
     bool alpha=(mat.flags&256u)!=0u || mat.opacity_tex==mat.albedo_tex;
     return materialCoverageOpacity(opacity*(alpha?texel.a:texel.r),(mat.flags&MATERIAL_FLAGS_PREVIEW_CUTOUT)!=0u)>=0.1;
 }

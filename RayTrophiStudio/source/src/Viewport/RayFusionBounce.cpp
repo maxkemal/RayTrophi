@@ -182,8 +182,13 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
             const auto found = m_uploadedImages.find(slot);
             return found != m_uploadedImages.end() && found->second.view && found->second.sampler;
         };
+        // Wet paint canvas over a tiled base (paint_base_tex): the bounce reads
+        // the BASE through the material UV transform and leaves the canvas out.
+        // The canvas is premultiplied (black where nothing is painted) and sits
+        // at the raw UV; probe GI is far below the frequency of a paint splat.
+        const uint32_t bounceAlbedo = m.paint_base_tex != 0u ? m.paint_base_tex : m.albedo_tex;
         const bool textured = m.transmission_tex != 0u ||
-            !textureResident(m.albedo_tex) || !textureResident(m.emission_tex) ||
+            !textureResident(bounceAlbedo) || !textureResident(m.emission_tex) ||
             !textureResident(m.opacity_tex) || !textureResident(m.metallic_tex) ||
             !textureResident(m.specular_tex);
         // Negated rather than rewritten: a NaN must stay UNsupported, and
@@ -247,7 +252,7 @@ uint64_t VulkanBackendAdapter::prepareRayFusionBounce() {
         //   biraz fazla sicak" olurdu. Kimse buna cift sayim demez.
         packed.emissive[0] = materials.size() < materialInNee.size() &&
             materialInNee[materials.size()] ? 1.0f : 0.0f;
-        packed.textures[0] = m.albedo_tex;
+        packed.textures[0] = bounceAlbedo;
         packed.textures[1] = m.emission_tex;
         // An unresident descriptor is a placeholder image, not the authored
         // alpha. Mark it out of range so coverage conservatively occludes.

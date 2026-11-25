@@ -1,5 +1,8 @@
 #include "Paint/GameDesign.h"
 #include "Paint/HiddenGameObjects.h"
+#ifndef RT_PLAYER
+#include "Core/StudioPlayPaint.h"
+#endif
 
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/BalloonPlayerDefaults.h"
@@ -12,6 +15,7 @@
 #include "ParticleSimulation.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <unordered_set>
 
@@ -39,7 +43,12 @@ json settingsToJson(const WetPaintSurfaceSettings& s) {
             {"reveal_opacity", s.reveal_opacity},
             {"wet_roughness", s.wet_roughness}, {"dry_roughness", s.dry_roughness},
             {"height_contribution", s.height_contribution},
-            {"normal_strength", s.normal_strength}};
+            {"normal_strength", s.normal_strength},
+            {"reveal_picture", s.reveal_picture},
+            {"picture_tolerance", s.picture_tolerance},
+            {"picture_hint", s.picture_hint},
+            {"picture_outline", s.picture_outline},
+            {"picture_blank", json::array({s.picture_blank[0], s.picture_blank[1], s.picture_blank[2]})}};
 }
 
 float number(const json& j, const char* key, float fallback, float lo, float hi) {
@@ -75,6 +84,19 @@ WetPaintSurfaceSettings settingsFromJson(const json& j) {
     s.dry_roughness = number(j, "dry_roughness", s.dry_roughness, 0.0f, 1.0f);
     s.height_contribution = number(j, "height_contribution", s.height_contribution, 0.0f, 1.0f);
     s.normal_strength = number(j, "normal_strength", s.normal_strength, 0.0f, 8.0f);
+    if (j.is_object() && j.contains("reveal_picture") && j["reveal_picture"].is_string())
+        s.reveal_picture = j["reveal_picture"].get<std::string>();
+    s.picture_tolerance = number(j, "picture_tolerance", s.picture_tolerance, 5.0f, 90.0f);
+    s.picture_hint = number(j, "picture_hint", s.picture_hint, 0.0f, 1.0f);
+    s.picture_outline = number(j, "picture_outline", s.picture_outline, 0.0f, 1.0f);
+    if (j.is_object() && j.contains("picture_blank") && j["picture_blank"].is_array() &&
+        j["picture_blank"].size() == 3) {
+        for (size_t i = 0; i < 3; ++i) {
+            if (j["picture_blank"][i].is_number()) {
+                s.picture_blank[i] = std::clamp(j["picture_blank"][i].get<float>(), 0.0f, 1.0f);
+            }
+        }
+    }
     return s;
 }
 
@@ -197,6 +219,7 @@ json saveGameDesign() {
 void queueGameDesign(const json& design) {
     pending_design = design.is_object() ? design : json();
     pending_demo = json();
+    pending_demo_ticks = 0;
     apply_status.clear();
 }
 
@@ -204,6 +227,7 @@ void resetGameDesign() {
     clearHiddenGameObjects();
     pending_design = json();
     pending_demo = json();
+    pending_demo_ticks = 0;
     apply_status.clear();
 }
 
@@ -233,11 +257,13 @@ void tickPendingDemo(SceneData& scene) {
     json output;
     std::string error;
     if (!balloonPaintCommand(scene, "configure", config, output, error)) {
-        apply_status = "balloon demo: " + error;
+        apply_status = "balloon demo: " + error +
+                       " (sdf_wait_ticks=" + std::to_string(pending_demo_ticks) + ")";
         SCENE_LOG_WARN("[GameDesign] " + apply_status);
     } else {
         apply_status = "applied: " + std::to_string(wetPaintGpu().surfaces().size()) +
-                       " paint surface(s), balloon demo prepared";
+                       " paint surface(s), balloon demo prepared (sdf_wait_ticks=" +
+                       std::to_string(pending_demo_ticks) + ")";
     }
 }
 
@@ -306,10 +332,20 @@ void tickGameDesign(SceneData& scene) {
     };
     auto& paint = wetPaintGpu();
     size_t added = 0;
+    const auto t_design_start = std::chrono::steady_clock::now();
+    double surfaces_ms = 0.0;
+    double hidden_ms = 0.0;
     try {
+#ifndef RT_PLAYER
+        if ((design.contains("wet_paint") || design.contains("balloon_demo")) &&
+            AppRuntime::bindStudioGamePaintDevice(scene)) {
+            SCENE_LOG_INFO("[StudioPlayPaint] Game compute bound to the Vulkan viewport.");
+        }
+#endif
         const json wet = design.value("wet_paint", json::object());
         const json surfaces = wet.value("surfaces", json::array());
         if (surfaces.is_array() && !surfaces.empty()) {
+            const auto t_surf = std::chrono::steady_clock::now();
             // The document replaces whatever a previous project left behind.
             paint.clear();
             for (const auto& entry : surfaces) {
@@ -319,7 +355,10 @@ void tickGameDesign(SceneData& scene) {
                 }
                 const std::string object = entry["object"].get<std::string>();
                 const int material = entry.value("material_id", -1);
-                const int resolution = std::clamp(entry.value("resolution", 1024), 32, 4096);
+                int resolution = std::clamp(entry.value("resolution", 1024), 32, 4096);
+#ifdef RT_PLAYER
+                resolution = std::min(resolution, defaultMaxPaintResolution);
+#endif
                 std::string error;
                 // Existing serialized Paint Edit textures may have a different
                 // size. Honor the saved game surface size before baking its atlas.
@@ -343,6 +382,8 @@ void tickGameDesign(SceneData& scene) {
                 ++added;
             }
             g_materials_dirty = true;
+            surfaces_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_surf).count();
         }
         if (wet.contains("splat") && wet["splat"].is_object()) {
             const json& j = wet["splat"];
@@ -362,10 +403,13 @@ void tickGameDesign(SceneData& scene) {
             paint.setSplatSettings(splat);
         }
         if (design.contains("hidden_objects")) {
+            const auto t_hid = std::chrono::steady_clock::now();
             std::string error;
             if (!configureHiddenGameObjects(scene, design["hidden_objects"], error)) {
                 note("Hidden objects: " + error);
             }
+            hidden_ms = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_hid).count();
         }
         if (design.contains("balloon_demo") && design["balloon_demo"].is_object()) {
             // Configured on a later tick, once every droplet collider is cooked.
@@ -375,9 +419,23 @@ void tickGameDesign(SceneData& scene) {
     } catch (const std::exception& e) {
         note(e.what());
     }
-    apply_status = problems.empty()
-        ? "applied: " + std::to_string(added) + " paint surface(s)"
-        : "applied " + std::to_string(added) + " paint surface(s), problems: " + problems;
+    const std::string status_before_demo = apply_status;
+    if (!pending_demo.is_null()) {
+        // Apply immediately when droplet colliders are already ready instead of
+        // waiting until Frame 1+2.
+        tickPendingDemo(scene);
+    }
+    const double total_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_design_start).count();
+    SCENE_LOG_INFO("[GameDesign] apply total=" + std::to_string(static_cast<int>(total_ms + 0.5)) +
+                   " ms (surfaces=" + std::to_string(static_cast<int>(surfaces_ms + 0.5)) +
+                   " ms/" + std::to_string(added) + ", hidden=" +
+                   std::to_string(static_cast<int>(hidden_ms + 0.5)) + " ms)");
+    if (apply_status == status_before_demo) {
+        apply_status = problems.empty()
+            ? "applied: " + std::to_string(added) + " paint surface(s)"
+            : "applied " + std::to_string(added) + " paint surface(s), problems: " + problems;
+    }
     if (!problems.empty()) {
         SCENE_LOG_WARN("[GameDesign] " + apply_status);
     }

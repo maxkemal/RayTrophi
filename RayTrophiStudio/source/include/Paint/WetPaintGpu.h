@@ -64,6 +64,22 @@ struct WetPaintSurfaceSettings {
     float dry_roughness = 0.30f;
     float height_contribution = 0.35f;
     float normal_strength = 0.5f;
+    // Hidden picture (2026-11-24): an image laid over the surface's UV page.
+    // Transparent pixels show the wall; dark/unsaturated opaque pixels
+    // (outlines) are always visible; saturated pixels are colourable regions,
+    // hidden until paint of a matching HUE (within picture_tolerance degrees,
+    // mixed paint counts) lands on them - then that texel shows the picture,
+    // permanently until the room resets. Empty path = off.
+    std::string reveal_picture;
+    float picture_tolerance = 30.0f;   // degrees of hue, 5..90
+    float picture_hint = 0.0f;         // 0..1 faint preview of hidden regions
+    // Opacity of the "always visible" picture pixels (outlines, white/grey)
+    // while NOT revealed; 0 = the whole picture is invisible. Any paint reveals
+    // them (no hue test).
+    float picture_outline = 1.0f;
+    // reveal_picture == "@base": the surface's OWN base texture is the hidden
+    // picture and the visible wall is this flat sRGB colour.
+    float picture_blank[3] = {1.0f, 1.0f, 1.0f};
 };
 
 // How particle contacts become paint.
@@ -100,6 +116,11 @@ struct WetPaintSurfaceInfo {
     uint32_t stamped_texels = 0;   // last tick
     uint32_t sources_dropped = 0;  // last tick: > 64 sources in one tile
     std::string texture;
+    // Canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md): chosen by the
+    // material itself (a base colour texture under the canvas and a non-identity
+    // UV transform). base_texture is that texture's name, "" in composite mode.
+    bool canvas_overlay = false;
+    std::string base_texture;
     WetPaintSurfaceSettings settings;
 };
 
@@ -152,6 +173,11 @@ struct WetPaintCoverage {
         uint32_t normal_texels = 0;
         float ratio = 0.0f;
         float mean_color[3] = {0.0f, 0.0f, 0.0f};   // sRGB 0..1 of covered texels
+        // Hidden picture progress (reveal_picture): colourable texels and how
+        // many of them are revealed. 0/0 when the surface has no picture.
+        uint32_t picture_texels = 0;
+        uint32_t picture_revealed_texels = 0;
+        float picture_ratio = 0.0f;
     };
     std::vector<Surface> surfaces;
     uint64_t covered_texels = 0;
@@ -198,7 +224,11 @@ public:
     // (Renderer::updateBackendMaterial: that one slot + the dirty region, both
     // backends) - g_materials_dirty alone is not enough in Studio, where that
     // flag is serviced only inside a full scene sync.
-    int publish(Backend::IBackend* render_backend, Backend::IBackend* viewport_backend);
+    // GPU-only callers pass their same-device target in its usual slot.
+    // Unpublished rectangles remain queued for a later compatible target.
+    int publish(Backend::IBackend* render_backend, Backend::IBackend* viewport_backend,
+                bool allow_host_copy = true);
+    void* publicationDevice() const;
     const std::vector<uint16_t>& hostPublishedMaterials() const { return host_materials_; }
 
     // Painted share of every surface. Exact by default: a dispatch + synchronize
@@ -211,6 +241,11 @@ public:
 
     bool empty() const { return surfaces_.empty(); }
     std::vector<WetPaintSurfaceInfo> surfaces() const;
+    // Returns the clean base colour texture that should be written on project
+    // save for `material_id` (the real source texture when one exists, or an
+    // un-blanked / un-painted copy of the surface's original base pixels so
+    // saving while "@base" or wet paint is active never white-washes the wall).
+    std::shared_ptr<Texture> cleanBaseTextureForSave(uint16_t material_id) const;
     const WetPaintStats& stats() const { return stats_; }
     RayTrophiSim::SimulationComputeContext* fallbackCompute(void* activeDevice) const {
         return activeDevice == own_compute_device_ ? own_compute_.get() : nullptr;
@@ -227,6 +262,8 @@ private:
     bool ensureCompute(SceneData& scene);
     bool prepareChannels(SceneData& scene);
     bool bakeGeometry(SceneData& scene, Surface& s, std::string& error);
+    void setCanvasOverlay(Surface& s, bool overlay);
+    void updateCanvasModes();
     static std::array<double, 24> geometryKey(SceneData& scene, const std::string& object);
     bool channels_dirty_ = false;
     float geometry_check_clock_ = 0.0f;

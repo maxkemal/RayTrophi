@@ -16,8 +16,8 @@
 
 namespace Paint {
 
-// Balloon meshes own their materials. Keep their authored inputs so switching
-// back to the translucent look restores textures and graph outputs as well.
+// Balloon meshes own their materials. Preserve the authored inputs for meshes
+// released when the demo is cleared or reconfigured.
 class BalloonOpaqueMaterials {
 public:
     void apply(UIContext& context, const nlohmann::json& nodes) {

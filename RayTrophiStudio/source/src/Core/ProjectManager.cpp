@@ -3,6 +3,7 @@
 #include "Game/GameRuntime.h"
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/GameDesign.h"
+#include "Paint/WetPaintGpu.h"
 #include "Fluid/LiquidEmissionAuthoring.h"
 #include "Fluid/MatterFogStreams.h"
 #include "Fluid/MatterSeedSources.h"
@@ -5173,8 +5174,22 @@ json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textur
         };
         
         if (pbsdf) {
-            // Use PrincipledBSDF pointer for correct texture property access
-            checkTexture(pbsdf->albedoProperty, "albedo");
+            // Use PrincipledBSDF pointer for correct texture property access.
+            // Wet paint surfaces (overlay tiled base, "@base" hidden picture,
+            // live splats): serialize the clean base texture instead of the
+            // transient transparent or white-washed canvas.
+            std::shared_ptr<Texture> cleanAlbedo =
+                Paint::wetPaintGpu().cleanBaseTextureForSave(static_cast<uint16_t>(i));
+            if (!cleanAlbedo && pbsdf->paintBaseTexture && pbsdf->paintBaseTexture->is_loaded()) {
+                cleanAlbedo = pbsdf->paintBaseTexture;
+            }
+            if (cleanAlbedo && cleanAlbedo->is_loaded()) {
+                MaterialProperty baseProp = pbsdf->albedoProperty;
+                baseProp.texture = cleanAlbedo;
+                checkTexture(baseProp, "albedo");
+            } else {
+                checkTexture(pbsdf->albedoProperty, "albedo");
+            }
             checkTexture(pbsdf->normalProperty, "normal");
             checkTexture(pbsdf->roughnessProperty, "roughness");
             checkTexture(pbsdf->metallicProperty, "metallic");

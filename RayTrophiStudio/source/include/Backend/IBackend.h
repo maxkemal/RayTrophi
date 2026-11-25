@@ -625,6 +625,10 @@ public:
         int64_t transmissionTexture = 0;
         int64_t opacityTexture = 0;
         int64_t heightTexture = 0;
+        // Wet paint canvas over a tiled base: the base colour texture the UV
+        // transform applies to; every slot above is then sampled at the raw UV
+        // (PrincipledBSDF::paintBaseTexture, docs/dev/WET_PAINT_CANVAS_UV.md).
+        int64_t paintBaseTexture = 0;
 
         // Packed-texture channel override for metallic/roughness slots:
         // 0 = Auto (ORM: rough .g / metal .b, BC4/R8 → .r), 1 = R, 2 = G, 3 = B.

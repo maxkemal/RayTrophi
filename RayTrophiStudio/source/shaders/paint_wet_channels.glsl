@@ -1,4 +1,5 @@
 // Existing Paint channel resolve, included after colour/state resolve.
+// Source plane 6 (optional, pc._p1 bit 3): hidden picture RGBA8.
 // Atlas planes: colour / roughness / height mask / normal / optional opacity. Source planes
 // additionally carry the two float-bit UV Jacobian distances baked by CPU Paint.
 uint sourceChannel(uint plane, uint texel) {
@@ -175,7 +176,7 @@ void compactChannelTiles() {
     }
 }
 
-void channelTile(uint tile_index, bool listed) {
+void channelTile(uint tile_index, bool edited) {
     if (pc._p0 == 0u) return;
     Tile t = tiles[tile_index];
     Surface s = surfaces[t.surface];
@@ -183,7 +184,10 @@ void channelTile(uint tile_index, bool listed) {
     // Dispatch after resolve so it reads the final height across workgroups.
     // A forced pass (bit 0: atlas expansion / seeded height) redoes every
     // plane; otherwise the changed bits decide, uniformly per workgroup.
-    const bool forced = (pc._p1 & 1u) != 0u;
+    const bool forced = edited || (pc._p1 & 1u) != 0u;
+    // For a settings edit the mask addresses the five output planes directly.
+    // Ordinary simulation and full atlas initialization keep their existing path.
+    const uint planes = edited ? pc.source_kind : 31u;
     if (gl_LocalInvocationIndex == 0u) {
         s_gate = forced ? (CHANGED_CONTENT | CHANGED_HEIGHT) : channelTileNeeds(t, s);
     }
@@ -194,8 +198,8 @@ void channelTile(uint tile_index, bool listed) {
     const bool height_normal = (s.flags & SURFACE_HEIGHT_NORMAL) != 0u;
     // Normals (and their height cache) only where a height near this tile
     // moved: a drying, still stain changes roughness, not its relief.
-    const bool redo_normals = height_normal && (needs & CHANGED_HEIGHT) != 0u;
-    if (redo_normals) cacheAddedHeight(t, s);
+    const bool redo_height = height_normal && (needs & CHANGED_HEIGHT) != 0u;
+    if (redo_height && (planes & 8u) != 0u) cacheAddedHeight(t, s);
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x,y; tileTexel(t,k,x,y);
         if (!inSurface(s,x,y)) continue;
@@ -203,32 +207,36 @@ void channelTile(uint tile_index, bool listed) {
         vec4 layer = unpackColor(color[ti]);
         float coverage = clamp(layer.a/255.0,0.0,1.0);
         // Recreate colour also after lazy atlas expansion, preserving old paint.
-        out_color[ti] = composite(base_color[ti],layer);
-        uint roughness = sourceChannel(1u,ti);
-        if ((s.flags&SURFACE_ROUGHNESS)!=0u && coverage > 0.0) {
-            float wet = float(s.pbr_params&255u)/255.0;
-            float dry = float((s.pbr_params>>8u)&255u)/255.0;
-            float target = mix(dry,wet,clamp(state[ti].x,0.0,1.0));
-            float original = float(roughness&255u)/255.0;
-            float value = floor(mix(original,target,channelMask(coverage))*255.0+0.5);
-            roughness = packColor(vec4(value,value,value,255.0));
+        if ((planes & 1u) != 0u) {
+            out_color[ti] = surfaceOutput(s, ti, layer, state[ti].w);
         }
-        out_color[pc._p0+ti] = roughness;
-        if (redo_normals || !height_normal) {
-            // Height + normal planes: recomputed where a nearby height moved
-            // (or copied through from the source when the surface has no
-            // height channel); otherwise the planes written last time stay.
-            uint height = sourceChannel(2u,ti);
-            uint normal = sourceChannel(3u,ti);
-            if (redo_normals) {
-                float value = raisedHeight(s,x,y);
-                height = packColor(vec4(value,value,value,255.0));
-                normal = channelNormal(t,s,x,y,ti);
+        if ((planes & 2u) != 0u) {
+            uint roughness = sourceChannel(1u, ti);
+            if ((s.flags & SURFACE_ROUGHNESS) != 0u && coverage > 0.0) {
+                float wet = float(s.pbr_params & 255u) / 255.0;
+                float dry = float((s.pbr_params >> 8u) & 255u) / 255.0;
+                float target = mix(dry, wet, clamp(state[ti].x, 0.0, 1.0));
+                float original = float(roughness & 255u) / 255.0;
+                float value = floor(mix(original, target, channelMask(coverage)) * 255.0 + 0.5);
+                roughness = packColor(vec4(value, value, value, 255.0));
             }
-            out_color[2u*pc._p0+ti] = height;
-            out_color[3u*pc._p0+ti] = normal;
+            out_color[pc._p0 + ti] = roughness;
         }
-        if ((pc._p1 & 2u) != 0u) {
+        if (redo_height || !height_normal) {
+            if ((planes & 4u) != 0u) {
+                uint height = sourceChannel(2u, ti);
+                if (redo_height) {
+                    float value = raisedHeight(s, x, y);
+                    height = packColor(vec4(value, value, value, 255.0));
+                }
+                out_color[2u * pc._p0 + ti] = height;
+            }
+            if ((planes & 8u) != 0u) {
+                out_color[3u * pc._p0 + ti] = redo_height ? channelNormal(t, s, x, y, ti)
+                                                        : sourceChannel(3u, ti);
+            }
+        }
+        if ((planes & 16u) != 0u && (pc._p1 & 2u) != 0u) {
             uint originalOpacity = 0xFFFFFFFFu;
             uint opacity = originalOpacity;
             if ((s.flags & SURFACE_REVEAL_OPACITY) != 0u) {
@@ -240,5 +248,6 @@ void channelTile(uint tile_index, bool listed) {
             out_color[4u * pc._p0 + ti] = opacity;
         }
     }
-    if (gl_LocalInvocationIndex == 0u) markDirty(t);
+    // The host queues the edited planes explicitly, distinct from simulation dirties.
+    if (!edited && gl_LocalInvocationIndex == 0u) markDirty(t);
 }

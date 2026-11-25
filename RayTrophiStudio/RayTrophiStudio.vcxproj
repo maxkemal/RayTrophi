@@ -3671,6 +3671,9 @@
     <ClCompile Include="source\src\Backend\VulkanFsrLoader.cpp" />
     <ClCompile Include="source\src\Backend\VulkanFsrUpscaler.cpp" />
     <ClCompile Include="source\src\Backend\VulkanGpuBreadcrumbs.cpp" />
+    <ClCompile Include="source\src\Device\SimulationPipelineCache.cpp" />
+    <ClCompile Include="source\src\Paint\WetPaintGeometryBake.cpp" />
+    <ClCompile Include="source\src\Viewport\ViewportPipelineCache.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleInputs.cpp" />
     <ClCompile Include="source\src\Backend\VulkanUpscaleAdapter.cpp" />
     <ClCompile Include="source\src\Api\RtApiUpscale.cpp" />
@@ -3681,6 +3684,9 @@
     <ClInclude Include="source\include\Backend\VulkanFsrLoader.h" />
     <ClInclude Include="source\include\Backend\VulkanFsrUpscaler.h" />
     <ClInclude Include="source\include\Backend\VulkanGpuBreadcrumbs.h" />
+    <ClInclude Include="source\include\Device\SimulationPipelineCache.h" />
+    <ClInclude Include="source\include\Paint\WetPaintGeometryBake.h" />
+    <ClInclude Include="source\include\Viewport\ViewportPipelineCache.h" />
     <ClInclude Include="source\include\Backend\VulkanUpscaleInputs.h" />
     <ClInclude Include="source\include\Api\RtApiUpscale.h" />
     <ClInclude Include="source\src\Api\RtIpcUpscale.h" />

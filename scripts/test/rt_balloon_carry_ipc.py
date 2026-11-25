@@ -59,6 +59,13 @@ def main():
     def row(state, id):
         return next(b for b in state["balloons"] if b["id"] == id)
 
+    def check_opaque(state):
+        config = state["config"]
+        assert "opaque_balloons" not in config and "transmission" not in config
+        for node in config["visual_nodes"]:
+            assert ipc.call("material.get", object_name=node, param="transmission") == 0, node
+            assert ipc.call("material.get", object_name=node, param="opacity") == 1, node
+
     def pick():
         camera = ipc.call("camera.get")
         view = ipc.call("viewport.status")
@@ -74,6 +81,7 @@ def main():
     before = demo()
     assert before["prepared"] and before["visual_mode"] == "flat_mesh"
     assert "interaction" in before, "Build updated Studio/Player first"
+    check_opaque(before)
     original = dict(before["config"])
     original.pop("surfaces", None)
     original.pop("resolution", None)
@@ -83,7 +91,8 @@ def main():
                   jolt_motion=False)
     try:
         config.pop("interaction_mode", None)
-        configured = demo("configure", config)
+        configured = demo("configure", dict(config, opaque_balloons=False, transmission=0.9))
+        check_opaque(configured)
         assert configured["config"]["interaction_mode"] == "carry", "Mesh default is not carry"
         if args.soft_body:
             assert configured["soft_body"], "Jolt shell did not initialize"

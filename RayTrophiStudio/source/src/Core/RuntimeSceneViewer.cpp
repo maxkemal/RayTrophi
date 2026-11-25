@@ -310,17 +310,33 @@ rtapi::Result RuntimeSceneViewer::prepareScene() {
     if (playerSceneLoad().busy()) {
         playerSceneLoad().checkpoint(87, "prepare_viewport");
     }
+    const auto t_vp_start = std::chrono::steady_clock::now();
     buildRasterScene(*backend_, context_.scene, context_.renderer);
+    const auto t_vp_raster = std::chrono::steady_clock::now();
     // Volume table after the raster build, same order as Studio's rebuild path
     // (geometry, then syncVDBVolumesToGPU + updateBackendGasVolumes).
     publishVolumes(context_.scene, context_.renderer, nullptr, backend_);
     context_.renderer.updateBackendGasVolumes(context_.scene);
     g_gas_volumes_dirty = false;
     backend_->setLights(context_.scene.lights);
-    context_.renderer.world.initializeLUT();
+    // Only precompute CPU Nishita LUTs when the scene actually uses Nishita and
+    // there is no Vulkan GPU LUT generator (syncVulkanWorld handles GPU Nishita
+    // LUTs and falls back to world.flushLUT() if GPU generation is unavailable).
+    auto* vulkan_world = dynamic_cast<Backend::VulkanBackendAdapter*>(backend_);
+    if (!vulkan_world && context_.renderer.world.getMode() == WORLD_MODE_NISHITA) {
+        context_.renderer.world.initializeLUT();
+    }
     auto world_data = context_.renderer.world.getGPUData();
-    syncVulkanWorld(dynamic_cast<Backend::VulkanBackendAdapter*>(backend_),
-                    context_.renderer.world, world_data);
+    syncVulkanWorld(vulkan_world, context_.renderer.world, world_data);
+    const auto t_vp_end = std::chrono::steady_clock::now();
+    const double raster_ms =
+        std::chrono::duration<double, std::milli>(t_vp_raster - t_vp_start).count();
+    const double world_ms =
+        std::chrono::duration<double, std::milli>(t_vp_end - t_vp_raster).count();
+    SCENE_LOG_INFO("[SceneLoad] prepare_viewport total=" +
+                   std::to_string(static_cast<int>(raster_ms + world_ms + 0.5)) +
+                   " ms (raster=" + std::to_string(static_cast<int>(raster_ms + 0.5)) +
+                   " ms, world_vol=" + std::to_string(static_cast<int>(world_ms + 0.5)) + " ms)");
     context_.scene.camera->update_camera_vectors();
     // Clouds continue from the time the project was saved at; a new device or
     // project always gets a fresh push.
@@ -543,7 +559,9 @@ void RuntimeSceneViewer::advanceRuntime(float dt_seconds) {
         return simulationClock().tick(scene, input);
     }();
     if (load.busy() && load.stage() == "game_design" && !Paint::gameDesignPending()) {
-        load.checkpoint(97, "first_frame", Paint::gameDesignStatus());
+        const std::string status = Paint::gameDesignStatus();
+        load.setDetail(status);
+        load.checkpoint(97, "first_frame", status);
         refresh_requested_ = true;
     }
     if (clock.pause_requested) {

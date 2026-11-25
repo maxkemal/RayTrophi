@@ -1,5 +1,143 @@
 # Sıradaki derleme kontrolleri — Player Android A1 (2026-11-22)
 
+## Studio Play ıslak boya yayını ve opak balonlar (2026-11-25)
+
+- **Studio canlı PASS, `workshop`:** Play → Stop çökmesi giderildi. İlk kesintisiz Play aralığında 2.121 GPU renk ve 7.238 GPU kanal kopyası, sonraki Play aralığında 1.175 renk ve 4.031 kanal kopyası kaydedildi. Her iki aralıkta da boya dokusu RAM indirme sayaçları sabit kaldı.
+- **Açık performans kalemi:** Stop → yeniden Play geçişinde editör önizlemesi eşitlenirken 826,25 MiB boya dokusu geri okundu. Play yeniden başladığında sayaçlar sabitlendi.
+- **Slider:** Roughness, normal ve gizli resim ayarları artık yalnız etkilenen yüzeyi ve kanalları yeniliyor. Kullanıcı maliyetin düştüğünü doğruladı.
+- **Opak balonlar:** Eski sahneler dahil Windows'ta opak açılış doğrulandı. Android cihazında eski sahne açılışı ve Oyun Ayarları'nda opaklık kontrolünün kaldırılması canlı kontrol bekliyor.
+
+## O7d Viewport `VkPipelineCache` (2026-11-25 gece, Antigravity) — ARTIMLI (Studio + Player + Android APK)
+
+- **Değişiklikler:** yeni `Viewport/ViewportPipelineCache.h/.cpp` (`viewport_raster_<vendor>_<device>.bin`, `VulkanViewportBackend` + `MaterialPreviewCoverage/Ibl/Shadow` + `RasterTaa` + `RasterGpuCull` bağlandı).
+- **Statik kontroller:** `gen_player_vcxproj.py --check`, `gen_player_android_cmake.py --check`, MSVC `/Zs` (8/8, 0 uyarı), Android NDK arm64 `-fsyntax-only` PASS.
+- **Derleme sonrası kabul (Android APK):**
+  1. 1. açılışta `viewport_raster_*.bin` kaydedilmeli; 2. (sıcak) açılışta `first_frame` **9,92 s** → **<1–2 s**, toplam `scene_load` **24,7 s → ~14–16 s** bandına inmeli.
+  2. Balonlar açılışta opak görünmeli. Yalnız balonlar transmission üretiyorsa geçiş ≈ 0 ms olmalı (boşta raster GPU ~180–190 ms / >5 FPS hedefi).
+
+## O8 + Android 512 boya tavanı + küçültülmüş pencere kapısı (2026-11-24 gece, Antigravity) — ARTIMLI (Windows Player + tek Android APK paketi)
+
+Bu paket önceki O7a + O7b + O7c ile birlikte tek Android Release APK derlemesine hazırdır (`.\scripts\Build-PlayerApk.ps1 -Abi arm64-v8a` veya `-Abi both`).
+- **O8 (`RayFusionViewportPasses` + `VulkanViewportBackend`):** Ray-query olmayan GPU'larda (Mali-G52) HDR geçişinde kullanılmayan `reflectionNormal` + `reflectionSpecular` (96 bit/px) ekleri `VK_ATTACHMENT_UNUSED` / `DONT_CARE`. Log: `[RayFusion] HDR render pass omitting unused reflection G-buffer attachments...`.
+- **Android 512 (`BalloonPlayerDefaults.h` + `GameDesign.cpp`):** Android Player açılışta ıslak boya yüzeylerini 512 ile sınırlar (`pbr_buffer_bytes` ~4× düşer, Mali boya süresi ~4× kısalır; F2/oyun ayarı yine üstüne yazabilir).
+- **Küçültülmüş pencere (`AppFrame` + `PlayerMain`):** Windows'ta pencere simge durumuna küçültülünce (capture kapalıyken) kare üretimi durur, 20 Hz IPC canlı kalır.
+- **Kabul:**
+  1. **Windows Player:** Simge durumuna küçült → 2 sn bekle → `frame_telemetry.frames_consumed` / render sayısı artmamalı; geri açınca hemen normal FPS'e dönmeli; `RT_VK_VALIDATION=1` ile hata olmamalı.
+  2. **Android APK (Lenovo TB330FU):** Soğuk + sıcak açılışta `scene_load` (`prepare_particles`, `game_design`, `elapsed_ms`), `[SimComputeCache] Loaded`, `[RayFusion] HDR render pass omitting...`, `paint.wet_status` (`resolution=512`), boşta raster GPU (önceki 697 ms) ve patlamada `paint_wet` sürelerini (önceki `tick 174 ms`, `channels 96 ms`) karşılaştır.
+
+## O7c `game_design` hızlandırma: paralel `WetPaintGeometryBake` + gereksiz gutter atlama (2026-11-24 gece, Antigravity) — ARTIMLI (Studio + Player + Android APK)
+
+- **Değişiklikler:** yeni `Paint/WetPaintGeometryBake.h/.cpp` (tek ortak OpenMP kodu; Studio `/openmp`, Windows Player `/openmp`, Android `-fopenmp -static-openmp`), `WetPaintGpu.cpp` (`bakeGeometry` çağrısı + paralel `packRgba8`), `GameDesign.cpp` (`[GameDesign] apply total=... ms (surfaces=..., hidden=...)` logu).
+- **Statik kontroller:** `gen_player_vcxproj.py --check` PASS, `gen_player_android_cmake.py --check` PASS, MSVC `/Zs /openmp` 3/3 PASS, Android NDK arm64 `-fopenmp -fsyntax-only` PASS.
+- **Derleme sonrası kabul:**
+  1. `workshop.rtp` açılışında `scene_load` → `game_design` süresini önceki **2.103,5 ms** ile karşılaştır; `SceneLog.txt`'de `[GameDesign] apply total=... ms (surfaces=... ms/7, hidden=... ms)` satırını oku.
+  2. Duvarlara ve gizli nesnelere balon patlat; `paint.wet_status` içinde `valid_texels`, `gutter_texels`, `tiles` değerlerinin ve boya yerleşiminin öncekiyle birebir aynı olduğunu doğrula.
+
+## O7a + O7b açılış hızlandırma: sim compute pipeline önbelleği + `game_design` render kapısı (2026-11-24 gece, Antigravity) — ARTIMLI (Studio + Player + Android APK)
+
+- **Değişiklikler:** yeni `Device/SimulationPipelineCache.h/.cpp` + `SimulationComputeVulkan.cpp` (273 kernel yerine yalnız 5 çekirdek kernel önceden ısıtılır, kalanı ilk dispatch'te tembel derlenir; diskte kalıcı `VkPipelineCache`), `PlayerMain.cpp` (`game_design` sırasında örtülü 3D raster atlanır), `GameDesign.cpp` / `RuntimeSceneViewer.cpp` / `PlayerSceneLoad.h` (`scene_load` `game_design` aşamasına `sdf_wait_ticks`).
+- **Statik kontroller:** `gen_player_vcxproj.py --check` PASS, `gen_player_android_cmake.py --check` PASS, Player MSVC `/Zs` 5/5 PASS, Android NDK arm64 `-fsyntax-only` PASS.
+- **Derleme sonrası kabul:**
+  1. **Soğuk + sıcak açılış (Windows Player & Android APK):** İlk açılışta logda `[SimCompute] Registered 273 kernels; pre-warmed 5 in <ms> ms (cache=cold)` ve `[SimComputeCache] Saved (...)`; ikinci açılışta `cache=hit` ve `[SimComputeCache] Loaded (...)` görünmeli.
+  2. **`scene_load` ölçümü:** `prepare_particles` ve `game_design` sürelerini önceki Lenovo 2257 profiliyle (`22,58 s` + `21,60 s`) karşılaştır; `game_design` satırında `sdf_wait_ticks=<N>` görünmeli, yükleme bitince ilk 3D kare gecikmesiz çizilmeli.
+  3. **İlk patlama & tembel derleme:** Player'da balon patlat → boya/damla hatasız çalışmalı. Studio'da sıvı/MPM/DEM sahnesi çalıştır → ilk dispatch'te ilgili kerneller tembel derlenip çıkışta önbelleğe kaydedilmeli.
+
+## ★★★★ Döşemeli duvarda tuval: `paint_base_tex` (2026-11-24, Claude yan oturum) — ★ TAM DERLEME (Studio + Player)
+
+★ **BUG FIX (2026-11-24 gece — ✔ CANLI DOĞRULANDI):**
+1. `MeshPaintAdapter.cpp`: `isGeneratedPaintTexture` yalnız tek renk / tamamen şeffaf
+   (`isUniformOrEmptyPaintTexture`) generated tuvali atıyor; kayıtlı `.rtp`'deki gerçek duvar/zemin/normal
+   dokuları korunuyor.
+2. `WetPaintGpu.h/.cpp` (`cleanBaseTextureForSave`) + `MaterialManager.cpp` + `ProjectManager.cpp`:
+   overlay, composite ve `@base` yüzeyleri kaydedilirken geçici şeffaf/beyazlatılmış/boyalı tuval yerine
+   temiz taban dokusu yazılıyor.
+3. `WetPaintGpu.cpp` (`updateCanvasModes` + resim-değişim reset): Materyal panelinden albedo dokusu
+   değiştirilince/silinince yüzey canlı olarak yeni dokuyu benimsiyor (`@base` dahil); yeni resim yolu
+   atanınca eski `state.w` sıfırlanıyor.
+4. `VulkanBackend.cpp` (`uploadMaterials`): `getTexID()` içinde yüklenen `vulkan_dirty` yeni dokular döngü
+   sonunda `compactMaterialTexturesLocked()` ile 2D-dizi sayfalarına + `refTable`'a alınıyor (RayFusion
+   viewport yeni dokuyu anında gösteriyor).
+5. `paint_wet.comp` (`paint_wet.spv` iki klasöre dağıtıldı, `spirv-val` Vulkan 1.2 PASS): `pictureKind`
+   akromatik eşiği `sat < 0.10 || mx < 0.12`; `pictureRevealTarget` tek patlamada snap yerine bileşen
+   renklerini %45'e kadar, tam ton/karışımı ıslak boya süresince kademeli olarak %100'e açıyor.
+
+★ ÖNCE: bu parti YAYGIN STRUCT değiştiriyor → **tam derleme**, artımlı değil. `PrincipledBSDF.h` (+`paintBaseTexture`),
+`Backend/IBackend.h` `MaterialData` (+`paintBaseTexture`), `Backend/vulkan_material_types.h` `VkGpuMaterial` 400→**416 B**
+(blok 26), çekirdek `_core_pad0` → `paint_base_tex` (boyut aynı). Artımlı derleme eski .obj bırakırsa erişim ihlali /
+saçma malzeme = derleme sorunu, kod hatası değil. SPV iki yerde (eski exe ile aynı çizer: eski host bu sözcüğe 0 yazıyor).
+/Zs PASS 9 dosya, `audit_shader_struct_layout.py` OK. Not: `docs/dev/WET_PAINT_CANVAS_UV.md`.
+
+1. **Döşemesiz yüzeyler değişmemeli (bağımsız, hızlı):** workshop'u aç; `paint.wet_status` her yüzeyde
+   `canvas_mode: "composite"`, `base_texture: ""`. Duvarlar, oyuncaklar, boya, gizli resim eskisi gibi.
+   Bozuksa: ortak yolun `paint_base_tex == 0` dalı değişmiş demektir (raster frag / closesthit).
+2. **Döşemeli duvar (asıl kabul, atılabilir kopyada):** PaintBack'e döşemeli bir doku ver (ör. `wall3.png`) ve döşemeyi
+   panelden ya da `python scripts/test/rt_wet_paint_tiled_canvas_ipc.py --object PaintBack --player --tile 6 --hold 30`
+   ile 6'ya çek. Beklenen: `canvas_mode: "overlay"`, `base_texture` dokunun adı, `material.get uv_scale_x` = 6 KALIR;
+   duvar kağıdı 6× tekrarlar, balon lekeleri gerçek boyda TEK kez, gizli resim duvarı TEK kez kaplar.
+   Bozuksa: (a) duvar kağıdı tekrarlamıyor ama boya doğru → `paint_base_tex` shader'a ulaşmıyor (VulkanBackend
+   `getTexID`/`maybeQueue`) ya da dönüşüm yine sıfırlandı (`bindTextureSetToMaterial` koruması); (b) boyasız yer SİYAH →
+   tuval önceden çarpılmış/şeffaf değil: `paint_wet.spv` eski ya da `kSurfaceOverlay` bayrağı gitmiyor; (c) duvar doğru ama
+   boya hâlâ küçük ve tekrarlı → eski `material_preview_frag.spv` / `_covered.spv`.
+3. **Studio Rendered (Vulkan RT):** aynı duvar raster ile aynı görünmeli. Farklıysa `closesthit.spv` eski.
+4. **Geri dönüş:** döşeme 1 → `composite`, duvar kağıdı eskisi gibi bir kez gerilmiş; o yüzeyin boyası sıfırlanır (bilinçli).
+5. **Kaydet/aç:** betik `--roundtrip E:/tmp/tiled.rtp` → açılışta yine `overlay`, `uv_scale_x` 6.
+6. ★ **SİNSİ — GI:** overlay'e geçince oda KARARMAMALI. RayFusion prob GI artık duvar kağıdını okur; boya GI'a girmez
+   (bilinçli). Oda belirgin koyulaşırsa `RayFusionBounce.cpp` tabanı değil tuvali (boyasız yerde siyah) okuyor demektir —
+   kimse bunu bug diye raporlamaz, "biraz loş" görünür.
+7. **Taban dokusu olmayan tuval:** düz renk bir duvarda döşeme verilirse 1'e geri çekilir, logda
+   `[WetPaint] ... reset to identity`; boya tekrarlanmaz.
+8. **Panel:** Studio Game Design yüzey ayarlarında overlay iken "Canvas over tiled base: <doku>" (salt-okur).
+9. **Android:** APK'dan önce `python scripts/compile_player_android_vk11.py` (değişen 5 raster/compute SPV'nin 1.1 kopyası).
+Bilinen: CPU render ve OptiX (dondurulmuş) tuvali hâlâ döşer; döşemeli normal/roughness haritası kanal tuvalinde bir kez
+gerilir; `@base` resim modu döşemesiz kalır (taban = resim).
+
+## ★★ Gizli resim düzeltmeleri (2026-11-24 akşam, YALNIZ SHADER, SPV iki yerde — uygulamayı yeniden başlat)
+
+1. Kontur/açık ton (tür 1) pikseli boyayı siliyordu (pastel duvarda boya bir an tutup kayboluyordu): boya artık
+   `açılma × (1 − kontur)` kadar kalkar — kontur 1'de boya kalır, 0'da yerini resim alır.
+2. Açılma kararlı: eşleşme×kaplama küçük bir eşiği geçince texel 1'e çıkar (`revealSnap`), sonraki farklı renk onu
+   örtemez. ★ SİNSİ: hâlâ "sonraki renk siliyor" görünüyorsa `paint.wet_coverage.picture_revealed_texels` düşüyor mu bak;
+   düşüyorsa bir state yazıcısı w'yi sıfırlıyor, düşmüyorsa görüntü/kompozit tarafı. Ayrıca demo 30 sn boşta kalınca
+   odayı SIFIRLAR (`idle_reset_seconds`) — açılmalar da gider, bu hata değil.
+
+## ★★★ Gizli resim: GÖRÜNMEZ mod + `@base` (2026-11-24, Claude + alt ajan) — header (WetPaintGpu.h, RtApiPaintWet.h) → Studio + Player derlemesi
+
+SPV iki yerde (düzen aynı; eski exe ile çalışır ama yeni ayarlar ancak derlemeyle gelir). Yeni: `picture_outline` 0..1
+(0 = resim tamamen görünmez; kontur/renksiz pikseller HERHANGİ boya ile, renkli bölgeler tonu tutan boya ile açılır),
+`reveal_picture="@base"` (duvarın kendi dokusu gizli resim, görünen duvar `picture_blank` rengi, varsayılan beyaz; kapatınca
+asıl doku geri gelir). Studio Game Design → Hidden picture: "Use wall texture as picture", "Blank wall colour",
+"Outline visibility". ★ UV'ler 0..1 olmalı (elle büyütülmüş UV resmi küçültüp tekrarlar — tuval oturumu bunu ele alıyor).
+
+1. **Görünmez mod:** outline 0, `@base` → duvar düz beyaz; balon patlayınca değen yerlerde duvarın kendi dokusu belirir,
+   renkli bölgeler yalnız doğru renkle. `paint.wet_coverage.picture_ratio` artar.
+2. ★ **SİNSİ:** `@base` kapatılınca asıl doku geri gelmeli (gelmezse `base_original` geri yüklenmiyor). Malzeme rengi
+   tabanlı yüzeyde beyaz bir an malzeme rengine dönüp geri gelebilir (bilinen).
+3. Outline 1 + kontur üstüne boya: kontur boyanın ÜSTÜNDE kalır (boyama kitabı; bilinçli).
+
+## ★★★★ Gizli duvar resmi: renge göre açılan boyama (2026-11-24, Claude + 2 alt ajan) — ARTIMLI (2 HEADER: WetPaintGpu.h, RtApiPaintWet.h → onları içeren ~15 .cpp)
+
+★ ÖNCE: derleme BİTTİKTEN SONRA `RayTrophiStudio/source/shaders/paint_wet.spv`'yi `x64/Release/shaders/`'a kopyala
+(yeni SPV 18 sözcüklük istatistik bekliyor, eski exe 16 ayırıyor — erken kopya = tampon taşması). Ajan ya da ben kopyalarım.
+
+Yeni: yüzey ayarı `reveal_picture` (resim yolu), `picture_tolerance` (ton derecesi 5..90, varsayılan 30), `picture_hint`
+(0..1). Resim UV sayfasına oturur: saydam piksel = duvar; koyu/doygunluğu düşük opak = HEP görünür (kontur, bulut);
+doygun = gizli, TONU tutan boya (karışım dahil) değince kalıcı açılır (`state.w`), oda sıfırlanınca kapanır. Kaynak atlas
+düzlem 6, `_p1 & 8`, yüzey bayrağı bit4 + tolerans/ipucu baytları, istatistik adımı 18 (16 resim pikseli, 17 açılan).
+IPC `paint.wet_set_settings` / Python / oyun tasarımı kaydı / Studio Game Design → "Hidden picture" (Browse). Örnek:
+`local_assets/hidden_pictures/kids_house.png` (repoda değil). /Zs PASS (6 dosya), tarif üretici + denetim OK.
+
+1. **Resimsiz yüzeyler değişmemeli (bağımsız, hızlı):** mevcut duvarlarda boya/kabartma/parlaklık aynı. Kod resimsiz
+   yüzeyde eski `composite`'e düşer.
+2. **Açılma:** Studio'da bir duvara (ör. PaintBack) resmi ver → konturlar ve bulutlar görünür, renkli bölgeler gizli.
+   Sarı balon → güneş/çiçek göbeği açılır; kırmızı → ev; mavi → çatı; kırmızı+sarı karışımı → turuncu kapı/top.
+   `paint.wet_coverage` → `picture_ratio` artmalı.
+3. ★★ **SİNSİ — yanlış renk açıyor/açmıyor:** her renk her yeri açıyorsa tolerans/ton yanlış; hiçbir renk açmıyorsa
+   (a) resim yüklenmedi → log'da `[WetPaint] hidden picture could not be loaded` (yol göreli ise proje klasörüne göre),
+   (b) satır yönü ters → resim baş aşağı görünür (UV v ekseni), (c) `_p1 & 8` bitine bak.
+4. **Sıfırlama:** oda sıfırlanınca resim tekrar gizlenmeli, konturlar kalmalı. Resim DEĞİŞTİRİLİNCE eski açılmalar
+   sıfırlanmaz (bilinen, oda sıfırlaması temizler).
+5. **Player:** oyun tasarımı kaydıyla resim Player'a gelir (göreli yol proje klasörüne göre çözülür).
+
 ## ★★★ paint_wet channels: tile DEĞİŞİM bayrağı (2026-11-24, Claude) — ✔ CANLI: göz testi PASS; 4 balon channels 0,76 → 0,69 ms/adım, channels/tick 1,63 → 1,15; resolve 0,26 → 0,44 (karşılaştırma okumaları) → adım toplamı ~%11 net düşüş (sürekli yeni damga olan pencerede; kurumada daha büyük olmalı)
 
 ★★ ÇÖZÜLDÜ (2026-11-24): kök = VERİ, `PaintRight` normali Studio'da da dışa bakıyordu; kullanıcı Studio'da Normals → Flip + kaydet → Player'da boya tutuyor. Açık kalan: Flip Normals'ın IPC'si yok (§1) ve yüz yönü reddi için sayaç yok (sessiz arıza). Eski not: SAĞ DUVAR (`PaintRight`) boyayı tutmuyor. IPC deneyi: `paint.wet_set_splat facing_min=-1` ile 3 balon sağ duvara +0,34 kaplama, `facing_min=0` ile ~0 → damga YÜZ YÖNÜ testinde eleniyor (kıvılcım = çarpışma olayı var). `PaintRight` = sol duvarın Y etrafında 180° döndürülmüşü (det +1); sol/arka birim dönüşüm ve sorunsuz. Aday 1: Player'daki dünya normali (`N`) odanın dışına bakıyor (kullanıcı: bazı nesnelerde normal Player'da Studio'nun tersi). Aday 2: ince OBB'de `resolveAABB` en yakın yüze iter (geliş yönüne bakmaz) → arka yüz normali. Sol duvar aynı OBB/hızla çalıştığı için aday 1 daha olası. Kod okumasında kayıt (N_orig yerel) ve yükleme (getNormalTransform) doğru görünüyor. Player'da normal okuyan IPC yok (scene.object_info/raycast unsupported_in_player).

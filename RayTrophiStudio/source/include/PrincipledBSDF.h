@@ -214,6 +214,14 @@ public:
         return emissionProperty.color * emissionProperty.intensity;
     }
     TextureTransform textureTransform;
+    // Wet paint canvas over a tiled base (runtime only, owned by
+    // Paint::WetPaintGpu, never saved). Set: albedoProperty.texture and the
+    // other slots are paint canvas pages sampled at the RAW mesh UV, and
+    // textureTransform applies only to this base colour texture, under the
+    // premultiplied canvas. Null: ordinary material. Vulkan raster/RT only;
+    // the CPU and OptiX paths sample the canvas through textureTransform.
+    // docs/dev/WET_PAINT_CANVAS_UV.md
+    std::shared_ptr<Texture> paintBaseTexture;
     int selected_uv_set = 0;
     // MaterialProperty transmissionProperty; // Shadowing removed
     Vec3 albedoValue;

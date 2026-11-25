@@ -10,6 +10,7 @@
  * =========================================================================
  */
 #include "Backend/VulkanViewportBackend.h"
+#include "Viewport/ViewportPipelineCache.h"
 #include "globals.h"
 
 #include <chrono>
@@ -201,8 +202,10 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
             cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
             cpci.stage = stage;
             cpci.layout = m_interactiveViewport.taaPipelineLayout;
-            ok = vkCreateComputePipelines(vkDevice, VK_NULL_HANDLE, 1, &cpci, nullptr,
+            ok = vkCreateComputePipelines(vkDevice, Backend::currentViewportPipelineCache(vkDevice),
+                                          1, &cpci, nullptr,
                                           &m_interactiveViewport.taaPipeline) == VK_SUCCESS;
+            if (ok) Backend::markViewportPipelineCacheDirty(vkDevice);
         }
         if (module != VK_NULL_HANDLE) vkDestroyShaderModule(vkDevice, module, nullptr);
         if (!ok) {

@@ -209,3 +209,5 @@ docs/dev/grain_suite/
 /scripts/test/rt_wet_paint_multislot_ipc.py
 /scripts/test/rt_wet_paint_rebake_ipc.py
 /scripts/test/rt_workshop_balloons_ipc.py
+
+local_assets/

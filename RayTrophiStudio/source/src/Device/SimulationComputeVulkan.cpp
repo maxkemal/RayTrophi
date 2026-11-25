@@ -31,12 +31,13 @@
  *   Kernels that need atomics return false (CPU fallback) when unavailable.
  */
 
-#include "SimulationGpuPassSamples.h"
-#include "SimulationIndirectDispatch.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanGpuBreadcrumbs.h"
+#include "Device/SimulationPipelineCache.h"
 #include "SimulationCompute.h"
 #include "SimulationComputeVulkanContext.h"
+#include "SimulationGpuPassSamples.h"
+#include "SimulationIndirectDispatch.h"
 #include "SimulationPipelineTrace.h"
 #include "SimulationSpirvRequirements.h"
 
@@ -45,11 +46,12 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <string>
 #include <map>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -64,2141 +66,2520 @@ namespace {
 // with an unrelated buffer in a newly-created Vulkan backend and pass the
 // getBufferSize()-based stale-handle test. Keep IDs process-unique instead.
 std::atomic<uint64_t> g_nextVulkanSimulationBufferId{1};
-}
+} // namespace
 
-// ── SPIR-V loading ────────────────────────────────────────────────────────────
+// ── SPIR-V loading
+// ────────────────────────────────────────────────────────────
 
-static std::vector<uint32_t> loadSPV(const std::string& path) {
-    std::ifstream f(path, std::ios::binary | std::ios::ate);
-    if (!f.is_open()) return {};
-    std::streamsize size = f.tellg();
-    if (size <= 0 || (size % 4) != 0) return {};
-    f.seekg(0, std::ios::beg);
-    std::vector<uint32_t> spv(static_cast<std::size_t>(size) / 4);
-    f.read(reinterpret_cast<char*>(spv.data()), size);
-    return spv;
+static std::vector<uint32_t> loadSPV(const std::string &path) {
+  std::ifstream f(path, std::ios::binary | std::ios::ate);
+  if (!f.is_open())
+    return {};
+  std::streamsize size = f.tellg();
+  if (size <= 0 || (size % 4) != 0)
+    return {};
+  f.seekg(0, std::ios::beg);
+  std::vector<uint32_t> spv(static_cast<std::size_t>(size) / 4);
+  f.read(reinterpret_cast<char *>(spv.data()), size);
+  return spv;
 }
 
 static std::string findShaderDir() {
-    for (const char* dir : {"shaders", "source/shaders", "../shaders",
-                             "RayTrophiStudio/source/shaders"}) {
-        if (std::filesystem::exists(std::string(dir) + "/skinning.spv"))
-            return dir;
-    }
-    return "shaders";
+  for (const char *dir : {"shaders", "source/shaders", "../shaders",
+                          "RayTrophiStudio/source/shaders"}) {
+    if (std::filesystem::exists(std::string(dir) + "/skinning.spv"))
+      return dir;
+  }
+  return "shaders";
 }
 
-// ── Backend ───────────────────────────────────────────────────────────────────
+// ── Backend
+// ───────────────────────────────────────────────────────────────────
 
 class VulkanSimulationComputeBackend final : public ISimulationComputeBackend {
 public:
-    VulkanSimulationComputeBackend(VkDevice device,
-                                   VkPhysicalDevice physDevice,
-                                   VkQueue computeQueue,
-                                   uint32_t queueFamily,
-                                   bool atomicFloatEnabled,
-                                   bool shaderFloat64Enabled)
-        : m_device(device)
-        , m_physDevice(physDevice)
-        , m_queue(computeQueue)
-        , m_queueFamily(queueFamily)
-        , m_has_float_atomics(atomicFloatEnabled)
-        , m_has_shader_float64(shaderFloat64Enabled) {
-        if (!m_device || !m_physDevice || !m_queue) return;
-        if (!initCommandPool())     return;
-        if (!initDescriptorPool())  return;
-        if (!initDescLayouts())     return;
-        initTimestampPool();
-        loadPipelines();
-        m_ready = true;
+  VulkanSimulationComputeBackend(VkDevice device, VkPhysicalDevice physDevice,
+                                 VkQueue computeQueue, uint32_t queueFamily,
+                                 bool atomicFloatEnabled,
+                                 bool shaderFloat64Enabled)
+      : m_device(device), m_physDevice(physDevice), m_queue(computeQueue),
+        m_queueFamily(queueFamily), m_has_float_atomics(atomicFloatEnabled),
+        m_has_shader_float64(shaderFloat64Enabled) {
+    if (!m_device || !m_physDevice || !m_queue)
+      return;
+    if (!initCommandPool())
+      return;
+    if (!initDescriptorPool())
+      return;
+    if (!initDescLayouts())
+      return;
+    initTimestampPool();
+    loadPipelines();
+    m_ready = true;
+  }
+
+  ~VulkanSimulationComputeBackend() override {
+    if (!m_device)
+      return;
+    if (m_queue)
+      vkQueueWaitIdle(m_queue);
+
+    for (auto &kv : m_pipelines) {
+      vkDestroyPipeline(m_device, kv.second.pipeline, nullptr);
+      vkDestroyPipelineLayout(m_device, kv.second.layout, nullptr);
+    }
+    m_pipelineCache.close();
+    for (auto &dl : m_descLayouts)
+      if (dl != VK_NULL_HANDLE)
+        vkDestroyDescriptorSetLayout(m_device, dl, nullptr);
+    for (VkDescriptorPool pool : m_descPools)
+      if (pool)
+        vkDestroyDescriptorPool(m_device, pool, nullptr);
+    if (m_queryPool)
+      vkDestroyQueryPool(m_device, m_queryPool, nullptr);
+    for (auto &slot : m_stg) {
+      destroyStaging(slot.up);
+      destroyStaging(slot.down);
+      for (auto &s : slot.retired)
+        destroyStaging(s);
+    }
+    for (auto &r : m_readbacks)
+      destroyStaging(r.staging);
+    if (m_copyCmdBuf)
+      vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
+    for (VkCommandBuffer cb : m_cmdBufs)
+      if (cb)
+        vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cb);
+    if (m_cmdPool)
+      vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
+    for (VkFence fence : m_fences)
+      if (fence)
+        vkDestroyFence(m_device, fence, nullptr);
+
+    for (auto &kv : m_buffers) {
+      if (kv.second.buffer)
+        vkDestroyBuffer(m_device, kv.second.buffer, nullptr);
+      if (kv.second.memory)
+        vkFreeMemory(m_device, kv.second.memory, nullptr);
+    }
+  }
+
+  // ── Identity ─────────────────────────────────────────────────────────────
+
+  ComputeBackendType type() const override {
+    return ComputeBackendType::VulkanCompute;
+  }
+  const char *name() const override { return "Vulkan Simulation Compute"; }
+
+  ComputeBackendCaps caps() const override {
+    ComputeBackendCaps c;
+    c.available = m_ready;
+    c.supports_async = false;
+    c.supports_shared_graphics_interop = false;
+    c.max_storage_buffer_bytes =
+        static_cast<std::size_t>(2) * 1024 * 1024 * 1024;
+    c.max_threads_per_group = 256;
+    return c;
+  }
+
+  bool supportsDispatch() const override { return m_ready; }
+
+  // ── GPU timestamp timing ─────────────────────────────────────────────────
+
+  bool supportsGpuTimestamps() const override { return m_timestampsSupported; }
+
+  void setGpuTimestampsEnabled(bool enabled) override {
+    if (!m_timestampsSupported)
+      return;
+    if (m_timestampsEnabled == enabled)
+      return;
+    // Turning instrumentation on or off mid-command-buffer would leave the
+    // pool half reset and the label list out of step with the slots. Close
+    // the submission first, then flip.
+    if (m_recording || inFlight())
+      synchronize();
+    m_timestampsEnabled = enabled;
+    m_tsCursor = 0;
+    m_tsOverflowed = false;
+    m_tsLabels.clear();
+  }
+
+  bool gpuTimestampsEnabled() const override { return m_timestampsEnabled; }
+
+  void resetGpuTimings() override { m_kernelTimes.clear(); }
+
+  bool fetchGpuTimings(std::vector<GpuKernelTiming> &out, bool reset) override {
+    if (!m_timestampsSupported)
+      return false;
+    out.clear();
+    out.reserve(m_kernelTimes.size());
+    for (const auto &[kernel, acc] : m_kernelTimes) {
+      out.push_back(GpuKernelTiming{kernel, acc.ms, acc.calls, acc.samplesMs});
+    }
+    std::sort(out.begin(), out.end(),
+              [](const GpuKernelTiming &a, const GpuKernelTiming &b) {
+                return a.ms > b.ms;
+              });
+    if (reset)
+      m_kernelTimes.clear();
+    return true;
+  }
+
+  // ── Buffer management ─────────────────────────────────────────────────────
+
+  ComputeBufferHandle createBuffer(const ComputeBufferDesc &desc) override {
+    if (!m_device || desc.size_bytes == 0)
+      return {};
+
+    // Phase 3d: an AccelInput buffer doubles as RT BLAS build input, so it
+    // needs the accel-input + vertex + device-address usages and an
+    // address-capable allocation.
+    const bool accelInput =
+        hasComputeBufferUsage(desc.usage, ComputeBufferUsage::AccelInput);
+
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = desc.size_bytes;
+    bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    if (hasComputeBufferUsage(desc.usage, ComputeBufferUsage::Indirect)) {
+      bci.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
+    }
+    if (accelInput) {
+      bci.usage |=
+          VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
+          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
+          VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+    }
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    VkBuffer buf = VK_NULL_HANDLE;
+    const VkResult createResult = vkCreateBuffer(m_device, &bci, nullptr, &buf);
+    if (createResult != VK_SUCCESS) {
+      logSimulationComputeInfo(
+          "[SimComputeVk][ERROR] vkCreateBuffer failed: name=" +
+          desc.debug_name + " bytes=" + std::to_string(desc.size_bytes) +
+          " VkResult=" + std::to_string(static_cast<int>(createResult)));
+      return {};
     }
 
-    ~VulkanSimulationComputeBackend() override {
-        if (!m_device) return;
-        if (m_queue) vkQueueWaitIdle(m_queue);
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_device, buf, &req);
 
-        for (auto& kv : m_pipelines) {
-            vkDestroyPipeline(m_device, kv.second.pipeline, nullptr);
-            vkDestroyPipelineLayout(m_device, kv.second.layout, nullptr);
-        }
-        for (auto& dl : m_descLayouts)
-            if (dl != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(m_device, dl, nullptr);
-        for (VkDescriptorPool pool : m_descPools)
-            if (pool) vkDestroyDescriptorPool(m_device, pool, nullptr);
-        if (m_queryPool) vkDestroyQueryPool(m_device, m_queryPool, nullptr);
-        for (auto& slot : m_stg) {
-            destroyStaging(slot.up);
-            destroyStaging(slot.down);
-            for (auto& s : slot.retired) destroyStaging(s);
-        }
-        for (auto& r : m_readbacks) destroyStaging(r.staging);
-        if (m_copyCmdBuf) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &m_copyCmdBuf);
-        for (VkCommandBuffer cb : m_cmdBufs)
-            if (cb) vkFreeCommandBuffers(m_device, m_cmdPool, 1, &cb);
-        if (m_cmdPool)   vkDestroyCommandPool(m_device, m_cmdPool, nullptr);
-        for (VkFence fence : m_fences)
-            if (fence) vkDestroyFence(m_device, fence, nullptr);
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = req.size;
 
-        for (auto& kv : m_buffers) {
-            if (kv.second.buffer) vkDestroyBuffer(m_device, kv.second.buffer, nullptr);
-            if (kv.second.memory) vkFreeMemory(m_device, kv.second.memory, nullptr);
-        }
+    // Address-capable allocation so vkGetBufferDeviceAddress works for BLAS
+    // interop.
+    VkMemoryAllocateFlagsInfo allocFlags{};
+    if (accelInput) {
+      allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+      allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+      ai.pNext = &allocFlags;
     }
 
-    // ── Identity ─────────────────────────────────────────────────────────────
-
-    ComputeBackendType type() const override { return ComputeBackendType::VulkanCompute; }
-    const char* name() const override        { return "Vulkan Simulation Compute"; }
-
-    ComputeBackendCaps caps() const override {
-        ComputeBackendCaps c;
-        c.available                      = m_ready;
-        c.supports_async                 = false;
-        c.supports_shared_graphics_interop = false;
-        c.max_storage_buffer_bytes       = static_cast<std::size_t>(2) * 1024 * 1024 * 1024;
-        c.max_threads_per_group          = 256;
-        return c;
+    // Try ReBAR first (device-local + host-visible: shader speed of VRAM,
+    // uploads become one memcpy). VRAM pressure can make this allocation
+    // fail even when the heap is large — fall back silently.
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    void *mapped = nullptr;
+    const uint32_t barType = findBarMemType(req.memoryTypeBits);
+    if (barType != UINT32_MAX) {
+      ai.memoryTypeIndex = barType;
+      if (vkAllocateMemory(m_device, &ai, nullptr, &mem) == VK_SUCCESS) {
+        if (vkMapMemory(m_device, mem, 0, VK_WHOLE_SIZE, 0, &mapped) !=
+            VK_SUCCESS) {
+          vkFreeMemory(m_device, mem, nullptr);
+          mem = VK_NULL_HANDLE;
+          mapped = nullptr;
+        }
+      }
     }
 
-    bool supportsDispatch() const override { return m_ready; }
+    if (mem == VK_NULL_HANDLE) {
+      uint32_t memType =
+          findMemType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+      if (memType == UINT32_MAX) {
+        // Fallback: host-visible (integrated GPU / APU)
+        memType = findMemType(req.memoryTypeBits,
+                              VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                  VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+      }
+      if (memType == UINT32_MAX) {
+        vkDestroyBuffer(m_device, buf, nullptr);
+        return {};
+      }
+      ai.memoryTypeIndex = memType;
+      const VkResult allocResult =
+          vkAllocateMemory(m_device, &ai, nullptr, &mem);
+      if (allocResult != VK_SUCCESS) {
+        logSimulationComputeInfo(
+            "[SimComputeVk][ERROR] vkAllocateMemory failed: name=" +
+            desc.debug_name + " requested=" + std::to_string(desc.size_bytes) +
+            " allocation=" + std::to_string(static_cast<uint64_t>(req.size)) +
+            " VkResult=" + std::to_string(static_cast<int>(allocResult)));
+        vkDestroyBuffer(m_device, buf, nullptr);
+        return {};
+      }
+    }
+    vkBindBufferMemory(m_device, buf, mem, 0);
 
-    // ── GPU timestamp timing ─────────────────────────────────────────────────
-
-    bool supportsGpuTimestamps() const override { return m_timestampsSupported; }
-
-    void setGpuTimestampsEnabled(bool enabled) override {
-        if (!m_timestampsSupported) return;
-        if (m_timestampsEnabled == enabled) return;
-        // Turning instrumentation on or off mid-command-buffer would leave the
-        // pool half reset and the label list out of step with the slots. Close
-        // the submission first, then flip.
-        if (m_recording || inFlight()) synchronize();
-        m_timestampsEnabled = enabled;
-        m_tsCursor = 0;
-        m_tsOverflowed = false;
-        m_tsLabels.clear();
+    // One-time diagnostic so the Console shows whether the ReBAR path
+    // engaged (BIOS ReBAR off => 256MB BAR heap => rejected by the >=1GB
+    // heap check, and uploads silently keep using staging copies).
+    static bool s_bar_logged = false;
+    if (!s_bar_logged) {
+      s_bar_logged = true;
+      logSimulationComputeInfo(
+          mapped ? "[SimComputeVk] ReBAR active: sim buffers are device-local "
+                   "host-visible (uploads = direct memcpy)."
+                 : "[SimComputeVk] ReBAR unavailable; uploads use staging "
+                   "copies.");
     }
 
-    bool gpuTimestampsEnabled() const override { return m_timestampsEnabled; }
+    uint64_t id =
+        g_nextVulkanSimulationBufferId.fetch_add(1, std::memory_order_relaxed);
+    m_buffers[id] = {buf,    mem,        desc.size_bytes,
+                     mapped, desc.usage, desc.debug_name};
+    auto &allocation = m_buffers[id];
+    allocation.allocation_bytes = req.size;
+    VkPhysicalDeviceMemoryProperties properties{};
+    vkGetPhysicalDeviceMemoryProperties(m_physDevice, &properties);
+    const auto flags = properties.memoryTypes[ai.memoryTypeIndex].propertyFlags;
+    allocation.device_local =
+        (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
+    allocation.host_visible =
+        (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
+    ComputeBufferHandle h;
+    h.id = id;
+    // ComputeBufferHandle defaults to CPU. Leaving that tag unchanged made
+    // ensureComputeBuffer treat every live Vulkan allocation as belonging
+    // to another backend on the next frame. It then overwrote the handle
+    // without destroying the old VkBuffer: exactly +60 buffers/frame for
+    // the Fireball preset and roughly +1 GB VRAM/s.
+    h.backend = type();
+    return h;
+  }
 
-    void resetGpuTimings() override { m_kernelTimes.clear(); }
+  bool destroyBuffer(ComputeBufferHandle h) override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end())
+      return false;
+    // The recorded-but-unsubmitted command buffer may still reference this
+    // VkBuffer (recorded transfers/dispatches can outlive a phase that
+    // bailed out before its synchronize). Freeing it now would make the
+    // next submit touch a destroyed handle — adaptive domains hit exactly
+    // this by resizing buffers between steps. Flush first (and drain a
+    // submission still in flight, which may read it too).
+    if (m_recording || inFlight())
+      synchronize();
+    // synchronize() fences only this compute queue. Live Gas fields may
+    // also be referenced by Vulkan RT on another queue of the same device.
+    // Destruction/resizing is a rare structural operation, so use a full
+    // device lifetime boundary here rather than allowing vkDestroyBuffer
+    // to race an external queue reader.
+    vkDeviceWaitIdle(m_device);
+    if (it->second.buffer)
+      vkDestroyBuffer(m_device, it->second.buffer, nullptr);
+    if (it->second.memory)
+      vkFreeMemory(m_device, it->second.memory, nullptr);
+    m_buffers.erase(it);
+    return true;
+  }
 
-    bool fetchGpuTimings(std::vector<GpuKernelTiming>& out, bool reset) override {
-        if (!m_timestampsSupported) return false;
-        out.clear();
-        out.reserve(m_kernelTimes.size());
-        for (const auto& [kernel, acc] : m_kernelTimes) {
-            out.push_back(GpuKernelTiming{kernel, acc.ms, acc.calls, acc.samplesMs});
-        }
-        std::sort(out.begin(), out.end(),
-                  [](const GpuKernelTiming& a, const GpuKernelTiming& b) {
-                      return a.ms > b.ms;
-                  });
-        if (reset) m_kernelTimes.clear();
-        return true;
-    }
+  bool resizeBuffer(ComputeBufferHandle h, std::size_t new_size) override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end() || it->second.size >= new_size)
+      return it != m_buffers.end();
+    // Preserve the address-capable usage of live Gas render fields across
+    // adaptive-domain growth.
+    const ComputeBufferUsage old_usage = it->second.usage;
+    const std::string old_name = it->second.debug_name;
+    if (m_recording || inFlight())
+      synchronize();            // see destroyBuffer — same stale-handle window
+    vkDeviceWaitIdle(m_device); // also covers external RT/viewport queues
+    if (it->second.buffer)
+      vkDestroyBuffer(m_device, it->second.buffer, nullptr);
+    if (it->second.memory)
+      vkFreeMemory(m_device, it->second.memory, nullptr);
+    it->second = {};
 
-    // ── Buffer management ─────────────────────────────────────────────────────
+    ComputeBufferDesc d;
+    d.size_bytes = new_size;
+    d.usage = old_usage;
+    d.debug_name = old_name;
+    ComputeBufferHandle nh = createBuffer(d);
+    if (!nh.valid())
+      return false;
+    // createBuffer may rehash m_buffers; the old iterator is not stable.
+    auto src = m_buffers.find(nh.id);
+    auto dst = m_buffers.find(h.id);
+    if (src == m_buffers.end() || dst == m_buffers.end())
+      return false;
+    dst->second = std::move(src->second);
+    m_buffers.erase(src);
+    return true;
+  }
 
-    ComputeBufferHandle createBuffer(const ComputeBufferDesc& desc) override {
-        if (!m_device || desc.size_bytes == 0) return {};
+  std::size_t getBufferSize(ComputeBufferHandle h) const override {
+    auto it = m_buffers.find(h.id);
+    return (it != m_buffers.end()) ? it->second.size : 0;
+  }
 
-        // Phase 3d: an AccelInput buffer doubles as RT BLAS build input, so it needs the
-        // accel-input + vertex + device-address usages and an address-capable allocation.
-        const bool accelInput = hasComputeBufferUsage(desc.usage, ComputeBufferUsage::AccelInput);
+  void *nativeBufferPtr(ComputeBufferHandle h) const override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end())
+      return nullptr;
+    return reinterpret_cast<void *>(it->second.buffer);
+  }
 
-        VkBufferCreateInfo bci{};
-        bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bci.size  = desc.size_bytes;
-        bci.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
-                    VK_BUFFER_USAGE_TRANSFER_SRC_BIT   |
-                    VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        if (hasComputeBufferUsage(desc.usage, ComputeBufferUsage::Indirect)) {
-            bci.usage |= VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT;
-        }
-        if (accelInput) {
-            bci.usage |= VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR |
-                         VK_BUFFER_USAGE_VERTEX_BUFFER_BIT |
-                         VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
-        }
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+  void *nativeDevice() const override {
+    return reinterpret_cast<void *>(m_device);
+  }
 
-        VkBuffer buf = VK_NULL_HANDLE;
-        const VkResult createResult =
-            vkCreateBuffer(m_device, &bci, nullptr, &buf);
-        if (createResult != VK_SUCCESS) {
-            logSimulationComputeInfo(
-                "[SimComputeVk][ERROR] vkCreateBuffer failed: name=" +
-                desc.debug_name + " bytes=" + std::to_string(desc.size_bytes) +
-                " VkResult=" + std::to_string(static_cast<int>(createResult)));
-            return {};
-        }
-
-        VkMemoryRequirements req{};
-        vkGetBufferMemoryRequirements(m_device, buf, &req);
-
-        VkMemoryAllocateInfo ai{};
-        ai.sType          = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        ai.allocationSize = req.size;
-
-        // Address-capable allocation so vkGetBufferDeviceAddress works for BLAS interop.
-        VkMemoryAllocateFlagsInfo allocFlags{};
-        if (accelInput) {
-            allocFlags.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
-            allocFlags.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
-            ai.pNext = &allocFlags;
-        }
-
-        // Try ReBAR first (device-local + host-visible: shader speed of VRAM,
-        // uploads become one memcpy). VRAM pressure can make this allocation
-        // fail even when the heap is large — fall back silently.
-        VkDeviceMemory mem    = VK_NULL_HANDLE;
-        void*          mapped = nullptr;
-        const uint32_t barType = findBarMemType(req.memoryTypeBits);
-        if (barType != UINT32_MAX) {
-            ai.memoryTypeIndex = barType;
-            if (vkAllocateMemory(m_device, &ai, nullptr, &mem) == VK_SUCCESS) {
-                if (vkMapMemory(m_device, mem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
-                    vkFreeMemory(m_device, mem, nullptr);
-                    mem    = VK_NULL_HANDLE;
-                    mapped = nullptr;
-                }
-            }
-        }
-
-        if (mem == VK_NULL_HANDLE) {
-            uint32_t memType = findMemType(req.memoryTypeBits,
-                                           VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-            if (memType == UINT32_MAX) {
-                // Fallback: host-visible (integrated GPU / APU)
-                memType = findMemType(req.memoryTypeBits,
-                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-                                      VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            }
-            if (memType == UINT32_MAX) {
-                vkDestroyBuffer(m_device, buf, nullptr);
-                return {};
-            }
-            ai.memoryTypeIndex = memType;
-            const VkResult allocResult =
-                vkAllocateMemory(m_device, &ai, nullptr, &mem);
-            if (allocResult != VK_SUCCESS) {
-                logSimulationComputeInfo(
-                    "[SimComputeVk][ERROR] vkAllocateMemory failed: name=" +
-                    desc.debug_name + " requested=" +
-                    std::to_string(desc.size_bytes) + " allocation=" +
-                    std::to_string(static_cast<uint64_t>(req.size)) +
-                    " VkResult=" +
-                    std::to_string(static_cast<int>(allocResult)));
-                vkDestroyBuffer(m_device, buf, nullptr);
-                return {};
-            }
-        }
-        vkBindBufferMemory(m_device, buf, mem, 0);
-
-        // One-time diagnostic so the Console shows whether the ReBAR path
-        // engaged (BIOS ReBAR off => 256MB BAR heap => rejected by the >=1GB
-        // heap check, and uploads silently keep using staging copies).
-        static bool s_bar_logged = false;
-        if (!s_bar_logged) {
-            s_bar_logged = true;
-            logSimulationComputeInfo(mapped
-                ? "[SimComputeVk] ReBAR active: sim buffers are device-local host-visible (uploads = direct memcpy)."
-                : "[SimComputeVk] ReBAR unavailable; uploads use staging copies.");
-        }
-
-        uint64_t id =
-            g_nextVulkanSimulationBufferId.fetch_add(1, std::memory_order_relaxed);
-        m_buffers[id] = { buf, mem, desc.size_bytes, mapped,
-                          desc.usage, desc.debug_name };
-        auto& allocation = m_buffers[id];
-        allocation.allocation_bytes = req.size;
-        VkPhysicalDeviceMemoryProperties properties{};
-        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &properties);
-        const auto flags = properties.memoryTypes[ai.memoryTypeIndex].propertyFlags;
-        allocation.device_local = (flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0;
-        allocation.host_visible = (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0;
-        ComputeBufferHandle h;
-        h.id = id;
-        // ComputeBufferHandle defaults to CPU. Leaving that tag unchanged made
-        // ensureComputeBuffer treat every live Vulkan allocation as belonging
-        // to another backend on the next frame. It then overwrote the handle
-        // without destroying the old VkBuffer: exactly +60 buffers/frame for
-        // the Fireball preset and roughly +1 GB VRAM/s.
-        h.backend = type();
-        return h;
-    }
-
-    bool destroyBuffer(ComputeBufferHandle h) override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end()) return false;
-        // The recorded-but-unsubmitted command buffer may still reference this
-        // VkBuffer (recorded transfers/dispatches can outlive a phase that
-        // bailed out before its synchronize). Freeing it now would make the
-        // next submit touch a destroyed handle — adaptive domains hit exactly
-        // this by resizing buffers between steps. Flush first (and drain a
-        // submission still in flight, which may read it too).
-        if (m_recording || inFlight()) synchronize();
-        // synchronize() fences only this compute queue. Live Gas fields may
-        // also be referenced by Vulkan RT on another queue of the same device.
-        // Destruction/resizing is a rare structural operation, so use a full
-        // device lifetime boundary here rather than allowing vkDestroyBuffer
-        // to race an external queue reader.
-        vkDeviceWaitIdle(m_device);
-        if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
-        if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
-        m_buffers.erase(it);
-        return true;
-    }
-
-    bool resizeBuffer(ComputeBufferHandle h, std::size_t new_size) override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end() || it->second.size >= new_size) return it != m_buffers.end();
-        // Preserve the address-capable usage of live Gas render fields across
-        // adaptive-domain growth.
-        const ComputeBufferUsage old_usage = it->second.usage;
-        const std::string old_name = it->second.debug_name;
-        if (m_recording || inFlight()) synchronize(); // see destroyBuffer — same stale-handle window
-        vkDeviceWaitIdle(m_device);      // also covers external RT/viewport queues
-        if (it->second.buffer) vkDestroyBuffer(m_device, it->second.buffer, nullptr);
-        if (it->second.memory) vkFreeMemory(m_device, it->second.memory, nullptr);
-        it->second = {};
-
-        ComputeBufferDesc d;
-        d.size_bytes = new_size;
-        d.usage = old_usage;
-        d.debug_name = old_name;
-        ComputeBufferHandle nh = createBuffer(d);
-        if (!nh.valid()) return false;
-        // createBuffer may rehash m_buffers; the old iterator is not stable.
-        auto src = m_buffers.find(nh.id);
-        auto dst = m_buffers.find(h.id);
-        if (src == m_buffers.end() || dst == m_buffers.end()) return false;
-        dst->second = std::move(src->second);
-        m_buffers.erase(src);
-        return true;
-    }
-
-    std::size_t getBufferSize(ComputeBufferHandle h) const override {
-        auto it = m_buffers.find(h.id);
-        return (it != m_buffers.end()) ? it->second.size : 0;
-    }
-
-    void* nativeBufferPtr(ComputeBufferHandle h) const override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end()) return nullptr;
-        return reinterpret_cast<void*>(it->second.buffer);
-    }
-
-    void* nativeDevice() const override { return reinterpret_cast<void*>(m_device); }
-
-    uint64_t bufferDeviceAddress(ComputeBufferHandle h) const override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end() || !it->second.buffer) return 0;
-        VkBufferDeviceAddressInfo info{};
-        info.sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
-        info.buffer = it->second.buffer;
+  uint64_t bufferDeviceAddress(ComputeBufferHandle h) const override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end() || !it->second.buffer)
+      return 0;
+    VkBufferDeviceAddressInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+    info.buffer = it->second.buffer;
 #if defined(__ANDROID__)
-        // libvulkan.so for API 29 does not export Vulkan 1.2 core entry points; resolve through the device.
-        // A Vulkan 1.1 device (Mali-G76) only has the VK_KHR_buffer_device_address name.
-        auto fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
-            vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
-        if (!fpGetAddress) {
-            fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
-                vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddressKHR"));
-        }
-        if (!fpGetAddress) return 0;
-        return static_cast<uint64_t>(fpGetAddress(m_device, &info));
+    // libvulkan.so for API 29 does not export Vulkan 1.2 core entry points;
+    // resolve through the device. A Vulkan 1.1 device (Mali-G76) only has the
+    // VK_KHR_buffer_device_address name.
+    auto fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
+        vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddress"));
+    if (!fpGetAddress) {
+      fpGetAddress = reinterpret_cast<PFN_vkGetBufferDeviceAddress>(
+          vkGetDeviceProcAddr(m_device, "vkGetBufferDeviceAddressKHR"));
+    }
+    if (!fpGetAddress)
+      return 0;
+    return static_cast<uint64_t>(fpGetAddress(m_device, &info));
 #else
-        return static_cast<uint64_t>(vkGetBufferDeviceAddress(m_device, &info));
+    return static_cast<uint64_t>(vkGetBufferDeviceAddress(m_device, &info));
 #endif
+  }
+
+  // ── Upload / Download ─────────────────────────────────────────────────────
+
+  bool uploadBuffer(ComputeBufferHandle h, const void *data,
+                    std::size_t size_bytes,
+                    std::size_t dst_offset = 0) override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end() || !data || size_bytes == 0)
+      return false;
+    if (dst_offset + size_bytes > it->second.size)
+      return false;
+
+    // Direct ReBAR writes are safe only before recording begins. Earlier
+    // queued dispatches must observe their old inputs, even when not yet
+    // submitted; stage later uploads in command order instead.
+    // A submission still in flight counts as queued work: it may read the
+    // old contents.
+    if (it->second.mapped && !m_recording && !inFlight()) {
+      std::memcpy(static_cast<uint8_t *>(it->second.mapped) + dst_offset, data,
+                  size_bytes);
+      return true;
     }
 
-    // ── Upload / Download ─────────────────────────────────────────────────────
-
-    bool uploadBuffer(ComputeBufferHandle h,
-                      const void* data,
-                      std::size_t size_bytes,
-                      std::size_t dst_offset = 0) override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end() || !data || size_bytes == 0) return false;
-        if (dst_offset + size_bytes > it->second.size) return false;
-
-        // Direct ReBAR writes are safe only before recording begins. Earlier
-        // queued dispatches must observe their old inputs, even when not yet
-        // submitted; stage later uploads in command order instead.
-        // A submission still in flight counts as queued work: it may read the
-        // old contents.
-        if (it->second.mapped && !m_recording && !inFlight()) {
-            std::memcpy(static_cast<uint8_t*>(it->second.mapped) + dst_offset,
-                        data, size_bytes);
-            return true;
-        }
-
-        // Recorded path: the copy goes INTO the compute command buffer instead
-        // of its own submit+fence round-trip. On Windows every
-        // vkQueueSubmit+vkWaitForFences costs ~0.3-1ms wall regardless of size
-        // (WDDM scheduling latency) — with 3 submits per sim phase that tax,
-        // not bandwidth, dominated the transfer timings. Taken whenever a
-        // batch is active or recorded work already exists (call order with the
-        // recorded stream must be preserved). Host data is captured into
-        // staging immediately, so the caller may reuse its buffer right away;
-        // the GPU copy lands with the next synchronize().
-        if (m_batchActive || m_recording || inFlight() || m_stg[m_slot].upCursor > 0) {
-            const std::size_t off =
-                stagingReserve(m_stg[m_slot].up, m_stg[m_slot].upCursor, size_bytes, /*for_download=*/false);
-            if (off == SIZE_MAX || !ensureRecording()) return false;
-            std::memcpy(static_cast<uint8_t*>(m_stg[m_slot].up.mapped) + off, data, size_bytes);
-            // WAR: a dispatch recorded earlier in THIS command buffer may still
-            // be reading the destination. The barrier after each dispatch is
-            // compute->compute only and does not order a TRANSFER write, so
-            // the copy could land mid-read (sync validation: 3900 hazards in
-            // 3 min of balloon pops; a kernel reading a half-written count or
-            // index walks off its buffer = an intermittent device loss).
-            if (m_dispatchSinceUploadBarrier) {
-                VkMemoryBarrier mb{};
-                mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-                mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-                mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-                vkCmdPipelineBarrier(m_cmdBuf,
-                                     VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                                     VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                     0, 1, &mb, 0, nullptr, 0, nullptr);
-                m_dispatchSinceUploadBarrier = false;
-            }
-            VkBufferCopy region{ off, dst_offset, static_cast<VkDeviceSize>(size_bytes) };
-            vkCmdCopyBuffer(m_cmdBuf, m_stg[m_slot].up.buf, it->second.buffer, 1, &region);
-            if (m_batchActive) m_batchHasUploads = true; // one barrier at endTransferBatch
-            else               recordUploadBarrier();
-            return true;
-        }
-
-        // Cold path (no recorded work pending): immediate copy + fence. The
-        // reserved staging region is rolled back after the fence — the wait
-        // guarantees it is reusable.
-        const std::size_t off =
-            stagingReserve(m_stg[m_slot].up, m_stg[m_slot].upCursor, size_bytes, /*for_download=*/false);
-        if (off == SIZE_MAX) return false;
-        std::memcpy(static_cast<uint8_t*>(m_stg[m_slot].up.mapped) + off, data, size_bytes);
-        submitCopyImmediate(m_stg[m_slot].up.buf, it->second.buffer, size_bytes, off, dst_offset);
-        m_stg[m_slot].upCursor = off;
-        return true;
-    }
-
-    bool downloadBuffer(ComputeBufferHandle h,
-                        void* data,
-                        std::size_t size_bytes,
-                        std::size_t src_offset = 0) const override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end() || !data || size_bytes == 0) return false;
-        if (src_offset + size_bytes > it->second.size) return false;
-
-        auto* self = const_cast<VulkanSimulationComputeBackend*>(this);
-        if (m_batchActive) {
-            // Recorded: barrier (once per batch) + copy go into the compute
-            // command buffer, AFTER the already-recorded dispatches; the host
-            // memcpy runs after the fence in synchronize(), which
-            // endTransferBatch() triggers. `data` is valid when
-            // endTransferBatch() returns.
-            const std::size_t off =
-                self->stagingReserve(self->m_stg[m_slot].down, self->m_stg[m_slot].downCursor,
-                                     size_bytes, /*for_download=*/true);
-            if (off == SIZE_MAX || !self->ensureRecording()) return false;
-            if (!self->m_batchDownBarrierDone) {
-                self->recordDownloadBarrier();
-                self->m_batchDownBarrierDone = true;
-            }
-            VkBufferCopy region{ src_offset, off, static_cast<VkDeviceSize>(size_bytes) };
-            vkCmdCopyBuffer(self->m_cmdBuf, it->second.buffer, self->m_stg[m_slot].down.buf, 1, &region);
-            // Capture the mapping NOW: if a later reserve grows/retires this
-            // staging buffer, the retired mapping stays valid until the fence.
-            self->m_stg[m_slot].pending.push_back(
-                { data, static_cast<const uint8_t*>(self->m_stg[m_slot].down.mapped) + off, size_bytes });
-            return true;
-        }
-        // The immediate copy has no barrier against a submission still in
-        // flight: drain it first.
-        self->waitInFlight();
-        const std::size_t off =
-            self->stagingReserve(self->m_stg[m_slot].down, self->m_stg[m_slot].downCursor,
-                                 size_bytes, /*for_download=*/true);
-        if (off == SIZE_MAX) return false;
-        self->submitCopyImmediate(it->second.buffer, m_stg[m_slot].down.buf, size_bytes, src_offset, off);
-        std::memcpy(data, static_cast<const uint8_t*>(m_stg[m_slot].down.mapped) + off, size_bytes);
-        self->m_stg[m_slot].downCursor = off;
-        return true;
-    }
-
-    // Transfer batches record their copies into the compute command buffer.
-    // An upload-only batch produces NO submission — the copies (and one
-    // TRANSFER→COMPUTE barrier) simply precede the dispatches recorded after
-    // it, and everything lands in the phase's single synchronize(). A batch
-    // containing downloads ends with one submit+fence covering uploads,
-    // dispatches AND downloads; the downloaded host pointers are valid when
-    // endTransferBatch() returns.
-    // ── Delayed readback ──────────────────────────────────────────────────────
-
-    uint64_t submitWithReadback(ComputeBufferHandle h, std::size_t size_bytes,
-                                std::size_t src_offset) override {
-        auto it = m_buffers.find(h.id);
-        if (it == m_buffers.end() || size_bytes == 0 || m_batchActive) return 0;
-        if (src_offset + size_bytes > it->second.size) return 0;
-        ReadbackSlot* slot = nullptr;
-        for (auto& r : m_readbacks) {
-            if (r.ticket == 0) { slot = &r; break; }
-        }
-        // A consumer that dropped its ticket (layout rebuilt, context changed)
-        // never collects it: reuse the oldest slot whose copy has completed.
-        if (!slot) {
-            for (auto& r : m_readbacks) {
-                if (r.serial <= m_completedSerial && (!slot || r.ticket < slot->ticket)) slot = &r;
-            }
-        }
-        if (!slot) return 0;   // every slot still queued: the caller synchronizes
-        slot->ticket = 0;
-        if (slot->staging.cap < size_bytes) {
-            // Free slot = its last copy was collected (fence passed), so the
-            // old buffer is not referenced by anything queued.
-            destroyStaging(slot->staging);
-            const std::size_t cap = std::max<std::size_t>(size_bytes, 4096);
-            Staging s;
-            if (!createStagingBuffer(cap, /*for_download=*/true, s.buf, s.mem)) return 0;
-            if (vkMapMemory(m_device, s.mem, 0, cap, 0, &s.mapped) != VK_SUCCESS) {
-                vkDestroyBuffer(m_device, s.buf, nullptr);
-                vkFreeMemory(m_device, s.mem, nullptr);
-                return 0;
-            }
-            s.cap = cap;
-            slot->staging = s;
-        }
-        if (!ensureRecording()) return 0;
-        recordDownloadBarrier();
-        VkBufferCopy region{ src_offset, 0, static_cast<VkDeviceSize>(size_bytes) };
-        vkCmdCopyBuffer(m_cmdBuf, it->second.buffer, slot->staging.buf, 1, &region);
-        // Make the transfer write visible to the host read after the fence.
+    // Recorded path: the copy goes INTO the compute command buffer instead
+    // of its own submit+fence round-trip. On Windows every
+    // vkQueueSubmit+vkWaitForFences costs ~0.3-1ms wall regardless of size
+    // (WDDM scheduling latency) — with 3 submits per sim phase that tax,
+    // not bandwidth, dominated the transfer timings. Taken whenever a
+    // batch is active or recorded work already exists (call order with the
+    // recorded stream must be preserved). Host data is captured into
+    // staging immediately, so the caller may reuse its buffer right away;
+    // the GPU copy lands with the next synchronize().
+    if (m_batchActive || m_recording || m_deferFrameSubmit || inFlight() ||
+        m_stg[m_slot].upCursor > 0) {
+      const std::size_t off =
+          stagingReserve(m_stg[m_slot].up, m_stg[m_slot].upCursor, size_bytes,
+                         /*for_download=*/false);
+      if (off == SIZE_MAX || !ensureRecording())
+        return false;
+      std::memcpy(static_cast<uint8_t *>(m_stg[m_slot].up.mapped) + off, data,
+                  size_bytes);
+      // WAR: a dispatch recorded earlier in THIS command buffer may still
+      // be reading the destination. The barrier after each dispatch is
+      // compute->compute only and does not order a TRANSFER write, so
+      // the copy could land mid-read (sync validation: 3900 hazards in
+      // 3 min of balloon pops; a kernel reading a half-written count or
+      // index walks off its buffer = an intermittent device loss).
+      if (m_dispatchSinceUploadBarrier) {
         VkMemoryBarrier mb{};
-        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-        vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
-        // Timestamps read their one query pool after the fence (synchronize);
-        // with them on, this is the old synchronous readback.
-        if (m_timestampsEnabled) {
-            synchronize();
-            slot->serial = m_submitSerial;
-        } else {
-            submitRecordingAsync();
-            slot->serial = m_inFlightSerial;
-        }
-        slot->size = size_bytes;
-        slot->ticket = ++m_nextReadbackTicket;
-        return slot->ticket;
-    }
-
-    bool collectReadback(uint64_t ticket, void* data, std::size_t size_bytes, bool wait) override {
-        if (ticket == 0 || !data) return false;
-        ReadbackSlot* slot = nullptr;
-        for (auto& r : m_readbacks) {
-            if (r.ticket == ticket) { slot = &r; break; }
-        }
-        if (!slot) return false;
-        if (slot->serial > m_completedSerial) {
-            // This serial was submitted asynchronously and is one of the
-            // in-flight slots. Retire what already finished; block (oldest
-            // first, up to this serial) only when asked to.
-            if (!inFlight()) return false;
-            retireCompletedInFlight();
-            if (slot->serial > m_completedSerial) {
-                if (!wait) return false;
-                waitInFlightThrough(slot->serial);
-            }
-            releaseStagingIfIdle();
-            if (slot->serial > m_completedSerial) return false;
-        }
-        std::memcpy(data, slot->staging.mapped, std::min(size_bytes, slot->size));
-        slot->ticket = 0;
-        return true;
-    }
-
-    void submitAsync() override {
-        if (!m_recording || m_batchActive) return;
-        if (m_timestampsEnabled) synchronize();
-        else submitRecordingAsync();
-    }
-
-    void beginTransferBatch() override {
-        m_batchActive = true;
-        m_batchHasUploads = false;
-        m_batchDownBarrierDone = false;
-    }
-
-    bool endTransferBatch() override {
-        m_batchActive = false;
-        if (m_batchHasUploads) {
-            recordUploadBarrier();
-            m_batchHasUploads = false;
-        }
-        if (!m_stg[m_slot].pending.empty()) {
-            synchronize(); // one submit+fence; flushes the slot's pending downloads
-        }
-        m_batchDownBarrierDone = false;
-        return true;
-    }
-
-    // ── Frame lifecycle ───────────────────────────────────────────────────────
-
-    void beginFrame(uint64_t /*frame_index*/) override {}
-    void endFrame() override {
-        // A simulation frame is a resource-lifetime boundary. Leaving a recorded
-        // command buffer open allowed particle/gas dispatches to survive across a
-        // timeline Pause/Play edge. A later cache restore could then resize or
-        // replace buffers still referenced by those unsubmitted commands; when a
-        // subsequent synchronize finally submitted the accumulated work, NVIDIA
-        // could hang in the driver (typically after the second/third pause).
-        //
-        // Submit and fence every completed simulation frame. Many solver phases
-        // already synchronize through their download batches, so this is a cheap
-        // no-op there; it only closes upload/dispatch-only tails that previously
-        // escaped the frame.
-        //
-        // Exception: a frame owner (Player clock) that submits the whole frame
-        // itself right after (setDeferFrameSubmit). The recording stays open for
-        // the wet paint that follows and goes out in that one async submission;
-        // the lifetime hazard above is still closed because destroyBuffer /
-        // resizeBuffer flush recorded + in-flight work before touching a buffer.
-        // Measured 2026-11-23 (Player 1080p, 10 balloon pops): this fence was
-        // ~9 ms of a 16 ms frame because on the single queue it also waited for
-        // the render frame queued ahead of it, and the GPU then idled while the
-        // CPU finished the frame.
-        if (m_deferFrameSubmit && !m_batchActive) return;
-        synchronize();
-    }
-
-    void setDeferFrameSubmit(bool defer) override { m_deferFrameSubmit = defer; }
-
-    void synchronize() override {
-        if (!m_recording && !inFlight()) return;
-        if (!m_recording) {
-            // Only the async submission is left: wait for it, then fall
-            // through to the host-side flush below.
-            waitInFlight();
-        } else {
-            if (m_breadcrumbs.enabled())
-                m_breadcrumbs.mark(m_cmdBuf, std::string("sync_tail ") + VulkanRT::kEndOfCommandBuffer);
-            vkEndCommandBuffer(m_cmdBuf);
-
-            VkSubmitInfo si{};
-            si.sType                = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-            si.commandBufferCount   = 1;
-            si.pCommandBuffers      = &m_cmdBuf;
-            m_breadcrumbs.commitSubmit();
-            vkQueueSubmit(m_queue, 1, &si, m_fence);
-            const uint64_t serial = ++m_submitSerial;
-            // The earlier slot was submitted first on the same queue; waiting
-            // for it releases its pool and command buffer.
-            waitInFlight();
-            VulkanRT::waitFenceBounded(m_device, m_fence, "SimulationComputeVulkan.cpp:566");
-            vkResetFences(m_device, 1, &m_fence);
-            m_completedSerial = std::max(m_completedSerial, serial);
-
-            // Read the timestamps BEFORE the command buffer is reset: resetting it
-            // does not clear the pool, but collecting here keeps the pool's lifetime
-            // reasoning in one place with the submission that wrote it.
-            if (m_timestampsEnabled) collectKernelTimestamps();
-
-            vkResetCommandBuffer(m_cmdBuf, 0);
-            vkResetDescriptorPool(m_device, m_descPool, 0);
-            m_descriptorCache.clear();
-            m_recordedDispatches = 0;
-            m_recording = false;
-        }
-
-        // Recorded transfers are now complete (nothing recorded, nothing in
-        // flight): flush deferred download memcpys, release retired staging
-        // buffers, rewind every slot's cursors.
-        for (int s = 0; s < kSlots; ++s) releaseSlotStaging(s);
-    }
-
-    // ── Dispatch ──────────────────────────────────────────────────────────────
-
-    ComputeMemoryReport memoryReport() const override {
-        ComputeMemoryReport report;
-        report.supported = true;
-        for (const auto& entry : m_buffers) {
-            const auto& buffer = entry.second;
-            report.buffers.push_back({buffer.debug_name, buffer.size,
-                buffer.allocation_bytes, buffer.device_local, buffer.host_visible});
-            report.requested_bytes += buffer.size;
-            report.allocation_bytes += buffer.allocation_bytes;
-            if (buffer.device_local) {
-                report.device_local_bytes += buffer.allocation_bytes;
-            }
-        }
-        std::sort(report.buffers.begin(), report.buffers.end(),
-            [](const ComputeMemoryAllocation& a, const ComputeMemoryAllocation& b) {
-                if (a.allocation_bytes != b.allocation_bytes) {
-                    return a.allocation_bytes > b.allocation_bytes;
-                }
-                return a.name < b.name;
-            });
-        return report;
-    }
-
-    // True when the kernel needs a device feature this device did not enable.
-    bool dispatch(const ComputeDispatch& cmd) override {
-        if (!m_ready || !cmd.constants || cmd.constants_size == 0) return false;
-        if (cmd.buffer_count > MAX_BINDINGS) return false;
-        VkBuffer indirect = VK_NULL_HANDLE;
-        if (!resolveIndirectDispatchBuffer(cmd, m_buffers, indirect)) return false;
-
-        const std::string kernel(cmd.kernel ? cmd.kernel : "");
-        auto pit = m_pipelines.find(kernel);
-        if (pit == m_pipelines.end()) return false;
-        const PipelineEntry& pe = pit->second;
-        // The descriptor set is allocated for cmd.buffer_count bindings, the
-        // pipeline layout for the kernel table's count. A mismatch binds an
-        // incompatible set: undefined behaviour that NVIDIA happens to tolerate
-        // and validation reports as VUID-...-layout-07988. Refuse it by name.
-        if (cmd.buffer_count != pe.buffer_count) {
-            static std::unordered_set<std::string> reported;
-            if (reported.insert(kernel).second) {
-                SCENE_LOG_ERROR("[SimCompute] kernel '" + kernel + "' dispatched with " +
-                                std::to_string(cmd.buffer_count) + " buffers but its table entry declares " +
-                                std::to_string(pe.buffer_count) + "; dispatch refused.");
-            }
-            return false;
-        }
-
-        // Resident subcycles can queue more than one pool's worth of dispatches.
-        // Drain at the pool's capacity, counted in DISPATCHES (not unique sets),
-        // so one submission stays as long as before descriptor reuse existed
-        // and below the 1024 timestamp-pair limit.
-        if (m_recordedDispatches >= MAX_DESC_SETS) {
-            // Hand the full pool to the GPU and keep recording into the other
-            // slot (2026-11-11). A full submit+wait here left the GPU idle
-            // while the host recorded the next 512 dispatches and the host
-            // idle while the GPU ran them: snow + water, 10.8k dispatches a
-            // frame, ran host-bound (host ~140 ms vs GPU ~100 ms). Timestamps
-            // keep the old wait (one query pool), and so does an open transfer
-            // batch (its deferred upload barrier belongs to its own buffer).
-            if (m_timestampsEnabled || m_batchActive) synchronize();
-            else submitRecordingAsync();
-        }
-        // Ensure command buffer is recording.
-        if (!ensureRecording()) return false;
-
-        VkDescriptorSetLayout layout = m_descLayouts[cmd.buffer_count];
-        if (layout == VK_NULL_HANDLE) return false;
-
-        // A substep loop binds the same buffers hundreds of times. Within one
-        // recording a set with identical bindings is reused: sets are never
-        // updated after recording, the pool reset in synchronize() drops the
-        // cache, and destroy/resize synchronize before a handle can change.
-        std::vector<uint64_t> set_key(cmd.buffer_count);
-        for (uint32_t b = 0; b < cmd.buffer_count; ++b) set_key[b] = cmd.buffers[b].id;
-        VkDescriptorSet ds = VK_NULL_HANDLE;
-        if (const auto cached = m_descriptorCache.find(set_key); cached != m_descriptorCache.end()) {
-            ds = cached->second;
-        } else {
-            std::array<VkDescriptorBufferInfo, MAX_BINDINGS> bufInfos{};
-            std::array<VkWriteDescriptorSet,   MAX_BINDINGS> writes{};
-            for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
-                auto bit = m_buffers.find(cmd.buffers[b].id);
-                if (bit == m_buffers.end() || !bit->second.buffer) return false;
-                bufInfos[b].buffer = bit->second.buffer;
-                bufInfos[b].offset = 0;
-                bufInfos[b].range  = VK_WHOLE_SIZE;
-            }
-
-            VkDescriptorSetAllocateInfo dsai{};
-            dsai.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-            dsai.descriptorPool     = m_descPool;
-            dsai.descriptorSetCount = 1;
-            dsai.pSetLayouts        = &layout;
-            if (vkAllocateDescriptorSets(m_device, &dsai, &ds) != VK_SUCCESS) return false;
-
-            for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
-                writes[b].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                writes[b].dstSet          = ds;
-                writes[b].dstBinding      = b;
-                writes[b].descriptorCount = 1;
-                writes[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                writes[b].pBufferInfo     = &bufInfos[b];
-            }
-            vkUpdateDescriptorSets(m_device, cmd.buffer_count, writes.data(), 0, nullptr);
-            m_descriptorCache.emplace(std::move(set_key), ds);
-        }
-        ++m_recordedDispatches;
-
-        // ── Opening timestamp ────────────────────────────────────────────
-        // Every dispatch is followed by a full compute->compute barrier below,
-        // so by the time this one starts recording the previous kernel has
-        // already drained. TOP_OF_PIPE here therefore marks this dispatch's
-        // start rather than an overlapped predecessor's.
-        const auto timing_label = cmd.timing_label
-            ? std::string_view(cmd.timing_label) : std::string_view(kernel);
-        const bool ts_this_dispatch = beginKernelTimestamp(timing_label);
-
-        // Record pipeline bind + descriptor bind + push constants + dispatch.
-        vkCmdBindPipeline(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pe.pipeline);
-        vkCmdBindDescriptorSets(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE,
-                                pe.layout, 0, 1, &ds, 0, nullptr);
-        vkCmdPushConstants(m_cmdBuf, pe.layout, VK_SHADER_STAGE_COMPUTE_BIT,
-                           0, static_cast<uint32_t>(cmd.constants_size), cmd.constants);
-
-        uint32_t gx = cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1;
-        uint32_t gy = cmd.groups.groups_y > 0 ? cmd.groups.groups_y : 1;
-        uint32_t gz = cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1;
-        if (indirect) {
-            recordIndirectDispatch(m_cmdBuf, indirect, cmd.indirect_offset);
-        } else {
-            vkCmdDispatch(m_cmdBuf, gx, gy, gz);
-        }
-        m_dispatchSinceUploadBarrier = true;   // see the recorded upload path
-
-        // Pipeline barrier: SHADER_WRITE → SHADER_READ so the next kernel
-        // sees the updated data.
-        VkMemoryBarrier mb{};
-        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
         mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(m_cmdBuf,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
-
-        // The closing timestamp sits AFTER the barrier on purpose: the barrier
-        // is part of what this dispatch costs the chain, and leaving it out
-        // would hide it in nobody's row.
-        if (ts_this_dispatch) endKernelTimestamp();
-        if (m_breadcrumbs.enabled()) m_breadcrumbs.mark(m_cmdBuf, std::string(timing_label));
-        return true;
+        mb.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0,
+                             nullptr, 0, nullptr);
+        m_dispatchSinceUploadBarrier = false;
+      }
+      VkBufferCopy region{off, dst_offset,
+                          static_cast<VkDeviceSize>(size_bytes)};
+      vkCmdCopyBuffer(m_cmdBuf, m_stg[m_slot].up.buf, it->second.buffer, 1,
+                      &region);
+      if (m_batchActive)
+        m_batchHasUploads = true; // one barrier at endTransferBatch
+      else
+        recordUploadBarrier();
+      return true;
     }
+
+    // Cold path (no recorded work pending): immediate copy + fence. The
+    // reserved staging region is rolled back after the fence — the wait
+    // guarantees it is reusable.
+    const std::size_t off =
+        stagingReserve(m_stg[m_slot].up, m_stg[m_slot].upCursor, size_bytes,
+                       /*for_download=*/false);
+    if (off == SIZE_MAX)
+      return false;
+    std::memcpy(static_cast<uint8_t *>(m_stg[m_slot].up.mapped) + off, data,
+                size_bytes);
+    submitCopyImmediate(m_stg[m_slot].up.buf, it->second.buffer, size_bytes,
+                        off, dst_offset);
+    m_stg[m_slot].upCursor = off;
+    return true;
+  }
+
+  bool downloadBuffer(ComputeBufferHandle h, void *data, std::size_t size_bytes,
+                      std::size_t src_offset = 0) const override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end() || !data || size_bytes == 0)
+      return false;
+    if (src_offset + size_bytes > it->second.size)
+      return false;
+
+    auto *self = const_cast<VulkanSimulationComputeBackend *>(this);
+    if (m_batchActive) {
+      // Recorded: barrier (once per batch) + copy go into the compute
+      // command buffer, AFTER the already-recorded dispatches; the host
+      // memcpy runs after the fence in synchronize(), which
+      // endTransferBatch() triggers. `data` is valid when
+      // endTransferBatch() returns.
+      const std::size_t off = self->stagingReserve(
+          self->m_stg[m_slot].down, self->m_stg[m_slot].downCursor, size_bytes,
+          /*for_download=*/true);
+      if (off == SIZE_MAX || !self->ensureRecording())
+        return false;
+      if (!self->m_batchDownBarrierDone) {
+        self->recordDownloadBarrier();
+        self->m_batchDownBarrierDone = true;
+      }
+      VkBufferCopy region{src_offset, off,
+                          static_cast<VkDeviceSize>(size_bytes)};
+      vkCmdCopyBuffer(self->m_cmdBuf, it->second.buffer,
+                      self->m_stg[m_slot].down.buf, 1, &region);
+      // Capture the mapping NOW: if a later reserve grows/retires this
+      // staging buffer, the retired mapping stays valid until the fence.
+      self->m_stg[m_slot].pending.push_back(
+          {data,
+           static_cast<const uint8_t *>(self->m_stg[m_slot].down.mapped) + off,
+           size_bytes});
+      return true;
+    }
+    // The immediate copy has no barrier against a submission still in
+    // flight: drain it first.
+    self->waitInFlight();
+    const std::size_t off = self->stagingReserve(
+        self->m_stg[m_slot].down, self->m_stg[m_slot].downCursor, size_bytes,
+        /*for_download=*/true);
+    if (off == SIZE_MAX)
+      return false;
+    self->submitCopyImmediate(it->second.buffer, m_stg[m_slot].down.buf,
+                              size_bytes, src_offset, off);
+    std::memcpy(data,
+                static_cast<const uint8_t *>(m_stg[m_slot].down.mapped) + off,
+                size_bytes);
+    self->m_stg[m_slot].downCursor = off;
+    return true;
+  }
+
+  // Transfer batches record their copies into the compute command buffer.
+  // An upload-only batch produces NO submission — the copies (and one
+  // TRANSFER→COMPUTE barrier) simply precede the dispatches recorded after
+  // it, and everything lands in the phase's single synchronize(). A batch
+  // containing downloads ends with one submit+fence covering uploads,
+  // dispatches AND downloads; the downloaded host pointers are valid when
+  // endTransferBatch() returns.
+  // ── Delayed readback ──────────────────────────────────────────────────────
+
+  uint64_t submitWithReadback(ComputeBufferHandle h, std::size_t size_bytes,
+                              std::size_t src_offset) override {
+    auto it = m_buffers.find(h.id);
+    if (it == m_buffers.end() || size_bytes == 0 || m_batchActive)
+      return 0;
+    if (src_offset + size_bytes > it->second.size)
+      return 0;
+    ReadbackSlot *slot = nullptr;
+    for (auto &r : m_readbacks) {
+      if (r.ticket == 0) {
+        slot = &r;
+        break;
+      }
+    }
+    // A consumer that dropped its ticket (layout rebuilt, context changed)
+    // never collects it: reuse the oldest slot whose copy has completed.
+    if (!slot) {
+      for (auto &r : m_readbacks) {
+        if (r.serial <= m_completedSerial && (!slot || r.ticket < slot->ticket))
+          slot = &r;
+      }
+    }
+    if (!slot)
+      return 0; // every slot still queued: the caller synchronizes
+    slot->ticket = 0;
+    if (slot->staging.cap < size_bytes) {
+      // Free slot = its last copy was collected (fence passed), so the
+      // old buffer is not referenced by anything queued.
+      destroyStaging(slot->staging);
+      const std::size_t cap = std::max<std::size_t>(size_bytes, 4096);
+      Staging s;
+      if (!createStagingBuffer(cap, /*for_download=*/true, s.buf, s.mem))
+        return 0;
+      if (vkMapMemory(m_device, s.mem, 0, cap, 0, &s.mapped) != VK_SUCCESS) {
+        vkDestroyBuffer(m_device, s.buf, nullptr);
+        vkFreeMemory(m_device, s.mem, nullptr);
+        return 0;
+      }
+      s.cap = cap;
+      slot->staging = s;
+    }
+    if (!ensureRecording())
+      return 0;
+    recordDownloadBarrier();
+    VkBufferCopy region{src_offset, 0, static_cast<VkDeviceSize>(size_bytes)};
+    vkCmdCopyBuffer(m_cmdBuf, it->second.buffer, slot->staging.buf, 1, &region);
+    // Make the transfer write visible to the host read after the fence.
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+    vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0,
+                         nullptr);
+    // Timestamps read their one query pool after the fence (synchronize);
+    // with them on, this is the old synchronous readback.
+    if (m_timestampsEnabled) {
+      synchronize();
+      slot->serial = m_submitSerial;
+    } else {
+      submitRecordingAsync();
+      slot->serial = m_inFlightSerial;
+    }
+    slot->size = size_bytes;
+    slot->ticket = ++m_nextReadbackTicket;
+    return slot->ticket;
+  }
+
+  bool collectReadback(uint64_t ticket, void *data, std::size_t size_bytes,
+                       bool wait) override {
+    if (ticket == 0 || !data)
+      return false;
+    ReadbackSlot *slot = nullptr;
+    for (auto &r : m_readbacks) {
+      if (r.ticket == ticket) {
+        slot = &r;
+        break;
+      }
+    }
+    if (!slot)
+      return false;
+    if (slot->serial > m_completedSerial) {
+      // This serial was submitted asynchronously and is one of the
+      // in-flight slots. Retire what already finished; block (oldest
+      // first, up to this serial) only when asked to.
+      if (!inFlight())
+        return false;
+      retireCompletedInFlight();
+      if (slot->serial > m_completedSerial) {
+        if (!wait)
+          return false;
+        waitInFlightThrough(slot->serial);
+      }
+      releaseStagingIfIdle();
+      if (slot->serial > m_completedSerial)
+        return false;
+    }
+    std::memcpy(data, slot->staging.mapped, std::min(size_bytes, slot->size));
+    slot->ticket = 0;
+    return true;
+  }
+
+  void submitAsync() override {
+    if (!m_recording || m_batchActive)
+      return;
+    if (m_timestampsEnabled)
+      synchronize();
+    else
+      submitRecordingAsync();
+  }
+
+  void beginTransferBatch() override {
+    m_batchActive = true;
+    m_batchHasUploads = false;
+    m_batchDownBarrierDone = false;
+  }
+
+  bool endTransferBatch() override {
+    m_batchActive = false;
+    if (m_batchHasUploads) {
+      recordUploadBarrier();
+      m_batchHasUploads = false;
+    }
+    if (!m_stg[m_slot].pending.empty()) {
+      synchronize(); // one submit+fence; flushes the slot's pending downloads
+    }
+    m_batchDownBarrierDone = false;
+    return true;
+  }
+
+  // ── Frame lifecycle ───────────────────────────────────────────────────────
+
+  void beginFrame(uint64_t /*frame_index*/) override {}
+  void endFrame() override {
+    // A simulation frame is a resource-lifetime boundary. Leaving a recorded
+    // command buffer open allowed particle/gas dispatches to survive across a
+    // timeline Pause/Play edge. A later cache restore could then resize or
+    // replace buffers still referenced by those unsubmitted commands; when a
+    // subsequent synchronize finally submitted the accumulated work, NVIDIA
+    // could hang in the driver (typically after the second/third pause).
+    //
+    // Submit and fence every completed simulation frame. Many solver phases
+    // already synchronize through their download batches, so this is a cheap
+    // no-op there; it only closes upload/dispatch-only tails that previously
+    // escaped the frame.
+    //
+    // Exception: a frame owner (Player clock) that submits the whole frame
+    // itself right after (setDeferFrameSubmit). The recording stays open for
+    // the wet paint that follows and goes out in that one async submission;
+    // the lifetime hazard above is still closed because destroyBuffer /
+    // resizeBuffer flush recorded + in-flight work before touching a buffer.
+    // Measured 2026-11-23 (Player 1080p, 10 balloon pops): this fence was
+    // ~9 ms of a 16 ms frame because on the single queue it also waited for
+    // the render frame queued ahead of it, and the GPU then idled while the
+    // CPU finished the frame.
+    if (m_deferFrameSubmit && !m_batchActive)
+      return;
+    synchronize();
+  }
+
+  void setDeferFrameSubmit(bool defer) override { m_deferFrameSubmit = defer; }
+
+  void synchronize() override {
+    if (!m_recording && !inFlight())
+      return;
+    if (!m_recording) {
+      // Only the async submission is left: wait for it, then fall
+      // through to the host-side flush below.
+      waitInFlight();
+    } else {
+      if (m_breadcrumbs.enabled())
+        m_breadcrumbs.mark(m_cmdBuf, std::string("sync_tail ") +
+                                         VulkanRT::kEndOfCommandBuffer);
+      vkEndCommandBuffer(m_cmdBuf);
+
+      VkSubmitInfo si{};
+      si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+      si.commandBufferCount = 1;
+      si.pCommandBuffers = &m_cmdBuf;
+      m_breadcrumbs.commitSubmit();
+      vkQueueSubmit(m_queue, 1, &si, m_fence);
+      const uint64_t serial = ++m_submitSerial;
+      // The earlier slot was submitted first on the same queue; waiting
+      // for it releases its pool and command buffer.
+      waitInFlight();
+      VulkanRT::waitFenceBounded(m_device, m_fence,
+                                 "SimulationComputeVulkan.cpp:566");
+      vkResetFences(m_device, 1, &m_fence);
+      m_completedSerial = std::max(m_completedSerial, serial);
+
+      // Read the timestamps BEFORE the command buffer is reset: resetting it
+      // does not clear the pool, but collecting here keeps the pool's lifetime
+      // reasoning in one place with the submission that wrote it.
+      if (m_timestampsEnabled)
+        collectKernelTimestamps();
+
+      vkResetCommandBuffer(m_cmdBuf, 0);
+      vkResetDescriptorPool(m_device, m_descPool, 0);
+      m_descriptorCache.clear();
+      m_recordedDispatches = 0;
+      m_recording = false;
+    }
+
+    // Recorded transfers are now complete (nothing recorded, nothing in
+    // flight): flush deferred download memcpys, release retired staging
+    // buffers, rewind every slot's cursors.
+    for (int s = 0; s < kSlots; ++s)
+      releaseSlotStaging(s);
+  }
+
+  // ── Dispatch ──────────────────────────────────────────────────────────────
+
+  ComputeMemoryReport memoryReport() const override {
+    ComputeMemoryReport report;
+    report.supported = true;
+    for (const auto &entry : m_buffers) {
+      const auto &buffer = entry.second;
+      report.buffers.push_back({buffer.debug_name, buffer.size,
+                                buffer.allocation_bytes, buffer.device_local,
+                                buffer.host_visible});
+      report.requested_bytes += buffer.size;
+      report.allocation_bytes += buffer.allocation_bytes;
+      if (buffer.device_local) {
+        report.device_local_bytes += buffer.allocation_bytes;
+      }
+    }
+    std::sort(
+        report.buffers.begin(), report.buffers.end(),
+        [](const ComputeMemoryAllocation &a, const ComputeMemoryAllocation &b) {
+          if (a.allocation_bytes != b.allocation_bytes) {
+            return a.allocation_bytes > b.allocation_bytes;
+          }
+          return a.name < b.name;
+        });
+    return report;
+  }
+
+  // True when the kernel needs a device feature this device did not enable.
+  bool dispatch(const ComputeDispatch &cmd) override {
+    if (!m_ready || !cmd.constants || cmd.constants_size == 0)
+      return false;
+    if (cmd.buffer_count > MAX_BINDINGS)
+      return false;
+    VkBuffer indirect = VK_NULL_HANDLE;
+    if (!resolveIndirectDispatchBuffer(cmd, m_buffers, indirect))
+      return false;
+
+    std::string kernel(cmd.kernel ? cmd.kernel : "");
+    if (kernel == "paint_wet" && cmd.constants_size >= sizeof(uint32_t)) {
+      uint32_t mode = 0;
+      std::memcpy(&mode, cmd.constants, sizeof(uint32_t));
+      if (mode <= 10u) {
+        kernel = "paint_wet." + std::to_string(mode);
+      }
+    }
+    auto pit = m_pipelines.find(kernel);
+    if (pit == m_pipelines.end()) {
+      pit = ensurePipeline(kernel);
+      if (pit == m_pipelines.end() && kernel.rfind("paint_wet.", 0) == 0) {
+        kernel = "paint_wet";
+        pit = m_pipelines.find(kernel);
+        if (pit == m_pipelines.end()) {
+          pit = ensurePipeline(kernel);
+        }
+      }
+      if (pit == m_pipelines.end())
+        return false;
+    }
+    const PipelineEntry &pe = pit->second;
+    // The descriptor set is allocated for cmd.buffer_count bindings, the
+    // pipeline layout for the kernel table's count. A mismatch binds an
+    // incompatible set: undefined behaviour that NVIDIA happens to tolerate
+    // and validation reports as VUID-...-layout-07988. Refuse it by name.
+    if (cmd.buffer_count != pe.buffer_count) {
+      static std::unordered_set<std::string> reported;
+      if (reported.insert(kernel).second) {
+        SCENE_LOG_ERROR(
+            "[SimCompute] kernel '" + kernel + "' dispatched with " +
+            std::to_string(cmd.buffer_count) +
+            " buffers but its table entry declares " +
+            std::to_string(pe.buffer_count) + "; dispatch refused.");
+      }
+      return false;
+    }
+
+    // Resident subcycles can queue more than one pool's worth of dispatches.
+    // Drain at the pool's capacity, counted in DISPATCHES (not unique sets),
+    // so one submission stays as long as before descriptor reuse existed
+    // and below the 1024 timestamp-pair limit.
+    if (m_recordedDispatches >= MAX_DESC_SETS) {
+      // Hand the full pool to the GPU and keep recording into the other
+      // slot (2026-11-11). A full submit+wait here left the GPU idle
+      // while the host recorded the next 512 dispatches and the host
+      // idle while the GPU ran them: snow + water, 10.8k dispatches a
+      // frame, ran host-bound (host ~140 ms vs GPU ~100 ms). Timestamps
+      // keep the old wait (one query pool), and so does an open transfer
+      // batch (its deferred upload barrier belongs to its own buffer).
+      if (m_timestampsEnabled || m_batchActive)
+        synchronize();
+      else
+        submitRecordingAsync();
+    }
+    // Ensure command buffer is recording.
+    if (!ensureRecording())
+      return false;
+
+    VkDescriptorSetLayout layout = m_descLayouts[cmd.buffer_count];
+    if (layout == VK_NULL_HANDLE)
+      return false;
+
+    // A substep loop binds the same buffers hundreds of times. Within one
+    // recording a set with identical bindings is reused: sets are never
+    // updated after recording, the pool reset in synchronize() drops the
+    // cache, and destroy/resize synchronize before a handle can change.
+    std::vector<uint64_t> set_key(cmd.buffer_count);
+    for (uint32_t b = 0; b < cmd.buffer_count; ++b)
+      set_key[b] = cmd.buffers[b].id;
+    VkDescriptorSet ds = VK_NULL_HANDLE;
+    if (const auto cached = m_descriptorCache.find(set_key);
+        cached != m_descriptorCache.end()) {
+      ds = cached->second;
+    } else {
+      std::array<VkDescriptorBufferInfo, MAX_BINDINGS> bufInfos{};
+      std::array<VkWriteDescriptorSet, MAX_BINDINGS> writes{};
+      for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
+        auto bit = m_buffers.find(cmd.buffers[b].id);
+        if (bit == m_buffers.end() || !bit->second.buffer)
+          return false;
+        bufInfos[b].buffer = bit->second.buffer;
+        bufInfos[b].offset = 0;
+        bufInfos[b].range = VK_WHOLE_SIZE;
+      }
+
+      VkDescriptorSetAllocateInfo dsai{};
+      dsai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+      dsai.descriptorPool = m_descPool;
+      dsai.descriptorSetCount = 1;
+      dsai.pSetLayouts = &layout;
+      if (vkAllocateDescriptorSets(m_device, &dsai, &ds) != VK_SUCCESS)
+        return false;
+
+      for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
+        writes[b].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[b].dstSet = ds;
+        writes[b].dstBinding = b;
+        writes[b].descriptorCount = 1;
+        writes[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[b].pBufferInfo = &bufInfos[b];
+      }
+      vkUpdateDescriptorSets(m_device, cmd.buffer_count, writes.data(), 0,
+                             nullptr);
+      m_descriptorCache.emplace(std::move(set_key), ds);
+    }
+    ++m_recordedDispatches;
+
+    // ── Opening timestamp ────────────────────────────────────────────
+    // Every dispatch is followed by a full compute->compute barrier below,
+    // so by the time this one starts recording the previous kernel has
+    // already drained. TOP_OF_PIPE here therefore marks this dispatch's
+    // start rather than an overlapped predecessor's.
+    const auto timing_label = cmd.timing_label
+                                  ? std::string_view(cmd.timing_label)
+                                  : std::string_view(kernel);
+    const bool ts_this_dispatch = beginKernelTimestamp(timing_label);
+
+    // Record pipeline bind + descriptor bind + push constants + dispatch.
+    vkCmdBindPipeline(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pe.pipeline);
+    vkCmdBindDescriptorSets(m_cmdBuf, VK_PIPELINE_BIND_POINT_COMPUTE, pe.layout,
+                            0, 1, &ds, 0, nullptr);
+    vkCmdPushConstants(m_cmdBuf, pe.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                       static_cast<uint32_t>(cmd.constants_size),
+                       cmd.constants);
+
+    uint32_t gx = cmd.groups.groups_x > 0 ? cmd.groups.groups_x : 1;
+    uint32_t gy = cmd.groups.groups_y > 0 ? cmd.groups.groups_y : 1;
+    uint32_t gz = cmd.groups.groups_z > 0 ? cmd.groups.groups_z : 1;
+    if (indirect) {
+      recordIndirectDispatch(m_cmdBuf, indirect, cmd.indirect_offset);
+    } else {
+      vkCmdDispatch(m_cmdBuf, gx, gy, gz);
+    }
+    m_dispatchSinceUploadBarrier = true; // see the recorded upload path
+
+    // Pipeline barrier: SHADER_WRITE → SHADER_READ so the next kernel
+    // sees the updated data.
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                         nullptr, 0, nullptr);
+
+    // The closing timestamp sits AFTER the barrier on purpose: the barrier
+    // is part of what this dispatch costs the chain, and leaving it out
+    // would hide it in nobody's row.
+    if (ts_this_dispatch)
+      endKernelTimestamp();
+    if (m_breadcrumbs.enabled())
+      m_breadcrumbs.mark(m_cmdBuf, std::string(timing_label));
+    return true;
+  }
 
 private:
-    // ── Internal types ────────────────────────────────────────────────────────
+  // ── Internal types ────────────────────────────────────────────────────────
 
-    // 10 bindings needed by sim_fluid_g2p (9 particle/velocity buffers +
-    // fluid_mask for the solid FLIP limiter). Raising this only grows the
-    // per-count descriptor layout table.
-    // Coupled terrain solvers keep several scalar fields resident at once.
-    // Snow uses 14 bindings (base, climate, ping-pong mass/ice/water and trace
-    // fields); Vulkan RT-class devices targeted by the renderer expose well
-    // above the core-minimum storage-buffer count.
-    static constexpr uint32_t MAX_BINDINGS      = 24;
-    static constexpr uint32_t MAX_DESC_SETS     = 512;
-    static constexpr uint32_t MAX_PUSH_CONSTANT = 128;
+  // 10 bindings needed by sim_fluid_g2p (9 particle/velocity buffers +
+  // fluid_mask for the solid FLIP limiter). Raising this only grows the
+  // per-count descriptor layout table.
+  // Coupled terrain solvers keep several scalar fields resident at once.
+  // Snow uses 14 bindings (base, climate, ping-pong mass/ice/water and trace
+  // fields); Vulkan RT-class devices targeted by the renderer expose well
+  // above the core-minimum storage-buffer count.
+  static constexpr uint32_t MAX_BINDINGS = 24;
+  static constexpr uint32_t MAX_DESC_SETS = 512;
+  static constexpr uint32_t MAX_PUSH_CONSTANT = 128;
 
-    struct Buf {
-        VkBuffer       buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
-        std::size_t    size   = 0;
-        void*          mapped = nullptr; // non-null: ReBAR (device-local host-visible) — uploads are direct memcpy
-        ComputeBufferUsage usage = ComputeBufferUsage::Storage;
-        std::string       debug_name;
-        uint64_t allocation_bytes = 0;
-        bool device_local = false;
-        bool host_visible = false;
-    };
+  struct Buf {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    std::size_t size = 0;
+    void *mapped = nullptr; // non-null: ReBAR (device-local host-visible) —
+                            // uploads are direct memcpy
+    ComputeBufferUsage usage = ComputeBufferUsage::Storage;
+    std::string debug_name;
+    uint64_t allocation_bytes = 0;
+    bool device_local = false;
+    bool host_visible = false;
+  };
 
-    struct PipelineEntry {
-        VkPipeline       pipeline = VK_NULL_HANDLE;
-        VkPipelineLayout layout   = VK_NULL_HANDLE;
-        uint32_t         buffer_count = 0;  // bindings the pipeline layout declares
-    };
+  struct PipelineEntry {
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    uint32_t buffer_count = 0; // bindings the pipeline layout declares
+  };
 
-    VkDevice         m_device     = VK_NULL_HANDLE;
-    VkPhysicalDevice m_physDevice = VK_NULL_HANDLE;
-    // Last retired dispatch per submission, read only after a device loss
-    // (Backend/VulkanGpuBreadcrumbs.h). Off on devices with VK_EXT_device_fault.
-    VulkanRT::GpuBreadcrumbTrail m_breadcrumbs{"sim_compute"};
+  struct KernelSpec {
+    std::string spv_path;
+    uint32_t buffer_count = 0;
+    uint32_t push_constant_size = 0;
+    bool attempted = false;
+    uint32_t spec_const0 = 0xFFFFFFFFu;
+  };
+
+  VkDevice m_device = VK_NULL_HANDLE;
+  VkPhysicalDevice m_physDevice = VK_NULL_HANDLE;
+  // Last retired dispatch per submission, read only after a device loss
+  // (Backend/VulkanGpuBreadcrumbs.h). Off on devices with VK_EXT_device_fault.
+  VulkanRT::GpuBreadcrumbTrail m_breadcrumbs{"sim_compute"};
 #ifdef RT_PLAYER
-    uint32_t m_maxSpirvVersion = 0;
-    uint32_t m_maxPushConstantSize = 0;
+  uint32_t m_maxSpirvVersion = 0;
+  uint32_t m_maxPushConstantSize = 0;
 #endif
-    VkQueue          m_queue      = VK_NULL_HANDLE;
-    uint32_t         m_queueFamily = 0;
+  VkQueue m_queue = VK_NULL_HANDLE;
+  uint32_t m_queueFamily = 0;
 
-    VkCommandPool    m_cmdPool  = VK_NULL_HANDLE;
-    // Recording slots (command buffer + descriptor pool + fence) used as a
-    // ring. Up to kSlots-1 are in flight (submitted, not yet waited) while one
-    // records; m_cmdBuf / m_descPool / m_fence name the recording slot.
-    // m_slotSerial holds each in-flight slot's submission serial (0 = free).
-    // ★ 2026-11-24: with two slots every async submit waited for the previous
-    // frame's submission, which on the single queue sits behind the render
-    // frame queued ahead of it. The Player then paid CPU + GPU serially
-    // (balloon pop, 1280x720: simulation.wet_paint 1.77 ms/frame of CPU wait,
-    // loop 555 -> 298 Hz, GPU idle ~45%). Three slots let the host record one
-    // frame ahead; the submit waits only for the one two frames back.
-    static constexpr int kSlots = 3;
-    std::array<VkCommandBuffer, kSlots>  m_cmdBufs{};
-    std::array<VkDescriptorPool, kSlots> m_descPools{};
-    std::array<VkFence, kSlots>          m_fences{};
-    std::array<uint64_t, kSlots>         m_slotSerial{};
-    int              m_slot = 0;
-    int              m_inFlightCount = 0;
-    bool inFlight() const { return m_inFlightCount > 0; }
-    VkCommandBuffer  m_cmdBuf   = VK_NULL_HANDLE;
-    VkFence          m_fence    = VK_NULL_HANDLE;
-    VkDescriptorPool m_descPool = VK_NULL_HANDLE;
-    uint32_t         m_recordedDispatches = 0;
-    // Descriptor sets written in the current recording, keyed by buffer ids.
-    std::map<std::vector<uint64_t>, VkDescriptorSet> m_descriptorCache;
+  VkCommandPool m_cmdPool = VK_NULL_HANDLE;
+  // Recording slots (command buffer + descriptor pool + fence) used as a
+  // ring. Up to kSlots-1 are in flight (submitted, not yet waited) while one
+  // records; m_cmdBuf / m_descPool / m_fence name the recording slot.
+  // m_slotSerial holds each in-flight slot's submission serial (0 = free).
+  // ★ 2026-11-24: with two slots every async submit waited for the previous
+  // frame's submission, which on the single queue sits behind the render
+  // frame queued ahead of it. The Player then paid CPU + GPU serially
+  // (balloon pop, 1280x720: simulation.wet_paint 1.77 ms/frame of CPU wait,
+  // loop 555 -> 298 Hz, GPU idle ~45%). Three slots let the host record one
+  // frame ahead; the submit waits only for the one two frames back.
+  static constexpr int kSlots = 3;
+  std::array<VkCommandBuffer, kSlots> m_cmdBufs{};
+  std::array<VkDescriptorPool, kSlots> m_descPools{};
+  std::array<VkFence, kSlots> m_fences{};
+  std::array<uint64_t, kSlots> m_slotSerial{};
+  int m_slot = 0;
+  int m_inFlightCount = 0;
+  bool inFlight() const { return m_inFlightCount > 0; }
+  VkCommandBuffer m_cmdBuf = VK_NULL_HANDLE;
+  VkFence m_fence = VK_NULL_HANDLE;
+  VkDescriptorPool m_descPool = VK_NULL_HANDLE;
+  uint32_t m_recordedDispatches = 0;
+  // Descriptor sets written in the current recording, keyed by buffer ids.
+  std::map<std::vector<uint64_t>, VkDescriptorSet> m_descriptorCache;
 
-    // One desc layout per buffer count (index = count, 0 unused).
-    std::array<VkDescriptorSetLayout, MAX_BINDINGS + 1> m_descLayouts{};
+  // One desc layout per buffer count (index = count, 0 unused).
+  std::array<VkDescriptorSetLayout, MAX_BINDINGS + 1> m_descLayouts{};
 
-    std::unordered_map<std::string, PipelineEntry> m_pipelines;
-    std::unordered_map<uint64_t, Buf>              m_buffers;
+  std::unordered_map<std::string, PipelineEntry> m_pipelines;
+  std::unordered_map<std::string, KernelSpec> m_kernelSpecs;
+  SimulationPipelineCache m_pipelineCache;
+  std::unordered_map<uint64_t, Buf> m_buffers;
 
-    bool     m_ready          = false;
-    bool     m_recording      = false;
+  bool m_ready = false;
+  bool m_recording = false;
 
-    // ── GPU timestamp timing ──────────────────────────────────────────────
-    //
-    // A pair of timestamps per dispatch, written into one pool that is reset at
-    // the start of every command buffer and read back after that submission's
-    // fence. The accumulator is keyed by kernel name because the solver calls
-    // the same kernel many times per step and the useful number is the total.
-    //
-    // ★ The slot cursor is per COMMAND BUFFER, not per step: synchronize() may
-    //   run several times inside one solver step (every download batch ends in
-    //   one), and each submission gets a freshly reset pool.
-    static constexpr uint32_t kTimestampSlots = 2048;  // 1024 dispatches/submit
-    VkQueryPool m_queryPool        = VK_NULL_HANDLE;
-    bool        m_timestampsSupported = false;
-    bool        m_timestampsEnabled   = false;
-    double      m_timestampPeriodNs   = 0.0;
-    uint64_t    m_timestampMask       = 0;
-    uint32_t    m_tsCursor            = 0;    // next free slot in this cmdbuf
-    bool        m_tsOverflowed        = false;
-    // Kernel name per timestamp PAIR, in recording order for this cmdbuf.
-    std::vector<std::string> m_tsLabels;
-    struct KernelTimeAccum {
-        double   ms    = 0.0;
-        uint32_t calls = 0;
-        std::vector<double> samplesMs;
-    };
-    std::unordered_map<std::string, KernelTimeAccum> m_kernelTimes;
-    bool     m_has_float_atomics = false;
-    bool     m_clustered_p2g = false;  // P2G kernels loaded in the clustered variant
-    bool     m_has_shared_float_atomics = false;  // gates sim_matter_p2g_block
-    bool     m_has_shader_float64 = false;
+  // ── GPU timestamp timing ──────────────────────────────────────────────
+  //
+  // A pair of timestamps per dispatch, written into one pool that is reset at
+  // the start of every command buffer and read back after that submission's
+  // fence. The accumulator is keyed by kernel name because the solver calls
+  // the same kernel many times per step and the useful number is the total.
+  //
+  // ★ The slot cursor is per COMMAND BUFFER, not per step: synchronize() may
+  //   run several times inside one solver step (every download batch ends in
+  //   one), and each submission gets a freshly reset pool.
+  static constexpr uint32_t kTimestampSlots = 2048; // 1024 dispatches/submit
+  VkQueryPool m_queryPool = VK_NULL_HANDLE;
+  bool m_timestampsSupported = false;
+  bool m_timestampsEnabled = false;
+  double m_timestampPeriodNs = 0.0;
+  uint64_t m_timestampMask = 0;
+  uint32_t m_tsCursor = 0; // next free slot in this cmdbuf
+  bool m_tsOverflowed = false;
+  // Kernel name per timestamp PAIR, in recording order for this cmdbuf.
+  std::vector<std::string> m_tsLabels;
+  struct KernelTimeAccum {
+    double ms = 0.0;
+    uint32_t calls = 0;
+    std::vector<double> samplesMs;
+  };
+  std::unordered_map<std::string, KernelTimeAccum> m_kernelTimes;
+  bool m_has_float_atomics = false;
+  bool m_clustered_p2g = false; // P2G kernels loaded in the clustered variant
+  bool m_has_shared_float_atomics = false; // gates sim_matter_p2g_block
+  bool m_has_shader_float64 = false;
 
-    // Persistent staging + copy command buffer (see stagingReserve /
-    // submitCopyImmediate). Direction-split: the upload staging prefers
-    // write-combined memory (fast streaming host writes, snoop-free GPU DMA
-    // reads), the download staging prefers host-cached (readback from WC
-    // memory is ~0.3GB/s — the 13x-slower-downloads lesson).
-    struct Staging {
-        VkBuffer       buf    = VK_NULL_HANDLE;
-        VkDeviceMemory mem    = VK_NULL_HANDLE;
-        std::size_t    cap    = 0;
-        void*          mapped = nullptr;
-    };
-    VkCommandBuffer m_copyCmdBuf    = VK_NULL_HANDLE;
+  // Persistent staging + copy command buffer (see stagingReserve /
+  // submitCopyImmediate). Direction-split: the upload staging prefers
+  // write-combined memory (fast streaming host writes, snoop-free GPU DMA
+  // reads), the download staging prefers host-cached (readback from WC
+  // memory is ~0.3GB/s — the 13x-slower-downloads lesson).
+  struct Staging {
+    VkBuffer buf = VK_NULL_HANDLE;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    std::size_t cap = 0;
+    void *mapped = nullptr;
+  };
+  VkCommandBuffer m_copyCmdBuf = VK_NULL_HANDLE;
 
-    // Submission serials: every vkQueueSubmit takes the next one; a fence wait
-    // marks its serial (and all earlier, same queue) completed.
-    uint64_t m_submitSerial    = 0;
-    uint64_t m_completedSerial = 0;
-    uint64_t m_inFlightSerial  = 0;
-    // Delayed readback slots (submitWithReadback / collectReadback). Their own
-    // host-cached buffers, NOT the download staging: those cursors rewind on a
-    // full synchronize(), which the delayed path exists to avoid.
-    struct ReadbackSlot {
-        Staging     staging;
-        uint64_t    ticket = 0;   // 0 = free
-        uint64_t    serial = 0;   // submission that carries the copy
-        std::size_t size   = 0;
-    };
-    static constexpr std::size_t kReadbackSlots = 4;
-    std::array<ReadbackSlot, kReadbackSlots> m_readbacks{};
-    uint64_t m_nextReadbackTicket = 0;
+  // Submission serials: every vkQueueSubmit takes the next one; a fence wait
+  // marks its serial (and all earlier, same queue) completed.
+  uint64_t m_submitSerial = 0;
+  uint64_t m_completedSerial = 0;
+  uint64_t m_inFlightSerial = 0;
+  // Delayed readback slots (submitWithReadback / collectReadback). Their own
+  // host-cached buffers, NOT the download staging: those cursors rewind on a
+  // full synchronize(), which the delayed path exists to avoid.
+  struct ReadbackSlot {
+    Staging staging;
+    uint64_t ticket = 0; // 0 = free
+    uint64_t serial = 0; // submission that carries the copy
+    std::size_t size = 0;
+  };
+  static constexpr std::size_t kReadbackSlots = 4;
+  std::array<ReadbackSlot, kReadbackSlots> m_readbacks{};
+  uint64_t m_nextReadbackTicket = 0;
 
-    // Transfer batch state (beginTransferBatch/endTransferBatch).
-    bool m_batchActive          = false;
-    bool m_deferFrameSubmit     = false; // see endFrame()
-    bool m_batchHasUploads      = false; // batch records copies; one barrier at end
-    bool m_dispatchSinceUploadBarrier = false; // a recorded upload must wait for it (WAR)
-    bool m_batchDownBarrierDone = false; // COMPUTE→TRANSFER barrier once per batch
-    // Downloads recorded into the command buffer; the host memcpy happens
-    // after the fence in synchronize(). `src` points into a staging mapping
-    // (possibly of a retired buffer — kept alive until that same fence).
-    struct PendingDownload {
-        void*       host;
-        const void* src;
-        std::size_t size;
-    };
-    // Staging belongs to a recording SLOT. Recorded copies reference their
-    // region until that slot's fence, so each slot's cursors rewind when ITS
-    // submission completes (waitInFlight / synchronize). One shared cursor
-    // could only rewind when nothing at all was recorded or in flight, which a
-    // continuous async frame loop (one submission per frame, Player) never
-    // reaches: the cursor grew until the next full synchronize().
-    struct SlotStaging {
-        Staging     up;
-        Staging     down;
-        std::size_t upCursor = 0;
-        std::size_t downCursor = 0;
-        std::vector<PendingDownload> pending;
-        // Replaced (grown) while recorded copies still reference them —
-        // destroyed after this slot's fence.
-        std::vector<Staging> retired;
-    };
-    std::array<SlotStaging, kSlots> m_stg{};
+  // Transfer batch state (beginTransferBatch/endTransferBatch).
+  bool m_batchActive = false;
+  bool m_deferFrameSubmit = false; // see endFrame()
+  bool m_batchHasUploads = false;  // batch records copies; one barrier at end
+  bool m_dispatchSinceUploadBarrier =
+      false; // a recorded upload must wait for it (WAR)
+  bool m_batchDownBarrierDone =
+      false; // COMPUTE→TRANSFER barrier once per batch
+  // Downloads recorded into the command buffer; the host memcpy happens
+  // after the fence in synchronize(). `src` points into a staging mapping
+  // (possibly of a retired buffer — kept alive until that same fence).
+  struct PendingDownload {
+    void *host;
+    const void *src;
+    std::size_t size;
+  };
+  // Staging belongs to a recording SLOT. Recorded copies reference their
+  // region until that slot's fence, so each slot's cursors rewind when ITS
+  // submission completes (waitInFlight / synchronize). One shared cursor
+  // could only rewind when nothing at all was recorded or in flight, which a
+  // continuous async frame loop (one submission per frame, Player) never
+  // reaches: the cursor grew until the next full synchronize().
+  struct SlotStaging {
+    Staging up;
+    Staging down;
+    std::size_t upCursor = 0;
+    std::size_t downCursor = 0;
+    std::vector<PendingDownload> pending;
+    // Replaced (grown) while recorded copies still reference them —
+    // destroyed after this slot's fence.
+    std::vector<Staging> retired;
+  };
+  std::array<SlotStaging, kSlots> m_stg{};
 
-    // ── Initialization ────────────────────────────────────────────────────────
+  // ── Initialization ────────────────────────────────────────────────────────
 
-    // Timestamps are optional: a queue family may report timestampValidBits == 0
-    // even on a device whose limits advertise a period. Checking the FAMILY (not
-    // just the device) is the part that is easy to get wrong — on a dedicated
-    // compute/transfer queue this is exactly where support disappears.
-    void initTimestampPool() {
-        VkPhysicalDeviceProperties props{};
-        vkGetPhysicalDeviceProperties(m_physDevice, &props);
-        if (props.limits.timestampPeriod <= 0.0f) return;
+  // Timestamps are optional: a queue family may report timestampValidBits == 0
+  // even on a device whose limits advertise a period. Checking the FAMILY (not
+  // just the device) is the part that is easy to get wrong — on a dedicated
+  // compute/transfer queue this is exactly where support disappears.
+  void initTimestampPool() {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &props);
+    if (props.limits.timestampPeriod <= 0.0f)
+      return;
 
-        uint32_t familyCount = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount, nullptr);
-        if (m_queueFamily >= familyCount) return;
-        std::vector<VkQueueFamilyProperties> families(familyCount);
-        vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount, families.data());
-        const uint32_t validBits = families[m_queueFamily].timestampValidBits;
-        if (validBits == 0) return;
-        m_timestampMask = validBits >= 64 ? UINT64_MAX : (uint64_t{1} << validBits) - 1;
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount,
+                                             nullptr);
+    if (m_queueFamily >= familyCount)
+      return;
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(m_physDevice, &familyCount,
+                                             families.data());
+    const uint32_t validBits = families[m_queueFamily].timestampValidBits;
+    if (validBits == 0)
+      return;
+    m_timestampMask =
+        validBits >= 64 ? UINT64_MAX : (uint64_t{1} << validBits) - 1;
 
-        VkQueryPoolCreateInfo qi{};
-        qi.sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
-        qi.queryType  = VK_QUERY_TYPE_TIMESTAMP;
-        qi.queryCount = kTimestampSlots;
-        if (vkCreateQueryPool(m_device, &qi, nullptr, &m_queryPool) != VK_SUCCESS) {
-            m_queryPool = VK_NULL_HANDLE;
-            return;
-        }
-        m_timestampPeriodNs   = static_cast<double>(props.limits.timestampPeriod);
-        m_timestampsSupported = true;
+    VkQueryPoolCreateInfo qi{};
+    qi.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = kTimestampSlots;
+    if (vkCreateQueryPool(m_device, &qi, nullptr, &m_queryPool) != VK_SUCCESS) {
+      m_queryPool = VK_NULL_HANDLE;
+      return;
     }
+    m_timestampPeriodNs = static_cast<double>(props.limits.timestampPeriod);
+    m_timestampsSupported = true;
+  }
 
-    bool initCommandPool() {
-        VkCommandPoolCreateInfo pi{};
-        pi.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-        pi.queueFamilyIndex = m_queueFamily;
-        pi.flags            = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-        if (vkCreateCommandPool(m_device, &pi, nullptr, &m_cmdPool) != VK_SUCCESS)
-            return false;
+  bool initCommandPool() {
+    VkCommandPoolCreateInfo pi{};
+    pi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    pi.queueFamilyIndex = m_queueFamily;
+    pi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    if (vkCreateCommandPool(m_device, &pi, nullptr, &m_cmdPool) != VK_SUCCESS)
+      return false;
 
-        VkCommandBufferAllocateInfo ai{};
-        ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-        ai.commandPool        = m_cmdPool;
-        ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-        ai.commandBufferCount = kSlots;
-        if (vkAllocateCommandBuffers(m_device, &ai, m_cmdBufs.data()) != VK_SUCCESS)
-            return false;
+    VkCommandBufferAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    ai.commandPool = m_cmdPool;
+    ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    ai.commandBufferCount = kSlots;
+    if (vkAllocateCommandBuffers(m_device, &ai, m_cmdBufs.data()) != VK_SUCCESS)
+      return false;
 
-        VkFenceCreateInfo fi{};
-        fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-        for (VkFence& fence : m_fences)
-            if (vkCreateFence(m_device, &fi, nullptr, &fence) != VK_SUCCESS) return false;
-        m_cmdBuf = m_cmdBufs[0];
-        m_fence  = m_fences[0];
-        return true;
-    }
+    VkFenceCreateInfo fi{};
+    fi.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    for (VkFence &fence : m_fences)
+      if (vkCreateFence(m_device, &fi, nullptr, &fence) != VK_SUCCESS)
+        return false;
+    m_cmdBuf = m_cmdBufs[0];
+    m_fence = m_fences[0];
+    return true;
+  }
 
-    bool initDescriptorPool() {
-        VkDescriptorPoolSize ps{};
-        ps.type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        ps.descriptorCount = MAX_DESC_SETS * MAX_BINDINGS;
+  bool initDescriptorPool() {
+    VkDescriptorPoolSize ps{};
+    ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    ps.descriptorCount = MAX_DESC_SETS * MAX_BINDINGS;
 
-        VkDescriptorPoolCreateInfo pi{};
-        pi.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-        pi.maxSets       = MAX_DESC_SETS;
-        pi.poolSizeCount = 1;
-        pi.pPoolSizes    = &ps;
-        pi.flags         = 0; // will be reset via vkResetDescriptorPool
-        for (VkDescriptorPool& pool : m_descPools)
-            if (vkCreateDescriptorPool(m_device, &pi, nullptr, &pool) != VK_SUCCESS) return false;
-        m_descPool = m_descPools[0];
-        return true;
-    }
+    VkDescriptorPoolCreateInfo pi{};
+    pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pi.maxSets = MAX_DESC_SETS;
+    pi.poolSizeCount = 1;
+    pi.pPoolSizes = &ps;
+    pi.flags = 0; // will be reset via vkResetDescriptorPool
+    for (VkDescriptorPool &pool : m_descPools)
+      if (vkCreateDescriptorPool(m_device, &pi, nullptr, &pool) != VK_SUCCESS)
+        return false;
+    m_descPool = m_descPools[0];
+    return true;
+  }
 
-    bool initDescLayouts() {
-        m_descLayouts[0] = VK_NULL_HANDLE;
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(m_physDevice, &properties);
+  bool initDescLayouts() {
+    m_descLayouts[0] = VK_NULL_HANDLE;
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(m_physDevice, &properties);
 #ifdef RT_PLAYER
-        m_maxSpirvVersion = properties.apiVersion >= VK_API_VERSION_1_3
-            ? 0x00010600u : 0x00010500u;
-        m_maxPushConstantSize = properties.limits.maxPushConstantsSize;
+    m_maxSpirvVersion =
+        properties.apiVersion >= VK_API_VERSION_1_3 ? 0x00010600u : 0x00010500u;
+    m_maxPushConstantSize = properties.limits.maxPushConstantsSize;
 #endif
-        const auto binding_limit = std::min(MAX_BINDINGS,
-            std::min(properties.limits.maxPerStageDescriptorStorageBuffers,
-                     properties.limits.maxDescriptorSetStorageBuffers));
-        for (uint32_t n = 1; n <= binding_limit; ++n) {
-            std::vector<VkDescriptorSetLayoutBinding> bindings(n);
-            for (uint32_t b = 0; b < n; ++b) {
-                bindings[b].binding         = b;
-                bindings[b].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                bindings[b].descriptorCount = 1;
-                bindings[b].stageFlags      = VK_SHADER_STAGE_COMPUTE_BIT;
-            }
-            VkDescriptorSetLayoutCreateInfo ci{};
-            ci.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-            ci.bindingCount = n;
-            ci.pBindings    = bindings.data();
-            if (vkCreateDescriptorSetLayout(m_device, &ci, nullptr, &m_descLayouts[n])
-                    != VK_SUCCESS) {
-                m_descLayouts[n] = VK_NULL_HANDLE;
-                return false;
-            }
-        }
-        return true;
+    const auto binding_limit =
+        std::min(MAX_BINDINGS,
+                 std::min(properties.limits.maxPerStageDescriptorStorageBuffers,
+                          properties.limits.maxDescriptorSetStorageBuffers));
+    for (uint32_t n = 1; n <= binding_limit; ++n) {
+      std::vector<VkDescriptorSetLayoutBinding> bindings(n);
+      for (uint32_t b = 0; b < n; ++b) {
+        bindings[b].binding = b;
+        bindings[b].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        bindings[b].descriptorCount = 1;
+        bindings[b].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+      }
+      VkDescriptorSetLayoutCreateInfo ci{};
+      ci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+      ci.bindingCount = n;
+      ci.pBindings = bindings.data();
+      if (vkCreateDescriptorSetLayout(m_device, &ci, nullptr,
+                                      &m_descLayouts[n]) != VK_SUCCESS) {
+        m_descLayouts[n] = VK_NULL_HANDLE;
+        return false;
+      }
     }
+    return true;
+  }
 
-    // ── Pipeline creation ─────────────────────────────────────────────────────
+  // ── Pipeline creation ─────────────────────────────────────────────────────
 
-    bool createPipeline(const std::string& kernelName,
-                        const std::string& spvPath,
-                        uint32_t bufferCount,
-                        uint32_t pushConstantSize) {
-        auto spv = loadSPV(spvPath);
-        if (spv.empty()) {
-            traceSimulationPipeline("module.missing_or_unreadable", kernelName, spvPath, spv,
-                                    VK_ERROR_INITIALIZATION_FAILED);
-            return false;
-        }
-        if (const char* reason = simulationSpirvRejection(
-                spv, m_has_float_atomics, m_has_shader_float64)) {
-            traceSimulationPipeline(reason, kernelName, spvPath, spv,
-                                    VK_ERROR_FEATURE_NOT_PRESENT);
-            return false;
-        }
-        if (kernelName == "sim_matter_p2g_block" && !m_has_shared_float_atomics) {
-            traceSimulationPipeline("module.shared_float_atomic_add_not_supported_on_this_GPU",
-                                    kernelName, spvPath, spv, VK_ERROR_FEATURE_NOT_PRESENT);
-            return false;
-        }
+  bool createPipeline(const std::string &kernelName, const std::string &spvPath,
+                      uint32_t bufferCount, uint32_t pushConstantSize,
+                      bool lazy = false, uint32_t specConst0 = 0xFFFFFFFFu) {
+    auto spv = loadSPV(spvPath);
+    if (spv.empty()) {
+      traceSimulationPipeline("module.missing_or_unreadable", kernelName,
+                              spvPath, spv, VK_ERROR_INITIALIZATION_FAILED);
+      return false;
+    }
+    if (const char *reason = simulationSpirvRejection(spv, m_has_float_atomics,
+                                                      m_has_shader_float64)) {
+      traceSimulationPipeline(reason, kernelName, spvPath, spv,
+                              VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+    }
+    if (kernelName == "sim_matter_p2g_block" && !m_has_shared_float_atomics) {
+      traceSimulationPipeline(
+          "module.shared_float_atomic_add_not_supported_on_this_GPU",
+          kernelName, spvPath, spv, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+    }
 #ifdef RT_PLAYER
-        if (spv[1] > m_maxSpirvVersion) {
-            traceSimulationPipeline("module.incompatible_spirv", kernelName, spvPath, spv,
-                                    VK_ERROR_INCOMPATIBLE_DRIVER);
-            return false;
-        }
-        if (pushConstantSize > m_maxPushConstantSize) {
-            traceSimulationPipeline("layout.push_limit", kernelName, spvPath, spv,
-                                    VK_ERROR_FEATURE_NOT_PRESENT);
-            return false;
-        }
+    if (spv[1] > m_maxSpirvVersion) {
+      traceSimulationPipeline("module.incompatible_spirv", kernelName, spvPath,
+                              spv, VK_ERROR_INCOMPATIBLE_DRIVER);
+      return false;
+    }
+    if (pushConstantSize > m_maxPushConstantSize) {
+      traceSimulationPipeline("layout.push_limit", kernelName, spvPath, spv,
+                              VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+    }
 #endif
-        if (bufferCount == 0 || bufferCount > MAX_BINDINGS ||
-            m_descLayouts[bufferCount] == VK_NULL_HANDLE) {
-            traceSimulationPipeline("layout.storage_bindings_unavailable", kernelName, spvPath, spv,
-                                    VK_ERROR_FEATURE_NOT_PRESENT);
-            return false;
-        }
-
-        VkShaderModuleCreateInfo smci{};
-        smci.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        smci.codeSize = spv.size() * sizeof(uint32_t);
-        smci.pCode    = spv.data();
-        VkShaderModule mod = VK_NULL_HANDLE;
-        traceSimulationPipeline("module.begin", kernelName, spvPath, spv);
-        const VkResult moduleResult = vkCreateShaderModule(m_device, &smci, nullptr, &mod);
-        traceSimulationPipeline("module.end", kernelName, spvPath, spv, moduleResult);
-        if (moduleResult != VK_SUCCESS)
-            return false;
-
-        VkPushConstantRange pcr{};
-        pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-        pcr.offset     = 0;
-        pcr.size       = pushConstantSize;
-
-        VkDescriptorSetLayout dl = m_descLayouts[bufferCount];
-        VkPipelineLayoutCreateInfo plci{};
-        plci.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        plci.setLayoutCount         = 1;
-        plci.pSetLayouts            = &dl;
-        plci.pushConstantRangeCount = 1;
-        plci.pPushConstantRanges    = &pcr;
-
-        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
-        traceSimulationPipeline("layout.begin", kernelName, spvPath, spv);
-        const VkResult layoutResult = vkCreatePipelineLayout(m_device, &plci, nullptr, &pipelineLayout);
-        traceSimulationPipeline("layout.end", kernelName, spvPath, spv, layoutResult);
-        if (layoutResult != VK_SUCCESS) {
-            vkDestroyShaderModule(m_device, mod, nullptr);
-            return false;
-        }
-
-        VkComputePipelineCreateInfo cpci{};
-        cpci.sType          = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
-        cpci.layout         = pipelineLayout;
-        cpci.stage.sType    = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        cpci.stage.stage    = VK_SHADER_STAGE_COMPUTE_BIT;
-        cpci.stage.module   = mod;
-        cpci.stage.pName    = "main";
-
-        VkPipeline pipeline = VK_NULL_HANDLE;
-        traceSimulationPipeline("pipeline.begin", kernelName, spvPath, spv);
-        const VkResult pipelineResult = vkCreateComputePipelines(
-            m_device, VK_NULL_HANDLE, 1, &cpci, nullptr, &pipeline);
-        traceSimulationPipeline("pipeline.end", kernelName, spvPath, spv, pipelineResult);
-        vkDestroyShaderModule(m_device, mod, nullptr);
-        if (pipelineResult != VK_SUCCESS) {
-            if (pipeline != VK_NULL_HANDLE) {
-                vkDestroyPipeline(m_device, pipeline, nullptr);
-            }
-            vkDestroyPipelineLayout(m_device, pipelineLayout, nullptr);
-            return false;
-        }
-
-        m_pipelines[kernelName] = { pipeline, pipelineLayout, bufferCount };
-        return true;
+    if (bufferCount == 0 || bufferCount > MAX_BINDINGS ||
+        m_descLayouts[bufferCount] == VK_NULL_HANDLE) {
+      traceSimulationPipeline("layout.storage_bindings_unavailable", kernelName,
+                              spvPath, spv, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
     }
 
-    void loadPipelines() {
-        const std::string sd = findShaderDir();
-        // {kernel_name, spv_file, buffer_count, push_constant_size_bytes}
-        // push_constant sizes must match CUDA-side struct sizes exactly.
-        struct KernelDef { const char* name; const char* spv; uint32_t bufs; uint32_t pc; };
-        static const KernelDef defs[] = {
-            // name                             spv file                                    bufs  pc_bytes
-            // name                                  spv                                bufs  pc_bytes
-            // pc_bytes must match the host-side GpuConstants struct sizes exactly.
-            // FluidP2GGpuConstants             = 9 fields × 4 bytes = 36
-            // FluidG2PGpuConstants             = 16 fields × 4 bytes = 64
-            //   (+affine_damping, +max_affine — APIC clamp parity with CPU)
-            // GridProjectionGpuConstants       = 9 fields × 4 bytes = 36
-            // FluidDensitySplatGpuConstants    = 9 fields × 4 bytes = 36
-            // FluidParticleIntegrateGpuConstants = 9 fields × 4 bytes = 36
-            // GridScalarAdvectionGpuConstants  = 5 fields × 4 bytes = 20
-            // GridVelocityDissipationGpuConstants = 5 fields × 4 bytes = 20
-            // FluidP2GGpuConstants = 36 bytes (nx,ny,nz,particle_count,component,orig_x,orig_y,orig_z,voxel_size)
-            // FluidDensitySplatGpuConstants = 36 bytes (nx,ny,nz,particle_count,orig_x,orig_y,orig_z,voxel_size,particle_density)
-            // FluidParticleIntegrateGpuConstants = 36 bytes (9 fields × 4)
-            { "sim_fluid_clear_float",              "sim_fluid_clear_float.spv",           1, 36 },
-            // Device twin of enforceSolidBoundaries (vel_x, vel_y, vel_z,
-            // fluid_mask); shares FluidP2GGpuConstants = 36 bytes.
-            { "sim_fluid_zero_solid_faces",         "sim_fluid_zero_solid_faces.spv",      4, 36 },
-            { "sim_fluid_particle_integrate_forces","sim_fluid_particle_forces.spv",       4, 96 },
-            { "sim_fluid_surface_columns_clear",    "sim_fluid_surface_columns_clear.spv", 1, 96 },
-            { "sim_fluid_surface_columns_build",    "sim_fluid_surface_columns_build.spv", 2, 96 },
-            { "sim_fluid_p2g_scatter",              "sim_fluid_p2g_scatter.spv",           5, 36 },
-            // Normalize shares the scatter pass's 5-buffer dispatch (vel/weight
-            // at bindings 3/4 — CUDA index parity). Registering it as 2 bound a
-            // 5-binding set on a 2-binding layout (UB): bindings 0/1 hit the
-            // particle position/velocity buffers → positions corrupted per step.
-            { "sim_fluid_p2g_normalize",            "sim_fluid_p2g_normalize.spv",         5, 36 },
-            { "sim_fluid_normalize_window",         "sim_fluid_normalize_window.spv",      2, 40 },
-            { "sim_fluid_density_clear",            "sim_fluid_density_clear.spv",         1, 36 },
-            { "sim_fluid_density_splat",            "sim_fluid_density_splat.spv",         2, 36 },
-            { "sim_fluid_label_bin_clear",          "sim_fluid_label_bin_clear.spv",       2, 80 },
-            { "sim_fluid_label_bin_scatter",        "sim_fluid_label_bin_scatter.spv",     5, 80 },
-            { "sim_fluid_label_classify",           "sim_fluid_label_classify.spv",        6, 80 },
-            { "sim_fluid_label_link_clear",         "sim_fluid_label_link_clear.spv",      2, 80 },
-            { "sim_fluid_label_link_scatter",       "sim_fluid_label_link_scatter.spv",    5, 80 },
-            { "sim_fluid_label_link_classify",      "sim_fluid_label_link_classify.spv",   6, 80 },
-            // GPU surface reconstruction (FluidSurfaceGpu.cpp, docs/dev/GPU_YUZEY_LEVEL_SET.md).
-            // All share SurfaceGpuConstants = 128 bytes; integer atomics only.
-            { "sim_surface_clear",                  "sim_surface_clear.spv",               1, 128 },
-            { "sim_surface_bin_assign",             "sim_surface_bin_assign.spv",          5, 128 },
-            { "sim_surface_scan",                   "sim_surface_scan.spv",                3, 128 },
-            { "sim_surface_scatter",                "sim_surface_scatter.spv",             3, 128 },
-            { "sim_surface_centres",                "sim_surface_centres.spv",             5, 128 },
-            { "sim_surface_gather",                 "sim_surface_gather.spv",              6, 128 },
-            { "sim_surface_gather_supported", "sim_surface_gather_supported.spv", 8, 128 },
-            { "sim_surface_composition_phase", "sim_surface_composition_phase.spv", 6, 128 },
-            { "sim_surface_smooth",                 "sim_surface_smooth.spv",              4, 128 },
-            { "sim_surface_proxy",                  "sim_surface_proxy.spv",               3, 128 },
-            { "sim_surface_uvw_gather",             "sim_surface_uvw_gather.spv",          6, 128 },
-            { "sim_surface_uvw_extend",             "sim_surface_uvw_extend.spv",          4, 128 },
-            { "sim_surface_composition",            "sim_surface_composition.spv",         6, 128 },
-            // Whitewater spawn potentials. The bucket-grid bin replaces the serial
-            // CSR bin on the host; only INTEGER atomics are used, so these do not
-            // depend on the shaderAtomicFloat support the P2G/splat pair needs.
-            // FoamBinGpuConstants = 10 fields x 4 = 40; the clear kernel shares the
-            // struct and reads only its tail field, so both declare the full range.
-            // 2 buffers: bucket counters AND the expected[] potentials, because
-            // sim_foam_crit is slot-dispatched and no longer visits every particle.
-            { "sim_foam_bin_clear",                 "sim_foam_bin_clear.spv",              2, 52 },
-            { "sim_foam_bin_scatter",               "sim_foam_bin_scatter.spv",            4, 52 },
-            // FoamCritGpuConstants = 21 fields x 4 = 84.
-            { "sim_foam_crit",                      "sim_foam_crit.spv",                   6, 96 },
-            // FoamNeighGpuConstants = 11 fields x 4 = 44. Reads the same bins as
-            // sim_foam_crit but iterates foam, not fluid.
-            { "sim_foam_neigh",                     "sim_foam_neigh.spv",                  5, 56 },
-            // FluidG2PGpuConstants = 17 fields x 4 = 68 (has use_solid_flip_limiter);
-            // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
-            { "sim_fluid_g2p",                      "sim_fluid_g2p.spv",                  10, 68 },
-            // Bindings 9..12 are Rankine bond history plus the three columns
-            // of the recoverable deformation gradient. Keep
-            // this descriptor contract in lockstep with GranularGpuDispatch;
-            // the old nine-binding layout leaves damage active while the new
-            // fracture-history telemetry remains permanently zero.
-            { "sim_matter_p2g", "sim_matter_p2g.spv", 10, 40 },
-            { "sim_matter_g2p", "sim_matter_g2p.spv", 12, 72 },
-            { "sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 128 },
-            { "sim_matter_stress_p2g", "sim_matter_stress_p2g.spv", 9, 52 },
-            { "sim_matter_settle", "sim_matter_settle.spv", 7, 52 },
-            { "sim_matter_advect", "sim_matter_advect.spv", 11, 104 },
-            { "sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40 },
-            { "sim_grain_mpm_init", "sim_grain_mpm_init.spv", 13, 32 },
-            { "sim_grain_mpm_clear", "sim_grain_mpm_clear.spv", 13, 32 },
-            { "sim_grain_mpm_hash", "sim_grain_mpm_hash.spv", 13, 32 },
-            { "sim_grain_mpm_gather", "sim_grain_mpm_gather.spv", 13, 32 },
-            { "sim_grain_mpm_apply", "sim_grain_mpm_apply.spv", 13, 32 },
-            { "sim_grain_mpm_count", "sim_grain_mpm_count.spv", 13, 32 },
-            { "sim_grain_fluid_cells", "sim_grain_fluid_cells.spv", 21, 96 },
-            { "sim_grain_fluid_refresh", "sim_grain_fluid_refresh.spv", 21, 96 },
-            { "sim_grain_fluid_delta", "sim_grain_fluid_delta.spv", 21, 96 },
-            { "sim_grain_fluid_reaction", "sim_grain_fluid_reaction.spv", 21, 96 },
-            { "sim_grain_fluid_apply", "sim_grain_fluid_apply.spv", 21, 96 },
-            { "sim_grain_fluid_clear", "sim_grain_fluid_clear.spv", 21, 96 },
-            { "sim_grain_fluid_hash", "sim_grain_fluid_hash.spv", 21, 96 },
-            { "sim_grain_fluid_solid", "sim_grain_fluid_solid.spv", 21, 96 },
-            { "sim_matter_copy", "sim_matter_copy.spv", 2, 4 },
-            { "sim_matter_clear", "sim_matter_clear.spv", 1, 4 },
-            { "sim_matter_mpm_pressure_reaction", "sim_matter_mpm_pressure_reaction.spv", 8, 40 },
-            { "sim_matter_pores", "sim_matter_pores.spv", 13, 40 },
-            { "sim_matter_zero_faces", "sim_matter_zero_faces.spv", 4, 36 },
-            { "sim_matter_liquid_wall", "sim_matter_liquid_wall.spv", 12, 32 },
-            { "sim_matter_mpm_boundary", "sim_matter_mpm_boundary.spv", 13, 52 },
-            { "sim_collider_bvh_query", "sim_collider_bvh_query.spv", 3, 80 },
-            { "sim_matter_mpm_particle_contact", "sim_matter_mpm_particle_contact.spv", 10, 48 },
-            { "sim_matter_partition", "sim_matter_partition.spv", 4, 8 },
-            { "sim_sparse_pressure_clear", "sim_sparse_pressure_clear.spv", 16, 80 },
-            { "sim_sparse_pressure_mark", "sim_sparse_pressure_mark.spv", 16, 80 },
-            { "sim_sparse_pressure_init", "sim_sparse_pressure_init.spv", 16, 80 },
-            { "sim_sparse_pressure_init_mac_weights",
-              "sim_sparse_pressure_init_mac_weights.spv", 18, 80 },
-            { "sim_sparse_pressure_jacobi", "sim_sparse_pressure_jacobi.spv", 16, 80 },
-            { "sim_sparse_pressure_copy", "sim_sparse_pressure_copy.spv", 16, 80 },
-            { "sim_sparse_pressure_spmv", "sim_sparse_pressure_spmv.spv", 16, 80 },
-            { "sim_sparse_pressure_spmv_mac_weights",
-              "sim_sparse_pressure_spmv_mac_weights.spv", 18, 80 },
-            { "sim_sparse_pressure_axpy", "sim_sparse_pressure_axpy.spv", 16, 80 },
-            { "sim_sparse_pressure_zpby", "sim_sparse_pressure_zpby.spv", 16, 80 },
-            { "sim_sparse_pressure_scatter", "sim_sparse_pressure_scatter.spv", 16, 80 },
-            { "sim_sparse_pressure_dense_clear", "sim_sparse_pressure_dense_clear.spv", 16, 80 },
-            { "sim_matter_grain_list_clear", "sim_matter_grain_list_clear.spv", 17, 128 },
-            { "sim_matter_grain_hash", "sim_matter_grain_hash.spv", 17, 128 },
-            { "sim_matter_grain_list_build", "sim_matter_grain_list_build.spv", 17, 128 },
-            { "sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128 },
-            { "sim_dem_bond_evaluate", "sim_dem_bond_evaluate.spv", 10, 32 },
-            { "sim_dem_bond_kick", "sim_dem_bond_kick.spv", 10, 32 },
-            { "sim_dem_bond_orient", "sim_dem_bond_orient.spv", 10, 32 },
-            { "sim_matter_grain_active_classify", "sim_matter_grain_active_classify.spv", 17, 128 },
-            { "sim_fluid_granular_stress_update",   "sim_fluid_granular_stress_update.spv", 15, 124 },
-            { "sim_fluid_granular_stress_p2g",      "sim_fluid_granular_stress_p2g.spv",    4, 48 },
-            { "sim_fluid_granular_settle",          "sim_fluid_granular_settle.spv",        5, 48 },
-            { "sim_fluid_advect_tail",              "sim_fluid_advect_tail.spv",           9, 100 },
-            { "sim_fluid_occupancy",                "sim_fluid_occupancy.spv",             4, 36 },
-            // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
-            // declare only the leading fields; the pipeline range must cover the
-            // full struct the host pushes (old 36 made vkCmdPushConstants exceed
-            // the range → validation error / UB on the gas + SOR paths).
-            { "sim_fluid_free_surface_sor",         "sim_fluid_free_surface_sor.spv",      3, 52 },
-            { "sim_grid_divergence",                "sim_grid_divergence.spv",             5, 52 },
-            { "sim_gas_divergence",                 "sim_gas_divergence.spv",             13, 64 },
-            { "sim_grid_sor",                       "sim_grid_sor.spv",                   13, 52 },
-            { "sim_grid_subtract_gradient",         "sim_grid_subtract_gradient.spv",     13, 52 },
-            // MGPCG free-surface pressure solve (Faz 1 Vulkan port of the CUDA
-            // sim_fluid_cg_* family — plain path only: non-variational, non-GFM,
-            // non-fused reductions, no multigrid; the host's generic path covers
-            // exactly this subset on non-CUDA backends).
-            // Implicit viscous diffusion (red-black Gauss-Seidel). One dispatch
-            // relaxes one colour of ALL THREE MAC components, so a sweep is two
-            // dispatches. FluidViscosityGpuConstants = 13 fields x 4 = 52 —
-            // deliberately the same 52 bytes as GridProjectionGpuConstants so it
-            // shares the size class the registry already validates.
-            // 10 buffers: vel xyz + mask + rhs xyz (the pre-diffusion field) +
-            // solid velocity xyz (the no-slip Dirichlet value).
-            // 11th binding: per-cell kinematic viscosity (per-substance
-            // overrides). The push block stayed 52 bytes — a pad word became
-            // has_nu — so only the descriptor count moved.
-            { "sim_fluid_viscosity_rbgs",           "sim_fluid_viscosity_rbgs.spv",       11, 52 },
-            // Viscosity solved to a tolerance (Jacobi PCG): 11 RBGS bindings +
-            // r/p/q/d/scalars/partials, then the sparse tile pair, then the
-            // compact MAC pair. Push = 72 bytes (PcgConstants).
-            { "sim_fluid_viscosity_pcg",            "sim_fluid_viscosity_pcg.spv",        17, 72 },
-            { "sim_sparse_grid_map_clear", "sim_sparse_grid_map_clear.spv", 7, 48 },
-            { "sim_sparse_grid_map_seed", "sim_sparse_grid_map_seed.spv", 7, 48 },
-            { "sim_sparse_grid_retire", "sim_sparse_grid_retire.spv", 7, 48 },
-            { "sim_sparse_grid_remap", "sim_sparse_grid_remap.spv", 7, 48 },
-            { "sim_sparse_mac_clear", "sim_sparse_mac_clear.spv", 8, 36 },
-            { "sim_sparse_mac_mark", "sim_sparse_mac_mark.spv", 8, 36 },
-            { "sim_sparse_mac_reset", "sim_sparse_mac_reset.spv", 8, 36 },
-            { "sim_sparse_mac_normalize", "sim_sparse_mac_normalize.spv", 8, 36 },
-            { "sim_sparse_mac_publish", "sim_sparse_mac_publish.spv", 8, 36 },
-            { "sim_sparse_mac_gather", "sim_sparse_mac_gather.spv", 8, 36 },
-            { "sim_sparse_mac_capture", "sim_sparse_mac_capture.spv", 8, 36 },
-            { "sim_sparse_mac_p2g", "sim_sparse_mac_p2g.spv", 7, 36 },
-            { "sim_sparse_mac_matter_p2g", "sim_sparse_mac_matter_p2g.spv", 12, 40 },
-            { "sim_sparse_mac_g2p", "sim_sparse_mac_g2p.spv", 11, 68 },
-            { "sim_sparse_mac_matter_g2p", "sim_sparse_mac_matter_g2p.spv", 13, 72 },
-            // Compact MAC velocity is canonical (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md):
-            // the dense kernel plus the MAC tile map and list.
-            { "sim_sparse_mac_zero_faces", "sim_sparse_mac_zero_faces.spv", 6, 36 },
-            { "sim_sparse_mac_matter_zero_faces", "sim_sparse_mac_matter_zero_faces.spv", 6, 36 },
-            { "sim_sparse_mac_matter_liquid_wall", "sim_sparse_mac_matter_liquid_wall.spv", 14, 32 },
-            { "sim_sparse_mac_divergence", "sim_sparse_mac_divergence.spv", 7, 52 },
-            { "sim_sparse_mac_divergence_var", "sim_sparse_mac_divergence_var.spv", 13, 52 },
-            { "sim_sparse_mac_divergence_porous", "sim_sparse_mac_divergence_porous.spv", 14, 52 },
-            { "sim_sparse_mac_subtract_gradient", "sim_sparse_mac_subtract_gradient.spv", 7, 52 },
-            { "sim_sparse_mac_subtract_gradient_var", "sim_sparse_mac_subtract_gradient_var.spv", 13, 52 },
-            { "sim_sparse_mac_capture_compact", "sim_sparse_mac_capture_compact.spv", 8, 36 },
-            { "sim_sparse_mac_solid_weights", "sim_sparse_mac_solid_weights.spv", 5, 16 },
-            { "sim_sparse_mac_advect", "sim_sparse_mac_advect.spv", 11, 100 },
-            { "sim_sparse_mac_matter_advect", "sim_sparse_mac_matter_advect.spv", 13, 104 },
-            { "sim_matter_liquid_drag", "sim_matter_liquid_drag.spv", 19, 48 },
-            { "sim_matter_p2g_fused", "sim_matter_p2g_fused.spv", 19, 48 },
-            // Shared-memory block P2G + its per-substep block sort (S5, 2026-11-11).
-            { "sim_matter_p2g_block", "sim_matter_p2g_block.spv", 21, 64 },
-            { "sim_matter_p2g_block_sort", "sim_matter_p2g_block_sort.spv", 5, 64 },
-            { "sim_matter_mpm_porosity", "sim_matter_mpm_porosity.spv", 14, 32 },
-            { "sim_sparse_mac_matter_mpm_porosity", "sim_sparse_mac_matter_mpm_porosity.spv", 16, 32 },
-            { "sim_sparse_mac_matter_liquid_drag", "sim_sparse_mac_matter_liquid_drag.spv", 21, 48 },
-            { "sim_sparse_mac_viscosity_capture", "sim_sparse_mac_viscosity_capture.spv", 15, 68 },
-            { "sim_sparse_mac_viscosity_sweep", "sim_sparse_mac_viscosity_sweep.spv", 15, 68 },
-            { "sim_sparse_viscosity_clear", "sim_sparse_viscosity_clear.spv", 13, 68 },
-            { "sim_sparse_viscosity_mark", "sim_sparse_viscosity_mark.spv", 13, 68 },
-            { "sim_sparse_viscosity_capture", "sim_sparse_viscosity_capture.spv", 13, 68 },
-            { "sim_sparse_viscosity_sweep", "sim_sparse_viscosity_sweep.spv", 13, 68 },
-            { "sim_sparse_viscosity_pcg", "sim_sparse_viscosity_pcg.spv", 19, 72 },
-            { "sim_sparse_mac_viscosity_pcg", "sim_sparse_mac_viscosity_pcg.spv", 21, 72 },
-            { "sim_fluid_divergence",               "sim_fluid_divergence.spv",            5, 52 },
-            { "sim_fluid_divergence_window", "sim_fluid_divergence_window.spv",
-              5, 76 },
-            { "sim_fluid_subtract_gradient",        "sim_fluid_subtract_gradient.spv",     5, 52 },
-            { "sim_fluid_cg_build_diag",            "sim_fluid_cg_build_diag.spv",         2, 52 },
-            { "sim_fluid_cg_build_diag_window", "sim_fluid_cg_build_diag_window.spv",
-              2, 76 },
-            { "sim_fluid_cg_residual_init",         "sim_fluid_cg_residual_init.spv",      4, 52 },
-            { "sim_fluid_cg_spmv",                  "sim_fluid_cg_spmv.spv",               4, 52 },
-            { "sim_fluid_cg_spmv_window", "sim_fluid_cg_spmv_window.spv",
-              4, 76 },
-            // Variational solid coupling: separate registrations because the
-            // registry binds a FIXED buffer count per kernel name and these carry
-            // the face-weight (+ solid-velocity) arrays on top of the plain set.
-            // Keeping them apart leaves the plain path byte-identical.
-            { "sim_fluid_divergence_var",           "sim_fluid_divergence_var.spv",       11, 52 },
-            { "sim_fluid_divergence_var_window", "sim_fluid_divergence_var_window.spv",
-              11, 76 },
-            // Porous grains (H1 B5): var divergence whose non-solid faces take
-            // the grains' velocity for their closed part. Matter path only, so
-            // never windowed.
-            { "sim_fluid_divergence_porous",        "sim_fluid_divergence_porous.spv",    12, 52 },
-            { "sim_fluid_subtract_gradient_var",    "sim_fluid_subtract_gradient_var.spv",11, 52 },
-            { "sim_fluid_cg_build_diag_var",        "sim_fluid_cg_build_diag_var.spv",     5, 52 },
-            { "sim_fluid_cg_build_diag_var_window", "sim_fluid_cg_build_diag_var_window.spv",
-              5, 76 },
-            { "sim_fluid_cg_spmv_var",              "sim_fluid_cg_spmv_var.spv",           7, 52 },
-            { "sim_fluid_cg_spmv_var_window", "sim_fluid_cg_spmv_var_window.spv",
-              7, 76 },
-            { "sim_fluid_cg_jacobi",                "sim_fluid_cg_jacobi.spv",             3, 52 },
-            { "sim_fluid_cg_jacobi_window", "sim_fluid_cg_jacobi_window.spv",
-              3, 76 },
-            { "sim_fluid_cg_copy",                  "sim_fluid_cg_copy.spv",               2, 52 },
-            { "sim_fluid_cg_copy_window", "sim_fluid_cg_copy_window.spv",
-              2, 76 },
-            { "sim_fluid_cg_axpy",                  "sim_fluid_cg_axpy.spv",               2, 52 },
-            { "sim_fluid_cg_axpy_window", "sim_fluid_cg_axpy_window.spv",
-              2, 76 },
-            { "sim_fluid_cg_zpby",                  "sim_fluid_cg_zpby.spv",               2, 52 },
-            { "sim_fluid_cg_zpby_window", "sim_fluid_cg_zpby_window.spv",
-              2, 76 },
-            // Double-precision block partials → requires shaderFloat64 (gated in
-            // dispatch(); pipeline creation simply fails without the feature).
-            { "sim_fluid_cg_dot",                   "sim_fluid_cg_dot.spv",                3, 52 },
-            { "sim_fluid_cg_dot_window", "sim_fluid_cg_dot_window.spv",
-              3, 76 },
-            // Device-resident CG scalars (alpha/beta/sigma live on the GPU) —
-            // collapses per-dot submit+fence round-trips into one small download
-            // every K iterations. All three read/write double scalars →
-            // shaderFloat64-gated like sim_fluid_cg_dot.
-            { "sim_fluid_cg_scalar_step",           "sim_fluid_cg_scalar_step.spv",        2, 52 },
-            { "sim_fluid_cg_axpy_dev",              "sim_fluid_cg_axpy_dev.spv",           3, 52 },
-            { "sim_fluid_cg_axpy_dev_window", "sim_fluid_cg_axpy_dev_window.spv",
-              3, 76 },
-            { "sim_fluid_cg_zpby_dev",              "sim_fluid_cg_zpby_dev.spv",           3, 52 },
-            { "sim_fluid_cg_zpby_dev_window", "sim_fluid_cg_zpby_dev_window.spv",
-              3, 76 },
-            // Fused CG kernels (CUDA name/buffer-order parity, plain branch only;
-            // + axpy2_dev, Vulkan-only fused p/r pair update). Cut the device-
-            // scalar loop from 9 to 6 dispatches+barriers per iteration.
-            { "sim_fluid_cg_jacobi_dot",            "sim_fluid_cg_jacobi_dot.spv",         4, 52 },
-            { "sim_fluid_cg_jacobi_dot_window", "sim_fluid_cg_jacobi_dot_window.spv",
-              4, 76 },
-            { "sim_fluid_cg_spmv_dot",              "sim_fluid_cg_spmv_dot.spv",           5, 52 },
-            { "sim_fluid_cg_spmv_dot_window", "sim_fluid_cg_spmv_dot_window.spv",
-              5, 76 },
-            { "sim_fluid_cg_spmv_dot_var",          "sim_fluid_cg_spmv_dot_var.spv",       8, 52 },
-            { "sim_fluid_cg_spmv_dot_var_window", "sim_fluid_cg_spmv_dot_var_window.spv",
-              8, 76 },
-            { "sim_fluid_cg_axpy2_dev",             "sim_fluid_cg_axpy2_dev.spv",          5, 52 },
-            { "sim_fluid_cg_axpy2_dev_window", "sim_fluid_cg_axpy2_dev_window.spv",
-              5, 76 },
-            { "sim_grid_advect_scalar",             "sim_grid_advect_scalar.spv",          7, 28 },
-            { "sim_inventory_advect_scalar", "sim_inventory_advect_scalar.spv", 7, 28 },
-            { "sim_gas_source_partition", "sim_gas_source_partition.spv", 7, 16 },
-            { "sim_inventory_maccormack_scalar", "sim_inventory_maccormack_scalar.spv", 7, 28 },
-            { "sim_inventory_conserve", "sim_inventory_conserve.spv", 6, 16 },
-            { "sim_inventory_clear", "sim_inventory_clear.spv", 2, 4 },
-            { "sim_inventory_deposit", "sim_inventory_deposit.spv", 3, 4 },
-            { "sim_inventory_momentum", "sim_inventory_momentum.spv", 7, 20 },
-            { "sim_inventory_summary", "sim_inventory_summary.spv", 4, 36 },
-            { "sim_audio_gas_flow", "sim_audio_gas_flow.spv", 7, 40 },
-            { "sim_inventory_surface_exchange", "sim_inventory_surface_exchange.spv", 11, 40 },
-            { "sim_inventory_surface_commit", "sim_inventory_surface_commit.spv", 8, 8 },
-            { "sim_inventory_saturation", "sim_inventory_saturation.spv", 11, 112 },
-            { "sim_inventory_rain_fall", "sim_inventory_rain_fall.spv", 4, 32 },
-            { "sim_grid_advect_velocity",           "sim_grid_advect_velocity.spv",       10, 24 },
-            { "sim_grid_velocity_dissipate_clamp",  "sim_grid_velocity_dissipate.spv",     3, 20 },
-            // MacCormack second pass (limited correction). Same 24B push-constant
-            // as the matching first-pass advection kernel; the extra bindings are
-            // the forward-advected field(s) plus a non-aliasing output.
-            { "sim_grid_maccormack_scalar",         "sim_grid_maccormack_scalar.spv",      7, 28 },
-            { "sim_grid_maccormack_velocity",       "sim_grid_maccormack_velocity.spv",   10, 24 },
-            { "sim_gas_inject",                     "sim_gas_inject.spv",                   7, 112 },
-            { "sim_gas_buoyancy",                   "sim_gas_buoyancy.spv",                 3, 44 },
-            { "sim_gas_force_evaluate",             "sim_gas_force_evaluate.spv",           7, 48 },
-            { "sim_gas_force_gather",               "sim_gas_force_gather.spv",             6, 48 },
-            // Device-resident ballistic particles (particle roadmap Phase 1.5 B).
-            // ParticleBallisticGpuConstants = 40 B, ParticleSpawnGpuConstants = 16 B.
-            { "sim_particle_ballistic",              "sim_particle_ballistic.spv",           10, 56 },
-            { "sim_particle_spawn",                  "sim_particle_spawn.spv",               12, 16 },
-            // Device collisions + contact events (ParticleDeviceCollision.cpp):
-            // 15 bindings (14 = size_scale, packed into event flags), ParticleCollideGpuConstants = 48 B.
-            { "sim_particle_collide",                "sim_particle_collide.spv",            15, 48 },
-            // GPU wet paint (WetPaintGpu.cpp): 17 bindings, WetPaintGpuConstants = 64 B.
-            { "paint_wet",                           "paint_wet.spv",                       17, 64 },
-            // GasCombustionGpuConstants = 18 x 4 = 72 (FG1 air inputs).
-            { "sim_gas_combustion",                 "sim_gas_combustion.spv",               6, 72 },
-            // VelocityMaxAbsGpuConstants = 4 uints = 16
-            { "sim_grid_velocity_max_abs",          "sim_grid_velocity_max_abs.spv",        4, 16 },
-            { "sim_gas_scalar_dissipate",           "sim_gas_scalar_dissipate.spv",         3, 36 },
-            { "sim_gas_surface_dust",               "sim_gas_surface_dust.spv",             5, 40 },
-            { "sim_gas_vorticity_curl",             "sim_gas_vorticity_curl.spv",           8, 28 },
-            { "sim_gas_vorticity_force",            "sim_gas_vorticity_force.spv",         11, 28 },
-            { "sim_gas_turbulence_cell",            "sim_gas_turbulence_cell.spv",          7, 96 },
-            { "sim_gas_turbulence_gather",          "sim_gas_turbulence_gather.spv",        9, 96 },
-            // Plain collider emission only — pyrolysis moved to sim_msf_* in
-            // Phase 2b, which dropped the 4 material/surface-state bindings.
-            { "sim_gas_collider_source",            "sim_gas_collider_source.spv",         10, 20 },
-            // Material State Field, three passes. gather integrates per-element
-            // state (4 SSBO, 64B); scatter atomically deposits released mass into
-            // per-cell fixed-point accumulators (7 SSBO, 48B); resolve folds those
-            // into the gas fields and clears them (8 SSBO, 32B).
-            // 80B since Phase 5: material2 carries water's boiling point in
-            // normalized units, which is what pins a wet surface's temperature.
-            { "sim_msf_gather",                     "sim_msf_gather.spv",                   7, 112 },
-            { "sim_msf_scatter",                    "sim_msf_scatter.spv",                  7, 48 },
-            { "sim_msf_resolve",                    "sim_msf_resolve.spv",                  9, 32 },
-            // Ambient / boundary-condition pass (Phase 4). Runs once per frame
-            // outside the domain loop, so it needs no gas bindings at all:
-            // centers + state + thermal sources + domain ambient zones (4 SSBO,
-            // 48B). This is what gives an object outside every domain a defined
-            // temperature.
-            // + queued heat + queued surface water (2026-10-18: 6 SSBO).
-            { "sim_msf_ambient",                    "sim_msf_ambient.spv",                  6, 48 },
-            // Block-max majorant for the live dense gas RT path. 2 SSBO
-            // (density in, per-block max out) + 32B push constant.
-            { "sim_gas_majorant",                   "sim_gas_majorant.spv",                 5, 40 },
-            // Mesh subdivision (linear 1->4). 2 SSBO (in/out tris) + 16B push-const.
-            { "subdivide_linear",                   "subdivide_linear.spv",                2, 16 },
-            // Catmull-Clark GPU refine (Phase 3b): per-level sparse stencil apply (5 SSBO:
-            // inPos/outPos/off/idx/w) then Newell face normals (4 SSBO) gathered per
-            // vertex atomic-free (4 SSBO). All take a 16B push-const (one uint count).
-            { "cc_stencil_apply",                   "cc_stencil_apply.spv",                5, 16 },
-            { "cc_face_normals",                    "cc_face_normals.spv",                 4, 16 },
-            { "cc_vertex_normals",                  "cc_vertex_normals.spv",               4, 16 },
-            // CC device-resident expand (Phase 3d): indexed refine -> non-indexed combined
-            // BLAS-layout buffer (6 SSBO: pos/nrm/triIdx/triUV/triMat/out, 16B push-const).
-            { "cc_expand_blas",                     "cc_expand_blas.spv",                  6, 16 },
-            // Terrain erosion (Vulkan port of erosion_kernels.cu). Push-constant sizes
-            // must match TerrainPhysics::*ParamsGPU (minus pointer fields, which become
-            // SSBO bindings instead). 1:1 numerical port; see
-            // project_terrain_erosion_gpu_migration memory for follow-up physics fixes.
-            // ThermalErosionParamsGPU  (no ptrs) = 6 fields x 4 bytes = 24
-            // PostProcessParamsGPU     (no ptrs) = 7 fields x 4 bytes = 28
-            // StreamPowerParamsGPU     (no ptrs) = 9 fields x 4 bytes = 36
-            { "terrain_thermal",                    "terrain_thermal.spv",                 3, 48 },
-            { "terrain_thermal_hardness",           "terrain_thermal_hardness.spv",        4, 48 },
-            { "terrain_thermal_flux",               "terrain_thermal_flux.spv",            4, 52 },
-            { "terrain_thermal_apply",              "terrain_thermal_apply.spv",           3, 52 },
-            { "terrain_stream_power",               "terrain_stream_power.spv",            5, 36 },
-            { "terrain_apply_stream_power",         "terrain_apply_stream_power.spv",      2, 36 },
-            { "terrain_pit_fill",                   "terrain_pit_fill.spv",                2, 28 },
-            { "terrain_spike_removal",              "terrain_spike_removal.spv",           2, 28 },
-            { "terrain_edge_preservation",          "terrain_edge_preservation.spv",       2, 28 },
-            { "terrain_smooth",                     "terrain_smooth.spv",                  2, 8  },
-            // Shallow-water "virtual pipes" hydraulic model (revived dead CUDA code —
-            // never had a working host caller — replaces the droplet Monte-Carlo model).
-            // FluvialErosionParamsGPU (no ptrs) = 11 fields x 4 bytes = 44.
-            { "terrain_pipe_rain",                  "terrain_pipe_rain.spv",               1, 16 },
-            { "terrain_pipe_flux",                  "terrain_pipe_flux.spv",               3, 44 },
-            { "terrain_pipe_water",                 "terrain_pipe_water.spv",              3, 44 },
-            { "terrain_pipe_erosion",               "terrain_pipe_erosion.spv",             4, 44 },
-            // WindErosionParamsGPU (no ptrs, +iterationSeed) = 10 fields x 4 bytes = 40.
-            { "terrain_wind",                       "terrain_wind.spv",                    1, 40 },
-            // Monte-Carlo droplet hydraulic erosion (replaces the pipe-model attempt for
-            // the "Hydraulic" node — user found droplet's organic channel character
-            // clearly better). 28 scalar fields x 4 bytes = 112.
-            { "terrain_hydraulic_droplet",          "terrain_hydraulic_droplet.spv",       13, 112 },
-            { "terrain_erosion_claim_clear",        "terrain_erosion_claim_clear.spv",      1, 8 },
-            { "terrain_erosion_gather",             "terrain_erosion_gather.spv",           2, 16 },
-            { "terrain_erosion_gather_apply",       "terrain_erosion_gather_apply.spv",     5, 12 },
-            { "terrain_hydraulic_channel_evolve",   "terrain_hydraulic_channel_evolve.spv", 12, 48 },
-            { "terrain_hydraulic_channel_apply",    "terrain_hydraulic_channel_apply.spv",   4, 8 },
-            { "terrain_hydraulic_route_init",       "terrain_hydraulic_route_init.spv",      4, 20 },
-            { "terrain_hydraulic_discharge_route",  "terrain_hydraulic_discharge_route.spv", 6, 16 },
-            { "terrain_hydraulic_macro_downsample", "terrain_hydraulic_macro_downsample.spv", 6, 16 },
-            { "terrain_hydraulic_macro_carve",      "terrain_hydraulic_macro_carve.spv",      3, 32 },
-            { "terrain_hydraulic_macro_apply",      "terrain_hydraulic_macro_apply.spv",      7, 20 },
-            { "terrain_hydraulic_macro_accumulate", "terrain_hydraulic_macro_accumulate.spv", 4, 8 },
-            // Device-resident particle runoff: height/material plus persistent scalar
-            // discharge and XY channel-direction memory.  All share 112-byte constants.
-            { "terrain_fluvial_runoff",             "terrain_fluvial_runoff.spv",           9, 112 },
-            { "terrain_fluvial_apply",              "terrain_fluvial_apply.spv",            6, 112 },
-            { "terrain_fluvial_talus",              "terrain_fluvial_talus.spv",            2, 112 },
-            // GPU flow-accumulation for Fluvial (iterative relaxation approximation of
-            // the CPU priority-flood + MFD accumulation — see terrain_flow_*.comp
-            // headers for the algorithm notes).
-            { "terrain_flow_fill",                  "terrain_flow_fill.spv",               3, 16 },
-            { "terrain_flow_weights",                "terrain_flow_weights.spv",             2, 12 },
-            { "terrain_flow_accumulate",             "terrain_flow_accumulate.spv",          3, 8  },
-            // Landscape-Evolution-Model cycle: drainage-area feedback, lake
-            // spill/outlet incision, downstream sediment transport, in-loop
-            // mass wasting and hillslope creep. See docs/dev/
-            // TERRAIN_EROSION_FLUVIAL_REWRITE.md for the pass order and for
-            // which numbers are physical and which are stability limits.
-            { "terrain_lem_restrict",                "terrain_lem_restrict.spv",             2, 20 },
-            { "terrain_lem_prolongate",              "terrain_lem_prolongate.spv",           3, 20 },
-            { "terrain_lem_rain",                    "terrain_lem_rain.spv",                 2, 32 },
-            { "terrain_lem_weights",                 "terrain_lem_weights.spv",              3, 16 },
-            { "terrain_lem_accumulate",              "terrain_lem_accumulate.spv",           4, 8  },
-            { "terrain_lem_incise",                  "terrain_lem_incise.spv",              10, 60 },
-            { "terrain_lem_route",                   "terrain_lem_route.spv",               10, 44 },
-            { "terrain_lem_talus",                   "terrain_lem_talus.spv",                6, 32 },
-            { "terrain_lem_alluvium",                "terrain_lem_alluvium.spv",             6, 32 },
-            { "terrain_lem_diffuse",                 "terrain_lem_diffuse.spv",              5, 20 },
-            { "terrain_lem_finalize",                "terrain_lem_finalize.spv",            11, 40 },
-            // Flat resolution (Garbrecht & Martz). See terrain_lem_flat_seed.comp.
-            { "terrain_lem_flat_seed",               "terrain_lem_flat_seed.spv",            2,  8 },
-            { "terrain_lem_flat_relax",              "terrain_lem_flat_relax.spv",           3,  8 },
-            { "terrain_lem_flat_ramp",               "terrain_lem_flat_ramp.spv",            4, 20 },
-            // Phase 1 GPU foliage parity kernel. Surface producers (terrain/mesh)
-            // share these include/exclude semantics and deterministic candidate RNG.
-            { "foliage_scatter_parity",              "foliage_scatter_parity.spv",           2, 48 },
-            { "foliage_scatter_terrain_accept",      "foliage_scatter_terrain_accept.spv",   7, 16 },
-            // Snow Layer's coupled Jacobi passes. Fourteen persistent scalar
-            // fields keep the entire settle/melt/runoff/geometry solve on the
-            // device; 88-byte constants select the current pass and physical
-            // metre-scale parameters. Gather writes need no float atomics.
-            { "terrain_snow_solver",                 "terrain_snow_solver.spv",             14, 88 },
-        };
-        // Clustered subgroup ops cut P2G same-address contention (see
-        // sim_fluid_p2g_scatter.glsl P2G_CLUSTERED). Same name, bindings and
-        // constants; a device without them keeps the per-lane kernels.
-        const bool clustered = supportsClusteredSubgroups();
-        m_has_shared_float_atomics = m_has_float_atomics && supportsSharedFloatAtomicAdd();
-        for (const auto& d : defs) {
-            std::string spv = d.spv;
-            if (clustered && (std::string(d.name) == "sim_matter_p2g" ||
-                              std::string(d.name) == "sim_matter_stress_p2g" ||
-                              std::string(d.name) == "sim_matter_p2g_fused")) {
-                spv = std::string(d.name) + "_clustered.spv";
-            }
-            createPipeline(d.name, sd + "/" + spv, d.bufs, d.pc);
+    VkShaderModuleCreateInfo smci{};
+    smci.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    smci.codeSize = spv.size() * sizeof(uint32_t);
+    smci.pCode = spv.data();
+    VkShaderModule mod = VK_NULL_HANDLE;
+    traceSimulationPipeline("module.begin", kernelName, spvPath, spv);
+    const VkResult moduleResult =
+        vkCreateShaderModule(m_device, &smci, nullptr, &mod);
+    traceSimulationPipeline("module.end", kernelName, spvPath, spv,
+                            moduleResult);
+    if (moduleResult != VK_SUCCESS)
+      return false;
+
+    VkPushConstantRange pcr{};
+    pcr.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+    pcr.offset = 0;
+    pcr.size = pushConstantSize;
+
+    VkDescriptorSetLayout dl = m_descLayouts[bufferCount];
+    VkPipelineLayoutCreateInfo plci{};
+    plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    plci.setLayoutCount = 1;
+    plci.pSetLayouts = &dl;
+    plci.pushConstantRangeCount = 1;
+    plci.pPushConstantRanges = &pcr;
+
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    traceSimulationPipeline("layout.begin", kernelName, spvPath, spv);
+    const VkResult layoutResult =
+        vkCreatePipelineLayout(m_device, &plci, nullptr, &pipelineLayout);
+    traceSimulationPipeline("layout.end", kernelName, spvPath, spv,
+                            layoutResult);
+    if (layoutResult != VK_SUCCESS) {
+      vkDestroyShaderModule(m_device, mod, nullptr);
+      return false;
+    }
+
+    VkSpecializationMapEntry specEntry{};
+    specEntry.constantID = 0;
+    specEntry.offset = 0;
+    specEntry.size = sizeof(uint32_t);
+    VkSpecializationInfo specInfo{};
+    specInfo.mapEntryCount = 1;
+    specInfo.pMapEntries = &specEntry;
+    specInfo.dataSize = sizeof(uint32_t);
+    specInfo.pData = &specConst0;
+
+    VkComputePipelineCreateInfo cpci{};
+    cpci.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+    cpci.layout = pipelineLayout;
+    cpci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    cpci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+    cpci.stage.module = mod;
+    cpci.stage.pName = "main";
+    if (specConst0 != 0xFFFFFFFFu) {
+      cpci.stage.pSpecializationInfo = &specInfo;
+    }
+
+    VkPipeline pipeline = VK_NULL_HANDLE;
+    traceSimulationPipeline("pipeline.begin", kernelName, spvPath, spv);
+    const VkResult pipelineResult = vkCreateComputePipelines(
+        m_device, m_pipelineCache.handle(), 1, &cpci, nullptr, &pipeline);
+    traceSimulationPipeline("pipeline.end", kernelName, spvPath, spv,
+                            pipelineResult);
+    vkDestroyShaderModule(m_device, mod, nullptr);
+    if (pipelineResult != VK_SUCCESS) {
+      if (pipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(m_device, pipeline, nullptr);
+      }
+      vkDestroyPipelineLayout(m_device, pipelineLayout, nullptr);
+      return false;
+    }
+
+    m_pipelines[kernelName] = {pipeline, pipelineLayout, bufferCount};
+    if (lazy || !m_pipelineCache.status().loaded) {
+      m_pipelineCache.markDirty();
+    }
+    return true;
+  }
+
+  auto ensurePipeline(const std::string &kernelName)
+      -> std::unordered_map<std::string, PipelineEntry>::iterator {
+    auto sit = m_kernelSpecs.find(kernelName);
+    if (sit == m_kernelSpecs.end() || sit->second.attempted) {
+      return m_pipelines.end();
+    }
+    sit->second.attempted = true;
+    if (!createPipeline(
+            kernelName, sit->second.spv_path, sit->second.buffer_count,
+            sit->second.push_constant_size, true, sit->second.spec_const0)) {
+      return m_pipelines.end();
+    }
+    return m_pipelines.find(kernelName);
+  }
+
+  void loadPipelines() {
+    const std::string sd = findShaderDir();
+    // {kernel_name, spv_file, buffer_count, push_constant_size_bytes}
+    // push_constant sizes must match CUDA-side struct sizes exactly.
+    struct KernelDef {
+      const char *name;
+      const char *spv;
+      uint32_t bufs;
+      uint32_t pc;
+    };
+    static const KernelDef defs[] = {
+        // name                             spv file bufs  pc_bytes
+        // name                                  spv bufs  pc_bytes
+        // pc_bytes must match the host-side GpuConstants struct sizes exactly.
+        // FluidP2GGpuConstants             = 9 fields × 4 bytes = 36
+        // FluidG2PGpuConstants             = 16 fields × 4 bytes = 64
+        //   (+affine_damping, +max_affine — APIC clamp parity with CPU)
+        // GridProjectionGpuConstants       = 9 fields × 4 bytes = 36
+        // FluidDensitySplatGpuConstants    = 9 fields × 4 bytes = 36
+        // FluidParticleIntegrateGpuConstants = 9 fields × 4 bytes = 36
+        // GridScalarAdvectionGpuConstants  = 5 fields × 4 bytes = 20
+        // GridVelocityDissipationGpuConstants = 5 fields × 4 bytes = 20
+        // FluidP2GGpuConstants = 36 bytes
+        // (nx,ny,nz,particle_count,component,orig_x,orig_y,orig_z,voxel_size)
+        // FluidDensitySplatGpuConstants = 36 bytes
+        // (nx,ny,nz,particle_count,orig_x,orig_y,orig_z,voxel_size,particle_density)
+        // FluidParticleIntegrateGpuConstants = 36 bytes (9 fields × 4)
+        {"sim_fluid_clear_float", "sim_fluid_clear_float.spv", 1, 36},
+        // Device twin of enforceSolidBoundaries (vel_x, vel_y, vel_z,
+        // fluid_mask); shares FluidP2GGpuConstants = 36 bytes.
+        {"sim_fluid_zero_solid_faces", "sim_fluid_zero_solid_faces.spv", 4, 36},
+        {"sim_fluid_particle_integrate_forces", "sim_fluid_particle_forces.spv",
+         4, 96},
+        {"sim_fluid_surface_columns_clear",
+         "sim_fluid_surface_columns_clear.spv", 1, 96},
+        {"sim_fluid_surface_columns_build",
+         "sim_fluid_surface_columns_build.spv", 2, 96},
+        {"sim_fluid_p2g_scatter", "sim_fluid_p2g_scatter.spv", 5, 36},
+        // Normalize shares the scatter pass's 5-buffer dispatch (vel/weight
+        // at bindings 3/4 — CUDA index parity). Registering it as 2 bound a
+        // 5-binding set on a 2-binding layout (UB): bindings 0/1 hit the
+        // particle position/velocity buffers → positions corrupted per step.
+        {"sim_fluid_p2g_normalize", "sim_fluid_p2g_normalize.spv", 5, 36},
+        {"sim_fluid_normalize_window", "sim_fluid_normalize_window.spv", 2, 40},
+        {"sim_fluid_density_clear", "sim_fluid_density_clear.spv", 1, 36},
+        {"sim_fluid_density_splat", "sim_fluid_density_splat.spv", 2, 36},
+        {"sim_fluid_label_bin_clear", "sim_fluid_label_bin_clear.spv", 2, 80},
+        {"sim_fluid_label_bin_scatter", "sim_fluid_label_bin_scatter.spv", 5,
+         80},
+        {"sim_fluid_label_classify", "sim_fluid_label_classify.spv", 6, 80},
+        {"sim_fluid_label_link_clear", "sim_fluid_label_link_clear.spv", 2, 80},
+        {"sim_fluid_label_link_scatter", "sim_fluid_label_link_scatter.spv", 5,
+         80},
+        {"sim_fluid_label_link_classify", "sim_fluid_label_link_classify.spv",
+         6, 80},
+        // GPU surface reconstruction (FluidSurfaceGpu.cpp,
+        // docs/dev/GPU_YUZEY_LEVEL_SET.md).
+        // All share SurfaceGpuConstants = 128 bytes; integer atomics only.
+        {"sim_surface_clear", "sim_surface_clear.spv", 1, 128},
+        {"sim_surface_bin_assign", "sim_surface_bin_assign.spv", 5, 128},
+        {"sim_surface_scan", "sim_surface_scan.spv", 3, 128},
+        {"sim_surface_scatter", "sim_surface_scatter.spv", 3, 128},
+        {"sim_surface_centres", "sim_surface_centres.spv", 5, 128},
+        {"sim_surface_gather", "sim_surface_gather.spv", 6, 128},
+        {"sim_surface_gather_supported", "sim_surface_gather_supported.spv", 8,
+         128},
+        {"sim_surface_composition_phase", "sim_surface_composition_phase.spv",
+         6, 128},
+        {"sim_surface_smooth", "sim_surface_smooth.spv", 4, 128},
+        {"sim_surface_proxy", "sim_surface_proxy.spv", 3, 128},
+        {"sim_surface_uvw_gather", "sim_surface_uvw_gather.spv", 6, 128},
+        {"sim_surface_uvw_extend", "sim_surface_uvw_extend.spv", 4, 128},
+        {"sim_surface_composition", "sim_surface_composition.spv", 6, 128},
+        // Whitewater spawn potentials. The bucket-grid bin replaces the serial
+        // CSR bin on the host; only INTEGER atomics are used, so these do not
+        // depend on the shaderAtomicFloat support the P2G/splat pair needs.
+        // FoamBinGpuConstants = 10 fields x 4 = 40; the clear kernel shares the
+        // struct and reads only its tail field, so both declare the full range.
+        // 2 buffers: bucket counters AND the expected[] potentials, because
+        // sim_foam_crit is slot-dispatched and no longer visits every particle.
+        {"sim_foam_bin_clear", "sim_foam_bin_clear.spv", 2, 52},
+        {"sim_foam_bin_scatter", "sim_foam_bin_scatter.spv", 4, 52},
+        // FoamCritGpuConstants = 21 fields x 4 = 84.
+        {"sim_foam_crit", "sim_foam_crit.spv", 6, 96},
+        // FoamNeighGpuConstants = 11 fields x 4 = 44. Reads the same bins as
+        // sim_foam_crit but iterates foam, not fluid.
+        {"sim_foam_neigh", "sim_foam_neigh.spv", 5, 56},
+        // FluidG2PGpuConstants = 17 fields x 4 = 68 (has
+        // use_solid_flip_limiter);
+        // buffer 10 = fluid_mask (solid FLIP limiter parity with CUDA).
+        {"sim_fluid_g2p", "sim_fluid_g2p.spv", 10, 68},
+        // Bindings 9..12 are Rankine bond history plus the three columns
+        // of the recoverable deformation gradient. Keep
+        // this descriptor contract in lockstep with GranularGpuDispatch;
+        // the old nine-binding layout leaves damage active while the new
+        // fracture-history telemetry remains permanently zero.
+        {"sim_matter_p2g", "sim_matter_p2g.spv", 10, 40},
+        {"sim_matter_g2p", "sim_matter_g2p.spv", 12, 72},
+        {"sim_matter_stress_update", "sim_matter_stress_update.spv", 18, 128},
+        {"sim_matter_stress_p2g", "sim_matter_stress_p2g.spv", 9, 52},
+        {"sim_matter_settle", "sim_matter_settle.spv", 7, 52},
+        {"sim_matter_advect", "sim_matter_advect.spv", 11, 104},
+        {"sim_matter_occupancy", "sim_matter_occupancy.spv", 6, 40},
+        {"sim_grain_mpm_init", "sim_grain_mpm_init.spv", 13, 32},
+        {"sim_grain_mpm_clear", "sim_grain_mpm_clear.spv", 13, 32},
+        {"sim_grain_mpm_hash", "sim_grain_mpm_hash.spv", 13, 32},
+        {"sim_grain_mpm_gather", "sim_grain_mpm_gather.spv", 13, 32},
+        {"sim_grain_mpm_apply", "sim_grain_mpm_apply.spv", 13, 32},
+        {"sim_grain_mpm_count", "sim_grain_mpm_count.spv", 13, 32},
+        {"sim_grain_fluid_cells", "sim_grain_fluid_cells.spv", 21, 96},
+        {"sim_grain_fluid_refresh", "sim_grain_fluid_refresh.spv", 21, 96},
+        {"sim_grain_fluid_delta", "sim_grain_fluid_delta.spv", 21, 96},
+        {"sim_grain_fluid_reaction", "sim_grain_fluid_reaction.spv", 21, 96},
+        {"sim_grain_fluid_apply", "sim_grain_fluid_apply.spv", 21, 96},
+        {"sim_grain_fluid_clear", "sim_grain_fluid_clear.spv", 21, 96},
+        {"sim_grain_fluid_hash", "sim_grain_fluid_hash.spv", 21, 96},
+        {"sim_grain_fluid_solid", "sim_grain_fluid_solid.spv", 21, 96},
+        {"sim_matter_copy", "sim_matter_copy.spv", 2, 4},
+        {"sim_matter_clear", "sim_matter_clear.spv", 1, 4},
+        {"sim_matter_mpm_pressure_reaction",
+         "sim_matter_mpm_pressure_reaction.spv", 8, 40},
+        {"sim_matter_pores", "sim_matter_pores.spv", 13, 40},
+        {"sim_matter_zero_faces", "sim_matter_zero_faces.spv", 4, 36},
+        {"sim_matter_liquid_wall", "sim_matter_liquid_wall.spv", 12, 32},
+        {"sim_matter_mpm_boundary", "sim_matter_mpm_boundary.spv", 13, 52},
+        {"sim_collider_bvh_query", "sim_collider_bvh_query.spv", 3, 80},
+        {"sim_matter_mpm_particle_contact",
+         "sim_matter_mpm_particle_contact.spv", 10, 48},
+        {"sim_matter_partition", "sim_matter_partition.spv", 4, 8},
+        {"sim_sparse_pressure_clear", "sim_sparse_pressure_clear.spv", 16, 80},
+        {"sim_sparse_pressure_mark", "sim_sparse_pressure_mark.spv", 16, 80},
+        {"sim_sparse_pressure_init", "sim_sparse_pressure_init.spv", 16, 80},
+        {"sim_sparse_pressure_init_mac_weights",
+         "sim_sparse_pressure_init_mac_weights.spv", 18, 80},
+        {"sim_sparse_pressure_jacobi", "sim_sparse_pressure_jacobi.spv", 16,
+         80},
+        {"sim_sparse_pressure_copy", "sim_sparse_pressure_copy.spv", 16, 80},
+        {"sim_sparse_pressure_spmv", "sim_sparse_pressure_spmv.spv", 16, 80},
+        {"sim_sparse_pressure_spmv_mac_weights",
+         "sim_sparse_pressure_spmv_mac_weights.spv", 18, 80},
+        {"sim_sparse_pressure_axpy", "sim_sparse_pressure_axpy.spv", 16, 80},
+        {"sim_sparse_pressure_zpby", "sim_sparse_pressure_zpby.spv", 16, 80},
+        {"sim_sparse_pressure_scatter", "sim_sparse_pressure_scatter.spv", 16,
+         80},
+        {"sim_sparse_pressure_dense_clear",
+         "sim_sparse_pressure_dense_clear.spv", 16, 80},
+        {"sim_matter_grain_list_clear", "sim_matter_grain_list_clear.spv", 17,
+         128},
+        {"sim_matter_grain_hash", "sim_matter_grain_hash.spv", 17, 128},
+        {"sim_matter_grain_list_build", "sim_matter_grain_list_build.spv", 17,
+         128},
+        {"sim_matter_grain_step", "sim_matter_grain_step.spv", 17, 128},
+        {"sim_dem_bond_evaluate", "sim_dem_bond_evaluate.spv", 10, 32},
+        {"sim_dem_bond_kick", "sim_dem_bond_kick.spv", 10, 32},
+        {"sim_dem_bond_orient", "sim_dem_bond_orient.spv", 10, 32},
+        {"sim_matter_grain_active_classify",
+         "sim_matter_grain_active_classify.spv", 17, 128},
+        {"sim_fluid_granular_stress_update",
+         "sim_fluid_granular_stress_update.spv", 15, 124},
+        {"sim_fluid_granular_stress_p2g", "sim_fluid_granular_stress_p2g.spv",
+         4, 48},
+        {"sim_fluid_granular_settle", "sim_fluid_granular_settle.spv", 5, 48},
+        {"sim_fluid_advect_tail", "sim_fluid_advect_tail.spv", 9, 100},
+        {"sim_fluid_occupancy", "sim_fluid_occupancy.spv", 4, 36},
+        // GridProjectionGpuConstants = 13 fields x 4 = 52. The shaders may
+        // declare only the leading fields; the pipeline range must cover the
+        // full struct the host pushes (old 36 made vkCmdPushConstants exceed
+        // the range → validation error / UB on the gas + SOR paths).
+        {"sim_fluid_free_surface_sor", "sim_fluid_free_surface_sor.spv", 3, 52},
+        {"sim_grid_divergence", "sim_grid_divergence.spv", 5, 52},
+        {"sim_gas_divergence", "sim_gas_divergence.spv", 13, 64},
+        {"sim_grid_sor", "sim_grid_sor.spv", 13, 52},
+        {"sim_grid_subtract_gradient", "sim_grid_subtract_gradient.spv", 13,
+         52},
+        // MGPCG free-surface pressure solve (Faz 1 Vulkan port of the CUDA
+        // sim_fluid_cg_* family — plain path only: non-variational, non-GFM,
+        // non-fused reductions, no multigrid; the host's generic path covers
+        // exactly this subset on non-CUDA backends).
+        // Implicit viscous diffusion (red-black Gauss-Seidel). One dispatch
+        // relaxes one colour of ALL THREE MAC components, so a sweep is two
+        // dispatches. FluidViscosityGpuConstants = 13 fields x 4 = 52 —
+        // deliberately the same 52 bytes as GridProjectionGpuConstants so it
+        // shares the size class the registry already validates.
+        // 10 buffers: vel xyz + mask + rhs xyz (the pre-diffusion field) +
+        // solid velocity xyz (the no-slip Dirichlet value).
+        // 11th binding: per-cell kinematic viscosity (per-substance
+        // overrides). The push block stayed 52 bytes — a pad word became
+        // has_nu — so only the descriptor count moved.
+        {"sim_fluid_viscosity_rbgs", "sim_fluid_viscosity_rbgs.spv", 11, 52},
+        // Viscosity solved to a tolerance (Jacobi PCG): 11 RBGS bindings +
+        // r/p/q/d/scalars/partials, then the sparse tile pair, then the
+        // compact MAC pair. Push = 72 bytes (PcgConstants).
+        {"sim_fluid_viscosity_pcg", "sim_fluid_viscosity_pcg.spv", 17, 72},
+        {"sim_sparse_grid_map_clear", "sim_sparse_grid_map_clear.spv", 7, 48},
+        {"sim_sparse_grid_map_seed", "sim_sparse_grid_map_seed.spv", 7, 48},
+        {"sim_sparse_grid_retire", "sim_sparse_grid_retire.spv", 7, 48},
+        {"sim_sparse_grid_remap", "sim_sparse_grid_remap.spv", 7, 48},
+        {"sim_sparse_mac_clear", "sim_sparse_mac_clear.spv", 8, 36},
+        {"sim_sparse_mac_mark", "sim_sparse_mac_mark.spv", 8, 36},
+        {"sim_sparse_mac_reset", "sim_sparse_mac_reset.spv", 8, 36},
+        {"sim_sparse_mac_normalize", "sim_sparse_mac_normalize.spv", 8, 36},
+        {"sim_sparse_mac_publish", "sim_sparse_mac_publish.spv", 8, 36},
+        {"sim_sparse_mac_gather", "sim_sparse_mac_gather.spv", 8, 36},
+        {"sim_sparse_mac_capture", "sim_sparse_mac_capture.spv", 8, 36},
+        {"sim_sparse_mac_p2g", "sim_sparse_mac_p2g.spv", 7, 36},
+        {"sim_sparse_mac_matter_p2g", "sim_sparse_mac_matter_p2g.spv", 12, 40},
+        {"sim_sparse_mac_g2p", "sim_sparse_mac_g2p.spv", 11, 68},
+        {"sim_sparse_mac_matter_g2p", "sim_sparse_mac_matter_g2p.spv", 13, 72},
+        // Compact MAC velocity is canonical
+        // (docs/dev/MATTER_SPARSE_S1_SIVI_GPU.md):
+        // the dense kernel plus the MAC tile map and list.
+        {"sim_sparse_mac_zero_faces", "sim_sparse_mac_zero_faces.spv", 6, 36},
+        {"sim_sparse_mac_matter_zero_faces",
+         "sim_sparse_mac_matter_zero_faces.spv", 6, 36},
+        {"sim_sparse_mac_matter_liquid_wall",
+         "sim_sparse_mac_matter_liquid_wall.spv", 14, 32},
+        {"sim_sparse_mac_divergence", "sim_sparse_mac_divergence.spv", 7, 52},
+        {"sim_sparse_mac_divergence_var", "sim_sparse_mac_divergence_var.spv",
+         13, 52},
+        {"sim_sparse_mac_divergence_porous",
+         "sim_sparse_mac_divergence_porous.spv", 14, 52},
+        {"sim_sparse_mac_subtract_gradient",
+         "sim_sparse_mac_subtract_gradient.spv", 7, 52},
+        {"sim_sparse_mac_subtract_gradient_var",
+         "sim_sparse_mac_subtract_gradient_var.spv", 13, 52},
+        {"sim_sparse_mac_capture_compact", "sim_sparse_mac_capture_compact.spv",
+         8, 36},
+        {"sim_sparse_mac_solid_weights", "sim_sparse_mac_solid_weights.spv", 5,
+         16},
+        {"sim_sparse_mac_advect", "sim_sparse_mac_advect.spv", 11, 100},
+        {"sim_sparse_mac_matter_advect", "sim_sparse_mac_matter_advect.spv", 13,
+         104},
+        {"sim_matter_liquid_drag", "sim_matter_liquid_drag.spv", 19, 48},
+        {"sim_matter_p2g_fused", "sim_matter_p2g_fused.spv", 19, 48},
+        // Shared-memory block P2G + its per-substep block sort (S5,
+        // 2026-11-11).
+        {"sim_matter_p2g_block", "sim_matter_p2g_block.spv", 21, 64},
+        {"sim_matter_p2g_block_sort", "sim_matter_p2g_block_sort.spv", 5, 64},
+        {"sim_matter_mpm_porosity", "sim_matter_mpm_porosity.spv", 14, 32},
+        {"sim_sparse_mac_matter_mpm_porosity",
+         "sim_sparse_mac_matter_mpm_porosity.spv", 16, 32},
+        {"sim_sparse_mac_matter_liquid_drag",
+         "sim_sparse_mac_matter_liquid_drag.spv", 21, 48},
+        {"sim_sparse_mac_viscosity_capture",
+         "sim_sparse_mac_viscosity_capture.spv", 15, 68},
+        {"sim_sparse_mac_viscosity_sweep", "sim_sparse_mac_viscosity_sweep.spv",
+         15, 68},
+        {"sim_sparse_viscosity_clear", "sim_sparse_viscosity_clear.spv", 13,
+         68},
+        {"sim_sparse_viscosity_mark", "sim_sparse_viscosity_mark.spv", 13, 68},
+        {"sim_sparse_viscosity_capture", "sim_sparse_viscosity_capture.spv", 13,
+         68},
+        {"sim_sparse_viscosity_sweep", "sim_sparse_viscosity_sweep.spv", 13,
+         68},
+        {"sim_sparse_viscosity_pcg", "sim_sparse_viscosity_pcg.spv", 19, 72},
+        {"sim_sparse_mac_viscosity_pcg", "sim_sparse_mac_viscosity_pcg.spv", 21,
+         72},
+        {"sim_fluid_divergence", "sim_fluid_divergence.spv", 5, 52},
+        {"sim_fluid_divergence_window", "sim_fluid_divergence_window.spv", 5,
+         76},
+        {"sim_fluid_subtract_gradient", "sim_fluid_subtract_gradient.spv", 5,
+         52},
+        {"sim_fluid_cg_build_diag", "sim_fluid_cg_build_diag.spv", 2, 52},
+        {"sim_fluid_cg_build_diag_window", "sim_fluid_cg_build_diag_window.spv",
+         2, 76},
+        {"sim_fluid_cg_residual_init", "sim_fluid_cg_residual_init.spv", 4, 52},
+        {"sim_fluid_cg_spmv", "sim_fluid_cg_spmv.spv", 4, 52},
+        {"sim_fluid_cg_spmv_window", "sim_fluid_cg_spmv_window.spv", 4, 76},
+        // Variational solid coupling: separate registrations because the
+        // registry binds a FIXED buffer count per kernel name and these carry
+        // the face-weight (+ solid-velocity) arrays on top of the plain set.
+        // Keeping them apart leaves the plain path byte-identical.
+        {"sim_fluid_divergence_var", "sim_fluid_divergence_var.spv", 11, 52},
+        {"sim_fluid_divergence_var_window",
+         "sim_fluid_divergence_var_window.spv", 11, 76},
+        // Porous grains (H1 B5): var divergence whose non-solid faces take
+        // the grains' velocity for their closed part. Matter path only, so
+        // never windowed.
+        {"sim_fluid_divergence_porous", "sim_fluid_divergence_porous.spv", 12,
+         52},
+        {"sim_fluid_subtract_gradient_var",
+         "sim_fluid_subtract_gradient_var.spv", 11, 52},
+        {"sim_fluid_cg_build_diag_var", "sim_fluid_cg_build_diag_var.spv", 5,
+         52},
+        {"sim_fluid_cg_build_diag_var_window",
+         "sim_fluid_cg_build_diag_var_window.spv", 5, 76},
+        {"sim_fluid_cg_spmv_var", "sim_fluid_cg_spmv_var.spv", 7, 52},
+        {"sim_fluid_cg_spmv_var_window", "sim_fluid_cg_spmv_var_window.spv", 7,
+         76},
+        {"sim_fluid_cg_jacobi", "sim_fluid_cg_jacobi.spv", 3, 52},
+        {"sim_fluid_cg_jacobi_window", "sim_fluid_cg_jacobi_window.spv", 3, 76},
+        {"sim_fluid_cg_copy", "sim_fluid_cg_copy.spv", 2, 52},
+        {"sim_fluid_cg_copy_window", "sim_fluid_cg_copy_window.spv", 2, 76},
+        {"sim_fluid_cg_axpy", "sim_fluid_cg_axpy.spv", 2, 52},
+        {"sim_fluid_cg_axpy_window", "sim_fluid_cg_axpy_window.spv", 2, 76},
+        {"sim_fluid_cg_zpby", "sim_fluid_cg_zpby.spv", 2, 52},
+        {"sim_fluid_cg_zpby_window", "sim_fluid_cg_zpby_window.spv", 2, 76},
+        // Double-precision block partials → requires shaderFloat64 (gated in
+        // dispatch(); pipeline creation simply fails without the feature).
+        {"sim_fluid_cg_dot", "sim_fluid_cg_dot.spv", 3, 52},
+        {"sim_fluid_cg_dot_window", "sim_fluid_cg_dot_window.spv", 3, 76},
+        // Device-resident CG scalars (alpha/beta/sigma live on the GPU) —
+        // collapses per-dot submit+fence round-trips into one small download
+        // every K iterations. All three read/write double scalars →
+        // shaderFloat64-gated like sim_fluid_cg_dot.
+        {"sim_fluid_cg_scalar_step", "sim_fluid_cg_scalar_step.spv", 2, 52},
+        {"sim_fluid_cg_axpy_dev", "sim_fluid_cg_axpy_dev.spv", 3, 52},
+        {"sim_fluid_cg_axpy_dev_window", "sim_fluid_cg_axpy_dev_window.spv", 3,
+         76},
+        {"sim_fluid_cg_zpby_dev", "sim_fluid_cg_zpby_dev.spv", 3, 52},
+        {"sim_fluid_cg_zpby_dev_window", "sim_fluid_cg_zpby_dev_window.spv", 3,
+         76},
+        // Fused CG kernels (CUDA name/buffer-order parity, plain branch only;
+        // + axpy2_dev, Vulkan-only fused p/r pair update). Cut the device-
+        // scalar loop from 9 to 6 dispatches+barriers per iteration.
+        {"sim_fluid_cg_jacobi_dot", "sim_fluid_cg_jacobi_dot.spv", 4, 52},
+        {"sim_fluid_cg_jacobi_dot_window", "sim_fluid_cg_jacobi_dot_window.spv",
+         4, 76},
+        {"sim_fluid_cg_spmv_dot", "sim_fluid_cg_spmv_dot.spv", 5, 52},
+        {"sim_fluid_cg_spmv_dot_window", "sim_fluid_cg_spmv_dot_window.spv", 5,
+         76},
+        {"sim_fluid_cg_spmv_dot_var", "sim_fluid_cg_spmv_dot_var.spv", 8, 52},
+        {"sim_fluid_cg_spmv_dot_var_window",
+         "sim_fluid_cg_spmv_dot_var_window.spv", 8, 76},
+        {"sim_fluid_cg_axpy2_dev", "sim_fluid_cg_axpy2_dev.spv", 5, 52},
+        {"sim_fluid_cg_axpy2_dev_window", "sim_fluid_cg_axpy2_dev_window.spv",
+         5, 76},
+        {"sim_grid_advect_scalar", "sim_grid_advect_scalar.spv", 7, 28},
+        {"sim_inventory_advect_scalar", "sim_inventory_advect_scalar.spv", 7,
+         28},
+        {"sim_gas_source_partition", "sim_gas_source_partition.spv", 7, 16},
+        {"sim_inventory_maccormack_scalar",
+         "sim_inventory_maccormack_scalar.spv", 7, 28},
+        {"sim_inventory_conserve", "sim_inventory_conserve.spv", 6, 16},
+        {"sim_inventory_clear", "sim_inventory_clear.spv", 2, 4},
+        {"sim_inventory_deposit", "sim_inventory_deposit.spv", 3, 4},
+        {"sim_inventory_momentum", "sim_inventory_momentum.spv", 7, 20},
+        {"sim_inventory_summary", "sim_inventory_summary.spv", 4, 36},
+        {"sim_audio_gas_flow", "sim_audio_gas_flow.spv", 7, 40},
+        {"sim_inventory_surface_exchange", "sim_inventory_surface_exchange.spv",
+         11, 40},
+        {"sim_inventory_surface_commit", "sim_inventory_surface_commit.spv", 8,
+         8},
+        {"sim_inventory_saturation", "sim_inventory_saturation.spv", 11, 112},
+        {"sim_inventory_rain_fall", "sim_inventory_rain_fall.spv", 4, 32},
+        {"sim_grid_advect_velocity", "sim_grid_advect_velocity.spv", 10, 24},
+        {"sim_grid_velocity_dissipate_clamp", "sim_grid_velocity_dissipate.spv",
+         3, 20},
+        // MacCormack second pass (limited correction). Same 24B push-constant
+        // as the matching first-pass advection kernel; the extra bindings are
+        // the forward-advected field(s) plus a non-aliasing output.
+        {"sim_grid_maccormack_scalar", "sim_grid_maccormack_scalar.spv", 7, 28},
+        {"sim_grid_maccormack_velocity", "sim_grid_maccormack_velocity.spv", 10,
+         24},
+        {"sim_gas_inject", "sim_gas_inject.spv", 7, 112},
+        {"sim_gas_buoyancy", "sim_gas_buoyancy.spv", 3, 44},
+        {"sim_gas_force_evaluate", "sim_gas_force_evaluate.spv", 7, 48},
+        {"sim_gas_force_gather", "sim_gas_force_gather.spv", 6, 48},
+        // Device-resident ballistic particles (particle roadmap Phase 1.5 B).
+        // ParticleBallisticGpuConstants = 40 B, ParticleSpawnGpuConstants = 16
+        // B.
+        {"sim_particle_ballistic", "sim_particle_ballistic.spv", 10, 56},
+        {"sim_particle_spawn", "sim_particle_spawn.spv", 12, 16},
+        // Device collisions + contact events (ParticleDeviceCollision.cpp):
+        // 15 bindings (14 = size_scale, packed into event flags),
+        // ParticleCollideGpuConstants = 48 B.
+        {"sim_particle_collide", "sim_particle_collide.spv", 15, 48},
+        // GPU wet paint (WetPaintGpu.cpp): 17 bindings, WetPaintGpuConstants =
+        // 64 B.
+        {"paint_wet", "paint_wet.spv", 17, 64},
+        // GasCombustionGpuConstants = 18 x 4 = 72 (FG1 air inputs).
+        {"sim_gas_combustion", "sim_gas_combustion.spv", 6, 72},
+        // VelocityMaxAbsGpuConstants = 4 uints = 16
+        {"sim_grid_velocity_max_abs", "sim_grid_velocity_max_abs.spv", 4, 16},
+        {"sim_gas_scalar_dissipate", "sim_gas_scalar_dissipate.spv", 3, 36},
+        {"sim_gas_surface_dust", "sim_gas_surface_dust.spv", 5, 40},
+        {"sim_gas_vorticity_curl", "sim_gas_vorticity_curl.spv", 8, 28},
+        {"sim_gas_vorticity_force", "sim_gas_vorticity_force.spv", 11, 28},
+        {"sim_gas_turbulence_cell", "sim_gas_turbulence_cell.spv", 7, 96},
+        {"sim_gas_turbulence_gather", "sim_gas_turbulence_gather.spv", 9, 96},
+        // Plain collider emission only — pyrolysis moved to sim_msf_* in
+        // Phase 2b, which dropped the 4 material/surface-state bindings.
+        {"sim_gas_collider_source", "sim_gas_collider_source.spv", 10, 20},
+        // Material State Field, three passes. gather integrates per-element
+        // state (4 SSBO, 64B); scatter atomically deposits released mass into
+        // per-cell fixed-point accumulators (7 SSBO, 48B); resolve folds those
+        // into the gas fields and clears them (8 SSBO, 32B).
+        // 80B since Phase 5: material2 carries water's boiling point in
+        // normalized units, which is what pins a wet surface's temperature.
+        {"sim_msf_gather", "sim_msf_gather.spv", 7, 112},
+        {"sim_msf_scatter", "sim_msf_scatter.spv", 7, 48},
+        {"sim_msf_resolve", "sim_msf_resolve.spv", 9, 32},
+        // Ambient / boundary-condition pass (Phase 4). Runs once per frame
+        // outside the domain loop, so it needs no gas bindings at all:
+        // centers + state + thermal sources + domain ambient zones (4 SSBO,
+        // 48B). This is what gives an object outside every domain a defined
+        // temperature.
+        // + queued heat + queued surface water (2026-10-18: 6 SSBO).
+        {"sim_msf_ambient", "sim_msf_ambient.spv", 6, 48},
+        // Block-max majorant for the live dense gas RT path. 2 SSBO
+        // (density in, per-block max out) + 32B push constant.
+        {"sim_gas_majorant", "sim_gas_majorant.spv", 5, 40},
+        // Mesh subdivision (linear 1->4). 2 SSBO (in/out tris) + 16B
+        // push-const.
+        {"subdivide_linear", "subdivide_linear.spv", 2, 16},
+        // Catmull-Clark GPU refine (Phase 3b): per-level sparse stencil apply
+        // (5 SSBO:
+        // inPos/outPos/off/idx/w) then Newell face normals (4 SSBO) gathered
+        // per
+        // vertex atomic-free (4 SSBO). All take a 16B push-const (one uint
+        // count).
+        {"cc_stencil_apply", "cc_stencil_apply.spv", 5, 16},
+        {"cc_face_normals", "cc_face_normals.spv", 4, 16},
+        {"cc_vertex_normals", "cc_vertex_normals.spv", 4, 16},
+        // CC device-resident expand (Phase 3d): indexed refine -> non-indexed
+        // combined
+        // BLAS-layout buffer (6 SSBO: pos/nrm/triIdx/triUV/triMat/out, 16B
+        // push-const).
+        {"cc_expand_blas", "cc_expand_blas.spv", 6, 16},
+        // Terrain erosion (Vulkan port of erosion_kernels.cu). Push-constant
+        // sizes
+        // must match TerrainPhysics::*ParamsGPU (minus pointer fields, which
+        // become
+        // SSBO bindings instead). 1:1 numerical port; see
+        // project_terrain_erosion_gpu_migration memory for follow-up physics
+        // fixes.
+        // ThermalErosionParamsGPU  (no ptrs) = 6 fields x 4 bytes = 24
+        // PostProcessParamsGPU     (no ptrs) = 7 fields x 4 bytes = 28
+        // StreamPowerParamsGPU     (no ptrs) = 9 fields x 4 bytes = 36
+        {"terrain_thermal", "terrain_thermal.spv", 3, 48},
+        {"terrain_thermal_hardness", "terrain_thermal_hardness.spv", 4, 48},
+        {"terrain_thermal_flux", "terrain_thermal_flux.spv", 4, 52},
+        {"terrain_thermal_apply", "terrain_thermal_apply.spv", 3, 52},
+        {"terrain_stream_power", "terrain_stream_power.spv", 5, 36},
+        {"terrain_apply_stream_power", "terrain_apply_stream_power.spv", 2, 36},
+        {"terrain_pit_fill", "terrain_pit_fill.spv", 2, 28},
+        {"terrain_spike_removal", "terrain_spike_removal.spv", 2, 28},
+        {"terrain_edge_preservation", "terrain_edge_preservation.spv", 2, 28},
+        {"terrain_smooth", "terrain_smooth.spv", 2, 8},
+        // Shallow-water "virtual pipes" hydraulic model (revived dead CUDA code
+        // —
+        // never had a working host caller — replaces the droplet Monte-Carlo
+        // model).
+        // FluvialErosionParamsGPU (no ptrs) = 11 fields x 4 bytes = 44.
+        {"terrain_pipe_rain", "terrain_pipe_rain.spv", 1, 16},
+        {"terrain_pipe_flux", "terrain_pipe_flux.spv", 3, 44},
+        {"terrain_pipe_water", "terrain_pipe_water.spv", 3, 44},
+        {"terrain_pipe_erosion", "terrain_pipe_erosion.spv", 4, 44},
+        // WindErosionParamsGPU (no ptrs, +iterationSeed) = 10 fields x 4 bytes
+        // = 40.
+        {"terrain_wind", "terrain_wind.spv", 1, 40},
+        // Monte-Carlo droplet hydraulic erosion (replaces the pipe-model
+        // attempt for
+        // the "Hydraulic" node — user found droplet's organic channel character
+        // clearly better). 28 scalar fields x 4 bytes = 112.
+        {"terrain_hydraulic_droplet", "terrain_hydraulic_droplet.spv", 13, 112},
+        {"terrain_erosion_claim_clear", "terrain_erosion_claim_clear.spv", 1,
+         8},
+        {"terrain_erosion_gather", "terrain_erosion_gather.spv", 2, 16},
+        {"terrain_erosion_gather_apply", "terrain_erosion_gather_apply.spv", 5,
+         12},
+        {"terrain_hydraulic_channel_evolve",
+         "terrain_hydraulic_channel_evolve.spv", 12, 48},
+        {"terrain_hydraulic_channel_apply",
+         "terrain_hydraulic_channel_apply.spv", 4, 8},
+        {"terrain_hydraulic_route_init", "terrain_hydraulic_route_init.spv", 4,
+         20},
+        {"terrain_hydraulic_discharge_route",
+         "terrain_hydraulic_discharge_route.spv", 6, 16},
+        {"terrain_hydraulic_macro_downsample",
+         "terrain_hydraulic_macro_downsample.spv", 6, 16},
+        {"terrain_hydraulic_macro_carve", "terrain_hydraulic_macro_carve.spv",
+         3, 32},
+        {"terrain_hydraulic_macro_apply", "terrain_hydraulic_macro_apply.spv",
+         7, 20},
+        {"terrain_hydraulic_macro_accumulate",
+         "terrain_hydraulic_macro_accumulate.spv", 4, 8},
+        // Device-resident particle runoff: height/material plus persistent
+        // scalar
+        // discharge and XY channel-direction memory.  All share 112-byte
+        // constants.
+        {"terrain_fluvial_runoff", "terrain_fluvial_runoff.spv", 9, 112},
+        {"terrain_fluvial_apply", "terrain_fluvial_apply.spv", 6, 112},
+        {"terrain_fluvial_talus", "terrain_fluvial_talus.spv", 2, 112},
+        // GPU flow-accumulation for Fluvial (iterative relaxation approximation
+        // of
+        // the CPU priority-flood + MFD accumulation — see terrain_flow_*.comp
+        // headers for the algorithm notes).
+        {"terrain_flow_fill", "terrain_flow_fill.spv", 3, 16},
+        {"terrain_flow_weights", "terrain_flow_weights.spv", 2, 12},
+        {"terrain_flow_accumulate", "terrain_flow_accumulate.spv", 3, 8},
+        // Landscape-Evolution-Model cycle: drainage-area feedback, lake
+        // spill/outlet incision, downstream sediment transport, in-loop
+        // mass wasting and hillslope creep. See docs/dev/
+        // TERRAIN_EROSION_FLUVIAL_REWRITE.md for the pass order and for
+        // which numbers are physical and which are stability limits.
+        {"terrain_lem_restrict", "terrain_lem_restrict.spv", 2, 20},
+        {"terrain_lem_prolongate", "terrain_lem_prolongate.spv", 3, 20},
+        {"terrain_lem_rain", "terrain_lem_rain.spv", 2, 32},
+        {"terrain_lem_weights", "terrain_lem_weights.spv", 3, 16},
+        {"terrain_lem_accumulate", "terrain_lem_accumulate.spv", 4, 8},
+        {"terrain_lem_incise", "terrain_lem_incise.spv", 10, 60},
+        {"terrain_lem_route", "terrain_lem_route.spv", 10, 44},
+        {"terrain_lem_talus", "terrain_lem_talus.spv", 6, 32},
+        {"terrain_lem_alluvium", "terrain_lem_alluvium.spv", 6, 32},
+        {"terrain_lem_diffuse", "terrain_lem_diffuse.spv", 5, 20},
+        {"terrain_lem_finalize", "terrain_lem_finalize.spv", 11, 40},
+        // Flat resolution (Garbrecht & Martz). See terrain_lem_flat_seed.comp.
+        {"terrain_lem_flat_seed", "terrain_lem_flat_seed.spv", 2, 8},
+        {"terrain_lem_flat_relax", "terrain_lem_flat_relax.spv", 3, 8},
+        {"terrain_lem_flat_ramp", "terrain_lem_flat_ramp.spv", 4, 20},
+        // Phase 1 GPU foliage parity kernel. Surface producers (terrain/mesh)
+        // share these include/exclude semantics and deterministic candidate
+        // RNG.
+        {"foliage_scatter_parity", "foliage_scatter_parity.spv", 2, 48},
+        {"foliage_scatter_terrain_accept", "foliage_scatter_terrain_accept.spv",
+         7, 16},
+        // Snow Layer's coupled Jacobi passes. Fourteen persistent scalar
+        // fields keep the entire settle/melt/runoff/geometry solve on the
+        // device; 88-byte constants select the current pass and physical
+        // metre-scale parameters. Gather writes need no float atomics.
+        {"terrain_snow_solver", "terrain_snow_solver.spv", 14, 88},
+    };
+    // Clustered subgroup ops cut P2G same-address contention (see
+    // sim_fluid_p2g_scatter.glsl P2G_CLUSTERED). Same name, bindings and
+    // constants; a device without them keeps the per-lane kernels.
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool clustered = supportsClusteredSubgroups();
+    m_has_shared_float_atomics =
+        m_has_float_atomics && supportsSharedFloatAtomicAdd();
+    std::vector<std::string> spvFiles;
+    spvFiles.reserve(std::size(defs));
+    m_kernelSpecs.reserve(std::size(defs));
+    for (const auto &d : defs) {
+      std::string spv = d.spv;
+      if (clustered && (std::string(d.name) == "sim_matter_p2g" ||
+                        std::string(d.name) == "sim_matter_stress_p2g" ||
+                        std::string(d.name) == "sim_matter_p2g_fused")) {
+        spv = std::string(d.name) + "_clustered.spv";
+      }
+      spvFiles.push_back(spv);
+      m_kernelSpecs[d.name] = {sd + "/" + spv, d.bufs, d.pc, false,
+                               0xFFFFFFFFu};
+    }
+    // Per-mode lazy specialized pipelines for paint_wet (RT_PAINT_MODE,
+    // constant_id 0) eliminate uber-shader register/stack/shared-memory
+    // pressure on both PC and Mali.
+    if (auto pwIt = m_kernelSpecs.find("paint_wet");
+        pwIt != m_kernelSpecs.end()) {
+      const KernelSpec baseSpec = pwIt->second;
+      for (uint32_t mode = 0u; mode <= 10u; ++mode) {
+        m_kernelSpecs["paint_wet." + std::to_string(mode)] = {
+            baseSpec.spv_path, baseSpec.buffer_count,
+            baseSpec.push_constant_size, false, mode};
+      }
+    }
+    m_pipelineCache.open(m_device, m_physDevice,
+                         simulationShaderStamp(sd, spvFiles));
+    // Pre-warm only the core interactive/Player kernels at startup so
+    // first-pop has no compile hitch and Player admission logs stay eager;
+    // all other kernels compile lazily on first dispatch using the cache.
+    static constexpr const char *kPrewarmKernels[] = {
+        "sim_particle_spawn",   "sim_particle_ballistic",
+        "sim_particle_collide", "paint_wet.0",
+        "paint_wet.1",          "paint_wet.2",
+        "paint_wet.3",          "paint_wet.6",
+        "paint_wet.7",          "paint_wet.9",
+        "paint_wet.10",         "sim_collider_bvh_query",
+    };
+    size_t prewarmed = 0;
+    for (const char *name : kPrewarmKernels) {
+      auto sit = m_kernelSpecs.find(name);
+      if (sit != m_kernelSpecs.end() && !sit->second.attempted) {
+        sit->second.attempted = true;
+        if (createPipeline(name, sit->second.spv_path, sit->second.buffer_count,
+                           sit->second.push_constant_size, false,
+                           sit->second.spec_const0)) {
+          ++prewarmed;
         }
-        m_clustered_p2g = clustered;
+      }
     }
+    m_pipelineCache.save();
+    const double ms = std::chrono::duration<double, std::milli>(
+                          std::chrono::steady_clock::now() - t0)
+                          .count();
+    const auto &cs = m_pipelineCache.status();
+    const char *cacheState = !cs.enabled ? "off" : (cs.loaded ? "hit" : "cold");
+    SCENE_LOG_INFO(
+        "[SimCompute] Registered " + std::to_string(m_kernelSpecs.size()) +
+        " kernels; pre-warmed " + std::to_string(prewarmed) + " in " +
+        std::to_string(static_cast<int>(ms + 0.5)) +
+        " ms (cache=" + cacheState + "); remaining compile on first dispatch.");
+    m_clustered_p2g = clustered;
+  }
 
-    // VulkanBackend enables shaderSharedFloat32AtomicAdd whenever the physical
-    // device supports it and buffer float atomics are enabled (same extension);
-    // the fallback device enables neither, and m_has_float_atomics is then false.
-    bool supportsSharedFloatAtomicAdd() const {
-        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomics{};
-        atomics.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
-        VkPhysicalDeviceFeatures2 features{};
-        features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
-        features.pNext = &atomics;
-        vkGetPhysicalDeviceFeatures2(m_physDevice, &features);
-        return atomics.shaderSharedFloat32AtomicAdd == VK_TRUE;
+  // VulkanBackend enables shaderSharedFloat32AtomicAdd whenever the physical
+  // device supports it and buffer float atomics are enabled (same extension);
+  // the fallback device enables neither, and m_has_float_atomics is then false.
+  bool supportsSharedFloatAtomicAdd() const {
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT atomics{};
+    atomics.sType =
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
+    VkPhysicalDeviceFeatures2 features{};
+    features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    features.pNext = &atomics;
+    vkGetPhysicalDeviceFeatures2(m_physDevice, &features);
+    return atomics.shaderSharedFloat32AtomicAdd == VK_TRUE;
+  }
+
+  bool supportsClusteredSubgroups() const {
+    VkPhysicalDeviceSubgroupProperties subgroup{};
+    subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
+    VkPhysicalDeviceProperties2 props{};
+    props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props.pNext = &subgroup;
+    vkGetPhysicalDeviceProperties2(m_physDevice, &props);
+    return subgroup.subgroupSize >= 8 &&
+           (subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+           (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) !=
+               0 &&
+           (subgroup.supportedOperations &
+            VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0 &&
+           (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT) !=
+               0;
+  }
+
+  // ── Helpers ───────────────────────────────────────────────────────────────
+
+  uint32_t findMemType(uint32_t typeBits, VkMemoryPropertyFlags props) const {
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+      if ((typeBits & (1u << i)) &&
+          (memProps.memoryTypes[i].propertyFlags & props) == props)
+        return i;
     }
+    return UINT32_MAX;
+  }
 
-    bool supportsClusteredSubgroups() const {
-        VkPhysicalDeviceSubgroupProperties subgroup{};
-        subgroup.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES;
-        VkPhysicalDeviceProperties2 props{};
-        props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
-        props.pNext = &subgroup;
-        vkGetPhysicalDeviceProperties2(m_physDevice, &props);
-        return subgroup.subgroupSize >= 8 &&
-            (subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
-            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT) != 0 &&
-            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) != 0 &&
-            (subgroup.supportedOperations & VK_SUBGROUP_FEATURE_CLUSTERED_BIT) != 0;
+  // ReBAR memory type: DEVICE_LOCAL + HOST_VISIBLE + HOST_COHERENT, but only
+  // when its heap is >=1GB — without resizable BAR the device-local
+  // host-visible window is just 256MB and it is shared with the graphics
+  // backend (this app renders through Vulkan RT), so we must not squat on it.
+  // Buffers landing here run at full VRAM speed for shaders while host
+  // uploads become a plain memcpy over PCIe (no staging copy, no submit, no
+  // fence). Host READS from this memory are write-combined-slow — downloads
+  // must keep going through the cached staging path.
+  uint32_t findBarMemType(uint32_t typeBits) const {
+    VkPhysicalDeviceMemoryProperties memProps{};
+    vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
+    constexpr VkMemoryPropertyFlags kBar = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+      if ((typeBits & (1u << i)) &&
+          (memProps.memoryTypes[i].propertyFlags & kBar) == kBar &&
+          memProps.memoryHeaps[memProps.memoryTypes[i].heapIndex].size >=
+              (VkDeviceSize(1) << 30))
+        return i;
     }
+    return UINT32_MAX;
+  }
 
-    // ── Helpers ───────────────────────────────────────────────────────────────
+  void destroyStaging(Staging &s) {
+    if (s.buf == VK_NULL_HANDLE)
+      return;
+    vkUnmapMemory(m_device, s.mem);
+    vkDestroyBuffer(m_device, s.buf, nullptr);
+    vkFreeMemory(m_device, s.mem, nullptr);
+    s = {};
+  }
 
-    uint32_t findMemType(uint32_t typeBits, VkMemoryPropertyFlags props) const {
-        VkPhysicalDeviceMemoryProperties memProps{};
-        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
-        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-            if ((typeBits & (1u << i)) &&
-                (memProps.memoryTypes[i].propertyFlags & props) == props)
-                return i;
+  bool createStagingBuffer(std::size_t size, bool for_download,
+                           VkBuffer &outBuf, VkDeviceMemory &outMem) {
+    VkBufferCreateInfo bci{};
+    bci.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bci.size = size;
+    bci.usage =
+        VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(m_device, &bci, nullptr, &outBuf) != VK_SUCCESS)
+      return false;
+
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(m_device, outBuf, &req);
+    // Download staging MUST prefer HOST_CACHED: reading back from
+    // write-combined host memory is ~0.3GB/s (measured 13x slower field
+    // downloads vs CUDA). Upload staging prefers plain coherent (WC):
+    // streaming host writes are fastest there and the GPU's DMA read
+    // doesn't have to snoop the CPU cache. Both fall back to whatever
+    // coherent host-visible type the driver offers.
+    constexpr VkMemoryPropertyFlags kBase =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    uint32_t mt = UINT32_MAX;
+    if (for_download) {
+      mt = findMemType(req.memoryTypeBits,
+                       kBase | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
+    } else {
+      VkPhysicalDeviceMemoryProperties memProps{};
+      vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
+      for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
+        const VkMemoryPropertyFlags f = memProps.memoryTypes[i].propertyFlags;
+        if ((req.memoryTypeBits & (1u << i)) && (f & kBase) == kBase &&
+            (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == 0) {
+          mt = i;
+          break;
         }
-        return UINT32_MAX;
+      }
+    }
+    if (mt == UINT32_MAX)
+      mt = findMemType(req.memoryTypeBits, kBase);
+    if (mt == UINT32_MAX) {
+      vkDestroyBuffer(m_device, outBuf, nullptr);
+      return false;
     }
 
-    // ReBAR memory type: DEVICE_LOCAL + HOST_VISIBLE + HOST_COHERENT, but only
-    // when its heap is >=1GB — without resizable BAR the device-local
-    // host-visible window is just 256MB and it is shared with the graphics
-    // backend (this app renders through Vulkan RT), so we must not squat on it.
-    // Buffers landing here run at full VRAM speed for shaders while host
-    // uploads become a plain memcpy over PCIe (no staging copy, no submit, no
-    // fence). Host READS from this memory are write-combined-slow — downloads
-    // must keep going through the cached staging path.
-    uint32_t findBarMemType(uint32_t typeBits) const {
-        VkPhysicalDeviceMemoryProperties memProps{};
-        vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
-        constexpr VkMemoryPropertyFlags kBar =
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
-            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-            if ((typeBits & (1u << i)) &&
-                (memProps.memoryTypes[i].propertyFlags & kBar) == kBar &&
-                memProps.memoryHeaps[memProps.memoryTypes[i].heapIndex].size >=
-                    (VkDeviceSize(1) << 30))
-                return i;
-        }
-        return UINT32_MAX;
+    VkMemoryAllocateInfo ai{};
+    ai.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = mt;
+    if (vkAllocateMemory(m_device, &ai, nullptr, &outMem) != VK_SUCCESS) {
+      vkDestroyBuffer(m_device, outBuf, nullptr);
+      return false;
     }
+    vkBindBufferMemory(m_device, outBuf, outMem, 0);
+    return true;
+  }
 
-    void destroyStaging(Staging& s) {
-        if (s.buf == VK_NULL_HANDLE) return;
-        vkUnmapMemory(m_device, s.mem);
+  // Reserve `size` bytes in the (grow-only, persistently mapped) staging
+  // buffer at its cursor; returns the region's offset or SIZE_MAX. If a
+  // grow is needed while recorded copies still reference the current buffer
+  // (cursor > 0), the old buffer is RETIRED — kept alive until the next
+  // fence — instead of destroyed.
+  std::size_t stagingReserve(Staging &s, std::size_t &cursor, std::size_t size,
+                             bool for_download) {
+    const std::size_t aligned = (size + 7u) & ~std::size_t(7);
+    if (s.buf == VK_NULL_HANDLE || cursor + aligned > s.cap) {
+      const std::size_t cap =
+          std::max<std::size_t>({aligned, s.cap * 2, 1u << 20});
+      if (s.buf != VK_NULL_HANDLE && cursor > 0) {
+        m_stg[m_slot].retired.push_back(s);
+        s = {};
+      } else {
+        destroyStaging(s);
+      }
+      cursor = 0;
+      if (!createStagingBuffer(cap, for_download, s.buf, s.mem))
+        return SIZE_MAX;
+      if (vkMapMemory(m_device, s.mem, 0, cap, 0, &s.mapped) != VK_SUCCESS) {
         vkDestroyBuffer(m_device, s.buf, nullptr);
         vkFreeMemory(m_device, s.mem, nullptr);
         s = {};
+        return SIZE_MAX;
+      }
+      s.cap = cap;
     }
+    const std::size_t base = cursor;
+    cursor += aligned;
+    return base;
+  }
 
-    bool createStagingBuffer(std::size_t size, bool for_download,
-                              VkBuffer& outBuf, VkDeviceMemory& outMem) {
-        VkBufferCreateInfo bci{};
-        bci.sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bci.size        = size;
-        bci.usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-        bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(m_device, &bci, nullptr, &outBuf) != VK_SUCCESS) return false;
+  // Barriers pairing recorded transfer copies with the surrounding compute
+  // dispatches inside the shared command buffer.
+  void recordUploadBarrier() {
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+    vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0,
+                         nullptr, 0, nullptr);
+  }
+  void recordDownloadBarrier() {
+    VkMemoryBarrier mb{};
+    mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    mb.srcAccessMask =
+        VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(
+        m_cmdBuf,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+        VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+  }
 
-        VkMemoryRequirements req{};
-        vkGetBufferMemoryRequirements(m_device, outBuf, &req);
-        // Download staging MUST prefer HOST_CACHED: reading back from
-        // write-combined host memory is ~0.3GB/s (measured 13x slower field
-        // downloads vs CUDA). Upload staging prefers plain coherent (WC):
-        // streaming host writes are fastest there and the GPU's DMA read
-        // doesn't have to snoop the CPU cache. Both fall back to whatever
-        // coherent host-visible type the driver offers.
-        constexpr VkMemoryPropertyFlags kBase =
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-        uint32_t mt = UINT32_MAX;
-        if (for_download) {
-            mt = findMemType(req.memoryTypeBits, kBase | VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
-        } else {
-            VkPhysicalDeviceMemoryProperties memProps{};
-            vkGetPhysicalDeviceMemoryProperties(m_physDevice, &memProps);
-            for (uint32_t i = 0; i < memProps.memoryTypeCount; ++i) {
-                const VkMemoryPropertyFlags f = memProps.memoryTypes[i].propertyFlags;
-                if ((req.memoryTypeBits & (1u << i)) && (f & kBase) == kBase &&
-                    (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) == 0) { mt = i; break; }
-            }
-        }
-        if (mt == UINT32_MAX) mt = findMemType(req.memoryTypeBits, kBase);
-        if (mt == UINT32_MAX) { vkDestroyBuffer(m_device, outBuf, nullptr); return false; }
-
-        VkMemoryAllocateInfo ai{};
-        ai.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        ai.allocationSize  = req.size;
-        ai.memoryTypeIndex = mt;
-        if (vkAllocateMemory(m_device, &ai, nullptr, &outMem) != VK_SUCCESS) {
-            vkDestroyBuffer(m_device, outBuf, nullptr);
-            return false;
-        }
-        vkBindBufferMemory(m_device, outBuf, outMem, 0);
-        return true;
+  void submitCopyImmediate(VkBuffer src, VkBuffer dst, std::size_t size,
+                           VkDeviceSize srcOff, VkDeviceSize dstOff) {
+    // Persistent copy command buffer (separate from the main compute
+    // recording), reset per use — the pool is created resettable (the main
+    // cmdbuf is already vkResetCommandBuffer'd every synchronize()).
+    if (m_copyCmdBuf == VK_NULL_HANDLE) {
+      VkCommandBufferAllocateInfo ai{};
+      ai.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+      ai.commandPool = m_cmdPool;
+      ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+      ai.commandBufferCount = 1;
+      if (vkAllocateCommandBuffers(m_device, &ai, &m_copyCmdBuf) != VK_SUCCESS)
+        return;
     }
+    waitInFlight();
+    vkResetCommandBuffer(m_copyCmdBuf, 0);
 
-    // Reserve `size` bytes in the (grow-only, persistently mapped) staging
-    // buffer at its cursor; returns the region's offset or SIZE_MAX. If a
-    // grow is needed while recorded copies still reference the current buffer
-    // (cursor > 0), the old buffer is RETIRED — kept alive until the next
-    // fence — instead of destroyed.
-    std::size_t stagingReserve(Staging& s, std::size_t& cursor,
-                               std::size_t size, bool for_download) {
-        const std::size_t aligned = (size + 7u) & ~std::size_t(7);
-        if (s.buf == VK_NULL_HANDLE || cursor + aligned > s.cap) {
-            const std::size_t cap = std::max<std::size_t>({ aligned, s.cap * 2, 1u << 20 });
-            if (s.buf != VK_NULL_HANDLE && cursor > 0) {
-                m_stg[m_slot].retired.push_back(s);
-                s = {};
-            } else {
-                destroyStaging(s);
-            }
-            cursor = 0;
-            if (!createStagingBuffer(cap, for_download, s.buf, s.mem)) return SIZE_MAX;
-            if (vkMapMemory(m_device, s.mem, 0, cap, 0, &s.mapped) != VK_SUCCESS) {
-                vkDestroyBuffer(m_device, s.buf, nullptr);
-                vkFreeMemory(m_device, s.mem, nullptr);
-                s = {};
-                return SIZE_MAX;
-            }
-            s.cap = cap;
-        }
-        const std::size_t base = cursor;
-        cursor += aligned;
-        return base;
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(m_copyCmdBuf, &bi);
+
+    VkBufferCopy region{srcOff, dstOff, static_cast<VkDeviceSize>(size)};
+    vkCmdCopyBuffer(m_copyCmdBuf, src, dst, 1, &region);
+    vkEndCommandBuffer(m_copyCmdBuf);
+
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &m_copyCmdBuf;
+    vkQueueSubmit(m_queue, 1, &si, m_fence);
+    const uint64_t serial = ++m_submitSerial;
+    VulkanRT::waitFenceBounded(m_device, m_fence,
+                               "SimulationComputeVulkan.cpp:1740");
+    vkResetFences(m_device, 1, &m_fence);
+    m_completedSerial = std::max(m_completedSerial, serial);
+  }
+
+  // Returns true when a pair was actually opened (so the caller knows to
+  // close it). Silently stops instrumenting once the pool is full rather than
+  // writing past it — an overflow must not corrupt the numbers that were
+  // already valid, and `m_tsOverflowed` records that the table is partial.
+  bool beginKernelTimestamp(std::string_view kernel) {
+    if (!m_timestampsEnabled || !m_queryPool)
+      return false;
+    if (m_tsCursor + 2 > kTimestampSlots) {
+      m_tsOverflowed = true;
+      return false;
     }
+    vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                        m_queryPool, m_tsCursor);
+    m_tsLabels.emplace_back(kernel);
+    m_tsCursor += 2;
+    return true;
+  }
 
-    // Barriers pairing recorded transfer copies with the surrounding compute
-    // dispatches inside the shared command buffer.
-    void recordUploadBarrier() {
-        VkMemoryBarrier mb{};
-        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-        vkCmdPipelineBarrier(m_cmdBuf,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
+  void endKernelTimestamp() {
+    vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                        m_queryPool, m_tsCursor - 1);
+  }
+
+  // Called after the fence in synchronize(), so the results are ready and no
+  // WAIT bit is needed. AVAILABILITY is still requested per query: a pool slot
+  // whose command was recorded but never executed (a path that returned early)
+  // would otherwise contribute a garbage delta.
+  void collectKernelTimestamps() {
+    if (!m_queryPool || m_tsCursor == 0 || m_tsLabels.empty()) {
+      m_tsCursor = 0;
+      m_tsLabels.clear();
+      return;
     }
-    void recordDownloadBarrier() {
-        VkMemoryBarrier mb{};
-        mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-        mb.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(m_cmdBuf,
-                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             0, 1, &mb, 0, nullptr, 0, nullptr);
+    const uint32_t count = m_tsCursor;
+    std::vector<uint64_t> results(static_cast<std::size_t>(count) * 2, 0ull);
+    const VkResult qr = vkGetQueryPoolResults(
+        m_device, m_queryPool, 0, count, results.size() * sizeof(uint64_t),
+        results.data(), sizeof(uint64_t) * 2,
+        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+    if (qr == VK_SUCCESS || qr == VK_NOT_READY) {
+      for (std::size_t pair = 0; pair < m_tsLabels.size(); ++pair) {
+        const std::size_t b = pair * 4; // 2 queries x (value, avail)
+        if (b + 3 >= results.size())
+          break;
+        if (results[b + 1] == 0ull || results[b + 3] == 0ull)
+          continue;
+        const uint64_t t0 = results[b + 0];
+        const uint64_t t1 = results[b + 2];
+        const double ms =
+            gpuTimestampDeltaMs(t0, t1, m_timestampMask, m_timestampPeriodNs);
+        const auto &kernel = m_tsLabels[pair];
+        auto &acc = m_kernelTimes[kernel];
+        acc.ms += ms;
+        acc.calls += 1u;
+        recordPlayerGpuPassSample(kernel, ms, acc.samplesMs);
+        recordWetPaintAggregate(m_kernelTimes, kernel, ms);
+      }
     }
+    m_tsCursor = 0;
+    m_tsLabels.clear();
+  }
 
-    void submitCopyImmediate(VkBuffer src, VkBuffer dst, std::size_t size,
-                              VkDeviceSize srcOff, VkDeviceSize dstOff) {
-        // Persistent copy command buffer (separate from the main compute
-        // recording), reset per use — the pool is created resettable (the main
-        // cmdbuf is already vkResetCommandBuffer'd every synchronize()).
-        if (m_copyCmdBuf == VK_NULL_HANDLE) {
-            VkCommandBufferAllocateInfo ai{};
-            ai.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-            ai.commandPool        = m_cmdPool;
-            ai.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-            ai.commandBufferCount = 1;
-            if (vkAllocateCommandBuffers(m_device, &ai, &m_copyCmdBuf) != VK_SUCCESS) return;
-        }
-        waitInFlight();
-        vkResetCommandBuffer(m_copyCmdBuf, 0);
+  // Submit the recording slot without waiting and move to the next slot of
+  // the ring. The submitted slot keeps its staging (the in-flight copies
+  // read it); retireSlot() releases it once its fence has passed.
+  void submitRecordingAsync() {
+    if (!m_recording)
+      return;
+    if (m_breadcrumbs.enabled())
+      m_breadcrumbs.mark(m_cmdBuf, std::string("async_tail ") +
+                                       VulkanRT::kEndOfCommandBuffer);
+    vkEndCommandBuffer(m_cmdBuf);
+    VkSubmitInfo si{};
+    si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    si.commandBufferCount = 1;
+    si.pCommandBuffers = &m_cmdBuf;
+    m_breadcrumbs.commitSubmit();
+    vkQueueSubmit(m_queue, 1, &si, m_fence);
+    m_inFlightSerial = ++m_submitSerial;
+    m_slotSerial[m_slot] = m_inFlightSerial;
+    ++m_inFlightCount;
+    // The next slot records next. If it is still in flight it is the
+    // OLDEST submission (kSlots-1 back): only that one is waited for, after
+    // this submit so the GPU already has the new work queued.
+    const int next = (m_slot + 1) % kSlots;
+    if (m_slotSerial[next] != 0)
+      retireSlot(next);
+    m_slot = next;
+    m_cmdBuf = m_cmdBufs[m_slot];
+    m_descPool = m_descPools[m_slot];
+    m_fence = m_fences[m_slot];
+    m_descriptorCache.clear(); // the cached sets belong to the other pool
+    m_recordedDispatches = 0;
+    m_recording = false;
+  }
 
-        VkCommandBufferBeginInfo bi{};
-        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        vkBeginCommandBuffer(m_copyCmdBuf, &bi);
-
-        VkBufferCopy region{ srcOff, dstOff, static_cast<VkDeviceSize>(size) };
-        vkCmdCopyBuffer(m_copyCmdBuf, src, dst, 1, &region);
-        vkEndCommandBuffer(m_copyCmdBuf);
-
-        VkSubmitInfo si{};
-        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers    = &m_copyCmdBuf;
-        vkQueueSubmit(m_queue, 1, &si, m_fence);
-        const uint64_t serial = ++m_submitSerial;
-        VulkanRT::waitFenceBounded(m_device, m_fence, "SimulationComputeVulkan.cpp:1740");
-        vkResetFences(m_device, 1, &m_fence);
-        m_completedSerial = std::max(m_completedSerial, serial);
+  // The in-flight slot with the lowest serial (submitted first), or -1.
+  int oldestInFlightSlot() const {
+    int oldest = -1;
+    for (int s = 0; s < kSlots; ++s) {
+      if (m_slotSerial[s] != 0 &&
+          (oldest < 0 || m_slotSerial[s] < m_slotSerial[oldest]))
+        oldest = s;
     }
+    return oldest;
+  }
 
-    // Returns true when a pair was actually opened (so the caller knows to
-    // close it). Silently stops instrumenting once the pool is full rather than
-    // writing past it — an overflow must not corrupt the numbers that were
-    // already valid, and `m_tsOverflowed` records that the table is partial.
-    bool beginKernelTimestamp(std::string_view kernel) {
-        if (!m_timestampsEnabled || !m_queryPool) return false;
-        if (m_tsCursor + 2 > kTimestampSlots) {
-            m_tsOverflowed = true;
-            return false;
-        }
-        vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                            m_queryPool, m_tsCursor);
-        m_tsLabels.emplace_back(kernel);
-        m_tsCursor += 2;
-        return true;
-    }
+  // Wait for one in-flight slot and make it reusable. Slots complete in
+  // submission order (one queue), so callers retire the oldest first.
+  void retireSlot(int slot) {
+    if (m_slotSerial[slot] == 0)
+      return;
+    VulkanRT::waitFenceBounded(m_device, m_fences[slot],
+                               "SimulationComputeVulkan.cpp:retireSlot");
+    vkResetFences(m_device, 1, &m_fences[slot]);
+    vkResetCommandBuffer(m_cmdBufs[slot], 0);
+    vkResetDescriptorPool(m_device, m_descPools[slot], 0);
+    m_completedSerial = std::max(m_completedSerial, m_slotSerial[slot]);
+    m_slotSerial[slot] = 0;
+    --m_inFlightCount;
+    // An in-flight slot is never the recording slot, so its staging is
+    // referenced by nothing any more.
+    releaseSlotStaging(slot);
+  }
 
-    void endKernelTimestamp() {
-        vkCmdWriteTimestamp(m_cmdBuf, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
-                            m_queryPool, m_tsCursor - 1);
+  // Retire, without blocking, every in-flight slot whose fence has passed.
+  void retireCompletedInFlight() {
+    for (int s = oldestInFlightSlot(); s >= 0; s = oldestInFlightSlot()) {
+      if (vkGetFenceStatus(m_device, m_fences[s]) != VK_SUCCESS)
+        break;
+      retireSlot(s);
     }
+  }
 
-    // Called after the fence in synchronize(), so the results are ready and no
-    // WAIT bit is needed. AVAILABILITY is still requested per query: a pool slot
-    // whose command was recorded but never executed (a path that returned early)
-    // would otherwise contribute a garbage delta.
-    void collectKernelTimestamps() {
-        if (!m_queryPool || m_tsCursor == 0 || m_tsLabels.empty()) {
-            m_tsCursor = 0;
-            m_tsLabels.clear();
-            return;
-        }
-        const uint32_t count = m_tsCursor;
-        std::vector<uint64_t> results(static_cast<std::size_t>(count) * 2, 0ull);
-        const VkResult qr = vkGetQueryPoolResults(
-            m_device, m_queryPool, 0, count,
-            results.size() * sizeof(uint64_t), results.data(),
-            sizeof(uint64_t) * 2,
-            VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
-        if (qr == VK_SUCCESS || qr == VK_NOT_READY) {
-            for (std::size_t pair = 0; pair < m_tsLabels.size(); ++pair) {
-                const std::size_t b = pair * 4;       // 2 queries x (value, avail)
-                if (b + 3 >= results.size()) break;
-                if (results[b + 1] == 0ull || results[b + 3] == 0ull) continue;
-                const uint64_t t0 = results[b + 0];
-                const uint64_t t1 = results[b + 2];
-                const double ms = gpuTimestampDeltaMs(t0, t1, m_timestampMask,
-                                                      m_timestampPeriodNs);
-                const auto& kernel = m_tsLabels[pair];
-                auto& acc = m_kernelTimes[kernel];
-                acc.ms += ms;
-                acc.calls += 1u;
-                recordPlayerGpuPassSample(kernel, ms, acc.samplesMs);
-                recordWetPaintAggregate(m_kernelTimes, kernel, ms);
-            }
-        }
-        m_tsCursor = 0;
-        m_tsLabels.clear();
+  // Wait until `serial` has completed, oldest submission first.
+  void waitInFlightThrough(uint64_t serial) {
+    for (int s = oldestInFlightSlot(); s >= 0 && m_completedSerial < serial;
+         s = oldestInFlightSlot()) {
+      retireSlot(s);
     }
+  }
 
-    // Submit the recording slot without waiting and move to the next slot of
-    // the ring. The submitted slot keeps its staging (the in-flight copies
-    // read it); retireSlot() releases it once its fence has passed.
-    void submitRecordingAsync() {
-        if (!m_recording) return;
-        if (m_breadcrumbs.enabled())
-            m_breadcrumbs.mark(m_cmdBuf, std::string("async_tail ") + VulkanRT::kEndOfCommandBuffer);
-        vkEndCommandBuffer(m_cmdBuf);
-        VkSubmitInfo si{};
-        si.sType              = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers    = &m_cmdBuf;
-        m_breadcrumbs.commitSubmit();
-        vkQueueSubmit(m_queue, 1, &si, m_fence);
-        m_inFlightSerial = ++m_submitSerial;
-        m_slotSerial[m_slot] = m_inFlightSerial;
-        ++m_inFlightCount;
-        // The next slot records next. If it is still in flight it is the
-        // OLDEST submission (kSlots-1 back): only that one is waited for, after
-        // this submit so the GPU already has the new work queued.
-        const int next = (m_slot + 1) % kSlots;
-        if (m_slotSerial[next] != 0) retireSlot(next);
-        m_slot = next;
-        m_cmdBuf   = m_cmdBufs[m_slot];
-        m_descPool = m_descPools[m_slot];
-        m_fence    = m_fences[m_slot];
-        m_descriptorCache.clear();  // the cached sets belong to the other pool
-        m_recordedDispatches = 0;
-        m_recording = false;
-    }
+  // Wait for every in-flight slot and make them reusable.
+  void waitInFlight() {
+    for (int s = oldestInFlightSlot(); s >= 0; s = oldestInFlightSlot())
+      retireSlot(s);
+  }
 
-    // The in-flight slot with the lowest serial (submitted first), or -1.
-    int oldestInFlightSlot() const {
-        int oldest = -1;
-        for (int s = 0; s < kSlots; ++s) {
-            if (m_slotSerial[s] != 0 && (oldest < 0 || m_slotSerial[s] < m_slotSerial[oldest]))
-                oldest = s;
-        }
-        return oldest;
-    }
+  // Nothing recorded, nothing in flight: every staging region the recorded
+  // copies used has been consumed. The delayed-readback path never runs the
+  // full synchronize(), so without this the upload cursor only ever grew.
+  void releaseStagingIfIdle() {
+    if (m_recording || inFlight() || m_batchActive)
+      return;
+    for (int s = 0; s < kSlots; ++s)
+      releaseSlotStaging(s);
+  }
 
-    // Wait for one in-flight slot and make it reusable. Slots complete in
-    // submission order (one queue), so callers retire the oldest first.
-    void retireSlot(int slot) {
-        if (m_slotSerial[slot] == 0) return;
-        VulkanRT::waitFenceBounded(m_device, m_fences[slot], "SimulationComputeVulkan.cpp:retireSlot");
-        vkResetFences(m_device, 1, &m_fences[slot]);
-        vkResetCommandBuffer(m_cmdBufs[slot], 0);
-        vkResetDescriptorPool(m_device, m_descPools[slot], 0);
-        m_completedSerial = std::max(m_completedSerial, m_slotSerial[slot]);
-        m_slotSerial[slot] = 0;
-        --m_inFlightCount;
-        // An in-flight slot is never the recording slot, so its staging is
-        // referenced by nothing any more.
-        releaseSlotStaging(slot);
-    }
+  // The slot's submission has completed (fence waited) and nothing records
+  // into it: its copies are done, its staging is free again.
+  void releaseSlotStaging(int slot) {
+    auto &st = m_stg[slot];
+    for (const auto &pd : st.pending)
+      std::memcpy(pd.host, pd.src, pd.size);
+    st.pending.clear();
+    for (auto &s : st.retired)
+      destroyStaging(s);
+    st.retired.clear();
+    st.upCursor = 0;
+    st.downCursor = 0;
+  }
 
-    // Retire, without blocking, every in-flight slot whose fence has passed.
-    void retireCompletedInFlight() {
-        for (int s = oldestInFlightSlot(); s >= 0; s = oldestInFlightSlot()) {
-            if (vkGetFenceStatus(m_device, m_fences[s]) != VK_SUCCESS) break;
-            retireSlot(s);
-        }
+  bool ensureRecording() {
+    if (m_recording)
+      return true;
+    VkCommandBufferBeginInfo bi{};
+    bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(m_cmdBuf, &bi) != VK_SUCCESS)
+      return false;
+    m_recording = true;
+    if (m_breadcrumbs.ensure(m_physDevice, m_device))
+      m_breadcrumbs.beginSubmit();
+    if (m_deferFrameSubmit) {
+      // Without the per-frame host fence nothing orders this submission
+      // after the render frame queued ahead of it, which still reads
+      // simulation buffers (vertex-pulled particles, wet paint atlas).
+      // A write here must wait for those reads (WAR) and see every earlier
+      // write: one barrier against ALL earlier commands on this queue. It
+      // also subsumes the in-flight barrier below.
+      VkMemoryBarrier mb{};
+      mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+      mb.dstAccessMask =
+          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+          VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+      vkCmdPipelineBarrier(m_cmdBuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                               VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           0, 1, &mb, 0, nullptr, 0, nullptr);
+    } else if (inFlight()) {
+      // The in-flight buffer ends with a compute->compute barrier, which
+      // does not order a TRANSFER here (an upload copy overwriting a
+      // buffer a queued dispatch still reads). One full barrier: its
+      // first scope is every earlier command on this queue, including
+      // the other submission.
+      VkMemoryBarrier mb{};
+      mb.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+      mb.srcAccessMask =
+          VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+      mb.dstAccessMask =
+          VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+          VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+      vkCmdPipelineBarrier(
+          m_cmdBuf,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+          VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
+          0, 1, &mb, 0, nullptr, 0, nullptr);
     }
-
-    // Wait until `serial` has completed, oldest submission first.
-    void waitInFlightThrough(uint64_t serial) {
-        for (int s = oldestInFlightSlot(); s >= 0 && m_completedSerial < serial;
-             s = oldestInFlightSlot()) {
-            retireSlot(s);
-        }
+    // A query must be reset before it is written, and the reset has to be
+    // recorded into the same command buffer that writes it.
+    if (m_timestampsEnabled && m_queryPool) {
+      vkCmdResetQueryPool(m_cmdBuf, m_queryPool, 0, kTimestampSlots);
+      m_tsCursor = 0;
+      m_tsOverflowed = false;
+      m_tsLabels.clear();
     }
-
-    // Wait for every in-flight slot and make them reusable.
-    void waitInFlight() {
-        for (int s = oldestInFlightSlot(); s >= 0; s = oldestInFlightSlot()) retireSlot(s);
-    }
-
-    // Nothing recorded, nothing in flight: every staging region the recorded
-    // copies used has been consumed. The delayed-readback path never runs the
-    // full synchronize(), so without this the upload cursor only ever grew.
-    void releaseStagingIfIdle() {
-        if (m_recording || inFlight() || m_batchActive) return;
-        for (int s = 0; s < kSlots; ++s) releaseSlotStaging(s);
-    }
-
-    // The slot's submission has completed (fence waited) and nothing records
-    // into it: its copies are done, its staging is free again.
-    void releaseSlotStaging(int slot) {
-        auto& st = m_stg[slot];
-        for (const auto& pd : st.pending) std::memcpy(pd.host, pd.src, pd.size);
-        st.pending.clear();
-        for (auto& s : st.retired) destroyStaging(s);
-        st.retired.clear();
-        st.upCursor = 0;
-        st.downCursor = 0;
-    }
-
-    bool ensureRecording() {
-        if (m_recording) return true;
-        VkCommandBufferBeginInfo bi{};
-        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        if (vkBeginCommandBuffer(m_cmdBuf, &bi) != VK_SUCCESS) return false;
-        m_recording = true;
-        if (m_breadcrumbs.ensure(m_physDevice, m_device)) m_breadcrumbs.beginSubmit();
-        if (m_deferFrameSubmit) {
-            // Without the per-frame host fence nothing orders this submission
-            // after the render frame queued ahead of it, which still reads
-            // simulation buffers (vertex-pulled particles, wet paint atlas).
-            // A write here must wait for those reads (WAR) and see every earlier
-            // write: one barrier against ALL earlier commands on this queue. It
-            // also subsumes the in-flight barrier below.
-            VkMemoryBarrier mb{};
-            mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            mb.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
-            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(m_cmdBuf,
-                                 VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0, 1, &mb, 0, nullptr, 0, nullptr);
-        } else if (inFlight()) {
-            // The in-flight buffer ends with a compute->compute barrier, which
-            // does not order a TRANSFER here (an upload copy overwriting a
-            // buffer a queued dispatch still reads). One full barrier: its
-            // first scope is every earlier command on this queue, including
-            // the other submission.
-            VkMemoryBarrier mb{};
-            mb.sType         = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
-            mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-            mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT |
-                               VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
-            vkCmdPipelineBarrier(m_cmdBuf,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 0, 1, &mb, 0, nullptr, 0, nullptr);
-        }
-        // A query must be reset before it is written, and the reset has to be
-        // recorded into the same command buffer that writes it.
-        if (m_timestampsEnabled && m_queryPool) {
-            vkCmdResetQueryPool(m_cmdBuf, m_queryPool, 0, kTimestampSlots);
-            m_tsCursor = 0;
-            m_tsOverflowed = false;
-            m_tsLabels.clear();
-        }
-        return true;
-    }
+    return true;
+  }
 };
 
-// ── Factory ───────────────────────────────────────────────────────────────────
+// ── Factory
+// ───────────────────────────────────────────────────────────────────
 
-std::unique_ptr<ISimulationComputeBackend>
-createVulkanSimulationComputeBackend(const SimulationComputeVulkanContext& ctx) {
-    if (!ctx.device || !ctx.physical_device || !ctx.compute_queue) return nullptr;
-    auto backend = std::make_unique<VulkanSimulationComputeBackend>(
-        static_cast<VkDevice>(ctx.device),
-        static_cast<VkPhysicalDevice>(ctx.physical_device),
-        static_cast<VkQueue>(ctx.compute_queue),
-        ctx.queue_family_index,
-        ctx.shader_atomic_float_enabled,
-        ctx.shader_float64_enabled);
-    if (!backend->supportsDispatch()) return nullptr;
-    return backend;
+std::unique_ptr<ISimulationComputeBackend> createVulkanSimulationComputeBackend(
+    const SimulationComputeVulkanContext &ctx) {
+  if (!ctx.device || !ctx.physical_device || !ctx.compute_queue)
+    return nullptr;
+  auto backend = std::make_unique<VulkanSimulationComputeBackend>(
+      static_cast<VkDevice>(ctx.device),
+      static_cast<VkPhysicalDevice>(ctx.physical_device),
+      static_cast<VkQueue>(ctx.compute_queue), ctx.queue_family_index,
+      ctx.shader_atomic_float_enabled, ctx.shader_float64_enabled);
+  if (!backend->supportsDispatch())
+    return nullptr;
+  return backend;
 }
 
 } // namespace RayTrophiSim
 
-// The Vulkan compute context filled in by VulkanBackend init (globals.h). Declared
-// here directly to avoid pulling the heavy globals.h into this device TU.
+// The Vulkan compute context filled in by VulkanBackend init (globals.h).
+// Declared here directly to avoid pulling the heavy globals.h into this device
+// TU.
 extern RayTrophiSim::SimulationComputeVulkanContext g_vulkan_sim_compute_ctx;
 
 namespace RayTrophiSim {
 
-// Lazily-created, process-wide compute backend shared by non-simulation GPU work
-// (mesh subdivision, etc.), independent of whether a GPU sim domain is active.
-// Returns nullptr when no Vulkan compute device is available (caller falls back to
-// CPU). The backend is created once on first use and reused; it is NOT torn down
-// (matches the lifetime of the Vulkan device, which outlives all mesh ops).
+// Lazily-created, process-wide compute backend shared by non-simulation GPU
+// work (mesh subdivision, etc.), independent of whether a GPU sim domain is
+// active. Returns nullptr when no Vulkan compute device is available (caller
+// falls back to CPU). The backend is created once on first use and reused; it
+// is NOT torn down (matches the lifetime of the Vulkan device, which outlives
+// all mesh ops).
 static std::unique_ptr<ISimulationComputeBackend> s_sharedMeshBackend;
-static void* s_sharedMeshBackendDevice = nullptr;
+static void *s_sharedMeshBackendDevice = nullptr;
 static std::recursive_mutex s_sharedMeshComputeMutex;
 
-std::recursive_mutex& sharedMeshComputeMutex() {
-    return s_sharedMeshComputeMutex;
+std::recursive_mutex &sharedMeshComputeMutex() {
+  return s_sharedMeshComputeMutex;
 }
 
-ISimulationComputeBackend* acquireSharedMeshComputeBackend() {
-    std::lock_guard<std::recursive_mutex> lock(s_sharedMeshComputeMutex);
-    void* curDev = g_vulkan_sim_compute_ctx.device;
-    // Backend switch (e.g. Vulkan RT -> OptiX -> Vulkan RT): the VkDevice our cached
-    // backend was built on was destroyed and a new one created. releaseSharedMeshCompute-
-    // Backend() should have run during the old device's teardown (s_backend then null); if
-    // some path skipped it, LEAK the stale backend — its VkDevice is gone, so running its
-    // destructor would dereference freed handles (the createBuffer crash) — and rebuild.
-    if (s_sharedMeshBackend && curDev && curDev != s_sharedMeshBackendDevice) {
-        s_sharedMeshBackend.release();   // intentional: stale device, cannot safely destruct
-        s_sharedMeshBackendDevice = nullptr;
-    }
-    // Retry creation until the Vulkan device exists (subdivision may run before the
-    // render backend finishes filling g_vulkan_sim_compute_ctx); once created, reuse.
-    if (!s_sharedMeshBackend && curDev) {
-        s_sharedMeshBackend = createVulkanSimulationComputeBackend(g_vulkan_sim_compute_ctx);
-        s_sharedMeshBackendDevice = curDev;
-    }
-    return (s_sharedMeshBackend && s_sharedMeshBackend->supportsDispatch()) ? s_sharedMeshBackend.get() : nullptr;
-}
-
-// Tear down the shared mesh compute backend. MUST be called while its VkDevice is still
-// valid (i.e. before vkDestroyDevice) so its buffers/pipelines are freed cleanly; a later
-// acquire then rebuilds against whatever device is current.
-void releaseSharedMeshComputeBackend() {
-    std::lock_guard<std::recursive_mutex> lock(s_sharedMeshComputeMutex);
-    s_sharedMeshBackend.reset();
+ISimulationComputeBackend *acquireSharedMeshComputeBackend() {
+  std::lock_guard<std::recursive_mutex> lock(s_sharedMeshComputeMutex);
+  void *curDev = g_vulkan_sim_compute_ctx.device;
+  // Backend switch (e.g. Vulkan RT -> OptiX -> Vulkan RT): the VkDevice our
+  // cached backend was built on was destroyed and a new one created.
+  // releaseSharedMeshCompute- Backend() should have run during the old device's
+  // teardown (s_backend then null); if some path skipped it, LEAK the stale
+  // backend — its VkDevice is gone, so running its destructor would dereference
+  // freed handles (the createBuffer crash) — and rebuild.
+  if (s_sharedMeshBackend && curDev && curDev != s_sharedMeshBackendDevice) {
+    s_sharedMeshBackend
+        .release(); // intentional: stale device, cannot safely destruct
     s_sharedMeshBackendDevice = nullptr;
+  }
+  // Retry creation until the Vulkan device exists (subdivision may run before
+  // the render backend finishes filling g_vulkan_sim_compute_ctx); once
+  // created, reuse.
+  if (!s_sharedMeshBackend && curDev) {
+    s_sharedMeshBackend =
+        createVulkanSimulationComputeBackend(g_vulkan_sim_compute_ctx);
+    s_sharedMeshBackendDevice = curDev;
+  }
+  return (s_sharedMeshBackend && s_sharedMeshBackend->supportsDispatch())
+             ? s_sharedMeshBackend.get()
+             : nullptr;
+}
+
+// Tear down the shared mesh compute backend. MUST be called while its VkDevice
+// is still valid (i.e. before vkDestroyDevice) so its buffers/pipelines are
+// freed cleanly; a later acquire then rebuilds against whatever device is
+// current.
+void releaseSharedMeshComputeBackend() {
+  std::lock_guard<std::recursive_mutex> lock(s_sharedMeshComputeMutex);
+  s_sharedMeshBackend.reset();
+  s_sharedMeshBackendDevice = nullptr;
 }
 
 } // namespace RayTrophiSim

@@ -5,6 +5,14 @@
 namespace Paint {
 
 inline constexpr int defaultBalloonCount = 5;
+#ifdef __ANDROID__
+// Android Player caps authored wet-paint surfaces to 512 on project load
+// (matches Android 512 texture staging; 4x less GPU memory and Mali paint cost).
+// F2 / game settings resize can still override per session.
+inline constexpr int defaultMaxPaintResolution = 512;
+#else
+inline constexpr int defaultMaxPaintResolution = 4096;
+#endif
 
 inline void applyBalloonPlayerDefaults(nlohmann::json& config) {
     if (!config.is_object()) {

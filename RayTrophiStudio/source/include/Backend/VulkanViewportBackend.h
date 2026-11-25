@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterViewportFrameRing.h"
@@ -66,19 +66,28 @@ private:
     VkDeviceSize m_externalMaterialBufferSize = 0;
     uint32_t m_externalMaterialCount = 0;
 
-    // ── Material preview scene-feature specialization (O3) ──────────────────
-    // material_preview_frag carries RT_SPEC_TERRAIN / _GRAPH / _WEATHER / _GLASS
-    // spec constants (ids 0..3, default true). The main + covered pipelines are
-    // created with only the features the scene can reach, and rebuilt when a
-    // new one appears. Implementation: Viewport/MaterialPreviewCoverage.cpp.
+    // ── Material preview scene-feature specialization (O3 / O3c) ────────────
+    // material_preview_frag carries spec constants (ids 0..7, default true).
+    // The main + covered pipelines are created with only the features the scene
+    // can reach, and rebuilt when a new one appears.
+    // Implementation: Viewport/MaterialPreviewCoverage.cpp.
 public:
-    static constexpr uint32_t kMpSpecTerrain = 1u << 0;
-    static constexpr uint32_t kMpSpecGraph   = 1u << 1;
-    static constexpr uint32_t kMpSpecWeather = 1u << 2;
-    static constexpr uint32_t kMpSpecGlass   = 1u << 3;
-    static constexpr uint32_t kMpSpecAll     = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather |
-                                               kMpSpecGlass;
-    static constexpr uint32_t kMpSpecCount   = 4;
+    static constexpr uint32_t kMpSpecTerrain     = 1u << 0;
+    static constexpr uint32_t kMpSpecGraph       = 1u << 1;
+    static constexpr uint32_t kMpSpecWeather     = 1u << 2;
+    static constexpr uint32_t kMpSpecGlass       = 1u << 3;
+    static constexpr uint32_t kMpSpecExtLobes    = 1u << 4;
+    static constexpr uint32_t kMpSpecAltLighting = 1u << 5;
+    static constexpr uint32_t kMpSpecFallbackSky = 1u << 6;
+    static constexpr uint32_t kMpSpecRayFusionGi = 1u << 7;
+    static constexpr uint32_t kMpSpecOptTex      = 1u << 8;
+    static constexpr uint32_t kMpSpecClearcoat   = 1u << 9;
+    static constexpr uint32_t kMpSpecAll         = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather |
+                                                   kMpSpecGlass | kMpSpecExtLobes |
+                                                   kMpSpecAltLighting | kMpSpecFallbackSky |
+                                                   kMpSpecRayFusionGi | kMpSpecOptTex |
+                                                   kMpSpecClearcoat;
+    static constexpr uint32_t kMpSpecCount       = 10;
     struct MaterialPreviewSpecStorage {
         VkSpecializationMapEntry entries[kMpSpecCount]{};
         VkBool32 values[kMpSpecCount]{};

@@ -162,7 +162,7 @@ SimulationClockResult SimulationClock::tick(SceneData& scene, const SimulationCl
     }
     if (defer_submit) {
         RTPERF_FRAME_SCOPE("simulation.compute_submit");
-        auto& compute = scene.getSimulationWorld().compute();
+        auto& compute = scene.simulation_world.compute();
         compute.submitAsync();             // no-op when wet paint already submitted
         compute.setDeferFrameSubmit(false); // never leaks into a non-owner caller
     }

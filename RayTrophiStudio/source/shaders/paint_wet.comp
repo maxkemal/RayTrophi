@@ -29,6 +29,10 @@
 //   * The colour layer is a paint LAYER (alpha = coverage) composited over the
 //     surface's original base colour into the output page.
 layout(local_size_x = 256) in;
+// Per-mode pipeline specialization (0xFFFFFFFFu = dynamic pc.mode fallback).
+layout(constant_id = 0) const uint RT_PAINT_MODE = 0xFFFFFFFFu;
+const uint RESET_INIT_ONLY_BIT = 16u; // pc._p1 bit 4: zero paint/scratch buffers only
+const uint CHANNEL_RANGE_BIT = 32u; // modes 7/8: source_count = first tile
 
 const uint TILE = 32u;
 const uint TEXELS_PER_THREAD = 4u;   // 32*32 / 256
@@ -52,7 +56,7 @@ const uint COMPACT_CHANNELS = 4u; // pc._p1 bit 2
 const uint SOURCE_DABS = 0u;
 const uint SOURCE_EVENTS = 1u;
 
-const uint STATS_STRIDE = 16u;
+const uint STATS_STRIDE = 18u;
 const uint ST_ACTIVE_TILES = 0u;
 const uint ST_DIRTY_MIN_X = 1u;
 const uint ST_DIRTY_MIN_Y = 2u;
@@ -69,11 +73,23 @@ const uint ST_SUM_B = 12u;
 const uint ST_WET_TEXELS = 13u;
 const uint ST_ROUGHNESS_TEXELS = 14u;
 const uint ST_NORMAL_TEXELS = 15u;
+const uint ST_PICTURE_TEXELS = 16u;    // colourable picture texels (valid texels of picture surfaces)
+const uint ST_PICTURE_REVEALED = 17u;  // of those, revealed (w >= 0.5)
 
 const uint SURFACE_OIL = 1u;
 const uint SURFACE_ROUGHNESS = 2u;
 const uint SURFACE_HEIGHT_NORMAL = 4u;
 const uint SURFACE_REVEAL_OPACITY = 8u;
+// Hidden picture: flags bit 4 = surface has a picture, bits 8..15 outline opacity, bits 16..23 hue
+// tolerance (byte of deg/180), bits 24..31 hint (byte of 0..1). Source plane 6
+// of the channel atlas is the picture (RGBA8 sRGB); pc._p1 bit 3 = plane exists.
+const uint SURFACE_PICTURE = 16u;
+const uint PICTURE_PLANE_BIT = 8u;
+// Canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md): the output page
+// is the paint (and picture) alone, PREMULTIPLIED, alpha = coverage; the
+// renderer composites it over the material's tiled base texture. The base
+// plane's rgb is only the pickup colour then, its alpha is 0.
+const uint SURFACE_OVERLAY = 32u;
 
 struct Surface {
     uint width; uint height; uint page_offset; uint tile_offset;
@@ -116,7 +132,7 @@ layout(set=0, binding=2) readonly buffer PosValid { vec4 pos_valid[]; };   // w:
 layout(set=0, binding=3) readonly buffer FlowNormal { vec4 flow_normal[]; }; // flow_x, flow_y, slope, oct normal
 layout(set=0, binding=4) readonly buffer BaseColor { uint base_color[]; };
 layout(set=0, binding=5) buffer Color { uint color[]; };
-layout(set=0, binding=6) buffer State { vec4 state[]; };                   // wet, pigment, thickness, -
+layout(set=0, binding=6) buffer State { vec4 state[]; };                   // wet, pigment, thickness, revealed (hidden picture)
 layout(set=0, binding=7) buffer ColorScratch { uint color_scratch[]; };
 layout(set=0, binding=8) buffer StateScratch { vec4 state_scratch[]; };
 layout(set=0, binding=9) buffer Output { uint out_color[]; };
@@ -274,12 +290,73 @@ vec4 carryPaint(vec4 dst, vec4 src, float alpha) {
     return dst;
 }
 
+
+// ── hidden picture ──────────────────────────────────────────────────────────
+
+bool pictureOn(Surface s) {
+    return (pc._p1 & PICTURE_PLANE_BIT) != 0u && pc._p0 != 0u && (s.flags & SURFACE_PICTURE) != 0u;
+}
+uint pictureTexel(uint ti) { return base_color[6u * pc._p0 + ti]; }
+// 0 not part of the picture, 1 achromatic (pure black outline / white / gray),
+// 2 colourable (hidden until matching or component paint lands).
+// Keep the achromatic threshold tight (sat < 0.10 or val < 0.12) so pastel
+// wall textures used with "@base" are colour-matched instead of acting like a
+// scratch-off mask that reveals on any paint colour.
+uint pictureKind(uint pic) {
+    vec4 p = unpackColor(pic);
+    if (p.a < 128.0) return 0u;
+    float mx = max(p.r, max(p.g, p.b)) / 255.0;
+    float mn = min(p.r, min(p.g, p.b)) / 255.0;
+    float sat = mx > 0.0 ? (mx - mn) / mx : 0.0;
+    if (sat < 0.10 || mx < 0.12) return 1u;
+    return 2u;
+}
+// rgb 0..1 -> hue in degrees (0..360), saturation and value out.
+float hueDegrees(vec3 c, out float sat, out float val) {
+    float mx = max(c.r, max(c.g, c.b));
+    float mn = min(c.r, min(c.g, c.b));
+    float d = mx - mn;
+    val = mx;
+    sat = mx > 0.0 ? d / mx : 0.0;
+    if (d <= 1e-6) return 0.0;
+    float h;
+    if (mx == c.r) h = mod((c.g - c.b) / d, 6.0);
+    else if (mx == c.g) h = (c.b - c.r) / d + 2.0;
+    else h = (c.r - c.g) / d + 4.0;
+    return h * 60.0;
+}
+float hueDistance(float a, float b) {
+    float d = abs(a - b);
+    return min(d, 360.0 - d);
+}
+// Gradual reveal target (0..1) for a colourable picture texel (kind 2).
+// Exact hue match (within tolerance) can reveal all the way to 1.0.
+// A component colour of a mix (e.g. red or yellow on an orange pixel, within
+// ~2.4x tolerance) reveals partially (up to 0.45); once the complementary
+// colour also hits and mixes toward the target hue, exact_match rises and
+// brings the texel smoothly to 1.0 (full original pixel colour).
+float pictureRevealTarget(Surface s, uint pic, vec4 paint) {
+    float cov = clamp(paint.a / 255.0, 0.0, 1.0);
+    if (cov <= 0.05) return 0.0;
+    float psat, pval, qsat, qval;
+    float ph = hueDegrees(paint.rgb / 255.0, psat, pval);
+    if (psat < 0.2) return 0.0;
+    float qh = hueDegrees(unpackColor(pic).rgb / 255.0, qsat, qval);
+    float tol = float((s.flags >> 16u) & 255u) / 255.0 * 180.0;
+    float d = hueDistance(ph, qh);
+    float exact_match = 1.0 - smoothstep(tol * 0.5, tol, d);
+    float comp_match = 1.0 - smoothstep(tol, min(90.0, tol * 2.4), d);
+    float color_cap = max(exact_match, 0.45 * comp_match);
+    return color_cap * smoothstep(0.10, 0.85, cov);
+}
+
 // ── STAMP ───────────────────────────────────────────────────────────────────
 
 shared uint s_list[MAX_TILE_SOURCES];
 shared uint s_count;
 shared uint s_flag;
 shared uint s_sum[4];
+shared uint s_pic[2];
 // Workgroup-uniform activity gate (one tile per workgroup). See
 // workgroupDilatedActive: the neighbourhood flags are read ONCE per tile, not
 // once per thread. Idle tiles were the bulk of paint_wet's cost: every mode
@@ -817,8 +894,26 @@ void tickTexel(Surface s, int px, int py) {
         }
     }
 
+    // Hidden picture: the reveal is permanent, never advected, and builds
+    // gradually while wet paint sits on the texel (no instant 1-pop snap).
+    float revealed = st.w;
+    if (pictureOn(s)) {
+        uint pic = pictureTexel(ti);
+        uint kind = pictureKind(pic);
+        float target = 0.0;
+        if (kind == 2u) {
+            target = pictureRevealTarget(s, pic, dst);
+        } else if (kind == 1u) {
+            target = smoothstep(0.10, 0.85, clamp(dst.a / 255.0, 0.0, 1.0));
+        }
+        if (target > revealed) {
+            float rate = clamp(pc.dt * (0.5 + 1.5 * clamp(st.x, 0.0, 1.0)), 0.0, 0.20);
+            revealed = min(target, revealed + (target - revealed) * rate);
+            if (target - revealed < 0.02) revealed = target;
+        }
+    }
     color_scratch[ti] = packColor(dst);
-    state_scratch[ti] = cleanState(vec4(next_wet, next_pigment, next_thickness, 0.0));
+    state_scratch[ti] = cleanState(vec4(next_wet, next_pigment, next_thickness, revealed));
 }
 
 void tickTile(uint tile_index) {
@@ -850,6 +945,81 @@ uint composite(uint base_packed, vec4 paint) {
     return packColor(vec4(o, b.a));
 }
 
+// The picture's opacity at a picture texel (kind 1 or 2) and the paint left
+// over it - shared by the composite and the overlay output.
+float pictureAmount(Surface s, uint kind, float pic_alpha, inout vec4 layer, float revealed) {
+    float amount = pic_alpha / 255.0;
+    if (kind == 2u) {
+        float hint = float((s.flags >> 24u) & 255u) / 255.0;
+        amount *= clamp(max(revealed, hint), 0.0, 1.0);
+        layer.a *= 1.0 - clamp(revealed, 0.0, 1.0);   // revealed area shows the clean picture
+    } else {
+        // kind 1: flags bits 8..15 = outline opacity while not revealed
+        float outline = float((s.flags >> 8u) & 255u) / 255.0;
+        amount *= clamp(max(outline, revealed), 0.0, 1.0);
+        // ★ Paint gives way only as far as the reveal CHANGED what is visible
+        //   (2026-11-24). Any paint reveals kind-1 texels, and on a pastel
+        //   wall most texels are kind 1: with the outline already fully shown
+        //   (outline = 1) the old `1 - revealed` erased every splat a moment
+        //   after it landed. Outline 0 (invisible picture): the picture pixel
+        //   takes the paint's place; outline 1: the paint simply stays.
+        layer.a *= 1.0 - clamp(revealed, 0.0, 1.0) * (1.0 - outline);
+    }
+    return amount;
+}
+
+// Base colour + hidden picture + paint layer. Without a picture (or on a texel
+// that is not part of it) this is exactly composite(base, layer).
+uint surfaceComposite(Surface s, uint ti, vec4 layer, float revealed) {
+    uint base = base_color[ti];
+    if (!pictureOn(s)) return composite(base, layer);
+    uint pic = pictureTexel(ti);
+    uint kind = pictureKind(pic);
+    if (kind == 0u) return composite(base, layer);
+    vec4 b = unpackColor(base);
+    vec4 p = unpackColor(pic);
+    float amount = pictureAmount(s, kind, p.a, layer, revealed);
+    vec3 o;
+    for (int c = 0; c < 3; ++c) {
+        float bl = srgbToLinear01(b[c] / 255.0);
+        float pl = srgbToLinear01(p[c] / 255.0);
+        o[c] = floor(linearToSrgb01(mix(bl, pl, amount)) * 255.0 + 0.5);
+    }
+    return composite(packColor(vec4(o, b.a)), layer);
+}
+
+// Overlay output: picture then paint, each over what is below, premultiplied in
+// linear light. Over an opaque base b the renderer's b*(1-a)+rgb is exactly
+// surfaceComposite's mix(mix(b, picture, ap), paint, a).
+uint overlayComposite(Surface s, uint ti, vec4 layer, float revealed) {
+    float ap = 0.0;
+    vec3 pic = vec3(0.0);
+    if (pictureOn(s)) {
+        uint packed_pic = pictureTexel(ti);
+        uint kind = pictureKind(packed_pic);
+        if (kind != 0u) {
+            vec4 p = unpackColor(packed_pic);
+            ap = pictureAmount(s, kind, p.a, layer, revealed);
+            for (int c = 0; c < 3; ++c) pic[c] = srgbToLinear01(p[c] / 255.0);
+        }
+    }
+    float a = clamp(layer.a / 255.0, 0.0, 1.0);
+    float alpha = a + ap * (1.0 - a);
+    vec3 o;
+    for (int c = 0; c < 3; ++c) {
+        float premul = srgbToLinear01(layer[c] / 255.0) * a + pic[c] * ap * (1.0 - a);
+        o[c] = floor(linearToSrgb01(clamp(premul, 0.0, 1.0)) * 255.0 + 0.5);
+    }
+    return packColor(vec4(o, floor(alpha * 255.0 + 0.5)));
+}
+
+// What the output page holds for a texel: the composite over the base, or the
+// premultiplied overlay a renderer puts over a tiled base.
+uint surfaceOutput(Surface s, uint ti, vec4 layer, float revealed) {
+    if ((s.flags & SURFACE_OVERLAY) != 0u) return overlayComposite(s, ti, layer, revealed);
+    return surfaceComposite(s, ti, layer, revealed);
+}
+
 void markDirty(Tile t) {
     uint base = t.surface * STATS_STRIDE;
     atomicMin(stats[base + ST_DIRTY_MIN_X], t.tx);
@@ -878,11 +1048,11 @@ void resolveTile(uint tile_index) {
         // thickness + coverage (normals of the neighbourhood).
         vec4 old_st = state[ti];
         uint old_c = color[ti];
-        if (c != old_c || st.x != old_st.x) changed |= CHANGED_CONTENT;
+        if (c != old_c || st.x != old_st.x || st.w != old_st.w) changed |= CHANGED_CONTENT;
         if (st.z != old_st.z || (c >> 24u) != (old_c >> 24u)) changed |= CHANGED_HEIGHT;
         state[ti] = st;
         color[ti] = c;
-        out_color[ti] = composite(base_color[ti], unpackColor(c));
+        out_color[ti] = surfaceOutput(s, ti, unpackColor(c), st.w);
         if (st.x > 0.001) wet = true;
     }
     if (wet) atomicOr(s_flag, 1u);
@@ -919,10 +1089,13 @@ void coverageTile(uint tile_index) {
     Surface s = surfaces[t.surface];
     uint lid = gl_LocalInvocationIndex;
     if (lid < 4u) s_sum[lid] = 0u;
+    if (lid < 2u) s_pic[lid] = 0u;
     if (lid == 0u) { s_count = 0u; s_flag = 0u; }
     barrier();
     uint covered = 0u, valid = 0u, wet = 0u;
     uint roughness_changed = 0u, normal_changed = 0u;
+    uint picture_texels = 0u, picture_revealed = 0u;
+    const bool picture = pictureOn(s);
     uvec3 sum = uvec3(0u);
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x, y; tileTexel(t, k, x, y);
@@ -930,6 +1103,10 @@ void coverageTile(uint tile_index) {
         uint ti = texelIndex(s, x, y);
         if (pos_valid[ti].w < 0.5 || pos_valid[ti].w > 1.5) continue;   // covered texels only
         ++valid;
+        if (picture && pictureKind(pictureTexel(ti)) == 2u) {
+            ++picture_texels;
+            if (state[ti].w >= 0.5) ++picture_revealed;
+        }
         vec4 c = unpackColor(color[ti]);
         if (c.a >= 127.5) {
             ++covered;
@@ -951,6 +1128,7 @@ void coverageTile(uint tile_index) {
     atomicAdd(s_flag, valid);
     atomicAdd(s_sum[0], sum.r); atomicAdd(s_sum[1], sum.g); atomicAdd(s_sum[2], sum.b);
     atomicAdd(s_sum[3], wet);
+    atomicAdd(s_pic[0], picture_texels); atomicAdd(s_pic[1], picture_revealed);
     barrier();
     if (lid == 0u) {
         uint base = t.surface * STATS_STRIDE;
@@ -960,48 +1138,59 @@ void coverageTile(uint tile_index) {
         atomicAdd(stats[base + ST_SUM_G], s_sum[1]);
         atomicAdd(stats[base + ST_SUM_B], s_sum[2]);
         atomicAdd(stats[base + ST_WET_TEXELS], s_sum[3]);
+        atomicAdd(stats[base + ST_PICTURE_TEXELS], s_pic[0]);
+        atomicAdd(stats[base + ST_PICTURE_REVEALED], s_pic[1]);
     }
 }
 
 void resetTile(uint tile_index) {
     Tile t = tiles[tile_index];
     Surface s = surfaces[t.surface];
+    const bool init_only = (pc._p1 & RESET_INIT_ONLY_BIT) != 0u;
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x, y; tileTexel(t, k, x, y);
         if (!inSurface(s, x, y)) continue;
         uint ti = texelIndex(s, x, y);
         color[ti] = 0u;
         state[ti] = vec4(0.0);
-        out_color[ti] = base_color[ti];
-        if (pc._p0 != 0u) {
-            for (uint channel=1u;channel<=3u;++channel)
-                out_color[channel*pc._p0+ti] = sourceChannel(channel,ti);
-            // Bit 1 opts into the five-output atlas. Old hosts pass only 0/1,
-            // so they must never access this extra output/source plane.
-            if ((pc._p1 & 2u) != 0u) {
-                out_color[4u * pc._p0 + ti] = (s.flags & SURFACE_REVEAL_OPACITY) != 0u
-                    ? 0u : 0xFFFFFFFFu;
+        color_scratch[ti] = 0u;
+        state_scratch[ti] = vec4(0.0);
+        if (!init_only) {
+            out_color[ti] = (pictureOn(s) || (s.flags & SURFACE_OVERLAY) != 0u)
+                ? surfaceOutput(s, ti, vec4(0.0), 0.0) : base_color[ti];
+            if (pc._p0 != 0u) {
+                for (uint channel=1u;channel<=3u;++channel)
+                    out_color[channel*pc._p0+ti] = sourceChannel(channel,ti);
+                // Bit 1 opts into the five-output atlas. Old hosts pass only 0/1,
+                // so they must never access this extra output/source plane.
+                if ((pc._p1 & 2u) != 0u) {
+                    out_color[4u * pc._p0 + ti] = (s.flags & SURFACE_REVEAL_OPACITY) != 0u
+                        ? 0u : 0xFFFFFFFFu;
+                }
             }
         }
     }
     if (gl_LocalInvocationIndex == 0u) {
         tile_flags[2u * tile_index] = 0u;
         tile_flags[2u * tile_index + 1u] = 0u;
-        // Its own planes are written above; the neighbours' normals read its
-        // (now flat) height across the edge.
-        markTileChanged(tile_index, CHANGED_CONTENT | CHANGED_HEIGHT);
-        markDirty(t);
+        if (!init_only) {
+            // Its own planes are written above; the neighbours' normals read its
+            // (now flat) height across the edge.
+            markTileChanged(tile_index, CHANGED_CONTENT | CHANGED_HEIGHT);
+            markDirty(t);
+        }
     }
 }
 
 void main() {
     uint wg = gl_WorkGroupID.x;
-    if (pc.mode == MODE_COMPACT_CHANNELS) {
+    const uint mode = (RT_PAINT_MODE == 0xFFFFFFFFu) ? pc.mode : RT_PAINT_MODE;
+    if (mode == MODE_COMPACT_CHANNELS) {
         compactChannelTiles();
         return;
     }
-    if (pc.mode == MODE_ROTATE) { rotateTile(gl_GlobalInvocationID.x); return; }
-    if (pc.mode == MODE_CONSUME) {
+    if (mode == MODE_ROTATE) { rotateTile(gl_GlobalInvocationID.x); return; }
+    if (mode == MODE_CONSUME) {
         if (gl_GlobalInvocationID.x == 0u) { counter[0] = 0u; counter[1] = 0u; }
         return;
     }
@@ -1010,25 +1199,30 @@ void main() {
     // resets and republishes only its own tiles (2026-11-19: resetting all 20
     // surfaces of a game room re-read ~270 MB per colour step into the second
     // VkDevice of the Studio preview).
-    if (pc.mode == MODE_RESET) {
+    if (mode == MODE_RESET) {
         uint t = wg + pc.source_count;
         if (t < pc.tile_count) resetTile(t);
         return;
     }
     if (wg >= pc.tile_count) return;
-    if (pc.mode == MODE_STAMP) stampTile(wg);
-    else if (pc.mode == MODE_TICK) tickTile(wg);
-    else if (pc.mode == MODE_RESOLVE) {
+    if (mode == MODE_STAMP) stampTile(wg);
+    else if (mode == MODE_TICK) tickTile(wg);
+    else if (mode == MODE_RESOLVE) {
         if ((pc._p1 & COMPACT_CHANNELS) != 0u && gl_GlobalInvocationID.x == 0u) {
             resetChannelList();
         }
         resolveTile(wg);
     }
-    else if (pc.mode == MODE_COVERAGE) coverageTile(wg);
-    else if (pc.mode == MODE_CHANNELS || pc.mode == MODE_CHANNELS_LIST) {
-        bool listed = pc.mode == MODE_CHANNELS_LIST;
-        uint tile_index = listed ? tile_flags[channelListBase() + wg] : wg;
-        channelTile(tile_index, listed);
+    else if (mode == MODE_COVERAGE) coverageTile(wg);
+    else if (mode == MODE_CHANNELS || mode == MODE_CHANNELS_LIST) {
+        bool listed = mode == MODE_CHANNELS_LIST;
+        bool edited = !listed && (pc._p1 & CHANNEL_RANGE_BIT) != 0u;
+        uint tile_index = listed ? tile_flags[channelListBase() + wg]
+                                 : wg + (edited ? pc.source_count : 0u);
+        if (tile_index < pc.tile_count) channelTile(tile_index, edited);
     }
-    else if (pc.mode == MODE_SEED_HEIGHT) seedHeightTile(wg);
+    else if (mode == MODE_SEED_HEIGHT) {
+        uint tile_index = wg + ((pc._p1 & CHANNEL_RANGE_BIT) != 0u ? pc.source_count : 0u);
+        if (tile_index < pc.tile_count) seedHeightTile(tile_index);
+    }
 }

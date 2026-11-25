@@ -1,4 +1,5 @@
 #include "Viewport/RasterGpuCull.h"
+#include "Viewport/ViewportPipelineCache.h"
 
 #include "Backend/VulkanBackend.h"
 #include "globals.h"
@@ -190,7 +191,9 @@ bool RasterGpuCull::ensure(VulkanRT::VulkanDevice& device,
         ci.stage = { VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
         ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
         ci.stage.module = sm; ci.stage.pName = "main";
-        VkResult r = vkCreateComputePipelines(vk, VK_NULL_HANDLE, 1, &ci, nullptr, &impl_->pipeline);
+        VkResult r = vkCreateComputePipelines(vk, Backend::currentViewportPipelineCache(vk),
+                                              1, &ci, nullptr, &impl_->pipeline);
+        if (r == VK_SUCCESS) Backend::markViewportPipelineCacheDirty(vk);
         vkDestroyShaderModule(vk, sm, nullptr);
         if (r != VK_SUCCESS) {
             SCENE_LOG_WARN("[RasterCull] compute pipeline olusturulamadi.");

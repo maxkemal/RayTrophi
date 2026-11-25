@@ -110,6 +110,29 @@ bool isGeneratedPaintTexture(const Texture& texture) {
     return texture.name.rfind("generated/", 0) == 0;
 }
 
+// True when a generated canvas holds only a flat colour fill (no underlying
+// texture was baked into it) or transparent zeros (an overlay canvas). Such a
+// canvas must NOT be reused as a source texture so flat-colour surfaces keep
+// following material colour edits; a generated canvas with real image detail
+// (saved wall/floor textures, normal maps) MUST be kept as the source.
+bool isUniformOrEmptyPaintTexture(const Texture& texture) {
+    if (texture.pixels.empty()) {
+        return true;
+    }
+    const CompactVec4 first = texture.pixels.front();
+    const bool all_transparent = (first.a == 0);
+    for (const CompactVec4& p : texture.pixels) {
+        if (all_transparent) {
+            if (p.a != 0) {
+                return false;
+            }
+        } else if (p.r != first.r || p.g != first.g || p.b != first.b || p.a != first.a) {
+            return false;
+        }
+    }
+    return true;
+}
+
 uint8_t linearToSrgbByteForFill(float value) {
     const float v = std::clamp(value, 0.0f, 1.0f);
     const float s = v <= 0.0031308f ? v * 12.92f : 1.055f * std::pow(v, 1.0f / 2.4f) - 0.055f;
@@ -2669,12 +2692,13 @@ bool MeshPaintAdapter::assignTextureToChannel(PaintChannel channel) {
         const std::string texture_name = std::string("generated/") + baseName + ".png";
         bool seeded = false;
         std::shared_ptr<Texture> source_texture = getChannelSourceTexture(channel);
-        // ★ Our own paint canvas is never a SOURCE. A saved project keeps the
-        // material pointing at "generated/..." (the canvas made last session);
-        // seeding from it froze the first base colour forever: a wall painted
-        // white once stayed white after its material was made blue (the bound
-        // texture overrides the colour). The original is the material colour.
-        if (source_texture && isGeneratedPaintTexture(*source_texture)) {
+        // ★ A flat-colour or transparent generated paint canvas is never a
+        // SOURCE: seeding from it froze a flat material's old colour forever
+        // after it was recoloured. A generated canvas that carries real image
+        // data (e.g. a wall/floor texture baked into a saved project) IS kept
+        // so opening the project in Player/Studio does not wipe wall textures.
+        if (source_texture && isGeneratedPaintTexture(*source_texture) &&
+            isUniformOrEmptyPaintTexture(*source_texture)) {
             source_texture.reset();
         }
         target_texture = cloneTextureForPaint(source_texture, texture_name, set.resolution, toTextureType(channel), channel, seeded);
@@ -2756,7 +2780,12 @@ void MeshPaintAdapter::bindTextureSetToMaterial() {
 
     // Since the PaintLayerStack baked the original texture's UV transformations into the pixel data,
     // we must reset the material's UV transforms to 1.0/0.0 to prevent the GPU from scaling the baked strokes.
-    if (auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(material)) {
+    // ★ Not on a wet paint canvas over a tiled base (paintBaseTexture): there the
+    // transform belongs to the base and the renderer samples the canvas at the raw
+    // UV already (docs/dev/WET_PAINT_CANVAS_UV.md). Resetting it would stretch the
+    // wallpaper over the whole wall the next time a channel is bound.
+    auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(material);
+    if (pbsdf && !pbsdf->paintBaseTexture) {
         pbsdf->textureTransform.scale = Vec2(1.0f, 1.0f);
         pbsdf->textureTransform.translation = Vec2(0.0f, 0.0f);
         pbsdf->textureTransform.tilingFactor = Vec2(1.0f, 1.0f);
@@ -2783,6 +2812,11 @@ bool MeshPaintAdapter::restoreOriginalMaterialTextures() {
     material->heightProperty.texture = set->getSourceTexture(PaintChannel::Mask);
     material->transmissionProperty.texture = set->getSourceTexture(PaintChannel::Transmission);
     material->opacityProperty.texture = set->getSourceTexture(PaintChannel::Opacity);
+    // The base under a wet paint canvas is the albedo again (its transform was
+    // kept on the material all along).
+    if (auto pbsdf = std::dynamic_pointer_cast<PrincipledBSDF>(material)) {
+        pbsdf->paintBaseTexture.reset();
+    }
 
     set->base_color.reset();
     set->normal.reset();

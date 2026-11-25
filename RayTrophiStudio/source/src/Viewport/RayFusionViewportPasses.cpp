@@ -347,7 +347,12 @@ bool ensureRayFusionViewportPasses(
     VkRenderPass& renderPass,
     VkRenderPass& renderPassLoad,
     VkRenderPass& hdrRenderPass,
-    VkRenderPass& hdrRenderPassLoad) {
+    VkRenderPass& hdrRenderPassLoad,
+    bool storeReflectionGbuffer) {
+    if (hdrRenderPass == VK_NULL_HANDLE && !storeReflectionGbuffer) {
+        SCENE_LOG_INFO("[RayFusion] HDR render pass omitting unused reflection G-buffer "
+                       "attachments (normal/specular): ray-query unsupported.");
+    }
     auto createViewportRenderPass = [&](VkFormat colorFormat,
                                         VkAttachmentLoadOp colorLoad,
                                         VkImageLayout colorInitial,
@@ -387,15 +392,19 @@ bool ensureRayFusionViewportPasses(
         //   CLEAR yapmak `resumeRtShadowShading`'in `clearValueCount = 0`
         //   cagrisini gecersiz kilardi; ayrica temizlik zaten kare basinda
         //   bir kez olmali, gecisin her yeniden acilisinda degil.
+        //   O8 (TBDR): on GPUs without ray-query, reflectionNormal (2) and
+        //   reflectionSpecular (3) are never read; mark them UNUSED/DONT_CARE
+        //   so tiled GPUs (Mali-G52) skip 96 bit/px of tile RAM and store BW.
         for (uint32_t g = 2; g < 5; ++g) {
+            const bool omit = !storeReflectionGbuffer && (g == 2 || g == 3);
             attachments[g].format = g == 2 ? kRfGbufferNormalFormat
                                            : (g == 3 ? kRfGbufferSpecularFormat : VK_FORMAT_R32G32B32A32_SFLOAT);
             attachments[g].samples = VK_SAMPLE_COUNT_1_BIT;
-            attachments[g].loadOp = colorLoad;
-            attachments[g].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            attachments[g].loadOp = omit ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : colorLoad;
+            attachments[g].storeOp = omit ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
             attachments[g].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             attachments[g].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            attachments[g].initialLayout = colorLoad == VK_ATTACHMENT_LOAD_OP_LOAD
+            attachments[g].initialLayout = (!omit && colorLoad == VK_ATTACHMENT_LOAD_OP_LOAD)
                 ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_UNDEFINED;
             attachments[g].finalLayout = VK_IMAGE_LAYOUT_GENERAL;
         }
@@ -403,10 +412,12 @@ bool ensureRayFusionViewportPasses(
         VkAttachmentReference colorRefs[4]{};
         colorRefs[0].attachment = 0;
         colorRefs[0].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        colorRefs[1].attachment = 2;
-        colorRefs[1].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        colorRefs[2].attachment = 3;
-        colorRefs[2].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        colorRefs[1].attachment = storeReflectionGbuffer ? 2u : VK_ATTACHMENT_UNUSED;
+        colorRefs[1].layout = storeReflectionGbuffer
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+        colorRefs[2].attachment = storeReflectionGbuffer ? 3u : VK_ATTACHMENT_UNUSED;
+        colorRefs[2].layout = storeReflectionGbuffer
+            ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
 
         colorRefs[3] = {4, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
         VkAttachmentReference depthRef{};

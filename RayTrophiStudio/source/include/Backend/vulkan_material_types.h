@@ -138,6 +138,13 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
     // Block 25 tail: SSS walk controls (were _volume_pad0/1 — size unchanged)
     float sss_method = 0.0f;        // 0 = random walk, 1 = fast (Lambert, no walk)
     float sss_walk_max_steps = 64.0f; // walk hard cap, [8, 256]; a `{}` default must not mean 8
+
+    // Block 26: wet paint canvas over a tiled base (16 bytes). 0 = ordinary
+    // material. Non-zero = the tiled base colour texture under a paint canvas:
+    // every other slot is then a canvas page at the RAW mesh UV and the UV
+    // transform applies only to this one (docs/dev/WET_PAINT_CANVAS_UV.md).
+    VkGpuTextureHandle paint_base_tex = 0;
+    uint32_t _paint_pad0 = 0, _paint_pad1 = 0, _paint_pad2 = 0;
 };
 
 // AUTHORING struct only — VkGpuMaterial is what the CPU fill code writes, but it
@@ -146,7 +153,7 @@ struct VK_GPU_ALIGN(16) VkGpuMaterial {
 // VkGpuMaterialExt (binding 24, feature-gated cold fields). Keeping the fill code
 // on this single struct means adding a material feature stays a one-place edit;
 // only the split decides which buffer the new field lands in.
-static_assert(sizeof(VkGpuMaterial) == 400, "VkGpuMaterial (authoring) must stay 400 bytes (25x16)");
+static_assert(sizeof(VkGpuMaterial) == 416, "VkGpuMaterial (authoring) must stay 416 bytes (26x16)");
 
 /**
  * @brief HOT material fields — binding 2, read by every closesthit/any-hit
@@ -178,7 +185,7 @@ struct VK_GPU_ALIGN(16) VkGpuMaterialCore {
     float tile_break_strength;
     uint32_t _terrain_layer_idx;
     VkGpuTextureHandle height_tex;
-    float _core_pad0;
+    VkGpuTextureHandle paint_base_tex;   // wet paint canvas base (was _core_pad0, same offset)
 };
 static_assert(sizeof(VkGpuMaterialCore) == 160, "VkGpuMaterialCore must stay 160 bytes (10x16); update shaders/material_struct.glsl `Material` to match");
 
@@ -226,7 +233,7 @@ inline void splitGpuMaterial(const VkGpuMaterial& m, VkGpuMaterialCore& c, VkGpu
     c.uv_rotation_degrees = m.uv_rotation_degrees; c.uv_tiling_x = m.uv_tiling_x; c.uv_tiling_y = m.uv_tiling_y; c.uv_wrap_mode = m.uv_wrap_mode;
     c.albedo_tex = m.albedo_tex; c.normal_tex = m.normal_tex; c.roughness_tex = m.roughness_tex; c.metallic_tex = m.metallic_tex;
     c.emission_tex = m.emission_tex; c.opacity_tex = m.opacity_tex; c.transmission_tex = m.transmission_tex; c.specular_tex = m.specular_tex;
-    c.tile_break_strength = m.tile_break_strength; c._terrain_layer_idx = m._terrain_layer_idx; c.height_tex = m.height_tex; c._core_pad0 = 0.0f;
+    c.tile_break_strength = m.tile_break_strength; c._terrain_layer_idx = m._terrain_layer_idx; c.height_tex = m.height_tex; c.paint_base_tex = m.paint_base_tex;
 
     e.subsurface_r = m.subsurface_r; e.subsurface_g = m.subsurface_g; e.subsurface_b = m.subsurface_b; e.subsurface_scale = m.subsurface_scale;
     e.subsurface_radius_r = m.subsurface_radius_r; e.subsurface_radius_g = m.subsurface_radius_g; e.subsurface_radius_b = m.subsurface_radius_b; e.subsurface_anisotropy = m.subsurface_anisotropy;

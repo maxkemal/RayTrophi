@@ -38,7 +38,7 @@ void main() {
     uint count = max(pc.materialMeta.x, 1u);
     uint index = min(vMaterialID & 0x7fffffffu, count - 1u);
     GpuMaterial mat = materials[index];
-    vec2 uv = applyUVTransform(vTexCoord, mat);
+    vec2 uv = materialSlotUV(vTexCoord, mat);
     vec2 uvDx = dFdx(uv);
     vec2 uvDy = dFdy(uv);
     if (impostor) return;
