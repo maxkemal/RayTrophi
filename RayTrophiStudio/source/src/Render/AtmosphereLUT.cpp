@@ -124,15 +124,30 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& inputParams) {
             float sinTheta = sqrtf(fmaxf(0.0f, 1.0f - cosTheta * cosTheta));
             float3 dir = make_float3(sinTheta * cosf(azimuth), cosTheta, sinTheta * sinf(azimuth));
             float3 sunDir = params.sun_direction;
-            float3 camPos = make_float3(0.0f, Rg + params.altitude, 0.0f);
+            // Match atmosphere_lut.comp: use at least a 10 m eye height so rays
+            // just below the horizon keep realistic mist before hitting ground,
+            // while steeper downward rays stop at the planet sphere instead of
+            // marching through Earth at sea-level Rayleigh density.
+            float alt = fmaxf(params.altitude, 10.0f);
+            float3 camPos = make_float3(0.0f, Rg + alt, 0.0f);
 
             float3 radiance = make_float3(0.0f, 0.0f, 0.0f);
             float b = 2.0f * host_dot(camPos, dir);
             float c = host_dot(camPos, camPos) - Rt * Rt;
             float d = b * b - 4.0f * c;
-            if (d >= 0) {
+            if (d >= 0.0f) {
                 float dist = (-b + sqrtf(d)) / 2.0f;
-                if (dist > 0) {
+                if (dist > 0.0f) {
+                    // Planet/ground sphere intersection: |camPos + t * dir|^2 = Rg^2.
+                    float bg = host_dot(camPos, dir);
+                    float cg = alt * (2.0f * Rg + alt);
+                    float discG = bg * bg - cg;
+                    bool hitGround = (bg < 0.0f && discG >= 0.0f);
+                    if (hitGround) {
+                        float tGround = fmaxf(-bg - sqrtf(discG), 0.0f);
+                        dist = fminf(dist, tGround);
+                    }
+
                     int steps = 128; // Increased from 32 to reduce banding
                     float step = dist / steps;
                     float3 opticalDepth = make_float3(0, 0, 0);
@@ -161,11 +176,32 @@ void AtmosphereLUT::precompute(const NishitaSkyParams& inputParams) {
                         float3 stepL = make_float3(inScat.x * transSun.x, inScat.y * transSun.y, inScat.z * transSun.z);
                         
                         float3 currentTrans = make_float3(expf(-opticalDepth.x), expf(-opticalDepth.y), expf(-opticalDepth.z));
-                        radiance = host_add(radiance, host_mul(stepL, step * currentTrans.x)); 
+                        radiance = host_add(radiance, make_float3(
+                            stepL.x * step * currentTrans.x,
+                            stepL.y * step * currentTrans.y,
+                            stepL.z * step * currentTrans.z));
                         
                         opticalDepth.x += (scatR.x + scatM.x) * step;
                         opticalDepth.y += (scatR.y + scatM.y) * step;
                         opticalDepth.z += (scatM.z + scatR.z) * step; // Note: Reusing scats
+                    }
+
+                    if (hitGround) {
+                        float3 groundPos = host_add(camPos, host_mul(dir, dist));
+                        float gLen = fmaxf(sqrtf(host_dot(groundPos, groundPos)), 1e-6f);
+                        float3 groundNormal = host_mul(groundPos, 1.0f / gLen);
+                        float sunNdotL = fmaxf(host_dot(groundNormal, sunDir), 0.0f);
+                        float3 transSunG = compute_transmittance_internal(
+                            groundPos, sunDir, Rg, Rt, rH, mH, params, ozoneExt);
+                        const float invPi = 1.0f / 3.14159265f;
+                        float3 groundRad = make_float3(
+                            0.18f * invPi * transSunG.x * sunNdotL,
+                            0.17f * invPi * transSunG.y * sunNdotL,
+                            0.15f * invPi * transSunG.z * sunNdotL);
+                        radiance = host_add(radiance, make_float3(
+                            groundRad.x * expf(-opticalDepth.x),
+                            groundRad.y * expf(-opticalDepth.y),
+                            groundRad.z * expf(-opticalDepth.z)));
                     }
                 }
             }

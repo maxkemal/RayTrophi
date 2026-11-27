@@ -944,7 +944,9 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 Animation::publishCharacterSkinPalette(
                     scene.boneData, ctx.importName, pose.jointGlobalTransforms,
                     this->finalBoneMatrices);
-                modelBoneMatrices = this->finalBoneMatrices;
+                if (apply_cpu_skinning) {
+                    modelBoneMatrices = this->finalBoneMatrices;
+                }
             }
         }
         else if (ctx.animator) {
@@ -1035,21 +1037,10 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                             SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Ozz");
                             ctx.loggedOzzRuntimeUsage = true;
                         }
-                        for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
-                            if (boneName.find(ctx.importName + "_") != 0) {
-                                continue;
-                            }
-                            if (globalIdx >= this->finalBoneMatrices.size() ||
-                                globalIdx >= ctx.ozzAnimationSet->sceneBoneToRuntimeJoint.size()) {
-                                continue;
-                            }
-
-                            const int runtimeJointIndex = ctx.ozzAnimationSet->sceneBoneToRuntimeJoint[globalIdx];
-                            if (runtimeJointIndex < 0 || static_cast<size_t>(runtimeJointIndex) >= modelBoneMatrices.size()) {
-                                continue;
-                            }
-                            this->finalBoneMatrices[globalIdx] = modelBoneMatrices[runtimeJointIndex];
-                        }
+                        Animation::publishOzzModelPalette(
+                            ctx.ozzAnimationSet->sceneBoneToRuntimeJoint,
+                            modelBoneMatrices,
+                            this->finalBoneMatrices);
                     }
                 } else {
                     size_t ozzClipIndex = 0;
@@ -1071,21 +1062,10 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                                 SCENE_LOG_INFO("[Renderer] Animation runtime for model '" + ctx.importName + "': Ozz");
                                 ctx.loggedOzzRuntimeUsage = true;
                             }
-                            for (const auto& [boneName, globalIdx] : scene.boneData.boneNameToIndex) {
-                                if (boneName.find(ctx.importName + "_") != 0) {
-                                    continue;
-                                }
-                                if (globalIdx >= this->finalBoneMatrices.size() ||
-                                    globalIdx >= ctx.ozzAnimationSet->sceneBoneToRuntimeJoint.size()) {
-                                    continue;
-                                }
-
-                                const int runtimeJointIndex = ctx.ozzAnimationSet->sceneBoneToRuntimeJoint[globalIdx];
-                                if (runtimeJointIndex < 0 || static_cast<size_t>(runtimeJointIndex) >= modelBoneMatrices.size()) {
-                                    continue;
-                                }
-                                this->finalBoneMatrices[globalIdx] = modelBoneMatrices[runtimeJointIndex];
-                            }
+                            Animation::publishOzzModelPalette(
+                                ctx.ozzAnimationSet->sceneBoneToRuntimeJoint,
+                                modelBoneMatrices,
+                                this->finalBoneMatrices);
                         }
                     }
                 }
@@ -1104,7 +1084,9 @@ bool Renderer::updateAnimationWithGraph(SceneData& scene, float deltaTime, bool 
                 Animation::publishCharacterSkinPalette(
                     scene.boneData, ctx.importName, ctx.animator->getJointGlobalTransforms(),
                     this->finalBoneMatrices);
-                modelBoneMatrices = this->finalBoneMatrices;
+                if (apply_cpu_skinning) {
+                    modelBoneMatrices = this->finalBoneMatrices;
+                }
             }
 
             // usedOzzRuntime=true simply means Ozz filled bone matrices this frame.
@@ -2948,6 +2930,28 @@ float Renderer::luminance(const Vec3& color) {
     return 0.2126f * color.x + 0.7152f * color.y + 0.0722f * color.z;
 }
 
+static inline float computeDistanceAttenuation(float dist_sq, float distance_falloff) {
+    const float falloff = std::clamp(distance_falloff, 0.0f, 2.0f);
+    return (falloff >= 1.9999f)
+        ? (1.0f / dist_sq)
+        : ((falloff <= 1e-4f) ? 1.0f : std::pow(dist_sq, -0.5f * falloff));
+}
+
+static inline Vec3f computeVolumetricLightIntensity(const Light& light, const Vec3& p, float light_dist) {
+    const LightType ltype = light.type();
+    if (ltype == LightType::Point || ltype == LightType::Area) {
+        const float dist_sq = std::max(light_dist * light_dist, 0.0001f);
+        const float atten = computeDistanceAttenuation(dist_sq, light.distance_falloff);
+        return toVec3f(light.color * light.intensity * atten);
+    }
+    if (ltype == LightType::Spot) {
+        const float dist_sq = std::max(light_dist * light_dist, 0.0001f);
+        const float atten = computeDistanceAttenuation(dist_sq, light.distance_falloff);
+        return toVec3f(light.getIntensity(p, light.position) * atten);
+    }
+    return toVec3f(light.getIntensity(p, light.position));
+}
+
 // --- Ak�ll� ���k se�imi ---
 int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights, const Vec3& hit_position) {
     int light_count = (int)lights.size();
@@ -2975,7 +2979,7 @@ int Renderer::pick_smart_light(const std::vector<std::shared_ptr<Light>>& lights
         }
         Vec3 delta = lights[i]->position - hit_position;
         float distance = std::max(1.0f, delta.length());
-        float falloff = 1.0f / (distance * distance);
+        float falloff = computeDistanceAttenuation(distance * distance, lights[i]->distance_falloff);
         float intensity = luminance(lights[i]->color * lights[i]->intensity);
 
         if (lights[i]->type() == LightType::Point) {
@@ -3091,7 +3095,9 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     else if (auto point = std::dynamic_pointer_cast<PointLight>(light)) {
         light_sample = point->random_point();
         to_light = light_sample - hit_point;
-        light_distance = to_light.length();
+        float dist_sq = to_light.length_squared();
+        light_distance = std::sqrt(dist_sq);
+        if (light_distance < 1e-4f) return direct_light;
         L = to_light / light_distance;
 
         // D�ZELTME: PointLight s�n�f� getIntensity i�inde zaten falloff (1/d^2) uyguluyor.
@@ -3099,7 +3105,9 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         attenuation = 1.0f;
 
         // Point Light Specific Boost: Global �arpan kald�r�ld�, sadece Point Light 10 kat g��lendirildi.
-        Li = point->getIntensity(hit_point, light_sample) * attenuation;
+        attenuation = computeDistanceAttenuation(
+            std::max(dist_sq, 0.0001f), point->distance_falloff);
+        Li = point->color * point->intensity * attenuation;
 
         float area = 4.0f * M_PI * point->getRadius() * point->getRadius();
         pdf_light = (1.0f / area) * pdf_light_select;
@@ -3108,15 +3116,18 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         // GPU ile uyumlu AreaLight sampling
         light_sample = areaLight->random_point();
         to_light = light_sample - hit_point;
-        light_distance = to_light.length();
+        float dist_sq = to_light.length_squared();
+        light_distance = std::sqrt(dist_sq);
+        if (light_distance < 1e-4f) return direct_light;
         L = to_light / light_distance;
 
         // Light normal (cross of u and v vectors)
         Vec3 light_normal = Vec3::cross(areaLight->getU(), areaLight->getV()).normalize();
         float cos_light = std::fmax(Vec3::dot(-L, light_normal), 0.0f);
-        attenuation = cos_light / (light_distance * light_distance);
+        attenuation = cos_light * computeDistanceAttenuation(
+            std::max(dist_sq, 0.0001f), areaLight->distance_falloff);
 
-        Li = areaLight->getIntensity(hit_point, light_sample) * attenuation;
+        Li = areaLight->color * areaLight->intensity * attenuation;
 
         float area = areaLight->getWidth() * areaLight->getHeight();
         pdf_light = (1.0f / std::fmax(area, 1e-4f)) * pdf_light_select;
@@ -3126,6 +3137,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
         light_sample = spotLight->position;
         to_light = light_sample - hit_point;
         light_distance = to_light.length();
+        if (light_distance < 1e-4f) return direct_light;
         L = to_light / light_distance;
 
         // Spot cone falloff
@@ -3144,7 +3156,8 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
 
         if (falloff < 1e-4f) return direct_light;
 
-        attenuation = falloff / (light_distance * light_distance);
+        float dist_sq = std::max(light_distance * light_distance, 0.0001f);
+        attenuation = falloff * computeDistanceAttenuation(dist_sq, spotLight->distance_falloff);
         Li = spotLight->getIntensity(hit_point, light_sample) * attenuation;
 
         float solid_angle = 2.0f * M_PI * (1.0f - outer_cos);
@@ -3163,7 +3176,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     int shadow_layers = 0;
     
     // Check hair shadows first (hair casts strong shadows on meshes)
-    if (hairSystem.getTotalStrandCount() > 0 && !hairSystem.isBVHDirty()) {
+    if (light->cast_shadows && hairSystem.getTotalStrandCount() > 0 && !hairSystem.isBVHDirty()) {
         Hair::HairHitInfo hairShadowHit;
         Vec3 hairShadowOrigin = shadow_ray_current.origin;
         Vec3 hairShadowDir = shadow_ray_current.direction;
@@ -3190,7 +3203,7 @@ Vec3 Renderer::calculate_direct_lighting_single_light(
     }
 
 
-    while (remaining_dist > 0.001f && shadow_layers < 4) {
+    while (light->cast_shadows && remaining_dist > 0.001f && shadow_layers < 4) {
         HitRecord shadow_rec;
         if (bvh->hit(shadow_ray_current, 0.001f, remaining_dist, shadow_rec)) {
             HitMaterialResolver::resolveMaterialPointers(shadow_rec);
@@ -3745,9 +3758,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     }
                     else if (auto pl = std::dynamic_pointer_cast<PointLight>(firstLight)) {
                         Vec3 toLight = pl->getPosition() - hairHit.position;
-                        mainLightDist = toLight.length();
+                        float dist_sq = toLight.length_squared();
+                        mainLightDist = std::sqrt(dist_sq);
                         mainLightDir = toLight / (mainLightDist + 1e-6f);
-                        mainLightColor = pl->getIntensity(hairHit.position, pl->getPosition());
+                        float atten = computeDistanceAttenuation(
+                            std::max(dist_sq, 0.0001f), pl->distance_falloff);
+                        mainLightColor = pl->color * pl->intensity * atten;
                     }
                 }
 
@@ -3817,9 +3833,13 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                         // Random point on the sphere (radius) → soft shadow parity with OptiX/Vulkan
                         lightPos = pl->random_point();
                         Vec3 toLight = lightPos - hairHit.position;
-                        lightDist = toLight.length();
+                        float dist_sq = toLight.length_squared();
+                        lightDist = std::sqrt(dist_sq);
+                        if (lightDist < 1e-4f) continue;
                         lightDir = toLight / lightDist;
-                        Li = pl->getIntensity(hairHit.position, lightPos);
+                        float atten = computeDistanceAttenuation(
+                            std::max(dist_sq, 0.0001f), pl->distance_falloff);
+                        Li = pl->color * pl->intensity * atten;
                     }
                     else if (auto dl = std::dynamic_pointer_cast<DirectionalLight>(light)) {
                         if (li == 0) continue; // Skip main light (already processed)
@@ -3830,18 +3850,25 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     else if (auto al = std::dynamic_pointer_cast<AreaLight>(light)) {
                         lightPos = al->random_point();
                         Vec3 toLight = lightPos - hairHit.position;
-                        lightDist = toLight.length();
+                        float dist_sq = toLight.length_squared();
+                        lightDist = std::sqrt(dist_sq);
+                        if (lightDist < 1e-4f) continue;
                         lightDir = toLight / lightDist;
-                        Li = al->getIntensity(hairHit.position, lightPos);
+                        float atten = computeDistanceAttenuation(
+                            std::max(dist_sq, 0.0001f), al->distance_falloff);
+                        Li = al->color * al->intensity * atten;
                     }
                     else if (auto sl = std::dynamic_pointer_cast<SpotLight>(light)) {
                         lightPos = sl->position;
                         Vec3 toLight = lightPos - hairHit.position;
-                        lightDist = toLight.length();
+                        float dist_sq = toLight.length_squared();
+                        lightDist = std::sqrt(dist_sq);
                         if (lightDist < 1e-4f) continue;
                         lightDir = toLight / lightDist;
                         // getIntensity already applies cone falloff; returns zero outside the cone
-                        Li = sl->getIntensity(hairHit.position, lightPos);
+                        float atten = computeDistanceAttenuation(
+                            std::max(dist_sq, 0.0001f), sl->distance_falloff);
+                        Li = sl->getIntensity(hairHit.position, lightPos) * atten;
                         if (Li.x <= 0.0f && Li.y <= 0.0f && Li.z <= 0.0f) continue;
                     }
                     else {
@@ -3853,12 +3880,12 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                     // Shadow check (mesh + hair)
                     Ray shadowRay(hairHit.position + N * 0.003f, lightDir);
                     HitRecord shadowRec;
-                    bool inShadow = bvh && bvh->hit(shadowRay, 0.001f, lightDist - 0.01f, shadowRec, true);
+                    bool inShadow = light->cast_shadows && bvh && bvh->hit(shadowRay, 0.001f, lightDist - 0.01f, shadowRec, true);
 
                     if (!inShadow) {
                         // Hair self-shadow (only if BVH is ready)
                         float lightShadow = 1.0f;
-                        if (!hairSystem.isBVHDirty()) {
+                        if (light->cast_shadows && !hairSystem.isBVHDirty()) {
                             Hair::HairHitInfo lsh;
                             Vec3 org = shadowRay.origin;
                             float d = std::min(lightDist, 100.0f);
@@ -4584,7 +4611,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                 light_dir = to_light / std::max(light_dist, 0.0001f);
                             }
 
-                            Vec3f light_intensity = toVec3f(light->getIntensity(p, light->position));
+                            Vec3f light_intensity = computeVolumetricLightIntensity(*light, p, light_dist);
                             
                             // --- PARITY: Atmospheric Extinction for Sun (Matches GPU) ---
                             // If this is the main sun light in Nishita mode, apply transmittance
@@ -4609,7 +4636,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             float shadow_transmittance = 1.0f;
                             HitRecord shadow_rec;
                             
-                            if (bvh->hit(shadow_ray_vol, 0.001f, light_dist, shadow_rec)) {
+                            if (light->cast_shadows && bvh->hit(shadow_ray_vol, 0.001f, light_dist, shadow_rec)) {
                                 HitMaterialResolver::resolveMaterialPointers(shadow_rec);
                                 if (!shadow_rec.vdb_volume) {
                                     shadow_transmittance = 0.0f;
@@ -4894,7 +4921,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                                 light_dir = to_light / std::max(light_dist, 0.0001f);
                             }
 
-                            Vec3f light_intensity = toVec3f(light->getIntensity(p, light->position));
+                            Vec3f light_intensity = computeVolumetricLightIntensity(*light, p, light_dist);
                             if (light_intensity.luminance() < 1e-5f) continue;
 
                             // Shadow Ray
@@ -4906,7 +4933,7 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                             float dist_trace = light_dist;
                             int shadow_layers = 0;
 
-                            while (dist_trace > 0.001f && shadow_layers < 2) {
+                            while (light->cast_shadows && dist_trace > 0.001f && shadow_layers < 2) {
                                 HitRecord sidx_rec;
                                 if (bvh->hit(shadow_ray_vol, 0.001f, dist_trace, sidx_rec)) {
                                     HitMaterialResolver::resolveMaterialPointers(sidx_rec);
@@ -5670,60 +5697,64 @@ Vec3 Renderer::ray_color(const Ray& r, const Hittable* bvh,
                 Vec3f wi; float distance; float light_attenuation;
                 if (sample_light_direction(light, hit_pos, Vec3::random_float(), Vec3::random_float(), &wi, &distance, &light_attenuation)) {
                     if (dot(N, wi) > 0.001f) {
-                        Vec3 shadow_origin = rec.point + rec.interpolated_normal * UnifiedConstants::SHADOW_BIAS;
-                        Ray shadow_ray(shadow_origin, toVec3(wi));
-                        bool meshOccluded = bvh->occluded(shadow_ray, UnifiedConstants::SHADOW_BIAS, distance);
-                        
-                        // --- VOLUMETRIC SHADOWING (VDB & Gas) ---
+                        bool meshOccluded = false;
                         float volShadowTransmittance = 1.0f;
-                        if (!meshOccluded && (!scene.vdb_volumes.empty() || !scene.gas_volumes.empty())) {
-                            for (const auto& v_ptr : scene.vdb_volumes) {
-                                if (!v_ptr || !v_ptr->visible) continue;
-                                float t0_v, t1_v;
-                                if (v_ptr->intersectTransformedAABB(shadow_ray, 0.001f, distance, t0_v, t1_v)) {
-                                    // Use a coarser step for shadow marching to preserve performance
-                                    const float shadowVoxel = rt_world_voxel_size(*v_ptr);
-                                    float s_step = (v_ptr->volume_shader
-                                        ? v_ptr->volume_shader->quality.primaryStep(shadowVoxel)
-                                        : shadowVoxel) * 2.5f;
-                                    float t_v = t0_v + 0.001f;
-                                    auto& mgr = VDBVolumeManager::getInstance();
-                                    int vid = v_ptr->getVDBVolumeID();
-                                    Matrix4x4 inv = v_ptr->getInverseTransform();
-                                    float ds = (v_ptr->volume_shader ? v_ptr->volume_shader->density.multiplier : 1.0f) * v_ptr->density_scale;
-                                    float sigma_t = (v_ptr->volume_shader ? (v_ptr->volume_shader->scattering.coefficient + v_ptr->volume_shader->absorption.coefficient) : 1.1f);
-                                    
-                                    while (t_v < t1_v) {
-                                        Vec3 sp = shadow_ray.at(t_v);
-                                        Vec3 local_sp = inv.transform_point(sp);
-                                        float dens = mgr.sampleDensityCPU(vid, local_sp.x, local_sp.y, local_sp.z);
-                                        if (dens > 0.01f) volShadowTransmittance *= expf(-dens * ds * sigma_t * s_step);
-                                        if (volShadowTransmittance < 0.01f) {
-                                            volShadowTransmittance = 0.0f;
-                                            break;
-                                        }
-                                        t_v += s_step;
-                                    }
-                                }
-                                if (volShadowTransmittance < 0.01f) break;
-                            }
-                        }
-
-                        // Hair shadow check (hair can cast shadows on meshes)
                         float hairShadowTransmittance = 1.0f;
-                        if (!meshOccluded && volShadowTransmittance > 0.01f && hairSystem.getTotalStrandCount() > 0 && !hairSystem.isBVHDirty()) {
-                            Hair::HairHitInfo hsh;
-                            Vec3 hairShadowOrigin = shadow_origin;
-                            Vec3 hairShadowDir = toVec3(wi);
-                            float hairShadowDist = std::min(distance, 100.0f);
-                            int hHits = 0;
-                            while (hHits < 6 && hairShadowDist > 0.01f && hairShadowTransmittance > 0.05f) {
-                                if (hairSystem.intersect(hairShadowOrigin, hairShadowDir, 0.002f, hairShadowDist, hsh)) {
-                                    hairShadowTransmittance *= 0.4f; // Each strand blocks 60%
-                                    hairShadowOrigin = hsh.position + hairShadowDir * 0.003f;
-                                    hairShadowDist -= (hsh.t + 0.003f);
-                                    hHits++;
-                                } else break;
+
+                        if (light.cast_shadows != 0) {
+                            Vec3 shadow_origin = rec.point + rec.interpolated_normal * UnifiedConstants::SHADOW_BIAS;
+                            Ray shadow_ray(shadow_origin, toVec3(wi));
+                            meshOccluded = bvh->occluded(shadow_ray, UnifiedConstants::SHADOW_BIAS, distance);
+                            
+                            // --- VOLUMETRIC SHADOWING (VDB & Gas) ---
+                            if (!meshOccluded && (!scene.vdb_volumes.empty() || !scene.gas_volumes.empty())) {
+                                for (const auto& v_ptr : scene.vdb_volumes) {
+                                    if (!v_ptr || !v_ptr->visible) continue;
+                                    float t0_v, t1_v;
+                                    if (v_ptr->intersectTransformedAABB(shadow_ray, 0.001f, distance, t0_v, t1_v)) {
+                                        // Use a coarser step for shadow marching to preserve performance
+                                        const float shadowVoxel = rt_world_voxel_size(*v_ptr);
+                                        float s_step = (v_ptr->volume_shader
+                                            ? v_ptr->volume_shader->quality.primaryStep(shadowVoxel)
+                                            : shadowVoxel) * 2.5f;
+                                        float t_v = t0_v + 0.001f;
+                                        auto& mgr = VDBVolumeManager::getInstance();
+                                        int vid = v_ptr->getVDBVolumeID();
+                                        Matrix4x4 inv = v_ptr->getInverseTransform();
+                                        float ds = (v_ptr->volume_shader ? v_ptr->volume_shader->density.multiplier : 1.0f) * v_ptr->density_scale;
+                                        float sigma_t = (v_ptr->volume_shader ? (v_ptr->volume_shader->scattering.coefficient + v_ptr->volume_shader->absorption.coefficient) : 1.1f);
+                                        
+                                        while (t_v < t1_v) {
+                                            Vec3 sp = shadow_ray.at(t_v);
+                                            Vec3 local_sp = inv.transform_point(sp);
+                                            float dens = mgr.sampleDensityCPU(vid, local_sp.x, local_sp.y, local_sp.z);
+                                            if (dens > 0.01f) volShadowTransmittance *= expf(-dens * ds * sigma_t * s_step);
+                                            if (volShadowTransmittance < 0.01f) {
+                                                volShadowTransmittance = 0.0f;
+                                                break;
+                                            }
+                                            t_v += s_step;
+                                        }
+                                    }
+                                    if (volShadowTransmittance < 0.01f) break;
+                                }
+                            }
+
+                            // Hair shadow check (hair can cast shadows on meshes)
+                            if (!meshOccluded && volShadowTransmittance > 0.01f && hairSystem.getTotalStrandCount() > 0 && !hairSystem.isBVHDirty()) {
+                                Hair::HairHitInfo hsh;
+                                Vec3 hairShadowOrigin = shadow_origin;
+                                Vec3 hairShadowDir = toVec3(wi);
+                                float hairShadowDist = std::min(distance, 100.0f);
+                                int hHits = 0;
+                                while (hHits < 6 && hairShadowDist > 0.01f && hairShadowTransmittance > 0.05f) {
+                                    if (hairSystem.intersect(hairShadowOrigin, hairShadowDir, 0.002f, hairShadowDist, hsh)) {
+                                        hairShadowTransmittance *= 0.4f; // Each strand blocks 60%
+                                        hairShadowOrigin = hsh.position + hairShadowDir * 0.003f;
+                                        hairShadowDist -= (hsh.t + 0.003f);
+                                        hHits++;
+                                    } else break;
+                                }
                             }
                         }
                         

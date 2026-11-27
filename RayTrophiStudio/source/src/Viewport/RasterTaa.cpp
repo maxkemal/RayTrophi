@@ -288,7 +288,8 @@ bool VulkanViewportBackend::ensureRasterTaaResources(uint32_t width, uint32_t he
                                      m_interactiveViewport.taaMotionImage.view,
                                      VK_IMAGE_LAYOUT_GENERAL};
         VkDescriptorImageInfo previous{m_interactiveViewport.postSampler,
-            m_interactiveViewport.objectPreviousClipImage.view, VK_IMAGE_LAYOUT_GENERAL};
+            m_interactiveViewport.objectPreviousClipImage.view,
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         VkDescriptorImageInfo infos[6] = {hdr, depth, history, out, motion, previous};
         VkWriteDescriptorSet writes[6]{};
         for (uint32_t b = 0; b < 6; ++b) {
@@ -388,7 +389,8 @@ void VulkanViewportBackend::recordRasterTaaPass(VkCommandBuffer cmd,
     }
 
     taaImageBarrier(cmd, m_interactiveViewport.objectPreviousClipImage.image,
-        VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+        VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
         VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
@@ -478,17 +480,37 @@ void VulkanViewportBackend::recordRasterTaaPass(VkCommandBuffer cmd,
 
     pc.width = width;
     pc.height = height;
-    // ★★★ blend = 1/(n+1): ilk kare TAM agirlikli, n. kare 1/(n+1). Bu bir
-    //   "feedback katsayisi" degil gercek bir CALISAN ORTALAMA -- hareketsiz
-    //   kamerada N kare sonra N ornekli bir tahmin verir, exponential bir
-    //   karisimin asla ulasamayacagi bir varyans dususu. Hedefe varinca sabit
-    //   kalir ki sahne degisimlerine hala tepki verebilsin.
+    const bool prevCamera = m_taaHasPrevViewProj && m_taaPrevDValid;
+    bool cameraCut = false;
+    if (prevCamera) {
+        const double forwardDot =
+            m_taaCurViewD[2][0] * m_taaPrevViewD[2][0] +
+            m_taaCurViewD[2][1] * m_taaPrevViewD[2][1] +
+            m_taaCurViewD[2][2] * m_taaPrevViewD[2][2];
+        const bool orthoChanged =
+            (m_taaCurProjD[3][3] > 0.5) != (m_taaPrevProjD[3][3] > 0.5);
+        cameraCut = (forwardDot < 0.7) || orthoChanged;
+    }
+    const bool useColorHistory = prevCamera && !cameraCut;
+    // Continuous real-time TAA during motion/gameplay (blend = 0.125 with
+    // reprojection + object motion + YCoCg 3x3 clamp), smoothly tightening to
+    // the exact 1/(n+1) running average once camera and scene settle.
+    constexpr float kContinuousTaaBlend = 0.125f;
     const uint32_t n = m_taaFrameIndex < m_taaTargetSamples ? m_taaFrameIndex
                                                             : m_taaTargetSamples;
-    pc.blend = 1.0f / static_cast<float>(n + 1u);
-    const bool prevCamera = m_taaHasPrevViewProj && m_taaPrevDValid;
-    pc.historyFlags = ((m_taaFrameIndex > 0u && prevCamera) ? 1u : 0u) |
-                      (prevCamera ? 2u : 0u) | (m_rasterUseGlobalInstBuffer ? 4u : 0u);
+    if (!useColorHistory) {
+        pc.blend = 1.0f;
+    } else if (m_taaFrameIndex == 0u) {
+        pc.blend = kContinuousTaaBlend;
+    } else {
+        const float accumBlend = 1.0f / static_cast<float>(n + 1u);
+        pc.blend = accumBlend < kContinuousTaaBlend ? accumBlend : kContinuousTaaBlend;
+    }
+    const bool hasObjectMotion =
+        m_rasterUseGlobalInstBuffer &&
+        (!m_rasterGlobalInstBuf || m_rasterGlobalInstBuf->hasMotion());
+    pc.historyFlags = (useColorHistory ? 1u : 0u) |
+                      (prevCamera ? 2u : 0u) | (hasObjectMotion ? 4u : 0u);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_interactiveViewport.taaPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,

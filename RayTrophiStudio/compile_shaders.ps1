@@ -159,7 +159,9 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
         $flags = @('--target-env=vulkan1.3', '-O')
         if ($shader.Name -in @(
                 'material_preview_sky_vert.vert', 'raster_post.comp',
+                'raster_post_fast.vert', 'raster_post_fast_frag.frag',
                 'particle_viewport.vert', 'particle_viewport_pull.vert', 'particle_viewport_frag.frag',
+                'particle_viewport_compact.comp',
                 'player_depth_card.vert', 'player_depth_card_frag.frag',
                 'sim_particle_ballistic.comp', 'sim_particle_spawn.comp', 'paint_wet.comp',
                 'material_preview_ibl.comp', 'material_preview_volume_shadow.comp',
@@ -189,6 +191,8 @@ foreach ($extension in @('comp', 'vert', 'frag', 'geom', 'rgen', 'rmiss', 'rchit
         Add-Shader $shader.FullName $shader.BaseName $flags
     }
 }
+Add-Shader (Join-Path $shaderRoot 'particle_viewport_pull.vert') 'particle_viewport_pull_compact' @(
+    '--target-env=vulkan1.2', '-O', '-DRT_PARTICLE_COMPACT=1')
 $splitFlags = @('--target-env=vulkan1.3', '--target-spv=spv1.4')
 $splitFlags += if ($VolumeOptimization -eq 'Off') { '-O0' } else { '-O' }
 Add-Shader (Join-Path $shaderRoot 'volume_closesthit.rchit') 'volume_fog_closesthit' `

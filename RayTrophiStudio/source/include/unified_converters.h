@@ -213,6 +213,8 @@ inline LightGPU toGpuLight(const UnifiedLight& unified) {
     gpu.area_height = unified.area_height;
     gpu.area_u = make_float3(unified.area_u.x, unified.area_u.y, unified.area_u.z);
     gpu.area_v = make_float3(unified.area_v.x, unified.area_v.y, unified.area_v.z);
+    gpu.cast_shadows = unified.cast_shadows;
+    gpu.distance_falloff = unified.distance_falloff;
     
     return gpu;
 }
@@ -238,6 +240,8 @@ inline UnifiedLight fromGpuLight(const LightGPU& gpu) {
     unified.area_height = gpu.area_height;
     unified.area_u = Vec3f(gpu.area_u.x, gpu.area_u.y, gpu.area_u.z);
     unified.area_v = Vec3f(gpu.area_v.x, gpu.area_v.y, gpu.area_v.z);
+    unified.cast_shadows = gpu.cast_shadows;
+    unified.distance_falloff = gpu.distance_falloff;
     
     return unified;
 }

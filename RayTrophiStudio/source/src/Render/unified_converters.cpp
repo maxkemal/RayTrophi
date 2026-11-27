@@ -10,6 +10,7 @@
 #include "AreaLight.h"
 #include "SpotLight.h"
 #include "Material.h"
+#include <algorithm>
 
 // =============================================================================
 // PRINCIPLEDBSDF -> UNIFIEDMATERIAL
@@ -109,6 +110,8 @@ UnifiedLight pointLightToUnified(const PointLight& light) {
     unified.area_height = 0.0f;
     unified.area_u = Vec3f(1.0f, 0.0f, 0.0f);
     unified.area_v = Vec3f(0.0f, 1.0f, 0.0f);  // GPU: make_float3(0, 1, 0)
+    unified.cast_shadows = light.cast_shadows ? 1 : 0;
+    unified.distance_falloff = std::clamp(light.distance_falloff, 0.0f, 2.0f);
     
     return unified;
 }
@@ -133,6 +136,8 @@ UnifiedLight directionalLightToUnified(const DirectionalLight& light) {
     unified.area_height = 0.0f;
     unified.area_u = Vec3f(1.0f, 0.0f, 0.0f);
     unified.area_v = Vec3f(0.0f, 1.0f, 0.0f);  // GPU: make_float3(0, 1, 0)
+    unified.cast_shadows = light.cast_shadows ? 1 : 0;
+    unified.distance_falloff = std::clamp(light.distance_falloff, 0.0f, 2.0f);
     
     return unified;
 }
@@ -155,6 +160,8 @@ UnifiedLight areaLightToUnified(const AreaLight& light) {
     unified.area_height = light.getHeight();
     unified.area_u = toVec3f(light.getU());
     unified.area_v = toVec3f(light.getV());
+    unified.cast_shadows = light.cast_shadows ? 1 : 0;
+    unified.distance_falloff = std::clamp(light.distance_falloff, 0.0f, 2.0f);
     
     // GPU doesn't set cone params for area lights (uses defaults)
     unified.inner_cone_cos = 1.0f;
@@ -187,6 +194,8 @@ UnifiedLight spotLightToUnified(const SpotLight& light) {
     unified.area_height = 0.0f;
     unified.area_u = Vec3f(1.0f, 0.0f, 0.0f);
     unified.area_v = Vec3f(0.0f, 1.0f, 0.0f);
+    unified.cast_shadows = light.cast_shadows ? 1 : 0;
+    unified.distance_falloff = std::clamp(light.distance_falloff, 0.0f, 2.0f);
     
     return unified;
 }
@@ -213,6 +222,9 @@ UnifiedLight toUnifiedLight(const std::shared_ptr<Light>& light) {
         return spotLightToUnified(*spot);
     }
     
-    // Unknown light type - return default
-    return UnifiedLight();
+    // Unknown light type - return default with cast_shadows preserved
+    UnifiedLight unified;
+    unified.cast_shadows = light->cast_shadows ? 1 : 0;
+    unified.distance_falloff = std::clamp(light->distance_falloff, 0.0f, 2.0f);
+    return unified;
 }

@@ -4175,6 +4175,42 @@ static const MethodDescriptor desc_lights_set_visible = {
 };
 static const MethodRegistration reg_lights_set_visible(desc_lights_set_visible);
 
+static const MethodParam params_lights_set_cast_shadows[] = {
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"cast_shadows", "bool", true, "", nullptr, nullptr, "bool", false},
+};
+static const MethodDescriptor desc_lights_set_cast_shadows = {
+    "lights.set_cast_shadows", "lights",
+    "Enable or disable shadow casting for a light",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "lights|set|cast_shadows|shadow|lighting",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_lights_set_cast_shadows, 2,
+    true
+};
+static const MethodRegistration reg_lights_set_cast_shadows(desc_lights_set_cast_shadows);
+
+static const MethodParam params_lights_set_distance_falloff[] = {
+    {"index", "int", true, "", nullptr, nullptr, "number", false},
+    {"distance_falloff", "float", true,
+     "Distance falloff exponent (0.0..2.0, 2.0 = inverse-square)",
+     nullptr, nullptr, "number", false},
+};
+static const MethodDescriptor desc_lights_set_distance_falloff = {
+    "lights.set_distance_falloff", "lights",
+    "Set per-light distance falloff exponent (0.0..2.0, default 2.0 = inverse-square)",
+    nullptr,
+    "write", "SceneWrite", false, "any",
+    "lights|set|distance_falloff|falloff|attenuation|lighting",
+    nullptr,
+    nullptr, nullptr, nullptr, nullptr,
+    params_lights_set_distance_falloff, 2,
+    true
+};
+static const MethodRegistration reg_lights_set_distance_falloff(desc_lights_set_distance_falloff);
+
 static const MethodParam params_material_assign[] = {
     {"material_name", "string", true, "", nullptr, nullptr, "string", false},
     {"object_name", "string", true, "", nullptr, nullptr, "string", false},

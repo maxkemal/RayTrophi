@@ -23,6 +23,7 @@
 
 #include "RtApiInternal.h"
 #include "Renderer.h"
+#include "globals.h"
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +58,8 @@ struct LightAppearance {
     Vec3 color;
     float intensity = 1.0f;
     bool visible = true;
+    bool cast_shadows = true;
+    float distance_falloff = 2.0f;
     std::string name;
 
     static LightAppearance capture(const Light& light) {
@@ -64,6 +67,8 @@ struct LightAppearance {
         a.color = light.color;
         a.intensity = light.intensity;
         a.visible = light.visible;
+        a.cast_shadows = light.cast_shadows;
+        a.distance_falloff = light.distance_falloff;
         a.name = light.nodeName;
         return a;
     }
@@ -71,6 +76,8 @@ struct LightAppearance {
         light.color = color;
         light.intensity = intensity;
         light.visible = visible;
+        light.cast_shadows = cast_shadows;
+        light.distance_falloff = distance_falloff;
         light.nodeName = name;
     }
 };
@@ -97,6 +104,7 @@ private:
         }
         ctx.renderer.resetCPUAccumulation();
         ctx.start_render = true;
+        g_lights_dirty = true;
     }
 
     std::shared_ptr<Light> light_;
@@ -129,6 +137,8 @@ void fillInfo(const Light& light, int index, LightInfo& info) {
     info.color = light.color;
     info.intensity = light.intensity;
     info.visible = light.visible;
+    info.cast_shadows = light.cast_shadows;
+    info.distance_falloff = light.distance_falloff;
     info.direction = light.direction;
 
     switch (light.type()) {
@@ -390,6 +400,29 @@ Result setLightVisible(int index, bool visible) {
     LightAppearance after = before;
     after.visible = visible;
     return commitAppearance(light, before, after, "Set light visibility");
+}
+
+Result setLightCastShadows(int index, bool cast_shadows) {
+    std::shared_ptr<Light> light;
+    if (Result r = acquireLight(index, light); !r) return r;
+
+    const LightAppearance before = LightAppearance::capture(*light);
+    LightAppearance after = before;
+    after.cast_shadows = cast_shadows;
+    return commitAppearance(light, before, after, "Set light cast shadows");
+}
+
+Result setLightDistanceFalloff(int index, float distance_falloff) {
+    std::shared_ptr<Light> light;
+    if (Result r = acquireLight(index, light); !r) return r;
+    if (!std::isfinite(distance_falloff)) {
+        return Result::fail("distance_falloff must be finite");
+    }
+
+    const LightAppearance before = LightAppearance::capture(*light);
+    LightAppearance after = before;
+    after.distance_falloff = std::clamp(distance_falloff, 0.0f, 2.0f);
+    return commitAppearance(light, before, after, "Set light distance falloff");
 }
 
 Result renameLight(int index, const std::string& name) {

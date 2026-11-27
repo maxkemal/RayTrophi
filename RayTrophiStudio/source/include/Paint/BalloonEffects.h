@@ -73,7 +73,8 @@ struct BalloonBurstSummary {
 };
 BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float balloon_size,
                                         const BalloonBurstShape& shape,
-                                        std::vector<BalloonBurstDrop>& out);
+                                        std::vector<BalloonBurstDrop>& out,
+                                        const Vec3* directed_target = nullptr);
 // One firework shell of `sparkles` sparks.
 void balloonSparkles(SceneData& scene, const Vec3& centre, float radius);
 // Every frame BEFORE the simulation step (the drop tap reads the previous step).

@@ -162,6 +162,144 @@ void display() {
     label(tr("player.window_resizing_keeps_the_chosen_game_resolution",
              "Window resizing keeps the chosen game resolution."),
           muted);
+
+    if (ui.status.contains("render") && ui.status["render"].is_object()) {
+        const auto &render = ui.status["render"];
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        heading(tr("player.render_lighting", "Render & lighting"),
+                tr("player.render_lighting_help",
+                   "Costly options start off by default on mobile; changes are saved locally."));
+
+        const std::string curQuality = render.value("quality", std::string("auto"));
+        ImGui::SetNextItemWidth(S(260));
+        if (ImGui::BeginCombo(trId("player.render_quality", "Quality preset"),
+                              curQuality.c_str())) {
+            for (const char *preset : {"performance", "balanced", "auto", "quality", "full"}) {
+                if (ImGui::Selectable(preset, curQuality == preset)) {
+                    call("render.configure", {{"quality", preset}});
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        const std::string curLighting = render.value("preview_lighting", std::string("scene"));
+        ImGui::SetNextItemWidth(S(260));
+        if (ImGui::BeginCombo(trId("player.render_lighting_mode", "Lighting mode"),
+                              curLighting.c_str())) {
+            for (const char *mode : {"scene", "three_point"}) {
+                if (ImGui::Selectable(mode, curLighting == mode)) {
+                    call("render.configure", {{"preview_lighting", mode}});
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        bool taa = render.value("taa", false);
+        if (ImGui::Checkbox(trId("player.render_taa", "Temporal anti-aliasing (TAA)"), &taa)) {
+            call("render.configure", {{"taa", taa}});
+        }
+
+        bool dof = render.value("dof", false);
+        if (ImGui::Checkbox(trId("player.render_dof", "Depth of field (DoF)"), &dof)) {
+            call("render.configure", {{"dof", dof}});
+        }
+
+        bool depthPrepass = render.value("depth_prepass", true);
+        if (ImGui::Checkbox(trId("player.render_depth_prepass", "Depth prepass"), &depthPrepass)) {
+            call("render.configure", {{"depth_prepass", depthPrepass}});
+        }
+
+        const bool rtSupported = render.value("rt_shadow_supported", false);
+        if (rtSupported) {
+            bool rtShadow = render.value("rt_shadow", false);
+            if (ImGui::Checkbox(trId("player.render_rt_shadow", "RT hardware shadows"),
+                                &rtShadow)) {
+                call("render.configure", {{"rt_shadow", rtShadow}});
+            }
+        }
+
+        bool probeEnabled = render.value("probe_enabled", false);
+        if (ImGui::Checkbox(trId("player.render_light_probes", "Light probes (GI)"),
+                            &probeEnabled)) {
+            call("render.configure", {{"probe_enabled", probeEnabled}});
+        }
+        if (probeEnabled) {
+            ImGui::Indent(S(20));
+            bool followCam = render.value("probe_follow_camera", false);
+            if (ImGui::Checkbox(trId("player.render_probe_follow_camera",
+                                     "Probes follow active camera"),
+                                &followCam)) {
+                call("render.configure", {{"probe_follow_camera", followCam}});
+            }
+            if (rtSupported) {
+                bool traced = render.value("probe_producer", std::string("sky_bake")) == "traced";
+                if (ImGui::Checkbox(trId("player.render_probe_traced", "Ray-traced probes"),
+                                    &traced)) {
+                    call("render.configure",
+                         {{"probe_producer", traced ? "traced" : "sky_bake"}});
+                }
+                bool bounce = render.value("probe_bounce", false);
+                if (ImGui::Checkbox(trId("player.render_probe_bounce", "Probe multi-bounce"),
+                                    &bounce)) {
+                    call("render.configure", {{"probe_bounce", bounce}});
+                }
+            }
+            ImGui::Unindent(S(20));
+        }
+
+        ImGui::Spacing();
+        if (action(trId("player.render_reset_defaults", "Reset render defaults"),
+                   ImVec2(S(240), 38))) {
+            call("render.reset", json::object());
+        }
+
+        const auto lights = rtapi::listLights();
+        bool hasVisibleLight = false;
+        for (const auto &light : lights) {
+            if (light.visible) {
+                hasVisibleLight = true;
+                break;
+            }
+        }
+        if (hasVisibleLight) {
+            ImGui::Spacing();
+            ImGui::Separator();
+            label(tr("player.scene_lights_shadows", "SCENE LIGHTS"), violet);
+            for (const auto &light : lights) {
+                if (!light.visible) {
+                    continue;
+                }
+                const std::string displayName =
+                    light.name.empty() ? ("Light #" + std::to_string(light.index)) : light.name;
+                const std::string typeTag = " [" + light.type + "]";
+                ImGui::PushID(light.index);
+                bool castShadows = light.cast_shadows;
+                if (ImGui::Checkbox(trId("player.light_cast_shadows", "Cast Shadows"),
+                                    &castShadows)) {
+                    const auto result = rtapi::setLightCastShadows(light.index, castShadows);
+                    ui.error = result.ok ? "" : result.error;
+                }
+                ImGui::SameLine();
+                label(displayName.c_str());
+                ImGui::SameLine(0.0f, 0.0f);
+                label(typeTag.c_str(), muted);
+                if (light.type == "point" || light.type == "spot" || light.type == "area") {
+                    float falloff = light.distance_falloff;
+                    ImGui::Indent(S(24));
+                    ImGui::SetNextItemWidth(S(160));
+                    if (ImGui::SliderFloat(trId("player.light_distance_falloff", "Falloff"),
+                                           &falloff, 0.0f, 2.0f, "%.2f")) {
+                        const auto result = rtapi::setLightDistanceFalloff(light.index, falloff);
+                        ui.error = result.ok ? "" : result.error;
+                    }
+                    ImGui::Unindent(S(24));
+                }
+                ImGui::PopID();
+            }
+        }
+    }
 }
 
 void audio() {

@@ -5,9 +5,13 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <utility>
+#include <vector>
 
 namespace Input {
 namespace {
+
+constexpr std::size_t kMaxPersons = 10;
 
 bool finiteNumber(const nlohmann::json &value) {
     return value.is_number() && std::isfinite(value.get<double>());
@@ -17,7 +21,7 @@ bool parse(const nlohmann::json &packet, std::map<int, BodyPerson> &people, doub
            std::string &error) {
     if (!packet.is_object() || !packet.contains("t") || !finiteNumber(packet["t"]) ||
         packet["t"].get<double>() < 0.0 || !packet.contains("persons") ||
-        !packet["persons"].is_array() || packet["persons"].size() > 10) {
+        !packet["persons"].is_array() || packet["persons"].size() > kMaxPersons) {
         error = "invalid_body_packet: finite t >= 0 and persons[0..10] required";
         return false;
     }
@@ -85,15 +89,25 @@ bool BodyPoseRuntime::set(const nlohmann::json &packet, std::string &error,
         return false;
     }
     expire(received);
-    // Bound retained identities too: omitted people have a 0.5 s grace, but cannot
-    // grow the tracker without limit by changing all ten IDs every packet.
-    std::size_t retained = parsed.size();
-    for (const auto &entry : tracks_) {
-        retained += parsed.count(entry.first) == 0;
-    }
-    if (retained > 10) {
+    if (parsed.size() > kMaxPersons) {
         error = "body_capacity_exceeded: wait for lost identities to expire or clear";
         return false;
+    }
+    // Bound retained identities too: omitted people have a 0.5 s grace, but if new
+    // identities arrive rapidly, evict the oldest omitted tracks instead of dropping frames.
+    std::vector<std::pair<Clock::time_point, int>> omitted;
+    for (const auto &entry : tracks_) {
+        if (parsed.count(entry.first) == 0) {
+            omitted.emplace_back(entry.second.received, entry.first);
+        }
+    }
+    if (parsed.size() + omitted.size() > kMaxPersons) {
+        std::sort(omitted.begin(), omitted.end());
+        const std::size_t evict_count = parsed.size() + omitted.size() - kMaxPersons;
+        for (std::size_t i = 0; i < evict_count; ++i) {
+            tracks_.erase(omitted[i].second);
+            ++expired_;
+        }
     }
     for (auto &entry : parsed) {
         const auto found = tracks_.find(entry.first);

@@ -1024,6 +1024,7 @@ ViewportPreviewLightingInfo viewportPreviewLighting() {
             for (const auto& l : g_ctx->scene.lights) {
                 if (!l || !l->visible) continue;
                 if (previewLights++ >= kMaterialPreviewMaxSceneLights) break;
+                if (!l->cast_shadows) continue;
                 const int need = l->type() == LightType::Point ? 6 :
                     (l->type() == LightType::Directional
                         ? directionalCascades : 1);

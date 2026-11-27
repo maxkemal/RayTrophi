@@ -9,6 +9,7 @@ namespace Backend {
 const char* rasterStageName(RasterStage stage) {
     switch (stage) {
         case RasterStage::GpuCull:      return "gpu_cull";
+        case RasterStage::ParticleCompaction: return "particle_compaction";
         case RasterStage::ShadowAtlas:  return "shadow_atlas";
         case RasterStage::TransmissionPrep: return "transmission_prep";
         case RasterStage::Sky:          return "sky";

@@ -1657,6 +1657,12 @@ __device__ float resolve_surface_transmission(const GpuMaterial& mat, const Opti
     return fminf(fmaxf(transmission, 0.0f), 1.0f);
 }
 
+__device__ __forceinline__ float compute_distance_attenuation(float dist_sq, float distance_falloff) {
+    return (distance_falloff >= 1.9999f)
+        ? (1.0f / dist_sq)
+        : ((distance_falloff <= 1e-4f) ? 1.0f : powf(dist_sq, -0.5f * distance_falloff));
+}
+
 __device__ int pick_smart_light(const float3& hit_position, curandState* rng, float* pdf_out = nullptr) {
     int light_count = optixLaunchParams.light_count;
     if (light_count == 0) {
@@ -1709,7 +1715,7 @@ __device__ int pick_smart_light(const float3& hit_position, curandState* rng, fl
         float dist = length(light.position - hit_position);
         dist = fmaxf(dist, 1.0f);
         
-        float falloff = 1.0f / (dist * dist);
+        float falloff = compute_distance_attenuation(dist * dist, light.distance_falloff);
         float intensity = luminance(light.color * light.intensity);
         
         if (light.type == 0) { // Point Light
@@ -1814,7 +1820,7 @@ __device__ float3 calculate_light_contribution(
         float3 dir = normalize(L);
         float3 jitter = light.radius * random_in_unit_sphere(rng);
         wi = normalize(dir * distance + jitter);
-        attenuation = 1.0f / (distance * distance);
+        attenuation = compute_distance_attenuation(distance * distance, light.distance_falloff);
     }
     else if (light.type == 1) { // Directional Light
         wi = sample_directional_light(light, payload.position, rng, wi);
@@ -1831,7 +1837,7 @@ __device__ float3 calculate_light_contribution(
         // Cosine falloff based on light normal
         float3 light_normal = normalize(cross(light.area_u, light.area_v));
         float cos_light = fmaxf(dot(-wi, light_normal), 0.0f);
-        attenuation = cos_light / (distance * distance);
+        attenuation = cos_light * compute_distance_attenuation(distance * distance, light.distance_falloff);
     }
     else if (light.type == 3) { // Spot Light
         float3 L = light.position - payload.position;
@@ -1842,7 +1848,7 @@ __device__ float3 calculate_light_contribution(
         // Spot cone falloff
         float falloff = spot_light_falloff(light, wi);
         if (falloff < 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
-        attenuation = falloff / (distance * distance);
+        attenuation = falloff * compute_distance_attenuation(distance * distance, light.distance_falloff);
     }
     else {
         return make_float3(0.0f, 0.0f, 0.0f);
@@ -1851,24 +1857,28 @@ __device__ float3 calculate_light_contribution(
     float NdotL = max(dot(payload.normal, wi),0.0001);
     //if (NdotL <= 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
 
-    // Terrain is a special case:
-    // using the smoothed shading normal for shadow origin caused large-scale terrains
-    // to self-shadow in a pixelated / low-resolution-looking way, especially as area size grew.
-    // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
-    float3 shadow_normal = payload.is_terrain
-        ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
-        : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
-    float3 origin = payload.position + shadow_normal * SCENE_EPSILON;
-    Ray shadow_ray(origin, wi);
-
     // Coloured shadow: transmissive surfaces tint the light instead of blocking it.
-    float3 shadow_tint = trace_shadow_ray_colored(shadow_ray, SCENE_EPSILON, distance);
-    float shadow_visibility = fmaxf(shadow_tint.x, fmaxf(shadow_tint.y, shadow_tint.z));
-    if (shadow_visibility <= 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
-    
-    // Check VDB Occlusion (Volumetric Shadow)
-    float vdb_transmittance = calculate_vdb_occlusion(origin, wi, distance, rng);
-    if (vdb_transmittance < 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
+    float3 shadow_tint = make_float3(1.0f, 1.0f, 1.0f);
+    float vdb_transmittance = 1.0f;
+    if (light.cast_shadows != 0) {
+        // Terrain is a special case:
+        // using the smoothed shading normal for shadow origin caused large-scale terrains
+        // to self-shadow in a pixelated / low-resolution-looking way, especially as area size grew.
+        // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
+        float3 shadow_normal = payload.is_terrain
+            ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
+            : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+        float3 origin = payload.position + shadow_normal * SCENE_EPSILON;
+        Ray shadow_ray(origin, wi);
+
+        shadow_tint = trace_shadow_ray_colored(shadow_ray, SCENE_EPSILON, distance);
+        float shadow_visibility = fmaxf(shadow_tint.x, fmaxf(shadow_tint.y, shadow_tint.z));
+        if (shadow_visibility <= 1e-4f) return make_float3(0.0f, 0.0f, 0.0f);
+
+        // Check VDB Occlusion (Volumetric Shadow)
+        vdb_transmittance = calculate_vdb_occlusion(origin, wi, distance, rng);
+        if (vdb_transmittance < 0.001f) return make_float3(0.0f, 0.0f, 0.0f);
+    }
 
     float3 f = evaluate_brdf(material, payload, wo, wi);
     float pdf_brdf_val = pdf_brdf(material, wo, wi, payload.normal);
@@ -1944,7 +1954,7 @@ __device__ float3 calculate_direct_lighting(
         float3 dir = normalize(L);
         float3 jitter = light.radius * random_in_unit_sphere(rng);
         wi = normalize(dir * distance + jitter);
-        attenuation = 1.0f / (distance * distance);
+        attenuation = compute_distance_attenuation(distance * distance, light.distance_falloff);
     }
     else if (light.type == 1) { // Directional Light
         wi = sample_directional_light(light, payload.position, rng, wi);
@@ -1960,7 +1970,7 @@ __device__ float3 calculate_direct_lighting(
         
         float3 light_normal = normalize(cross(light.area_u, light.area_v));
         float cos_light = fmaxf(dot(-wi, light_normal), 0.0f);
-        attenuation = cos_light / (distance * distance);
+        attenuation = cos_light * compute_distance_attenuation(distance * distance, light.distance_falloff);
     }
     else if (light.type == 3) { // Spot Light
         float3 L = light.position - payload.position;
@@ -1970,7 +1980,7 @@ __device__ float3 calculate_direct_lighting(
         
         float falloff = spot_light_falloff(light, wi);
         if (falloff < 1e-4f) return result;
-        attenuation = falloff / (distance * distance);
+        attenuation = falloff * compute_distance_attenuation(distance * distance, light.distance_falloff);
     }
     else {
         return result;
@@ -1980,19 +1990,22 @@ __device__ float3 calculate_direct_lighting(
     if (NdotL <= 0.001f) return result;
 
     // ==== Shadow ray ====
-    // Terrain is a special case:
-    // using the smoothed shading normal for shadow origin caused large-scale terrains
-    // to self-shadow in a pixelated / low-resolution-looking way, especially as area size grew.
-    // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
-    float3 shadow_normal = payload.is_terrain
-        ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
-        : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
-    float3 origin = payload.position + shadow_normal * shadow_bias;
-    Ray shadow_ray(origin, wi);
+    float3 shadow_tint = make_float3(1.0f, 1.0f, 1.0f);
+    if (light.cast_shadows != 0) {
+        // Terrain is a special case:
+        // using the smoothed shading normal for shadow origin caused large-scale terrains
+        // to self-shadow in a pixelated / low-resolution-looking way, especially as area size grew.
+        // Keep terrain on geometric shadow normals; only regular meshes use the softened path.
+        float3 shadow_normal = payload.is_terrain
+            ? safe_normalize(payload.geom_normal, make_float3(0.0f, 1.0f, 0.0f))
+            : safe_normalize(payload.normal, make_float3(0.0f, 1.0f, 0.0f));
+        float3 origin = payload.position + shadow_normal * shadow_bias;
+        Ray shadow_ray(origin, wi);
 
-    // Coloured shadow: transmissive surfaces tint the light instead of blocking it.
-    float3 shadow_tint = trace_shadow_ray_colored(shadow_ray, shadow_bias, distance);
-    if (fmaxf(shadow_tint.x, fmaxf(shadow_tint.y, shadow_tint.z)) <= 1e-4f) return result;
+        // Coloured shadow: transmissive surfaces tint the light instead of blocking it.
+        shadow_tint = trace_shadow_ray_colored(shadow_ray, shadow_bias, distance);
+        if (fmaxf(shadow_tint.x, fmaxf(shadow_tint.y, shadow_tint.z)) <= 1e-4f) return result;
+    }
 
     // ==== BRDF & PDF ====
     float3 f = evaluate_brdf(mat, payload, wo, wi);
@@ -2082,7 +2095,8 @@ __device__ float3 calculate_brdf_mis(
 
             float3 f = evaluate_brdf(mat, payload, wo, wi);
             float NdotL = fmaxf(dot(payload.normal, wi), 0.0f);
-            float3 Li = light.color * light.intensity / (dist * dist);
+            float atten = compute_distance_attenuation(fmaxf(dist * dist, 1e-8f), light.distance_falloff);
+            float3 Li = light.color * light.intensity * atten;
 			
             result += (f * Li * NdotL) * mis_weight * light_count; // Sadece seçilen ışık örneklendiği için çarpım.
         }

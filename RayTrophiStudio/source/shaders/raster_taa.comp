@@ -111,28 +111,33 @@ void main() {
 
     const vec3 current = max(texture(inHDR, uv).rgb, vec3(0.0));
     const float currentDepth = texture(inDepth, uv).r;
-    const vec4 objectPrevious = (pc.historyFlags & TAA_OBJECT_MODELS) != 0u ?
-        texelFetch(inPreviousClip, p, 0) : vec4(0.0);
-    vec4 reprojectInput = objectPrevious.w > 0.5 ?
-        vec4(objectPrevious.xyz, 1.0) : vec4(uv * 2.0 - 1.0, currentDepth, 1.0);
+    const vec2 objectMotion = (pc.historyFlags & TAA_OBJECT_MODELS) != 0u ?
+        texelFetch(inPreviousClip, p, 0).xy : vec2(65504.0, 0.0);
+    const bool hasObjDelta = abs(objectMotion.x) <= 1000.0;
+    const bool objRejected = objectMotion.x < -1000.0;
+    const vec4 camReprojectInput = vec4(uv * 2.0 - 1.0, currentDepth, 1.0);
 
     {
         vec4 motion = vec4(0.0, 0.0, 0.0, 1.0);
         if ((pc.historyFlags & TAA_PREV_CAMERA) != 0u) {
-            // Sky (depth 1) reprojects at the far plane: rotation only, which
-            // is what a point at infinity does.
-            const float d = texture(inDepth, uv).r;
-            vec4 pc4 = pc.reprojection * reprojectInput;
-            if (pc4.w > 1e-9) {
-                vec2 prevUv = (pc4.xy / pc4.w) * 0.5 + 0.5;
+            if (hasObjDelta) {
+                vec2 prevUv = uv + objectMotion;
                 bool onScreen = all(greaterThanEqual(prevUv, vec2(0.0))) &&
                                 all(lessThanEqual(prevUv, vec2(1.0)));
-                float oldDepth = texelFetch(inHistory,
-                    clamp(ivec2(prevUv * vec2(pc.width, pc.height)), ivec2(0),
-                        ivec2(pc.width, pc.height) - 1), 0).a;
-                bool depthValid = abs(pc4.z / pc4.w - oldDepth) < 0.001;
-                bool valid = onScreen && depthValid && objectPrevious.w > -0.5;
-                motion = vec4((prevUv - uv) * vec2(pc.width, pc.height), 0.0, valid ? 0.0 : 1.0);
+                motion = vec4(objectMotion * vec2(pc.width, pc.height), 0.0, onScreen ? 0.0 : 1.0);
+            } else {
+                vec4 pc4 = pc.reprojection * camReprojectInput;
+                if (pc4.w > 1e-9) {
+                    vec2 prevUv = (pc4.xy / pc4.w) * 0.5 + 0.5;
+                    bool onScreen = all(greaterThanEqual(prevUv, vec2(0.0))) &&
+                                    all(lessThanEqual(prevUv, vec2(1.0)));
+                    float oldDepth = texelFetch(inHistory,
+                        clamp(ivec2(prevUv * vec2(pc.width, pc.height)), ivec2(0),
+                            ivec2(pc.width, pc.height) - 1), 0).a;
+                    bool depthValid = abs(pc4.z / pc4.w - oldDepth) < 0.001;
+                    bool valid = onScreen && depthValid && !objRejected;
+                    motion = vec4((prevUv - uv) * vec2(pc.width, pc.height), 0.0, valid ? 0.0 : 1.0);
+                }
             }
         }
         imageStore(outMotion, p, motion);
@@ -173,10 +178,14 @@ void main() {
         return;
     }
 
-    const vec3 ndc = vec3(uv * 2.0 - 1.0, depth);
-    vec4 prevClip = pc.reprojection * reprojectInput;
-    if (prevClip.w <= 1e-9) { imageStore(outResolved, p, vec4(current, currentDepth)); return; }
-    const vec2 prevUv = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+    vec2 prevUv;
+    if (hasObjDelta) {
+        prevUv = uv + objectMotion;
+    } else {
+        vec4 prevClip = pc.reprojection * camReprojectInput;
+        if (prevClip.w <= 1e-9) { imageStore(outResolved, p, vec4(current, currentDepth)); return; }
+        prevUv = (prevClip.xy / prevClip.w) * 0.5 + 0.5;
+    }
     if (any(lessThan(prevUv, vec2(0.0))) || any(greaterThan(prevUv, vec2(1.0)))) {
         // Ekran disindan geldi: gecmis YOK. Kirpmak degil, atmak dogru --
         // kenardaki pikseli komsusuna kirpmak, ekran kenari boyunca bir

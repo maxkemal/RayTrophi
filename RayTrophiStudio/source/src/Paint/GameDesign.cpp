@@ -6,6 +6,7 @@
 
 #include "Paint/BalloonPaintDemo.h"
 #include "Paint/BalloonPlayerDefaults.h"
+#include "Paint/GameDesignStartupHelper.h"
 #include "Paint/WetPaintGpu.h"
 #include "Paint/MeshPaintAdapter.h"
 #include "TriangleMesh.h"
@@ -17,6 +18,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <unordered_set>
 
 namespace Paint {
@@ -30,6 +34,8 @@ std::string apply_status;
 // project loader): its pools are GPU-required and warm up against them.
 json pending_demo;            // null: nothing waiting
 int pending_demo_ticks = 0;
+bool pending_demo_timer_active = false;
+std::chrono::steady_clock::time_point pending_demo_wait_start;
 constexpr int kDemoWaitTicks = 60 * 60;   // ~1 minute of frames, then report
 
 json settingsToJson(const WetPaintSurfaceSettings& s) {
@@ -102,14 +108,12 @@ WetPaintSurfaceSettings settingsFromJson(const json& j) {
 
 std::shared_ptr<MeshPaintAdapter> gamePaintAdapter(SceneData& scene,
                                                  const std::string& object_name,
-                                                 int material_id) {
+                                                 int material_id,
+                                                 const FlatMeshLookup* mesh_lookup = nullptr) {
     std::shared_ptr<Triangle> representative;
-    // Flat meshes are authoritative. One representative supplies only the
-    // existing texture adapter's material key, never scene geometry.
-    for (const auto& object : scene.world.objects) {
-        auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
-        if (!mesh || mesh->nodeName != object_name || !mesh->geometry) {
-            continue;
+    auto findInMesh = [&](const std::shared_ptr<TriangleMesh>& mesh) {
+        if (!mesh || !mesh->geometry) {
+            return;
         }
         const auto& geometry = *mesh->geometry;
         const auto* materials = geometry.get_attribute_data<uint16_t>("materialID");
@@ -129,14 +133,126 @@ std::shared_ptr<MeshPaintAdapter> gamePaintAdapter(SceneData& scene,
                 break;
             }
         }
-        if (representative) {
-            break;
+    };
+
+    // Flat meshes are authoritative. One representative supplies only the
+    // existing texture adapter's material key, never scene geometry.
+    if (mesh_lookup) {
+        auto it = mesh_lookup->find(object_name);
+        if (it != mesh_lookup->end()) {
+            for (const auto& mesh : it->second) {
+                findInMesh(mesh);
+                if (representative) {
+                    break;
+                }
+            }
+        }
+    } else {
+        for (const auto& object : scene.world.objects) {
+            auto mesh = std::dynamic_pointer_cast<TriangleMesh>(object);
+            if (!mesh || mesh->nodeName != object_name || !mesh->geometry) {
+                continue;
+            }
+            findInMesh(mesh);
+            if (representative) {
+                break;
+            }
         }
     }
     if (!representative) {
         return nullptr;
     }
     return std::make_shared<MeshPaintAdapter>(&scene, representative);
+}
+
+bool filesIdentical(const std::filesystem::path& a, const std::filesystem::path& b) {
+    std::error_code ec;
+    const auto size_a = std::filesystem::file_size(a, ec);
+    if (ec) return false;
+    const auto size_b = std::filesystem::file_size(b, ec);
+    if (ec || size_a != size_b) return false;
+    std::ifstream fa(a, std::ios::binary);
+    std::ifstream fb(b, std::ios::binary);
+    if (!fa || !fb) return false;
+    char buf_a[8192];
+    char buf_b[8192];
+    while (fa && fb) {
+        fa.read(buf_a, sizeof(buf_a));
+        fb.read(buf_b, sizeof(buf_b));
+        const auto n_a = fa.gcount();
+        const auto n_b = fb.gcount();
+        if (n_a != n_b || std::memcmp(buf_a, buf_b, static_cast<size_t>(n_a)) != 0) {
+            return false;
+        }
+    }
+    return fa.eof() && fb.eof();
+}
+
+// Hidden picture files are project assets, not references into the author's disk.
+// On save, external files are copied into "<project stem>_pictures/" next to the
+// project and stored as project-relative paths (matching "_environment/").
+std::string portabilizeHiddenPicturePath(const std::string& stored,
+                                         const std::string& project_filepath,
+                                         const std::string& source_project_filepath) {
+    if (stored.empty() || stored == "@base" || project_filepath.empty()) {
+        return stored;
+    }
+    namespace fs = std::filesystem;
+    try {
+        const fs::path project_json_path(project_filepath);
+        const fs::path project_dir = fs::absolute(project_json_path).parent_path();
+        const fs::path pic_dir = project_dir / (project_json_path.stem().string() + "_pictures");
+        fs::path source(stored);
+        std::error_code ec;
+        if (source.is_relative()) {
+            const fs::path original = source_project_filepath.empty()
+                ? project_dir / source
+                : fs::absolute(fs::path(source_project_filepath)).parent_path() / source;
+            const fs::path destination_candidate = project_dir / source;
+            if (fs::is_regular_file(original, ec)) {
+                source = original;
+            } else if (fs::is_regular_file(destination_candidate, ec)) {
+                source = destination_candidate;
+            }
+        }
+        if (!fs::is_regular_file(source, ec)) {
+            SCENE_LOG_WARN("[GameDesign] Hidden picture is missing, path kept as stored: " +
+                           stored);
+            return stored;
+        }
+        const fs::path relative_picture = fs::relative(source, pic_dir, ec);
+        if (!ec && !relative_picture.empty() && *relative_picture.begin() != "..") {
+            return (pic_dir.filename() / relative_picture).generic_string();
+        }
+        fs::create_directories(pic_dir, ec);
+        if (ec) {
+            SCENE_LOG_WARN("[GameDesign] Could not create pictures folder (" + ec.message() +
+                           "): " + pic_dir.string());
+            return stored;
+        }
+        const fs::path base_stem = source.stem();
+        const fs::path ext = source.extension();
+        fs::path target = pic_dir / source.filename();
+        for (int suffix = 1; suffix <= 999; ++suffix) {
+            if (!fs::exists(target, ec)) {
+                break;
+            }
+            if (filesIdentical(source, target)) {
+                return (pic_dir.filename() / target.filename()).generic_string();
+            }
+            target = pic_dir / (base_stem.string() + "_" + std::to_string(suffix) + ext.string());
+        }
+        fs::copy_file(source, target, fs::copy_options::none, ec);
+        if (ec) {
+            SCENE_LOG_WARN("[GameDesign] Could not copy hidden picture into project (" +
+                           ec.message() + "): " + stored);
+            return stored;
+        }
+        return (pic_dir.filename() / target.filename()).generic_string();
+    } catch (const std::exception& e) {
+        SCENE_LOG_WARN(std::string("[GameDesign] Hidden picture portability failed: ") + e.what());
+        return stored;
+    }
 }
 
 } // namespace
@@ -153,9 +269,10 @@ bool resizeGamePaintSurfaces(SceneData& scene, int resolution, std::string& erro
         return false;
     }
     std::vector<std::shared_ptr<MeshPaintAdapter>> adapters;
+    const FlatMeshLookup flat_meshes = buildFlatMeshLookup(scene);
     bool changed = false;
     for (const auto& surface : surfaces) {
-        auto adapter = gamePaintAdapter(scene, surface.object, surface.material_id);
+        auto adapter = gamePaintAdapter(scene, surface.object, surface.material_id, &flat_meshes);
         if (!adapter || !adapter->isValid() || !adapter->getTextureSet() ||
             !adapter->getTextureSet()->initialized) {
             error = "paint texture unavailable: " + surface.object;
@@ -189,7 +306,8 @@ bool resizeGamePaintSurfaces(SceneData& scene, int resolution, std::string& erro
     return ok;
 }
 
-json saveGameDesign() {
+json saveGameDesign(const std::string& project_filepath,
+                    const std::string& source_project_filepath) {
     auto& paint = wetPaintGpu();
     const json demo = balloonPaintDesign();
     if (paint.empty() && demo.is_null()) {
@@ -197,8 +315,15 @@ json saveGameDesign() {
     }
     json surfaces = json::array();
     for (const auto& s : paint.surfaces()) {
+        WetPaintSurfaceSettings saved_settings = s.settings;
+        if (!project_filepath.empty() && !saved_settings.reveal_picture.empty()) {
+            saved_settings.reveal_picture =
+                portabilizeHiddenPicturePath(saved_settings.reveal_picture, project_filepath,
+                                             source_project_filepath);
+        }
         surfaces.push_back({{"object", s.object}, {"material_id", s.material_id},
-                            {"resolution", s.resolution}, {"settings", settingsToJson(s.settings)}});
+                            {"resolution", s.resolution},
+                            {"settings", settingsToJson(saved_settings)}});
     }
     const auto& splat = paint.splatSettings();
     json design = {{"version", 1},
@@ -216,10 +341,33 @@ json saveGameDesign() {
     return design;
 }
 
+void adoptSavedGamePicturePaths(const json& saved_design) {
+    if (saved_design.is_null()) {
+        return;
+    }
+    auto& paint = wetPaintGpu();
+    const auto surfaces = paint.surfaces();
+    for (const auto& entry : saved_design.at("wet_paint").at("surfaces")) {
+        const auto& object = entry.at("object").get_ref<const std::string&>();
+        const int material_id = entry.at("material_id").get<int>();
+        const auto& picture =
+            entry.at("settings").at("reveal_picture").get_ref<const std::string&>();
+        const auto surface = std::find_if(surfaces.begin(), surfaces.end(), [&](const auto& s) {
+            return s.object == object && s.material_id == material_id;
+        });
+        if (surface != surfaces.end() && surface->settings.reveal_picture != picture) {
+            auto settings = surface->settings;
+            settings.reveal_picture = picture;
+            paint.setSurfaceSettings(object, material_id, settings);
+        }
+    }
+}
+
 void queueGameDesign(const json& design) {
     pending_design = design.is_object() ? design : json();
     pending_demo = json();
     pending_demo_ticks = 0;
+    pending_demo_timer_active = false;
     apply_status.clear();
 }
 
@@ -228,6 +376,7 @@ void resetGameDesign() {
     pending_design = json();
     pending_demo = json();
     pending_demo_ticks = 0;
+    pending_demo_timer_active = false;
     apply_status.clear();
 }
 
@@ -237,7 +386,12 @@ bool gameDesignPending() {
 
 namespace {
 
-void tickPendingDemo(SceneData& scene) {
+void tickPendingDemo(SceneData& scene, GameDesignTiming* timing = nullptr) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!pending_demo_timer_active) {
+        pending_demo_wait_start = now;
+        pending_demo_timer_active = true;
+    }
     std::string waiting;
     if (!balloonPaintCollidersReady(scene, waiting)) {
         if (++pending_demo_ticks < kDemoWaitTicks) {
@@ -247,8 +401,12 @@ void tickPendingDemo(SceneData& scene) {
         apply_status = "balloon demo not prepared: collider SDF never finished (" + waiting + ")";
         SCENE_LOG_WARN("[GameDesign] " + apply_status);
         pending_demo = json();
+        pending_demo_timer_active = false;
         return;
     }
+    const double sdf_wait_ms = std::chrono::duration<double, std::milli>(
+        now - pending_demo_wait_start).count();
+    pending_demo_timer_active = false;
     json config = std::move(pending_demo);
 #ifdef RT_PLAYER
     applyBalloonPlayerDefaults(config);
@@ -256,6 +414,7 @@ void tickPendingDemo(SceneData& scene) {
     pending_demo = json();
     json output;
     std::string error;
+    const auto t_demo = std::chrono::steady_clock::now();
     if (!balloonPaintCommand(scene, "configure", config, output, error)) {
         apply_status = "balloon demo: " + error +
                        " (sdf_wait_ticks=" + std::to_string(pending_demo_ticks) + ")";
@@ -264,6 +423,21 @@ void tickPendingDemo(SceneData& scene) {
         apply_status = "applied: " + std::to_string(wetPaintGpu().surfaces().size()) +
                        " paint surface(s), balloon demo prepared (sdf_wait_ticks=" +
                        std::to_string(pending_demo_ticks) + ")";
+    }
+    const double demo_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_demo).count();
+    if (timing) {
+        timing->sdf_wait_ms = sdf_wait_ms;
+        timing->demo_ms = demo_ms;
+    } else {
+        const std::string demo_summary =
+            "demo=" + std::to_string(static_cast<int>(demo_ms + 0.5)) +
+            "ms, sdf_wait=" + std::to_string(static_cast<int>(sdf_wait_ms + 0.5)) + "ms";
+        apply_status += " [" + demo_summary + "]";
+        SCENE_LOG_INFO("[GameDesign] demo configure=" +
+                       std::to_string(static_cast<int>(demo_ms + 0.5)) +
+                       " ms (sdf_wait=" + std::to_string(static_cast<int>(sdf_wait_ms + 0.5)) +
+                       " ms, sdf_wait_ticks=" + std::to_string(pending_demo_ticks) + ")");
     }
 }
 
@@ -333,8 +507,7 @@ void tickGameDesign(SceneData& scene) {
     auto& paint = wetPaintGpu();
     size_t added = 0;
     const auto t_design_start = std::chrono::steady_clock::now();
-    double surfaces_ms = 0.0;
-    double hidden_ms = 0.0;
+    GameDesignTiming timing;
     try {
 #ifndef RT_PLAYER
         if ((design.contains("wet_paint") || design.contains("balloon_demo")) &&
@@ -345,7 +518,10 @@ void tickGameDesign(SceneData& scene) {
         const json wet = design.value("wet_paint", json::object());
         const json surfaces = wet.value("surfaces", json::array());
         if (surfaces.is_array() && !surfaces.empty()) {
-            const auto t_surf = std::chrono::steady_clock::now();
+            const auto t_lookup = std::chrono::steady_clock::now();
+            const FlatMeshLookup flat_meshes = buildFlatMeshLookup(scene);
+            timing.adapter_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_lookup).count();
             // The document replaces whatever a previous project left behind.
             paint.clear();
             for (const auto& entry : surfaces) {
@@ -357,35 +533,66 @@ void tickGameDesign(SceneData& scene) {
                 const int material = entry.value("material_id", -1);
                 int resolution = std::clamp(entry.value("resolution", 1024), 32, 4096);
 #ifdef RT_PLAYER
-                resolution = std::min(resolution, defaultMaxPaintResolution);
+                resolution = std::min(resolution, effectiveMaxPaintResolution());
 #endif
                 std::string error;
+                // Sync serialized layer-stack dimensions to target resolution
+                // before WetPaintGpu binds channels, avoiding repeated 512<->1024
+                // CPU resamples inside MeshPaintAdapter::ensureLayerStack().
+                const auto t_adapter = std::chrono::steady_clock::now();
+                syncLayerStackResolution(scene, object, material, resolution);
                 // Existing serialized Paint Edit textures may have a different
                 // size. Honor the saved game surface size before baking its atlas.
-                auto adapter = gamePaintAdapter(scene, object, material);
-                if (adapter && adapter->getTextureSet() &&
-                    adapter->getTextureSet()->initialized) {
-                    const auto texture = adapter->getTextureSet()->getTexture(PaintChannel::BaseColor);
-                    if (texture && (texture->width != resolution || texture->height != resolution) &&
-                        !adapter->resizeTextureSet(resolution)) {
-                        note(object + ": could not restore saved paint resolution");
-                        continue;
+                if (!scene.mesh_paint_texture_sets.empty()) {
+                    auto adapter = gamePaintAdapter(scene, object, material, &flat_meshes);
+                    timing.adapter_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t_adapter).count();
+                    if (adapter && adapter->getTextureSet() &&
+                        adapter->getTextureSet()->initialized) {
+                        const auto texture =
+                            adapter->getTextureSet()->getTexture(PaintChannel::BaseColor);
+                        if (texture &&
+                            (texture->width != resolution || texture->height != resolution)) {
+                            const auto t_resize = std::chrono::steady_clock::now();
+                            const bool resized = adapter->resizeTextureSet(resolution);
+                            timing.resize_ms += std::chrono::duration<double, std::milli>(
+                                std::chrono::steady_clock::now() - t_resize).count();
+                            if (!resized) {
+                                note(object + ": could not restore saved paint resolution");
+                                continue;
+                            }
+                        }
                     }
+                } else {
+                    timing.adapter_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t_adapter).count();
                 }
+                const auto t_add = std::chrono::steady_clock::now();
                 if (!paint.addSurface(scene, object, material, resolution, error)) {
+                    timing.add_surface_ms += std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t_add).count();
                     // A renamed or deleted object: say so, keep the rest.
                     note(object + ": " + error);
                     continue;
                 }
-                paint.setSurfaceSettings(object, material,
-                                         settingsFromJson(entry.value("settings", json::object())));
+                timing.add_surface_ms += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_add).count();
+                const auto t_set = std::chrono::steady_clock::now();
+                WetPaintSurfaceSettings surface_settings =
+                    settingsFromJson(entry.value("settings", json::object()));
+#ifdef RT_PLAYER
+                surface_settings.lifetime_seconds = (std::min)(
+                    surface_settings.lifetime_seconds, effectiveMaxPaintLifetimeSeconds());
+#endif
+                paint.setSurfaceSettings(object, material, surface_settings);
+                timing.settings_ms += std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t_set).count();
                 ++added;
             }
             g_materials_dirty = true;
-            surfaces_ms = std::chrono::duration<double, std::milli>(
-                std::chrono::steady_clock::now() - t_surf).count();
         }
         if (wet.contains("splat") && wet["splat"].is_object()) {
+            const auto t_splat = std::chrono::steady_clock::now();
             const json& j = wet["splat"];
             WetPaintSplatSettings splat;
             splat.consume_particles = flag(j, "consume_particles", splat.consume_particles);
@@ -401,6 +608,8 @@ void tickGameDesign(SceneData& scene) {
                     std::clamp<uint32_t>(j["max_events_per_tick"].get<uint32_t>(), 1u, 1u << 20);
             }
             paint.setSplatSettings(splat);
+            timing.settings_ms += std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - t_splat).count();
         }
         if (design.contains("hidden_objects")) {
             const auto t_hid = std::chrono::steady_clock::now();
@@ -408,13 +617,14 @@ void tickGameDesign(SceneData& scene) {
             if (!configureHiddenGameObjects(scene, design["hidden_objects"], error)) {
                 note("Hidden objects: " + error);
             }
-            hidden_ms = std::chrono::duration<double, std::milli>(
+            timing.hidden_ms = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t_hid).count();
         }
         if (design.contains("balloon_demo") && design["balloon_demo"].is_object()) {
             // Configured on a later tick, once every droplet collider is cooked.
             pending_demo = design["balloon_demo"];
             pending_demo_ticks = 0;
+            pending_demo_timer_active = false;
         }
     } catch (const std::exception& e) {
         note(e.what());
@@ -423,18 +633,34 @@ void tickGameDesign(SceneData& scene) {
     if (!pending_demo.is_null()) {
         // Apply immediately when droplet colliders are already ready instead of
         // waiting until Frame 1+2.
-        tickPendingDemo(scene);
+        tickPendingDemo(scene, &timing);
     }
     const double total_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t_design_start).count();
-    SCENE_LOG_INFO("[GameDesign] apply total=" + std::to_string(static_cast<int>(total_ms + 0.5)) +
-                   " ms (surfaces=" + std::to_string(static_cast<int>(surfaces_ms + 0.5)) +
-                   " ms/" + std::to_string(added) + ", hidden=" +
-                   std::to_string(static_cast<int>(hidden_ms + 0.5)) + " ms)");
+    const auto roundMs = [](double ms) {
+        return std::to_string(static_cast<int>(ms + 0.5));
+    };
+    SCENE_LOG_INFO("[GameDesign] apply total=" + roundMs(total_ms) +
+                   " ms (adapter=" + roundMs(timing.adapter_ms) +
+                   " ms, resize=" + roundMs(timing.resize_ms) +
+                   " ms, add_surface=" + roundMs(timing.add_surface_ms) +
+                   " ms, settings=" + roundMs(timing.settings_ms) +
+                   " ms, hidden=" + roundMs(timing.hidden_ms) +
+                   " ms, demo=" + roundMs(timing.demo_ms) +
+                   " ms, sdf_wait=" + roundMs(timing.sdf_wait_ms) +
+                   " ms, surfaces=" + std::to_string(added) +
+                   ", sdf_wait_ticks=" + std::to_string(pending_demo_ticks) + ")");
+    const std::string timing_tag =
+        " [total=" + roundMs(total_ms) + " add=" + roundMs(timing.add_surface_ms) +
+        " set=" + roundMs(timing.settings_ms) + " hid=" + roundMs(timing.hidden_ms) +
+        " demo=" + roundMs(timing.demo_ms) + " ms]";
     if (apply_status == status_before_demo) {
         apply_status = problems.empty()
-            ? "applied: " + std::to_string(added) + " paint surface(s)"
-            : "applied " + std::to_string(added) + " paint surface(s), problems: " + problems;
+            ? "applied: " + std::to_string(added) + " paint surface(s)" + timing_tag
+            : "applied " + std::to_string(added) + " paint surface(s)" + timing_tag +
+                  ", problems: " + problems;
+    } else {
+        apply_status += timing_tag;
     }
     if (!problems.empty()) {
         SCENE_LOG_WARN("[GameDesign] " + apply_status);

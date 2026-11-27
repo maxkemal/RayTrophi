@@ -1,70 +1,72 @@
-#include "RayFusion/ProbeSettings.h"
-#include "OfflineDeviceHooks.h"
-#include "Game/GameRuntime.h"
-#include "Paint/BalloonPaintDemo.h"
-#include "Paint/GameDesign.h"
-#include "Paint/WetPaintGpu.h"
-#include "Fluid/LiquidEmissionAuthoring.h"
-#include "Fluid/MatterFogStreams.h"
-#include "Fluid/MatterSeedSources.h"
-#include "Fluid/SourceSplatGeometryJson.h"
-#include "Fluid/MatterPhaseOutputJson.h"
-#include "Atmosphere/LensWeatherState.h"
-#include "Fluid/MatterPoreAuthoring.h"
-#include "Fluid/MatterGrain.h"
-#include "Animation/RigBindingScope.h"
-#include "Fluid/MatterPhaseConfig.h"
-#include "Fluid/FluidFogDensity.h"
-#include "PostProcess/PostService.h"
 #include "ProjectManager.h"
-#include "Backend/UpscaleSettingsJson.h"
-#include "Backend/RealtimeDenoiserSettingsJson.h"
-#include "ProjectTimelineReset.h"
-#include "ProjectSimulationCache.h"
-#include "globals.h"
-#include "Renderer.h"
+#include "Animation/AnimationData.h"
+#include "Animation/RigAnatomy.h"
+#include "Animation/RigBindingScope.h"
+#include "Animation/RigEditing.h"
+#include "Animation/RigIKTimeline.h"
+#include "Animation/RigSerialization.h"
+#include "AreaLight.h"
+#include "AshDebrisSerialization.h"
+#include "Atmosphere/LensWeatherState.h"
 #include "Backend/IBackend.h"
 #include "Backend/IViewportBackend.h"
+#include "Backend/RealtimeDenoiserSettingsJson.h"
+#include "Backend/UpscaleSettingsJson.h"
 #include "Backend/VulkanBackend.h"
-#include "Animation/AnimationData.h"
-#include "Animation/RigSerialization.h"
-#include "Animation/RigIKTimeline.h"
-#include "Animation/RigAnatomy.h"
-#include "Animation/RigEditing.h"
-#include <stdexcept>
-#include "Triangle.h"
-#include "InstanceManager.h"
-#include "PrincipledBSDF.h"
-#include "PointLight.h"
 #include "DirectionalLight.h"
-#include "SpotLight.h"
-#include "AreaLight.h"
-#include "WaterSystem.h"
-#include "MeshModifiers.h"
-#include "Paint/PaintLayerStack.h"
-#include "AshDebrisSerialization.h"
-#include "KinematicColliderSerialization.h"
-#include "SubstanceLibrary.h"
 #include "Fluid/FluidDomainSubstance.h"
+#include "Fluid/FluidFogDensity.h"
+#include "Fluid/LiquidEmissionAuthoring.h"
+#include "Fluid/MatterFogStreams.h"
+#include "Fluid/MatterGrain.h"
+#include "Fluid/MatterPhaseConfig.h"
+#include "Fluid/MatterPhaseOutputJson.h"
+#include "Fluid/MatterPoreAuthoring.h"
+#include "Fluid/MatterSeedSources.h"
+#include "Fluid/SourceSplatGeometryJson.h"
+#include "Game/GameRuntime.h"
+#include "InstanceManager.h"
+#include "KinematicColliderSerialization.h"
+#include "MeshModifiers.h"
+#include "OfflineDeviceHooks.h"
+#include "Paint/BalloonPaintDemo.h"
+#include "Paint/GameDesign.h"
+#include "Paint/PaintLayerStack.h"
+#include "Paint/WetPaintGpu.h"
+#include "Physics/ParticleSdfLoadDeduplicator.h"
+#include "PointLight.h"
+#include "PostProcess/PostService.h"
+#include "PrincipledBSDF.h"
+#include "ProjectSimulationCache.h"
+#include "ProjectTimelineReset.h"
+#include "RayFusion/ProbeSettings.h"
+#include "Renderer.h"
+#include "SpotLight.h"
+#include "SubstanceLibrary.h"
+#include "Triangle.h"
 #include "UI/TemplateHubUI.h"
+#include "WaterSystem.h"
+#include "globals.h"
 #include "json.hpp"
 #include "simdjson.h"
-#include <fstream>
-#include <filesystem>
-#include <istream>
-#include <streambuf>
-#include <sstream>
-#include <iomanip>
-#include <unordered_set>
-#include <unordered_map>
 #include <algorithm>
-#include <cmath>
 #include <cctype>
+#include <chrono>
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <istream>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <sstream>
+#include <stdexcept>
+#include <streambuf>
 #include <thread>
-#include <chrono>
+#include <unordered_map>
+#include <unordered_set>
+
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -78,577 +80,641 @@
 #endif
 #endif
 
-#include <chrono>
+#include "RiverSpline.h"
 #include "TerrainManager.h"
 #include "TerrainRoadNetwork.h"
-#include "RiverSpline.h"
+#include <chrono>
 
-#include "stb_image_write.h"
-#include "stb_image.h"
 #include "ColorProcessingParams.h"
-#include "ThermalFractureSerialization.h"
 #include "MeshEdit/SplineSerialization.h"
+#include "ThermalFractureSerialization.h"
+#include "stb_image.h"
+#include "stb_image_write.h"
 
 // Helper for stbi_write_to_func
 namespace {
-    void write_to_vector_func(void* context, void* data, int size) {
-        auto* vec = static_cast<std::vector<char>*>(context);
-        const char* d = static_cast<const char*>(data);
-        vec->insert(vec->end(), d, d + size);
-    }
-
-    // JPG quality used for embedded color textures. q=92 is visually transparent
-    // for albedo/emission while shrinking 5-10x vs PNG.
-    constexpr int kEmbeddedJpegQuality = 92;
-
-    bool isLossyEncodableUsage(const std::string& usage) {
-        // Only pure color channels tolerate JPG. Normal/roughness/metallic/height/
-        // opacity/transmission carry numeric data — JPG artifacts corrupt shading
-        // or masks, so they must stay PNG.
-        return usage == "albedo" || usage == "emission";
-    }
-
-    // Role-aware encoder: JPG for color textures with fully-opaque alpha,
-    // PNG everywhere else (including any albedo/emission that uses alpha).
-    bool encodeTextureRoleAware(const uint8_t* rgba, int width, int height,
-                                const std::string& usage,
-                                std::vector<char>& out_bytes,
-                                std::string& out_ext) {
-        out_bytes.clear();
-        out_ext.clear();
-
-        const size_t pixel_count = static_cast<size_t>(width) * static_cast<size_t>(height);
-
-        bool prefer_jpg = isLossyEncodableUsage(usage);
-        if (prefer_jpg) {
-            for (size_t i = 0; i < pixel_count; ++i) {
-                if (rgba[i * 4 + 3] != 255) { prefer_jpg = false; break; }
-            }
-        }
-
-        if (prefer_jpg) {
-            std::vector<uint8_t> rgb(pixel_count * 3);
-            for (size_t i = 0; i < pixel_count; ++i) {
-                rgb[i * 3 + 0] = rgba[i * 4 + 0];
-                rgb[i * 3 + 1] = rgba[i * 4 + 1];
-                rgb[i * 3 + 2] = rgba[i * 4 + 2];
-            }
-            if (stbi_write_jpg_to_func(write_to_vector_func, &out_bytes,
-                                       width, height, 3, rgb.data(),
-                                       kEmbeddedJpegQuality) && !out_bytes.empty()) {
-                out_ext = ".jpg";
-                return true;
-            }
-            out_bytes.clear();
-        }
-
-        if (stbi_write_png_to_func(write_to_vector_func, &out_bytes,
-                                   width, height, 4, rgba, width * 4) &&
-            !out_bytes.empty()) {
-            out_ext = ".png";
-            return true;
-        }
-        return false;
-    }
-
-    // Result of attempting PNG → JPG recompression on a passthrough blob.
-    // If recompressed is true, `bytes` owns the new encoded data; otherwise
-    // callers should write the original bytes through unchanged.
-    struct ColorRecompressionResult {
-        bool recompressed = false;
-        std::vector<char> bytes;
-        std::string ext;
-    };
-
-    // For albedo/emission blobs that are PNG with fully-opaque alpha, decode
-    // and re-encode as JPG q92. Anything else (other roles, non-PNG inputs,
-    // any alpha < 255, or recompression that didn't shrink the file) returns
-    // recompressed=false so the caller falls back to byte-for-byte passthrough.
-    ColorRecompressionResult pickColorRecompression(const char* in_data, size_t in_size,
-                                                     const std::string& usage) {
-        ColorRecompressionResult result;
-        if (!isLossyEncodableUsage(usage) || in_data == nullptr || in_size < 8) {
-            return result;
-        }
-
-        const unsigned char* magic = reinterpret_cast<const unsigned char*>(in_data);
-        const bool is_png = (magic[0] == 0x89 && magic[1] == 0x50 && magic[2] == 0x4E && magic[3] == 0x47 &&
-                             magic[4] == 0x0D && magic[5] == 0x0A && magic[6] == 0x1A && magic[7] == 0x0A);
-        if (!is_png) {
-            return result;
-        }
-
-        int w = 0, h = 0, ch = 0;
-        unsigned char* decoded = stbi_load_from_memory(
-            reinterpret_cast<const stbi_uc*>(in_data),
-            static_cast<int>(in_size),
-            &w, &h, &ch, 4);
-        if (!decoded || w <= 0 || h <= 0) {
-            if (decoded) stbi_image_free(decoded);
-            return result;
-        }
-
-        const size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
-        bool fully_opaque = true;
-        for (size_t i = 0; i < pixel_count; ++i) {
-            if (decoded[i * 4 + 3] != 255) { fully_opaque = false; break; }
-        }
-        if (!fully_opaque) {
-            stbi_image_free(decoded);
-            return result;
-        }
-
-        std::vector<char> recoded;
-        std::string recoded_ext;
-        const bool ok = encodeTextureRoleAware(decoded, w, h, usage, recoded, recoded_ext);
-        stbi_image_free(decoded);
-
-        if (!ok || recoded_ext != ".jpg" || recoded.empty() || recoded.size() >= in_size) {
-            return result;
-        }
-
-        result.recompressed = true;
-        result.bytes = std::move(recoded);
-        result.ext = std::move(recoded_ext);
-        return result;
-    }
-
-    class ScopedPerfTimer {
-    public:
-        explicit ScopedPerfTimer(std::string label)
-            : label_(std::move(label)), start_(std::chrono::steady_clock::now()) {}
-
-        ~ScopedPerfTimer() {
-            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - start_).count();
-            SCENE_LOG_INFO("[Perf] " + label_ + ": " + std::to_string(elapsed) + " ms");
-        }
-
-    private:
-        std::string label_;
-        std::chrono::steady_clock::time_point start_;
-    };
-
-    size_t streamFileToOutput(std::ifstream& in, std::ofstream& out, std::vector<char>& buffer) {
-        size_t total_written = 0;
-        while (in) {
-            in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-            const std::streamsize read_count = in.gcount();
-            if (read_count <= 0) {
-                break;
-            }
-
-            out.write(buffer.data(), read_count);
-            total_written += static_cast<size_t>(read_count);
-        }
-        return total_written;
-    }
-
-    std::string sanitizeFilenameComponent(const std::string& input) {
-        std::string out;
-        out.reserve(input.size());
-        for (unsigned char c : input) {
-            if ((c >= 'a' && c <= 'z') ||
-                (c >= 'A' && c <= 'Z') ||
-                (c >= '0' && c <= '9') ||
-                c == '.' || c == '_' || c == '-') {
-                out.push_back(static_cast<char>(c));
-            } else {
-                out.push_back('_');
-            }
-        }
-        if (out.empty()) out = "texture";
-        return out;
-    }
-
-    std::string sniffTextureExtensionFromBytes(const std::vector<char>& data) {
-        if (data.size() >= 8) {
-            const unsigned char* b = reinterpret_cast<const unsigned char*>(data.data());
-            if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 &&
-                b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A) {
-                return ".png";
-            }
-        }
-        if (data.size() >= 3) {
-            const unsigned char* b = reinterpret_cast<const unsigned char*>(data.data());
-            if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) {
-                return ".jpg";
-            }
-        }
-        if (data.size() >= 4) {
-            const char* b = data.data();
-            if (std::memcmp(b, "DDS ", 4) == 0) return ".dds";
-            if (std::memcmp(b, "qoif", 4) == 0) return ".qoi";
-            if (std::memcmp(b, "RIFF", 4) == 0 && data.size() >= 12 && std::memcmp(b + 8, "WEBP", 4) == 0) return ".webp";
-            if (data.size() >= 10 && std::memcmp(b, "#?RADIANCE", 10) == 0) return ".hdr";
-            if (data.size() >= 6 && std::memcmp(b, "#?RGBE", 6) == 0) return ".hdr";
-            if (std::memcmp(b, "v/1\x01", 4) == 0 || std::memcmp(b, "v/1\x02", 4) == 0) return ".exr";
-        }
-        if (data.size() >= 18) {
-            const unsigned char* b = reinterpret_cast<const unsigned char*>(data.data());
-            const uint8_t image_type = b[2];
-            const uint8_t pixel_depth = b[16];
-            if ((image_type == 2 || image_type == 3 || image_type == 10 || image_type == 11) &&
-                (pixel_depth == 8 || pixel_depth == 16 || pixel_depth == 24 || pixel_depth == 32)) {
-                return ".tga";
-            }
-        }
-        return ".bin";
-    }
-
-    std::string chooseMaterializedTextureExtension(const std::filesystem::path& source_path, const std::vector<char>* cached_bytes = nullptr) {
-        std::string ext = source_path.extension().string();
-        std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (!ext.empty() && ext != ".bin") {
-            return ext;
-        }
-        if (cached_bytes && !cached_bytes->empty()) {
-            return sniffTextureExtensionFromBytes(*cached_bytes);
-        }
-        return ext.empty() ? std::string(".png") : ext;
-    }
-
-    struct PreviousEmbeddedTextureEntry {
-        std::filesystem::path bin_path;
-        int64_t offset = -1;
-        int64_t size = 0;
-        std::string format;
-    };
-
-    std::unordered_map<std::string, PreviousEmbeddedTextureEntry> g_previous_embedded_texture_entries;
-
-    std::string previousEmbeddedTextureKey(const std::string& original_name,
-                                           const std::string& usage,
-                                           int width,
-                                           int height) {
-        return original_name + "\n" + usage + "\n" +
-               std::to_string(width) + "x" + std::to_string(height);
-    }
-
-    // Adds one saved project's embedded-texture manifest to the reuse index.
-    // Existing keys win, so the caller decides precedence by call order.
-    //
-    // ★★★★ The manifest lives in the ".shared" sidecar since format 3.0; only
-    //   older projects carry "textures" in the main JSON. This used to read the
-    //   main JSON alone, so the index was EMPTY for every current project and
-    //   every save re-encoded every embedded texture on the main thread.
-    //   Measured 2026-09-25 on a 64-texture scene: serializeTextures 122.6 s
-    //   for 1.22 GB, "previous-embed-reused: 0", and the 5-minute autosave
-    //   paid it too - reported as the app "sometimes freezing on one core"
-    //   during a fluid sim, which is where everyone looked first.
-    void addPreviousEmbeddedTextureEntries(const std::filesystem::path& json_path,
-                                           const std::filesystem::path& bin_path) {
-        if (!std::filesystem::exists(bin_path)) {
-            return;
-        }
-        std::filesystem::path manifest_path = json_path;
-        manifest_path += ".shared";
-        if (!std::filesystem::exists(manifest_path)) {
-            manifest_path = json_path;  // pre-3.0 layout
-        }
-        if (!std::filesystem::exists(manifest_path)) {
-            return;
-        }
-
-        try {
-            std::ifstream in(manifest_path);
-            if (!in.is_open()) {
-                return;
-            }
-
-            nlohmann::json root;
-            in >> root;
-            if (!root.contains("textures") || !root["textures"].is_array()) {
-                return;
-            }
-            std::size_t added = 0;
-
-            for (const auto& tex : root["textures"]) {
-                if (tex.value("mode", std::string{}) != "embed") {
-                    continue;
-                }
-
-                const std::string original_name = tex.value("original_name", std::string{});
-                const std::string usage = tex.value("usage", std::string{});
-                const int width = tex.value("width", 0);
-                const int height = tex.value("height", 0);
-                const int64_t offset = tex.value("offset", int64_t(-1));
-                const int64_t size = tex.value("size", int64_t(0));
-                if (original_name.empty() || usage.empty() || width <= 0 || height <= 0 || offset < 0 || size <= 0) {
-                    continue;
-                }
-
-                PreviousEmbeddedTextureEntry entry;
-                entry.bin_path = bin_path;
-                entry.offset = offset;
-                entry.size = size;
-                entry.format = tex.value("format", std::string{});
-                if (g_previous_embedded_texture_entries.emplace(
-                        previousEmbeddedTextureKey(original_name, usage, width, height),
-                        std::move(entry)).second) {
-                    ++added;
-                }
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(added) +
-                           " previous embedded texture entries for save reuse from " +
-                           manifest_path.string());
-        } catch (const std::exception& e) {
-            SCENE_LOG_WARN("[ProjectManager] Failed to read previous embedded texture manifest " +
-                           manifest_path.string() + ": " + std::string(e.what()));
-        }
-    }
-
-    bool readPreviousEmbeddedTextureBlob(const PreviousEmbeddedTextureEntry& entry,
-                                         std::vector<char>& out) {
-        out.clear();
-        if (entry.offset < 0 || entry.size <= 0 || !std::filesystem::exists(entry.bin_path)) {
-            return false;
-        }
-
-        std::error_code ec;
-        const auto source_size = std::filesystem::file_size(entry.bin_path, ec);
-        if (ec || source_size < static_cast<uint64_t>(entry.offset + entry.size)) {
-            return false;
-        }
-
-        std::ifstream in(entry.bin_path, std::ios::binary);
-        if (!in.is_open()) {
-            return false;
-        }
-
-        in.seekg(entry.offset, std::ios::beg);
-        out.resize(static_cast<size_t>(entry.size));
-        in.read(out.data(), static_cast<std::streamsize>(out.size()));
-        if (in.gcount() != static_cast<std::streamsize>(out.size())) {
-            out.clear();
-            return false;
-        }
-        return true;
-    }
-
-    bool copyPreviousEmbeddedTextureBlob(const PreviousEmbeddedTextureEntry& entry,
-                                         std::ofstream& out,
-                                         std::vector<char>& buffer) {
-        if (entry.offset < 0 || entry.size <= 0 || !std::filesystem::exists(entry.bin_path)) {
-            return false;
-        }
-
-        std::error_code ec;
-        const auto source_size = std::filesystem::file_size(entry.bin_path, ec);
-        if (ec || source_size < static_cast<uint64_t>(entry.offset + entry.size)) {
-            return false;
-        }
-
-        std::ifstream in(entry.bin_path, std::ios::binary);
-        if (!in.is_open()) {
-            return false;
-        }
-
-        in.seekg(entry.offset, std::ios::beg);
-        int64_t remaining = entry.size;
-        while (remaining > 0 && in) {
-            const std::streamsize chunk = static_cast<std::streamsize>(
-                std::min<int64_t>(remaining, static_cast<int64_t>(buffer.size())));
-            in.read(buffer.data(), chunk);
-            const std::streamsize read_count = in.gcount();
-            if (read_count <= 0) {
-                return false;
-            }
-            out.write(buffer.data(), read_count);
-            remaining -= static_cast<int64_t>(read_count);
-        }
-
-        return remaining == 0;
-    }
-
+void write_to_vector_func(void *context, void *data, int size) {
+  auto *vec = static_cast<std::vector<char> *>(context);
+  const char *d = static_cast<const char *>(data);
+  vec->insert(vec->end(), d, d + size);
 }
+
+// JPG quality used for embedded color textures. q=92 is visually transparent
+// for albedo/emission while shrinking 5-10x vs PNG.
+constexpr int kEmbeddedJpegQuality = 92;
+
+bool isLossyEncodableUsage(const std::string &usage) {
+  // Only pure color channels tolerate JPG. Normal/roughness/metallic/height/
+  // opacity/transmission carry numeric data — JPG artifacts corrupt shading
+  // or masks, so they must stay PNG.
+  return usage == "albedo" || usage == "emission";
+}
+
+// Role-aware encoder: JPG for color textures with fully-opaque alpha,
+// PNG everywhere else (including any albedo/emission that uses alpha).
+bool encodeTextureRoleAware(const uint8_t *rgba, int width, int height,
+                            const std::string &usage,
+                            std::vector<char> &out_bytes,
+                            std::string &out_ext) {
+  out_bytes.clear();
+  out_ext.clear();
+
+  const size_t pixel_count =
+      static_cast<size_t>(width) * static_cast<size_t>(height);
+
+  bool prefer_jpg = isLossyEncodableUsage(usage);
+  if (prefer_jpg) {
+    for (size_t i = 0; i < pixel_count; ++i) {
+      if (rgba[i * 4 + 3] != 255) {
+        prefer_jpg = false;
+        break;
+      }
+    }
+  }
+
+  if (prefer_jpg) {
+    std::vector<uint8_t> rgb(pixel_count * 3);
+    for (size_t i = 0; i < pixel_count; ++i) {
+      rgb[i * 3 + 0] = rgba[i * 4 + 0];
+      rgb[i * 3 + 1] = rgba[i * 4 + 1];
+      rgb[i * 3 + 2] = rgba[i * 4 + 2];
+    }
+    if (stbi_write_jpg_to_func(write_to_vector_func, &out_bytes, width, height,
+                               3, rgb.data(), kEmbeddedJpegQuality) &&
+        !out_bytes.empty()) {
+      out_ext = ".jpg";
+      return true;
+    }
+    out_bytes.clear();
+  }
+
+  if (stbi_write_png_to_func(write_to_vector_func, &out_bytes, width, height, 4,
+                             rgba, width * 4) &&
+      !out_bytes.empty()) {
+    out_ext = ".png";
+    return true;
+  }
+  return false;
+}
+
+// Result of attempting PNG → JPG recompression on a passthrough blob.
+// If recompressed is true, `bytes` owns the new encoded data; otherwise
+// callers should write the original bytes through unchanged.
+struct ColorRecompressionResult {
+  bool recompressed = false;
+  std::vector<char> bytes;
+  std::string ext;
+};
+
+// For albedo/emission blobs that are PNG with fully-opaque alpha, decode
+// and re-encode as JPG q92. Anything else (other roles, non-PNG inputs,
+// any alpha < 255, or recompression that didn't shrink the file) returns
+// recompressed=false so the caller falls back to byte-for-byte passthrough.
+ColorRecompressionResult pickColorRecompression(const char *in_data,
+                                                size_t in_size,
+                                                const std::string &usage) {
+  ColorRecompressionResult result;
+  if (!isLossyEncodableUsage(usage) || in_data == nullptr || in_size < 8) {
+    return result;
+  }
+
+  const unsigned char *magic = reinterpret_cast<const unsigned char *>(in_data);
+  const bool is_png =
+      (magic[0] == 0x89 && magic[1] == 0x50 && magic[2] == 0x4E &&
+       magic[3] == 0x47 && magic[4] == 0x0D && magic[5] == 0x0A &&
+       magic[6] == 0x1A && magic[7] == 0x0A);
+  if (!is_png) {
+    return result;
+  }
+
+  int w = 0, h = 0, ch = 0;
+  unsigned char *decoded =
+      stbi_load_from_memory(reinterpret_cast<const stbi_uc *>(in_data),
+                            static_cast<int>(in_size), &w, &h, &ch, 4);
+  if (!decoded || w <= 0 || h <= 0) {
+    if (decoded)
+      stbi_image_free(decoded);
+    return result;
+  }
+
+  const size_t pixel_count = static_cast<size_t>(w) * static_cast<size_t>(h);
+  bool fully_opaque = true;
+  for (size_t i = 0; i < pixel_count; ++i) {
+    if (decoded[i * 4 + 3] != 255) {
+      fully_opaque = false;
+      break;
+    }
+  }
+  if (!fully_opaque) {
+    stbi_image_free(decoded);
+    return result;
+  }
+
+  std::vector<char> recoded;
+  std::string recoded_ext;
+  const bool ok =
+      encodeTextureRoleAware(decoded, w, h, usage, recoded, recoded_ext);
+  stbi_image_free(decoded);
+
+  if (!ok || recoded_ext != ".jpg" || recoded.empty() ||
+      recoded.size() >= in_size) {
+    return result;
+  }
+
+  result.recompressed = true;
+  result.bytes = std::move(recoded);
+  result.ext = std::move(recoded_ext);
+  return result;
+}
+
+class ScopedPerfTimer {
+public:
+  explicit ScopedPerfTimer(std::string label)
+      : label_(std::move(label)), start_(std::chrono::steady_clock::now()) {}
+
+  ~ScopedPerfTimer() {
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - start_)
+                             .count();
+    SCENE_LOG_INFO("[Perf] " + label_ + ": " + std::to_string(elapsed) + " ms");
+  }
+
+private:
+  std::string label_;
+  std::chrono::steady_clock::time_point start_;
+};
+
+size_t streamFileToOutput(std::ifstream &in, std::ofstream &out,
+                          std::vector<char> &buffer) {
+  size_t total_written = 0;
+  while (in) {
+    in.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const std::streamsize read_count = in.gcount();
+    if (read_count <= 0) {
+      break;
+    }
+
+    out.write(buffer.data(), read_count);
+    total_written += static_cast<size_t>(read_count);
+  }
+  return total_written;
+}
+
+std::string sanitizeFilenameComponent(const std::string &input) {
+  std::string out;
+  out.reserve(input.size());
+  for (unsigned char c : input) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+      out.push_back(static_cast<char>(c));
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty())
+    out = "texture";
+  return out;
+}
+
+std::string sniffTextureExtensionFromBytes(const std::vector<char> &data) {
+  if (data.size() >= 8) {
+    const unsigned char *b =
+        reinterpret_cast<const unsigned char *>(data.data());
+    if (b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 &&
+        b[4] == 0x0D && b[5] == 0x0A && b[6] == 0x1A && b[7] == 0x0A) {
+      return ".png";
+    }
+  }
+  if (data.size() >= 3) {
+    const unsigned char *b =
+        reinterpret_cast<const unsigned char *>(data.data());
+    if (b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) {
+      return ".jpg";
+    }
+  }
+  if (data.size() >= 4) {
+    const char *b = data.data();
+    if (std::memcmp(b, "DDS ", 4) == 0)
+      return ".dds";
+    if (std::memcmp(b, "qoif", 4) == 0)
+      return ".qoi";
+    if (std::memcmp(b, "RIFF", 4) == 0 && data.size() >= 12 &&
+        std::memcmp(b + 8, "WEBP", 4) == 0)
+      return ".webp";
+    if (data.size() >= 10 && std::memcmp(b, "#?RADIANCE", 10) == 0)
+      return ".hdr";
+    if (data.size() >= 6 && std::memcmp(b, "#?RGBE", 6) == 0)
+      return ".hdr";
+    if (std::memcmp(b, "v/1\x01", 4) == 0 || std::memcmp(b, "v/1\x02", 4) == 0)
+      return ".exr";
+  }
+  if (data.size() >= 18) {
+    const unsigned char *b =
+        reinterpret_cast<const unsigned char *>(data.data());
+    const uint8_t image_type = b[2];
+    const uint8_t pixel_depth = b[16];
+    if ((image_type == 2 || image_type == 3 || image_type == 10 ||
+         image_type == 11) &&
+        (pixel_depth == 8 || pixel_depth == 16 || pixel_depth == 24 ||
+         pixel_depth == 32)) {
+      return ".tga";
+    }
+  }
+  return ".bin";
+}
+
+std::string chooseMaterializedTextureExtension(
+    const std::filesystem::path &source_path,
+    const std::vector<char> *cached_bytes = nullptr) {
+  std::string ext = source_path.extension().string();
+  std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  if (!ext.empty() && ext != ".bin") {
+    return ext;
+  }
+  if (cached_bytes && !cached_bytes->empty()) {
+    return sniffTextureExtensionFromBytes(*cached_bytes);
+  }
+  return ext.empty() ? std::string(".png") : ext;
+}
+
+struct PreviousEmbeddedTextureEntry {
+  std::filesystem::path bin_path;
+  int64_t offset = -1;
+  int64_t size = 0;
+  std::string format;
+};
+
+std::unordered_map<std::string, PreviousEmbeddedTextureEntry>
+    g_previous_embedded_texture_entries;
+
+std::string previousEmbeddedTextureKey(const std::string &original_name,
+                                       const std::string &usage, int width,
+                                       int height) {
+  return original_name + "\n" + usage + "\n" + std::to_string(width) + "x" +
+         std::to_string(height);
+}
+
+// Adds one saved project's embedded-texture manifest to the reuse index.
+// Existing keys win, so the caller decides precedence by call order.
+//
+// ★★★★ The manifest lives in the ".shared" sidecar since format 3.0; only
+//   older projects carry "textures" in the main JSON. This used to read the
+//   main JSON alone, so the index was EMPTY for every current project and
+//   every save re-encoded every embedded texture on the main thread.
+//   Measured 2026-09-25 on a 64-texture scene: serializeTextures 122.6 s
+//   for 1.22 GB, "previous-embed-reused: 0", and the 5-minute autosave
+//   paid it too - reported as the app "sometimes freezing on one core"
+//   during a fluid sim, which is where everyone looked first.
+void addPreviousEmbeddedTextureEntries(const std::filesystem::path &json_path,
+                                       const std::filesystem::path &bin_path) {
+  if (!std::filesystem::exists(bin_path)) {
+    return;
+  }
+  std::filesystem::path manifest_path = json_path;
+  manifest_path += ".shared";
+  if (!std::filesystem::exists(manifest_path)) {
+    manifest_path = json_path; // pre-3.0 layout
+  }
+  if (!std::filesystem::exists(manifest_path)) {
+    return;
+  }
+
+  try {
+    std::ifstream in(manifest_path);
+    if (!in.is_open()) {
+      return;
+    }
+
+    nlohmann::json root;
+    in >> root;
+    if (!root.contains("textures") || !root["textures"].is_array()) {
+      return;
+    }
+    std::size_t added = 0;
+
+    for (const auto &tex : root["textures"]) {
+      if (tex.value("mode", std::string{}) != "embed") {
+        continue;
+      }
+
+      const std::string original_name =
+          tex.value("original_name", std::string{});
+      const std::string usage = tex.value("usage", std::string{});
+      const int width = tex.value("width", 0);
+      const int height = tex.value("height", 0);
+      const int64_t offset = tex.value("offset", int64_t(-1));
+      const int64_t size = tex.value("size", int64_t(0));
+      if (original_name.empty() || usage.empty() || width <= 0 || height <= 0 ||
+          offset < 0 || size <= 0) {
+        continue;
+      }
+
+      PreviousEmbeddedTextureEntry entry;
+      entry.bin_path = bin_path;
+      entry.offset = offset;
+      entry.size = size;
+      entry.format = tex.value("format", std::string{});
+      if (g_previous_embedded_texture_entries
+              .emplace(previousEmbeddedTextureKey(original_name, usage, width,
+                                                  height),
+                       std::move(entry))
+              .second) {
+        ++added;
+      }
+    }
+
+    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(added) +
+                   " previous embedded texture entries for save reuse from " +
+                   manifest_path.string());
+  } catch (const std::exception &e) {
+    SCENE_LOG_WARN(
+        "[ProjectManager] Failed to read previous embedded texture manifest " +
+        manifest_path.string() + ": " + std::string(e.what()));
+  }
+}
+
+bool readPreviousEmbeddedTextureBlob(const PreviousEmbeddedTextureEntry &entry,
+                                     std::vector<char> &out) {
+  out.clear();
+  if (entry.offset < 0 || entry.size <= 0 ||
+      !std::filesystem::exists(entry.bin_path)) {
+    return false;
+  }
+
+  std::error_code ec;
+  const auto source_size = std::filesystem::file_size(entry.bin_path, ec);
+  if (ec || source_size < static_cast<uint64_t>(entry.offset + entry.size)) {
+    return false;
+  }
+
+  std::ifstream in(entry.bin_path, std::ios::binary);
+  if (!in.is_open()) {
+    return false;
+  }
+
+  in.seekg(entry.offset, std::ios::beg);
+  out.resize(static_cast<size_t>(entry.size));
+  in.read(out.data(), static_cast<std::streamsize>(out.size()));
+  if (in.gcount() != static_cast<std::streamsize>(out.size())) {
+    out.clear();
+    return false;
+  }
+  return true;
+}
+
+bool copyPreviousEmbeddedTextureBlob(const PreviousEmbeddedTextureEntry &entry,
+                                     std::ofstream &out,
+                                     std::vector<char> &buffer) {
+  if (entry.offset < 0 || entry.size <= 0 ||
+      !std::filesystem::exists(entry.bin_path)) {
+    return false;
+  }
+
+  std::error_code ec;
+  const auto source_size = std::filesystem::file_size(entry.bin_path, ec);
+  if (ec || source_size < static_cast<uint64_t>(entry.offset + entry.size)) {
+    return false;
+  }
+
+  std::ifstream in(entry.bin_path, std::ios::binary);
+  if (!in.is_open()) {
+    return false;
+  }
+
+  in.seekg(entry.offset, std::ios::beg);
+  int64_t remaining = entry.size;
+  while (remaining > 0 && in) {
+    const std::streamsize chunk = static_cast<std::streamsize>(
+        std::min<int64_t>(remaining, static_cast<int64_t>(buffer.size())));
+    in.read(buffer.data(), chunk);
+    const std::streamsize read_count = in.gcount();
+    if (read_count <= 0) {
+      return false;
+    }
+    out.write(buffer.data(), read_count);
+    remaining -= static_cast<int64_t>(read_count);
+  }
+
+  return remaining == 0;
+}
+
+} // namespace
 
 using json = nlohmann::json;
 namespace fs = std::filesystem;
 
 namespace {
-enum class ProjectBackendMode {
-    CPU,
-    OPTIX,
-    VULKAN
-};
+enum class ProjectBackendMode { CPU, OPTIX, VULKAN };
 
-static ProjectBackendMode modeFromSettings(const RenderSettings& settings) {
-    if (settings.use_vulkan) return ProjectBackendMode::VULKAN;
-    if (settings.use_optix) return ProjectBackendMode::OPTIX;
+static ProjectBackendMode modeFromSettings(const RenderSettings &settings) {
+  if (settings.use_vulkan)
+    return ProjectBackendMode::VULKAN;
+  if (settings.use_optix)
+    return ProjectBackendMode::OPTIX;
+  return ProjectBackendMode::CPU;
+}
+
+static ProjectBackendMode modeFromBackendPtr(Backend::IBackend *backend) {
+  if (!backend)
     return ProjectBackendMode::CPU;
-}
 
-static ProjectBackendMode modeFromBackendPtr(Backend::IBackend* backend) {
-    if (!backend) return ProjectBackendMode::CPU;
-
-    Backend::BackendType type = Backend::BackendType::CPU_EMBREE;
-    try {
-        type = backend->getInfo().type;
-    } catch (...) {
-        return ProjectBackendMode::CPU;
-    }
-
-    if (type == Backend::BackendType::VULKAN_RT || type == Backend::BackendType::VULKAN_COMPUTE) {
-        return ProjectBackendMode::VULKAN;
-    }
-    if (type == Backend::BackendType::OPTIX) {
-        return ProjectBackendMode::OPTIX;
-    }
+  Backend::BackendType type = Backend::BackendType::CPU_EMBREE;
+  try {
+    type = backend->getInfo().type;
+  } catch (...) {
     return ProjectBackendMode::CPU;
+  }
+
+  if (type == Backend::BackendType::VULKAN_RT ||
+      type == Backend::BackendType::VULKAN_COMPUTE) {
+    return ProjectBackendMode::VULKAN;
+  }
+  if (type == Backend::BackendType::OPTIX) {
+    return ProjectBackendMode::OPTIX;
+  }
+  return ProjectBackendMode::CPU;
 }
 
-static const char* modeToString(ProjectBackendMode mode) {
-    switch (mode) {
-        case ProjectBackendMode::VULKAN: return "Vulkan";
-        case ProjectBackendMode::OPTIX: return "OptiX";
-        default: return "CPU";
-    }
+static const char *modeToString(ProjectBackendMode mode) {
+  switch (mode) {
+  case ProjectBackendMode::VULKAN:
+    return "Vulkan";
+  case ProjectBackendMode::OPTIX:
+    return "OptiX";
+  default:
+    return "CPU";
+  }
 }
 
-static fs::path pathFromUtf8(const std::string& utf8_path) {
+static fs::path pathFromUtf8(const std::string &utf8_path) {
 #ifdef _WIN32
-    auto toWide = [](const std::string& src, UINT codepage, DWORD flags) -> std::wstring {
-        const int size = MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
-        if (size <= 0) return {};
-        std::wstring out(static_cast<size_t>(size - 1), L'\0');
-        if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(), size) <= 0) return {};
-        return out;
-    };
+  auto toWide = [](const std::string &src, UINT codepage,
+                   DWORD flags) -> std::wstring {
+    const int size =
+        MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
+    if (size <= 0)
+      return {};
+    std::wstring out(static_cast<size_t>(size - 1), L'\0');
+    if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(),
+                            size) <= 0)
+      return {};
+    return out;
+  };
 
-    std::wstring wide = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
-    if (wide.empty()) {
-        wide = toWide(utf8_path, CP_ACP, 0);
-    }
-    if (!wide.empty()) {
-        return fs::path(wide);
-    }
-    return fs::path(utf8_path);
+  std::wstring wide = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
+  if (wide.empty()) {
+    wide = toWide(utf8_path, CP_ACP, 0);
+  }
+  if (!wide.empty()) {
+    return fs::path(wide);
+  }
+  return fs::path(utf8_path);
 #else
-    return fs::u8path(utf8_path);
+  return fs::u8path(utf8_path);
 #endif
 }
 
-static simdjson::error_code loadJsonRootFromFile(simdjson::dom::parser& parser,
-                                                 const std::string& filepath,
-                                                 simdjson::dom::element& root,
-                                                 std::string* read_error = nullptr) {
-    auto readFileToString = [](const fs::path& path, std::string& out_text, std::string& out_err) -> bool {
-        std::ifstream in_json(path, std::ios::binary);
-        if (!in_json.is_open()) {
-            out_err = "open failed";
-            return false;
-        }
-
-        out_text.assign(std::istreambuf_iterator<char>(in_json), std::istreambuf_iterator<char>());
-        if (!in_json.good() && !in_json.eof()) {
-            out_err = "stream read failed";
-            return false;
-        }
-
-        return true;
-    };
-
-    std::string json_text;
-    std::string last_error;
-
-#ifdef _WIN32
-    auto readFileToStringWin32 = [](const std::string& utf8_path, std::string& out_text, std::string& out_err) -> bool {
-        auto toWide = [](const std::string& src, UINT codepage, DWORD flags) -> std::wstring {
-            int size = MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
-            if (size <= 0) return {};
-            std::wstring out(static_cast<size_t>(size), L'\0');
-            if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(), size) <= 0) return {};
-            out.resize(static_cast<size_t>(size - 1));
-            return out;
-        };
-
-        std::wstring path_w = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
-        if (path_w.empty()) {
-            path_w = toWide(utf8_path, CP_ACP, 0);
-        }
-        if (path_w.empty()) {
-            out_err = "utf8/acp to wide conversion failed";
-            return false;
-        }
-
-        HANDLE file = CreateFileW(path_w.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                                  nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (file == INVALID_HANDLE_VALUE) {
-            out_err = "CreateFileW failed (err=" + std::to_string(GetLastError()) + ")";
-            return false;
-        }
-
-        LARGE_INTEGER file_size{};
-        if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0) {
-            out_err = "GetFileSizeEx failed (err=" + std::to_string(GetLastError()) + ")";
-            CloseHandle(file);
-            return false;
-        }
-
-        if (file_size.QuadPart > static_cast<LONGLONG>(std::numeric_limits<size_t>::max())) {
-            out_err = "file too large";
-            CloseHandle(file);
-            return false;
-        }
-
-        out_text.resize(static_cast<size_t>(file_size.QuadPart));
-        DWORD read_total = 0;
-        while (read_total < static_cast<DWORD>(out_text.size())) {
-            DWORD chunk_read = 0;
-            const DWORD remaining = static_cast<DWORD>(out_text.size()) - read_total;
-            if (!ReadFile(file, out_text.data() + read_total, remaining, &chunk_read, nullptr)) {
-                out_err = "ReadFile failed (err=" + std::to_string(GetLastError()) + ")";
-                CloseHandle(file);
-                return false;
-            }
-            if (chunk_read == 0) break;
-            read_total += chunk_read;
-        }
-        out_text.resize(read_total);
-        CloseHandle(file);
-        return true;
-    };
-#endif
-
-    const fs::path utf8_path = pathFromUtf8(filepath);
-
-    if (!readFileToString(utf8_path, json_text, last_error)) {
-        fs::path native_path(filepath);
-        std::string native_error;
-        if (!readFileToString(native_path, json_text, native_error)) {
-#ifdef _WIN32
-            std::string winapi_error;
-            if (readFileToStringWin32(filepath, json_text, winapi_error)) {
-                last_error = "u8path=" + last_error + " | native=" + native_error + " | winapi=ok";
-            } else {
-#endif
-            std::error_code ec_u8_exists;
-            std::error_code ec_native_exists;
-            const bool u8_exists = fs::exists(utf8_path, ec_u8_exists);
-            const bool native_exists = fs::exists(native_path, ec_native_exists);
-            if (read_error) {
-                *read_error = "u8path=" + last_error +
-                              " (exists=" + std::string(u8_exists ? "true" : "false") + ")" +
-                              " | native=" + native_error +
-                              " (exists=" + std::string(native_exists ? "true" : "false") + ")" +
-#ifdef _WIN32
-                              " | winapi=" + winapi_error +
-#endif
-                              " | cwd=" + fs::current_path().string();
-            }
-            return simdjson::IO_ERROR;
-#ifdef _WIN32
-            }
-#endif
-        }
+static simdjson::error_code
+loadJsonRootFromFile(simdjson::dom::parser &parser, const std::string &filepath,
+                     simdjson::dom::element &root,
+                     std::string *read_error = nullptr) {
+  auto readFileToString = [](const fs::path &path, std::string &out_text,
+                             std::string &out_err) -> bool {
+    std::ifstream in_json(path, std::ios::binary);
+    if (!in_json.is_open()) {
+      out_err = "open failed";
+      return false;
     }
 
-    simdjson::padded_string padded_json(json_text);
-    return parser.parse(padded_json).get(root);
+    out_text.assign(std::istreambuf_iterator<char>(in_json),
+                    std::istreambuf_iterator<char>());
+    if (!in_json.good() && !in_json.eof()) {
+      out_err = "stream read failed";
+      return false;
+    }
+
+    return true;
+  };
+
+  std::string json_text;
+  std::string last_error;
+
+#ifdef _WIN32
+  auto readFileToStringWin32 = [](const std::string &utf8_path,
+                                  std::string &out_text,
+                                  std::string &out_err) -> bool {
+    auto toWide = [](const std::string &src, UINT codepage,
+                     DWORD flags) -> std::wstring {
+      int size =
+          MultiByteToWideChar(codepage, flags, src.c_str(), -1, nullptr, 0);
+      if (size <= 0)
+        return {};
+      std::wstring out(static_cast<size_t>(size), L'\0');
+      if (MultiByteToWideChar(codepage, flags, src.c_str(), -1, out.data(),
+                              size) <= 0)
+        return {};
+      out.resize(static_cast<size_t>(size - 1));
+      return out;
+    };
+
+    std::wstring path_w = toWide(utf8_path, CP_UTF8, MB_ERR_INVALID_CHARS);
+    if (path_w.empty()) {
+      path_w = toWide(utf8_path, CP_ACP, 0);
+    }
+    if (path_w.empty()) {
+      out_err = "utf8/acp to wide conversion failed";
+      return false;
+    }
+
+    HANDLE file =
+        CreateFileW(path_w.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+      out_err =
+          "CreateFileW failed (err=" + std::to_string(GetLastError()) + ")";
+      return false;
+    }
+
+    LARGE_INTEGER file_size{};
+    if (!GetFileSizeEx(file, &file_size) || file_size.QuadPart < 0) {
+      out_err =
+          "GetFileSizeEx failed (err=" + std::to_string(GetLastError()) + ")";
+      CloseHandle(file);
+      return false;
+    }
+
+    if (file_size.QuadPart >
+        static_cast<LONGLONG>(std::numeric_limits<size_t>::max())) {
+      out_err = "file too large";
+      CloseHandle(file);
+      return false;
+    }
+
+    out_text.resize(static_cast<size_t>(file_size.QuadPart));
+    DWORD read_total = 0;
+    while (read_total < static_cast<DWORD>(out_text.size())) {
+      DWORD chunk_read = 0;
+      const DWORD remaining = static_cast<DWORD>(out_text.size()) - read_total;
+      if (!ReadFile(file, out_text.data() + read_total, remaining, &chunk_read,
+                    nullptr)) {
+        out_err =
+            "ReadFile failed (err=" + std::to_string(GetLastError()) + ")";
+        CloseHandle(file);
+        return false;
+      }
+      if (chunk_read == 0)
+        break;
+      read_total += chunk_read;
+    }
+    out_text.resize(read_total);
+    CloseHandle(file);
+    return true;
+  };
+#endif
+
+  const fs::path utf8_path = pathFromUtf8(filepath);
+
+  if (!readFileToString(utf8_path, json_text, last_error)) {
+    fs::path native_path(filepath);
+    std::string native_error;
+    if (!readFileToString(native_path, json_text, native_error)) {
+#ifdef _WIN32
+      std::string winapi_error;
+      if (readFileToStringWin32(filepath, json_text, winapi_error)) {
+        last_error = "u8path=" + last_error + " | native=" + native_error +
+                     " | winapi=ok";
+      } else {
+#endif
+        std::error_code ec_u8_exists;
+        std::error_code ec_native_exists;
+        const bool u8_exists = fs::exists(utf8_path, ec_u8_exists);
+        const bool native_exists = fs::exists(native_path, ec_native_exists);
+        if (read_error) {
+          *read_error =
+              "u8path=" + last_error +
+              " (exists=" + std::string(u8_exists ? "true" : "false") + ")" +
+              " | native=" + native_error +
+              " (exists=" + std::string(native_exists ? "true" : "false") +
+              ")" +
+#ifdef _WIN32
+              " | winapi=" + winapi_error +
+#endif
+              " | cwd=" + fs::current_path().string();
+        }
+        return simdjson::IO_ERROR;
+#ifdef _WIN32
+      }
+#endif
+    }
+  }
+
+  simdjson::padded_string padded_json(json_text);
+  return parser.parse(padded_json).get(root);
 }
-}
+} // namespace
 
 // Global project data instance
 ProjectData g_project;
@@ -660,485 +726,610 @@ ProjectData g_project;
 // Helper Functions
 // ============================================================================
 
-static json vec3ToJson(const Vec3& v) {
-    return { v.x, v.y, v.z };
+static json vec3ToJson(const Vec3 &v) { return {v.x, v.y, v.z}; }
+
+static Vec3 jsonToVec3(const json &j) {
+  if (j.is_array() && j.size() >= 3)
+    return Vec3(j[0], j[1], j[2]);
+  return Vec3(0, 0, 0);
 }
 
-static Vec3 jsonToVec3(const json& j) {
-    if (j.is_array() && j.size() >= 3)
-        return Vec3(j[0], j[1], j[2]);
-    return Vec3(0, 0, 0);
+static const char *particleEmitterSourceModeToString(
+    RayTrophiSim::ParticleEmitterSourceMode mode) {
+  switch (mode) {
+  case RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin:
+    return "ObjectOrigin";
+  case RayTrophiSim::ParticleEmitterSourceMode::ForceFieldOrigin:
+    return "ForceFieldOrigin";
+  case RayTrophiSim::ParticleEmitterSourceMode::Point:
+  default:
+    return "Point";
+  }
 }
 
-static const char* particleEmitterSourceModeToString(RayTrophiSim::ParticleEmitterSourceMode mode) {
-    switch (mode) {
-        case RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin: return "ObjectOrigin";
-        case RayTrophiSim::ParticleEmitterSourceMode::ForceFieldOrigin: return "ForceFieldOrigin";
-        case RayTrophiSim::ParticleEmitterSourceMode::Point:
-        default: return "Point";
-    }
+static RayTrophiSim::ParticleEmitterSourceMode
+particleEmitterSourceModeFromString(const std::string &value) {
+  if (value == "ObjectOrigin")
+    return RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin;
+  if (value == "ForceFieldOrigin")
+    return RayTrophiSim::ParticleEmitterSourceMode::ForceFieldOrigin;
+  return RayTrophiSim::ParticleEmitterSourceMode::Point;
 }
 
-static RayTrophiSim::ParticleEmitterSourceMode particleEmitterSourceModeFromString(const std::string& value) {
-    if (value == "ObjectOrigin") return RayTrophiSim::ParticleEmitterSourceMode::ObjectOrigin;
-    if (value == "ForceFieldOrigin") return RayTrophiSim::ParticleEmitterSourceMode::ForceFieldOrigin;
-    return RayTrophiSim::ParticleEmitterSourceMode::Point;
+static const char *
+particleEmitterSpawnModeToString(RayTrophiSim::ParticleEmitterSpawnMode mode) {
+  switch (mode) {
+  case RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface:
+    return "ObjectAABBSurface";
+  case RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface:
+    return "MeshSurface";
+  case RayTrophiSim::ParticleEmitterSpawnMode::Center:
+  default:
+    return "Center";
+  }
 }
 
-static const char* particleEmitterSpawnModeToString(RayTrophiSim::ParticleEmitterSpawnMode mode) {
-    switch (mode) {
-        case RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface: return "ObjectAABBSurface";
-        case RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface: return "MeshSurface";
-        case RayTrophiSim::ParticleEmitterSpawnMode::Center:
-        default: return "Center";
-    }
+static RayTrophiSim::ParticleEmitterSpawnMode
+particleEmitterSpawnModeFromString(const std::string &value) {
+  if (value == "ObjectAABBSurface")
+    return RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface;
+  if (value == "MeshSurface")
+    return RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface;
+  return RayTrophiSim::ParticleEmitterSpawnMode::Center;
 }
 
-static RayTrophiSim::ParticleEmitterSpawnMode particleEmitterSpawnModeFromString(const std::string& value) {
-    if (value == "ObjectAABBSurface") return RayTrophiSim::ParticleEmitterSpawnMode::ObjectAABBSurface;
-    if (value == "MeshSurface") return RayTrophiSim::ParticleEmitterSpawnMode::MeshSurface;
-    return RayTrophiSim::ParticleEmitterSpawnMode::Center;
+static const char *particleColliderSourceModeToString(
+    RayTrophiSim::ParticleColliderSourceMode mode) {
+  switch (mode) {
+  case RayTrophiSim::ParticleColliderSourceMode::ObjectAABB:
+    return "ObjectAABB";
+  case RayTrophiSim::ParticleColliderSourceMode::ObjectOBB:
+    return "ObjectOBB";
+  case RayTrophiSim::ParticleColliderSourceMode::Sphere:
+    return "Sphere";
+  case RayTrophiSim::ParticleColliderSourceMode::Capsule:
+    return "Capsule";
+  // These were MISSING — an ObjectMeshSDF (voxel) / ConvexDecomp / MeshBVH
+  // collider fell through to "PlaneY", so it reloaded as a flat ground plane.
+  case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF:
+    return "ObjectMeshSDF";
+  case RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp:
+    return "ObjectConvexDecomp";
+  case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH:
+    return "ObjectMeshBVH";
+  case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
+  default:
+    return "PlaneY";
+  }
 }
 
-static const char* particleColliderSourceModeToString(RayTrophiSim::ParticleColliderSourceMode mode) {
-    switch (mode) {
-        case RayTrophiSim::ParticleColliderSourceMode::ObjectAABB: return "ObjectAABB";
-        case RayTrophiSim::ParticleColliderSourceMode::ObjectOBB: return "ObjectOBB";
-        case RayTrophiSim::ParticleColliderSourceMode::Sphere: return "Sphere";
-        case RayTrophiSim::ParticleColliderSourceMode::Capsule: return "Capsule";
-        // These were MISSING — an ObjectMeshSDF (voxel) / ConvexDecomp / MeshBVH
-        // collider fell through to "PlaneY", so it reloaded as a flat ground plane.
-        case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF: return "ObjectMeshSDF";
-        case RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp: return "ObjectConvexDecomp";
-        case RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH: return "ObjectMeshBVH";
-        case RayTrophiSim::ParticleColliderSourceMode::PlaneY:
-        default: return "PlaneY";
-    }
+static RayTrophiSim::ParticleColliderSourceMode
+particleColliderSourceModeFromString(const std::string &value) {
+  if (value == "ObjectAABB")
+    return RayTrophiSim::ParticleColliderSourceMode::ObjectAABB;
+  if (value == "ObjectOBB")
+    return RayTrophiSim::ParticleColliderSourceMode::ObjectOBB;
+  if (value == "Sphere")
+    return RayTrophiSim::ParticleColliderSourceMode::Sphere;
+  if (value == "Capsule")
+    return RayTrophiSim::ParticleColliderSourceMode::Capsule;
+  if (value == "ObjectMeshSDF")
+    return RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
+  if (value == "ObjectConvexDecomp")
+    return RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp;
+  if (value == "ObjectMeshBVH")
+    return RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH;
+  return RayTrophiSim::ParticleColliderSourceMode::PlaneY;
 }
 
-static RayTrophiSim::ParticleColliderSourceMode particleColliderSourceModeFromString(const std::string& value) {
-    if (value == "ObjectAABB") return RayTrophiSim::ParticleColliderSourceMode::ObjectAABB;
-    if (value == "ObjectOBB") return RayTrophiSim::ParticleColliderSourceMode::ObjectOBB;
-    if (value == "Sphere") return RayTrophiSim::ParticleColliderSourceMode::Sphere;
-    if (value == "Capsule") return RayTrophiSim::ParticleColliderSourceMode::Capsule;
-    if (value == "ObjectMeshSDF") return RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
-    if (value == "ObjectConvexDecomp") return RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp;
-    if (value == "ObjectMeshBVH") return RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH;
-    return RayTrophiSim::ParticleColliderSourceMode::PlaneY;
+static const char *simulationGridDomainSourceModeToString(
+    RayTrophiSim::SimulationGridDomainSourceMode mode) {
+  switch (mode) {
+  case RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds:
+    return "ObjectBounds";
+  case RayTrophiSim::SimulationGridDomainSourceMode::Adaptive:
+    return "Adaptive";
+  case RayTrophiSim::SimulationGridDomainSourceMode::ManualBox:
+  default:
+    return "ManualBox";
+  }
 }
 
-static const char* simulationGridDomainSourceModeToString(RayTrophiSim::SimulationGridDomainSourceMode mode) {
-    switch (mode) {
-        case RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds: return "ObjectBounds";
-        case RayTrophiSim::SimulationGridDomainSourceMode::Adaptive: return "Adaptive";
-        case RayTrophiSim::SimulationGridDomainSourceMode::ManualBox:
-        default: return "ManualBox";
-    }
+static RayTrophiSim::SimulationGridDomainSourceMode
+simulationGridDomainSourceModeFromString(const std::string &value) {
+  if (value == "ObjectBounds")
+    return RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds;
+  if (value == "Adaptive")
+    return RayTrophiSim::SimulationGridDomainSourceMode::Adaptive;
+  return RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
 }
 
-static RayTrophiSim::SimulationGridDomainSourceMode simulationGridDomainSourceModeFromString(const std::string& value) {
-    if (value == "ObjectBounds") return RayTrophiSim::SimulationGridDomainSourceMode::ObjectBounds;
-    if (value == "Adaptive") return RayTrophiSim::SimulationGridDomainSourceMode::Adaptive;
-    return RayTrophiSim::SimulationGridDomainSourceMode::ManualBox;
+static const char *simulationGridDomainBoundaryModeToString(
+    RayTrophiSim::SimulationGridDomainBoundaryMode mode) {
+  switch (mode) {
+  case RayTrophiSim::SimulationGridDomainBoundaryMode::Closed:
+    return "Closed";
+  case RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic:
+    return "Periodic";
+  case RayTrophiSim::SimulationGridDomainBoundaryMode::Open:
+  default:
+    return "Open";
+  }
 }
 
-static const char* simulationGridDomainBoundaryModeToString(RayTrophiSim::SimulationGridDomainBoundaryMode mode) {
-    switch (mode) {
-        case RayTrophiSim::SimulationGridDomainBoundaryMode::Closed: return "Closed";
-        case RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic: return "Periodic";
-        case RayTrophiSim::SimulationGridDomainBoundaryMode::Open:
-        default: return "Open";
-    }
+static RayTrophiSim::SimulationGridDomainBoundaryMode
+simulationGridDomainBoundaryModeFromString(const std::string &value) {
+  if (value == "Closed")
+    return RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
+  if (value == "Periodic")
+    return RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic;
+  return RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
 }
 
-static RayTrophiSim::SimulationGridDomainBoundaryMode simulationGridDomainBoundaryModeFromString(const std::string& value) {
-    if (value == "Closed") return RayTrophiSim::SimulationGridDomainBoundaryMode::Closed;
-    if (value == "Periodic") return RayTrophiSim::SimulationGridDomainBoundaryMode::Periodic;
-    return RayTrophiSim::SimulationGridDomainBoundaryMode::Open;
+static json domainVolumeShaderToJson(const VolumeShader &shader) {
+  json s;
+  s["name"] = shader.name;
+  s["density"] = shader.density.toJson();
+  s["scattering"] = shader.scattering.toJson();
+  s["absorption"] = shader.absorption.toJson();
+  s["emission"] = shader.emission.toJson();
+  s["emission_response"] = shader.emission_response.toJson();
+  s["quality"] = shader.quality.toJson();
+  s["material_program"] = shader.material_program.toJson();
+  s["material_graph"] = shader.material_graph;
+  s["motion_blur"] = {{"enabled", shader.motion_blur.enabled},
+                      {"velocity_channel", shader.motion_blur.velocity_channel},
+                      {"scale", shader.motion_blur.scale}};
+  return s;
 }
 
-static json domainVolumeShaderToJson(const VolumeShader& shader) {
-    json s;
-    s["name"] = shader.name;
-    s["density"] = shader.density.toJson();
-    s["scattering"] = shader.scattering.toJson();
-    s["absorption"] = shader.absorption.toJson();
-    s["emission"] = shader.emission.toJson();
-    s["emission_response"] = shader.emission_response.toJson();
-    s["quality"] = shader.quality.toJson();
-    s["material_program"] = shader.material_program.toJson();
-    s["material_graph"] = shader.material_graph;
-    s["motion_blur"] = {
-        {"enabled", shader.motion_blur.enabled},
-        {"velocity_channel", shader.motion_blur.velocity_channel},
-        {"scale", shader.motion_blur.scale}
-    };
-    return s;
+static std::shared_ptr<VolumeShader>
+domainVolumeShaderFromJson(const json &js) {
+  auto shader = std::make_shared<VolumeShader>();
+  shader->name = js.value("name", std::string("Volume Shader"));
+  if (js.contains("density"))
+    shader->density.fromJson(js["density"]);
+  if (js.contains("scattering"))
+    shader->scattering.fromJson(js["scattering"]);
+  if (js.contains("absorption"))
+    shader->absorption.fromJson(js["absorption"]);
+  if (js.contains("emission"))
+    shader->emission.fromJson(js["emission"]);
+  if (js.contains("emission_response")) {
+    shader->emission_response.fromJson(js["emission_response"]);
+  }
+  if (js.contains("quality"))
+    shader->quality.fromJson(js["quality"]);
+  if (js.contains("material_program"))
+    shader->material_program.fromJson(js["material_program"]);
+  shader->material_graph = js.value("material_graph", std::string());
+  if (js.contains("motion_blur")) {
+    shader->motion_blur.enabled = js["motion_blur"].value("enabled", false);
+    shader->motion_blur.velocity_channel =
+        js["motion_blur"].value("velocity_channel", std::string("vel"));
+    shader->motion_blur.scale = js["motion_blur"].value("scale", 1.0f);
+  }
+  return shader;
 }
 
-static std::shared_ptr<VolumeShader> domainVolumeShaderFromJson(const json& js) {
-    auto shader = std::make_shared<VolumeShader>();
-    shader->name = js.value("name", std::string("Volume Shader"));
-    if (js.contains("density")) shader->density.fromJson(js["density"]);
-    if (js.contains("scattering")) shader->scattering.fromJson(js["scattering"]);
-    if (js.contains("absorption")) shader->absorption.fromJson(js["absorption"]);
-    if (js.contains("emission")) shader->emission.fromJson(js["emission"]);
-    if (js.contains("emission_response")) {
-        shader->emission_response.fromJson(js["emission_response"]);
-    }
-    if (js.contains("quality")) shader->quality.fromJson(js["quality"]);
-    if (js.contains("material_program")) shader->material_program.fromJson(js["material_program"]);
-    shader->material_graph = js.value("material_graph", std::string());
-    if (js.contains("motion_blur")) {
-        shader->motion_blur.enabled = js["motion_blur"].value("enabled", false);
-        shader->motion_blur.velocity_channel = js["motion_blur"].value("velocity_channel", std::string("vel"));
-        shader->motion_blur.scale = js["motion_blur"].value("scale", 1.0f);
-    }
-    return shader;
+static const char *
+simulationDomainTypeToString(RayTrophiSim::SimulationDomainType type) {
+  switch (type) {
+  case RayTrophiSim::SimulationDomainType::Matter:
+    return "Matter";
+  case RayTrophiSim::SimulationDomainType::LegacyFluid:
+    return "Fluid";
+  case RayTrophiSim::SimulationDomainType::LegacyGas:
+  default:
+    return "Gas";
+  }
 }
 
-static const char* simulationDomainTypeToString(RayTrophiSim::SimulationDomainType type) {
-    switch (type) {
-        case RayTrophiSim::SimulationDomainType::Matter: return "Matter";
-        case RayTrophiSim::SimulationDomainType::LegacyFluid: return "Fluid";
-        case RayTrophiSim::SimulationDomainType::LegacyGas:
-        default: return "Gas";
-    }
+static RayTrophiSim::SimulationDomainType
+simulationDomainTypeFromString(const std::string &value) {
+  return RayTrophiSim::parseSavedSimulationDomainType(value);
 }
 
-static RayTrophiSim::SimulationDomainType simulationDomainTypeFromString(const std::string& value) {
-    return RayTrophiSim::parseSavedSimulationDomainType(value);
+static const char *rigidBodyShapeToString(RayTrophiSim::RigidBodyShape shape) {
+  switch (shape) {
+  case RayTrophiSim::RigidBodyShape::Sphere:
+    return "Sphere";
+  case RayTrophiSim::RigidBodyShape::Capsule:
+    return "Capsule";
+  case RayTrophiSim::RigidBodyShape::Mesh:
+    return "Mesh";
+  case RayTrophiSim::RigidBodyShape::Box:
+  default:
+    return "Box";
+  }
 }
 
-static const char* rigidBodyShapeToString(RayTrophiSim::RigidBodyShape shape) {
-    switch (shape) {
-        case RayTrophiSim::RigidBodyShape::Sphere: return "Sphere";
-        case RayTrophiSim::RigidBodyShape::Capsule: return "Capsule";
-        case RayTrophiSim::RigidBodyShape::Mesh: return "Mesh";
-        case RayTrophiSim::RigidBodyShape::Box:
-        default: return "Box";
-    }
+static RayTrophiSim::RigidBodyShape
+rigidBodyShapeFromString(const std::string &value) {
+  if (value == "Sphere")
+    return RayTrophiSim::RigidBodyShape::Sphere;
+  if (value == "Capsule")
+    return RayTrophiSim::RigidBodyShape::Capsule;
+  if (value == "Mesh")
+    return RayTrophiSim::RigidBodyShape::Mesh;
+  return RayTrophiSim::RigidBodyShape::Box;
 }
 
-static RayTrophiSim::RigidBodyShape rigidBodyShapeFromString(const std::string& value) {
-    if (value == "Sphere") return RayTrophiSim::RigidBodyShape::Sphere;
-    if (value == "Capsule") return RayTrophiSim::RigidBodyShape::Capsule;
-    if (value == "Mesh") return RayTrophiSim::RigidBodyShape::Mesh;
-    return RayTrophiSim::RigidBodyShape::Box;
+static const char *
+rigidBodyMotionTypeToString(RayTrophiSim::RigidBodyMotionType type) {
+  switch (type) {
+  case RayTrophiSim::RigidBodyMotionType::Static:
+    return "Static";
+  case RayTrophiSim::RigidBodyMotionType::Kinematic:
+    return "Kinematic";
+  case RayTrophiSim::RigidBodyMotionType::Dynamic:
+  default:
+    return "Dynamic";
+  }
 }
 
-static const char* rigidBodyMotionTypeToString(RayTrophiSim::RigidBodyMotionType type) {
-    switch (type) {
-        case RayTrophiSim::RigidBodyMotionType::Static: return "Static";
-        case RayTrophiSim::RigidBodyMotionType::Kinematic: return "Kinematic";
-        case RayTrophiSim::RigidBodyMotionType::Dynamic:
-        default: return "Dynamic";
-    }
+static RayTrophiSim::RigidBodyMotionType
+rigidBodyMotionTypeFromString(const std::string &value) {
+  if (value == "Static")
+    return RayTrophiSim::RigidBodyMotionType::Static;
+  if (value == "Kinematic")
+    return RayTrophiSim::RigidBodyMotionType::Kinematic;
+  return RayTrophiSim::RigidBodyMotionType::Dynamic;
 }
 
-static RayTrophiSim::RigidBodyMotionType rigidBodyMotionTypeFromString(const std::string& value) {
-    if (value == "Static") return RayTrophiSim::RigidBodyMotionType::Static;
-    if (value == "Kinematic") return RayTrophiSim::RigidBodyMotionType::Kinematic;
-    return RayTrophiSim::RigidBodyMotionType::Dynamic;
+static const char *bodyKindToString(RayTrophiSim::BodyKind kind) {
+  switch (kind) {
+  case RayTrophiSim::BodyKind::SoftBody:
+    return "SoftBody";
+  case RayTrophiSim::BodyKind::Cloth:
+    return "Cloth";
+  case RayTrophiSim::BodyKind::Rigid:
+  default:
+    return "Rigid";
+  }
 }
 
-static const char* bodyKindToString(RayTrophiSim::BodyKind kind) {
-    switch (kind) {
-        case RayTrophiSim::BodyKind::SoftBody: return "SoftBody";
-        case RayTrophiSim::BodyKind::Cloth: return "Cloth";
-        case RayTrophiSim::BodyKind::Rigid:
-        default: return "Rigid";
-    }
+static RayTrophiSim::BodyKind bodyKindFromString(const std::string &value) {
+  if (value == "SoftBody")
+    return RayTrophiSim::BodyKind::SoftBody;
+  if (value == "Cloth")
+    return RayTrophiSim::BodyKind::Cloth;
+  return RayTrophiSim::BodyKind::Rigid;
 }
 
-static RayTrophiSim::BodyKind bodyKindFromString(const std::string& value) {
-    if (value == "SoftBody") return RayTrophiSim::BodyKind::SoftBody;
-    if (value == "Cloth") return RayTrophiSim::BodyKind::Cloth;
-    return RayTrophiSim::BodyKind::Rigid;
+static const char *
+particlePhysicsModeToString(RayTrophiSim::ParticlePhysicsMode mode) {
+  switch (mode) {
+  case RayTrophiSim::ParticlePhysicsMode::Granular:
+    return "Granular";
+  case RayTrophiSim::ParticlePhysicsMode::Fluid:
+    return "Fluid";
+  case RayTrophiSim::ParticlePhysicsMode::Gas:
+    return "Gas";
+  case RayTrophiSim::ParticlePhysicsMode::Spark:
+  default:
+    return "Spark";
+  }
 }
 
-static const char* particlePhysicsModeToString(RayTrophiSim::ParticlePhysicsMode mode) {
-    switch (mode) {
-        case RayTrophiSim::ParticlePhysicsMode::Granular: return "Granular";
-        case RayTrophiSim::ParticlePhysicsMode::Fluid: return "Fluid";
-        case RayTrophiSim::ParticlePhysicsMode::Gas: return "Gas";
-        case RayTrophiSim::ParticlePhysicsMode::Spark:
-        default: return "Spark";
-    }
+static RayTrophiSim::ParticlePhysicsMode
+particlePhysicsModeFromString(const std::string &value) {
+  if (value == "Granular")
+    return RayTrophiSim::ParticlePhysicsMode::Granular;
+  if (value == "Fluid")
+    return RayTrophiSim::ParticlePhysicsMode::Fluid;
+  if (value == "Gas")
+    return RayTrophiSim::ParticlePhysicsMode::Gas;
+  return RayTrophiSim::ParticlePhysicsMode::Spark;
 }
 
-static RayTrophiSim::ParticlePhysicsMode particlePhysicsModeFromString(const std::string& value) {
-    if (value == "Granular") return RayTrophiSim::ParticlePhysicsMode::Granular;
-    if (value == "Fluid") return RayTrophiSim::ParticlePhysicsMode::Fluid;
-    if (value == "Gas") return RayTrophiSim::ParticlePhysicsMode::Gas;
-    return RayTrophiSim::ParticlePhysicsMode::Spark;
+static const char *
+particleQualityModeToString(RayTrophiSim::ParticleQualityMode quality) {
+  switch (quality) {
+  case RayTrophiSim::ParticleQualityMode::Preview:
+    return "Preview";
+  case RayTrophiSim::ParticleQualityMode::Offline:
+    return "Offline";
+  case RayTrophiSim::ParticleQualityMode::Realtime:
+  default:
+    return "Realtime";
+  }
 }
 
-static const char* particleQualityModeToString(RayTrophiSim::ParticleQualityMode quality) {
-    switch (quality) {
-        case RayTrophiSim::ParticleQualityMode::Preview: return "Preview";
-        case RayTrophiSim::ParticleQualityMode::Offline: return "Offline";
-        case RayTrophiSim::ParticleQualityMode::Realtime:
-        default: return "Realtime";
-    }
+static RayTrophiSim::ParticleQualityMode
+particleQualityModeFromString(const std::string &value) {
+  if (value == "Preview")
+    return RayTrophiSim::ParticleQualityMode::Preview;
+  if (value == "Offline")
+    return RayTrophiSim::ParticleQualityMode::Offline;
+  return RayTrophiSim::ParticleQualityMode::Realtime;
 }
 
-static RayTrophiSim::ParticleQualityMode particleQualityModeFromString(const std::string& value) {
-    if (value == "Preview") return RayTrophiSim::ParticleQualityMode::Preview;
-    if (value == "Offline") return RayTrophiSim::ParticleQualityMode::Offline;
-    return RayTrophiSim::ParticleQualityMode::Realtime;
+static const char *
+particleExecutionPolicyToString(RayTrophiSim::ParticleExecutionPolicy policy) {
+  switch (policy) {
+  case RayTrophiSim::ParticleExecutionPolicy::GPURequired:
+    return "GPURequired";
+  case RayTrophiSim::ParticleExecutionPolicy::CPU:
+    return "CPU";
+  case RayTrophiSim::ParticleExecutionPolicy::Auto:
+  default:
+    return "Auto";
+  }
 }
 
-static const char* particleExecutionPolicyToString(RayTrophiSim::ParticleExecutionPolicy policy) {
-    switch (policy) {
-        case RayTrophiSim::ParticleExecutionPolicy::GPURequired: return "GPURequired";
-        case RayTrophiSim::ParticleExecutionPolicy::CPU: return "CPU";
-        case RayTrophiSim::ParticleExecutionPolicy::Auto:
-        default: return "Auto";
-    }
+static RayTrophiSim::ParticleExecutionPolicy
+particleExecutionPolicyFromString(const std::string &value) {
+  if (value == "GPURequired")
+    return RayTrophiSim::ParticleExecutionPolicy::GPURequired;
+  if (value == "CPU")
+    return RayTrophiSim::ParticleExecutionPolicy::CPU;
+  return RayTrophiSim::ParticleExecutionPolicy::Auto;
 }
 
-static RayTrophiSim::ParticleExecutionPolicy particleExecutionPolicyFromString(const std::string& value) {
-    if (value == "GPURequired") return RayTrophiSim::ParticleExecutionPolicy::GPURequired;
-    if (value == "CPU") return RayTrophiSim::ParticleExecutionPolicy::CPU;
-    return RayTrophiSim::ParticleExecutionPolicy::Auto;
+static json mat4ToJson(const Matrix4x4 &m) {
+  json j = json::array();
+  for (int i = 0; i < 4; ++i)
+    for (int k = 0; k < 4; ++k)
+      j.push_back(m.m[i][k]);
+  return j;
 }
 
-static json mat4ToJson(const Matrix4x4& m) {
-    json j = json::array();
-    for(int i = 0; i < 4; ++i)
-        for(int k = 0; k < 4; ++k)
-            j.push_back(m.m[i][k]);
-    return j;
-}
+static Matrix4x4 jsonToMat4(const json &j) {
+  Matrix4x4 m;
+  for (int i = 0; i < 4; ++i)
+    for (int k = 0; k < 4; ++k)
+      m.m[i][k] = (i == k ? 1.0f : 0.0f);
 
-static Matrix4x4 jsonToMat4(const json& j) {
-    Matrix4x4 m;
-    for(int i=0; i<4; ++i) for(int k=0; k<4; ++k) m.m[i][k] = (i==k ? 1.0f : 0.0f);
-
-    if (j.is_array() && j.size() == 16) {
-        int idx = 0;
-        for(int i = 0; i < 4; ++i)
-            for(int k = 0; k < 4; ++k)
-                m.m[i][k] = j[idx++];
-    }
-    return m;
+  if (j.is_array() && j.size() == 16) {
+    int idx = 0;
+    for (int i = 0; i < 4; ++i)
+      for (int k = 0; k < 4; ++k)
+        m.m[i][k] = j[idx++];
+  }
+  return m;
 }
 
 // Helper to check for identity matrix with epsilon
-static bool isIdentity(const Matrix4x4& m) {
-    const float epsilon = 0.0001f;
-    for (int r = 0; r < 4; ++r) {
-        for (int c = 0; c < 4; ++c) {
-            float expected = (r == c) ? 1.0f : 0.0f;
-            if (std::abs(m.m[r][c] - expected) > epsilon) return false;
-        }
+static bool isIdentity(const Matrix4x4 &m) {
+  const float epsilon = 0.0001f;
+  for (int r = 0; r < 4; ++r) {
+    for (int c = 0; c < 4; ++c) {
+      float expected = (r == c) ? 1.0f : 0.0f;
+      if (std::abs(m.m[r][c] - expected) > epsilon)
+        return false;
     }
-    return true;
+  }
+  return true;
 }
 
 // Binary IO Helpers
-static void writeStringBinary(std::ofstream& out, const std::string& str) {
-    uint16_t len = static_cast<uint16_t>(str.length());
-    out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-    if (len > 0) out.write(str.data(), len);
+static void writeStringBinary(std::ofstream &out, const std::string &str) {
+  uint16_t len = static_cast<uint16_t>(str.length());
+  out.write(reinterpret_cast<const char *>(&len), sizeof(len));
+  if (len > 0)
+    out.write(str.data(), len);
 }
 
 // simdjson helpers
 static json sjsonToNlohmann(simdjson::dom::element el) {
-    return json::parse(std::string(simdjson::minify(el)));
+  return json::parse(std::string(simdjson::minify(el)));
 }
-static json sjsonToNlohmann(simdjson::simdjson_result<simdjson::dom::element> res) {
-    simdjson::dom::element el;
-    if (res.get(el)) return json();
-    return sjsonToNlohmann(el);
+static json
+sjsonToNlohmann(simdjson::simdjson_result<simdjson::dom::element> res) {
+  simdjson::dom::element el;
+  if (res.get(el))
+    return json();
+  return sjsonToNlohmann(el);
 }
 
 static Vec3 sjsonToVec3(simdjson::dom::element el) {
-    simdjson::dom::array arr;
-    if (el.get_array().get(arr)) return Vec3(0, 0, 0);
-    float x = 0, y = 0, z = 0;
-    size_t i = 0;
-    for (simdjson::dom::element val : arr) {
-        double d = 0;
-        val.get(d);
-        if (i == 0) x = (float)d;
-        else if (i == 1) y = (float)d;
-        else if (i == 2) z = (float)d;
-        i++;
-    }
-    return Vec3(x, y, z);
+  simdjson::dom::array arr;
+  if (el.get_array().get(arr))
+    return Vec3(0, 0, 0);
+  float x = 0, y = 0, z = 0;
+  size_t i = 0;
+  for (simdjson::dom::element val : arr) {
+    double d = 0;
+    val.get(d);
+    if (i == 0)
+      x = (float)d;
+    else if (i == 1)
+      y = (float)d;
+    else if (i == 2)
+      z = (float)d;
+    i++;
+  }
+  return Vec3(x, y, z);
 }
 static Vec3 sjsonToVec3(simdjson::simdjson_result<simdjson::dom::element> res) {
-    simdjson::dom::element el;
-    if (res.get(el)) return Vec3(0, 0, 0);
-    return sjsonToVec3(el);
+  simdjson::dom::element el;
+  if (res.get(el))
+    return Vec3(0, 0, 0);
+  return sjsonToVec3(el);
 }
 
 static Matrix4x4 sjsonToMat4(simdjson::dom::element el) {
-    Matrix4x4 m;
-    simdjson::dom::array arr;
-    if (el.get_array().get(arr) || arr.size() != 16) return m;
-    int idx = 0;
-    for (simdjson::dom::element val : arr) {
-        int r = idx / 4;
-        int c = idx % 4;
-        double d = 0;
-        val.get(d);
-        m.m[r][c] = (float)d;
-        idx++;
-    }
+  Matrix4x4 m;
+  simdjson::dom::array arr;
+  if (el.get_array().get(arr) || arr.size() != 16)
     return m;
+  int idx = 0;
+  for (simdjson::dom::element val : arr) {
+    int r = idx / 4;
+    int c = idx % 4;
+    double d = 0;
+    val.get(d);
+    m.m[r][c] = (float)d;
+    idx++;
+  }
+  return m;
 }
-static Matrix4x4 sjsonToMat4(simdjson::simdjson_result<simdjson::dom::element> res) {
-    simdjson::dom::element el;
-    if (res.get(el)) return Matrix4x4();
-    return sjsonToMat4(el);
+static Matrix4x4
+sjsonToMat4(simdjson::simdjson_result<simdjson::dom::element> res) {
+  simdjson::dom::element el;
+  if (res.get(el))
+    return Matrix4x4();
+  return sjsonToMat4(el);
 }
 
-// Seekable read-only streambuf over an in-memory buffer. openProject reads the whole
-// project .bin into RAM once and parses from here: the geometry/skin-weight readers issue
-// millions of tiny read() calls, and against an ifstream each one pays the full iostream +
-// OS round-trip. Against this buffer a read() is a bounds check + memcpy.
+// Seekable read-only streambuf over an in-memory buffer. openProject reads the
+// whole project .bin into RAM once and parses from here: the
+// geometry/skin-weight readers issue millions of tiny read() calls, and against
+// an ifstream each one pays the full iostream + OS round-trip. Against this
+// buffer a read() is a bounds check + memcpy.
 namespace {
 class MemReadBuf : public std::streambuf {
 public:
-    MemReadBuf(char* data, size_t size) {
-        setg(data, data, data + size);
-    }
+  MemReadBuf(char *data, size_t size) { setg(data, data, data + size); }
+
 protected:
-    pos_type seekoff(off_type off, std::ios_base::seekdir dir, std::ios_base::openmode which) override {
-        if (!(which & std::ios_base::in)) return pos_type(off_type(-1));
-        char* base = eback();
-        char* target = nullptr;
-        switch (dir) {
-            case std::ios_base::beg: target = base + off; break;
-            case std::ios_base::cur: target = gptr() + off; break;
-            case std::ios_base::end: target = egptr() + off; break;
-            default: return pos_type(off_type(-1));
-        }
-        if (target < base || target > egptr()) return pos_type(off_type(-1));
-        setg(base, target, egptr());
-        return pos_type(target - base);
+  pos_type seekoff(off_type off, std::ios_base::seekdir dir,
+                   std::ios_base::openmode which) override {
+    if (!(which & std::ios_base::in))
+      return pos_type(off_type(-1));
+    char *base = eback();
+    char *target = nullptr;
+    switch (dir) {
+    case std::ios_base::beg:
+      target = base + off;
+      break;
+    case std::ios_base::cur:
+      target = gptr() + off;
+      break;
+    case std::ios_base::end:
+      target = egptr() + off;
+      break;
+    default:
+      return pos_type(off_type(-1));
     }
-    pos_type seekpos(pos_type pos, std::ios_base::openmode which) override {
-        return seekoff(off_type(pos), std::ios_base::beg, which);
-    }
+    if (target < base || target > egptr())
+      return pos_type(off_type(-1));
+    setg(base, target, egptr());
+    return pos_type(target - base);
+  }
+  pos_type seekpos(pos_type pos, std::ios_base::openmode which) override {
+    return seekoff(off_type(pos), std::ios_base::beg, which);
+  }
 };
 } // namespace
 
-static std::string readStringBinary(std::istream& in) {
-    uint16_t len = 0;
-    in.read(reinterpret_cast<char*>(&len), sizeof(len));
-    if (!in || len == 0) return "";
-    std::string str(len, '\0');
-    in.read(&str[0], len);
-    return str;
+static std::string readStringBinary(std::istream &in) {
+  uint16_t len = 0;
+  in.read(reinterpret_cast<char *>(&len), sizeof(len));
+  if (!in || len == 0)
+    return "";
+  std::string str(len, '\0');
+  in.read(&str[0], len);
+  return str;
 }
 
 // Generate internal package path like "models/0001/filename.glb"
-std::string ProjectManager::generatePackagePath(const std::string& original_path, 
-                                                 const std::string& folder, 
-                                                 uint32_t id) {
-    fs::path orig(original_path);
-    std::ostringstream oss;
-    // Use subfolders to prevent name collisions and preserve relative paths (e.g. for .bin files)
-    oss << folder << "/" << std::setfill('0') << std::setw(4) << id << "/" << orig.filename().string();
-    return oss.str();
+std::string
+ProjectManager::generatePackagePath(const std::string &original_path,
+                                    const std::string &folder, uint32_t id) {
+  fs::path orig(original_path);
+  std::ostringstream oss;
+  // Use subfolders to prevent name collisions and preserve relative paths (e.g.
+  // for .bin files)
+  oss << folder << "/" << std::setfill('0') << std::setw(4) << id << "/"
+      << orig.filename().string();
+  return oss.str();
 }
 
 // ============================================================================
 // Serialization / Sync Logic
 // ============================================================================
 
-void ProjectManager::syncProjectToScene(SceneData& scene) {
-    // 1. Build a Quick Lookup Map for Scene Objects
-    std::unordered_map<std::string, std::shared_ptr<Triangle>> scene_obj_map;
-    // Utilize cache if available, otherwise build it
-    for (const auto& obj : scene.world.objects) {
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            if (!tri->getNodeName().empty()) {
-                scene_obj_map[tri->getNodeName()] = tri;
-            }
+void ProjectManager::syncProjectToScene(SceneData &scene) {
+  // 1. Build a Quick Lookup Map for Scene Objects
+  std::unordered_map<std::string, std::shared_ptr<Triangle>> scene_obj_map;
+  // Utilize cache if available, otherwise build it
+  for (const auto &obj : scene.world.objects) {
+    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+      if (!tri->getNodeName().empty()) {
+        scene_obj_map[tri->getNodeName()] = tri;
+      }
+    }
+  }
+
+  // 2. Iterate Imported Models and Sync
+  for (auto &model : g_project.imported_models) {
+    // Deduplicate to clean up any existing bloat in memory
+    std::vector<ImportedModelData::ObjectInstance> unique_objs;
+    std::unordered_set<std::string> seen;
+    for (auto &obj : model.objects) {
+      if (seen.insert(obj.node_name).second) {
+        unique_objs.push_back(std::move(obj));
+      }
+    }
+    model.objects = std::move(unique_objs);
+
+    // Re-evaluate deleted objects
+    std::vector<std::string> current_deleted;
+
+    for (auto &inst : model.objects) {
+      auto it = scene_obj_map.find(inst.node_name);
+      if (it != scene_obj_map.end()) {
+        // Object Exists in Scene - Update Status
+        auto tri = it->second;
+
+        // Update Transform
+        if (auto th = tri->getTransformPtr()) {
+          inst.transform = th->base;
+        } else {
+          // Fallback if no handle (shouldn't happen for valid objects)
         }
+
+        // Update Material
+        inst.material_id = tri->getMaterialID();
+
+        // Update Visibility (approximation, as Triangle doesn't strictly have
+        // 'visible' flag exposed easily usually, but let's assume if it's in
+        // the list, it's visible. If you implement a specific hide flag in
+        // Triangle, use it here.)
+        inst.visible = true;
+      } else if (scene.fracture_parked_nodes.count(inst.node_name) != 0) {
+        // ★ ABSENT IS NOT THE SAME AS DELETED.
+        //
+        // A fractured mesh has its original geometry PARKED: pulled out
+        // of world.objects so the shards render in its place, but very
+        // much still owned by the session (Restore puts it back). This
+        // loop only knows "I cannot find it", and recording that as a
+        // deletion made saving a fractured object destroy it — the
+        // re-import skipped the node on reload, and the shards were
+        // never persisted either, so the object was simply gone.
+        //
+        // Keep the node in the model. Reopening the project therefore
+        // gives back the WHOLE, un-fractured mesh: the fracture itself
+        // does not survive the round trip yet, but nothing is lost.
+        inst.visible = true;
+      } else {
+        // Object MISSING from Scene -> It is DELETED
+        current_deleted.push_back(inst.node_name);
+        inst.visible = false; // Mark implicit
+      }
     }
 
-    // 2. Iterate Imported Models and Sync
-    for (auto& model : g_project.imported_models) {
-        // Deduplicate to clean up any existing bloat in memory
-        std::vector<ImportedModelData::ObjectInstance> unique_objs;
-        std::unordered_set<std::string> seen;
-        for (auto& obj : model.objects) {
-            if (seen.insert(obj.node_name).second) {
-                unique_objs.push_back(std::move(obj));
-            }
-        }
-        model.objects = std::move(unique_objs);
+    model.deleted_objects = current_deleted;
+  }
 
-        // Re-evaluate deleted objects
-        std::vector<std::string> current_deleted;
-        
-        for (auto& inst : model.objects) {
-            auto it = scene_obj_map.find(inst.node_name);
-            if (it != scene_obj_map.end()) {
-                // Object Exists in Scene - Update Status
-                auto tri = it->second;
-                
-                // Update Transform
-                if (auto th = tri->getTransformPtr()) {
-                    inst.transform = th->base;
-                } else {
-                    // Fallback if no handle (shouldn't happen for valid objects)
-                }
-                
-                // Update Material
-                inst.material_id = tri->getMaterialID();
-                
-                // Update Visibility (approximation, as Triangle doesn't strictly have 'visible' flag exposed easily usually, 
-                // but let's assume if it's in the list, it's visible. 
-                // If you implement a specific hide flag in Triangle, use it here.)
-                inst.visible = true; 
-            } else if (scene.fracture_parked_nodes.count(inst.node_name) != 0) {
-                // ★ ABSENT IS NOT THE SAME AS DELETED.
-                //
-                // A fractured mesh has its original geometry PARKED: pulled out
-                // of world.objects so the shards render in its place, but very
-                // much still owned by the session (Restore puts it back). This
-                // loop only knows "I cannot find it", and recording that as a
-                // deletion made saving a fractured object destroy it — the
-                // re-import skipped the node on reload, and the shards were
-                // never persisted either, so the object was simply gone.
-                //
-                // Keep the node in the model. Reopening the project therefore
-                // gives back the WHOLE, un-fractured mesh: the fracture itself
-                // does not survive the round trip yet, but nothing is lost.
-                inst.visible = true;
-            } else {
-                // Object MISSING from Scene -> It is DELETED
-                current_deleted.push_back(inst.node_name);
-                inst.visible = false; // Mark implicit
-            }
-        }
-        
-        model.deleted_objects = current_deleted;
+  // 3. Sync Procedurals
+  // Procedurals are usually directly managed in `procedural_objects` list by
+  // Add/Remove calls. But we should sync transforms just in case.
+  for (auto &proc : g_project.procedural_objects) {
+    // Find procedural object in scene by Name (or ID if we stored it in
+    // Triangle?) Currently relying on Name matching for procedurals is risky if
+    // duplicates allowed. But let's try. Better: Procedural creation assigns
+    // 'nodeName' = 'display_name'.
+    auto it = scene_obj_map.find(proc.display_name);
+    if (it != scene_obj_map.end()) {
+      if (auto th = it->second->getTransformPtr()) {
+        proc.transform = th->base;
+      }
+      proc.material_id = it->second->getMaterialID();
     }
-    
-    // 3. Sync Procedurals
-    // Procedurals are usually directly managed in `procedural_objects` list by Add/Remove calls.
-    // But we should sync transforms just in case.
-    for (auto& proc : g_project.procedural_objects) {
-        // Find procedural object in scene by Name (or ID if we stored it in Triangle?)
-        // Currently relying on Name matching for procedurals is risky if duplicates allowed.
-        // But let's try.
-        // Better: Procedural creation assigns 'nodeName' = 'display_name'.
-        auto it = scene_obj_map.find(proc.display_name);
-        if (it != scene_obj_map.end()) {
-             if (auto th = it->second->getTransformPtr()) {
-                 proc.transform = th->base;
-             }
-             proc.material_id = it->second->getMaterialID();
-        }
-    }
+  }
 }
 
 // ============================================================================
@@ -1149,174 +1340,199 @@ void ProjectManager::syncProjectToScene(SceneData& scene) {
 // Project Lifecycle
 // ============================================================================
 
-void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer_backend_reset) {
-    Game::resetRuntime();
-    // The game design is project state: a queued document and the live paint
-    // surfaces/demo of the previous project never survive into the next one.
-    Paint::resetGameDesign();
-    // 1. Ensure GPU and active backends are completely idle before clearing resources
-    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
-    extern std::unique_ptr<Backend::IBackend> g_backend;
-    if (g_viewport_backend) {
-        try { g_viewport_backend->waitForCompletion(); } catch (...) {}
+void ProjectManager::newProject(SceneData &scene, Renderer &renderer,
+                                bool defer_backend_reset) {
+  Game::resetRuntime();
+  // The game design is project state: a queued document and the live paint
+  // surfaces/demo of the previous project never survive into the next one.
+  Paint::resetGameDesign();
+  // 1. Ensure GPU and active backends are completely idle before clearing
+  // resources
+  extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+  extern std::unique_ptr<Backend::IBackend> g_backend;
+  if (g_viewport_backend) {
+    try {
+      g_viewport_backend->waitForCompletion();
+    } catch (...) {
     }
-    if (g_backend) {
-        try { g_backend->waitForCompletion(); } catch (...) {}
+  }
+  if (g_backend) {
+    try {
+      g_backend->waitForCompletion();
+    } catch (...) {
     }
-    if (render_settings.use_optix) {
-        try { OfflineDeviceHooks::synchronize(); } catch (...) {}
+  }
+  if (render_settings.use_optix) {
+    try {
+      OfflineDeviceHooks::synchronize();
+    } catch (...) {
     }
-    // Releases the wet paint atlas while the compute backend is idle and alive.
-    Paint::resetBalloonPaintDemo();
+  }
+  // Releases the wet paint atlas while the compute backend is idle and alive.
+  Paint::resetBalloonPaintDemo();
 
-    g_project.clear();
-    m_package_files.clear();
-    clearEmbeddedTextureCache();
-    {
-        // A new project starts from the built-ins only.
-        std::string substance_error;
-        RayTrophiSim::replaceProjectSubstances({}, substance_error);
+  g_project.clear();
+  m_package_files.clear();
+  clearEmbeddedTextureCache();
+  {
+    // A new project starts from the built-ins only.
+    std::string substance_error;
+    RayTrophiSim::replaceProjectSubstances({}, substance_error);
+  }
+
+  // 2. Reset Globals
+  bool was_optix = render_settings.use_optix;
+  bool was_vulkan = render_settings.use_vulkan;
+  bool was_denoiser = render_settings.use_denoiser;
+  DenoiserMode was_denoiser_mode = render_settings.denoiser_mode;
+
+  render_settings = RenderSettings(); // Default constructor resets to defaults
+
+  // Restore Device Preference
+  render_settings.use_optix = was_optix;
+  render_settings.use_vulkan = was_vulkan;
+  render_settings.use_denoiser = was_denoiser;
+  render_settings.denoiser_mode = was_denoiser_mode;
+
+  renderer.world.reset(); // Reset Atmosphere/Godrays
+  // Reset global and scene color processing (tonemap/postfx) to defaults for
+  // new project
+  extern ColorProcessor color_processor; // global in Main.cpp
+  color_processor.params = ColorProcessor::ColorProcessingParams();
+  scene.color_processor.params = color_processor.params;
+
+  // 3. Clear Central Subsystems
+  MaterialManager::getInstance().clear();
+  RiverManager::getInstance().clear(
+      &scene); // Clear rivers BEFORE WaterManager (rivers own WaterSurfaces)
+  // Road assignments reference splines by name, so they must not survive
+  // into a different scene: a name that happens to repeat would silently
+  // turn an unrelated curve into a road.
+  TerrainNodesV2::RoadNetworkRegistry::getInstance().clear();
+  WaterManager::getInstance().clear();
+  TerrainManager::getInstance().removeAllTerrains(scene);
+  InstanceManager::getInstance().clearAll(); // Clear foliage/scatter instances
+  VDBVolumeManager::getInstance()
+      .unloadAll(); // Clear VDB/Gas GPU handles and reset IDs
+  renderer.getHairSystem().clearAll(); // Clear all hair grooms
+
+  // Ensure scene containers are empty before backend geometry rebuild.
+  // This guarantees "empty scene" cleanup path and prevents stale instance
+  // carryover.
+  scene.clear();
+
+  // Do not call uploadHairToGPU() here after clearing the hair system.
+  // The empty-scene backend rebuild below is the authoritative GPU reset.
+  // Calling the hair upload path with zero grooms can make Vulkan interpret
+  // stale pre-reset BLAS entries as hair BLASes and destroy old buffers twice
+  // during project open/new-project transitions.
+
+  // 4. CRITICAL: Rebuild backend geometry for the empty scene.
+  // This ensures that all GPU BLAS, instances, and TLAS are fully
+  // cleared/reset. If we only call uploadHairToGPU, old meshes from previous
+  // projects may linger in the AccelManager's internal instance list, causing
+  // slowness even if they aren't visible.
+  //
+  // Vulkan must hit this path too:
+  // VulkanBackendAdapter::rebuildAccelerationStructure is the only place that
+  // purges m_uploadedImages and the material preview descriptor bindings.
+  // Skipping it on Vulkan leaves textures from the previous scene bleeding into
+  // the new project's material preview mode.
+  //
+  // openProject passes defer_backend_reset=true: the post-load finalize already
+  // drives a full rebuild (Main.cpp syncActiveRenderBackendScene or the
+  // g_vulkan_rebuild_pending block), so running it here on the empty pre-load
+  // scene is wasted work for foliage-heavy projects.
+  if (!defer_backend_reset && renderer.m_backend) {
+    try {
+      renderer.m_backend->waitForCompletion();
+      if (render_settings.use_vulkan) {
+        renderer.m_backend->rebuildAccelerationStructure();
+      } else {
+        renderer.rebuildBackendGeometry(scene);
+      }
+      renderer.m_backend->resetAccumulation();
+    } catch (...) {
     }
-    
-    // 2. Reset Globals
-    bool was_optix = render_settings.use_optix;
-    bool was_vulkan = render_settings.use_vulkan;
-    bool was_denoiser = render_settings.use_denoiser;
-    DenoiserMode was_denoiser_mode = render_settings.denoiser_mode;
-    
-    render_settings = RenderSettings(); // Default constructor resets to defaults
-    
-    // Restore Device Preference
-    render_settings.use_optix = was_optix;
-    render_settings.use_vulkan = was_vulkan;
-    render_settings.use_denoiser = was_denoiser;
-    render_settings.denoiser_mode = was_denoiser_mode;
+  }
 
-    renderer.world.reset();             // Reset Atmosphere/Godrays
-    // Reset global and scene color processing (tonemap/postfx) to defaults for new project
-    extern ColorProcessor color_processor; // global in Main.cpp
-    color_processor.params = ColorProcessor::ColorProcessingParams();
-    scene.color_processor.params = color_processor.params;
-    
-    // 3. Clear Central Subsystems
-    MaterialManager::getInstance().clear();
-    RiverManager::getInstance().clear(&scene);  // Clear rivers BEFORE WaterManager (rivers own WaterSurfaces)
-    // Road assignments reference splines by name, so they must not survive
-    // into a different scene: a name that happens to repeat would silently
-    // turn an unrelated curve into a road.
-    TerrainNodesV2::RoadNetworkRegistry::getInstance().clear();
-    WaterManager::getInstance().clear();
-    TerrainManager::getInstance().removeAllTerrains(scene);
-    InstanceManager::getInstance().clearAll();  // Clear foliage/scatter instances 
-    VDBVolumeManager::getInstance().unloadAll(); // Clear VDB/Gas GPU handles and reset IDs
-    renderer.getHairSystem().clearAll();        // Clear all hair grooms
-
-    // Ensure scene containers are empty before backend geometry rebuild.
-    // This guarantees "empty scene" cleanup path and prevents stale instance carryover.
-    scene.clear();
-
-    // Do not call uploadHairToGPU() here after clearing the hair system.
-    // The empty-scene backend rebuild below is the authoritative GPU reset.
-    // Calling the hair upload path with zero grooms can make Vulkan interpret
-    // stale pre-reset BLAS entries as hair BLASes and destroy old buffers twice
-    // during project open/new-project transitions.
-
-    // 4. CRITICAL: Rebuild backend geometry for the empty scene.
-    // This ensures that all GPU BLAS, instances, and TLAS are fully cleared/reset.
-    // If we only call uploadHairToGPU, old meshes from previous projects may linger
-    // in the AccelManager's internal instance list, causing slowness even if
-    // they aren't visible.
-    //
-    // Vulkan must hit this path too: VulkanBackendAdapter::rebuildAccelerationStructure
-    // is the only place that purges m_uploadedImages and the material preview
-    // descriptor bindings. Skipping it on Vulkan leaves textures from the
-    // previous scene bleeding into the new project's material preview mode.
-    //
-    // openProject passes defer_backend_reset=true: the post-load finalize already
-    // drives a full rebuild (Main.cpp syncActiveRenderBackendScene or the
-    // g_vulkan_rebuild_pending block), so running it here on the empty pre-load
-    // scene is wasted work for foliage-heavy projects.
-    if (!defer_backend_reset && renderer.m_backend) {
-        try {
-            renderer.m_backend->waitForCompletion();
-            if (render_settings.use_vulkan) {
-                renderer.m_backend->rebuildAccelerationStructure();
-            } else {
-                renderer.rebuildBackendGeometry(scene);
-            }
-            renderer.m_backend->resetAccumulation();
-        } catch (...) {}
+  // [VIEWPORT TEXTURE LEAK FIX] The dedicated raster viewport backend keeps its
+  // own m_uploadedImages cache that rebuildBackendGeometry never touches (the
+  // render-backend pending-block only calls rebuildAccelerationStructure on
+  // g_backend). Without purging it here, consecutive project loads leave stale
+  // texture IDs in the viewport's material preview descriptor array, causing
+  // old textures to bleed into the new project's Material Preview mode.
+  extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
+  if (g_viewport_backend) {
+    try {
+      g_viewport_backend->waitForCompletion();
+    } catch (...) {
     }
-
-    // [VIEWPORT TEXTURE LEAK FIX] The dedicated raster viewport backend keeps its
-    // own m_uploadedImages cache that rebuildBackendGeometry never touches (the
-    // render-backend pending-block only calls rebuildAccelerationStructure on
-    // g_backend). Without purging it here, consecutive project loads leave stale
-    // texture IDs in the viewport's material preview descriptor array, causing old
-    // textures to bleed into the new project's Material Preview mode.
-    extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
-    if (g_viewport_backend) {
-        try { g_viewport_backend->waitForCompletion(); } catch (...) {}
-        // Use resetForProjectReload (not rebuildAccelerationStructure directly):
-        // the viewport backend owns a material preview descriptor set whose
-        // binding-1 texture array holds VkImageViews from m_uploadedImages. A
-        // bare rebuildAccelerationStructure would destroy those images while
-        // the descSet still references them, crashing the driver on the next
-        // material-preview draw. resetForProjectReload tears the descSet down
-        // first so it will be recreated fresh against the new project.
-        if (auto* vkViewport = dynamic_cast<Backend::VulkanBackendAdapter*>(g_viewport_backend.get())) {
-            vkViewport->resetForProjectReload();
-        } else {
-            g_viewport_backend->rebuildAccelerationStructure();
-        }
-        g_viewport_raster_rebuild_pending = true;
+    // Use resetForProjectReload (not rebuildAccelerationStructure directly):
+    // the viewport backend owns a material preview descriptor set whose
+    // binding-1 texture array holds VkImageViews from m_uploadedImages. A
+    // bare rebuildAccelerationStructure would destroy those images while
+    // the descSet still references them, crashing the driver on the next
+    // material-preview draw. resetForProjectReload tears the descSet down
+    // first so it will be recreated fresh against the new project.
+    if (auto *vkViewport = dynamic_cast<Backend::VulkanBackendAdapter *>(
+            g_viewport_backend.get())) {
+      vkViewport->resetForProjectReload();
+    } else {
+      g_viewport_backend->rebuildAccelerationStructure();
     }
+    g_viewport_raster_rebuild_pending = true;
+  }
 
-
-    // 4. Clear Animation/Bone Caches (CRITICAL - prevents bone corruption on new project)
-    // Clear per-model animator contexts and their bone caches
-    for (auto& ctx : scene.importedModelContexts) {
-        if (ctx.animator) {
-            ctx.animator->clear();
-        }
-        if (ctx.graph) {
-            ctx.graph.reset();
-        }
-        ctx.members.clear();
+  // 4. Clear Animation/Bone Caches (CRITICAL - prevents bone corruption on new
+  // project) Clear per-model animator contexts and their bone caches
+  for (auto &ctx : scene.importedModelContexts) {
+    if (ctx.animator) {
+      ctx.animator->clear();
     }
-    RigAuthoring::clearSelection(scene); scene.rigView.edit_mode=false; scene.rigView.edit_character.clear(); scene.rigView.pose_views.clear(); scene.rigView.pose_view_dirty.clear();
-    scene.importedModelContexts.clear();
-    
-    // Clear scene-level animation and bone data
-    scene.animationDataList.clear();
-    scene.boneData.clear();
-    
-    // Clear renderer's cached bone matrices
-    renderer.finalBoneMatrices.clear();
-    
-    // Clear Animation Graphs
-    g_animGraphUI.graphs.clear();
-    g_animGraphUI.activeCharacter = "";
-    g_animGraphUI = AnimGraphUIState();
-    
-    // Ensure scene always has an active camera so viewport is never black
-    if (scene.cameras.empty() || !scene.camera) {
-        auto startup_camera = std::make_shared<Camera>(
-            Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
-            Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f,
-            0.0f, (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
-        startup_camera->nodeName = "Startup Camera";
-        scene.addCamera(startup_camera);
-        scene.setActiveCamera(scene.cameras.size() - 1);
+    if (ctx.graph) {
+      ctx.graph.reset();
     }
-    scene.initialized = true;
+    ctx.members.clear();
+  }
+  RigAuthoring::clearSelection(scene);
+  scene.rigView.edit_mode = false;
+  scene.rigView.edit_character.clear();
+  scene.rigView.pose_views.clear();
+  scene.rigView.pose_view_dirty.clear();
+  scene.importedModelContexts.clear();
 
-    // The scene is gone; edge-triggered diagnostics must not carry its state
-    // into the next one (that is what made the second comparison run look
-    // silent while hunting the domain-edge black band).
-    sceneLogOnChangeReset();
-    SCENE_LOG_INFO("New project created. Subsystems and animation caches cleared.");
-    requestProjectTimelineReset();
+  // Clear scene-level animation and bone data
+  scene.animationDataList.clear();
+  scene.boneData.clear();
+
+  // Clear renderer's cached bone matrices
+  renderer.finalBoneMatrices.clear();
+
+  // Clear Animation Graphs
+  g_animGraphUI.graphs.clear();
+  g_animGraphUI.activeCharacter = "";
+  g_animGraphUI = AnimGraphUIState();
+
+  // Ensure scene always has an active camera so viewport is never black
+  if (scene.cameras.empty() || !scene.camera) {
+    auto startup_camera = std::make_shared<Camera>(
+        Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
+        Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f, 0.0f,
+        (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
+    startup_camera->nodeName = "Startup Camera";
+    scene.addCamera(startup_camera);
+    scene.setActiveCamera(scene.cameras.size() - 1);
+  }
+  scene.initialized = true;
+
+  // The scene is gone; edge-triggered diagnostics must not carry its state
+  // into the next one (that is what made the second comparison run look
+  // silent while hunting the domain-edge black band).
+  sceneLogOnChangeReset();
+  SCENE_LOG_INFO(
+      "New project created. Subsystems and animation caches cleared.");
+  requestProjectTimelineReset();
 }
 
 // ============================================================================
@@ -1329,2206 +1545,2521 @@ void ProjectManager::newProject(SceneData& scene, Renderer& renderer, bool defer
 // relative to the project; on open a relative path is resolved against the
 // project folder. An absolute path from an older project is left untouched
 // (it still works on the author's machine), and is migrated on its next save.
-static void portabilizeWorldImagePath(nlohmann::json& holder, const char* key,
-                                      const fs::path& project_json_path) {
-    if (!holder.is_object() || !holder.contains(key) || !holder[key].is_string()) return;
-    const std::string stored = holder[key].get<std::string>();
-    if (stored.empty()) return;
-    try {
-        const fs::path project_dir = project_json_path.parent_path();
-        fs::path source = pathFromUtf8(stored);
-        if (source.is_relative()) return;                 // already portable
-        std::error_code ec;
-        if (!fs::exists(source, ec)) {
-            SCENE_LOG_WARN("[ProjectManager] World image is missing, path kept as stored: " + stored);
-            return;
-        }
-        const fs::path env_dir = project_dir / (project_json_path.stem().string() + "_environment");
-        fs::path target = env_dir / source.filename();
-        const std::string rel_to_project = fs::relative(source, project_dir, ec).generic_string();
-        // Empty = different drive; ".." prefix = outside the project folder.
-        const bool inside_project = !ec && !rel_to_project.empty() && rel_to_project.rfind("..", 0) != 0;
-        if (!inside_project) {
-            fs::create_directories(env_dir, ec);
-            if (!fs::exists(target, ec) || fs::file_size(target, ec) != fs::file_size(source, ec)) {
-                fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
-                if (ec) {
-                    SCENE_LOG_WARN("[ProjectManager] Could not copy world image into the project (" +
-                                   ec.message() + "): " + stored);
-                    return;
-                }
-            }
-        } else {
-            target = source;
-        }
-        holder[key] = fs::relative(target, project_dir, ec).generic_string();
-    } catch (const std::exception& e) {
-        SCENE_LOG_WARN(std::string("[ProjectManager] World image portability failed: ") + e.what());
+static void portabilizeWorldImagePath(nlohmann::json &holder, const char *key,
+                                      const fs::path &project_json_path) {
+  if (!holder.is_object() || !holder.contains(key) || !holder[key].is_string())
+    return;
+  const std::string stored = holder[key].get<std::string>();
+  if (stored.empty())
+    return;
+  try {
+    const fs::path project_dir = project_json_path.parent_path();
+    fs::path source = pathFromUtf8(stored);
+    if (source.is_relative())
+      return; // already portable
+    std::error_code ec;
+    if (!fs::exists(source, ec)) {
+      SCENE_LOG_WARN(
+          "[ProjectManager] World image is missing, path kept as stored: " +
+          stored);
+      return;
     }
+    const fs::path env_dir =
+        project_dir / (project_json_path.stem().string() + "_environment");
+    fs::path target = env_dir / source.filename();
+    const std::string rel_to_project =
+        fs::relative(source, project_dir, ec).generic_string();
+    // Empty = different drive; ".." prefix = outside the project folder.
+    const bool inside_project =
+        !ec && !rel_to_project.empty() && rel_to_project.rfind("..", 0) != 0;
+    if (!inside_project) {
+      fs::create_directories(env_dir, ec);
+      if (!fs::exists(target, ec) ||
+          fs::file_size(target, ec) != fs::file_size(source, ec)) {
+        fs::copy_file(source, target, fs::copy_options::overwrite_existing, ec);
+        if (ec) {
+          SCENE_LOG_WARN(
+              "[ProjectManager] Could not copy world image into the project (" +
+              ec.message() + "): " + stored);
+          return;
+        }
+      }
+    } else {
+      target = source;
+    }
+    holder[key] = fs::relative(target, project_dir, ec).generic_string();
+  } catch (const std::exception &e) {
+    SCENE_LOG_WARN(
+        std::string("[ProjectManager] World image portability failed: ") +
+        e.what());
+  }
 }
 
-static void resolveWorldImagePath(nlohmann::json& holder, const char* key,
-                                  const fs::path& project_json_path) {
-    if (!holder.is_object() || !holder.contains(key) || !holder[key].is_string()) return;
-    const std::string stored = holder[key].get<std::string>();
-    if (stored.empty()) return;
-    const fs::path p = pathFromUtf8(stored);
-    if (p.is_absolute()) return;
-    holder[key] = (project_json_path.parent_path() / p).generic_string();
+static void resolveWorldImagePath(nlohmann::json &holder, const char *key,
+                                  const fs::path &project_json_path) {
+  if (!holder.is_object() || !holder.contains(key) || !holder[key].is_string())
+    return;
+  const std::string stored = holder[key].get<std::string>();
+  if (stored.empty())
+    return;
+  const fs::path p = pathFromUtf8(stored);
+  if (p.is_absolute())
+    return;
+  holder[key] = (project_json_path.parent_path() / p).generic_string();
 }
 
-bool ProjectManager::saveProject(SceneData& scene, RenderSettings& settings, Renderer& renderer,
-                                  std::function<void(int, const std::string&)> progress_callback) {
-    if (g_project.current_file_path.empty()) {
-        SCENE_LOG_ERROR("No file path set. Use saveProject(filepath, scene, settings) instead.");
-        return false;
-    }
-    return saveProject(g_project.current_file_path, scene, settings, renderer, progress_callback);
+bool ProjectManager::saveProject(
+    SceneData &scene, RenderSettings &settings, Renderer &renderer,
+    std::function<void(int, const std::string &)> progress_callback) {
+  if (g_project.current_file_path.empty()) {
+    SCENE_LOG_ERROR("No file path set. Use saveProject(filepath, scene, "
+                    "settings) instead.");
+    return false;
+  }
+  return saveProject(g_project.current_file_path, scene, settings, renderer,
+                     progress_callback);
 }
 
-bool ProjectManager::saveProject(const std::string& filepath, SceneData& scene, RenderSettings& settings, Renderer& renderer,
-                                  std::function<void(int, const std::string&)> progress_callback) {
-    return saveProjectImpl(filepath, scene, settings, renderer, std::move(progress_callback), false);
+bool ProjectManager::saveProject(
+    const std::string &filepath, SceneData &scene, RenderSettings &settings,
+    Renderer &renderer,
+    std::function<void(int, const std::string &)> progress_callback) {
+  return saveProjectImpl(filepath, scene, settings, renderer,
+                         std::move(progress_callback), false);
 }
 
-bool ProjectManager::saveProjectCopy(const std::string& filepath, SceneData& scene,
-                                     RenderSettings& settings, Renderer& renderer) {
-    return saveProjectImpl(filepath, scene, settings, renderer, nullptr, true);
+bool ProjectManager::saveProjectCopy(const std::string &filepath,
+                                     SceneData &scene, RenderSettings &settings,
+                                     Renderer &renderer) {
+  return saveProjectImpl(filepath, scene, settings, renderer, nullptr, true);
 }
 
-bool ProjectManager::saveProjectImpl(const std::string& filepath, SceneData& scene, RenderSettings& settings,
-                                     Renderer& renderer,
-                                     std::function<void(int, const std::string&)> progress_callback,
-                                     bool as_copy) {
-    std::lock_guard<std::mutex> save_lock(save_mutex_);
-    save_in_progress_.store(true, std::memory_order_release);
-    struct SaveInProgressReset {
-        std::atomic<bool>& flag;
-        ~SaveInProgressReset() { flag.store(false, std::memory_order_release); }
-    } save_in_progress_reset{save_in_progress_};
-    active_save_as_copy_ = as_copy;
-    active_save_path_ = filepath;
-
-    ScopedPerfTimer total_timer(as_copy ? "ProjectManager::saveProjectCopy total"
-                                        : "ProjectManager::saveProject total");
-
-    if (progress_callback) progress_callback(0, "Preparing to save...");
-
-    // Update Project Name from File Path if it's "Untitled" or empty
-    // This ensures assets (like terrains) get the correct prefix
-    fs::path p(filepath);
-    std::string filename = p.stem().string(); // "my_project" from "C:/.../my_project.rtp"
-    if (!as_copy && (g_project.project_name == "Untitled" || g_project.project_name.empty())) {
-        g_project.project_name = filename;
-    }
-    // The project this scene came from, before the path is retargeted below.
-    // Its .bin already holds every unchanged embedded texture; an autosave or
-    // a first "Save As" writes to a different file and would otherwise
-    // re-encode all of them.
-    const std::string source_project_path = g_project.current_file_path;
-    if (!ProjectSimulationCache::canSaveAs(scene, source_project_path, filepath, as_copy)) {
-        return false;
-    }
-    // Also store the current path (a copy leaves the project's identity alone)
-    if (!as_copy) g_project.current_file_path = filepath;
-
-    {
-        ScopedPerfTimer timer("saveProject compactPendingDeletedObjects");
-        const size_t compacted = scene.compactPendingDeletedObjects();
-        if (compacted > 0) {
-            SCENE_LOG_INFO("[ProjectManager] Compacted " + std::to_string(compacted) + " pending-deleted object(s) before save.");
-        }
-    }
-
-    // Sync project data with current scene state
-    {
-        ScopedPerfTimer timer("saveProject syncProjectToScene");
-        syncProjectToScene(scene);
-    }
-
-    // 1. Prepare Safe Save paths
-    fs::path final_json_path(filepath);
-    fs::path final_bin_path = final_json_path;
-    final_bin_path += ".bin";
-    fs::path final_shared_path = final_json_path;
-    final_shared_path += ".shared";
-    
-    fs::path temp_json_path = final_json_path;
-    temp_json_path += ".tmp";
-    fs::path temp_bin_path = final_bin_path;
-    temp_bin_path += ".tmp";
-    fs::path temp_shared_path = final_shared_path;
-    temp_shared_path += ".tmp";
-
-    g_previous_embedded_texture_entries.clear();
-    addPreviousEmbeddedTextureEntries(final_json_path, final_bin_path);
-    if (!source_project_path.empty()) {
-        const fs::path source_json_path = pathFromUtf8(source_project_path);
-        if (source_json_path != final_json_path) {
-            fs::path source_bin_path = source_json_path;
-            source_bin_path += ".bin";
-            addPreviousEmbeddedTextureEntries(source_json_path, source_bin_path);
-        }
-    }
-
-    // 2. Open Streams
-    std::ofstream out_json(temp_json_path);
-    std::ofstream out_bin(temp_bin_path, std::ios::binary);
-    std::ofstream out_shared(temp_shared_path);
-
-    if (!out_json.is_open() || !out_bin.is_open() || !out_shared.is_open()) {
-        SCENE_LOG_ERROR("Failed to create temporary save files.");
-        return false;
-    }
-
-    try {
-        std::unordered_map<std::string, uint64_t> bin_section_sizes;
-        auto currentBinOffset = [&out_bin]() -> uint64_t {
-            const std::streampos pos = out_bin.tellp();
-            if (pos < 0) return 0;
-            return static_cast<uint64_t>(pos);
-        };
-        auto measureBinarySection = [&](const std::string& name, auto&& fn) {
-            const uint64_t begin = currentBinOffset();
-            fn();
-            const uint64_t end = currentBinOffset();
-            bin_section_sizes[name] += (end >= begin) ? (end - begin) : 0;
-        };
-
-        if (progress_callback) progress_callback(5, "Writing geometry...");
-
-        // Write geometry to binary file FIRST
-        if (save_settings.save_geometry) {
-            ScopedPerfTimer timer("saveProject writeGeometryBinary");
-            // Physics bodies bake their simulated/deformed result into the source
-            // meshes' LOCAL verts, which writeGeometryBinary serializes verbatim.
-            // Restore every body to its rest mesh so the FILE holds the clean rest
-            // pose (not the final sim frame, which otherwise reloads stuck and even
-            // survives removing the body), then put the live deformation back after
-            // the geometry is written so the on-screen sim is undisturbed.
-            auto body_rest_snapshot = scene.snapshotAndRestoreBodiesToRest();
-            measureBinarySection("geometry", [&]() {
-                writeGeometryBinary(out_bin, scene);
-            });
-            scene.reapplyBodyRestSnapshot(body_rest_snapshot);
-        }
-        
-        if (progress_callback) progress_callback(30, "Writing metadata...");
-
-        // 3. Write JSON 
-        json root;
-        json shared_root;
-        root["format_version"] = "3.0";
-        shared_root["format_version"] = "3.0";
-        root["project_name"] = g_project.project_name;
-        root["author"] = g_project.author;
-        root["description"] = g_project.description;
-        root["next_model_id"] = g_project.next_model_id;
-       root["next_object_id"] = g_project.next_object_id;
-        root["next_texture_id"] = g_project.next_texture_id;
-        root["has_geometry"] = save_settings.save_geometry;
-        root["save_settings"] = {
-            {"texture_storage_mode", static_cast<int>(save_settings.texture_storage_mode)},
-            {"embed_missing_only", save_settings.embed_missing_only},
-            {"save_geometry", save_settings.save_geometry}
-        };
-
-        json shared_models_arr = json::array();
-        json scene_instances_arr = json::array();
-        for (const auto& model : g_project.imported_models) {
-            json m;
-            m["id"] = model.id;
-            m["original_path"] = model.original_path;
-            m["package_path"] = model.package_path;
-            m["display_name"] = model.display_name;
-            m["deleted_objects"] = model.deleted_objects;
-            shared_models_arr.push_back(m);
-
-            json si;
-            si["model_id"] = model.id;
-            json objects_arr = json::array();
-            for (const auto& inst : model.objects) {
-                json o;
-                o["node_name"] = inst.node_name;
-                o["transform"] = mat4ToJson(inst.transform);
-                o["material_id"] = inst.material_id;
-                o["visible"] = inst.visible;
-                objects_arr.push_back(o);
-            }
-            si["objects"] = objects_arr;
-            scene_instances_arr.push_back(si);
-        }
-        shared_root["imported_models"] = shared_models_arr;
-        root["model_instances"] = scene_instances_arr;
-        
-        // Procedural objects (still saved for non-geometry mode)
-        json procedurals_arr = json::array();
-        for (const auto& proc : g_project.procedural_objects) {
-            json p;
-            p["id"] = proc.id;
-            p["mesh_type"] = static_cast<int>(proc.mesh_type);
-            p["display_name"] = proc.display_name;
-            p["transform"] = mat4ToJson(proc.transform);
-            p["material_id"] = proc.material_id;
-            p["visible"] = proc.visible;
-            procedurals_arr.push_back(p);
-        }
-        root["procedural_objects"] = procedurals_arr;
-
-        json spline_objects = json::array();
-        for (const auto& object : scene.world.objects) {
-            if (const auto spline = std::dynamic_pointer_cast<MeshEdit::SplineObject>(object)) {
-                spline_objects.push_back(MeshEdit::serializeSpline(*spline));
-            }
-        }
-        root["spline_objects"] = std::move(spline_objects);
-        
-        if (progress_callback) progress_callback(50, "Saving materials...");
-        
-        // Materials (Library / Shared)
-        auto& mat_mgr = MaterialManager::getInstance();
-        {
-            ScopedPerfTimer timer("saveProject serialize materials");
-            shared_root["materials"] = mat_mgr.serialize(fs::path(filepath).parent_path().string());
-        }
-        
-        if (progress_callback) progress_callback(60, "Saving lights...");
-        
-        // Lights
-        root["lights"] = serializeLights(scene.lights);
-        
-        if (progress_callback) progress_callback(70, "Saving cameras...");
-        
-        // Cameras
-        root["cameras"] = serializeCameras(scene.cameras, scene.active_camera_index);
-        
-        if (progress_callback) progress_callback(80, "Saving render settings...");
-        
-        // Render Settings
-        root["render_settings"] = serializeRenderSettings(settings);
-
-        // Ensure UI/global color processor state is reflected into the scene before saving
-        extern ColorProcessor color_processor; // defined in Main.cpp
-        scene.color_processor.params = color_processor.params;
-
-        // Post-Process / Color Grading settings (store from scene's color processor)
-        const auto& pp = scene.color_processor.params;
-        root["postfx"] = {
-            {"exposure_v2", rtpost::saveExposure(pp.exposure_settings)},
-            {"exposure", pp.global_exposure},
-            {"gamma", pp.global_gamma},
-            {"saturation", pp.saturation},
-            {"color_temperature", pp.color_temperature},
-            {"tone_mapping", static_cast<int>(pp.tone_mapping_type)},
-            {"vignette_enabled", pp.enable_vignette},
-            {"vignette_strength", pp.vignette_strength}
-        };
-
-        // UI Layout (ImGui state)
-        if (!g_project.ui_layout_data.empty()) {
-            root["ui_layout"] = g_project.ui_layout_data; 
-        }
-        
-        // Timeline/Animation (keyframes)
-        if (progress_callback) progress_callback(82, "Saving animation keyframes...");
-        json j_timeline;
-        scene.timeline.serialize(j_timeline);
-        root["timeline"] = j_timeline;
-        
-        // BoneData (skeleton/skinning information)
-        if (progress_callback) progress_callback(83, "Saving bone data...");
-        {
-            json j_bones;
-            
-            // Save bone name to index mapping
-            json j_bone_map = json::object();
-            for (const auto& [name, idx] : scene.boneData.boneNameToIndex) {
-                j_bone_map[name] = idx;
-            }
-            j_bones["boneNameToIndex"] = j_bone_map;
-            
-            // Save bone offset matrices
-            json j_offsets = json::object();
-            for (const auto& [name, matrix] : scene.boneData.boneOffsetMatrices) {
-                j_offsets[name] = mat4ToJson(matrix);
-            }
-            j_bones["boneOffsetMatrices"] = j_offsets;
-            
-            // Save bone default local transforms (bind pose)
-            json j_defaults = json::object();
-            for (const auto& [name, matrix] : scene.boneData.boneDefaultTransforms) {
-                j_defaults[name] = mat4ToJson(matrix);
-            }
-            j_bones["boneDefaultTransforms"] = j_defaults;
-
-            json j_weighted = json::array();
-            for (const auto& name : scene.boneData.weightedBoneNames) {
-                j_weighted.push_back(name);
-            }
-            j_bones["weightedBoneNames"] = j_weighted;
-            
-            // Save bone hierarchy
-            json j_parents = json::object();
-            for (const auto& [child, parent] : scene.boneData.boneParents) {
-                j_parents[child] = parent;
-            }
-            j_bones["boneParents"] = j_parents;
-            
-            // Save per-model inverses
-            json j_model_invs = json::object();
-            for (const auto& [prefix, inv] : scene.boneData.perModelInverses) {
-                j_model_invs[prefix] = mat4ToJson(inv);
-            }
-            j_bones["perModelInverses"] = j_model_invs;
-            
-            // Save global inverse transform
-            j_bones["globalInverseTransform"] = mat4ToJson(scene.boneData.globalInverseTransform);
-            
-            root["boneData"] = j_bones;
-        }
-        
-        // AnimationData (bone animation keyframes)
-        if (progress_callback) progress_callback(83, "Saving animation data...");
-        {
-            json j_animations = json::array();
-            
-            for (const auto& anim : scene.animationDataList) {
-                if (!anim) continue;
-                json j_anim;
-                j_anim["name"] = anim->name;
-                j_anim["modelName"] = anim->modelName;
-                j_anim["rigAuthoring"] = anim->rigAuthoring;
-                j_anim["ikChannels"] = RigAuthoring::serializeIKChannels(anim->ikChannels);
-                j_anim["duration"] = anim->duration;
-                j_anim["ticksPerSecond"] = anim->ticksPerSecond;
-                j_anim["startFrame"] = anim->startFrame;
-                j_anim["endFrame"] = anim->endFrame;
-                
-                // Position keys
-                json j_pos_keys = json::object();
-                for (const auto& [nodeName, keys] : anim->positionKeys) {
-                    json j_keys = json::array();
-                    for (const auto& key : keys) {
-                        j_keys.push_back({
-                            {"time", key.time},
-                            {"x", key.value.x},
-                            {"y", key.value.y},
-                            {"z", key.value.z}
-                        });
-                    }
-                    j_pos_keys[nodeName] = j_keys;
-                }
-                j_anim["positionKeys"] = j_pos_keys;
-                
-                // Rotation keys
-                json j_rot_keys = json::object();
-                for (const auto& [nodeName, keys] : anim->rotationKeys) {
-                    json j_keys = json::array();
-                    for (const auto& key : keys) {
-                        j_keys.push_back({
-                            {"time", key.time},
-                            {"w", key.value.w},
-                            {"x", key.value.x},
-                            {"y", key.value.y},
-                            {"z", key.value.z}
-                        });
-                    }
-                    j_rot_keys[nodeName] = j_keys;
-                }
-                j_anim["rotationKeys"] = j_rot_keys;
-                
-                // Scaling keys
-                json j_scale_keys = json::object();
-                for (const auto& [nodeName, keys] : anim->scalingKeys) {
-                    json j_keys = json::array();
-                    for (const auto& key : keys) {
-                        j_keys.push_back({
-                            {"time", key.time},
-                            {"x", key.value.x},
-                            {"y", key.value.y},
-                            {"z", key.value.z}
-                        });
-                    }
-                    j_scale_keys[nodeName] = j_keys;
-                }
-                j_anim["scalingKeys"] = j_scale_keys;
-                
-                j_animations.push_back(j_anim);
-            }
-            
-           
-            root["animationDataList"] = j_animations;
-            SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.animationDataList.size()) + " animation clips.");
-        }
-        
-        // Animation Graphs (Visual Scripting)
-        if (progress_callback) progress_callback(83, "Saving animation graphs...");
-        {
-            json j_graphs = json::object();
-            for(const auto& [name, graph] : g_animGraphUI.graphs) {
-                if(graph) {
-                    json g;
-                    graph->saveToJson(g);
-                    j_graphs[name] = g;
-                }
-            }
-            root["animationGraphs"] = j_graphs;
-            root["activeGraphCharacter"] = g_animGraphUI.activeCharacter;
-        }
-
-        // World Settings (Atmosphere, Godrays, etc.)
-        if (progress_callback) progress_callback(82, "Saving world settings...");
-        json j_world;
-        renderer.world.serialize(j_world);
-        portabilizeWorldImagePath(j_world, "hdri_path", fs::path(filepath));
-        if (j_world.contains("advanced"))
-            portabilizeWorldImagePath(j_world["advanced"], "env_overlay_path", fs::path(filepath));
-        root["world"] = j_world;
-        
-        // Water System
-        if (progress_callback) progress_callback(83, "Saving water surfaces...");
-        root["water"] = WaterManager::getInstance().serialize();
-
-        // RayFusion probe producer: without this the Player re-traced the whole
-        // probe field on every open even when Studio had it switched off.
-        root["rayfusion_probe"] = {{"traced", RayFusion::probeProducerTraced().load() != 0}};
-
-        // Game design: paint surfaces + their settings, splat rules, balloon demo.
-        {
-            json game_design = Paint::saveGameDesign();
-            if (!game_design.is_null()) {
-                root["game_design"] = std::move(game_design);
-            }
-        }
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(WaterManager::getInstance().getWaterSurfaces().size()) + " water surfaces.");
-
-        // Terrain System
-        if (progress_callback) progress_callback(84, "Saving terrain system...");
-        auto abs_path = std::filesystem::absolute(filepath);
-        std::string terrainDir = abs_path.parent_path().string();
-        SCENE_LOG_INFO("[ProjectManager] Saving terrain system to: " + terrainDir);
-        root["terrain_system"] = TerrainManager::getInstance().serialize(terrainDir);
-        
-        // River System
-        if (progress_callback) progress_callback(84, "Saving river system...");
-        root["rivers"] = RiverManager::getInstance().serialize();
-        root["road_assignments"] = TerrainNodesV2::RoadNetworkRegistry::getInstance().serialize();
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(RiverManager::getInstance().getRivers().size()) + " rivers");
-        
-        // Mesh Modifiers System
-        if (progress_callback) progress_callback(84, "Saving mesh modifiers...");
-        root["mesh_modifiers"] = json::object();
-        for (const auto& [nodeName, stack] : scene.mesh_modifiers) {
-            if (!stack.modifiers.empty()) {
-                json stackJson;
-                stack.serialize(stackJson);
-                root["mesh_modifiers"][nodeName] = stackJson;
-            }
-        }
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.mesh_modifiers.size()) + " mesh modifiers.");
-
-        // Geometry Node Graphs (Faz 8a Geo-DAG). Only graphs with at least one real
-        // operator node are saved — the default Base Mesh -> Output pair is recreated
-        // automatically by the Geometry Graph panel and carries no information. The
-        // pristine originalBaseMesh snapshot goes into the binary sidecar so a loaded
-        // graph's Evaluate starts from the true original instead of compounding onto
-        // the saved (already-evaluated) scene mesh.
-        {
-            if (progress_callback) progress_callback(84, "Saving geometry node graphs...");
-            root["geometry_node_graphs"] = json::object();
-            size_t savedGraphCount = 0;
-            measureBinarySection("geometry_node_graphs", [&]() {
-                for (const auto& [nodeName, graphPtr] : scene.geometry_node_graphs) {
-                    if (!graphPtr) continue;
-                    bool hasOperator = false;
-                    for (const auto& n : graphPtr->nodes) {
-                        const std::string t = n->getTypeId();
-                        if (t != "GeoV2.BaseMesh" && t != "GeoV2.Output") { hasOperator = true; break; }
-                    }
-                    if (!hasOperator) continue;
-                    json jg;
-                    GeometryNodesV2::serializeGeometryGraph(*graphPtr, jg, &out_bin);
-                    root["geometry_node_graphs"][nodeName] = jg;
-                    ++savedGraphCount;
-                }
-            });
-            SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(savedGraphCount) + " geometry node graphs.");
-        }
-
-        // Fixed-topology deformation clips use the project binary sidecar. The
-        // JSON stores only clip metadata/frame numbers; payload is tightly packed Vec3 P samples.
-        {
-            root["geometry_caches"] = json::object();
-            measureBinarySection("geometry_caches", [&]() {
-                Animation::serializeGeometryCaches(scene.geometry_caches,
-                                                   root["geometry_caches"], &out_bin);
-            });
-        }
-
-        // Material Node Graphs (MaterialNodesV2 Faz 1) — structure only (no binary
-        // payload; textures are referenced by name and re-resolved on load). A graph
-        // with just the default Output node still carries the user's seeded values,
-        // but it is equivalent to the material itself, so only graphs with at least
-        // one additional node are saved.
-        {
-            root["material_node_graphs"] = json::object();
-            size_t savedMatGraphCount = 0;
-            for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
-                if (!graphPtr || graphPtr->nodes.size() <= 1) continue;
-                json jg;
-                MaterialNodesV2::serializeMaterialGraph(*graphPtr, jg);
-                root["material_node_graphs"][matName] = jg;
-                ++savedMatGraphCount;
-            }
-            if (savedMatGraphCount > 0) {
-                SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(savedMatGraphCount) + " material node graphs.");
-            }
-        }
-
-        // Paint Layer Stacks
-        if (!scene.mesh_paint_layer_stacks.empty()) {
-            if (progress_callback) progress_callback(84, "Saving paint layers...");
-            root["mesh_paint_layers"] = json::object();
-            measureBinarySection("paint_layers", [&]() {
-                for (const auto& [key, stack] : scene.mesh_paint_layer_stacks) {
-                    if (stack.empty()) continue;
-                    json j_stack;
-                    stack.serialize(j_stack, out_bin);
-                    root["mesh_paint_layers"][key] = j_stack;
-                }
-            });
-            SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
-        }
-
-        // Foliage System
-        if (progress_callback) progress_callback(84, "Saving foliage system...");
-        measureBinarySection("foliage", [&]() {
-            root["instances"] = InstanceManager::getInstance().serialize(&out_bin);
-        });
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(InstanceManager::getInstance().getGroups().size()) + " foliage groups.");
-        
-        // VDB Volumes
-        if (progress_callback) progress_callback(84, "Saving VDB volumes...");
-        root["vdb_volumes"] = serializeVDBVolumes(scene.vdb_volumes);
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.vdb_volumes.size()) + " VDB volumes.");
-
-        // Gas Volumes
-        if (progress_callback) progress_callback(84, "Saving Gas volumes...");
-        root["gas_volumes"] = serializeGasVolumes(scene.gas_volumes);
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.gas_volumes.size()) + " Gas volumes.");
-
-        // Project substances (derived from built-ins; only overrides stored).
-        {
-            json substances = json::array();
-            for (const auto& item : RayTrophiSim::projectSubstances()) {
-                substances.push_back({{"name", item.name}, {"based_on", item.based_on},
-                                      {"overrides", item.overrides}});
-            }
-            root["substances"] = std::move(substances);
-        }
-
-        // Force Fields
-        if (progress_callback) progress_callback(84, "Saving Force Fields...");
-        root["force_fields"] = serializeForceFields(scene.force_field_manager);
-        root["object_substances"] = matter::saveObjectSubstances(scene);
-        root["audio"] = scene.audio->save(pathFromUtf8(filepath));
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.force_field_manager.force_fields.size()) + " Force Fields.");
-
-        // Particle Simulation
-        if (progress_callback) progress_callback(84, "Saving particle simulation...");
-        scene.pruneInvalidParticleObjectBindings();
-        scene.syncActiveParticleSystemObjectFromRuntime();
-        root["particle_simulation"] = serializeParticleSimulation(scene);
-        if (auto particles = scene.getParticleSimulationSystem()) {
-            SCENE_LOG_INFO("[ProjectManager] Saved particle simulation with " +
-                           std::to_string(particles->emitters().size()) + " emitters and " +
-                           std::to_string(particles->colliders().size()) + " colliders.");
-        } else {
-            SCENE_LOG_INFO("[ProjectManager] Saved empty particle simulation.");
-        }
-
-        // Bone-attached solver-neutral collider producers.
-        root["kinematic_colliders"] =
-            RayTrophiSim::serializeKinematicColliders(
-                scene.kinematic_colliders);
-        SCENE_LOG_INFO(
-            "[ProjectManager] Saved " +
-            std::to_string(scene.kinematic_colliders.sets().size()) +
-            " kinematic collider proxy set(s).");
-
-        // Rigid Bodies
-        if (progress_callback) progress_callback(84, "Saving rigid bodies...");
-        root["rigid_bodies"] = serializeRigidBodies(scene);
-        SCENE_LOG_INFO("[ProjectManager] Saved " + std::to_string(scene.rigid_bodies.size()) + " rigid body descriptor(s).");
-        
-        // Hair System
-        if (progress_callback) progress_callback(84, "Saving hair system...");
-        // Use binary stream for faster saving
-        {
-            ScopedPerfTimer timer("saveProject serialize hair");
-            measureBinarySection("hair", [&]() {
-                root["hair"] = renderer.getHairSystem().serialize(&out_bin);
-            });
-        }
-        root["hair_material"] = renderer.getHairMaterial();
-        SCENE_LOG_INFO("[ProjectManager] Saved hair system with " + std::to_string(renderer.getHairSystem().getGroomCount()) + " grooms.");
-
-        
-        // Imported Model Context Metadata
-        if (progress_callback) progress_callback(84, "Saving model contexts...");
-        json j_contexts = json::array();
-        for (const auto& ctx : scene.importedModelContexts) {
-            json c;
-            c["importName"] = ctx.importName;
-            c["authoringOwned"] = ctx.authoringOwned;
-            c["rigRevision"] = ctx.rigRevision;
-            c["rigTemplateId"] = ctx.rigTemplateId;
-            c["rigTemplateVersion"] = ctx.rigTemplateVersion;
-            c["rigBoundMeshes"] = ctx.rigBoundMeshes;
-            c["rigWeightAlgorithm"] = ctx.rigWeightAlgorithm;
-            c["rigEnvelopeSettings"] = {
-                {"torso_radius", ctx.rigEnvelopeTorsoRadius},
-                {"limb_radius", ctx.rigEnvelopeLimbRadius},
-                {"extremity_radius", ctx.rigEnvelopeExtremityRadius},
-                {"falloff", ctx.rigEnvelopeFalloff}};
-            c["rigEnvelopeProfiles"] = json::array();
-            for (const auto& profile : ctx.rigEnvelopeProfiles) {
-                c["rigEnvelopeProfiles"].push_back(
-                    {{"bone", profile.bone},
-                     {"start_radius", profile.startRadius},
-                     {"end_radius", profile.endRadius},
-                     {"start_extension", profile.startExtension},
-                     {"end_extension", profile.endExtension},
-                     {"falloff", profile.falloff}});
-            }
-            c["rigSceneTransform"] = RigAuthoring::serializeRigPlacement(ctx.rigSceneTransform);
-            c["nodeHierarchy"] = RigAuthoring::serializeRigHierarchy(ctx.nodeHierarchy);
-            c["rigAnatomy"] = RigAuthoring::serializeRigAnatomy(ctx.rigAnatomy);
-            c["animGraphAssetKey"] = ctx.animGraphAssetKey;
-            c["hasAnimation"] = ctx.hasAnimation;
-            c["globalInverseTransform"] = mat4ToJson(ctx.globalInverseTransform);
-            c["useRootMotion"] = ctx.useRootMotion;
-            c["rootMotionBone"] = ctx.rootMotionBone;
-            c["useAnimGraph"] = ctx.useAnimGraph;
-            c["animGraphFollowTimeline"] = ctx.animGraphFollowTimeline;
-            c["preferOzzRuntime"] = ctx.preferOzzRuntime;
-            c["visible"] = ctx.visible;
-            j_contexts.push_back(c);
-        }
-        root["importedModelContexts"] = j_contexts;
-
-        // Textures (with embed option)
-        if (progress_callback) progress_callback(85, "Processing textures...");
-        {
-            ScopedPerfTimer timer("saveProject serialize textures");
-            const bool embed_textures = (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::Embedded);
-            // Textures the material node graphs reference but no material slot holds (an
-            // Image Texture behind a Bright/Contrast, ColorRamp, Mix, ...). Without these the
-            // project saves a graph pointing at a texture it never stored.
-            std::vector<std::shared_ptr<Texture>> graph_textures;
-            for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
-                if (!graphPtr) continue;
-                for (auto& tex : MaterialNodesV2::collectGraphTextures(*graphPtr)) {
-                    graph_textures.push_back(std::move(tex));
-                }
-            }
-            measureBinarySection("textures", [&]() {
-                shared_root["textures"] = serializeTextures(out_bin, embed_textures, graph_textures);
-            });
-        }
-        
-        // Write JSON - Use error handler to replace invalid UTF-8 characters
-        // Write JSON - Use minified output (-1) for maximum performance and smallest size
-        {
-            ScopedPerfTimer timer("saveProject dump json");
-            out_json << root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-            out_shared << shared_root.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-        }
-        
-        {
-            ScopedPerfTimer timer("saveProject flush streams");
-            out_json.flush();
-            out_bin.flush();
-            out_shared.flush();
-        }
-
-        const uint64_t total_bin_bytes = currentBinOffset();
-        SCENE_LOG_INFO("[ProjectManager] Binary section size report:");
-        for (const auto& [name, bytes] : bin_section_sizes) {
-            const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
-            const double pct = total_bin_bytes > 0
-                ? (100.0 * static_cast<double>(bytes) / static_cast<double>(total_bin_bytes))
-                : 0.0;
-            SCENE_LOG_INFO("  - " + name + ": " + std::to_string(bytes) + " bytes (" +
-                           std::to_string(mb) + " MB, " + std::to_string(pct) + "%)");
-        }
-        SCENE_LOG_INFO("[ProjectManager] Binary total: " + std::to_string(total_bin_bytes) +
-                       " bytes (" + std::to_string(static_cast<double>(total_bin_bytes) / (1024.0 * 1024.0)) + " MB)");
-
-        out_json.close();
-        out_bin.close();
-        out_shared.close();
-        
-        if (progress_callback) progress_callback(95, "Finalizing...");
-
-        // Atomic Commit
-        try {
-            ScopedPerfTimer timer("saveProject atomic commit");
-            if (fs::exists(final_json_path)) fs::remove(final_json_path);
-            if (fs::exists(final_bin_path)) fs::remove(final_bin_path);
-            if (fs::exists(final_shared_path)) fs::remove(final_shared_path);
-            fs::rename(temp_json_path, final_json_path);
-            fs::rename(temp_bin_path, final_bin_path);
-            fs::rename(temp_shared_path, final_shared_path);
-        } catch (const fs::filesystem_error& e) {
-            SCENE_LOG_ERROR("FileSystem Error during rename: " + std::string(e.what()));
-            return false;
-        }
-        
-    } catch (const std::exception& e) {
-        SCENE_LOG_ERROR("Save failed: " + std::string(e.what()));
-        if (out_json.is_open()) out_json.close();
-        if (out_bin.is_open()) out_bin.close();
-        if (out_shared.is_open()) out_shared.close();
-        if (fs::exists(temp_json_path)) fs::remove(temp_json_path);
-        if (fs::exists(temp_bin_path)) fs::remove(temp_bin_path);
-        if (fs::exists(temp_shared_path)) fs::remove(temp_shared_path);
-        return false;
-    }
-    
-    if (!as_copy) {
-        g_project.current_file_path = filepath;
-        g_project.is_modified = false;
-        raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
-    }
-    
-    ProjectSimulationCache::afterSuccessfulSave(scene, source_project_path, filepath, as_copy);
-    if (progress_callback) progress_callback(100, "Done.");
-    SCENE_LOG_INFO(std::string(as_copy ? "Project copy saved: " : "Project saved successfully: ") + filepath);
-    return true;
-}
-
-bool ProjectManager::openProject(const std::string& filepath, SceneData& scene,
-                                  RenderSettings& settings, Renderer& renderer, 
-                                  Backend::IBackend* backend,
-                                  std::function<void(int, const std::string&)> progress_callback) {
-    ScopedPerfTimer total_timer("ProjectManager::openProject total");
-
-    const bool prev_use_optix = settings.use_optix;
-    const bool prev_use_vulkan = settings.use_vulkan;
-    const ProjectBackendMode prev_backend_mode = modeFromBackendPtr(backend);
-    
-    if (progress_callback) progress_callback(0, "Opening project file with turbo parser...");
-    
-    // 1. Read JSON Metadata with simdjson
-    simdjson::dom::parser parser;
-    simdjson::dom::element root;
-
-    std::string read_error;
-    simdjson::error_code error;
-    {
-        ScopedPerfTimer timer("openProject parse json");
-        error = loadJsonRootFromFile(parser, filepath, root, &read_error);
-    }
-    if (error) {
-        SCENE_LOG_ERROR("Failed to parse project file with simdjson: " + std::string(simdjson::error_message(error)) +
-                        " | path=" + filepath +
-                        (read_error.empty() ? "" : " | read_error=" + read_error));
-        return false;
-    }
-
-    simdjson::dom::parser shared_parser;
-    simdjson::dom::element shared_root;
-    bool has_shared = false;
-    fs::path shared_filepath = pathFromUtf8(filepath);
-    shared_filepath += ".shared";
-    if (fs::exists(shared_filepath)) {
-        std::string shared_read_error;
-        simdjson::error_code shared_err = loadJsonRootFromFile(shared_parser, shared_filepath.string(), shared_root, &shared_read_error);
-        if (!shared_err) {
-            has_shared = true;
-        } else {
-            SCENE_LOG_ERROR("Failed to parse shared library file: " + std::string(simdjson::error_message(shared_err)));
-            return false;
-        }
-    }
-
-    // 2. Prepare Binary Stream
-    fs::path bin_path = pathFromUtf8(filepath);
-    bin_path += ".bin";
-    std::ifstream bin_file(bin_path, std::ios::binary);
-    bool has_binary = bin_file.is_open();
-
-    // Fast path: slurp the whole .bin into RAM and parse from a memory stream.
-    // The skin-weight / standalone-triangle readers do per-element read() calls
-    // (10+ per triangle); against the file stream those dominate load time.
-    // Size-gated so a pathologically large .bin falls back to the file stream
-    // instead of doubling peak RSS.
-    std::vector<char> bin_data;
-    std::unique_ptr<MemReadBuf> bin_membuf;
-    std::unique_ptr<std::istream> bin_memstream;
-    if (has_binary) {
-        std::error_code size_ec;
-        const uintmax_t bin_size = fs::file_size(bin_path, size_ec);
-        constexpr uintmax_t kMaxInMemoryBin = 1ull << 30; // 1 GB
-        if (!size_ec && bin_size > 0 && bin_size <= kMaxInMemoryBin) {
-            ScopedPerfTimer timer("openProject slurp .bin");
-            bin_data.resize(static_cast<size_t>(bin_size));
-            if (bin_file.read(bin_data.data(), static_cast<std::streamsize>(bin_size))) {
-                bin_membuf = std::make_unique<MemReadBuf>(bin_data.data(), bin_data.size());
-                bin_memstream = std::make_unique<std::istream>(bin_membuf.get());
-            } else {
-                bin_data.clear();
-                bin_data.shrink_to_fit();
-                bin_file.clear();
-                bin_file.seekg(0, std::ios::beg);
-            }
-        }
-    }
-    std::istream& in_bin = bin_memstream ? *bin_memstream : static_cast<std::istream&>(bin_file);
-    
-    // Clear current project and scene
-    if (progress_callback) progress_callback(5, "Clearing scene...");
-    
-    if (backend) {
-        backend->waitForCompletion();
-    }
-
-    const bool had_runtime_scene_content =
-        !scene.world.objects.empty() ||
-        !scene.gas_volumes.empty() ||
-        !scene.vdb_volumes.empty() ||
-        !scene.lights.empty();
-
-    {
-        ScopedPerfTimer timer("openProject reset scene");
-        // When opening a project over an existing runtime scene, keep the
-        // backend reset so old BLAS/textures are freed before the new load.
-        // On first startup the scene is already empty; deferring avoids waking
-        // the render backend during project parsing while the viewport is Solid.
-        newProject(scene, renderer, !had_runtime_scene_content);
-    }
-    // newProject already called TerrainManager::removeAllTerrains and scene.clear();
-    // don't repeat them here.
-    
-    auto temp_camera = std::make_shared<Camera>(
-        Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
-        60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 6);
-    temp_camera->nodeName = "Loading...";
-    scene.addCamera(temp_camera);
-    
-    renderer.resetCPUAccumulation();
-    if (backend) backend->resetAccumulation();
-    
-    try {
-
-        // Load metadata
-        {
-            std::string_view fv_sv = "2.0";
-            simdjson::dom::element fv_el;
-            if (!root["format_version"].get(fv_el)) {
-                if (fv_el.is_number()) {
-                    double fv_val = 2.0;
-                    fv_el.get(fv_val);
-                    g_project.format_version = std::to_string(fv_val).substr(0, 3);
-                } else {
-                    fv_el.get(fv_sv);
-                    g_project.format_version = std::string(fv_sv);
-                }
-            } else {
-                g_project.format_version = "2.0";
-            }
-        }
-        
-        {
-            std::string_view name_sv = "Untitled", author_sv = "", desc_sv = "";
-            root["project_name"].get(name_sv);
-            root["author"].get(author_sv);
-            root["description"].get(desc_sv);
-            g_project.project_name = std::string(name_sv);
-            g_project.author = std::string(author_sv);
-            g_project.description = std::string(desc_sv);
-        }
-
-        if (auto save_settings_el = root["save_settings"]; !save_settings_el.error()) {
-            simdjson::dom::object save_settings_obj;
-            if (!save_settings_el.get(save_settings_obj)) {
-                int64_t texture_storage_mode = static_cast<int>(ProjectManager::TextureStorageMode::Embedded);
-                bool embed_missing_only = false;
-                bool save_geometry = true;
-
-                if (auto mode_el = save_settings_obj["texture_storage_mode"]; !mode_el.error()) {
-                    mode_el.get(texture_storage_mode);
-                }
-                if (auto embed_missing_el = save_settings_obj["embed_missing_only"]; !embed_missing_el.error()) {
-                    embed_missing_el.get(embed_missing_only);
-                }
-                if (auto save_geometry_el = save_settings_obj["save_geometry"]; !save_geometry_el.error()) {
-                    save_geometry_el.get(save_geometry);
-                }
-
-                save_settings.texture_storage_mode = static_cast<ProjectManager::TextureStorageMode>(texture_storage_mode);
-                save_settings.embed_missing_only = embed_missing_only;
-                save_settings.save_geometry = save_geometry;
-            }
-        }
-
-        int64_t next_model = 1, next_obj = 1, next_tex = 1;
-        root["next_model_id"].get(next_model);
-        root["next_object_id"].get(next_obj);
-        root["next_texture_id"].get(next_tex);
-        g_project.next_model_id = (uint32_t)next_model;
-        g_project.next_object_id = (uint32_t)next_obj;
-        g_project.next_texture_id = (uint32_t)next_tex;
-
-        g_project.imported_models.clear();
-        simdjson::dom::element models_source;
-        simdjson::error_code models_err = has_shared ? shared_root["imported_models"].get(models_source) : root["imported_models"].get(models_source);
-        if (!models_err) {
-            simdjson::dom::array imported_models_arr;
-            if (!models_source.get(imported_models_arr)) {
-                for (auto j_model_el : imported_models_arr) {
-                    auto j_model = sjsonToNlohmann(j_model_el);
-                    ImportedModelData model;
-                    model.id = j_model.value("id", 0ull);
-                    model.original_path = j_model.value("original_path", "");
-                    model.package_path = j_model.value("package_path", "");
-                    model.display_name = j_model.value("display_name", "");
-                    model.deleted_objects = j_model.value("deleted_objects", std::vector<std::string>{});
-
-                    // For backwards compatibility: If instances are embedded here, load them
-                    if (!has_shared && j_model.contains("objects") && j_model["objects"].is_array()) {
-                        std::unordered_set<std::string> seen_nodes;
-                        for (const auto& j_obj : j_model["objects"]) {
-                            std::string node_name = j_obj.value("node_name", "");
-                            if (seen_nodes.insert(node_name).second) {
-                                ImportedModelData::ObjectInstance inst;
-                                inst.node_name = std::move(node_name);
-                                if (j_obj.contains("transform")) {
-                                    inst.transform = jsonToMat4(j_obj["transform"]);
-                                }
-                                inst.material_id = j_obj.value("material_id", static_cast<uint16_t>(0));
-                                inst.visible = j_obj.value("visible", true);
-                                model.objects.push_back(inst);
-                            }
-                        }
-                    }
-
-                    g_project.imported_models.push_back(std::move(model));
-                }
-            }
-        }
-        
-        // If has_shared, instances are in root["model_instances"]
-        if (has_shared) {
-            simdjson::dom::element instances_el;
-            if (!root["model_instances"].get(instances_el)) {
-                simdjson::dom::array instances_arr;
-                if (!instances_el.get(instances_arr)) {
-                    for (auto j_inst_el : instances_arr) {
-                        auto j_inst = sjsonToNlohmann(j_inst_el);
-                        uint64_t m_id = j_inst.value("model_id", 0ull);
-                        ImportedModelData* model = g_project.findModelById(m_id);
-                        if (model && j_inst.contains("objects") && j_inst["objects"].is_array()) {
-                            std::unordered_set<std::string> seen_nodes;
-                            for (const auto& j_obj : j_inst["objects"]) {
-                                std::string node_name = j_obj.value("node_name", "");
-                                if (seen_nodes.insert(node_name).second) {
-                                    ImportedModelData::ObjectInstance inst;
-                                    inst.node_name = std::move(node_name);
-                                    if (j_obj.contains("transform")) {
-                                        inst.transform = jsonToMat4(j_obj["transform"]);
-                                    }
-                                    inst.material_id = j_obj.value("material_id", static_cast<uint16_t>(0));
-                                    inst.visible = j_obj.value("visible", true);
-                                    model->objects.push_back(inst);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        fs::path project_folder = pathFromUtf8(filepath).parent_path();
-        
-        bool is_v3 = (g_project.format_version == "3.0");
-        bool has_geometry = false;
-        root["has_geometry"].get(has_geometry);
-        
-        auto loadSplineObjects = [&]() {
-            simdjson::dom::element spline_el;
-            if (!root["spline_objects"].get(spline_el)) {
-                simdjson::dom::array spline_arr;
-                if (!spline_el.get(spline_arr)) {
-                    for (auto spline_item : spline_arr) {
-                        auto payload = sjsonToNlohmann(spline_item);
-                        auto object = std::make_shared<MeshEdit::SplineObject>();
-                        std::string spline_error;
-                        if (MeshEdit::deserializeSpline(payload, *object, spline_error)) {
-                            object->visible = true;
-                            scene.world.objects.push_back(std::move(object));
-                        } else {
-                            SCENE_LOG_WARN("Skipping invalid spline during project load: " + spline_error);
-                        }
-                    }
-                }
-            }
-        };
-        loadSplineObjects();
-
-        if (is_v3 && has_geometry && has_binary) {
-            if (progress_callback) progress_callback(10, "Loading geometry...");
-            {
-                ScopedPerfTimer timer("openProject readGeometryBinary");
-                if (!readGeometryBinary(in_bin, scene)) {
-                    SCENE_LOG_ERROR("Failed to read geometry from binary file.");
-                    return false;
-                }
-            }
-
-            // Textures
-            simdjson::dom::element tex_el;
-            simdjson::error_code tex_err = has_shared ? shared_root["textures"].get(tex_el) : root["textures"].get(tex_el);
-            if (!tex_err) {
-                if (progress_callback) progress_callback(35, "Restoring textures...");
-                ScopedPerfTimer timer("openProject deserializeTextures");
-                deserializeTextures(sjsonToNlohmann(tex_el), in_bin, project_folder.string());
-            }
-
-            // Materials
-            simdjson::dom::element mat_el;
-            simdjson::error_code mat_err = has_shared ? shared_root["materials"].get(mat_el) : root["materials"].get(mat_el);
-            if (!mat_err) {
-                if (progress_callback) progress_callback(40, "Loading materials...");
-                ScopedPerfTimer timer("openProject deserialize materials");
-                MaterialManager::getInstance().deserialize(sjsonToNlohmann(mat_el), project_folder.string());
-            }
-
-            // Lights
-            simdjson::dom::element lights_el;
-            if (!root["lights"].get(lights_el)) {
-                if (progress_callback) progress_callback(50, "Loading lights...");
-                deserializeLights(sjsonToNlohmann(lights_el), scene.lights);
-            }
-
-            // Cameras
-            simdjson::dom::element cams_el;
-            if (!root["cameras"].get(cams_el)) {
-                if (progress_callback) progress_callback(60, "Loading cameras...");
-                deserializeCameras(sjsonToNlohmann(cams_el), scene);
-            } else {
-                scene.cameras.clear();
-                scene.camera = nullptr;
-                auto default_cam = std::make_shared<Camera>(
-                    Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
-                    60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 10);
-                default_cam->nodeName = "Default Camera";
-                scene.addCamera(default_cam);
-                scene.setActiveCamera(0);
-            }
-
-            // Render Settings
-            simdjson::dom::element rs_el;
-            if (!root["render_settings"].get(rs_el)) {
-                if (progress_callback) progress_callback(70, "Loading render settings...");
-                deserializeRenderSettings(sjsonToNlohmann(rs_el), settings);
-            }
-            settings.animation_current_frame = 0;
-            settings.animation_playback_frame = 0;
-            settings.animation_is_playing = false;
-            // Post-Process / Color Grading
-            simdjson::dom::element postfx_el;
-            if (!root["postfx"].get(postfx_el)) {
-                json pj = sjsonToNlohmann(postfx_el);
-                auto& pp = scene.color_processor.params;
-                pp.global_exposure = pj.value("exposure", pp.global_exposure);
-                pp.global_gamma = pj.value("gamma", pp.global_gamma);
-                pp.saturation = pj.value("saturation", pp.saturation);
-                pp.color_temperature = pj.value("color_temperature", pp.color_temperature);
-                pp.tone_mapping_type = static_cast<ToneMappingType>(pj.value("tone_mapping", static_cast<int>(pp.tone_mapping_type)));
-                pp.enable_vignette = pj.value("vignette_enabled", pp.enable_vignette);
-                pp.vignette_strength = pj.value("vignette_strength", pp.vignette_strength);
-                rtpost::loadExposure(pj, scene.color_processor);
-                // Also copy into global UI color processor so UI reflects loaded values
-                extern ColorProcessor color_processor; // defined in Main.cpp
-                color_processor.params = pp;
-            }
-            
-            // UI Layout
-            std::string_view ui_layout;
-            if (!root["ui_layout"].get(ui_layout)) {
-                g_project.ui_layout_data = std::string(ui_layout);
-            }
-
-            // World Settings
-            simdjson::dom::element world_el;
-            if (!root["world"].get(world_el)) {
-                ScopedPerfTimer timer("openProject deserialize world");
-                nlohmann::json world_json = sjsonToNlohmann(world_el);
-                resolveWorldImagePath(world_json, "hdri_path", fs::path(filepath));
-                if (world_json.contains("advanced"))
-                    resolveWorldImagePath(world_json["advanced"], "env_overlay_path", fs::path(filepath));
-                renderer.world.deserialize(world_json);
-            }
-
-            // Water Surfaces
-            simdjson::dom::element water_el;
-            if (!root["water"].get(water_el)) {
-                WaterManager::getInstance().deserialize(sjsonToNlohmann(water_el), scene);
-            }
-
-            // Probe producer. A project that stores nothing gets the default, so one
-            // project's choice never leaks into the next one opened in this process.
-            {
-                bool traced = true;
-                simdjson::dom::element probe_el;
-                if (!root["rayfusion_probe"].get(probe_el)) {
-                    bool v = true;
-                    if (!probe_el["traced"].get(v)) traced = v;
-                }
-                RayFusion::probeProducerTraced().store(traced ? 1 : 0);
-            }
-
-            // Game design: applied by the shared simulation clock on its next
-            // tick, once the scene (and its GPU) is ready, in Studio and Player.
-            simdjson::dom::element game_design_el;
-            if (!root["game_design"].get(game_design_el)) {
-                Paint::queueGameDesign(sjsonToNlohmann(game_design_el));
-            }
-
-            // Terrain System
-            simdjson::dom::element ts_el;
-            if (!root["terrain_system"].get(ts_el)) {
-                if (progress_callback) progress_callback(75, "Loading terrain system...");
-                auto abs_path = std::filesystem::absolute(filepath);
-                std::string terrainDir = abs_path.parent_path().string();
-                ScopedPerfTimer timer("openProject deserialize terrain");
-                TerrainManager::getInstance().deserialize(sjsonToNlohmann(ts_el), terrainDir, scene);
-            }
-
-            // River System
-            simdjson::dom::element rivers_el;
-            if (!root["rivers"].get(rivers_el)) {
-                if (progress_callback) progress_callback(76, "Loading river system...");
-                RiverManager::getInstance().clear(&scene);
-                RiverManager::getInstance().deserialize(sjsonToNlohmann(rivers_el), scene);
-            }
-
-            // Road assignments. Stores no curve geometry - only which spline is a
-            // road and under which profile - so it loads after the scene objects
-            // that own those curves.
-            simdjson::dom::element roads_el;
-            if (!root["road_assignments"].get(roads_el)) {
-                TerrainNodesV2::RoadNetworkRegistry::getInstance().deserialize(
-                    sjsonToNlohmann(roads_el));
-            }
-
-            // Foliage System
-            simdjson::dom::element inst_el;
-            if (!root["instances"].get(inst_el)) {
-                if (progress_callback) progress_callback(77, "Loading foliage system...");
-                ScopedPerfTimer timer("openProject deserialize foliage");
-                InstanceManager::getInstance().deserializeFast(inst_el, scene);
-                if (has_binary) {
-                    InstanceManager::getInstance().deserializeBinaryInstances(inst_el, in_bin);
-                }
-            }
-
-            if (InstanceManager::getInstance().getGroups().empty() &&
-                TerrainManager::getInstance().hasLegacyFoliage()) {
-                int migrated_legacy_groups = TerrainManager::getInstance().migrateLegacyFoliageToInstanceGroups(scene, true);
-                if (migrated_legacy_groups > 0 && progress_callback) {
-                    progress_callback(77, "Migrating legacy foliage...");
-                }
-            }
-
-            if (!InstanceManager::getInstance().getGroups().empty()) {
-                Backend::BackendType backendType = Backend::BackendType::CPU_CUSTOM;
-                if (backend) {
-                    backendType = backend->getInfo().type;
-                }
-                const bool nativeFlatInstances =
-                    backendType == Backend::BackendType::VULKAN_RT ||
-                    backendType == Backend::BackendType::VULKAN_COMPUTE ||
-                    backendType == Backend::BackendType::OPTIX;
-                if (nativeFlatInstances) {
-                    if (progress_callback) progress_callback(77, "Loading flat foliage instances...");
-                    for (auto& group : InstanceManager::getInstance().getGroups()) {
-                        group.active_hittables.clear();
-                        group.gpu_dirty = true;
-                    }
-                } else {
-                    if (progress_callback) progress_callback(77, "Building foliage BVH & instances...");
-                    InstanceManager::getInstance().rebuildSceneObjects(scene);
-                }
-            }
-
-            // Mesh Modifiers System
-            scene.mesh_modifiers.clear();
-            scene.base_mesh_cache.clear();
-            simdjson::dom::element modRoot;
-            if (!root["mesh_modifiers"].get(modRoot)) {
-                if (progress_callback) progress_callback(78, "Loading mesh modifiers...");
-                nlohmann::json nlohmannMods = sjsonToNlohmann(modRoot);
-                for (auto it = nlohmannMods.begin(); it != nlohmannMods.end(); ++it) {
-                    std::string nodeName = it.key();
-                    MeshModifiers::ModifierStack stack;
-                    stack.deserialize(it.value());
-                    scene.mesh_modifiers[nodeName] = stack;
-                }
-
-                // We must lazily build base_mesh_cache for these modifiers, evaluate them and set new objects
-                // NOTE: Foliage instances (tail of objects vector) are never mesh-modified,
-                // so we can limit the scan to non-foliage objects for efficiency.
-                size_t mod_foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
-                size_t mod_selectable = (mod_foliage_count <= scene.world.objects.size())
-                                            ? (scene.world.objects.size() - mod_foliage_count)
-                                            : scene.world.objects.size();
-
-                for(const auto& [nodeName, stack] : scene.mesh_modifiers) {
-                    std::vector<std::shared_ptr<Triangle>> baseTriangles;
-                    std::vector<std::shared_ptr<Hittable>> remainingObjects;
-                    remainingObjects.reserve(scene.world.objects.size());
-
-                    // Scan only non-foliage objects for modifier matches
-                    for (size_t mi = 0; mi < mod_selectable; ++mi) {
-                        const auto& obj = scene.world.objects[mi];
-                        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-                            if (tri->getNodeName() == nodeName) {
-                                baseTriangles.push_back(tri);
-                            } else {
-                                remainingObjects.push_back(obj);
-                            }
-                        } else {
-                            remainingObjects.push_back(obj);
-                        }
-                    }
-                    // Append foliage tail untouched
-                    for (size_t mi = mod_selectable; mi < scene.world.objects.size(); ++mi) {
-                        remainingObjects.push_back(scene.world.objects[mi]);
-                    }
-
-                    if (!baseTriangles.empty() && !stack.modifiers.empty()) {
-                        scene.base_mesh_cache[nodeName] = baseTriangles;
-                        const bool hasWater = std::any_of(
-                            stack.modifiers.begin(), stack.modifiers.end(),
-                            [](const MeshModifiers::ModifierData& modifier) {
-                                return modifier.enabled &&
-                                       modifier.type == MeshModifiers::ModifierType::WaterSurface;
-                            });
-                        const bool hasSimpleSubdivision = std::any_of(
-                            stack.modifiers.begin(), stack.modifiers.end(),
-                            [](const MeshModifiers::ModifierData& modifier) {
-                                return modifier.enabled &&
-                                       modifier.type == MeshModifiers::ModifierType::FlatSubdivision;
-                            });
-                        std::shared_ptr<TriangleMesh> evaluatedMesh;
-                        auto newMesh = (hasWater || hasSimpleSubdivision)
-                            ? stack.evaluate(baseTriangles, false, &evaluatedMesh)
-                            : stack.evaluate(baseTriangles, false);
-                        // Insert new mesh BEFORE foliage tail in a single range insertion
-                        // (prevents quadratic complexity O(N*M) which freezes on high-poly meshes)
-                        size_t insert_pos = remainingObjects.size() - mod_foliage_count;
-                        if (evaluatedMesh) {
-                            evaluatedMesh->nodeName = nodeName;
-                            remainingObjects.insert(remainingObjects.begin() + insert_pos, evaluatedMesh);
-                            ++mod_selectable;
-                            if (hasWater) {
-                                WaterManager::getInstance().bindExistingWaterMesh(
-                                    evaluatedMesh, WaterSurface::Type::Plane);
-                            }
-                        } else {
-                            remainingObjects.insert(remainingObjects.begin() + insert_pos, newMesh.begin(), newMesh.end());
-                            mod_selectable += newMesh.size(); // Track new non-foliage count
-                        }
-                        scene.world.objects = remainingObjects;
-                    }
-                }
-            }
-
-            // Geometry Node Graphs (Faz 8a Geo-DAG). NOT auto-evaluated on load: the
-            // saved scene mesh IS the last evaluated result, so the scene already looks
-            // right — the graph (and its pristine originalBaseMesh from the binary
-            // sidecar) is just re-attached so the next Evaluate/Apply works correctly.
-            scene.geometry_node_graphs.clear();
-            {
-                simdjson::dom::element geo_graphs_el;
-                if (!root["geometry_node_graphs"].get(geo_graphs_el)) {
-                    if (progress_callback) progress_callback(78, "Loading geometry node graphs...");
-                    nlohmann::json jGraphs = sjsonToNlohmann(geo_graphs_el);
-                    for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
-                        auto graph = GeometryNodesV2::deserializeGeometryGraph(it.value(), &in_bin);
-                        if (graph) scene.geometry_node_graphs[it.key()] = graph;
-                    }
-                    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.geometry_node_graphs.size()) + " geometry node graphs.");
-                }
-            }
-
-            scene.geometry_caches.clear();
-            {
-                simdjson::dom::element geometry_caches_el;
-                if (!root["geometry_caches"].get(geometry_caches_el)) {
-                    Animation::deserializeGeometryCaches(
-                        sjsonToNlohmann(geometry_caches_el), scene.geometry_caches, &in_bin);
-                    SCENE_LOG_INFO("[ProjectManager] Loaded " +
-                        std::to_string(scene.geometry_caches.size()) + " geometry caches.");
-                }
-            }
-
-            // Material Node Graphs (MaterialNodesV2 Faz 1). NOT auto-applied on load:
-            // the saved material values ARE the last applied result — the graph is just
-            // re-attached so the next Apply works. Runs after materials deserialize, so
-            // texture-by-name references resolve against the live session first.
-            scene.material_node_graphs.clear();
-            {
-                simdjson::dom::element mat_graphs_el;
-                if (!root["material_node_graphs"].get(mat_graphs_el)) {
-                    nlohmann::json jGraphs = sjsonToNlohmann(mat_graphs_el);
-                    for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
-                        auto graph = MaterialNodesV2::deserializeMaterialGraph(it.value());
-                        if (graph) scene.material_node_graphs[it.key()] = graph;
-                    }
-                    if (!scene.material_node_graphs.empty()) {
-                        SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.material_node_graphs.size()) + " material node graphs.");
-                    }
-                    // Resolve the graphs' Image Texture references NOW, while the embedded
-                    // blob cache is still alive — clearEmbeddedTextureCache() runs at the end
-                    // of this load. A graph texture behind a manipulation node is bound to no
-                    // material slot, so nothing else has already pulled it out of the cache,
-                    // and by the time the editor lazily resolved it the blobs were gone: the
-                    // node came back empty. Resolving here also hands every node the SAME
-                    // Texture object the materials use, instead of a private duplicate.
-                    size_t resolvedGraphTextures = 0;
-                    for (const auto& [matName, graphPtr] : scene.material_node_graphs) {
-                        if (!graphPtr) continue;
-                        resolvedGraphTextures += MaterialNodesV2::collectGraphTextures(*graphPtr).size();
-                    }
-                    if (resolvedGraphTextures > 0) {
-                        SCENE_LOG_INFO("[ProjectManager] Resolved " + std::to_string(resolvedGraphTextures) +
-                                       " material-graph textures.");
-                    }
-
-                    // Rebuild the compiled per-pixel programs (textures are resolved by now, so
-                    // their chains compile with the right texture handles). Without this the
-                    // graph did nothing until the node editor was opened on that material and
-                    // Live was toggled — the only thing that re-ran the compile.
-                    const size_t activePrograms =
-                        MaterialNodesV2::compileGraphProgramsForScene(scene.material_node_graphs);
-                    if (activePrograms > 0) {
-                        SCENE_LOG_INFO("[ProjectManager] Compiled " + std::to_string(activePrograms) +
-                                       " per-pixel material programs from node graphs.");
-                    }
-                }
-            }
-
-            // Paint Layer Stacks
-            simdjson::dom::element paint_layers_el;
-            if (!root["mesh_paint_layers"].get(paint_layers_el)) {
-                if (progress_callback) progress_callback(79, "Loading paint layers...");
-                nlohmann::json j_paint = sjsonToNlohmann(paint_layers_el);
-                for (auto it = j_paint.begin(); it != j_paint.end(); ++it) {
-                    Paint::PaintLayerStack stack;
-                    stack.deserialize(it.value(), in_bin);
-                    scene.mesh_paint_layer_stacks[it.key()] = std::move(stack);
-                }
-                SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.mesh_paint_layer_stacks.size()) + " paint layer stacks.");
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] load step: substances");
-            // Project substances BEFORE anything that names one. Always
-            // replaced, also with an empty set: the previous project's
-            // substances must not leak into this one.
-            {
-                std::vector<RayTrophiSim::ProjectSubstance> substances;
-                simdjson::dom::element substances_el;
-                if (!root["substances"].get(substances_el)) {
-                    const json list = sjsonToNlohmann(substances_el);
-                    for (const auto& item : list) {
-                        RayTrophiSim::ProjectSubstance substance;
-                        substance.name = item.value("name", std::string());
-                        substance.based_on = item.value("based_on", std::string());
-                        substance.overrides = item.value("overrides", json::object());
-                        substances.push_back(std::move(substance));
-                    }
-                }
-                std::string substance_error;
-                if (!RayTrophiSim::replaceProjectSubstances(substances, substance_error)) {
-                    // Nothing is half-loaded: the library keeps built-ins only,
-                    // and every reference to a project substance now fails its
-                    // strict lookup by name instead of borrowing another one.
-                    const std::string load_error = substance_error;
-                    RayTrophiSim::replaceProjectSubstances({}, substance_error);
-                    SCENE_LOG_ERROR("[ProjectManager] Project substances not loaded: " + load_error);
-                } else if (!substances.empty()) {
-                    SCENE_LOG_INFO("[ProjectManager] Loaded " +
-                                   std::to_string(substances.size()) + " project substances.");
-                }
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] load step: vdb/gas/forcefields");
-            // VDB / Gas / Force Fields / Particle Simulation
-            simdjson::dom::element vdb_el, gas_el, ff_el, particles_el;
-            simdjson::dom::element kinematic_el, rigid_el;
-            if (!root["vdb_volumes"].get(vdb_el)) deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
-            if (!root["gas_volumes"].get(gas_el)) deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
-            if (!root["force_fields"].get(ff_el)) deserializeForceFields(sjsonToNlohmann(ff_el), scene);
-            SCENE_LOG_INFO("[ProjectManager] load step: object substances + audio restore");
-            if (progress_callback) progress_callback(80, "Restoring audio...");
-            simdjson::dom::element audio_el;
-            simdjson::dom::element object_substances_el;
-            matter::restoreObjectSubstances(scene,
-                root["object_substances"].get(object_substances_el) ? json::object() :
-                sjsonToNlohmann(object_substances_el));
-            scene.audio->restore(root["audio"].get(audio_el) ? json() : sjsonToNlohmann(audio_el),
-                                 pathFromUtf8(filepath).parent_path());
-            SCENE_LOG_INFO("[ProjectManager] load step: particles");
-            if (progress_callback) progress_callback(81, "Preparing particle systems...");
-            if (!root["particle_simulation"].get(particles_el)) deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
-            SCENE_LOG_INFO("[ProjectManager] load step: kinematic colliders");
-            if (progress_callback) progress_callback(82, "Restoring physics...");
-            if (!root["kinematic_colliders"].get(kinematic_el)) {
-                std::string error;
-                if (!RayTrophiSim::deserializeKinematicColliders(
-                        sjsonToNlohmann(kinematic_el),
-                        scene.kinematic_colliders,
-                        error)) {
-                    throw std::runtime_error(
-                        "Kinematic colliders: " + error);
-                }
-            }
-            SCENE_LOG_INFO("[ProjectManager] load step: rigid bodies");
-            if (!root["rigid_bodies"].get(rigid_el)) deserializeRigidBodies(sjsonToNlohmann(rigid_el), scene);
-
-            SCENE_LOG_INFO("[ProjectManager] load step: hair");
-            // Hair System
-            // newProject already cleared HairSystem + uploaded empty hair to GPU.
-            // Skip the redundant second clear/upload here; only load + upload when
-            // the project actually has hair data. For projects without hair the
-            // newProject clear is sufficient.
-            simdjson::dom::element hair_el;
-            if (!root["hair"].get(hair_el)) {
-                if (progress_callback) progress_callback(78, "Loading hair system...");
-                renderer.getHairSystem().clearAll();
-                renderer.getHairSystem().deserialize(sjsonToNlohmann(hair_el), &in_bin);
-
-                simdjson::dom::element hm_el;
-                if (!root["hair_material"].get(hm_el)) {
-                    auto j_hm = sjsonToNlohmann(hm_el);
-                    renderer.setHairMaterial(j_hm.get<Hair::HairMaterialParams>());
-                }
-                renderer.getHairSystem().buildBVH();
-                renderer.uploadHairToGPU();
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] load step: timeline");
-            // Timeline
-            simdjson::dom::element timeline_el;
-            if (!root["timeline"].get(timeline_el)) {
-                scene.timeline.deserialize(sjsonToNlohmann(timeline_el));
-            }
-            // Open at the authored initial state, without replaying a saved scrub frame.
-            scene.timeline.current_frame = 0;
-
-            SCENE_LOG_INFO("[ProjectManager] load step: animation graphs");
-            // Animation Graphs
-            simdjson::dom::element anim_graphs_el;
-            if (!root["animationGraphs"].get(anim_graphs_el)) {
-                g_animGraphUI = AnimGraphUIState();
-                auto j_graphs = sjsonToNlohmann(anim_graphs_el);
-                for (auto& [name, j_graph] : j_graphs.items()) {
-                    auto graph = std::make_unique<AnimationGraph::AnimationNodeGraph>();
-                    graph->loadFromJson(j_graph);
-                    g_animGraphUI.graphs[name] = std::move(graph);
-                }
-                std::string_view active_graph;
-                if (!root["activeGraphCharacter"].get(active_graph)) {
-                    g_animGraphUI.activeCharacter = std::string(active_graph);
-                }
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] load step: bone data");
-            // Bone Data
-            simdjson::dom::element bone_el;
-            if (!root["boneData"].get(bone_el)) {
-                scene.boneData.clear();
-                auto j_bones = sjsonToNlohmann(bone_el);
-                for (auto& [name, idx] : j_bones["boneNameToIndex"].items()) {
-                    scene.boneData.boneNameToIndex[name] = idx.get<int>();
-                }
-                if (j_bones.contains("boneOffsetMatrices")) {
-                    for (auto& [name, mat] : j_bones["boneOffsetMatrices"].items()) {
-                        scene.boneData.boneOffsetMatrices[name] = jsonToMat4(mat);
-                    }
-                }
-                if (j_bones.contains("boneDefaultTransforms")) {
-                    for (auto& [name, mat] : j_bones["boneDefaultTransforms"].items()) {
-                        scene.boneData.boneDefaultTransforms[name] = jsonToMat4(mat);
-                    }
-                }
-                if (j_bones.contains("weightedBoneNames")) {
-                    for (const auto& name : j_bones["weightedBoneNames"]) {
-                        scene.boneData.weightedBoneNames.insert(name.get<std::string>());
-                    }
-                }
-                if (j_bones.contains("boneParents")) {
-                    for (auto& [child, parent] : j_bones["boneParents"].items()) {
-                        scene.boneData.boneParents[child] = parent.get<std::string>();
-                    }
-                }
-                if (j_bones.contains("perModelInverses")) {
-                    for (auto& [prefix, mat] : j_bones["perModelInverses"].items()) {
-                        scene.boneData.perModelInverses[prefix] = jsonToMat4(mat);
-                    }
-                }
-                if (j_bones.contains("globalInverseTransform")) {
-                    scene.boneData.globalInverseTransform = jsonToMat4(j_bones["globalInverseTransform"]);
-                }
-                scene.boneData.rebuildReverseLookup();
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] load step: ui settings");
-            // UI Settings
-            simdjson::dom::element ui_set_el;
-            if (!root["ui_settings"].get(ui_set_el)) {
-                scene.ui_settings_json_str = std::string(simdjson::minify(ui_set_el));
-                scene.load_counter++;
-            }
-
-            SCENE_LOG_INFO("[ProjectManager] load step: imported model contexts");
-            // Imported Models Contexts
-            simdjson::dom::array imc_arr;
-            if (!root["importedModelContexts"].get(imc_arr)) {
-                RigAuthoring::clearSelection(scene); scene.rigView.edit_mode=false; scene.rigView.edit_character.clear(); scene.rigView.pose_views.clear(); scene.rigView.pose_view_dirty.clear();
-                scene.importedModelContexts.clear();
-                for (auto j_ctx_el : imc_arr) {
-                    auto j_ctx = sjsonToNlohmann(j_ctx_el);
-                    SceneData::ImportedModelContext ctx;
-                    ctx.importName = j_ctx.value("importName", "");
-                    ctx.animGraphAssetKey = j_ctx.value("animGraphAssetKey", ctx.importName);
-                    ctx.hasAnimation = j_ctx.value("hasAnimation", false);
-                    if (j_ctx.contains("globalInverseTransform")) {
-                        ctx.globalInverseTransform = jsonToMat4(j_ctx["globalInverseTransform"]);
-                    } else {
-                        ctx.globalInverseTransform = Matrix4x4::identity();
-                    }
-                    ctx.useRootMotion = j_ctx.value("useRootMotion", false);
-                    ctx.rootMotionBone = j_ctx.value("rootMotionBone", "");
-                    ctx.useAnimGraph = j_ctx.value("useAnimGraph", false);
-                    ctx.animGraphFollowTimeline = j_ctx.value("animGraphFollowTimeline", false);
-                    ctx.preferOzzRuntime = j_ctx.value("preferOzzRuntime", true);
-                    ctx.loggedOzzRuntimeUsage = false;
-                    ctx.visible = j_ctx.value("visible", true);
-                    ctx.authoringOwned = j_ctx.value("authoringOwned", false);
-                    ctx.rigRevision = j_ctx.value("rigRevision", uint64_t{0});
-                    ctx.rigTemplateId = j_ctx.value("rigTemplateId", std::string{});
-                    ctx.rigTemplateVersion = j_ctx.value("rigTemplateVersion", 1);
-                    if (j_ctx.contains("rigBoundMeshes")) {
-                        std::string error;
-                        if (!RigAuthoring::readRigBoundMeshes(
-                                j_ctx["rigBoundMeshes"], ctx.rigBoundMeshes, error)) {
-                            throw std::runtime_error(error);
-                        }
-                    }
-                    ctx.rigWeightAlgorithm =
-                        j_ctx.value("rigWeightAlgorithm", std::string{});
-                    if (ctx.rigWeightAlgorithm != "" &&
-                        ctx.rigWeightAlgorithm != "nearest_segment" &&
-                        ctx.rigWeightAlgorithm != "anatomical_capsule_v1" &&
-                        ctx.rigWeightAlgorithm != "geodesic_voxel_v1") {
-                        throw std::runtime_error("Invalid rig weight algorithm");
-                    }
-                    if (j_ctx.contains("rigEnvelopeSettings")) {
-                        const auto& settings = j_ctx["rigEnvelopeSettings"];
-                        ctx.rigEnvelopeTorsoRadius = settings.value("torso_radius", .16f);
-                        ctx.rigEnvelopeLimbRadius = settings.value("limb_radius", .065f);
-                        ctx.rigEnvelopeExtremityRadius =
-                            settings.value("extremity_radius", .05f);
-                        ctx.rigEnvelopeFalloff = settings.value("falloff", 2.f);
-                        const bool validEnvelope =
-                            std::isfinite(ctx.rigEnvelopeTorsoRadius) &&
-                            ctx.rigEnvelopeTorsoRadius >= .02f &&
-                            ctx.rigEnvelopeTorsoRadius <= .5f &&
-                            std::isfinite(ctx.rigEnvelopeLimbRadius) &&
-                            ctx.rigEnvelopeLimbRadius >= .01f &&
-                            ctx.rigEnvelopeLimbRadius <= .3f &&
-                            std::isfinite(ctx.rigEnvelopeExtremityRadius) &&
-                            ctx.rigEnvelopeExtremityRadius >= .005f &&
-                            ctx.rigEnvelopeExtremityRadius <= .2f &&
-                            std::isfinite(ctx.rigEnvelopeFalloff) &&
-                            ctx.rigEnvelopeFalloff >= .5f && ctx.rigEnvelopeFalloff <= 8.f;
-                        if (!validEnvelope)
-                            throw std::runtime_error("Invalid rig envelope settings");
-                    }
-                    if (j_ctx.contains("rigEnvelopeProfiles")) {
-                        const auto& profiles = j_ctx["rigEnvelopeProfiles"];
-                        if (!profiles.is_array() || profiles.size() > 4096)
-                            throw std::runtime_error("Invalid rig envelope profiles");
-                        std::unordered_set<std::string> envelopeBones;
-                        for (const auto& value : profiles) {
-                            RigAuthoring::EnvelopeBoneProfile profile;
-                            profile.bone = value.at("bone").get<std::string>();
-                            profile.startRadius = value.at("start_radius").get<float>();
-                            profile.endRadius = value.at("end_radius").get<float>();
-                            profile.startExtension = value.at("start_extension").get<float>();
-                            profile.endExtension = value.at("end_extension").get<float>();
-                            profile.falloff = value.at("falloff").get<float>();
-                            const bool validProfile =
-                                !profile.bone.empty() && envelopeBones.insert(profile.bone).second &&
-                                std::isfinite(profile.startRadius) &&
-                                profile.startRadius >= .005f && profile.startRadius <= .5f &&
-                                std::isfinite(profile.endRadius) &&
-                                profile.endRadius >= .005f && profile.endRadius <= .5f &&
-                                std::isfinite(profile.startExtension) &&
-                                profile.startExtension >= 0.f &&
-                                profile.startExtension <= .75f &&
-                                std::isfinite(profile.endExtension) &&
-                                profile.endExtension >= 0.f && profile.endExtension <= .75f &&
-                                std::isfinite(profile.falloff) && profile.falloff >= .5f &&
-                                profile.falloff <= 8.f;
-                            if (!validProfile)
-                                throw std::runtime_error("Invalid rig envelope profile");
-                            ctx.rigEnvelopeProfiles.push_back(std::move(profile));
-                        }
-                    }
-                    if (j_ctx.contains("nodeHierarchy")) {
-                        std::string error;
-                        if (!RigAuthoring::deserializeRigHierarchy(j_ctx["nodeHierarchy"], ctx.nodeHierarchy, error))
-                            throw std::runtime_error("Model hierarchy " + ctx.importName + ": " + error);
-                    }
-                    if(j_ctx.contains("rigSceneTransform")){std::string error;if(!RigAuthoring::deserializeRigPlacement(j_ctx["rigSceneTransform"],ctx.rigSceneTransform,error))throw std::runtime_error("Rig placement " + ctx.importName + ": " + error);}
-                    if(j_ctx.contains("rigAnatomy")){std::string error;if(!RigAuthoring::deserializeRigAnatomy(j_ctx["rigAnatomy"],ctx.nodeHierarchy,ctx.rigAnatomy,error))throw std::runtime_error("Rig anatomy " + ctx.importName + ": " + error);}
-                    if (!ctx.animGraphAssetKey.empty()) {
-                        auto itGraph = g_animGraphUI.graphs.find(ctx.animGraphAssetKey);
-                        if (itGraph != g_animGraphUI.graphs.end() && itGraph->second) {
-                            ctx.runtimeGraph = itGraph->second->clone();
-                            ctx.graph = ctx.runtimeGraph;
-                        }
-                    }
-                    scene.importedModelContexts.push_back(ctx);
-                }
-            }
-
-            // Animation Data List
-            simdjson::dom::array adl_arr;
-            if (!root["animationDataList"].get(adl_arr)) {
-                scene.animationDataList.clear();
-                for (auto j_anim_el : adl_arr) {
-                    auto j_anim = sjsonToNlohmann(j_anim_el);
-                    AnimationData anim;
-                    anim.name = j_anim.value("name", "");
-                    anim.modelName = j_anim.value("modelName", "");
-                    anim.rigAuthoring = j_anim.value("rigAuthoring", false);
-                    if (j_anim.contains("ikChannels")) { std::string error; if (!RigAuthoring::deserializeIKChannels(j_anim["ikChannels"], anim.ikChannels, error)) throw std::runtime_error(error); }
-                    anim.duration = j_anim.value("duration", 0.0);
-                    anim.ticksPerSecond = j_anim.value("ticksPerSecond", 24.0);
-                    anim.startFrame = j_anim.value("startFrame", 0);
-                    anim.endFrame = j_anim.value("endFrame", 0);
-                    
-                    if (j_anim.contains("positionKeys")) {
-                         for (auto& [nodeName, j_keys] : j_anim["positionKeys"].items()) {
-                             // ★ The .rtp key SCHEMA is unchanged (time/x/y/z):
-                             // Faz 0 swapped the in-memory type, not the file
-                             // format, so old projects load unchanged.
-                             RayTrophi::VectorKeys keys;
-                             keys.reserve(j_keys.size());
-                             for (const auto& k : j_keys) {
-                                 keys.emplace_back(k.value("time", 0.0),
-                                                   Vec3(k.value("x", 0.0f),
-                                                        k.value("y", 0.0f),
-                                                        k.value("z", 0.0f)));
-                             }
-                             anim.positionKeys[nodeName] = std::move(keys);
-                         }
-                    }
-                    if (j_anim.contains("rotationKeys")) {
-                         for (auto& [nodeName, j_keys] : j_anim["rotationKeys"].items()) {
-                             RayTrophi::QuatKeys keys;
-                             keys.reserve(j_keys.size());
-                             for (const auto& k : j_keys) {
-                                 // Quaternion's constructor is (w, x, y, z) - the
-                                 // same order the file stores.
-                                 keys.emplace_back(k.value("time", 0.0),
-                                                   Quaternion(k.value("w", 1.0f),
-                                                              k.value("x", 0.0f),
-                                                              k.value("y", 0.0f),
-                                                              k.value("z", 0.0f)));
-                             }
-                             anim.rotationKeys[nodeName] = std::move(keys);
-                         }
-                    }
-                    if (j_anim.contains("scalingKeys")) {
-                         for (auto& [nodeName, j_keys] : j_anim["scalingKeys"].items()) {
-                             RayTrophi::VectorKeys keys;
-                             keys.reserve(j_keys.size());
-                             for (const auto& k : j_keys) {
-                                 // Scale defaults to 1, not 0 - a missing component
-                                 // here must not collapse the node.
-                                 keys.emplace_back(k.value("time", 0.0),
-                                                   Vec3(k.value("x", 1.0f),
-                                                        k.value("y", 1.0f),
-                                                        k.value("z", 1.0f)));
-                             }
-                             anim.scalingKeys[nodeName] = std::move(keys);
-                         }
-                    }
-                    
-                    { std::string error; if (!RigAuthoring::validateIKClipChannels(scene, anim, error)) throw std::runtime_error(error); }
-                    scene.animationDataList.push_back(std::make_shared<AnimationData>(anim));
-                }
-            }
-
-            clearEmbeddedTextureCache();
-        } else {
-            SCENE_LOG_ERROR("Project file is in legacy format. Please re-import your models.");
-            return false;
-        }
-
-    } catch (const std::exception& e) {
-        SCENE_LOG_ERROR("Error during project loading: " + std::string(e.what()));
-        return false;
-    }
-    
-    if (bin_file.is_open()) bin_file.close();
-    bin_memstream.reset();
-    bin_membuf.reset();
-    bin_data.clear();
-    bin_data.shrink_to_fit();
-
-    const ProjectBackendMode requested_backend_mode = modeFromSettings(settings);
-    const bool backend_mode_changed =
-        (settings.use_optix != prev_use_optix) ||
-        (settings.use_vulkan != prev_use_vulkan) ||
-        (requested_backend_mode != prev_backend_mode);
-    if (backend_mode_changed) {
-        settings.backend_changed = true;
-        SCENE_LOG_INFO(std::string("[ProjectLoad] Backend switch scheduled: ") +
-            modeToString(prev_backend_mode) + " -> " + modeToString(requested_backend_mode));
-    }
-    
+bool ProjectManager::saveProjectImpl(
+    const std::string &filepath, SceneData &scene, RenderSettings &settings,
+    Renderer &renderer,
+    std::function<void(int, const std::string &)> progress_callback,
+    bool as_copy) {
+  std::lock_guard<std::mutex> save_lock(save_mutex_);
+  save_in_progress_.store(true, std::memory_order_release);
+  struct SaveInProgressReset {
+    std::atomic<bool> &flag;
+    ~SaveInProgressReset() { flag.store(false, std::memory_order_release); }
+  } save_in_progress_reset{save_in_progress_};
+  active_save_as_copy_ = as_copy;
+  active_save_path_ = filepath;
+
+  ScopedPerfTimer total_timer(as_copy ? "ProjectManager::saveProjectCopy total"
+                                      : "ProjectManager::saveProject total");
+
+  if (progress_callback)
+    progress_callback(0, "Preparing to save...");
+
+  // Update Project Name from File Path if it's "Untitled" or empty
+  // This ensures assets (like terrains) get the correct prefix
+  fs::path p(filepath);
+  std::string filename =
+      p.stem().string(); // "my_project" from "C:/.../my_project.rtp"
+  if (!as_copy && (g_project.project_name == "Untitled" ||
+                   g_project.project_name.empty())) {
+    g_project.project_name = filename;
+  }
+  // The project this scene came from, before the path is retargeted below.
+  // Its .bin already holds every unchanged embedded texture; an autosave or
+  // a first "Save As" writes to a different file and would otherwise
+  // re-encode all of them.
+  const std::string source_project_path = g_project.current_file_path;
+  if (!ProjectSimulationCache::canSaveAs(scene, source_project_path, filepath,
+                                         as_copy)) {
+    return false;
+  }
+  // Also store the current path (a copy leaves the project's identity alone)
+  if (!as_copy)
     g_project.current_file_path = filepath;
+
+  {
+    ScopedPerfTimer timer("saveProject compactPendingDeletedObjects");
+    const size_t compacted = scene.compactPendingDeletedObjects();
+    if (compacted > 0) {
+      SCENE_LOG_INFO("[ProjectManager] Compacted " + std::to_string(compacted) +
+                     " pending-deleted object(s) before save.");
+    }
+  }
+
+  // Sync project data with current scene state
+  {
+    ScopedPerfTimer timer("saveProject syncProjectToScene");
+    syncProjectToScene(scene);
+  }
+
+  // 1. Prepare Safe Save paths
+  fs::path final_json_path(filepath);
+  fs::path final_bin_path = final_json_path;
+  final_bin_path += ".bin";
+  fs::path final_shared_path = final_json_path;
+  final_shared_path += ".shared";
+
+  fs::path temp_json_path = final_json_path;
+  temp_json_path += ".tmp";
+  fs::path temp_bin_path = final_bin_path;
+  temp_bin_path += ".tmp";
+  fs::path temp_shared_path = final_shared_path;
+  temp_shared_path += ".tmp";
+
+  g_previous_embedded_texture_entries.clear();
+  addPreviousEmbeddedTextureEntries(final_json_path, final_bin_path);
+  if (!source_project_path.empty()) {
+    const fs::path source_json_path = pathFromUtf8(source_project_path);
+    if (source_json_path != final_json_path) {
+      fs::path source_bin_path = source_json_path;
+      source_bin_path += ".bin";
+      addPreviousEmbeddedTextureEntries(source_json_path, source_bin_path);
+    }
+  }
+
+  // 2. Open Streams
+  std::ofstream out_json(temp_json_path);
+  std::ofstream out_bin(temp_bin_path, std::ios::binary);
+  std::ofstream out_shared(temp_shared_path);
+  json saved_game_design;
+
+  if (!out_json.is_open() || !out_bin.is_open() || !out_shared.is_open()) {
+    SCENE_LOG_ERROR("Failed to create temporary save files.");
+    return false;
+  }
+
+  try {
+    std::unordered_map<std::string, uint64_t> bin_section_sizes;
+    auto currentBinOffset = [&out_bin]() -> uint64_t {
+      const std::streampos pos = out_bin.tellp();
+      if (pos < 0)
+        return 0;
+      return static_cast<uint64_t>(pos);
+    };
+    auto measureBinarySection = [&](const std::string &name, auto &&fn) {
+      const uint64_t begin = currentBinOffset();
+      fn();
+      const uint64_t end = currentBinOffset();
+      bin_section_sizes[name] += (end >= begin) ? (end - begin) : 0;
+    };
+
+    if (progress_callback)
+      progress_callback(5, "Writing geometry...");
+
+    // Write geometry to binary file FIRST
+    if (save_settings.save_geometry) {
+      ScopedPerfTimer timer("saveProject writeGeometryBinary");
+      // Physics bodies bake their simulated/deformed result into the source
+      // meshes' LOCAL verts, which writeGeometryBinary serializes verbatim.
+      // Restore every body to its rest mesh so the FILE holds the clean rest
+      // pose (not the final sim frame, which otherwise reloads stuck and even
+      // survives removing the body), then put the live deformation back after
+      // the geometry is written so the on-screen sim is undisturbed.
+      auto body_rest_snapshot = scene.snapshotAndRestoreBodiesToRest();
+      measureBinarySection("geometry",
+                           [&]() { writeGeometryBinary(out_bin, scene); });
+      scene.reapplyBodyRestSnapshot(body_rest_snapshot);
+    }
+
+    if (progress_callback)
+      progress_callback(30, "Writing metadata...");
+
+    // 3. Write JSON
+    json root;
+    json shared_root;
+    root["format_version"] = "3.0";
+    shared_root["format_version"] = "3.0";
+    root["project_name"] = g_project.project_name;
+    root["author"] = g_project.author;
+    root["description"] = g_project.description;
+    root["next_model_id"] = g_project.next_model_id;
+    root["next_object_id"] = g_project.next_object_id;
+    root["next_texture_id"] = g_project.next_texture_id;
+    root["has_geometry"] = save_settings.save_geometry;
+    root["save_settings"] = {
+        {"texture_storage_mode",
+         static_cast<int>(save_settings.texture_storage_mode)},
+        {"embed_missing_only", save_settings.embed_missing_only},
+        {"save_geometry", save_settings.save_geometry}};
+
+    json shared_models_arr = json::array();
+    json scene_instances_arr = json::array();
+    for (const auto &model : g_project.imported_models) {
+      json m;
+      m["id"] = model.id;
+      m["original_path"] = model.original_path;
+      m["package_path"] = model.package_path;
+      m["display_name"] = model.display_name;
+      m["deleted_objects"] = model.deleted_objects;
+      shared_models_arr.push_back(m);
+
+      json si;
+      si["model_id"] = model.id;
+      json objects_arr = json::array();
+      for (const auto &inst : model.objects) {
+        json o;
+        o["node_name"] = inst.node_name;
+        o["transform"] = mat4ToJson(inst.transform);
+        o["material_id"] = inst.material_id;
+        o["visible"] = inst.visible;
+        objects_arr.push_back(o);
+      }
+      si["objects"] = objects_arr;
+      scene_instances_arr.push_back(si);
+    }
+    shared_root["imported_models"] = shared_models_arr;
+    root["model_instances"] = scene_instances_arr;
+
+    // Procedural objects (still saved for non-geometry mode)
+    json procedurals_arr = json::array();
+    for (const auto &proc : g_project.procedural_objects) {
+      json p;
+      p["id"] = proc.id;
+      p["mesh_type"] = static_cast<int>(proc.mesh_type);
+      p["display_name"] = proc.display_name;
+      p["transform"] = mat4ToJson(proc.transform);
+      p["material_id"] = proc.material_id;
+      p["visible"] = proc.visible;
+      procedurals_arr.push_back(p);
+    }
+    root["procedural_objects"] = procedurals_arr;
+
+    json spline_objects = json::array();
+    for (const auto &object : scene.world.objects) {
+      if (const auto spline =
+              std::dynamic_pointer_cast<MeshEdit::SplineObject>(object)) {
+        spline_objects.push_back(MeshEdit::serializeSpline(*spline));
+      }
+    }
+    root["spline_objects"] = std::move(spline_objects);
+
+    if (progress_callback)
+      progress_callback(50, "Saving materials...");
+
+    // Materials (Library / Shared)
+    auto &mat_mgr = MaterialManager::getInstance();
+    {
+      ScopedPerfTimer timer("saveProject serialize materials");
+      shared_root["materials"] =
+          mat_mgr.serialize(fs::path(filepath).parent_path().string());
+    }
+
+    if (progress_callback)
+      progress_callback(60, "Saving lights...");
+
+    // Lights
+    root["lights"] = serializeLights(scene.lights);
+
+    if (progress_callback)
+      progress_callback(70, "Saving cameras...");
+
+    // Cameras
+    root["cameras"] =
+        serializeCameras(scene.cameras, scene.active_camera_index);
+
+    if (progress_callback)
+      progress_callback(80, "Saving render settings...");
+
+    // Render Settings
+    root["render_settings"] = serializeRenderSettings(settings);
+
+    // Ensure UI/global color processor state is reflected into the scene before
+    // saving
+    extern ColorProcessor color_processor; // defined in Main.cpp
+    scene.color_processor.params = color_processor.params;
+
+    // Post-Process / Color Grading settings (store from scene's color
+    // processor)
+    const auto &pp = scene.color_processor.params;
+    root["postfx"] = {
+        {"exposure_v2", rtpost::saveExposure(pp.exposure_settings)},
+        {"exposure", pp.global_exposure},
+        {"gamma", pp.global_gamma},
+        {"saturation", pp.saturation},
+        {"color_temperature", pp.color_temperature},
+        {"tone_mapping", static_cast<int>(pp.tone_mapping_type)},
+        {"vignette_enabled", pp.enable_vignette},
+        {"vignette_strength", pp.vignette_strength}};
+
+    // UI Layout (ImGui state)
+    if (!g_project.ui_layout_data.empty()) {
+      root["ui_layout"] = g_project.ui_layout_data;
+    }
+
+    // Timeline/Animation (keyframes)
+    if (progress_callback)
+      progress_callback(82, "Saving animation keyframes...");
+    json j_timeline;
+    scene.timeline.serialize(j_timeline);
+    root["timeline"] = j_timeline;
+
+    // BoneData (skeleton/skinning information)
+    if (progress_callback)
+      progress_callback(83, "Saving bone data...");
+    {
+      json j_bones;
+
+      // Save bone name to index mapping
+      json j_bone_map = json::object();
+      for (const auto &[name, idx] : scene.boneData.boneNameToIndex) {
+        j_bone_map[name] = idx;
+      }
+      j_bones["boneNameToIndex"] = j_bone_map;
+
+      // Save bone offset matrices
+      json j_offsets = json::object();
+      for (const auto &[name, matrix] : scene.boneData.boneOffsetMatrices) {
+        j_offsets[name] = mat4ToJson(matrix);
+      }
+      j_bones["boneOffsetMatrices"] = j_offsets;
+
+      // Save bone default local transforms (bind pose)
+      json j_defaults = json::object();
+      for (const auto &[name, matrix] : scene.boneData.boneDefaultTransforms) {
+        j_defaults[name] = mat4ToJson(matrix);
+      }
+      j_bones["boneDefaultTransforms"] = j_defaults;
+
+      json j_weighted = json::array();
+      for (const auto &name : scene.boneData.weightedBoneNames) {
+        j_weighted.push_back(name);
+      }
+      j_bones["weightedBoneNames"] = j_weighted;
+
+      // Save bone hierarchy
+      json j_parents = json::object();
+      for (const auto &[child, parent] : scene.boneData.boneParents) {
+        j_parents[child] = parent;
+      }
+      j_bones["boneParents"] = j_parents;
+
+      // Save per-model inverses
+      json j_model_invs = json::object();
+      for (const auto &[prefix, inv] : scene.boneData.perModelInverses) {
+        j_model_invs[prefix] = mat4ToJson(inv);
+      }
+      j_bones["perModelInverses"] = j_model_invs;
+
+      // Save global inverse transform
+      j_bones["globalInverseTransform"] =
+          mat4ToJson(scene.boneData.globalInverseTransform);
+
+      root["boneData"] = j_bones;
+    }
+
+    // AnimationData (bone animation keyframes)
+    if (progress_callback)
+      progress_callback(83, "Saving animation data...");
+    {
+      json j_animations = json::array();
+
+      for (const auto &anim : scene.animationDataList) {
+        if (!anim)
+          continue;
+        json j_anim;
+        j_anim["name"] = anim->name;
+        j_anim["modelName"] = anim->modelName;
+        j_anim["rigAuthoring"] = anim->rigAuthoring;
+        j_anim["ikChannels"] =
+            RigAuthoring::serializeIKChannels(anim->ikChannels);
+        j_anim["duration"] = anim->duration;
+        j_anim["ticksPerSecond"] = anim->ticksPerSecond;
+        j_anim["startFrame"] = anim->startFrame;
+        j_anim["endFrame"] = anim->endFrame;
+
+        // Position keys
+        json j_pos_keys = json::object();
+        for (const auto &[nodeName, keys] : anim->positionKeys) {
+          json j_keys = json::array();
+          for (const auto &key : keys) {
+            j_keys.push_back({{"time", key.time},
+                              {"x", key.value.x},
+                              {"y", key.value.y},
+                              {"z", key.value.z}});
+          }
+          j_pos_keys[nodeName] = j_keys;
+        }
+        j_anim["positionKeys"] = j_pos_keys;
+
+        // Rotation keys
+        json j_rot_keys = json::object();
+        for (const auto &[nodeName, keys] : anim->rotationKeys) {
+          json j_keys = json::array();
+          for (const auto &key : keys) {
+            j_keys.push_back({{"time", key.time},
+                              {"w", key.value.w},
+                              {"x", key.value.x},
+                              {"y", key.value.y},
+                              {"z", key.value.z}});
+          }
+          j_rot_keys[nodeName] = j_keys;
+        }
+        j_anim["rotationKeys"] = j_rot_keys;
+
+        // Scaling keys
+        json j_scale_keys = json::object();
+        for (const auto &[nodeName, keys] : anim->scalingKeys) {
+          json j_keys = json::array();
+          for (const auto &key : keys) {
+            j_keys.push_back({{"time", key.time},
+                              {"x", key.value.x},
+                              {"y", key.value.y},
+                              {"z", key.value.z}});
+          }
+          j_scale_keys[nodeName] = j_keys;
+        }
+        j_anim["scalingKeys"] = j_scale_keys;
+
+        j_animations.push_back(j_anim);
+      }
+
+      root["animationDataList"] = j_animations;
+      SCENE_LOG_INFO("[ProjectManager] Saved " +
+                     std::to_string(scene.animationDataList.size()) +
+                     " animation clips.");
+    }
+
+    // Animation Graphs (Visual Scripting)
+    if (progress_callback)
+      progress_callback(83, "Saving animation graphs...");
+    {
+      json j_graphs = json::object();
+      for (const auto &[name, graph] : g_animGraphUI.graphs) {
+        if (graph) {
+          json g;
+          graph->saveToJson(g);
+          j_graphs[name] = g;
+        }
+      }
+      root["animationGraphs"] = j_graphs;
+      root["activeGraphCharacter"] = g_animGraphUI.activeCharacter;
+    }
+
+    // World Settings (Atmosphere, Godrays, etc.)
+    if (progress_callback)
+      progress_callback(82, "Saving world settings...");
+    json j_world;
+    renderer.world.serialize(j_world);
+    portabilizeWorldImagePath(j_world, "hdri_path", fs::path(filepath));
+    if (j_world.contains("advanced"))
+      portabilizeWorldImagePath(j_world["advanced"], "env_overlay_path",
+                                fs::path(filepath));
+    root["world"] = j_world;
+
+    // Water System
+    if (progress_callback)
+      progress_callback(83, "Saving water surfaces...");
+    root["water"] = WaterManager::getInstance().serialize();
+
+    // RayFusion probe producer: without this the Player re-traced the whole
+    // probe field on every open even when Studio had it switched off.
+    root["rayfusion_probe"] = {
+        {"traced", RayFusion::probeProducerTraced().load() != 0}};
+
+    // Game design: paint surfaces + their settings, splat rules, balloon demo.
+    {
+      saved_game_design = Paint::saveGameDesign(filepath, source_project_path);
+      if (!saved_game_design.is_null()) {
+        root["game_design"] = saved_game_design;
+      }
+    }
+    SCENE_LOG_INFO(
+        "[ProjectManager] Saved " +
+        std::to_string(WaterManager::getInstance().getWaterSurfaces().size()) +
+        " water surfaces.");
+
+    // Terrain System
+    if (progress_callback)
+      progress_callback(84, "Saving terrain system...");
+    auto abs_path = std::filesystem::absolute(filepath);
+    std::string terrainDir = abs_path.parent_path().string();
+    SCENE_LOG_INFO("[ProjectManager] Saving terrain system to: " + terrainDir);
+    root["terrain_system"] =
+        TerrainManager::getInstance().serialize(terrainDir);
+
+    // River System
+    if (progress_callback)
+      progress_callback(84, "Saving river system...");
+    root["rivers"] = RiverManager::getInstance().serialize();
+    root["road_assignments"] =
+        TerrainNodesV2::RoadNetworkRegistry::getInstance().serialize();
+    SCENE_LOG_INFO(
+        "[ProjectManager] Saved " +
+        std::to_string(RiverManager::getInstance().getRivers().size()) +
+        " rivers");
+
+    // Mesh Modifiers System
+    if (progress_callback)
+      progress_callback(84, "Saving mesh modifiers...");
+    root["mesh_modifiers"] = json::object();
+    for (const auto &[nodeName, stack] : scene.mesh_modifiers) {
+      if (!stack.modifiers.empty()) {
+        json stackJson;
+        stack.serialize(stackJson);
+        root["mesh_modifiers"][nodeName] = stackJson;
+      }
+    }
+    SCENE_LOG_INFO("[ProjectManager] Saved " +
+                   std::to_string(scene.mesh_modifiers.size()) +
+                   " mesh modifiers.");
+
+    // Geometry Node Graphs (Faz 8a Geo-DAG). Only graphs with at least one real
+    // operator node are saved — the default Base Mesh -> Output pair is
+    // recreated automatically by the Geometry Graph panel and carries no
+    // information. The pristine originalBaseMesh snapshot goes into the binary
+    // sidecar so a loaded graph's Evaluate starts from the true original
+    // instead of compounding onto the saved (already-evaluated) scene mesh.
+    {
+      if (progress_callback)
+        progress_callback(84, "Saving geometry node graphs...");
+      root["geometry_node_graphs"] = json::object();
+      size_t savedGraphCount = 0;
+      measureBinarySection("geometry_node_graphs", [&]() {
+        for (const auto &[nodeName, graphPtr] : scene.geometry_node_graphs) {
+          if (!graphPtr)
+            continue;
+          bool hasOperator = false;
+          for (const auto &n : graphPtr->nodes) {
+            const std::string t = n->getTypeId();
+            if (t != "GeoV2.BaseMesh" && t != "GeoV2.Output") {
+              hasOperator = true;
+              break;
+            }
+          }
+          if (!hasOperator)
+            continue;
+          json jg;
+          GeometryNodesV2::serializeGeometryGraph(*graphPtr, jg, &out_bin);
+          root["geometry_node_graphs"][nodeName] = jg;
+          ++savedGraphCount;
+        }
+      });
+      SCENE_LOG_INFO("[ProjectManager] Saved " +
+                     std::to_string(savedGraphCount) +
+                     " geometry node graphs.");
+    }
+
+    // Fixed-topology deformation clips use the project binary sidecar. The
+    // JSON stores only clip metadata/frame numbers; payload is tightly packed
+    // Vec3 P samples.
+    {
+      root["geometry_caches"] = json::object();
+      measureBinarySection("geometry_caches", [&]() {
+        Animation::serializeGeometryCaches(scene.geometry_caches,
+                                           root["geometry_caches"], &out_bin);
+      });
+    }
+
+    // Material Node Graphs (MaterialNodesV2 Faz 1) — structure only (no binary
+    // payload; textures are referenced by name and re-resolved on load). A
+    // graph with just the default Output node still carries the user's seeded
+    // values, but it is equivalent to the material itself, so only graphs with
+    // at least one additional node are saved.
+    {
+      root["material_node_graphs"] = json::object();
+      size_t savedMatGraphCount = 0;
+      for (const auto &[matName, graphPtr] : scene.material_node_graphs) {
+        if (!graphPtr || graphPtr->nodes.size() <= 1)
+          continue;
+        json jg;
+        MaterialNodesV2::serializeMaterialGraph(*graphPtr, jg);
+        root["material_node_graphs"][matName] = jg;
+        ++savedMatGraphCount;
+      }
+      if (savedMatGraphCount > 0) {
+        SCENE_LOG_INFO("[ProjectManager] Saved " +
+                       std::to_string(savedMatGraphCount) +
+                       " material node graphs.");
+      }
+    }
+
+    // Paint Layer Stacks
+    if (!scene.mesh_paint_layer_stacks.empty()) {
+      if (progress_callback)
+        progress_callback(84, "Saving paint layers...");
+      root["mesh_paint_layers"] = json::object();
+      measureBinarySection("paint_layers", [&]() {
+        for (const auto &[key, stack] : scene.mesh_paint_layer_stacks) {
+          if (stack.empty())
+            continue;
+          json j_stack;
+          stack.serialize(j_stack, out_bin);
+          root["mesh_paint_layers"][key] = j_stack;
+        }
+      });
+      SCENE_LOG_INFO("[ProjectManager] Saved " +
+                     std::to_string(scene.mesh_paint_layer_stacks.size()) +
+                     " paint layer stacks.");
+    }
+
+    // Foliage System
+    if (progress_callback)
+      progress_callback(84, "Saving foliage system...");
+    measureBinarySection("foliage", [&]() {
+      root["instances"] = InstanceManager::getInstance().serialize(&out_bin);
+    });
+    SCENE_LOG_INFO(
+        "[ProjectManager] Saved " +
+        std::to_string(InstanceManager::getInstance().getGroups().size()) +
+        " foliage groups.");
+
+    // VDB Volumes
+    if (progress_callback)
+      progress_callback(84, "Saving VDB volumes...");
+    root["vdb_volumes"] = serializeVDBVolumes(scene.vdb_volumes);
+    SCENE_LOG_INFO("[ProjectManager] Saved " +
+                   std::to_string(scene.vdb_volumes.size()) + " VDB volumes.");
+
+    // Gas Volumes
+    if (progress_callback)
+      progress_callback(84, "Saving Gas volumes...");
+    root["gas_volumes"] = serializeGasVolumes(scene.gas_volumes);
+    SCENE_LOG_INFO("[ProjectManager] Saved " +
+                   std::to_string(scene.gas_volumes.size()) + " Gas volumes.");
+
+    // Project substances (derived from built-ins; only overrides stored).
+    {
+      json substances = json::array();
+      for (const auto &item : RayTrophiSim::projectSubstances()) {
+        substances.push_back({{"name", item.name},
+                              {"based_on", item.based_on},
+                              {"overrides", item.overrides}});
+      }
+      root["substances"] = std::move(substances);
+    }
+
+    // Force Fields
+    if (progress_callback)
+      progress_callback(84, "Saving Force Fields...");
+    root["force_fields"] = serializeForceFields(scene.force_field_manager);
+    root["object_substances"] = matter::saveObjectSubstances(scene);
+    root["audio"] = scene.audio->save(pathFromUtf8(filepath));
+    SCENE_LOG_INFO(
+        "[ProjectManager] Saved " +
+        std::to_string(scene.force_field_manager.force_fields.size()) +
+        " Force Fields.");
+
+    // Particle Simulation
+    if (progress_callback)
+      progress_callback(84, "Saving particle simulation...");
+    scene.pruneInvalidParticleObjectBindings();
+    scene.syncActiveParticleSystemObjectFromRuntime();
+    root["particle_simulation"] = serializeParticleSimulation(scene);
+    if (auto particles = scene.getParticleSimulationSystem()) {
+      SCENE_LOG_INFO(
+          "[ProjectManager] Saved particle simulation with " +
+          std::to_string(particles->emitters().size()) + " emitters and " +
+          std::to_string(particles->colliders().size()) + " colliders.");
+    } else {
+      SCENE_LOG_INFO("[ProjectManager] Saved empty particle simulation.");
+    }
+
+    // Bone-attached solver-neutral collider producers.
+    root["kinematic_colliders"] =
+        RayTrophiSim::serializeKinematicColliders(scene.kinematic_colliders);
+    SCENE_LOG_INFO("[ProjectManager] Saved " +
+                   std::to_string(scene.kinematic_colliders.sets().size()) +
+                   " kinematic collider proxy set(s).");
+
+    // Rigid Bodies
+    if (progress_callback)
+      progress_callback(84, "Saving rigid bodies...");
+    root["rigid_bodies"] = serializeRigidBodies(scene);
+    SCENE_LOG_INFO("[ProjectManager] Saved " +
+                   std::to_string(scene.rigid_bodies.size()) +
+                   " rigid body descriptor(s).");
+
+    // Hair System
+    if (progress_callback)
+      progress_callback(84, "Saving hair system...");
+    // Use binary stream for faster saving
+    {
+      ScopedPerfTimer timer("saveProject serialize hair");
+      measureBinarySection("hair", [&]() {
+        root["hair"] = renderer.getHairSystem().serialize(&out_bin);
+      });
+    }
+    root["hair_material"] = renderer.getHairMaterial();
+    SCENE_LOG_INFO("[ProjectManager] Saved hair system with " +
+                   std::to_string(renderer.getHairSystem().getGroomCount()) +
+                   " grooms.");
+
+    // Imported Model Context Metadata
+    if (progress_callback)
+      progress_callback(84, "Saving model contexts...");
+    json j_contexts = json::array();
+    for (const auto &ctx : scene.importedModelContexts) {
+      json c;
+      c["importName"] = ctx.importName;
+      c["authoringOwned"] = ctx.authoringOwned;
+      c["rigRevision"] = ctx.rigRevision;
+      c["rigTemplateId"] = ctx.rigTemplateId;
+      c["rigTemplateVersion"] = ctx.rigTemplateVersion;
+      c["rigBoundMeshes"] = ctx.rigBoundMeshes;
+      c["rigWeightAlgorithm"] = ctx.rigWeightAlgorithm;
+      c["rigEnvelopeSettings"] = {
+          {"torso_radius", ctx.rigEnvelopeTorsoRadius},
+          {"limb_radius", ctx.rigEnvelopeLimbRadius},
+          {"extremity_radius", ctx.rigEnvelopeExtremityRadius},
+          {"falloff", ctx.rigEnvelopeFalloff}};
+      c["rigEnvelopeProfiles"] = json::array();
+      for (const auto &profile : ctx.rigEnvelopeProfiles) {
+        c["rigEnvelopeProfiles"].push_back(
+            {{"bone", profile.bone},
+             {"start_radius", profile.startRadius},
+             {"end_radius", profile.endRadius},
+             {"start_extension", profile.startExtension},
+             {"end_extension", profile.endExtension},
+             {"falloff", profile.falloff}});
+      }
+      c["rigSceneTransform"] =
+          RigAuthoring::serializeRigPlacement(ctx.rigSceneTransform);
+      c["nodeHierarchy"] =
+          RigAuthoring::serializeRigHierarchy(ctx.nodeHierarchy);
+      c["rigAnatomy"] = RigAuthoring::serializeRigAnatomy(ctx.rigAnatomy);
+      c["animGraphAssetKey"] = ctx.animGraphAssetKey;
+      c["hasAnimation"] = ctx.hasAnimation;
+      c["globalInverseTransform"] = mat4ToJson(ctx.globalInverseTransform);
+      c["useRootMotion"] = ctx.useRootMotion;
+      c["rootMotionBone"] = ctx.rootMotionBone;
+      c["useAnimGraph"] = ctx.useAnimGraph;
+      c["animGraphFollowTimeline"] = ctx.animGraphFollowTimeline;
+      c["preferOzzRuntime"] = ctx.preferOzzRuntime;
+      c["visible"] = ctx.visible;
+      j_contexts.push_back(c);
+    }
+    root["importedModelContexts"] = j_contexts;
+
+    // Textures (with embed option)
+    if (progress_callback)
+      progress_callback(85, "Processing textures...");
+    {
+      ScopedPerfTimer timer("saveProject serialize textures");
+      const bool embed_textures =
+          (save_settings.texture_storage_mode ==
+           ProjectManager::TextureStorageMode::Embedded);
+      // Textures the material node graphs reference but no material slot holds
+      // (an Image Texture behind a Bright/Contrast, ColorRamp, Mix, ...).
+      // Without these the project saves a graph pointing at a texture it never
+      // stored.
+      std::vector<std::shared_ptr<Texture>> graph_textures;
+      for (const auto &[matName, graphPtr] : scene.material_node_graphs) {
+        if (!graphPtr)
+          continue;
+        for (auto &tex : MaterialNodesV2::collectGraphTextures(*graphPtr)) {
+          graph_textures.push_back(std::move(tex));
+        }
+      }
+      measureBinarySection("textures", [&]() {
+        shared_root["textures"] =
+            serializeTextures(out_bin, embed_textures, graph_textures);
+      });
+    }
+
+    // Write JSON - Use error handler to replace invalid UTF-8 characters
+    // Write JSON - Use minified output (-1) for maximum performance and
+    // smallest size
+    {
+      ScopedPerfTimer timer("saveProject dump json");
+      out_json << root.dump(-1, ' ', false,
+                            nlohmann::json::error_handler_t::replace);
+      out_shared << shared_root.dump(-1, ' ', false,
+                                     nlohmann::json::error_handler_t::replace);
+    }
+
+    {
+      ScopedPerfTimer timer("saveProject flush streams");
+      out_json.flush();
+      out_bin.flush();
+      out_shared.flush();
+    }
+
+    const uint64_t total_bin_bytes = currentBinOffset();
+    SCENE_LOG_INFO("[ProjectManager] Binary section size report:");
+    for (const auto &[name, bytes] : bin_section_sizes) {
+      const double mb = static_cast<double>(bytes) / (1024.0 * 1024.0);
+      const double pct = total_bin_bytes > 0
+                             ? (100.0 * static_cast<double>(bytes) /
+                                static_cast<double>(total_bin_bytes))
+                             : 0.0;
+      SCENE_LOG_INFO("  - " + name + ": " + std::to_string(bytes) + " bytes (" +
+                     std::to_string(mb) + " MB, " + std::to_string(pct) + "%)");
+    }
+    SCENE_LOG_INFO("[ProjectManager] Binary total: " +
+                   std::to_string(total_bin_bytes) + " bytes (" +
+                   std::to_string(static_cast<double>(total_bin_bytes) /
+                                  (1024.0 * 1024.0)) +
+                   " MB)");
+
+    out_json.close();
+    out_bin.close();
+    out_shared.close();
+
+    if (progress_callback)
+      progress_callback(95, "Finalizing...");
+
+    // Atomic Commit
+    try {
+      ScopedPerfTimer timer("saveProject atomic commit");
+      if (fs::exists(final_json_path))
+        fs::remove(final_json_path);
+      if (fs::exists(final_bin_path))
+        fs::remove(final_bin_path);
+      if (fs::exists(final_shared_path))
+        fs::remove(final_shared_path);
+      fs::rename(temp_json_path, final_json_path);
+      fs::rename(temp_bin_path, final_bin_path);
+      fs::rename(temp_shared_path, final_shared_path);
+    } catch (const fs::filesystem_error &e) {
+      SCENE_LOG_ERROR("FileSystem Error during rename: " +
+                      std::string(e.what()));
+      return false;
+    }
+
+  } catch (const std::exception &e) {
+    SCENE_LOG_ERROR("Save failed: " + std::string(e.what()));
+    if (out_json.is_open())
+      out_json.close();
+    if (out_bin.is_open())
+      out_bin.close();
+    if (out_shared.is_open())
+      out_shared.close();
+    if (fs::exists(temp_json_path))
+      fs::remove(temp_json_path);
+    if (fs::exists(temp_bin_path))
+      fs::remove(temp_bin_path);
+    if (fs::exists(temp_shared_path))
+      fs::remove(temp_shared_path);
+    return false;
+  }
+
+  if (!as_copy) {
+    g_project.current_file_path = filepath;
+    Paint::adoptSavedGamePicturePaths(saved_game_design);
     g_project.is_modified = false;
     raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
+  }
 
-    // Bind an existing on-disk bake cache (render-only point cache) now that the
-    // project path is known AND particle systems are loaded (deserializeParticle
-    // Simulation ran earlier at the "particle_simulation" step). MUST be here, not
-    // inside deserializeParticleSimulation — current_file_path is only assigned on
-    // THIS line, i.e. AFTER that deserialize call, so doing it there saw an empty/
-    // stale path and the cache never bound. A config mismatch leaves it unbound
-    // (the sim falls back to live resimulation).
+  ProjectSimulationCache::afterSuccessfulSave(scene, source_project_path,
+                                              filepath, as_copy);
+  if (progress_callback)
+    progress_callback(100, "Done.");
+  SCENE_LOG_INFO(std::string(as_copy ? "Project copy saved: "
+                                     : "Project saved successfully: ") +
+                 filepath);
+  return true;
+}
+
+bool ProjectManager::openProject(
+    const std::string &filepath, SceneData &scene, RenderSettings &settings,
+    Renderer &renderer, Backend::IBackend *backend,
+    std::function<void(int, const std::string &)> progress_callback) {
+  ScopedPerfTimer total_timer("ProjectManager::openProject total");
+
+  const bool prev_use_optix = settings.use_optix;
+  const bool prev_use_vulkan = settings.use_vulkan;
+  const ProjectBackendMode prev_backend_mode = modeFromBackendPtr(backend);
+
+  if (progress_callback)
+    progress_callback(0, "Opening project file with turbo parser...");
+
+  // 1. Read JSON Metadata with simdjson
+  simdjson::dom::parser parser;
+  simdjson::dom::element root;
+
+  std::string read_error;
+  simdjson::error_code error;
+  {
+    ScopedPerfTimer timer("openProject parse json");
+    error = loadJsonRootFromFile(parser, filepath, root, &read_error);
+  }
+  if (error) {
+    SCENE_LOG_ERROR("Failed to parse project file with simdjson: " +
+                    std::string(simdjson::error_message(error)) +
+                    " | path=" + filepath +
+                    (read_error.empty() ? "" : " | read_error=" + read_error));
+    return false;
+  }
+
+  simdjson::dom::parser shared_parser;
+  simdjson::dom::element shared_root;
+  bool has_shared = false;
+  fs::path shared_filepath = pathFromUtf8(filepath);
+  shared_filepath += ".shared";
+  if (fs::exists(shared_filepath)) {
+    std::string shared_read_error;
+    simdjson::error_code shared_err =
+        loadJsonRootFromFile(shared_parser, shared_filepath.string(),
+                             shared_root, &shared_read_error);
+    if (!shared_err) {
+      has_shared = true;
+    } else {
+      SCENE_LOG_ERROR("Failed to parse shared library file: " +
+                      std::string(simdjson::error_message(shared_err)));
+      return false;
+    }
+  }
+
+  // 2. Prepare Binary Stream
+  fs::path bin_path = pathFromUtf8(filepath);
+  bin_path += ".bin";
+  std::ifstream bin_file(bin_path, std::ios::binary);
+  bool has_binary = bin_file.is_open();
+
+  // Fast path: slurp the whole .bin into RAM and parse from a memory stream.
+  // The skin-weight / standalone-triangle readers do per-element read() calls
+  // (10+ per triangle); against the file stream those dominate load time.
+  // Size-gated so a pathologically large .bin falls back to the file stream
+  // instead of doubling peak RSS.
+  std::vector<char> bin_data;
+  std::unique_ptr<MemReadBuf> bin_membuf;
+  std::unique_ptr<std::istream> bin_memstream;
+  if (has_binary) {
+    std::error_code size_ec;
+    const uintmax_t bin_size = fs::file_size(bin_path, size_ec);
+    constexpr uintmax_t kMaxInMemoryBin = 1ull << 30; // 1 GB
+    if (!size_ec && bin_size > 0 && bin_size <= kMaxInMemoryBin) {
+      ScopedPerfTimer timer("openProject slurp .bin");
+      bin_data.resize(static_cast<size_t>(bin_size));
+      if (bin_file.read(bin_data.data(),
+                        static_cast<std::streamsize>(bin_size))) {
+        bin_membuf =
+            std::make_unique<MemReadBuf>(bin_data.data(), bin_data.size());
+        bin_memstream = std::make_unique<std::istream>(bin_membuf.get());
+      } else {
+        bin_data.clear();
+        bin_data.shrink_to_fit();
+        bin_file.clear();
+        bin_file.seekg(0, std::ios::beg);
+      }
+    }
+  }
+  std::istream &in_bin =
+      bin_memstream ? *bin_memstream : static_cast<std::istream &>(bin_file);
+
+  // Clear current project and scene
+  if (progress_callback)
+    progress_callback(5, "Clearing scene...");
+
+  if (backend) {
+    backend->waitForCompletion();
+  }
+
+  const bool had_runtime_scene_content =
+      !scene.world.objects.empty() || !scene.gas_volumes.empty() ||
+      !scene.vdb_volumes.empty() || !scene.lights.empty();
+
+  {
+    ScopedPerfTimer timer("openProject reset scene");
+    // When opening a project over an existing runtime scene, keep the
+    // backend reset so old BLAS/textures are freed before the new load.
+    // On first startup the scene is already empty; deferring avoids waking
+    // the render backend during project parsing while the viewport is Solid.
+    newProject(scene, renderer, !had_runtime_scene_content);
+  }
+  // newProject already called TerrainManager::removeAllTerrains and
+  // scene.clear(); don't repeat them here.
+
+  auto temp_camera =
+      std::make_shared<Camera>(Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0),
+                               60.0f, 16.0f / 9.0f, 0.0f, 10.0f, 6);
+  temp_camera->nodeName = "Loading...";
+  scene.addCamera(temp_camera);
+
+  renderer.resetCPUAccumulation();
+  if (backend)
+    backend->resetAccumulation();
+
+  try {
+
+    // Load metadata
     {
-        const std::string cache_dir = SceneData::simCacheDirForProject(filepath);
-        if (!cache_dir.empty() && scene.setSimDiskCache(cache_dir)) {
-            SCENE_LOG_INFO("[ProjectManager] Simulation bake cache bound from: " + cache_dir);
-        } else if (!cache_dir.empty()) {
-            SCENE_LOG_INFO("[ProjectManager] No matching sim bake cache at: " + cache_dir +
-                           " (none baked, or config changed since bake).");
+      std::string_view fv_sv = "2.0";
+      simdjson::dom::element fv_el;
+      if (!root["format_version"].get(fv_el)) {
+        if (fv_el.is_number()) {
+          double fv_val = 2.0;
+          fv_el.get(fv_val);
+          g_project.format_version = std::to_string(fv_val).substr(0, 3);
+        } else {
+          fv_el.get(fv_sv);
+          g_project.format_version = std::string(fv_sv);
         }
+      } else {
+        g_project.format_version = "2.0";
+      }
     }
 
-    if (progress_callback) progress_callback(88, "Rebuilding model contexts...");
-
-    scene.initialized = true;
-    
-    // Foliage instances are always at the tail of scene.world.objects
-    // (appended by InstanceManager::rebuildSceneObjects). Skip them to
-    // avoid O(models × 2M) RTTI casts + string comparisons.
-    size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
-    size_t selectable_count = (foliage_count <= scene.world.objects.size())
-                                  ? (scene.world.objects.size() - foliage_count)
-                                  : scene.world.objects.size();
-
-    // Resolve type + node name ONCE per object, instead of once per (model × object):
-    // the old per-context scan did 2 dynamic_pointer_casts on every selectable object for
-    // every imported model, which is O(models × objects) RTTI on large scenes.
-    std::vector<std::pair<const std::string*, std::shared_ptr<Hittable>>> named_selectables;
-    named_selectables.reserve(selectable_count);
-    for (size_t i = 0; i < selectable_count; ++i) {
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
-            const std::string* name = &tri->getNodeName();
-            named_selectables.emplace_back(name, std::move(tri));
-        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(scene.world.objects[i])) {
-            const std::string* name = &mesh->nodeName;
-            named_selectables.emplace_back(name, std::move(mesh));
-        }
+    {
+      std::string_view name_sv = "Untitled", author_sv = "", desc_sv = "";
+      root["project_name"].get(name_sv);
+      root["author"].get(author_sv);
+      root["description"].get(desc_sv);
+      g_project.project_name = std::string(name_sv);
+      g_project.author = std::string(author_sv);
+      g_project.description = std::string(desc_sv);
     }
 
-    // Rebuild members
-    for (auto& ctx : scene.importedModelContexts) {
-        if (ctx.importName.empty()) continue;
-        if (!ctx.hasAnimation) {
-            for (const auto& animation : scene.animationDataList) {
-                if (animation &&
-                    (animation->modelName == ctx.importName ||
-                     (animation->modelName.empty() && scene.importedModelContexts.size() == 1))) {
-                    ctx.hasAnimation = true;
-                    break;
+    if (auto save_settings_el = root["save_settings"];
+        !save_settings_el.error()) {
+      simdjson::dom::object save_settings_obj;
+      if (!save_settings_el.get(save_settings_obj)) {
+        int64_t texture_storage_mode =
+            static_cast<int>(ProjectManager::TextureStorageMode::Embedded);
+        bool embed_missing_only = false;
+        bool save_geometry = true;
+
+        if (auto mode_el = save_settings_obj["texture_storage_mode"];
+            !mode_el.error()) {
+          mode_el.get(texture_storage_mode);
+        }
+        if (auto embed_missing_el = save_settings_obj["embed_missing_only"];
+            !embed_missing_el.error()) {
+          embed_missing_el.get(embed_missing_only);
+        }
+        if (auto save_geometry_el = save_settings_obj["save_geometry"];
+            !save_geometry_el.error()) {
+          save_geometry_el.get(save_geometry);
+        }
+
+        save_settings.texture_storage_mode =
+            static_cast<ProjectManager::TextureStorageMode>(
+                texture_storage_mode);
+        save_settings.embed_missing_only = embed_missing_only;
+        save_settings.save_geometry = save_geometry;
+      }
+    }
+
+    int64_t next_model = 1, next_obj = 1, next_tex = 1;
+    root["next_model_id"].get(next_model);
+    root["next_object_id"].get(next_obj);
+    root["next_texture_id"].get(next_tex);
+    g_project.next_model_id = (uint32_t)next_model;
+    g_project.next_object_id = (uint32_t)next_obj;
+    g_project.next_texture_id = (uint32_t)next_tex;
+
+    g_project.imported_models.clear();
+    simdjson::dom::element models_source;
+    simdjson::error_code models_err =
+        has_shared ? shared_root["imported_models"].get(models_source)
+                   : root["imported_models"].get(models_source);
+    if (!models_err) {
+      simdjson::dom::array imported_models_arr;
+      if (!models_source.get(imported_models_arr)) {
+        for (auto j_model_el : imported_models_arr) {
+          auto j_model = sjsonToNlohmann(j_model_el);
+          ImportedModelData model;
+          model.id = j_model.value("id", 0ull);
+          model.original_path = j_model.value("original_path", "");
+          model.package_path = j_model.value("package_path", "");
+          model.display_name = j_model.value("display_name", "");
+          model.deleted_objects =
+              j_model.value("deleted_objects", std::vector<std::string>{});
+
+          // For backwards compatibility: If instances are embedded here, load
+          // them
+          if (!has_shared && j_model.contains("objects") &&
+              j_model["objects"].is_array()) {
+            std::unordered_set<std::string> seen_nodes;
+            for (const auto &j_obj : j_model["objects"]) {
+              std::string node_name = j_obj.value("node_name", "");
+              if (seen_nodes.insert(node_name).second) {
+                ImportedModelData::ObjectInstance inst;
+                inst.node_name = std::move(node_name);
+                if (j_obj.contains("transform")) {
+                  inst.transform = jsonToMat4(j_obj["transform"]);
                 }
+                inst.material_id =
+                    j_obj.value("material_id", static_cast<uint16_t>(0));
+                inst.visible = j_obj.value("visible", true);
+                model.objects.push_back(inst);
+              }
             }
+          }
+
+          g_project.imported_models.push_back(std::move(model));
         }
-        ctx.members.clear();
-        std::string prefix = ctx.importName + "_";
-        for (const auto& [namePtr, obj] : named_selectables) {
-            if (namePtr->compare(0, prefix.size(), prefix) == 0) {
-                ctx.members.push_back(obj);
+      }
+    }
+
+    // If has_shared, instances are in root["model_instances"]
+    if (has_shared) {
+      simdjson::dom::element instances_el;
+      if (!root["model_instances"].get(instances_el)) {
+        simdjson::dom::array instances_arr;
+        if (!instances_el.get(instances_arr)) {
+          for (auto j_inst_el : instances_arr) {
+            auto j_inst = sjsonToNlohmann(j_inst_el);
+            uint64_t m_id = j_inst.value("model_id", 0ull);
+            ImportedModelData *model = g_project.findModelById(m_id);
+            if (model && j_inst.contains("objects") &&
+                j_inst["objects"].is_array()) {
+              std::unordered_set<std::string> seen_nodes;
+              for (const auto &j_obj : j_inst["objects"]) {
+                std::string node_name = j_obj.value("node_name", "");
+                if (seen_nodes.insert(node_name).second) {
+                  ImportedModelData::ObjectInstance inst;
+                  inst.node_name = std::move(node_name);
+                  if (j_obj.contains("transform")) {
+                    inst.transform = jsonToMat4(j_obj["transform"]);
+                  }
+                  inst.material_id =
+                      j_obj.value("material_id", static_cast<uint16_t>(0));
+                  inst.visible = j_obj.value("visible", true);
+                  model->objects.push_back(inst);
+                }
+              }
             }
+          }
         }
-        if (ctx.nodeHierarchy.empty()) {
+      }
+    }
+
+    fs::path project_folder = pathFromUtf8(filepath).parent_path();
+
+    bool is_v3 = (g_project.format_version == "3.0");
+    bool has_geometry = false;
+    root["has_geometry"].get(has_geometry);
+
+    auto loadSplineObjects = [&]() {
+      simdjson::dom::element spline_el;
+      if (!root["spline_objects"].get(spline_el)) {
+        simdjson::dom::array spline_arr;
+        if (!spline_el.get(spline_arr)) {
+          for (auto spline_item : spline_arr) {
+            auto payload = sjsonToNlohmann(spline_item);
+            auto object = std::make_shared<MeshEdit::SplineObject>();
+            std::string spline_error;
+            if (MeshEdit::deserializeSpline(payload, *object, spline_error)) {
+              object->visible = true;
+              scene.world.objects.push_back(std::move(object));
+            } else {
+              SCENE_LOG_WARN("Skipping invalid spline during project load: " +
+                             spline_error);
+            }
+          }
+        }
+      }
+    };
+    loadSplineObjects();
+
+    if (is_v3 && has_geometry && has_binary) {
+      if (progress_callback)
+        progress_callback(10, "Loading geometry...");
+      {
+        ScopedPerfTimer timer("openProject readGeometryBinary");
+        if (!readGeometryBinary(in_bin, scene)) {
+          SCENE_LOG_ERROR("Failed to read geometry from binary file.");
+          return false;
+        }
+      }
+
+      // Textures
+      simdjson::dom::element tex_el;
+      simdjson::error_code tex_err = has_shared
+                                         ? shared_root["textures"].get(tex_el)
+                                         : root["textures"].get(tex_el);
+      if (!tex_err) {
+        if (progress_callback)
+          progress_callback(35, "Restoring textures...");
+        ScopedPerfTimer timer("openProject deserializeTextures");
+        deserializeTextures(sjsonToNlohmann(tex_el), in_bin,
+                            project_folder.string());
+      }
+
+      // Materials
+      simdjson::dom::element mat_el;
+      simdjson::error_code mat_err = has_shared
+                                         ? shared_root["materials"].get(mat_el)
+                                         : root["materials"].get(mat_el);
+      if (!mat_err) {
+        if (progress_callback)
+          progress_callback(40, "Loading materials...");
+        ScopedPerfTimer timer("openProject deserialize materials");
+        MaterialManager::getInstance().deserialize(sjsonToNlohmann(mat_el),
+                                                   project_folder.string());
+      }
+
+      // Lights
+      simdjson::dom::element lights_el;
+      if (!root["lights"].get(lights_el)) {
+        if (progress_callback)
+          progress_callback(50, "Loading lights...");
+        deserializeLights(sjsonToNlohmann(lights_el), scene.lights);
+      }
+
+      // Cameras
+      simdjson::dom::element cams_el;
+      if (!root["cameras"].get(cams_el)) {
+        if (progress_callback)
+          progress_callback(60, "Loading cameras...");
+        deserializeCameras(sjsonToNlohmann(cams_el), scene);
+      } else {
+        scene.cameras.clear();
+        scene.camera = nullptr;
+        auto default_cam = std::make_shared<Camera>(
+            Vec3(0, 2, 5), Vec3(0, 0, 0), Vec3(0, 1, 0), 60.0f, 16.0f / 9.0f,
+            0.0f, 10.0f, 10);
+        default_cam->nodeName = "Default Camera";
+        scene.addCamera(default_cam);
+        scene.setActiveCamera(0);
+      }
+
+      // Render Settings
+      simdjson::dom::element rs_el;
+      if (!root["render_settings"].get(rs_el)) {
+        if (progress_callback)
+          progress_callback(70, "Loading render settings...");
+        deserializeRenderSettings(sjsonToNlohmann(rs_el), settings);
+      }
+      settings.animation_current_frame = 0;
+      settings.animation_playback_frame = 0;
+      settings.animation_is_playing = false;
+      // Post-Process / Color Grading
+      simdjson::dom::element postfx_el;
+      if (!root["postfx"].get(postfx_el)) {
+        json pj = sjsonToNlohmann(postfx_el);
+        auto &pp = scene.color_processor.params;
+        pp.global_exposure = pj.value("exposure", pp.global_exposure);
+        pp.global_gamma = pj.value("gamma", pp.global_gamma);
+        pp.saturation = pj.value("saturation", pp.saturation);
+        pp.color_temperature =
+            pj.value("color_temperature", pp.color_temperature);
+        pp.tone_mapping_type = static_cast<ToneMappingType>(
+            pj.value("tone_mapping", static_cast<int>(pp.tone_mapping_type)));
+        pp.enable_vignette = pj.value("vignette_enabled", pp.enable_vignette);
+        pp.vignette_strength =
+            pj.value("vignette_strength", pp.vignette_strength);
+        rtpost::loadExposure(pj, scene.color_processor);
+        // Also copy into global UI color processor so UI reflects loaded values
+        extern ColorProcessor color_processor; // defined in Main.cpp
+        color_processor.params = pp;
+      }
+
+      // UI Layout
+      std::string_view ui_layout;
+      if (!root["ui_layout"].get(ui_layout)) {
+        g_project.ui_layout_data = std::string(ui_layout);
+      }
+
+      // World Settings
+      simdjson::dom::element world_el;
+      if (!root["world"].get(world_el)) {
+        ScopedPerfTimer timer("openProject deserialize world");
+        nlohmann::json world_json = sjsonToNlohmann(world_el);
+        resolveWorldImagePath(world_json, "hdri_path", fs::path(filepath));
+        if (world_json.contains("advanced"))
+          resolveWorldImagePath(world_json["advanced"], "env_overlay_path",
+                                fs::path(filepath));
+        renderer.world.deserialize(world_json);
+      }
+
+      // Water Surfaces
+      simdjson::dom::element water_el;
+      if (!root["water"].get(water_el)) {
+        WaterManager::getInstance().deserialize(sjsonToNlohmann(water_el),
+                                                scene);
+      }
+
+      // Probe producer. A project that stores nothing gets the default, so one
+      // project's choice never leaks into the next one opened in this process.
+      {
+        bool traced = true;
+        simdjson::dom::element probe_el;
+        if (!root["rayfusion_probe"].get(probe_el)) {
+          bool v = true;
+          if (!probe_el["traced"].get(v))
+            traced = v;
+        }
+        RayFusion::probeProducerTraced().store(traced ? 1 : 0);
+      }
+
+      // Game design: applied by the shared simulation clock on its next
+      // tick, once the scene (and its GPU) is ready, in Studio and Player.
+      simdjson::dom::element game_design_el;
+      if (!root["game_design"].get(game_design_el)) {
+        Paint::queueGameDesign(sjsonToNlohmann(game_design_el));
+      }
+
+      // Terrain System
+      simdjson::dom::element ts_el;
+      if (!root["terrain_system"].get(ts_el)) {
+        if (progress_callback)
+          progress_callback(75, "Loading terrain system...");
+        auto abs_path = std::filesystem::absolute(filepath);
+        std::string terrainDir = abs_path.parent_path().string();
+        ScopedPerfTimer timer("openProject deserialize terrain");
+        TerrainManager::getInstance().deserialize(sjsonToNlohmann(ts_el),
+                                                  terrainDir, scene);
+      }
+
+      // River System
+      simdjson::dom::element rivers_el;
+      if (!root["rivers"].get(rivers_el)) {
+        if (progress_callback)
+          progress_callback(76, "Loading river system...");
+        RiverManager::getInstance().clear(&scene);
+        RiverManager::getInstance().deserialize(sjsonToNlohmann(rivers_el),
+                                                scene);
+      }
+
+      // Road assignments. Stores no curve geometry - only which spline is a
+      // road and under which profile - so it loads after the scene objects
+      // that own those curves.
+      simdjson::dom::element roads_el;
+      if (!root["road_assignments"].get(roads_el)) {
+        TerrainNodesV2::RoadNetworkRegistry::getInstance().deserialize(
+            sjsonToNlohmann(roads_el));
+      }
+
+      // Foliage System
+      simdjson::dom::element inst_el;
+      if (!root["instances"].get(inst_el)) {
+        if (progress_callback)
+          progress_callback(77, "Loading foliage system...");
+        ScopedPerfTimer timer("openProject deserialize foliage");
+        InstanceManager::getInstance().deserializeFast(inst_el, scene);
+        if (has_binary) {
+          InstanceManager::getInstance().deserializeBinaryInstances(inst_el,
+                                                                    in_bin);
+        }
+      }
+
+      if (InstanceManager::getInstance().getGroups().empty() &&
+          TerrainManager::getInstance().hasLegacyFoliage()) {
+        int migrated_legacy_groups =
+            TerrainManager::getInstance().migrateLegacyFoliageToInstanceGroups(
+                scene, true);
+        if (migrated_legacy_groups > 0 && progress_callback) {
+          progress_callback(77, "Migrating legacy foliage...");
+        }
+      }
+
+      if (!InstanceManager::getInstance().getGroups().empty()) {
+        Backend::BackendType backendType = Backend::BackendType::CPU_CUSTOM;
+        if (backend) {
+          backendType = backend->getInfo().type;
+        }
+        const bool nativeFlatInstances =
+            backendType == Backend::BackendType::VULKAN_RT ||
+            backendType == Backend::BackendType::VULKAN_COMPUTE ||
+            backendType == Backend::BackendType::OPTIX;
+        if (nativeFlatInstances) {
+          if (progress_callback)
+            progress_callback(77, "Loading flat foliage instances...");
+          for (auto &group : InstanceManager::getInstance().getGroups()) {
+            group.active_hittables.clear();
+            group.gpu_dirty = true;
+          }
+        } else {
+          if (progress_callback)
+            progress_callback(77, "Building foliage BVH & instances...");
+          InstanceManager::getInstance().rebuildSceneObjects(scene);
+        }
+      }
+
+      // Mesh Modifiers System
+      scene.mesh_modifiers.clear();
+      scene.base_mesh_cache.clear();
+      simdjson::dom::element modRoot;
+      if (!root["mesh_modifiers"].get(modRoot)) {
+        if (progress_callback)
+          progress_callback(78, "Loading mesh modifiers...");
+        nlohmann::json nlohmannMods = sjsonToNlohmann(modRoot);
+        for (auto it = nlohmannMods.begin(); it != nlohmannMods.end(); ++it) {
+          std::string nodeName = it.key();
+          MeshModifiers::ModifierStack stack;
+          stack.deserialize(it.value());
+          scene.mesh_modifiers[nodeName] = stack;
+        }
+
+        // We must lazily build base_mesh_cache for these modifiers, evaluate
+        // them and set new objects NOTE: Foliage instances (tail of objects
+        // vector) are never mesh-modified, so we can limit the scan to
+        // non-foliage objects for efficiency.
+        size_t mod_foliage_count =
+            InstanceManager::getInstance().getTotalInstanceCount();
+        size_t mod_selectable =
+            (mod_foliage_count <= scene.world.objects.size())
+                ? (scene.world.objects.size() - mod_foliage_count)
+                : scene.world.objects.size();
+
+        for (const auto &[nodeName, stack] : scene.mesh_modifiers) {
+          std::vector<std::shared_ptr<Triangle>> baseTriangles;
+          std::vector<std::shared_ptr<Hittable>> remainingObjects;
+          remainingObjects.reserve(scene.world.objects.size());
+
+          // Scan only non-foliage objects for modifier matches
+          for (size_t mi = 0; mi < mod_selectable; ++mi) {
+            const auto &obj = scene.world.objects[mi];
+            if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+              if (tri->getNodeName() == nodeName) {
+                baseTriangles.push_back(tri);
+              } else {
+                remainingObjects.push_back(obj);
+              }
+            } else {
+              remainingObjects.push_back(obj);
+            }
+          }
+          // Append foliage tail untouched
+          for (size_t mi = mod_selectable; mi < scene.world.objects.size();
+               ++mi) {
+            remainingObjects.push_back(scene.world.objects[mi]);
+          }
+
+          if (!baseTriangles.empty() && !stack.modifiers.empty()) {
+            scene.base_mesh_cache[nodeName] = baseTriangles;
+            const bool hasWater = std::any_of(
+                stack.modifiers.begin(), stack.modifiers.end(),
+                [](const MeshModifiers::ModifierData &modifier) {
+                  return modifier.enabled &&
+                         modifier.type ==
+                             MeshModifiers::ModifierType::WaterSurface;
+                });
+            const bool hasSimpleSubdivision = std::any_of(
+                stack.modifiers.begin(), stack.modifiers.end(),
+                [](const MeshModifiers::ModifierData &modifier) {
+                  return modifier.enabled &&
+                         modifier.type ==
+                             MeshModifiers::ModifierType::FlatSubdivision;
+                });
+            std::shared_ptr<TriangleMesh> evaluatedMesh;
+            auto newMesh =
+                (hasWater || hasSimpleSubdivision)
+                    ? stack.evaluate(baseTriangles, false, &evaluatedMesh)
+                    : stack.evaluate(baseTriangles, false);
+            // Insert new mesh BEFORE foliage tail in a single range insertion
+            // (prevents quadratic complexity O(N*M) which freezes on high-poly
+            // meshes)
+            size_t insert_pos = remainingObjects.size() - mod_foliage_count;
+            if (evaluatedMesh) {
+              evaluatedMesh->nodeName = nodeName;
+              remainingObjects.insert(remainingObjects.begin() + insert_pos,
+                                      evaluatedMesh);
+              ++mod_selectable;
+              if (hasWater) {
+                WaterManager::getInstance().bindExistingWaterMesh(
+                    evaluatedMesh, WaterSurface::Type::Plane);
+              }
+            } else {
+              remainingObjects.insert(remainingObjects.begin() + insert_pos,
+                                      newMesh.begin(), newMesh.end());
+              mod_selectable += newMesh.size(); // Track new non-foliage count
+            }
+            scene.world.objects = remainingObjects;
+          }
+        }
+      }
+
+      // Geometry Node Graphs (Faz 8a Geo-DAG). NOT auto-evaluated on load: the
+      // saved scene mesh IS the last evaluated result, so the scene already
+      // looks right — the graph (and its pristine originalBaseMesh from the
+      // binary sidecar) is just re-attached so the next Evaluate/Apply works
+      // correctly.
+      scene.geometry_node_graphs.clear();
+      {
+        simdjson::dom::element geo_graphs_el;
+        if (!root["geometry_node_graphs"].get(geo_graphs_el)) {
+          if (progress_callback)
+            progress_callback(78, "Loading geometry node graphs...");
+          nlohmann::json jGraphs = sjsonToNlohmann(geo_graphs_el);
+          for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
+            auto graph =
+                GeometryNodesV2::deserializeGeometryGraph(it.value(), &in_bin);
+            if (graph)
+              scene.geometry_node_graphs[it.key()] = graph;
+          }
+          SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                         std::to_string(scene.geometry_node_graphs.size()) +
+                         " geometry node graphs.");
+        }
+      }
+
+      scene.geometry_caches.clear();
+      {
+        simdjson::dom::element geometry_caches_el;
+        if (!root["geometry_caches"].get(geometry_caches_el)) {
+          Animation::deserializeGeometryCaches(
+              sjsonToNlohmann(geometry_caches_el), scene.geometry_caches,
+              &in_bin);
+          SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                         std::to_string(scene.geometry_caches.size()) +
+                         " geometry caches.");
+        }
+      }
+
+      // Material Node Graphs (MaterialNodesV2 Faz 1). NOT auto-applied on load:
+      // the saved material values ARE the last applied result — the graph is
+      // just re-attached so the next Apply works. Runs after materials
+      // deserialize, so texture-by-name references resolve against the live
+      // session first.
+      scene.material_node_graphs.clear();
+      {
+        simdjson::dom::element mat_graphs_el;
+        if (!root["material_node_graphs"].get(mat_graphs_el)) {
+          nlohmann::json jGraphs = sjsonToNlohmann(mat_graphs_el);
+          for (auto it = jGraphs.begin(); it != jGraphs.end(); ++it) {
+            auto graph = MaterialNodesV2::deserializeMaterialGraph(it.value());
+            if (graph)
+              scene.material_node_graphs[it.key()] = graph;
+          }
+          if (!scene.material_node_graphs.empty()) {
+            SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                           std::to_string(scene.material_node_graphs.size()) +
+                           " material node graphs.");
+          }
+          // Resolve the graphs' Image Texture references NOW, while the
+          // embedded blob cache is still alive — clearEmbeddedTextureCache()
+          // runs at the end of this load. A graph texture behind a manipulation
+          // node is bound to no material slot, so nothing else has already
+          // pulled it out of the cache, and by the time the editor lazily
+          // resolved it the blobs were gone: the node came back empty.
+          // Resolving here also hands every node the SAME Texture object the
+          // materials use, instead of a private duplicate.
+          size_t resolvedGraphTextures = 0;
+          for (const auto &[matName, graphPtr] : scene.material_node_graphs) {
+            if (!graphPtr)
+              continue;
+            resolvedGraphTextures +=
+                MaterialNodesV2::collectGraphTextures(*graphPtr).size();
+          }
+          if (resolvedGraphTextures > 0) {
+            SCENE_LOG_INFO("[ProjectManager] Resolved " +
+                           std::to_string(resolvedGraphTextures) +
+                           " material-graph textures.");
+          }
+
+          // Rebuild the compiled per-pixel programs (textures are resolved by
+          // now, so their chains compile with the right texture handles).
+          // Without this the graph did nothing until the node editor was opened
+          // on that material and Live was toggled — the only thing that re-ran
+          // the compile.
+          const size_t activePrograms =
+              MaterialNodesV2::compileGraphProgramsForScene(
+                  scene.material_node_graphs);
+          if (activePrograms > 0) {
+            SCENE_LOG_INFO("[ProjectManager] Compiled " +
+                           std::to_string(activePrograms) +
+                           " per-pixel material programs from node graphs.");
+          }
+        }
+      }
+
+      // Paint Layer Stacks
+      simdjson::dom::element paint_layers_el;
+      if (!root["mesh_paint_layers"].get(paint_layers_el)) {
+        if (progress_callback)
+          progress_callback(79, "Loading paint layers...");
+        nlohmann::json j_paint = sjsonToNlohmann(paint_layers_el);
+        for (auto it = j_paint.begin(); it != j_paint.end(); ++it) {
+          Paint::PaintLayerStack stack;
+          stack.deserialize(it.value(), in_bin);
+          scene.mesh_paint_layer_stacks[it.key()] = std::move(stack);
+        }
+        SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                       std::to_string(scene.mesh_paint_layer_stacks.size()) +
+                       " paint layer stacks.");
+      }
+
+      SCENE_LOG_INFO("[ProjectManager] load step: substances");
+      // Project substances BEFORE anything that names one. Always
+      // replaced, also with an empty set: the previous project's
+      // substances must not leak into this one.
+      {
+        std::vector<RayTrophiSim::ProjectSubstance> substances;
+        simdjson::dom::element substances_el;
+        if (!root["substances"].get(substances_el)) {
+          const json list = sjsonToNlohmann(substances_el);
+          for (const auto &item : list) {
+            RayTrophiSim::ProjectSubstance substance;
+            substance.name = item.value("name", std::string());
+            substance.based_on = item.value("based_on", std::string());
+            substance.overrides = item.value("overrides", json::object());
+            substances.push_back(std::move(substance));
+          }
+        }
+        std::string substance_error;
+        if (!RayTrophiSim::replaceProjectSubstances(substances,
+                                                    substance_error)) {
+          // Nothing is half-loaded: the library keeps built-ins only,
+          // and every reference to a project substance now fails its
+          // strict lookup by name instead of borrowing another one.
+          const std::string load_error = substance_error;
+          RayTrophiSim::replaceProjectSubstances({}, substance_error);
+          SCENE_LOG_ERROR("[ProjectManager] Project substances not loaded: " +
+                          load_error);
+        } else if (!substances.empty()) {
+          SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                         std::to_string(substances.size()) +
+                         " project substances.");
+        }
+      }
+
+      SCENE_LOG_INFO("[ProjectManager] load step: vdb/gas/forcefields");
+      // VDB / Gas / Force Fields / Particle Simulation
+      simdjson::dom::element vdb_el, gas_el, ff_el, particles_el;
+      simdjson::dom::element kinematic_el, rigid_el;
+      if (!root["vdb_volumes"].get(vdb_el))
+        deserializeVDBVolumes(sjsonToNlohmann(vdb_el), scene);
+      if (!root["gas_volumes"].get(gas_el))
+        deserializeGasVolumes(sjsonToNlohmann(gas_el), scene);
+      if (!root["force_fields"].get(ff_el))
+        deserializeForceFields(sjsonToNlohmann(ff_el), scene);
+      SCENE_LOG_INFO(
+          "[ProjectManager] load step: object substances + audio restore");
+      if (progress_callback)
+        progress_callback(80, "Restoring audio...");
+      simdjson::dom::element audio_el;
+      simdjson::dom::element object_substances_el;
+      matter::restoreObjectSubstances(
+          scene, root["object_substances"].get(object_substances_el)
+                     ? json::object()
+                     : sjsonToNlohmann(object_substances_el));
+      scene.audio->restore(
+          root["audio"].get(audio_el) ? json() : sjsonToNlohmann(audio_el),
+          pathFromUtf8(filepath).parent_path());
+      SCENE_LOG_INFO("[ProjectManager] load step: particles");
+      if (progress_callback)
+        progress_callback(81, "Preparing particle systems...");
+      if (!root["particle_simulation"].get(particles_el))
+        deserializeParticleSimulation(sjsonToNlohmann(particles_el), scene);
+      SCENE_LOG_INFO("[ProjectManager] load step: kinematic colliders");
+      if (progress_callback)
+        progress_callback(82, "Restoring physics...");
+      if (!root["kinematic_colliders"].get(kinematic_el)) {
+        std::string error;
+        if (!RayTrophiSim::deserializeKinematicColliders(
+                sjsonToNlohmann(kinematic_el), scene.kinematic_colliders,
+                error)) {
+          throw std::runtime_error("Kinematic colliders: " + error);
+        }
+      }
+      SCENE_LOG_INFO("[ProjectManager] load step: rigid bodies");
+      if (!root["rigid_bodies"].get(rigid_el))
+        deserializeRigidBodies(sjsonToNlohmann(rigid_el), scene);
+
+      SCENE_LOG_INFO("[ProjectManager] load step: hair");
+      // Hair System
+      // newProject already cleared HairSystem + uploaded empty hair to GPU.
+      // Skip the redundant second clear/upload here; only load + upload when
+      // the project actually has hair data. For projects without hair the
+      // newProject clear is sufficient.
+      simdjson::dom::element hair_el;
+      if (!root["hair"].get(hair_el)) {
+        if (progress_callback)
+          progress_callback(78, "Loading hair system...");
+        renderer.getHairSystem().clearAll();
+        renderer.getHairSystem().deserialize(sjsonToNlohmann(hair_el), &in_bin);
+
+        simdjson::dom::element hm_el;
+        if (!root["hair_material"].get(hm_el)) {
+          auto j_hm = sjsonToNlohmann(hm_el);
+          renderer.setHairMaterial(j_hm.get<Hair::HairMaterialParams>());
+        }
+        renderer.getHairSystem().buildBVH();
+        renderer.uploadHairToGPU();
+      }
+
+      SCENE_LOG_INFO("[ProjectManager] load step: timeline");
+      // Timeline
+      simdjson::dom::element timeline_el;
+      if (!root["timeline"].get(timeline_el)) {
+        scene.timeline.deserialize(sjsonToNlohmann(timeline_el));
+      }
+      // Open at the authored initial state, without replaying a saved scrub
+      // frame.
+      scene.timeline.current_frame = 0;
+
+      SCENE_LOG_INFO("[ProjectManager] load step: animation graphs");
+      // Animation Graphs
+      simdjson::dom::element anim_graphs_el;
+      if (!root["animationGraphs"].get(anim_graphs_el)) {
+        g_animGraphUI = AnimGraphUIState();
+        auto j_graphs = sjsonToNlohmann(anim_graphs_el);
+        for (auto &[name, j_graph] : j_graphs.items()) {
+          auto graph = std::make_unique<AnimationGraph::AnimationNodeGraph>();
+          graph->loadFromJson(j_graph);
+          g_animGraphUI.graphs[name] = std::move(graph);
+        }
+        std::string_view active_graph;
+        if (!root["activeGraphCharacter"].get(active_graph)) {
+          g_animGraphUI.activeCharacter = std::string(active_graph);
+        }
+      }
+
+      SCENE_LOG_INFO("[ProjectManager] load step: bone data");
+      // Bone Data
+      simdjson::dom::element bone_el;
+      if (!root["boneData"].get(bone_el)) {
+        scene.boneData.clear();
+        auto j_bones = sjsonToNlohmann(bone_el);
+        for (auto &[name, idx] : j_bones["boneNameToIndex"].items()) {
+          scene.boneData.boneNameToIndex[name] = idx.get<int>();
+        }
+        if (j_bones.contains("boneOffsetMatrices")) {
+          for (auto &[name, mat] : j_bones["boneOffsetMatrices"].items()) {
+            scene.boneData.boneOffsetMatrices[name] = jsonToMat4(mat);
+          }
+        }
+        if (j_bones.contains("boneDefaultTransforms")) {
+          for (auto &[name, mat] : j_bones["boneDefaultTransforms"].items()) {
+            scene.boneData.boneDefaultTransforms[name] = jsonToMat4(mat);
+          }
+        }
+        if (j_bones.contains("weightedBoneNames")) {
+          for (const auto &name : j_bones["weightedBoneNames"]) {
+            scene.boneData.weightedBoneNames.insert(name.get<std::string>());
+          }
+        }
+        if (j_bones.contains("boneParents")) {
+          for (auto &[child, parent] : j_bones["boneParents"].items()) {
+            scene.boneData.boneParents[child] = parent.get<std::string>();
+          }
+        }
+        if (j_bones.contains("perModelInverses")) {
+          for (auto &[prefix, mat] : j_bones["perModelInverses"].items()) {
+            scene.boneData.perModelInverses[prefix] = jsonToMat4(mat);
+          }
+        }
+        if (j_bones.contains("globalInverseTransform")) {
+          scene.boneData.globalInverseTransform =
+              jsonToMat4(j_bones["globalInverseTransform"]);
+        }
+        scene.boneData.rebuildReverseLookup();
+      }
+
+      SCENE_LOG_INFO("[ProjectManager] load step: ui settings");
+      // UI Settings
+      simdjson::dom::element ui_set_el;
+      if (!root["ui_settings"].get(ui_set_el)) {
+        scene.ui_settings_json_str = std::string(simdjson::minify(ui_set_el));
+        scene.load_counter++;
+      }
+
+      SCENE_LOG_INFO("[ProjectManager] load step: imported model contexts");
+      // Imported Models Contexts
+      simdjson::dom::array imc_arr;
+      if (!root["importedModelContexts"].get(imc_arr)) {
+        RigAuthoring::clearSelection(scene);
+        scene.rigView.edit_mode = false;
+        scene.rigView.edit_character.clear();
+        scene.rigView.pose_views.clear();
+        scene.rigView.pose_view_dirty.clear();
+        scene.importedModelContexts.clear();
+        for (auto j_ctx_el : imc_arr) {
+          auto j_ctx = sjsonToNlohmann(j_ctx_el);
+          SceneData::ImportedModelContext ctx;
+          ctx.importName = j_ctx.value("importName", "");
+          ctx.animGraphAssetKey =
+              j_ctx.value("animGraphAssetKey", ctx.importName);
+          ctx.hasAnimation = j_ctx.value("hasAnimation", false);
+          if (j_ctx.contains("globalInverseTransform")) {
+            ctx.globalInverseTransform =
+                jsonToMat4(j_ctx["globalInverseTransform"]);
+          } else {
+            ctx.globalInverseTransform = Matrix4x4::identity();
+          }
+          ctx.useRootMotion = j_ctx.value("useRootMotion", false);
+          ctx.rootMotionBone = j_ctx.value("rootMotionBone", "");
+          ctx.useAnimGraph = j_ctx.value("useAnimGraph", false);
+          ctx.animGraphFollowTimeline =
+              j_ctx.value("animGraphFollowTimeline", false);
+          ctx.preferOzzRuntime = j_ctx.value("preferOzzRuntime", true);
+          ctx.loggedOzzRuntimeUsage = false;
+          ctx.visible = j_ctx.value("visible", true);
+          ctx.authoringOwned = j_ctx.value("authoringOwned", false);
+          ctx.rigRevision = j_ctx.value("rigRevision", uint64_t{0});
+          ctx.rigTemplateId = j_ctx.value("rigTemplateId", std::string{});
+          ctx.rigTemplateVersion = j_ctx.value("rigTemplateVersion", 1);
+          if (j_ctx.contains("rigBoundMeshes")) {
             std::string error;
-            if (!RigAuthoring::rebuildLegacyRigHierarchy(scene.boneData, ctx.importName, ctx.nodeHierarchy, error)) {
-                SCENE_LOG_ERROR("[ProjectManager] Cannot restore legacy rig hierarchy " + ctx.importName + ": " + error);
-                return false;
+            if (!RigAuthoring::readRigBoundMeshes(j_ctx["rigBoundMeshes"],
+                                                  ctx.rigBoundMeshes, error)) {
+              throw std::runtime_error(error);
             }
+          }
+          ctx.rigWeightAlgorithm =
+              j_ctx.value("rigWeightAlgorithm", std::string{});
+          if (ctx.rigWeightAlgorithm != "" &&
+              ctx.rigWeightAlgorithm != "nearest_segment" &&
+              ctx.rigWeightAlgorithm != "anatomical_capsule_v1" &&
+              ctx.rigWeightAlgorithm != "geodesic_voxel_v1") {
+            throw std::runtime_error("Invalid rig weight algorithm");
+          }
+          if (j_ctx.contains("rigEnvelopeSettings")) {
+            const auto &settings = j_ctx["rigEnvelopeSettings"];
+            ctx.rigEnvelopeTorsoRadius = settings.value("torso_radius", .16f);
+            ctx.rigEnvelopeLimbRadius = settings.value("limb_radius", .065f);
+            ctx.rigEnvelopeExtremityRadius =
+                settings.value("extremity_radius", .05f);
+            ctx.rigEnvelopeFalloff = settings.value("falloff", 2.f);
+            const bool validEnvelope =
+                std::isfinite(ctx.rigEnvelopeTorsoRadius) &&
+                ctx.rigEnvelopeTorsoRadius >= .02f &&
+                ctx.rigEnvelopeTorsoRadius <= .5f &&
+                std::isfinite(ctx.rigEnvelopeLimbRadius) &&
+                ctx.rigEnvelopeLimbRadius >= .01f &&
+                ctx.rigEnvelopeLimbRadius <= .3f &&
+                std::isfinite(ctx.rigEnvelopeExtremityRadius) &&
+                ctx.rigEnvelopeExtremityRadius >= .005f &&
+                ctx.rigEnvelopeExtremityRadius <= .2f &&
+                std::isfinite(ctx.rigEnvelopeFalloff) &&
+                ctx.rigEnvelopeFalloff >= .5f && ctx.rigEnvelopeFalloff <= 8.f;
+            if (!validEnvelope)
+              throw std::runtime_error("Invalid rig envelope settings");
+          }
+          if (j_ctx.contains("rigEnvelopeProfiles")) {
+            const auto &profiles = j_ctx["rigEnvelopeProfiles"];
+            if (!profiles.is_array() || profiles.size() > 4096)
+              throw std::runtime_error("Invalid rig envelope profiles");
+            std::unordered_set<std::string> envelopeBones;
+            for (const auto &value : profiles) {
+              RigAuthoring::EnvelopeBoneProfile profile;
+              profile.bone = value.at("bone").get<std::string>();
+              profile.startRadius = value.at("start_radius").get<float>();
+              profile.endRadius = value.at("end_radius").get<float>();
+              profile.startExtension = value.at("start_extension").get<float>();
+              profile.endExtension = value.at("end_extension").get<float>();
+              profile.falloff = value.at("falloff").get<float>();
+              const bool validProfile =
+                  !profile.bone.empty() &&
+                  envelopeBones.insert(profile.bone).second &&
+                  std::isfinite(profile.startRadius) &&
+                  profile.startRadius >= .005f && profile.startRadius <= .5f &&
+                  std::isfinite(profile.endRadius) &&
+                  profile.endRadius >= .005f && profile.endRadius <= .5f &&
+                  std::isfinite(profile.startExtension) &&
+                  profile.startExtension >= 0.f &&
+                  profile.startExtension <= .75f &&
+                  std::isfinite(profile.endExtension) &&
+                  profile.endExtension >= 0.f && profile.endExtension <= .75f &&
+                  std::isfinite(profile.falloff) && profile.falloff >= .5f &&
+                  profile.falloff <= 8.f;
+              if (!validProfile)
+                throw std::runtime_error("Invalid rig envelope profile");
+              ctx.rigEnvelopeProfiles.push_back(std::move(profile));
+            }
+          }
+          if (j_ctx.contains("nodeHierarchy")) {
+            std::string error;
+            if (!RigAuthoring::deserializeRigHierarchy(
+                    j_ctx["nodeHierarchy"], ctx.nodeHierarchy, error))
+              throw std::runtime_error("Model hierarchy " + ctx.importName +
+                                       ": " + error);
+          }
+          if (j_ctx.contains("rigSceneTransform")) {
+            std::string error;
+            if (!RigAuthoring::deserializeRigPlacement(
+                    j_ctx["rigSceneTransform"], ctx.rigSceneTransform, error))
+              throw std::runtime_error("Rig placement " + ctx.importName +
+                                       ": " + error);
+          }
+          if (j_ctx.contains("rigAnatomy")) {
+            std::string error;
+            if (!RigAuthoring::deserializeRigAnatomy(j_ctx["rigAnatomy"],
+                                                     ctx.nodeHierarchy,
+                                                     ctx.rigAnatomy, error))
+              throw std::runtime_error("Rig anatomy " + ctx.importName + ": " +
+                                       error);
+          }
+          if (!ctx.animGraphAssetKey.empty()) {
+            auto itGraph = g_animGraphUI.graphs.find(ctx.animGraphAssetKey);
+            if (itGraph != g_animGraphUI.graphs.end() && itGraph->second) {
+              ctx.runtimeGraph = itGraph->second->clone();
+              ctx.graph = ctx.runtimeGraph;
+            }
+          }
+          scene.importedModelContexts.push_back(ctx);
         }
-        ctx.rebuildSkeletonRepresentation(scene.boneData);
+      }
+
+      // Animation Data List
+      simdjson::dom::array adl_arr;
+      if (!root["animationDataList"].get(adl_arr)) {
+        scene.animationDataList.clear();
+        for (auto j_anim_el : adl_arr) {
+          auto j_anim = sjsonToNlohmann(j_anim_el);
+          AnimationData anim;
+          anim.name = j_anim.value("name", "");
+          anim.modelName = j_anim.value("modelName", "");
+          anim.rigAuthoring = j_anim.value("rigAuthoring", false);
+          if (j_anim.contains("ikChannels")) {
+            std::string error;
+            if (!RigAuthoring::deserializeIKChannels(j_anim["ikChannels"],
+                                                     anim.ikChannels, error))
+              throw std::runtime_error(error);
+          }
+          anim.duration = j_anim.value("duration", 0.0);
+          anim.ticksPerSecond = j_anim.value("ticksPerSecond", 24.0);
+          anim.startFrame = j_anim.value("startFrame", 0);
+          anim.endFrame = j_anim.value("endFrame", 0);
+
+          if (j_anim.contains("positionKeys")) {
+            for (auto &[nodeName, j_keys] : j_anim["positionKeys"].items()) {
+              // ★ The .rtp key SCHEMA is unchanged (time/x/y/z):
+              // Faz 0 swapped the in-memory type, not the file
+              // format, so old projects load unchanged.
+              RayTrophi::VectorKeys keys;
+              keys.reserve(j_keys.size());
+              for (const auto &k : j_keys) {
+                keys.emplace_back(k.value("time", 0.0),
+                                  Vec3(k.value("x", 0.0f), k.value("y", 0.0f),
+                                       k.value("z", 0.0f)));
+              }
+              anim.positionKeys[nodeName] = std::move(keys);
+            }
+          }
+          if (j_anim.contains("rotationKeys")) {
+            for (auto &[nodeName, j_keys] : j_anim["rotationKeys"].items()) {
+              RayTrophi::QuatKeys keys;
+              keys.reserve(j_keys.size());
+              for (const auto &k : j_keys) {
+                // Quaternion's constructor is (w, x, y, z) - the
+                // same order the file stores.
+                keys.emplace_back(
+                    k.value("time", 0.0),
+                    Quaternion(k.value("w", 1.0f), k.value("x", 0.0f),
+                               k.value("y", 0.0f), k.value("z", 0.0f)));
+              }
+              anim.rotationKeys[nodeName] = std::move(keys);
+            }
+          }
+          if (j_anim.contains("scalingKeys")) {
+            for (auto &[nodeName, j_keys] : j_anim["scalingKeys"].items()) {
+              RayTrophi::VectorKeys keys;
+              keys.reserve(j_keys.size());
+              for (const auto &k : j_keys) {
+                // Scale defaults to 1, not 0 - a missing component
+                // here must not collapse the node.
+                keys.emplace_back(k.value("time", 0.0),
+                                  Vec3(k.value("x", 1.0f), k.value("y", 1.0f),
+                                       k.value("z", 1.0f)));
+              }
+              anim.scalingKeys[nodeName] = std::move(keys);
+            }
+          }
+
+          {
+            std::string error;
+            if (!RigAuthoring::validateIKClipChannels(scene, anim, error))
+              throw std::runtime_error(error);
+          }
+          scene.animationDataList.push_back(
+              std::make_shared<AnimationData>(anim));
+        }
+      }
+
+      clearEmbeddedTextureCache();
+    } else {
+      SCENE_LOG_ERROR(
+          "Project file is in legacy format. Please re-import your models.");
+      return false;
     }
 
-    std::string rigRuntimeError;
-    if (!RigAuthoring::restoreOwnedRigRuntime(scene, rigRuntimeError)) {
-        SCENE_LOG_ERROR("[ProjectManager] " + rigRuntimeError);
+  } catch (const std::exception &e) {
+    SCENE_LOG_ERROR("Error during project loading: " + std::string(e.what()));
+    return false;
+  }
+
+  if (bin_file.is_open())
+    bin_file.close();
+  bin_memstream.reset();
+  bin_membuf.reset();
+  bin_data.clear();
+  bin_data.shrink_to_fit();
+
+  const ProjectBackendMode requested_backend_mode = modeFromSettings(settings);
+  const bool backend_mode_changed =
+      (settings.use_optix != prev_use_optix) ||
+      (settings.use_vulkan != prev_use_vulkan) ||
+      (requested_backend_mode != prev_backend_mode);
+  if (backend_mode_changed) {
+    settings.backend_changed = true;
+    SCENE_LOG_INFO(std::string("[ProjectLoad] Backend switch scheduled: ") +
+                   modeToString(prev_backend_mode) + " -> " +
+                   modeToString(requested_backend_mode));
+  }
+
+  g_project.current_file_path = filepath;
+  g_project.is_modified = false;
+  raytrophi::templates::TemplateHubUI::instance().addRecentProject(filepath);
+
+  // Bind an existing on-disk bake cache (render-only point cache) now that the
+  // project path is known AND particle systems are loaded (deserializeParticle
+  // Simulation ran earlier at the "particle_simulation" step). MUST be here,
+  // not inside deserializeParticleSimulation — current_file_path is only
+  // assigned on THIS line, i.e. AFTER that deserialize call, so doing it there
+  // saw an empty/ stale path and the cache never bound. A config mismatch
+  // leaves it unbound (the sim falls back to live resimulation).
+  {
+    const std::string cache_dir = SceneData::simCacheDirForProject(filepath);
+    if (!cache_dir.empty() && scene.setSimDiskCache(cache_dir)) {
+      SCENE_LOG_INFO("[ProjectManager] Simulation bake cache bound from: " +
+                     cache_dir);
+    } else if (!cache_dir.empty()) {
+      SCENE_LOG_INFO(
+          "[ProjectManager] No matching sim bake cache at: " + cache_dir +
+          " (none baked, or config changed since bake).");
+    }
+  }
+
+  if (progress_callback)
+    progress_callback(88, "Rebuilding model contexts...");
+
+  scene.initialized = true;
+
+  // Foliage instances are always at the tail of scene.world.objects
+  // (appended by InstanceManager::rebuildSceneObjects). Skip them to
+  // avoid O(models × 2M) RTTI casts + string comparisons.
+  size_t foliage_count = InstanceManager::getInstance().getTotalInstanceCount();
+  size_t selectable_count = (foliage_count <= scene.world.objects.size())
+                                ? (scene.world.objects.size() - foliage_count)
+                                : scene.world.objects.size();
+
+  // Resolve type + node name ONCE per object, instead of once per (model ×
+  // object): the old per-context scan did 2 dynamic_pointer_casts on every
+  // selectable object for every imported model, which is O(models × objects)
+  // RTTI on large scenes.
+  std::vector<std::pair<const std::string *, std::shared_ptr<Hittable>>>
+      named_selectables;
+  named_selectables.reserve(selectable_count);
+  for (size_t i = 0; i < selectable_count; ++i) {
+    if (auto tri =
+            std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
+      const std::string *name = &tri->getNodeName();
+      named_selectables.emplace_back(name, std::move(tri));
+    } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(
+                   scene.world.objects[i])) {
+      const std::string *name = &mesh->nodeName;
+      named_selectables.emplace_back(name, std::move(mesh));
+    }
+  }
+
+  // Rebuild members
+  for (auto &ctx : scene.importedModelContexts) {
+    if (ctx.importName.empty())
+      continue;
+    if (!ctx.hasAnimation) {
+      for (const auto &animation : scene.animationDataList) {
+        if (animation && (animation->modelName == ctx.importName ||
+                          (animation->modelName.empty() &&
+                           scene.importedModelContexts.size() == 1))) {
+          ctx.hasAnimation = true;
+          break;
+        }
+      }
+    }
+    ctx.members.clear();
+    std::string prefix = ctx.importName + "_";
+    for (const auto &[namePtr, obj] : named_selectables) {
+      if (namePtr->compare(0, prefix.size(), prefix) == 0) {
+        ctx.members.push_back(obj);
+      }
+    }
+    if (ctx.nodeHierarchy.empty()) {
+      std::string error;
+      if (!RigAuthoring::rebuildLegacyRigHierarchy(
+              scene.boneData, ctx.importName, ctx.nodeHierarchy, error)) {
+        SCENE_LOG_ERROR(
+            "[ProjectManager] Cannot restore legacy rig hierarchy " +
+            ctx.importName + ": " + error);
         return false;
+      }
     }
-    if (!scene.animationDataList.empty() && !scene.boneData.boneNameToIndex.empty()) {
-        renderer.initializeAnimationSystem(scene);
-        renderer.updateAnimationWithGraph(scene, 0.0f, true);
-    }
+    ctx.rebuildSkeletonRepresentation(scene.boneData);
+  }
 
-    // IMPORTANT: Do not push GPU data from this loader thread.
-    // Backend can be switched/destroyed concurrently (e.g. project requests different engine),
-    // causing null/dangling backend access. Main thread performs deferred full GPU sync.
-    
-    g_needs_geometry_rebuild.store(true);
-    // IMPORTANT: Must be true so main-thread scene-load finalization performs full backend sync.
-    // Otherwise GPU backend may keep stale scene state until a manual backend toggle occurs.
-    g_needs_optix_sync.store(true);
-    g_camera_dirty = true;
-    g_lights_dirty = true;
-    markWorldDirty();
-    g_geometry_dirty = true;
-    g_materials_dirty = true;
-    g_gas_volumes_dirty = true;
-    g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
-    
-    if (!scene.camera || scene.cameras.empty()) {
-        auto fallback_camera = std::make_shared<Camera>(
-            Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
-            Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f,
-            0.0f, (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
-        fallback_camera->nodeName = "Startup Camera";
-        scene.addCamera(fallback_camera);
-        scene.setActiveCamera(scene.cameras.size() - 1);
-    }
-    
-    if (scene.camera) {
-        scene.camera->update_camera_vectors();
-        if (backend) renderer.syncCameraToBackend(*scene.camera);
-    }
-    
-    if (progress_callback) progress_callback(91, "Project data loaded, finalizing...");
-    SCENE_LOG_INFO("Project loaded with turbo parser: " + filepath);
-    requestProjectTimelineReset();
-    return true;
+  std::string rigRuntimeError;
+  if (!RigAuthoring::restoreOwnedRigRuntime(scene, rigRuntimeError)) {
+    SCENE_LOG_ERROR("[ProjectManager] " + rigRuntimeError);
+    return false;
+  }
+  if (!scene.animationDataList.empty() &&
+      !scene.boneData.boneNameToIndex.empty()) {
+    renderer.initializeAnimationSystem(scene);
+    renderer.updateAnimationWithGraph(scene, 0.0f, true);
+  }
+
+  // IMPORTANT: Do not push GPU data from this loader thread.
+  // Backend can be switched/destroyed concurrently (e.g. project requests
+  // different engine), causing null/dangling backend access. Main thread
+  // performs deferred full GPU sync.
+
+  g_needs_geometry_rebuild.store(true);
+  // IMPORTANT: Must be true so main-thread scene-load finalization performs
+  // full backend sync. Otherwise GPU backend may keep stale scene state until a
+  // manual backend toggle occurs.
+  g_needs_optix_sync.store(true);
+  g_camera_dirty = true;
+  g_lights_dirty = true;
+  markWorldDirty();
+  g_geometry_dirty = true;
+  g_materials_dirty = true;
+  g_gas_volumes_dirty = true;
+  g_scene_geometry_generation.fetch_add(1, std::memory_order_release);
+
+  if (!scene.camera || scene.cameras.empty()) {
+    auto fallback_camera = std::make_shared<Camera>(
+        Vec3(11.0f, 8.0f, 14.0f), Vec3(0.0f, 0.25f, 0.0f),
+        Vec3(0.0f, 1.0f, 0.0f), 40.0f, 16.0f / 9.0f, 0.0f,
+        (Vec3(11.0f, 8.0f, 14.0f) - Vec3(0.0f, 0.25f, 0.0f)).length(), 0);
+    fallback_camera->nodeName = "Startup Camera";
+    scene.addCamera(fallback_camera);
+    scene.setActiveCamera(scene.cameras.size() - 1);
+  }
+
+  if (scene.camera) {
+    scene.camera->update_camera_vectors();
+    if (backend)
+      renderer.syncCameraToBackend(*scene.camera);
+  }
+
+  if (progress_callback)
+    progress_callback(91, "Project data loaded, finalizing...");
+  SCENE_LOG_INFO("Project loaded with turbo parser: " + filepath);
+  requestProjectTimelineReset();
+  return true;
 }
 
 // ============================================================================
 // Asset Import
 // ============================================================================
 
-bool ProjectManager::importModel(const std::string& filepath, SceneData& scene,
-    Renderer& renderer, Backend::IBackend* backend,
-    std::function<void(int, const std::string&)> progress_callback,
+bool ProjectManager::importModel(
+    const std::string &filepath, SceneData &scene, Renderer &renderer,
+    Backend::IBackend *backend,
+    std::function<void(int, const std::string &)> progress_callback,
     bool rebuild) {
-    if (!fs::exists(filepath)) {
-        SCENE_LOG_ERROR("File not found: " + filepath);
-        return false;
+  if (!fs::exists(filepath)) {
+    SCENE_LOG_ERROR("File not found: " + filepath);
+    return false;
+  }
+
+  if (progress_callback)
+    progress_callback(0, "Preparing import...");
+
+  // Generate package path and unique ID
+  uint32_t id = g_project.generateModelId();
+  std::string package_path = generatePackagePath(filepath, "models", id);
+  std::string import_prefix = std::to_string(id);
+
+  ImportedModelData model;
+  model.id = id;
+  model.original_path = filepath;
+  model.package_path = package_path;
+  model.display_name = fs::path(filepath).stem().string();
+
+  // NOTE: In v3.0+ format, geometry is embedded in the binary file (.bin)
+  // so we NO LONGER copy the original model file to the project folder.
+  // This saves disk space and avoids confusion.
+  // The original_path is kept for reference only (e.g., to show source).
+
+  size_t objects_before = scene.world.objects.size();
+
+  if (progress_callback)
+    progress_callback(20, "Parsing model geometry...");
+
+  // Load with Assimp - append mode (don't clear existing scene)
+  // AssimpLoader usually just takes time, ideally we'd pass progress callback
+  // into it too
+  try {
+    renderer.create_scene(
+        scene, backend, filepath, progress_callback, true,
+        import_prefix); // append = true, import_prefix = unique id
+  } catch (const std::exception &e) {
+    SCENE_LOG_ERROR("Failed to load model '" + filepath +
+                    "': " + std::string(e.what()));
+    return false;
+  } catch (...) {
+    SCENE_LOG_ERROR("Unknown error while loading model: " + filepath);
+    return false;
+  }
+
+  if (progress_callback)
+    progress_callback(80, "Processing objects...");
+
+  // Track new objects. With import-flat, create_scene has already collapsed
+  // non-skinned groups to SoA TriangleMesh Hittables — the Triangle-only cast
+  // silently recorded NOTHING for them, so ImportedModelData.objects came back
+  // empty on flat imports. Handle both representations.
+  std::unordered_set<std::string> processed_nodes;
+  for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
+    std::string unique_name; // Already prefixed by AssimpLoader now!
+    const Transform *th = nullptr;
+    uint16_t mat_id = 0;
+    if (auto tri =
+            std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
+      unique_name = tri->getNodeName();
+      th = tri->getTransformPtr();
+      mat_id = tri->getMaterialID();
+    } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(
+                   scene.world.objects[i])) {
+      unique_name = mesh->nodeName;
+      th = mesh->transform.get();
+      if (mesh->geometry && mesh->geometry->get_vertex_count() > 0) {
+        if (const uint16_t *ids =
+                mesh->geometry->get_attribute_data<uint16_t>("materialID")) {
+          mat_id = ids[0];
+        }
+      }
+    } else {
+      continue;
     }
-    
-    if (progress_callback) progress_callback(0, "Preparing import...");
 
-    // Generate package path and unique ID
-    uint32_t id = g_project.generateModelId();
-    std::string package_path = generatePackagePath(filepath, "models", id);
-    std::string import_prefix = std::to_string(id);
-    
-    ImportedModelData model;
-    model.id = id;
-    model.original_path = filepath;
-    model.package_path = package_path;
-    model.display_name = fs::path(filepath).stem().string();
-    
-    // NOTE: In v3.0+ format, geometry is embedded in the binary file (.bin)
-    // so we NO LONGER copy the original model file to the project folder.
-    // This saves disk space and avoids confusion.
-    // The original_path is kept for reference only (e.g., to show source).
-
-    
-    size_t objects_before = scene.world.objects.size();
-    
-    if (progress_callback) progress_callback(20, "Parsing model geometry...");
-
-    // Load with Assimp - append mode (don't clear existing scene)
-    // AssimpLoader usually just takes time, ideally we'd pass progress callback into it too
-    try {
-        renderer.create_scene(scene, backend, filepath, progress_callback, true, import_prefix);  // append = true, import_prefix = unique id
-    } catch (const std::exception& e) {
-        SCENE_LOG_ERROR("Failed to load model '" + filepath + "': " + std::string(e.what()));
-        return false;
-    } catch (...) {
-        SCENE_LOG_ERROR("Unknown error while loading model: " + filepath);
-        return false;
+    if (processed_nodes.insert(unique_name).second) {
+      ImportedModelData::ObjectInstance inst;
+      inst.node_name = unique_name;
+      if (th) {
+        inst.transform = th->base;
+      }
+      inst.material_id = mat_id;
+      inst.visible = true;
+      model.objects.push_back(inst);
     }
-    
-    if (progress_callback) progress_callback(80, "Processing objects...");
+  }
 
-    // Track new objects. With import-flat, create_scene has already collapsed non-skinned
-    // groups to SoA TriangleMesh Hittables — the Triangle-only cast silently recorded
-    // NOTHING for them, so ImportedModelData.objects came back empty on flat imports.
-    // Handle both representations.
-    std::unordered_set<std::string> processed_nodes;
-    for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
-        std::string unique_name; // Already prefixed by AssimpLoader now!
-        const Transform* th = nullptr;
-        uint16_t mat_id = 0;
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i])) {
-            unique_name = tri->getNodeName();
-            th = tri->getTransformPtr();
-            mat_id = tri->getMaterialID();
-        } else if (auto mesh = std::dynamic_pointer_cast<TriangleMesh>(scene.world.objects[i])) {
-            unique_name = mesh->nodeName;
-            th = mesh->transform.get();
-            if (mesh->geometry && mesh->geometry->get_vertex_count() > 0) {
-                if (const uint16_t* ids = mesh->geometry->get_attribute_data<uint16_t>("materialID")) {
-                    mat_id = ids[0];
-                }
-            }
-        } else {
+  g_project.imported_models.push_back(model);
+  g_project.is_modified = true;
+
+  // Deduplicate all imported models to clean up any existing bloat in memory
+  for (auto &m : g_project.imported_models) {
+    std::vector<ImportedModelData::ObjectInstance> unique_objs;
+    std::unordered_set<std::string> seen;
+    for (auto &obj : m.objects) {
+      if (seen.insert(obj.node_name).second) {
+        unique_objs.push_back(std::move(obj));
+      }
+    }
+    m.objects = std::move(unique_objs);
+  }
+
+  // ── Import-flat (gated): collapse each freshly-imported facade group into
+  // the single shared SoA TriangleMesh the loader already built (the facades'
+  // common parentMesh), so the scene holds ONE Hittable per mesh instead of a
+  // per-face soup. Mirrors the materialize-flip / apply-flat path and activates
+  // the sculpt-on-flat SoA path on imported meshes (a cage-less direct mesh).
+  // Skinned meshes collapse too: skin weights live per SoA vertex in
+  // GeometryDetail and every backend consumes TriangleMesh::applySkinning.
+  // Runs AFTER the ImportedModelData tracking above, so serialization still
+  // records the per-node instances. Selection/material on the collapsed mesh go
+  // through the representative-facade path, registered by
+  // SceneUI::rebuildMeshCache on the next UI pass (e.g. selection/sculpt).
+  {
+    extern bool g_dense_mesh_as_hittable;
+    if (g_dense_mesh_as_hittable &&
+        scene.world.objects.size() > objects_before) {
+      // Collapse EVERY imported mesh to flat (threshold 1, skinned included) —
+      // the per-face Triangle facade is being phased out entirely, so leaving
+      // small meshes as facades is against the direction (and they leak into
+      // the viewport's loose-triangle HUD count).
+      constexpr size_t kMinFlatFaces = 1;
+      std::unordered_map<TriangleMesh *, std::shared_ptr<TriangleMesh>>
+          flatGroups;
+      std::unordered_map<TriangleMesh *, size_t> faceCounts;
+      for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
+        auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+        if (!tri || !tri->parentMesh)
+          continue; // standalone / non-facade → leave as-is
+        TriangleMesh *pm = tri->parentMesh.get();
+        flatGroups[pm] = tri->parentMesh;
+        faceCounts[pm]++;
+      }
+      bool anyCollapse = false;
+      for (const auto &[pm, count] : faceCounts) {
+        if (count >= kMinFlatFaces) {
+          anyCollapse = true;
+          break;
+        }
+      }
+      if (anyCollapse) {
+        std::vector<std::shared_ptr<Hittable>> rebuilt;
+        rebuilt.reserve(scene.world.objects.size());
+        std::unordered_set<TriangleMesh *> emitted;
+        for (size_t i = 0; i < scene.world.objects.size(); ++i) {
+          if (i < objects_before) {
+            rebuilt.push_back(scene.world.objects[i]);
             continue;
+          }
+          auto tri =
+              std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
+          TriangleMesh *pm =
+              (tri && tri->parentMesh) ? tri->parentMesh.get() : nullptr;
+          const bool collapse = pm && faceCounts[pm] >= kMinFlatFaces;
+          if (collapse) {
+            if (emitted.insert(pm).second) {
+              rebuilt.push_back(
+                  flatGroups[pm]); // one TriangleMesh Hittable per group
+            }
+            // drop the per-face facade
+          } else {
+            rebuilt.push_back(scene.world.objects[i]);
+          }
         }
+        scene.world.objects = std::move(rebuilt);
+        SCENE_LOG_INFO("[import-flat] collapsed " +
+                       std::to_string(emitted.size()) +
+                       " mesh(es) to flat TriangleMesh");
+      }
+    }
+  }
 
-        if (processed_nodes.insert(unique_name).second) {
-            ImportedModelData::ObjectInstance inst;
-            inst.node_name = unique_name;
-            if (th) {
-                inst.transform = th->base;
-            }
-            inst.material_id = mat_id;
-            inst.visible = true;
-            model.objects.push_back(inst);
-        }
+  // AUTO-ACTIVATE CAMERA: If imported model has cameras, set first new one as
+  // active
+  if (!scene.cameras.empty()) {
+    // Find if we have new cameras (cameras added during this import)
+    // Simple approach: if active camera is default and we have imported
+    // cameras, activate first imported Better: check if camera count increased
+    size_t camera_count = scene.cameras.size();
+    if (camera_count > 1 && scene.active_camera_index == 0) {
+      // Switch to the newly imported camera (likely the last one)
+      scene.setActiveCamera(camera_count - 1);
+      SCENE_LOG_INFO("Auto-activated imported camera: Camera #" +
+                     std::to_string(camera_count - 1));
+    } else if (camera_count == 1 && scene.camera) {
+      // Only one camera exists, ensure it's active
+      scene.setActiveCamera(0);
     }
-    
-    g_project.imported_models.push_back(model);
-    g_project.is_modified = true;
+  }
 
-    // Deduplicate all imported models to clean up any existing bloat in memory
-    for (auto& m : g_project.imported_models) {
-        std::vector<ImportedModelData::ObjectInstance> unique_objs;
-        std::unordered_set<std::string> seen;
-        for (auto& obj : m.objects) {
-            if (seen.insert(obj.node_name).second) {
-                unique_objs.push_back(std::move(obj));
-            }
-        }
-        m.objects = std::move(unique_objs);
-    }
+  if (rebuild) {
+    if (progress_callback)
+      progress_callback(90, "Rebuilding BVH...");
+    extern RenderSettings render_settings; // From globals or Main.cpp
+    renderer.rebuildBVH(scene, render_settings.UI_use_embree);
+    renderer.resetCPUAccumulation();
 
-    // ── Import-flat (gated): collapse each freshly-imported facade group into the single shared
-    // SoA TriangleMesh the loader already built (the facades' common parentMesh), so the scene
-    // holds ONE Hittable per mesh instead of a per-face soup. Mirrors the materialize-flip /
-    // apply-flat path and activates the sculpt-on-flat SoA path on imported meshes (a cage-less
-    // direct mesh). Skinned meshes collapse too: skin weights live per SoA vertex in
-    // GeometryDetail and every backend consumes TriangleMesh::applySkinning.
-    // Runs AFTER the ImportedModelData tracking above, so serialization still records the per-node
-    // instances. Selection/material on the collapsed mesh go through the representative-facade
-    // path, registered by SceneUI::rebuildMeshCache on the next UI pass (e.g. selection/sculpt).
-    {
-        extern bool g_dense_mesh_as_hittable;
-        if (g_dense_mesh_as_hittable && scene.world.objects.size() > objects_before) {
-            // Collapse EVERY imported mesh to flat (threshold 1, skinned included) — the per-face
-            // Triangle facade is being phased out entirely, so leaving small meshes as facades is
-            // against the direction (and they leak into the viewport's loose-triangle HUD count).
-            constexpr size_t kMinFlatFaces = 1;
-            std::unordered_map<TriangleMesh*, std::shared_ptr<TriangleMesh>> flatGroups;
-            std::unordered_map<TriangleMesh*, size_t> faceCounts;
-            for (size_t i = objects_before; i < scene.world.objects.size(); ++i) {
-                auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
-                if (!tri || !tri->parentMesh) continue; // standalone / non-facade → leave as-is
-                TriangleMesh* pm = tri->parentMesh.get();
-                flatGroups[pm] = tri->parentMesh;
-                faceCounts[pm]++;
-            }
-            bool anyCollapse = false;
-            for (const auto& [pm, count] : faceCounts) {
-                if (count >= kMinFlatFaces) { anyCollapse = true; break; }
-            }
-            if (anyCollapse) {
-                std::vector<std::shared_ptr<Hittable>> rebuilt;
-                rebuilt.reserve(scene.world.objects.size());
-                std::unordered_set<TriangleMesh*> emitted;
-                for (size_t i = 0; i < scene.world.objects.size(); ++i) {
-                    if (i < objects_before) { rebuilt.push_back(scene.world.objects[i]); continue; }
-                    auto tri = std::dynamic_pointer_cast<Triangle>(scene.world.objects[i]);
-                    TriangleMesh* pm = (tri && tri->parentMesh) ? tri->parentMesh.get() : nullptr;
-                    const bool collapse = pm && faceCounts[pm] >= kMinFlatFaces;
-                    if (collapse) {
-                        if (emitted.insert(pm).second) {
-                            rebuilt.push_back(flatGroups[pm]); // one TriangleMesh Hittable per group
-                        }
-                        // drop the per-face facade
-                    } else {
-                        rebuilt.push_back(scene.world.objects[i]);
-                    }
-                }
-                scene.world.objects = std::move(rebuilt);
-                SCENE_LOG_INFO("[import-flat] collapsed " + std::to_string(emitted.size()) +
-                               " mesh(es) to flat TriangleMesh");
-            }
-        }
+    if (backend) {
+      if (progress_callback)
+        progress_callback(95, "Uploading to GPU...");
+      renderer.rebuildBackendGeometry(scene);
+      backend->setLights(scene.lights);
+      if (scene.camera) {
+        renderer.syncCameraToBackend(*scene.camera);
+      }
+      backend->resetAccumulation();
     }
+  }
 
-    // AUTO-ACTIVATE CAMERA: If imported model has cameras, set first new one as active
-    if (!scene.cameras.empty()) {
-        // Find if we have new cameras (cameras added during this import)
-        // Simple approach: if active camera is default and we have imported cameras, activate first imported
-        // Better: check if camera count increased
-        size_t camera_count = scene.cameras.size();
-        if (camera_count > 1 && scene.active_camera_index == 0) {
-            // Switch to the newly imported camera (likely the last one)
-            scene.setActiveCamera(camera_count - 1);
-            SCENE_LOG_INFO("Auto-activated imported camera: Camera #" + std::to_string(camera_count - 1));
-        } else if (camera_count == 1 && scene.camera) {
-            // Only one camera exists, ensure it's active
-            scene.setActiveCamera(0);
-        }
-    }
-    
-    if (rebuild) {
-        if (progress_callback) progress_callback(90, "Rebuilding BVH...");
-        extern RenderSettings render_settings;  // From globals or Main.cpp
-        renderer.rebuildBVH(scene, render_settings.UI_use_embree);
-        renderer.resetCPUAccumulation();
-        
-        if (backend) {
-            if (progress_callback) progress_callback(95, "Uploading to GPU...");
-            renderer.rebuildBackendGeometry(scene);
-            backend->setLights(scene.lights);
-            if (scene.camera) {
-                renderer.syncCameraToBackend(*scene.camera);
-            }
-            backend->resetAccumulation();
-        }
-    }
-    
-    if (progress_callback) progress_callback(100, "Done.");
-    SCENE_LOG_INFO("Model imported: " + model.display_name + " (ID: " + std::to_string(id) + ", " + std::to_string(model.objects.size()) + " objects)");
-    return true;
+  if (progress_callback)
+    progress_callback(100, "Done.");
+  SCENE_LOG_INFO("Model imported: " + model.display_name +
+                 " (ID: " + std::to_string(id) + ", " +
+                 std::to_string(model.objects.size()) + " objects)");
+  return true;
 }
 
 // ... Rest of the file (procedural, textures, etc.) ...
 // Just keeping the rest as is, but ensuring the file is complete.
 // Since I'm using write_to_file, I must include EVERYTHING.
 
-bool ProjectManager::importTexture(const std::string& filepath) {
-    if (!fs::exists(filepath)) {
-        SCENE_LOG_ERROR("Texture file not found: " + filepath);
-        return false;
-    }
-    
-    uint32_t id = g_project.generateTextureId();
-    std::string package_path = generatePackagePath(filepath, "textures", id);
-    
-    TextureAssetData tex;
-    tex.id = id;
-    tex.original_path = filepath;
-    tex.package_path = package_path;
-    tex.usage = "unknown";
-    
-    // Copy to project folder if exists
-    if (!g_project.current_file_path.empty()) {
-        fs::path project_folder = pathFromUtf8(g_project.current_file_path).parent_path();
-        fs::path dest_path = project_folder / package_path;
-        
-        try {
-            fs::create_directories(dest_path.parent_path());
-            fs::copy_file(filepath, dest_path, fs::copy_options::overwrite_existing);
-        } catch (const std::exception& e) {
-            SCENE_LOG_WARN("Could not copy texture file: " + std::string(e.what()));
-        }
-    }
-    
-    g_project.texture_assets.push_back(tex);
-    g_project.is_modified = true;
-    
-    SCENE_LOG_INFO("Texture imported: " + fs::path(filepath).filename().string());
-    return true;
-}
-
-uint64_t ProjectManager::addProceduralObject(ProceduralMeshType type, const std::string& name,
-                                              const Matrix4x4& transform, SceneData& scene,
-                                              Renderer& renderer, Backend::IBackend* backend) {
-    uint64_t id = g_project.generateObjectId();
-    
-    ProceduralObjectData proc;
-    proc.id = id;
-    proc.mesh_type = type;
-    proc.display_name = name;
-    proc.transform = transform;
-    proc.material_id = 0;
-    proc.visible = true;
-    
-    g_project.procedural_objects.push_back(proc);
-    g_project.is_modified = true;
-    
-    return id;
-}
-
-bool ProjectManager::removeProceduralObject(uint64_t id, SceneData& scene) {
-    auto it = std::find_if(g_project.procedural_objects.begin(), 
-                           g_project.procedural_objects.end(),
-                           [id](const ProceduralObjectData& p) { return p.id == id; });
-    
-    if (it == g_project.procedural_objects.end()) {
-        return false;
-    }
-    
-    g_project.procedural_objects.erase(it);
-    g_project.is_modified = true;
-    
-    return true;
-}
-
-std::vector<uint8_t> ProjectManager::extractFileFromPackage(const std::string& internal_path) {
-    if (!g_project.current_file_path.empty()) {
-        fs::path project_folder = pathFromUtf8(g_project.current_file_path).parent_path();
-        fs::path file_path = project_folder / internal_path;
-        
-        if (fs::exists(file_path)) {
-            std::ifstream in(file_path, std::ios::binary);
-            if (in) {
-                return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
-            }
-        }
-    }
-    return {};
-}
-
-bool ProjectManager::fileExistsInPackage(const std::string& internal_path) {
-    if (!g_project.current_file_path.empty()) {
-        fs::path project_folder = pathFromUtf8(g_project.current_file_path).parent_path();
-        return fs::exists(project_folder / internal_path);
-    }
+bool ProjectManager::importTexture(const std::string &filepath) {
+  if (!fs::exists(filepath)) {
+    SCENE_LOG_ERROR("Texture file not found: " + filepath);
     return false;
+  }
+
+  uint32_t id = g_project.generateTextureId();
+  std::string package_path = generatePackagePath(filepath, "textures", id);
+
+  TextureAssetData tex;
+  tex.id = id;
+  tex.original_path = filepath;
+  tex.package_path = package_path;
+  tex.usage = "unknown";
+
+  // Copy to project folder if exists
+  if (!g_project.current_file_path.empty()) {
+    fs::path project_folder =
+        pathFromUtf8(g_project.current_file_path).parent_path();
+    fs::path dest_path = project_folder / package_path;
+
+    try {
+      fs::create_directories(dest_path.parent_path());
+      fs::copy_file(filepath, dest_path, fs::copy_options::overwrite_existing);
+    } catch (const std::exception &e) {
+      SCENE_LOG_WARN("Could not copy texture file: " + std::string(e.what()));
+    }
+  }
+
+  g_project.texture_assets.push_back(tex);
+  g_project.is_modified = true;
+
+  SCENE_LOG_INFO("Texture imported: " + fs::path(filepath).filename().string());
+  return true;
 }
 
-bool ProjectManager::writeZipPackage(const std::string& filepath) {
-    SCENE_LOG_WARN("ZIP packaging not yet implemented. Save using regular project format.");
-    return false; // Not implemented
+uint64_t ProjectManager::addProceduralObject(ProceduralMeshType type,
+                                             const std::string &name,
+                                             const Matrix4x4 &transform,
+                                             SceneData &scene,
+                                             Renderer &renderer,
+                                             Backend::IBackend *backend) {
+  uint64_t id = g_project.generateObjectId();
+
+  ProceduralObjectData proc;
+  proc.id = id;
+  proc.mesh_type = type;
+  proc.display_name = name;
+  proc.transform = transform;
+  proc.material_id = 0;
+  proc.visible = true;
+
+  g_project.procedural_objects.push_back(proc);
+  g_project.is_modified = true;
+
+  return id;
 }
 
-bool ProjectManager::readZipPackage(const std::string& filepath) {
-    SCENE_LOG_WARN("ZIP packaging not yet implemented.");
+bool ProjectManager::removeProceduralObject(uint64_t id, SceneData &scene) {
+  auto it = std::find_if(
+      g_project.procedural_objects.begin(), g_project.procedural_objects.end(),
+      [id](const ProceduralObjectData &p) { return p.id == id; });
+
+  if (it == g_project.procedural_objects.end()) {
     return false;
+  }
+
+  g_project.procedural_objects.erase(it);
+  g_project.is_modified = true;
+
+  return true;
+}
+
+std::vector<uint8_t>
+ProjectManager::extractFileFromPackage(const std::string &internal_path) {
+  if (!g_project.current_file_path.empty()) {
+    fs::path project_folder =
+        pathFromUtf8(g_project.current_file_path).parent_path();
+    fs::path file_path = project_folder / internal_path;
+
+    if (fs::exists(file_path)) {
+      std::ifstream in(file_path, std::ios::binary);
+      if (in) {
+        return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+      }
+    }
+  }
+  return {};
+}
+
+bool ProjectManager::fileExistsInPackage(const std::string &internal_path) {
+  if (!g_project.current_file_path.empty()) {
+    fs::path project_folder =
+        pathFromUtf8(g_project.current_file_path).parent_path();
+    return fs::exists(project_folder / internal_path);
+  }
+  return false;
+}
+
+bool ProjectManager::writeZipPackage(const std::string &filepath) {
+  SCENE_LOG_WARN(
+      "ZIP packaging not yet implemented. Save using regular project format.");
+  return false; // Not implemented
+}
+
+bool ProjectManager::readZipPackage(const std::string &filepath) {
+  SCENE_LOG_WARN("ZIP packaging not yet implemented.");
+  return false;
 }
 
 // ============================================================================
@@ -3540,2365 +4071,2761 @@ bool ProjectManager::readZipPackage(const std::string& filepath) {
 static constexpr char RTP_MAGIC[4] = {'R', 'T', 'P', '8'};
 static constexpr uint32_t RTP_VERSION = 8;
 
-bool ProjectManager::writeGeometryBinary(std::ofstream& out, const SceneData& scene) {
-    // Write header
-    out.write(RTP_MAGIC, 4);
-    uint32_t version = RTP_VERSION;
-    out.write(reinterpret_cast<const char*>(&version), sizeof(version));
-    
-    // FILTERING: Identify terrain flat meshes to exclude from binary geometry —
-    // terrain geometry is regenerated from its heightmap on load (see
-    // TerrainManager::deserialize), never round-tripped through this block.
-    std::unordered_set<TriangleMesh*> terrain_meshes;
-    auto& terrains = TerrainManager::getInstance().getTerrains();
-    for (auto& t : terrains) {
-        if (t.flatMesh) terrain_meshes.insert(t.flatMesh.get());
-    }
+bool ProjectManager::writeGeometryBinary(std::ofstream &out,
+                                         const SceneData &scene) {
+  // Write header
+  out.write(RTP_MAGIC, 4);
+  uint32_t version = RTP_VERSION;
+  out.write(reinterpret_cast<const char *>(&version), sizeof(version));
 
-    // Identify unique flat meshes (TriangleMesh) and standalone triangles
-    std::unordered_set<TriangleMesh*> processed_meshes;
-    std::vector<std::shared_ptr<TriangleMesh>> flat_meshes;
-    std::vector<std::shared_ptr<Triangle>> standalone_triangles;
-    std::unordered_map<std::shared_ptr<Transform>, uint32_t> transform_map;
-    std::vector<std::shared_ptr<Transform>> transforms;
+  // FILTERING: Identify terrain flat meshes to exclude from binary geometry —
+  // terrain geometry is regenerated from its heightmap on load (see
+  // TerrainManager::deserialize), never round-tripped through this block.
+  std::unordered_set<TriangleMesh *> terrain_meshes;
+  auto &terrains = TerrainManager::getInstance().getTerrains();
+  for (auto &t : terrains) {
+    if (t.flatMesh)
+      terrain_meshes.insert(t.flatMesh.get());
+  }
 
-    for (const auto& obj : scene.world.objects) {
-        if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
-            // Skip foliage instances (they are serialized via InstanceManager)
-            if (tri->getNodeName().find("_inst_") != std::string::npos) continue;
+  // Identify unique flat meshes (TriangleMesh) and standalone triangles
+  std::unordered_set<TriangleMesh *> processed_meshes;
+  std::vector<std::shared_ptr<TriangleMesh>> flat_meshes;
+  std::vector<std::shared_ptr<Triangle>> standalone_triangles;
+  std::unordered_map<std::shared_ptr<Transform>, uint32_t> transform_map;
+  std::vector<std::shared_ptr<Transform>> transforms;
 
-            if (tri->parentMesh && tri->parentMesh->geometry) {
-                TriangleMesh* pm = tri->parentMesh.get();
-                if (processed_meshes.find(pm) == processed_meshes.end()) {
-                    processed_meshes.insert(pm);
-                    flat_meshes.push_back(tri->parentMesh);
-                    
-                    auto th = tri->parentMesh->transform;
-                    if (th && transform_map.find(th) == transform_map.end()) {
-                        transform_map[th] = static_cast<uint32_t>(transforms.size());
-                        transforms.push_back(th);
-                    }
-                }
-            } else {
-                standalone_triangles.push_back(tri);
+  for (const auto &obj : scene.world.objects) {
+    if (auto tri = std::dynamic_pointer_cast<Triangle>(obj)) {
+      // Skip foliage instances (they are serialized via InstanceManager)
+      if (tri->getNodeName().find("_inst_") != std::string::npos)
+        continue;
 
-                auto th = tri->getTransformHandle();
-                if (th && transform_map.find(th) == transform_map.end()) {
-                    transform_map[th] = static_cast<uint32_t>(transforms.size());
-                    transforms.push_back(th);
-                }
-            }
-        } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
-            // Flat mesh-as-Hittable (open-flat / import-flat / apply-flat / Simple-subdivide-flat /
-            // add-object-flat): there is no per-face facade, so the Triangle branch above never sees
-            // it. Serialize the SoA TriangleMesh DIRECTLY as a mesh group — mirrors the
-            // facade→parentMesh branch. Without this, every flat mesh is silently dropped on save
-            // (geometry loss on the next round-trip), since the whole flat migration removes facades.
-            if (!tm->geometry || tm->transient) continue;
-            if (tm->nodeName.find("_inst_") != std::string::npos) continue; // foliage via InstanceManager
-            if (terrain_meshes.count(tm.get())) continue; // terrain: regenerated from heightmap on load
-            TriangleMesh* pm = tm.get();
-            if (processed_meshes.insert(pm).second) {
-                flat_meshes.push_back(tm);
-                auto th = tm->transform;
-                if (th && transform_map.find(th) == transform_map.end()) {
-                    transform_map[th] = static_cast<uint32_t>(transforms.size());
-                    transforms.push_back(th);
-                }
-            }
+      if (tri->parentMesh && tri->parentMesh->geometry) {
+        TriangleMesh *pm = tri->parentMesh.get();
+        if (processed_meshes.find(pm) == processed_meshes.end()) {
+          processed_meshes.insert(pm);
+          flat_meshes.push_back(tri->parentMesh);
+
+          auto th = tri->parentMesh->transform;
+          if (th && transform_map.find(th) == transform_map.end()) {
+            transform_map[th] = static_cast<uint32_t>(transforms.size());
+            transforms.push_back(th);
+          }
         }
-    }
-    
-    // Write transform count and data
-    uint32_t transform_count = static_cast<uint32_t>(transforms.size());
-    out.write(reinterpret_cast<const char*>(&transform_count), sizeof(transform_count));
-    
-    for (const auto& tr : transforms) {
-        out.write(reinterpret_cast<const char*>(&tr->base), sizeof(Matrix4x4));
-        out.write(reinterpret_cast<const char*>(&tr->position), sizeof(Vec3));
-        out.write(reinterpret_cast<const char*>(&tr->rotation), sizeof(Vec3));
-        out.write(reinterpret_cast<const char*>(&tr->scale), sizeof(Vec3));
-    }
+      } else {
+        standalone_triangles.push_back(tri);
 
-    // Write flat meshes count
-    uint32_t mesh_group_count = static_cast<uint32_t>(flat_meshes.size());
-    out.write(reinterpret_cast<const char*>(&mesh_group_count), sizeof(mesh_group_count));
-
-    for (const auto& pm : flat_meshes) {
-        // Node name
-        writeStringBinary(out, pm->nodeName);
-        
-        // Transform index
-        uint32_t tr_idx = 0xFFFFFFFF;
-        if (pm->transform) {
-            auto it = transform_map.find(pm->transform);
-            if (it != transform_map.end()) {
-                tr_idx = it->second;
-            }
-        }
-        out.write(reinterpret_cast<const char*>(&tr_idx), sizeof(tr_idx));
-        
-        uint32_t vCount = static_cast<uint32_t>(pm->geometry->get_vertex_count());
-        uint32_t iCount = static_cast<uint32_t>(pm->geometry->indices.size());
-        
-        out.write(reinterpret_cast<const char*>(&vCount), sizeof(vCount));
-        out.write(reinterpret_cast<const char*>(&iCount), sizeof(iCount));
-        
-        // Retrieve original geometry arrays (local space)
-        const Vec3* origP = pm->geometry->get_positions_orig();
-        if (!origP) origP = pm->geometry->get_positions();
-        const Vec3* origN = pm->geometry->get_normals_orig();
-        if (!origN) origN = pm->geometry->get_normals();
-        const Vec2* uvs = pm->geometry->get_uvs();
-        const uint16_t* matIDs = pm->geometry->get_material_ids();
-        
-        // Block writes (Zero-overhead block copy to disk)
-        if (origP) out.write(reinterpret_cast<const char*>(origP), vCount * sizeof(Vec3));
-        if (origN) out.write(reinterpret_cast<const char*>(origN), vCount * sizeof(Vec3));
-        if (uvs) out.write(reinterpret_cast<const char*>(uvs), vCount * sizeof(Vec2));
-        if (matIDs) out.write(reinterpret_cast<const char*>(matIDs), vCount * sizeof(uint16_t));
-        out.write(reinterpret_cast<const char*>(pm->geometry->indices.data()), iCount * sizeof(uint32_t));
-        
-        // Find extra UV sets
-        std::vector<uint32_t> extra_uv_set_indices;
-        for (int set = 1; set < 8; ++set) {
-            std::string attrName = "uv" + std::to_string(set);
-            if (pm->geometry->has_attribute(attrName)) {
-                extra_uv_set_indices.push_back(set);
-            }
-        }
-        
-        uint32_t extra_uv_sets_count = static_cast<uint32_t>(extra_uv_set_indices.size());
-        out.write(reinterpret_cast<const char*>(&extra_uv_sets_count), sizeof(extra_uv_sets_count));
-        for (uint32_t set_idx : extra_uv_set_indices) {
-            out.write(reinterpret_cast<const char*>(&set_idx), sizeof(set_idx));
-            std::string attrName = "uv" + std::to_string(set_idx);
-            const Vec2* extraUvs = pm->geometry->get_attribute_data<Vec2>(attrName);
-            if (extraUvs) {
-                out.write(reinterpret_cast<const char*>(extraUvs), vCount * sizeof(Vec2));
-            }
-        }
-        
-        // Has skinning — require at least one REAL (non-empty) per-vertex weight list, not just an
-        // allocated skin_weights vector. A phantom skin (vector sized to vCount but every entry
-        // empty) must not be written as has_skin=1, or the mesh stays facade on every reopen.
-        bool real_skin = false;
-        for (const auto& w : pm->geometry->skin_weights) { if (!w.empty()) { real_skin = true; break; } }
-        uint8_t has_skin = real_skin ? 1 : 0;
-        out.write(reinterpret_cast<const char*>(&has_skin), sizeof(has_skin));
-        if (has_skin) {
-            for (uint32_t v = 0; v < vCount; ++v) {
-                const auto& weights = pm->geometry->skin_weights[v];
-                uint8_t weight_count = static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
-                out.write(reinterpret_cast<const char*>(&weight_count), sizeof(weight_count));
-                for (uint8_t w = 0; w < weight_count; ++w) {
-                    int32_t bone_idx = weights[w].first;
-                    float weight = weights[w].second;
-                    out.write(reinterpret_cast<const char*>(&bone_idx), sizeof(bone_idx));
-                    out.write(reinterpret_cast<const char*>(&weight), sizeof(weight));
-                }
-            }
-        }
-    }
-
-    // Write standalone triangles count and data
-    uint32_t standalone_count = static_cast<uint32_t>(standalone_triangles.size());
-    out.write(reinterpret_cast<const char*>(&standalone_count), sizeof(standalone_count));
-    
-    for (const auto& tri : standalone_triangles) {
-        Vec3 v0 = tri->getOriginalVertexPosition(0);
-        Vec3 v1 = tri->getOriginalVertexPosition(1);
-        Vec3 v2 = tri->getOriginalVertexPosition(2);
-        out.write(reinterpret_cast<const char*>(&v0), sizeof(Vec3));
-        out.write(reinterpret_cast<const char*>(&v1), sizeof(Vec3));
-        out.write(reinterpret_cast<const char*>(&v2), sizeof(Vec3));
-        
-        Vec3 n0 = tri->getOriginalVertexNormal(0);
-        Vec3 n1 = tri->getOriginalVertexNormal(1);
-        Vec3 n2 = tri->getOriginalVertexNormal(2);
-        out.write(reinterpret_cast<const char*>(&n0), sizeof(Vec3));
-        out.write(reinterpret_cast<const char*>(&n1), sizeof(Vec3));
-        out.write(reinterpret_cast<const char*>(&n2), sizeof(Vec3));
-        
-        Vec2 uv0 = tri->t_ref(0);
-        Vec2 uv1 = tri->t_ref(1);
-        Vec2 uv2 = tri->t_ref(2);
-        out.write(reinterpret_cast<const char*>(&uv0), sizeof(Vec2));
-        out.write(reinterpret_cast<const char*>(&uv1), sizeof(Vec2));
-        out.write(reinterpret_cast<const char*>(&uv2), sizeof(Vec2));
-        
-        uint32_t uv_set_count = static_cast<uint32_t>(tri->getUVSetCount());
-        out.write(reinterpret_cast<const char*>(&uv_set_count), sizeof(uv_set_count));
-        for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
-            const auto [set_uv0, set_uv1, set_uv2] = tri->getUVSetCoordinates(uv_set);
-            out.write(reinterpret_cast<const char*>(&set_uv0), sizeof(Vec2));
-            out.write(reinterpret_cast<const char*>(&set_uv1), sizeof(Vec2));
-            out.write(reinterpret_cast<const char*>(&set_uv2), sizeof(Vec2));
-        }
-        
-        uint16_t mat_id = tri->getMaterialID();
-        out.write(reinterpret_cast<const char*>(&mat_id), sizeof(mat_id));
-        
-        uint32_t tr_idx = 0xFFFFFFFF;
         auto th = tri->getTransformHandle();
-        if (th) {
-            auto it = transform_map.find(th);
-            if (it != transform_map.end()) {
-                tr_idx = it->second;
-            }
+        if (th && transform_map.find(th) == transform_map.end()) {
+          transform_map[th] = static_cast<uint32_t>(transforms.size());
+          transforms.push_back(th);
         }
-        out.write(reinterpret_cast<const char*>(&tr_idx), sizeof(tr_idx));
-        
-        writeStringBinary(out, tri->getNodeName());
-        
-        // hasAnySkinWeights() (real non-empty bone weights), NOT hasSkinData() (struct merely
-        // allocated). Writing the allocated-but-empty phantom skin as has_skin=1 is what pinned
-        // imported (Tripo etc.) meshes to facade across every save/open round-trip.
-        uint8_t has_skin = tri->hasAnySkinWeights() ? 1 : 0;
-        out.write(reinterpret_cast<const char*>(&has_skin), sizeof(has_skin));
-        if (has_skin) {
-            for (int vi = 0; vi < 3; ++vi) {
-                const auto& weights = tri->getSkinBoneWeights(vi);
-                uint8_t weight_count = static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
-                out.write(reinterpret_cast<const char*>(&weight_count), sizeof(weight_count));
-                for (size_t w = 0; w < weight_count; ++w) {
-                    int32_t bone_idx = weights[w].first;
-                    float weight = weights[w].second;
-                    out.write(reinterpret_cast<const char*>(&bone_idx), sizeof(bone_idx));
-                    out.write(reinterpret_cast<const char*>(&weight), sizeof(weight));
-                }
-            }
+      }
+    } else if (auto tm = std::dynamic_pointer_cast<TriangleMesh>(obj)) {
+      // Flat mesh-as-Hittable (open-flat / import-flat / apply-flat /
+      // Simple-subdivide-flat / add-object-flat): there is no per-face facade,
+      // so the Triangle branch above never sees it. Serialize the SoA
+      // TriangleMesh DIRECTLY as a mesh group — mirrors the facade→parentMesh
+      // branch. Without this, every flat mesh is silently dropped on save
+      // (geometry loss on the next round-trip), since the whole flat migration
+      // removes facades.
+      if (!tm->geometry || tm->transient)
+        continue;
+      if (tm->nodeName.find("_inst_") != std::string::npos)
+        continue; // foliage via InstanceManager
+      if (terrain_meshes.count(tm.get()))
+        continue; // terrain: regenerated from heightmap on load
+      TriangleMesh *pm = tm.get();
+      if (processed_meshes.insert(pm).second) {
+        flat_meshes.push_back(tm);
+        auto th = tm->transform;
+        if (th && transform_map.find(th) == transform_map.end()) {
+          transform_map[th] = static_cast<uint32_t>(transforms.size());
+          transforms.push_back(th);
         }
+      }
     }
-    
-    SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(mesh_group_count) + " flat meshes, " + 
-                   std::to_string(standalone_count) + " standalone triangles, " +
-                   std::to_string(transform_count) + " transforms to binary (v8).");
-    return true;
+  }
+
+  // Write transform count and data
+  uint32_t transform_count = static_cast<uint32_t>(transforms.size());
+  out.write(reinterpret_cast<const char *>(&transform_count),
+            sizeof(transform_count));
+
+  for (const auto &tr : transforms) {
+    out.write(reinterpret_cast<const char *>(&tr->base), sizeof(Matrix4x4));
+    out.write(reinterpret_cast<const char *>(&tr->position), sizeof(Vec3));
+    out.write(reinterpret_cast<const char *>(&tr->rotation), sizeof(Vec3));
+    out.write(reinterpret_cast<const char *>(&tr->scale), sizeof(Vec3));
+  }
+
+  // Write flat meshes count
+  uint32_t mesh_group_count = static_cast<uint32_t>(flat_meshes.size());
+  out.write(reinterpret_cast<const char *>(&mesh_group_count),
+            sizeof(mesh_group_count));
+
+  for (const auto &pm : flat_meshes) {
+    // Node name
+    writeStringBinary(out, pm->nodeName);
+
+    // Transform index
+    uint32_t tr_idx = 0xFFFFFFFF;
+    if (pm->transform) {
+      auto it = transform_map.find(pm->transform);
+      if (it != transform_map.end()) {
+        tr_idx = it->second;
+      }
+    }
+    out.write(reinterpret_cast<const char *>(&tr_idx), sizeof(tr_idx));
+
+    uint32_t vCount = static_cast<uint32_t>(pm->geometry->get_vertex_count());
+    uint32_t iCount = static_cast<uint32_t>(pm->geometry->indices.size());
+
+    out.write(reinterpret_cast<const char *>(&vCount), sizeof(vCount));
+    out.write(reinterpret_cast<const char *>(&iCount), sizeof(iCount));
+
+    // Retrieve original geometry arrays (local space)
+    const Vec3 *origP = pm->geometry->get_positions_orig();
+    if (!origP)
+      origP = pm->geometry->get_positions();
+    const Vec3 *origN = pm->geometry->get_normals_orig();
+    if (!origN)
+      origN = pm->geometry->get_normals();
+    const Vec2 *uvs = pm->geometry->get_uvs();
+    const uint16_t *matIDs = pm->geometry->get_material_ids();
+
+    // Block writes (Zero-overhead block copy to disk)
+    if (origP)
+      out.write(reinterpret_cast<const char *>(origP), vCount * sizeof(Vec3));
+    if (origN)
+      out.write(reinterpret_cast<const char *>(origN), vCount * sizeof(Vec3));
+    if (uvs)
+      out.write(reinterpret_cast<const char *>(uvs), vCount * sizeof(Vec2));
+    if (matIDs)
+      out.write(reinterpret_cast<const char *>(matIDs),
+                vCount * sizeof(uint16_t));
+    out.write(reinterpret_cast<const char *>(pm->geometry->indices.data()),
+              iCount * sizeof(uint32_t));
+
+    // Find extra UV sets
+    std::vector<uint32_t> extra_uv_set_indices;
+    for (int set = 1; set < 8; ++set) {
+      std::string attrName = "uv" + std::to_string(set);
+      if (pm->geometry->has_attribute(attrName)) {
+        extra_uv_set_indices.push_back(set);
+      }
+    }
+
+    uint32_t extra_uv_sets_count =
+        static_cast<uint32_t>(extra_uv_set_indices.size());
+    out.write(reinterpret_cast<const char *>(&extra_uv_sets_count),
+              sizeof(extra_uv_sets_count));
+    for (uint32_t set_idx : extra_uv_set_indices) {
+      out.write(reinterpret_cast<const char *>(&set_idx), sizeof(set_idx));
+      std::string attrName = "uv" + std::to_string(set_idx);
+      const Vec2 *extraUvs = pm->geometry->get_attribute_data<Vec2>(attrName);
+      if (extraUvs) {
+        out.write(reinterpret_cast<const char *>(extraUvs),
+                  vCount * sizeof(Vec2));
+      }
+    }
+
+    // Has skinning — require at least one REAL (non-empty) per-vertex weight
+    // list, not just an allocated skin_weights vector. A phantom skin (vector
+    // sized to vCount but every entry empty) must not be written as has_skin=1,
+    // or the mesh stays facade on every reopen.
+    bool real_skin = false;
+    for (const auto &w : pm->geometry->skin_weights) {
+      if (!w.empty()) {
+        real_skin = true;
+        break;
+      }
+    }
+    uint8_t has_skin = real_skin ? 1 : 0;
+    out.write(reinterpret_cast<const char *>(&has_skin), sizeof(has_skin));
+    if (has_skin) {
+      for (uint32_t v = 0; v < vCount; ++v) {
+        const auto &weights = pm->geometry->skin_weights[v];
+        uint8_t weight_count =
+            static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
+        out.write(reinterpret_cast<const char *>(&weight_count),
+                  sizeof(weight_count));
+        for (uint8_t w = 0; w < weight_count; ++w) {
+          int32_t bone_idx = weights[w].first;
+          float weight = weights[w].second;
+          out.write(reinterpret_cast<const char *>(&bone_idx),
+                    sizeof(bone_idx));
+          out.write(reinterpret_cast<const char *>(&weight), sizeof(weight));
+        }
+      }
+    }
+  }
+
+  // Write standalone triangles count and data
+  uint32_t standalone_count =
+      static_cast<uint32_t>(standalone_triangles.size());
+  out.write(reinterpret_cast<const char *>(&standalone_count),
+            sizeof(standalone_count));
+
+  for (const auto &tri : standalone_triangles) {
+    Vec3 v0 = tri->getOriginalVertexPosition(0);
+    Vec3 v1 = tri->getOriginalVertexPosition(1);
+    Vec3 v2 = tri->getOriginalVertexPosition(2);
+    out.write(reinterpret_cast<const char *>(&v0), sizeof(Vec3));
+    out.write(reinterpret_cast<const char *>(&v1), sizeof(Vec3));
+    out.write(reinterpret_cast<const char *>(&v2), sizeof(Vec3));
+
+    Vec3 n0 = tri->getOriginalVertexNormal(0);
+    Vec3 n1 = tri->getOriginalVertexNormal(1);
+    Vec3 n2 = tri->getOriginalVertexNormal(2);
+    out.write(reinterpret_cast<const char *>(&n0), sizeof(Vec3));
+    out.write(reinterpret_cast<const char *>(&n1), sizeof(Vec3));
+    out.write(reinterpret_cast<const char *>(&n2), sizeof(Vec3));
+
+    Vec2 uv0 = tri->t_ref(0);
+    Vec2 uv1 = tri->t_ref(1);
+    Vec2 uv2 = tri->t_ref(2);
+    out.write(reinterpret_cast<const char *>(&uv0), sizeof(Vec2));
+    out.write(reinterpret_cast<const char *>(&uv1), sizeof(Vec2));
+    out.write(reinterpret_cast<const char *>(&uv2), sizeof(Vec2));
+
+    uint32_t uv_set_count = static_cast<uint32_t>(tri->getUVSetCount());
+    out.write(reinterpret_cast<const char *>(&uv_set_count),
+              sizeof(uv_set_count));
+    for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+      const auto [set_uv0, set_uv1, set_uv2] = tri->getUVSetCoordinates(uv_set);
+      out.write(reinterpret_cast<const char *>(&set_uv0), sizeof(Vec2));
+      out.write(reinterpret_cast<const char *>(&set_uv1), sizeof(Vec2));
+      out.write(reinterpret_cast<const char *>(&set_uv2), sizeof(Vec2));
+    }
+
+    uint16_t mat_id = tri->getMaterialID();
+    out.write(reinterpret_cast<const char *>(&mat_id), sizeof(mat_id));
+
+    uint32_t tr_idx = 0xFFFFFFFF;
+    auto th = tri->getTransformHandle();
+    if (th) {
+      auto it = transform_map.find(th);
+      if (it != transform_map.end()) {
+        tr_idx = it->second;
+      }
+    }
+    out.write(reinterpret_cast<const char *>(&tr_idx), sizeof(tr_idx));
+
+    writeStringBinary(out, tri->getNodeName());
+
+    // hasAnySkinWeights() (real non-empty bone weights), NOT hasSkinData()
+    // (struct merely allocated). Writing the allocated-but-empty phantom skin
+    // as has_skin=1 is what pinned imported (Tripo etc.) meshes to facade
+    // across every save/open round-trip.
+    uint8_t has_skin = tri->hasAnySkinWeights() ? 1 : 0;
+    out.write(reinterpret_cast<const char *>(&has_skin), sizeof(has_skin));
+    if (has_skin) {
+      for (int vi = 0; vi < 3; ++vi) {
+        const auto &weights = tri->getSkinBoneWeights(vi);
+        uint8_t weight_count =
+            static_cast<uint8_t>(std::min(weights.size(), (size_t)255));
+        out.write(reinterpret_cast<const char *>(&weight_count),
+                  sizeof(weight_count));
+        for (size_t w = 0; w < weight_count; ++w) {
+          int32_t bone_idx = weights[w].first;
+          float weight = weights[w].second;
+          out.write(reinterpret_cast<const char *>(&bone_idx),
+                    sizeof(bone_idx));
+          out.write(reinterpret_cast<const char *>(&weight), sizeof(weight));
+        }
+      }
+    }
+  }
+
+  SCENE_LOG_INFO("[ProjectManager] Wrote " + std::to_string(mesh_group_count) +
+                 " flat meshes, " + std::to_string(standalone_count) +
+                 " standalone triangles, " + std::to_string(transform_count) +
+                 " transforms to binary (v8).");
+  return true;
 }
 
-bool ProjectManager::readGeometryBinary(std::istream& in, SceneData& scene) {
-    // Read and validate header (accept RTP3, RTP4, RTP5, RTP6, RTP7, RTP8 formats)
-    char magic[4];
-    in.read(magic, 4);
-    
-    // Check for valid magic
-    bool is_v3 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '3');
-    bool is_v4 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '4');
-    bool is_v5 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '5');
-    bool is_v6 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '6');
-    bool is_v7 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '7');
-    bool is_v8 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' && magic[3] == '8');
-    
-    if (!is_v3 && !is_v4 && !is_v5 && !is_v6 && !is_v7 && !is_v8) {
-        SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
-        return false;
+bool ProjectManager::readGeometryBinary(std::istream &in, SceneData &scene) {
+  // Read and validate header (accept RTP3, RTP4, RTP5, RTP6, RTP7, RTP8
+  // formats)
+  char magic[4];
+  in.read(magic, 4);
+
+  // Check for valid magic
+  bool is_v3 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' &&
+                magic[3] == '3');
+  bool is_v4 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' &&
+                magic[3] == '4');
+  bool is_v5 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' &&
+                magic[3] == '5');
+  bool is_v6 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' &&
+                magic[3] == '6');
+  bool is_v7 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' &&
+                magic[3] == '7');
+  bool is_v8 = (magic[0] == 'R' && magic[1] == 'T' && magic[2] == 'P' &&
+                magic[3] == '8');
+
+  if (!is_v3 && !is_v4 && !is_v5 && !is_v6 && !is_v7 && !is_v8) {
+    SCENE_LOG_ERROR("[ProjectManager] Invalid geometry file format.");
+    return false;
+  }
+
+  uint32_t version;
+  in.read(reinterpret_cast<char *>(&version), sizeof(version));
+  if (!in) {
+    SCENE_LOG_ERROR(
+        "[ProjectManager] Geometry binary: failed to read version.");
+    return false;
+  }
+  if (version > RTP_VERSION) {
+    SCENE_LOG_WARN("[ProjectManager] Newer geometry format (v" +
+                   std::to_string(version) + "), some features may not load.");
+  }
+
+  // Read transforms
+  uint32_t transform_count;
+  in.read(reinterpret_cast<char *>(&transform_count), sizeof(transform_count));
+  if (!in) {
+    SCENE_LOG_ERROR(
+        "[ProjectManager] Invalid transform count in geometry file: " +
+        std::to_string(transform_count));
+    return false;
+  }
+
+  std::vector<std::shared_ptr<Transform>> transforms;
+  transforms.reserve(transform_count);
+
+  for (uint32_t i = 0; i < transform_count; ++i) {
+    auto tr = std::make_shared<Transform>();
+    in.read(reinterpret_cast<char *>(&tr->base), sizeof(Matrix4x4));
+
+    if (version >= 5) {
+      // Read components
+      in.read(reinterpret_cast<char *>(&tr->position), sizeof(Vec3));
+      in.read(reinterpret_cast<char *>(&tr->rotation), sizeof(Vec3));
+      in.read(reinterpret_cast<char *>(&tr->scale), sizeof(Vec3));
+    } else {
+      // v4 or older (or if components missing): Decompose base matrix to
+      // restore components This prevents "Identity Reset" when UI updates the
+      // matrix
+      tr->base.decompose(tr->position, tr->rotation, tr->scale);
     }
-    
-    uint32_t version;
-    in.read(reinterpret_cast<char*>(&version), sizeof(version));
+
+    // Ensure dirty or final is updated?
+    tr->markDirty();
+
+    transforms.push_back(tr);
+  }
+
+  // ── Open-project legacy-facade → flat collapse (shared by BOTH the v8
+  // standalone path and the pre-v8 legacy path). Old projects — and re-saved
+  // sculpt files whose mesh round-tripped as a parentMesh-less Triangle SOUP —
+  // keep those facades forever; the writer re-emits a parentMesh-less facade as
+  // a standalone triangle. Collapse the just-loaded standalone facades into ONE
+  // flat SoA TriangleMesh per node so the open scene is flat like the
+  // mesh-group emit_flat / import-flat paths. Uses hasAnySkinWeights() (REAL
+  // bone weights), not hasSkinData() (struct merely allocated): a phantom skin
+  // (skinData!=0, all-empty weights — Tripo/imports) collapses to flat; a
+  // genuine rig stays facade (SoA skinning write-back is a later increment).
+  // The standalone verts were saved LOCAL (getOriginalVertexPosition) + a
+  // transform handle — exactly what facadesToFlatMesh consumes — so the world
+  // pose is preserved. Must run BEFORE the v8 early return, or v8 standalone
+  // facades never collapse (the reported re-saved-sculpt bug).
+  auto collapseStandaloneFacadesToFlat = [&scene]() {
+    extern bool g_dense_mesh_as_hittable;
+    if (!g_dense_mesh_as_hittable)
+      return;
+    std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>>
+        legacyGroups;
+    for (const auto &obj : scene.world.objects) {
+      auto t = std::dynamic_pointer_cast<Triangle>(obj);
+      if (!t || t->parentMesh)
+        continue; // mesh-group facade handled elsewhere
+      // hasAnySkinWeights() = REAL non-empty bone weights, NOT hasSkinData()
+      // (struct merely allocated). A phantom skin (skinData!=0, all-empty
+      // weights — Tripo/imports) collapses to flat; a genuine rig stays facade
+      // (SoA skinning write-back is a later increment).
+      const std::string &nn = t->getNodeName();
+      if (nn.empty())
+        continue; // unnamed loose tris stay as-is
+      legacyGroups[nn].push_back(t);
+    }
+    std::unordered_map<std::string, std::shared_ptr<TriangleMesh>> flatByNode;
+    for (auto &kv : legacyGroups) {
+      if (kv.second.empty())
+        continue;
+      if (auto fm = MeshModifiers::facadesToFlatMesh(kv.second)) {
+        fm->nodeName = kv.first;
+        flatByNode[kv.first] = fm;
+      }
+    }
+    if (flatByNode.empty())
+      return;
+    std::vector<std::shared_ptr<Hittable>> rebuilt;
+    rebuilt.reserve(scene.world.objects.size());
+    std::unordered_set<std::string> emitted;
+    for (const auto &obj : scene.world.objects) {
+      auto t = std::dynamic_pointer_cast<Triangle>(obj);
+      // Predicate MUST mirror the collection loop (hasAnySkinWeights, not
+      // hasSkinData), or a phantom-skin facade is collected but never dropped →
+      // flat built then discarded.
+      if (t && !t->parentMesh) {
+        auto it = flatByNode.find(t->getNodeName());
+        if (it != flatByNode.end()) {
+          if (emitted.insert(t->getNodeName()).second)
+            rebuilt.push_back(it->second);
+          continue; // drop the legacy facade
+        }
+      }
+      rebuilt.push_back(obj);
+    }
+    scene.world.objects = std::move(rebuilt);
+    SCENE_LOG_INFO("[open-flat] collapsed " +
+                   std::to_string(flatByNode.size()) +
+                   " standalone facade mesh(es) to flat TriangleMesh");
+  };
+
+  if (version >= 8) {
+    // Read Mesh Groups
+    uint32_t mesh_group_count = 0;
+    in.read(reinterpret_cast<char *>(&mesh_group_count),
+            sizeof(mesh_group_count));
     if (!in) {
-        SCENE_LOG_ERROR("[ProjectManager] Geometry binary: failed to read version.");
+      SCENE_LOG_ERROR(
+          "[ProjectManager] Invalid mesh group count in geometry file.");
+      return false;
+    }
+
+    for (uint32_t mg = 0; mg < mesh_group_count; ++mg) {
+      std::string nodeName = readStringBinary(in);
+      uint32_t tr_idx;
+      in.read(reinterpret_cast<char *>(&tr_idx), sizeof(tr_idx));
+
+      uint32_t vCount = 0, iCount = 0;
+      in.read(reinterpret_cast<char *>(&vCount), sizeof(vCount));
+      in.read(reinterpret_cast<char *>(&iCount), sizeof(iCount));
+
+      if (!in) {
+        SCENE_LOG_ERROR("[ProjectManager] Truncated geometry binary while "
+                        "reading mesh metadata.");
         return false;
-    }
-    if (version > RTP_VERSION) {
-        SCENE_LOG_WARN("[ProjectManager] Newer geometry format (v" + std::to_string(version) + "), some features may not load.");
-    }
-    
-    // Read transforms
-    uint32_t transform_count;
-    in.read(reinterpret_cast<char*>(&transform_count), sizeof(transform_count));
-    if (!in) {
-        SCENE_LOG_ERROR("[ProjectManager] Invalid transform count in geometry file: " + std::to_string(transform_count));
+      }
+
+      auto triMesh = std::make_shared<TriangleMesh>();
+      triMesh->nodeName = nodeName;
+      if (tr_idx < transforms.size()) {
+        triMesh->transform = transforms[tr_idx];
+      }
+
+      triMesh->geometry->resize_vertices(vCount);
+      triMesh->geometry->indices.resize(iCount);
+
+      triMesh->geometry->add_attribute<Vec3>("P");
+      triMesh->geometry->add_attribute<Vec3>("N");
+      triMesh->geometry->add_attribute<Vec3>("P_orig");
+      triMesh->geometry->add_attribute<Vec3>("N_orig");
+      triMesh->geometry->add_attribute<Vec2>("uv");
+      triMesh->geometry->add_attribute<uint16_t>("materialID");
+
+      Vec3 *positions = triMesh->geometry->get_attribute_data_mut<Vec3>("P");
+      Vec3 *normals = triMesh->geometry->get_attribute_data_mut<Vec3>("N");
+      Vec3 *origPositions =
+          triMesh->geometry->get_attribute_data_mut<Vec3>("P_orig");
+      Vec3 *origNormals =
+          triMesh->geometry->get_attribute_data_mut<Vec3>("N_orig");
+      Vec2 *uvs = triMesh->geometry->get_attribute_data_mut<Vec2>("uv");
+      uint16_t *matIDs =
+          triMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
+
+      if (origPositions)
+        in.read(reinterpret_cast<char *>(origPositions), vCount * sizeof(Vec3));
+      if (origNormals)
+        in.read(reinterpret_cast<char *>(origNormals), vCount * sizeof(Vec3));
+      if (uvs)
+        in.read(reinterpret_cast<char *>(uvs), vCount * sizeof(Vec2));
+      if (matIDs)
+        in.read(reinterpret_cast<char *>(matIDs), vCount * sizeof(uint16_t));
+      in.read(reinterpret_cast<char *>(triMesh->geometry->indices.data()),
+              iCount * sizeof(uint32_t));
+
+      if (positions && origPositions)
+        std::memcpy(positions, origPositions, vCount * sizeof(Vec3));
+      if (normals && origNormals)
+        std::memcpy(normals, origNormals, vCount * sizeof(Vec3));
+
+      uint32_t extra_uv_sets_count = 0;
+      in.read(reinterpret_cast<char *>(&extra_uv_sets_count),
+              sizeof(extra_uv_sets_count));
+      for (uint32_t uv_set = 0; uv_set < extra_uv_sets_count; ++uv_set) {
+        uint32_t uv_set_idx;
+        in.read(reinterpret_cast<char *>(&uv_set_idx), sizeof(uv_set_idx));
+        std::string attrName = "uv" + std::to_string(uv_set_idx);
+        triMesh->geometry->add_attribute<Vec2>(attrName);
+        Vec2 *extraUvs =
+            triMesh->geometry->get_attribute_data_mut<Vec2>(attrName);
+        if (extraUvs) {
+          in.read(reinterpret_cast<char *>(extraUvs), vCount * sizeof(Vec2));
+        }
+      }
+
+      uint8_t has_skin = 0;
+      in.read(reinterpret_cast<char *>(&has_skin), sizeof(has_skin));
+      if (has_skin) {
+        triMesh->geometry->skin_weights.resize(vCount);
+        for (uint32_t v = 0; v < vCount; ++v) {
+          uint8_t weight_count = 0;
+          in.read(reinterpret_cast<char *>(&weight_count),
+                  sizeof(weight_count));
+          triMesh->geometry->skin_weights[v].resize(weight_count);
+          for (uint8_t w = 0; w < weight_count; ++w) {
+            int32_t bone_idx;
+            float weight;
+            in.read(reinterpret_cast<char *>(&bone_idx), sizeof(bone_idx));
+            in.read(reinterpret_cast<char *>(&weight), sizeof(weight));
+            triMesh->geometry->skin_weights[v][w] = {bone_idx, weight};
+          }
+        }
+      }
+
+      if (!in) {
+        SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed while "
+                        "reading flat mesh data.");
         return false;
-    }
-    
-    std::vector<std::shared_ptr<Transform>> transforms;
-    transforms.reserve(transform_count);
-    
-    for (uint32_t i = 0; i < transform_count; ++i) {
-        auto tr = std::make_shared<Transform>();
-        in.read(reinterpret_cast<char*>(&tr->base), sizeof(Matrix4x4));
-        
-        if (version >= 5) {
-            // Read components
-            in.read(reinterpret_cast<char*>(&tr->position), sizeof(Vec3));
-            in.read(reinterpret_cast<char*>(&tr->rotation), sizeof(Vec3));
-            in.read(reinterpret_cast<char*>(&tr->scale), sizeof(Vec3));
-        } else {
-            // v4 or older (or if components missing): Decompose base matrix to restore components
-            // This prevents "Identity Reset" when UI updates the matrix
-            tr->base.decompose(tr->position, tr->rotation, tr->scale);
-        }
-        
-        // Ensure dirty or final is updated?
-        tr->markDirty(); 
-        
-        transforms.push_back(tr);
-    }
+      }
 
-    // ── Open-project legacy-facade → flat collapse (shared by BOTH the v8 standalone path and the
-    // pre-v8 legacy path). Old projects — and re-saved sculpt files whose mesh round-tripped as a
-    // parentMesh-less Triangle SOUP — keep those facades forever; the writer re-emits a
-    // parentMesh-less facade as a standalone triangle. Collapse the just-loaded standalone facades
-    // into ONE flat SoA TriangleMesh per node so the open scene is flat like the mesh-group
-    // emit_flat / import-flat paths. Uses hasAnySkinWeights() (REAL bone weights), not hasSkinData()
-    // (struct merely allocated): a phantom skin (skinData!=0, all-empty weights — Tripo/imports)
-    // collapses to flat; a genuine rig stays facade (SoA skinning write-back is a later increment).
-    // The standalone verts were saved LOCAL (getOriginalVertexPosition) + a transform handle —
-    // exactly what facadesToFlatMesh consumes — so the world pose is preserved. Must run BEFORE the
-    // v8 early return, or v8 standalone facades never collapse (the reported re-saved-sculpt bug).
-    auto collapseStandaloneFacadesToFlat = [&scene]() {
-        extern bool g_dense_mesh_as_hittable;
-        if (!g_dense_mesh_as_hittable) return;
-        std::unordered_map<std::string, std::vector<std::shared_ptr<Triangle>>> legacyGroups;
-        for (const auto& obj : scene.world.objects) {
-            auto t = std::dynamic_pointer_cast<Triangle>(obj);
-            if (!t || t->parentMesh) continue;        // mesh-group facade handled elsewhere
-            // hasAnySkinWeights() = REAL non-empty bone weights, NOT hasSkinData() (struct merely
-            // allocated). A phantom skin (skinData!=0, all-empty weights — Tripo/imports) collapses
-            // to flat; a genuine rig stays facade (SoA skinning write-back is a later increment).
-            const std::string& nn = t->getNodeName();
-            if (nn.empty()) continue;                 // unnamed loose tris stay as-is
-            legacyGroups[nn].push_back(t);
-        }
-        std::unordered_map<std::string, std::shared_ptr<TriangleMesh>> flatByNode;
-        for (auto& kv : legacyGroups) {
-            if (kv.second.empty()) continue;
-            if (auto fm = MeshModifiers::facadesToFlatMesh(kv.second)) {
-                fm->nodeName = kv.first;
-                flatByNode[kv.first] = fm;
-            }
-        }
-        if (flatByNode.empty()) return;
-        std::vector<std::shared_ptr<Hittable>> rebuilt;
-        rebuilt.reserve(scene.world.objects.size());
-        std::unordered_set<std::string> emitted;
-        for (const auto& obj : scene.world.objects) {
-            auto t = std::dynamic_pointer_cast<Triangle>(obj);
-            // Predicate MUST mirror the collection loop (hasAnySkinWeights, not hasSkinData), or a
-            // phantom-skin facade is collected but never dropped → flat built then discarded.
-            if (t && !t->parentMesh) {
-                auto it = flatByNode.find(t->getNodeName());
-                if (it != flatByNode.end()) {
-                    if (emitted.insert(t->getNodeName()).second) rebuilt.push_back(it->second);
-                    continue; // drop the legacy facade
-                }
-            }
-            rebuilt.push_back(obj);
-        }
-        scene.world.objects = std::move(rebuilt);
-        SCENE_LOG_INFO("[open-flat] collapsed " + std::to_string(flatByNode.size()) +
-                       " standalone facade mesh(es) to flat TriangleMesh");
-    };
-
-    if (version >= 8) {
-        // Read Mesh Groups
-        uint32_t mesh_group_count = 0;
-        in.read(reinterpret_cast<char*>(&mesh_group_count), sizeof(mesh_group_count));
-        if (!in) {
-            SCENE_LOG_ERROR("[ProjectManager] Invalid mesh group count in geometry file.");
-            return false;
-        }
-        
-        for (uint32_t mg = 0; mg < mesh_group_count; ++mg) {
-            std::string nodeName = readStringBinary(in);
-            uint32_t tr_idx;
-            in.read(reinterpret_cast<char*>(&tr_idx), sizeof(tr_idx));
-            
-            uint32_t vCount = 0, iCount = 0;
-            in.read(reinterpret_cast<char*>(&vCount), sizeof(vCount));
-            in.read(reinterpret_cast<char*>(&iCount), sizeof(iCount));
-            
-            if (!in) {
-                SCENE_LOG_ERROR("[ProjectManager] Truncated geometry binary while reading mesh metadata.");
-                return false;
-            }
-            
-            auto triMesh = std::make_shared<TriangleMesh>();
-            triMesh->nodeName = nodeName;
-            if (tr_idx < transforms.size()) {
-                triMesh->transform = transforms[tr_idx];
-            }
-            
-            triMesh->geometry->resize_vertices(vCount);
-            triMesh->geometry->indices.resize(iCount);
-            
-            triMesh->geometry->add_attribute<Vec3>("P");
-            triMesh->geometry->add_attribute<Vec3>("N");
-            triMesh->geometry->add_attribute<Vec3>("P_orig");
-            triMesh->geometry->add_attribute<Vec3>("N_orig");
-            triMesh->geometry->add_attribute<Vec2>("uv");
-            triMesh->geometry->add_attribute<uint16_t>("materialID");
-            
-            Vec3* positions = triMesh->geometry->get_attribute_data_mut<Vec3>("P");
-            Vec3* normals = triMesh->geometry->get_attribute_data_mut<Vec3>("N");
-            Vec3* origPositions = triMesh->geometry->get_attribute_data_mut<Vec3>("P_orig");
-            Vec3* origNormals = triMesh->geometry->get_attribute_data_mut<Vec3>("N_orig");
-            Vec2* uvs = triMesh->geometry->get_attribute_data_mut<Vec2>("uv");
-            uint16_t* matIDs = triMesh->geometry->get_attribute_data_mut<uint16_t>("materialID");
-            
-            if (origPositions) in.read(reinterpret_cast<char*>(origPositions), vCount * sizeof(Vec3));
-            if (origNormals) in.read(reinterpret_cast<char*>(origNormals), vCount * sizeof(Vec3));
-            if (uvs) in.read(reinterpret_cast<char*>(uvs), vCount * sizeof(Vec2));
-            if (matIDs) in.read(reinterpret_cast<char*>(matIDs), vCount * sizeof(uint16_t));
-            in.read(reinterpret_cast<char*>(triMesh->geometry->indices.data()), iCount * sizeof(uint32_t));
-            
-            if (positions && origPositions) std::memcpy(positions, origPositions, vCount * sizeof(Vec3));
-            if (normals && origNormals) std::memcpy(normals, origNormals, vCount * sizeof(Vec3));
-            
-            uint32_t extra_uv_sets_count = 0;
-            in.read(reinterpret_cast<char*>(&extra_uv_sets_count), sizeof(extra_uv_sets_count));
-            for (uint32_t uv_set = 0; uv_set < extra_uv_sets_count; ++uv_set) {
-                uint32_t uv_set_idx;
-                in.read(reinterpret_cast<char*>(&uv_set_idx), sizeof(uv_set_idx));
-                std::string attrName = "uv" + std::to_string(uv_set_idx);
-                triMesh->geometry->add_attribute<Vec2>(attrName);
-                Vec2* extraUvs = triMesh->geometry->get_attribute_data_mut<Vec2>(attrName);
-                if (extraUvs) {
-                    in.read(reinterpret_cast<char*>(extraUvs), vCount * sizeof(Vec2));
-                }
-            }
-            
-            uint8_t has_skin = 0;
-            in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
-            if (has_skin) {
-                triMesh->geometry->skin_weights.resize(vCount);
-                for (uint32_t v = 0; v < vCount; ++v) {
-                    uint8_t weight_count = 0;
-                    in.read(reinterpret_cast<char*>(&weight_count), sizeof(weight_count));
-                    triMesh->geometry->skin_weights[v].resize(weight_count);
-                    for (uint8_t w = 0; w < weight_count; ++w) {
-                        int32_t bone_idx;
-                        float weight;
-                        in.read(reinterpret_cast<char*>(&bone_idx), sizeof(bone_idx));
-                        in.read(reinterpret_cast<char*>(&weight), sizeof(weight));
-                        triMesh->geometry->skin_weights[v][w] = {bone_idx, weight};
-                    }
-                }
-            }
-            
-            if (!in) {
-                SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed while reading flat mesh data.");
-                return false;
-            }
-            
-            uint32_t numTriangles = iCount / 3;
-            // ── Open-project-flat (gated): emit the loaded mesh as ONE SoA TriangleMesh Hittable
-            // instead of a per-face Triangle facade soup — the loader-level equivalent of
-            // import-flat / apply-flat / Simple-subdivide-flat. This never materializes the facade
-            // soup at all (no transient RAM spike on load), and activates the sculpt-on-flat SoA
-            // path on the loaded mesh (a cage-less direct mesh). Skinned meshes keep the facade path
-            // (SoA skinning write-back is a later increment). Flag OFF or skinned → original facade
-            // emission, byte-for-byte behaviour. Selection/material/sculpt on the collapsed mesh go
-            // through the representative-facade path registered by SceneUI::rebuildMeshCache.
-            extern bool g_dense_mesh_as_hittable;
-            // Recompute from the ACTUAL loaded weights: an old file may carry a phantom has_skin=1
-            // with all-empty weight lists. Treat skin as real only if some vertex has a non-empty
-            // list, so a rigless imported mesh collapses to flat even from a pre-fix save.
-            bool real_has_skin = false;
-            if (has_skin) {
-                for (const auto& w : triMesh->geometry->skin_weights) { if (!w.empty()) { real_has_skin = true; break; } }
-            }
-            const bool emit_flat = g_dense_mesh_as_hittable && numTriangles >= 1;
-            if (has_skin && !real_has_skin)
-                SCENE_LOG_INFO(std::string("[open-flat] mesh-group node='") + nodeName +
-                               "' phantom skin stripped -> FLAT");
-            if (emit_flat) {
-                scene.world.objects.push_back(triMesh); // one TriangleMesh Hittable per mesh group
-            } else {
-                for (uint32_t t = 0; t < numTriangles; ++t) {
-                    auto triangle = std::make_shared<Triangle>(triMesh, t);
-                    scene.world.objects.push_back(triangle);
-                }
-            }
-            
-            // For static flat meshes, apply root transform if not identity (use real_has_skin so a
-            // phantom-skin mesh that just collapsed to flat still gets its world P/N baked).
-            if (triMesh->transform && !real_has_skin) {
-                if (!triMesh->transform->base.isIdentity()) {
-                    Vec3* pos = triMesh->geometry->get_positions_mut();
-                    Vec3* norm = triMesh->geometry->get_normals_mut();
-                    const Vec3* op = triMesh->geometry->get_positions_orig();
-                    const Vec3* on = triMesh->geometry->get_normals_orig();
-                    Matrix4x4 rootTransform = triMesh->transform->getFinal();
-                    Matrix4x4 rootNormalTransform = triMesh->transform->getNormalTransform();
-                    if (pos && op && norm && on) {
-                        #pragma omp parallel for schedule(static)
-                        for (int v = 0; v < (int)vCount; ++v) {
-                            pos[v] = rootTransform.transform_point(op[v]);
-                            norm[v] = rootNormalTransform.transform_vector(on[v]).normalize();
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Read standalone triangles
-        uint32_t standalone_tri_count = 0;
-        in.read(reinterpret_cast<char*>(&standalone_tri_count), sizeof(standalone_tri_count));
-        scene.world.objects.reserve(scene.world.objects.size() + standalone_tri_count);
-        
-        for (uint32_t i = 0; i < standalone_tri_count; ++i) {
-            Vec3 v0, v1, v2;
-            in.read(reinterpret_cast<char*>(&v0), sizeof(Vec3));
-            in.read(reinterpret_cast<char*>(&v1), sizeof(Vec3));
-            in.read(reinterpret_cast<char*>(&v2), sizeof(Vec3));
-            Vec3 n0, n1, n2;
-            in.read(reinterpret_cast<char*>(&n0), sizeof(Vec3));
-            in.read(reinterpret_cast<char*>(&n1), sizeof(Vec3));
-            in.read(reinterpret_cast<char*>(&n2), sizeof(Vec3));
-            Vec2 uv0, uv1, uv2;
-            in.read(reinterpret_cast<char*>(&uv0), sizeof(Vec2));
-            in.read(reinterpret_cast<char*>(&uv1), sizeof(Vec2));
-            in.read(reinterpret_cast<char*>(&uv2), sizeof(Vec2));
-            
-            uint32_t uv_set_count = 0;
-            in.read(reinterpret_cast<char*>(&uv_set_count), sizeof(uv_set_count));
-            std::vector<std::array<Vec2, 3>> uv_sets(uv_set_count);
-            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
-                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][0]), sizeof(Vec2));
-                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][1]), sizeof(Vec2));
-                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][2]), sizeof(Vec2));
-            }
-            
-            uint16_t mat_id;
-            in.read(reinterpret_cast<char*>(&mat_id), sizeof(mat_id));
-            uint32_t tr_idx;
-            in.read(reinterpret_cast<char*>(&tr_idx), sizeof(tr_idx));
-            
-            std::string node_name = readStringBinary(in);
-            
-            if (!in) {
-                SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed while reading standalone triangles.");
-                return false;
-            }
-            
-            auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
-            tri->setNodeName(node_name);
-            if (tr_idx < transforms.size()) {
-                tri->setTransformHandle(transforms[tr_idx]);
-            }
-            
-            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
-                tri->setUVSetCoordinates(uv_set, uv_sets[uv_set][0], uv_sets[uv_set][1], uv_sets[uv_set][2]);
-            }
-            
-            uint8_t has_skin;
-            in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
-            if (has_skin) {
-                tri->initializeSkinData();
-                for (int vi = 0; vi < 3; ++vi) {
-                    uint8_t weight_count = 0;
-                    in.read(reinterpret_cast<char*>(&weight_count), sizeof(weight_count));
-                    std::vector<std::pair<int, float>> weights(weight_count);
-                    for (uint8_t w = 0; w < weight_count; ++w) {
-                        in.read(reinterpret_cast<char*>(&weights[w].first), sizeof(int32_t));
-                        in.read(reinterpret_cast<char*>(&weights[w].second), sizeof(float));
-                    }
-                    tri->setSkinBoneWeights(vi, weights);
-                }
-            }
-            
-            if (tr_idx < transforms.size()) {
-                if (!has_skin) {
-                    if (!transforms[tr_idx]->base.isIdentity()) {
-                        tri->updateTransformedVertices();
-                    } else {
-                        tri->update_bounding_box();
-                    }
-                }
-            } else {
-                tri->update_bounding_box();
-            }
-            
-            scene.world.objects.push_back(tri);
-        }
-        
-        // v8 standalone facades (e.g. a re-saved sculpt file whose mesh round-tripped as a
-        // parentMesh-less soup) must collapse here too — this path returns before the pre-v8
-        // collapse below would ever run.
-        collapseStandaloneFacadesToFlat();
-
-        SCENE_LOG_INFO("[ProjectManager] Loaded flat geometry (v8): " + std::to_string(mesh_group_count) + " meshes, " + std::to_string(standalone_tri_count) + " standalone triangles, " + std::to_string(transform_count) + " transforms.");
-        return true;
-    }
-
-    std::vector<std::string> node_names;
-    if (version >= 7) {
-        uint32_t node_name_count = 0;
-        in.read(reinterpret_cast<char*>(&node_name_count), sizeof(node_name_count));
-        if (!in) {
-            SCENE_LOG_ERROR("[ProjectManager] Invalid node name table in geometry file.");
-            return false;
-        }
-
-        node_names.reserve(node_name_count);
-        for (uint32_t i = 0; i < node_name_count; ++i) {
-            node_names.push_back(readStringBinary(in));
-            if (!in) {
-                SCENE_LOG_ERROR("[ProjectManager] Failed reading node name table entry.");
-                return false;
-            }
-        }
-    }
-    
-    // Read triangles
-    uint32_t tri_count;
-    in.read(reinterpret_cast<char*>(&tri_count), sizeof(tri_count));
-    if (!in) {
-        SCENE_LOG_ERROR("[ProjectManager] Invalid triangle count in geometry file: " + std::to_string(tri_count));
-        return false;
-    }
-    
-    scene.world.objects.reserve(scene.world.objects.size() + tri_count);
-    
-    std::unordered_map<std::string, std::shared_ptr<OriginalMeshGeometry>> sharedGeoms;
-    
-    for (uint32_t i = 0; i < tri_count; ++i) {
-        // Vertices
-        Vec3 v0, v1, v2;
-        in.read(reinterpret_cast<char*>(&v0), sizeof(Vec3));
-        in.read(reinterpret_cast<char*>(&v1), sizeof(Vec3));
-        in.read(reinterpret_cast<char*>(&v2), sizeof(Vec3));
-        
-        // Normals
-        Vec3 n0, n1, n2;
-        in.read(reinterpret_cast<char*>(&n0), sizeof(Vec3));
-        in.read(reinterpret_cast<char*>(&n1), sizeof(Vec3));
-        in.read(reinterpret_cast<char*>(&n2), sizeof(Vec3));
-        
-        // UVs
-        Vec2 uv0, uv1, uv2;
-        in.read(reinterpret_cast<char*>(&uv0), sizeof(Vec2));
-        in.read(reinterpret_cast<char*>(&uv1), sizeof(Vec2));
-        in.read(reinterpret_cast<char*>(&uv2), sizeof(Vec2));
-        
-        uint32_t uv_set_count = 0;
-        std::vector<std::array<Vec2, 3>> uv_sets;
-        if (version >= 6) {
-            in.read(reinterpret_cast<char*>(&uv_set_count), sizeof(uv_set_count));
-            uv_sets.resize(uv_set_count);
-            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
-                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][0]), sizeof(Vec2));
-                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][1]), sizeof(Vec2));
-                in.read(reinterpret_cast<char*>(&uv_sets[uv_set][2]), sizeof(Vec2));
-            }
-        }
-
-        // Material ID
-        uint16_t mat_id;
-        in.read(reinterpret_cast<char*>(&mat_id), sizeof(mat_id));
-        
-        // Transform index
-        uint32_t tr_idx;
-        in.read(reinterpret_cast<char*>(&tr_idx), sizeof(tr_idx));
-
-        // Node name
-        std::string node_name;
-        if (version >= 7) {
-            uint32_t node_name_idx = 0xFFFFFFFF;
-            in.read(reinterpret_cast<char*>(&node_name_idx), sizeof(node_name_idx));
-            if (node_name_idx < node_names.size()) {
-                node_name = node_names[node_name_idx];
-            }
-        } else {
-            node_name = readStringBinary(in);
-        }
-        
-        if (!in) {
-            SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed at triangle " +
-                            std::to_string(i) + "/" + std::to_string(tri_count) + ". File may be truncated.");
+      uint32_t numTriangles = iCount / 3;
+      // ── Open-project-flat (gated): emit the loaded mesh as ONE SoA
+      // TriangleMesh Hittable instead of a per-face Triangle facade soup — the
+      // loader-level equivalent of import-flat / apply-flat /
+      // Simple-subdivide-flat. This never materializes the facade soup at all
+      // (no transient RAM spike on load), and activates the sculpt-on-flat SoA
+      // path on the loaded mesh (a cage-less direct mesh). Skinned meshes keep
+      // the facade path (SoA skinning write-back is a later increment). Flag
+      // OFF or skinned → original facade emission, byte-for-byte behaviour.
+      // Selection/material/sculpt on the collapsed mesh go through the
+      // representative-facade path registered by SceneUI::rebuildMeshCache.
+      extern bool g_dense_mesh_as_hittable;
+      // Recompute from the ACTUAL loaded weights: an old file may carry a
+      // phantom has_skin=1 with all-empty weight lists. Treat skin as real only
+      // if some vertex has a non-empty list, so a rigless imported mesh
+      // collapses to flat even from a pre-fix save.
+      bool real_has_skin = false;
+      if (has_skin) {
+        for (const auto &w : triMesh->geometry->skin_weights) {
+          if (!w.empty()) {
+            real_has_skin = true;
             break;
+          }
         }
-        
-        // Create triangle
-        auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2, mat_id);
-        tri->setNodeName(node_name);
+      }
+      const bool emit_flat = g_dense_mesh_as_hittable && numTriangles >= 1;
+      if (has_skin && !real_has_skin)
+        SCENE_LOG_INFO(std::string("[open-flat] mesh-group node='") + nodeName +
+                       "' phantom skin stripped -> FLAT");
+      if (emit_flat) {
+        scene.world.objects.push_back(
+            triMesh); // one TriangleMesh Hittable per mesh group
+      } else {
+        for (uint32_t t = 0; t < numTriangles; ++t) {
+          auto triangle = std::make_shared<Triangle>(triMesh, t);
+          scene.world.objects.push_back(triangle);
+        }
+      }
 
-        if (version >= 6) {
-            for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
-                tri->setUVSetCoordinates(uv_set, uv_sets[uv_set][0], uv_sets[uv_set][1], uv_sets[uv_set][2]);
+      // For static flat meshes, apply root transform if not identity (use
+      // real_has_skin so a phantom-skin mesh that just collapsed to flat still
+      // gets its world P/N baked).
+      if (triMesh->transform && !real_has_skin) {
+        if (!triMesh->transform->base.isIdentity()) {
+          Vec3 *pos = triMesh->geometry->get_positions_mut();
+          Vec3 *norm = triMesh->geometry->get_normals_mut();
+          const Vec3 *op = triMesh->geometry->get_positions_orig();
+          const Vec3 *on = triMesh->geometry->get_normals_orig();
+          Matrix4x4 rootTransform = triMesh->transform->getFinal();
+          Matrix4x4 rootNormalTransform =
+              triMesh->transform->getNormalTransform();
+          if (pos && op && norm && on) {
+#pragma omp parallel for schedule(static)
+            for (int v = 0; v < (int)vCount; ++v) {
+              pos[v] = rootTransform.transform_point(op[v]);
+              norm[v] = rootNormalTransform.transform_vector(on[v]).normalize();
             }
-        } else {
-            tri->setUVSetCoordinates(0, uv0, uv1, uv2);
+          }
         }
-
-        if (Material* mat = MaterialManager::getInstance().getMaterial(mat_id)) {
-            if (auto* pbsdf = dynamic_cast<PrincipledBSDF*>(mat)) {
-                tri->applyUVSet(static_cast<size_t>(std::max(0, pbsdf->selected_uv_set)));
-            }
-        }
-        
-        // Read skinning data (v4+)
-        bool has_skin_data = false;
-        if (version >= 4) {
-            uint8_t has_skin;
-            in.read(reinterpret_cast<char*>(&has_skin), sizeof(has_skin));
-            has_skin_data = (has_skin != 0);
-            
-            if (has_skin_data) {
-                tri->initializeSkinData();
-                
-                // Read bone weights for each vertex
-                for (int vi = 0; vi < 3; ++vi) {
-                    uint8_t weight_count;
-                    in.read(reinterpret_cast<char*>(&weight_count), sizeof(weight_count));
-                    
-                    std::vector<std::pair<int, float>> weights;
-                    weights.reserve(weight_count);
-                    
-                    for (uint8_t w = 0; w < weight_count; ++w) {
-                        int32_t bone_idx;
-                        float weight;
-                        in.read(reinterpret_cast<char*>(&bone_idx), sizeof(bone_idx));
-                        in.read(reinterpret_cast<char*>(&weight), sizeof(weight));
-                        weights.emplace_back(bone_idx, weight);
-                    }
-                    
-                    tri->setSkinBoneWeights(vi, weights);
-                }
-            }
-        }
-
-        // Determine if we need to allocate and link the shared OriginalMeshGeometry on load.
-        // We only need it if:
-        // 1. The mesh has skin data (rigged), OR
-        // 2. The mesh has a non-Identity transform (so we must run updateTransformedVertices,
-        //    which requires the original geometry to transform correctly).
-        // For static meshes with Identity (or no) transform, we keep originalGeometry null to save ~1.3 GB of RAM!
-        const bool has_transform = (tr_idx < transforms.size());
-        const bool needsOriginalGeometryOnLoad = has_skin_data || (has_transform && !transforms[tr_idx]->base.isIdentity());
-
-        if (needsOriginalGeometryOnLoad) {
-            auto& sharedGeom = sharedGeoms[node_name];
-            if (!sharedGeom) {
-                sharedGeom = std::make_shared<OriginalMeshGeometry>();
-            }
-            unsigned int baseIdx = static_cast<unsigned int>(sharedGeom->positions.size());
-            sharedGeom->positions.push_back(v0);
-            sharedGeom->positions.push_back(v1);
-            sharedGeom->positions.push_back(v2);
-            
-            auto normalize_safe = [](const Vec3& n) {
-                float len = n.length();
-                return len > 1e-6f ? n / len : Vec3(0.0f, 1.0f, 0.0f);
-            };
-            sharedGeom->normals.push_back(normalize_safe(n0));
-            sharedGeom->normals.push_back(normalize_safe(n1));
-            sharedGeom->normals.push_back(normalize_safe(n2));
-
-            tri->setAssimpVertexIndices(baseIdx + 0, baseIdx + 1, baseIdx + 2);
-            tri->setOriginalGeometry(sharedGeom);
-        }
-        
-        // Assign transform
-        if (has_transform) {
-            tri->setTransformHandle(transforms[tr_idx]);
-            
-            // Static meshes need an initial CPU-space update for BVH/picking.
-            // Skinned meshes must stay in bind/local space until animation updates them.
-            if (!has_skin_data) {
-                if (!transforms[tr_idx]->base.isIdentity()) {
-                    tri->updateTransformedVertices();
-                } else {
-                    tri->update_bounding_box();
-                }
-            }
-        } else {
-            tri->update_bounding_box();
-        }
-        scene.world.objects.push_back(tri);
+      }
     }
 
-    // Pre-v8 legacy path: collapse the just-loaded standalone facades to flat (same helper the v8
-    // standalone path calls before its early return).
+    // Read standalone triangles
+    uint32_t standalone_tri_count = 0;
+    in.read(reinterpret_cast<char *>(&standalone_tri_count),
+            sizeof(standalone_tri_count));
+    scene.world.objects.reserve(scene.world.objects.size() +
+                                standalone_tri_count);
+
+    for (uint32_t i = 0; i < standalone_tri_count; ++i) {
+      Vec3 v0, v1, v2;
+      in.read(reinterpret_cast<char *>(&v0), sizeof(Vec3));
+      in.read(reinterpret_cast<char *>(&v1), sizeof(Vec3));
+      in.read(reinterpret_cast<char *>(&v2), sizeof(Vec3));
+      Vec3 n0, n1, n2;
+      in.read(reinterpret_cast<char *>(&n0), sizeof(Vec3));
+      in.read(reinterpret_cast<char *>(&n1), sizeof(Vec3));
+      in.read(reinterpret_cast<char *>(&n2), sizeof(Vec3));
+      Vec2 uv0, uv1, uv2;
+      in.read(reinterpret_cast<char *>(&uv0), sizeof(Vec2));
+      in.read(reinterpret_cast<char *>(&uv1), sizeof(Vec2));
+      in.read(reinterpret_cast<char *>(&uv2), sizeof(Vec2));
+
+      uint32_t uv_set_count = 0;
+      in.read(reinterpret_cast<char *>(&uv_set_count), sizeof(uv_set_count));
+      std::vector<std::array<Vec2, 3>> uv_sets(uv_set_count);
+      for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+        in.read(reinterpret_cast<char *>(&uv_sets[uv_set][0]), sizeof(Vec2));
+        in.read(reinterpret_cast<char *>(&uv_sets[uv_set][1]), sizeof(Vec2));
+        in.read(reinterpret_cast<char *>(&uv_sets[uv_set][2]), sizeof(Vec2));
+      }
+
+      uint16_t mat_id;
+      in.read(reinterpret_cast<char *>(&mat_id), sizeof(mat_id));
+      uint32_t tr_idx;
+      in.read(reinterpret_cast<char *>(&tr_idx), sizeof(tr_idx));
+
+      std::string node_name = readStringBinary(in);
+
+      if (!in) {
+        SCENE_LOG_ERROR("[ProjectManager] Geometry binary: stream failed while "
+                        "reading standalone triangles.");
+        return false;
+      }
+
+      auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1,
+                                            uv2, mat_id);
+      tri->setNodeName(node_name);
+      if (tr_idx < transforms.size()) {
+        tri->setTransformHandle(transforms[tr_idx]);
+      }
+
+      for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+        tri->setUVSetCoordinates(uv_set, uv_sets[uv_set][0], uv_sets[uv_set][1],
+                                 uv_sets[uv_set][2]);
+      }
+
+      uint8_t has_skin;
+      in.read(reinterpret_cast<char *>(&has_skin), sizeof(has_skin));
+      if (has_skin) {
+        tri->initializeSkinData();
+        for (int vi = 0; vi < 3; ++vi) {
+          uint8_t weight_count = 0;
+          in.read(reinterpret_cast<char *>(&weight_count),
+                  sizeof(weight_count));
+          std::vector<std::pair<int, float>> weights(weight_count);
+          for (uint8_t w = 0; w < weight_count; ++w) {
+            in.read(reinterpret_cast<char *>(&weights[w].first),
+                    sizeof(int32_t));
+            in.read(reinterpret_cast<char *>(&weights[w].second),
+                    sizeof(float));
+          }
+          tri->setSkinBoneWeights(vi, weights);
+        }
+      }
+
+      if (tr_idx < transforms.size()) {
+        if (!has_skin) {
+          if (!transforms[tr_idx]->base.isIdentity()) {
+            tri->updateTransformedVertices();
+          } else {
+            tri->update_bounding_box();
+          }
+        }
+      } else {
+        tri->update_bounding_box();
+      }
+
+      scene.world.objects.push_back(tri);
+    }
+
+    // v8 standalone facades (e.g. a re-saved sculpt file whose mesh
+    // round-tripped as a parentMesh-less soup) must collapse here too — this
+    // path returns before the pre-v8 collapse below would ever run.
     collapseStandaloneFacadesToFlat();
 
-    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(tri_count) + " triangles, " +
-                   std::to_string(transform_count) + " transforms from binary.");
+    SCENE_LOG_INFO("[ProjectManager] Loaded flat geometry (v8): " +
+                   std::to_string(mesh_group_count) + " meshes, " +
+                   std::to_string(standalone_tri_count) +
+                   " standalone triangles, " + std::to_string(transform_count) +
+                   " transforms.");
     return true;
+  }
+
+  std::vector<std::string> node_names;
+  if (version >= 7) {
+    uint32_t node_name_count = 0;
+    in.read(reinterpret_cast<char *>(&node_name_count),
+            sizeof(node_name_count));
+    if (!in) {
+      SCENE_LOG_ERROR(
+          "[ProjectManager] Invalid node name table in geometry file.");
+      return false;
+    }
+
+    node_names.reserve(node_name_count);
+    for (uint32_t i = 0; i < node_name_count; ++i) {
+      node_names.push_back(readStringBinary(in));
+      if (!in) {
+        SCENE_LOG_ERROR(
+            "[ProjectManager] Failed reading node name table entry.");
+        return false;
+      }
+    }
+  }
+
+  // Read triangles
+  uint32_t tri_count;
+  in.read(reinterpret_cast<char *>(&tri_count), sizeof(tri_count));
+  if (!in) {
+    SCENE_LOG_ERROR(
+        "[ProjectManager] Invalid triangle count in geometry file: " +
+        std::to_string(tri_count));
+    return false;
+  }
+
+  scene.world.objects.reserve(scene.world.objects.size() + tri_count);
+
+  std::unordered_map<std::string, std::shared_ptr<OriginalMeshGeometry>>
+      sharedGeoms;
+
+  for (uint32_t i = 0; i < tri_count; ++i) {
+    // Vertices
+    Vec3 v0, v1, v2;
+    in.read(reinterpret_cast<char *>(&v0), sizeof(Vec3));
+    in.read(reinterpret_cast<char *>(&v1), sizeof(Vec3));
+    in.read(reinterpret_cast<char *>(&v2), sizeof(Vec3));
+
+    // Normals
+    Vec3 n0, n1, n2;
+    in.read(reinterpret_cast<char *>(&n0), sizeof(Vec3));
+    in.read(reinterpret_cast<char *>(&n1), sizeof(Vec3));
+    in.read(reinterpret_cast<char *>(&n2), sizeof(Vec3));
+
+    // UVs
+    Vec2 uv0, uv1, uv2;
+    in.read(reinterpret_cast<char *>(&uv0), sizeof(Vec2));
+    in.read(reinterpret_cast<char *>(&uv1), sizeof(Vec2));
+    in.read(reinterpret_cast<char *>(&uv2), sizeof(Vec2));
+
+    uint32_t uv_set_count = 0;
+    std::vector<std::array<Vec2, 3>> uv_sets;
+    if (version >= 6) {
+      in.read(reinterpret_cast<char *>(&uv_set_count), sizeof(uv_set_count));
+      uv_sets.resize(uv_set_count);
+      for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+        in.read(reinterpret_cast<char *>(&uv_sets[uv_set][0]), sizeof(Vec2));
+        in.read(reinterpret_cast<char *>(&uv_sets[uv_set][1]), sizeof(Vec2));
+        in.read(reinterpret_cast<char *>(&uv_sets[uv_set][2]), sizeof(Vec2));
+      }
+    }
+
+    // Material ID
+    uint16_t mat_id;
+    in.read(reinterpret_cast<char *>(&mat_id), sizeof(mat_id));
+
+    // Transform index
+    uint32_t tr_idx;
+    in.read(reinterpret_cast<char *>(&tr_idx), sizeof(tr_idx));
+
+    // Node name
+    std::string node_name;
+    if (version >= 7) {
+      uint32_t node_name_idx = 0xFFFFFFFF;
+      in.read(reinterpret_cast<char *>(&node_name_idx), sizeof(node_name_idx));
+      if (node_name_idx < node_names.size()) {
+        node_name = node_names[node_name_idx];
+      }
+    } else {
+      node_name = readStringBinary(in);
+    }
+
+    if (!in) {
+      SCENE_LOG_ERROR(
+          "[ProjectManager] Geometry binary: stream failed at triangle " +
+          std::to_string(i) + "/" + std::to_string(tri_count) +
+          ". File may be truncated.");
+      break;
+    }
+
+    // Create triangle
+    auto tri = std::make_shared<Triangle>(v0, v1, v2, n0, n1, n2, uv0, uv1, uv2,
+                                          mat_id);
+    tri->setNodeName(node_name);
+
+    if (version >= 6) {
+      for (uint32_t uv_set = 0; uv_set < uv_set_count; ++uv_set) {
+        tri->setUVSetCoordinates(uv_set, uv_sets[uv_set][0], uv_sets[uv_set][1],
+                                 uv_sets[uv_set][2]);
+      }
+    } else {
+      tri->setUVSetCoordinates(0, uv0, uv1, uv2);
+    }
+
+    if (Material *mat = MaterialManager::getInstance().getMaterial(mat_id)) {
+      if (auto *pbsdf = dynamic_cast<PrincipledBSDF *>(mat)) {
+        tri->applyUVSet(
+            static_cast<size_t>(std::max(0, pbsdf->selected_uv_set)));
+      }
+    }
+
+    // Read skinning data (v4+)
+    bool has_skin_data = false;
+    if (version >= 4) {
+      uint8_t has_skin;
+      in.read(reinterpret_cast<char *>(&has_skin), sizeof(has_skin));
+      has_skin_data = (has_skin != 0);
+
+      if (has_skin_data) {
+        tri->initializeSkinData();
+
+        // Read bone weights for each vertex
+        for (int vi = 0; vi < 3; ++vi) {
+          uint8_t weight_count;
+          in.read(reinterpret_cast<char *>(&weight_count),
+                  sizeof(weight_count));
+
+          std::vector<std::pair<int, float>> weights;
+          weights.reserve(weight_count);
+
+          for (uint8_t w = 0; w < weight_count; ++w) {
+            int32_t bone_idx;
+            float weight;
+            in.read(reinterpret_cast<char *>(&bone_idx), sizeof(bone_idx));
+            in.read(reinterpret_cast<char *>(&weight), sizeof(weight));
+            weights.emplace_back(bone_idx, weight);
+          }
+
+          tri->setSkinBoneWeights(vi, weights);
+        }
+      }
+    }
+
+    // Determine if we need to allocate and link the shared OriginalMeshGeometry
+    // on load. We only need it if:
+    // 1. The mesh has skin data (rigged), OR
+    // 2. The mesh has a non-Identity transform (so we must run
+    // updateTransformedVertices,
+    //    which requires the original geometry to transform correctly).
+    // For static meshes with Identity (or no) transform, we keep
+    // originalGeometry null to save ~1.3 GB of RAM!
+    const bool has_transform = (tr_idx < transforms.size());
+    const bool needsOriginalGeometryOnLoad =
+        has_skin_data ||
+        (has_transform && !transforms[tr_idx]->base.isIdentity());
+
+    if (needsOriginalGeometryOnLoad) {
+      auto &sharedGeom = sharedGeoms[node_name];
+      if (!sharedGeom) {
+        sharedGeom = std::make_shared<OriginalMeshGeometry>();
+      }
+      unsigned int baseIdx =
+          static_cast<unsigned int>(sharedGeom->positions.size());
+      sharedGeom->positions.push_back(v0);
+      sharedGeom->positions.push_back(v1);
+      sharedGeom->positions.push_back(v2);
+
+      auto normalize_safe = [](const Vec3 &n) {
+        float len = n.length();
+        return len > 1e-6f ? n / len : Vec3(0.0f, 1.0f, 0.0f);
+      };
+      sharedGeom->normals.push_back(normalize_safe(n0));
+      sharedGeom->normals.push_back(normalize_safe(n1));
+      sharedGeom->normals.push_back(normalize_safe(n2));
+
+      tri->setAssimpVertexIndices(baseIdx + 0, baseIdx + 1, baseIdx + 2);
+      tri->setOriginalGeometry(sharedGeom);
+    }
+
+    // Assign transform
+    if (has_transform) {
+      tri->setTransformHandle(transforms[tr_idx]);
+
+      // Static meshes need an initial CPU-space update for BVH/picking.
+      // Skinned meshes must stay in bind/local space until animation updates
+      // them.
+      if (!has_skin_data) {
+        if (!transforms[tr_idx]->base.isIdentity()) {
+          tri->updateTransformedVertices();
+        } else {
+          tri->update_bounding_box();
+        }
+      }
+    } else {
+      tri->update_bounding_box();
+    }
+    scene.world.objects.push_back(tri);
+  }
+
+  // Pre-v8 legacy path: collapse the just-loaded standalone facades to flat
+  // (same helper the v8 standalone path calls before its early return).
+  collapseStandaloneFacadesToFlat();
+
+  SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(tri_count) +
+                 " triangles, " + std::to_string(transform_count) +
+                 " transforms from binary.");
+  return true;
 }
 
 // ============================================================================
 // LIGHT SERIALIZATION
 // ============================================================================
 
-json ProjectManager::serializeLights(const std::vector<std::shared_ptr<Light>>& lights) {
-    json arr = json::array();
-    
-    for (size_t i = 0; i < lights.size(); ++i) {
-        const auto& light = lights[i];
-        json l;
-        
-        l["id"] = i;
-        l["type"] = static_cast<int>(light->type());
-        l["position"] = vec3ToJson(light->position);
-        l["direction"] = vec3ToJson(light->direction);
-        l["color"] = vec3ToJson(light->color);
-        l["intensity"] = light->intensity;
-        l["radius"] = light->getRadius();
-        
-        // Spot light specific
-        if (light->type() == LightType::Spot) {
-            auto spot = std::dynamic_pointer_cast<SpotLight>(light);
-            if (spot) {
-                l["angle"] = spot->getAngleDegrees();
-                l["falloff"] = spot->getFalloff();
-            }
-        }
-        
-        // Area light specific
-        if (light->type() == LightType::Area) {
-            if (auto al = std::dynamic_pointer_cast<AreaLight>(light)) {
-                l["width"] = al->getWidth();
-                l["height"] = al->getHeight();
-            }
-        }
-        
-        arr.push_back(l);
+json ProjectManager::serializeLights(
+    const std::vector<std::shared_ptr<Light>> &lights) {
+  json arr = json::array();
+
+  for (size_t i = 0; i < lights.size(); ++i) {
+    const auto &light = lights[i];
+    json l;
+
+    l["id"] = i;
+    l["type"] = static_cast<int>(light->type());
+    l["position"] = vec3ToJson(light->position);
+    l["direction"] = vec3ToJson(light->direction);
+    l["color"] = vec3ToJson(light->color);
+    l["intensity"] = light->intensity;
+    l["radius"] = light->getRadius();
+    l["cast_shadows"] = light->cast_shadows;
+    l["distance_falloff"] = light->distance_falloff;
+
+    // Spot light specific
+    if (light->type() == LightType::Spot) {
+      auto spot = std::dynamic_pointer_cast<SpotLight>(light);
+      if (spot) {
+        l["angle"] = spot->getAngleDegrees();
+        l["falloff"] = spot->getFalloff();
+      }
     }
-    
-    return arr;
+
+    // Area light specific
+    if (light->type() == LightType::Area) {
+      if (auto al = std::dynamic_pointer_cast<AreaLight>(light)) {
+        l["width"] = al->getWidth();
+        l["height"] = al->getHeight();
+      }
+    }
+
+    arr.push_back(l);
+  }
+
+  return arr;
 }
 
-void ProjectManager::deserializeLights(const json& j, std::vector<std::shared_ptr<Light>>& lights) {
-    lights.clear();
-    
-    for (const auto& l : j) {
-        LightType type = static_cast<LightType>(l.value("type", 0));
-        
-        Vec3 position = jsonToVec3(l.value("position", json::array({0, 5, 0})));
-        Vec3 direction = jsonToVec3(l.value("direction", json::array({0, -1, 0})));
-        Vec3 color = jsonToVec3(l.value("color", json::array({1, 1, 1})));
-        float intensity = l.value("intensity", 100.0f);
-        float radius = l.value("radius", 0.01f);
-        
-        std::shared_ptr<Light> light;
-        
-        switch (type) {
-            case LightType::Point: {
-                auto pl = std::make_shared<PointLight>(position, color * intensity, radius);
-                light = pl;
-                break;
-            }
-            case LightType::Directional: {
-                auto dl = std::make_shared<DirectionalLight>(direction, color * intensity, radius);
-                dl->position = position; // Very distant, but use position for reference
-                light = dl;
-                break;
-            }
-            case LightType::Spot: {
-                float angle = l.value("angle", 45.0f);
-                auto sl = std::make_shared<SpotLight>(position, direction, color * intensity, angle, radius);
-                sl->setFalloff(l.value("falloff", 0.1f));
-                light = sl;
-                break;
-            }
-            case LightType::Area: {
-                float width = l.value("width", 1.0f);
-                float height = l.value("height", 1.0f);
-                Vec3 u_vec(1, 0, 0);
-                Vec3 v_vec(0, 0, 1);
-                auto al = std::make_shared<AreaLight>(position, u_vec, v_vec, width, height, color * intensity);
-                light = al;
-                break;
-            }
-            default:
-                SCENE_LOG_WARN("[ProjectManager] Unknown light type: " + std::to_string(static_cast<int>(type)));
-                continue;
-        }
-        
-        if (light) {
-            light->nodeName = l.value("name", "Light_" + std::to_string(lights.size()));
-            lights.push_back(light);
-        }
+void ProjectManager::deserializeLights(
+    const json &j, std::vector<std::shared_ptr<Light>> &lights) {
+  lights.clear();
+
+  for (const auto &l : j) {
+    LightType type = static_cast<LightType>(l.value("type", 0));
+
+    Vec3 position = jsonToVec3(l.value("position", json::array({0, 5, 0})));
+    Vec3 direction = jsonToVec3(l.value("direction", json::array({0, -1, 0})));
+    Vec3 color = jsonToVec3(l.value("color", json::array({1, 1, 1})));
+    float intensity = l.value("intensity", 100.0f);
+    float radius = l.value("radius", 0.01f);
+
+    std::shared_ptr<Light> light;
+
+    switch (type) {
+    case LightType::Point: {
+      auto pl =
+          std::make_shared<PointLight>(position, color * intensity, radius);
+      light = pl;
+      break;
     }
-    
-    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(lights.size()) + " lights.");
+    case LightType::Directional: {
+      auto dl = std::make_shared<DirectionalLight>(direction, color * intensity,
+                                                   radius);
+      dl->position = position; // Very distant, but use position for reference
+      light = dl;
+      break;
+    }
+    case LightType::Spot: {
+      float angle = l.value("angle", 45.0f);
+      auto sl = std::make_shared<SpotLight>(position, direction,
+                                            color * intensity, angle, radius);
+      sl->setFalloff(l.value("falloff", 0.1f));
+      light = sl;
+      break;
+    }
+    case LightType::Area: {
+      float width = l.value("width", 1.0f);
+      float height = l.value("height", 1.0f);
+      Vec3 u_vec(1, 0, 0);
+      Vec3 v_vec(0, 0, 1);
+      auto al = std::make_shared<AreaLight>(position, u_vec, v_vec, width,
+                                            height, color * intensity);
+      light = al;
+      break;
+    }
+    default:
+      SCENE_LOG_WARN("[ProjectManager] Unknown light type: " +
+                     std::to_string(static_cast<int>(type)));
+      continue;
+    }
+
+    if (light) {
+      light->nodeName =
+          l.value("name", "Light_" + std::to_string(lights.size()));
+      light->cast_shadows = l.value("cast_shadows", true);
+      light->distance_falloff = std::clamp(l.value("distance_falloff", 2.0f), 0.0f, 2.0f);
+      lights.push_back(light);
+    }
+  }
+
+  SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(lights.size()) +
+                 " lights.");
 }
 
 // ============================================================================
 // CAMERA SERIALIZATION
 // ============================================================================
 
-json ProjectManager::serializeCameras(const std::vector<std::shared_ptr<Camera>>& cameras, size_t active_index) {
-    json arr = json::array();
-    
-    for (size_t i = 0; i < cameras.size(); ++i) {
-        const auto& cam = cameras[i];
-        json c;
-        
-        c["id"] = i;
-        c["name"] = cam->nodeName.empty() ? ("Camera_" + std::to_string(i)) : cam->nodeName;
-        c["position"] = vec3ToJson(cam->lookfrom);
-        c["target"] = vec3ToJson(cam->lookat);
-        c["up"] = vec3ToJson(cam->vup);
-        c["fov"] = cam->vfov;
-        c["aperture"] = cam->aperture;
-        c["focus_dist"] = cam->focus_dist;
+json ProjectManager::serializeCameras(
+    const std::vector<std::shared_ptr<Camera>> &cameras, size_t active_index) {
+  json arr = json::array();
 
-        c["is_active"] = (i == active_index);
-        
-        // Extended Camera Parameters
-        c["iso"] = cam->iso_preset_index;
-        c["shutter"] = cam->shutter_preset_index;
-        c["fstop_idx"] = cam->fstop_preset_index;
-        c["auto_exposure"] = cam->auto_exposure;
-        c["ev_comp"] = cam->ev_compensation;
-        c["output_aspect_idx"] = cam->output_aspect_index;
-        c["use_physical_lens"] = cam->use_physical_lens;
-        c["focal_length_mm"] = cam->focal_length_mm;
-        c["sensor_width_mm"] = cam->sensor_width_mm;
-        c["enable_motion_blur"] = cam->enable_motion_blur;
-        c["rig_mode"] = static_cast<int>(cam->rig_mode);
-        c["dolly_pos"] = cam->dolly_position;
-        c["lens_radius"] = cam->lens_radius;
-        c["depth_of_field"] = cam->depth_of_field;
-        c["lens_weather"] = atmosphere::lensWeatherJson(cam->lens_weather);
-        c["blade_count"] = cam->blade_count;
-        c["lens_distortion"] = cam->distortion;
-        c["body_preset_index"] = cam->body_preset_index;
-        c["iso_val"] = cam->iso;
-        c["sensor_height_mm"] = cam->sensor_height_mm;
-        
-        arr.push_back(c);
-    }
-    
-    return arr;
+  for (size_t i = 0; i < cameras.size(); ++i) {
+    const auto &cam = cameras[i];
+    json c;
+
+    c["id"] = i;
+    c["name"] =
+        cam->nodeName.empty() ? ("Camera_" + std::to_string(i)) : cam->nodeName;
+    c["position"] = vec3ToJson(cam->lookfrom);
+    c["target"] = vec3ToJson(cam->lookat);
+    c["up"] = vec3ToJson(cam->vup);
+    c["fov"] = cam->vfov;
+    c["aperture"] = cam->aperture;
+    c["focus_dist"] = cam->focus_dist;
+
+    c["is_active"] = (i == active_index);
+
+    // Extended Camera Parameters
+    c["iso"] = cam->iso_preset_index;
+    c["shutter"] = cam->shutter_preset_index;
+    c["fstop_idx"] = cam->fstop_preset_index;
+    c["auto_exposure"] = cam->auto_exposure;
+    c["ev_comp"] = cam->ev_compensation;
+    c["output_aspect_idx"] = cam->output_aspect_index;
+    c["use_physical_lens"] = cam->use_physical_lens;
+    c["focal_length_mm"] = cam->focal_length_mm;
+    c["sensor_width_mm"] = cam->sensor_width_mm;
+    c["enable_motion_blur"] = cam->enable_motion_blur;
+    c["rig_mode"] = static_cast<int>(cam->rig_mode);
+    c["dolly_pos"] = cam->dolly_position;
+    c["lens_radius"] = cam->lens_radius;
+    c["depth_of_field"] = cam->depth_of_field;
+    c["lens_weather"] = atmosphere::lensWeatherJson(cam->lens_weather);
+    c["blade_count"] = cam->blade_count;
+    c["lens_distortion"] = cam->distortion;
+    c["body_preset_index"] = cam->body_preset_index;
+    c["iso_val"] = cam->iso;
+    c["sensor_height_mm"] = cam->sensor_height_mm;
+
+    arr.push_back(c);
+  }
+
+  return arr;
 }
 
-void ProjectManager::deserializeCameras(const json& j, SceneData& scene) {
-    scene.cameras.clear();
-    size_t active_idx = 0;
-    
-    for (const auto& c : j) {
-        Vec3 position = jsonToVec3(c.value("position", json::array({0, 2, 5})));
-        Vec3 target = jsonToVec3(c.value("target", json::array({0, 0, 0})));
-        Vec3 up = jsonToVec3(c.value("up", json::array({0, 1, 0})));
-        float fov = c.value("fov", 60.0f);
-        float aperture = c.value("aperture", 0.0f);
-        float focus_dist = c.value("focus_dist", 10.0f);
-        int blade_count = c.value("blade_count", 6);
-        
-        // Get aspect ratio from render settings (or default 16:9)
-        float aspect = 16.0f / 9.0f;
-        
-        auto cam = std::make_shared<Camera>(position, target, up, fov, aspect, aperture, focus_dist, blade_count);
-        cam->nodeName = c.value("name", "Camera");
-        cam->lens_weather = atmosphere::lensWeatherFromProjectJson(
-            c.value("lens_weather", json::object()));
-        
-        // Restore Extended Parameters
-        cam->iso_preset_index = c.value("iso", 1);
-        cam->shutter_preset_index = c.value("shutter", 1);
-        cam->fstop_preset_index = c.value("fstop_idx", 4);
-        cam->auto_exposure = c.value("auto_exposure", true);
-        cam->ev_compensation = c.value("ev_comp", 0.0f);
-        cam->output_aspect_index = c.value("output_aspect_idx", 2);
-        cam->use_physical_lens = c.value("use_physical_lens", false);
-        cam->focal_length_mm = c.value("focal_length_mm", 50.0f);
-        cam->sensor_width_mm = c.value("sensor_width_mm", 36.0f);
-        cam->enable_motion_blur = c.value("enable_motion_blur", false);
-        cam->rig_mode = static_cast<Camera::RigMode>(c.value("rig_mode", 0));
-        cam->dolly_position = c.value("dolly_pos", 0.0f);
-        cam->lens_radius = c.value("lens_radius", aperture * 0.5f);   // (ayni satir iki kez yazilmisti)
-        // ★★★★ ESKI PROJELERIN NIYETI: anahtar yokken tek kapali-anahtar
-        //   "aciklik = 0" idi. Varsayilani `aperture > 0.001` yapmak, o
-        //   dosyalari YAZILDIKLARI ANLAMLA okur: aciklik acik birakilmissa
-        //   DoF isteniyordu, sifirlanmissa istenmiyordu. Sabit bir `true`
-        //   varsayilani, DoF'u kapatmis her eski sahneyi sessizce bulaniklastirirdi.
-        cam->depth_of_field = c.value("depth_of_field", aperture > 0.001f);
+void ProjectManager::deserializeCameras(const json &j, SceneData &scene) {
+  scene.cameras.clear();
+  size_t active_idx = 0;
 
-        // Key renamed from "distortion" (2026-10-27) and the old key is NOT read:
-        // for years the value had no live panel or IPC, but was saved/restored
-        // and could be written by Auto Lens Characteristics, so old projects
-        // carried an invisible lens bend (and it disabled FSR). Old projects load
-        // undistorted; a deliberate value is set again from the camera panel.
-        cam->distortion = c.value("lens_distortion", 0.0f);
-        cam->body_preset_index = c.value("body_preset_index", 1); // Default to Full Frame (index 1)
-        cam->iso = c.value("iso_val", 100);
-        cam->sensor_height_mm = c.value("sensor_height_mm", 24.0f);
-        
-        scene.cameras.push_back(cam);
-        
-        if (c.value("is_active", false)) {
-            active_idx = scene.cameras.size() - 1;
-        }
+  for (const auto &c : j) {
+    Vec3 position = jsonToVec3(c.value("position", json::array({0, 2, 5})));
+    Vec3 target = jsonToVec3(c.value("target", json::array({0, 0, 0})));
+    Vec3 up = jsonToVec3(c.value("up", json::array({0, 1, 0})));
+    float fov = c.value("fov", 60.0f);
+    float aperture = c.value("aperture", 0.0f);
+    float focus_dist = c.value("focus_dist", 10.0f);
+    int blade_count = c.value("blade_count", 6);
+
+    // Get aspect ratio from render settings (or default 16:9)
+    float aspect = 16.0f / 9.0f;
+
+    auto cam = std::make_shared<Camera>(position, target, up, fov, aspect,
+                                        aperture, focus_dist, blade_count);
+    cam->nodeName = c.value("name", "Camera");
+    cam->lens_weather = atmosphere::lensWeatherFromProjectJson(
+        c.value("lens_weather", json::object()));
+
+    // Restore Extended Parameters
+    cam->iso_preset_index = c.value("iso", 1);
+    cam->shutter_preset_index = c.value("shutter", 1);
+    cam->fstop_preset_index = c.value("fstop_idx", 4);
+    cam->auto_exposure = c.value("auto_exposure", true);
+    cam->ev_compensation = c.value("ev_comp", 0.0f);
+    cam->output_aspect_index = c.value("output_aspect_idx", 2);
+    cam->use_physical_lens = c.value("use_physical_lens", false);
+    cam->focal_length_mm = c.value("focal_length_mm", 50.0f);
+    cam->sensor_width_mm = c.value("sensor_width_mm", 36.0f);
+    cam->enable_motion_blur = c.value("enable_motion_blur", false);
+    cam->rig_mode = static_cast<Camera::RigMode>(c.value("rig_mode", 0));
+    cam->dolly_position = c.value("dolly_pos", 0.0f);
+    cam->lens_radius = c.value(
+        "lens_radius", aperture * 0.5f); // (ayni satir iki kez yazilmisti)
+    // ★★★★ ESKI PROJELERIN NIYETI: anahtar yokken tek kapali-anahtar
+    //   "aciklik = 0" idi. Varsayilani `aperture > 0.001` yapmak, o
+    //   dosyalari YAZILDIKLARI ANLAMLA okur: aciklik acik birakilmissa
+    //   DoF isteniyordu, sifirlanmissa istenmiyordu. Sabit bir `true`
+    //   varsayilani, DoF'u kapatmis her eski sahneyi sessizce
+    //   bulaniklastirirdi.
+    cam->depth_of_field = c.value("depth_of_field", aperture > 0.001f);
+
+    // Key renamed from "distortion" (2026-10-27) and the old key is NOT read:
+    // for years the value had no live panel or IPC, but was saved/restored
+    // and could be written by Auto Lens Characteristics, so old projects
+    // carried an invisible lens bend (and it disabled FSR). Old projects load
+    // undistorted; a deliberate value is set again from the camera panel.
+    cam->distortion = c.value("lens_distortion", 0.0f);
+    cam->body_preset_index =
+        c.value("body_preset_index", 1); // Default to Full Frame (index 1)
+    cam->iso = c.value("iso_val", 100);
+    cam->sensor_height_mm = c.value("sensor_height_mm", 24.0f);
+
+    scene.cameras.push_back(cam);
+
+    if (c.value("is_active", false)) {
+      active_idx = scene.cameras.size() - 1;
     }
-    
-    if (!scene.cameras.empty()) {
-        scene.setActiveCamera(active_idx);
-    }
-    
-    SCENE_LOG_INFO("[ProjectManager] Loaded " + std::to_string(scene.cameras.size()) + " cameras.");
+  }
+
+  if (!scene.cameras.empty()) {
+    scene.setActiveCamera(active_idx);
+  }
+
+  SCENE_LOG_INFO("[ProjectManager] Loaded " +
+                 std::to_string(scene.cameras.size()) + " cameras.");
 }
 
 // ============================================================================
 // RENDER SETTINGS SERIALIZATION
 // ============================================================================
 
-json ProjectManager::serializeRenderSettings(const RenderSettings& settings) {
-    json j;
-    j["upscale"] = VulkanRT::serializeUpscaleSettings(settings.upscale);
-    j["realtime_denoiser"] = VulkanRT::serializeRealtimeDenoiserSettings(settings.realtime_denoiser);
-    
-    j["samples_per_pixel"] = settings.samples_per_pixel;
-    j["samples_per_pass"] = settings.samples_per_pass;
-    j["show_scene_stats_hud"] = settings.show_scene_stats_hud;
-    j["volume_metrics_overlay"] = settings.volume_metrics_overlay;
-    j["mouse_sensitivity"] = settings.mouse_sensitivity;
-    j["navigation_scale"] = settings.navigation_scale;
-    j["navigation_scale_auto"] = settings.navigation_scale_auto;
-    j["pan_sensitivity"] = settings.pan_sensitivity;
-    j["zoom_sensitivity"] = settings.zoom_sensitivity;
-    j["fly_speed_multiplier"] = settings.fly_speed_multiplier;
-    j["max_bounces"] = settings.max_bounces;
-    j["diffuse_bounces"] = settings.diffuse_bounces;
-    j["transmission_bounces"] = settings.transmission_bounces;
-    j["rr_start_bounce"] = settings.rr_start_bounce;
-    j["motion_profile_enabled"] = settings.motion_profile_enabled;
-    j["motion_max_bounces"] = settings.motion_max_bounces;
-    j["motion_diffuse_bounces"] = settings.motion_diffuse_bounces;
-    j["motion_transmission_bounces"] = settings.motion_transmission_bounces;
-    j["motion_settle_ms"] = settings.motion_settle_ms;
-    j["final_render_width"] = settings.final_render_width;
-    j["final_render_height"] = settings.final_render_height;
-    j["use_embree"] = settings.UI_use_embree;
-    // use_denoiser (viewport denoiser) intentionally not serialized:
-    // restoring it as true on project load can trigger a data race during
-    // the OptiX path-trace GPU transition before the denoiser is ready.
-    j["render_use_denoiser"] = settings.render_use_denoiser;
-    j["denoiser_mode"] = static_cast<int>(settings.denoiser_mode);
-    j["denoiser_quality"] = static_cast<int>(settings.denoiser_quality);
-    j["denoiser_schedule"] = static_cast<int>(settings.denoiser_schedule);
-    j["max_samples"] = settings.max_samples;
-    j["min_samples"] = settings.min_samples;
-    j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
-    j["variance_threshold"] = settings.variance_threshold;
-    // Additional UI / post-process fields
-    j["denoiser_blend_factor"] = settings.denoiser_blend_factor;
-    j["quality_preset"] = static_cast<int>(settings.quality_preset);
-    j["raster_viewport_quality_preset"] = static_cast<int>(settings.raster_viewport_quality_preset);
-    j["viewport_automatic_cutout"] = settings.viewport_automatic_cutout;
-    j["material_preview_lighting_preset"] = static_cast<int>(settings.material_preview_lighting_preset);
-    j["grid_fade_distance"] = settings.grid_fade_distance;
-    j["grid_opacity"] = settings.grid_opacity;
-    j["resolution_source"] = static_cast<int>(settings.resolution_source);
-    j["aspect_base_height"] = settings.aspect_base_height;
-    j["aspect_ratio_index"] = settings.aspect_ratio_index;
-    j["show_background"] = settings.show_background;
-    j["transparent_background"] = settings.transparent_background;
-    j["persistent_tonemap"] = settings.persistent_tonemap;
-    
-    // Animation Sequencer Settings
-    j["animation_start_frame"] = settings.animation_start_frame;
-    j["animation_end_frame"] = settings.animation_end_frame;
-    j["animation_fps"] = settings.animation_fps;
-    j["animation_output_folder"] = settings.animation_output_folder;
-    
-    return j;
+json ProjectManager::serializeRenderSettings(const RenderSettings &settings) {
+  json j;
+  j["upscale"] = VulkanRT::serializeUpscaleSettings(settings.upscale);
+  j["realtime_denoiser"] =
+      VulkanRT::serializeRealtimeDenoiserSettings(settings.realtime_denoiser);
+
+  j["samples_per_pixel"] = settings.samples_per_pixel;
+  j["samples_per_pass"] = settings.samples_per_pass;
+  j["show_scene_stats_hud"] = settings.show_scene_stats_hud;
+  j["volume_metrics_overlay"] = settings.volume_metrics_overlay;
+  j["mouse_sensitivity"] = settings.mouse_sensitivity;
+  j["navigation_scale"] = settings.navigation_scale;
+  j["navigation_scale_auto"] = settings.navigation_scale_auto;
+  j["pan_sensitivity"] = settings.pan_sensitivity;
+  j["zoom_sensitivity"] = settings.zoom_sensitivity;
+  j["fly_speed_multiplier"] = settings.fly_speed_multiplier;
+  j["max_bounces"] = settings.max_bounces;
+  j["diffuse_bounces"] = settings.diffuse_bounces;
+  j["transmission_bounces"] = settings.transmission_bounces;
+  j["rr_start_bounce"] = settings.rr_start_bounce;
+  j["motion_profile_enabled"] = settings.motion_profile_enabled;
+  j["motion_max_bounces"] = settings.motion_max_bounces;
+  j["motion_diffuse_bounces"] = settings.motion_diffuse_bounces;
+  j["motion_transmission_bounces"] = settings.motion_transmission_bounces;
+  j["motion_settle_ms"] = settings.motion_settle_ms;
+  j["final_render_width"] = settings.final_render_width;
+  j["final_render_height"] = settings.final_render_height;
+  j["use_embree"] = settings.UI_use_embree;
+  // use_denoiser (viewport denoiser) intentionally not serialized:
+  // restoring it as true on project load can trigger a data race during
+  // the OptiX path-trace GPU transition before the denoiser is ready.
+  j["render_use_denoiser"] = settings.render_use_denoiser;
+  j["denoiser_mode"] = static_cast<int>(settings.denoiser_mode);
+  j["denoiser_quality"] = static_cast<int>(settings.denoiser_quality);
+  j["denoiser_schedule"] = static_cast<int>(settings.denoiser_schedule);
+  j["max_samples"] = settings.max_samples;
+  j["min_samples"] = settings.min_samples;
+  j["use_adaptive_sampling"] = settings.use_adaptive_sampling;
+  j["variance_threshold"] = settings.variance_threshold;
+  // Additional UI / post-process fields
+  j["denoiser_blend_factor"] = settings.denoiser_blend_factor;
+  j["quality_preset"] = static_cast<int>(settings.quality_preset);
+  j["raster_viewport_quality_preset"] =
+      static_cast<int>(settings.raster_viewport_quality_preset);
+  j["viewport_automatic_cutout"] = settings.viewport_automatic_cutout;
+  j["material_preview_lighting_preset"] =
+      static_cast<int>(settings.material_preview_lighting_preset);
+  j["grid_fade_distance"] = settings.grid_fade_distance;
+  j["grid_opacity"] = settings.grid_opacity;
+  j["resolution_source"] = static_cast<int>(settings.resolution_source);
+  j["aspect_base_height"] = settings.aspect_base_height;
+  j["aspect_ratio_index"] = settings.aspect_ratio_index;
+  j["show_background"] = settings.show_background;
+  j["transparent_background"] = settings.transparent_background;
+  j["persistent_tonemap"] = settings.persistent_tonemap;
+
+  // Animation Sequencer Settings
+  j["animation_start_frame"] = settings.animation_start_frame;
+  j["animation_end_frame"] = settings.animation_end_frame;
+  j["animation_fps"] = settings.animation_fps;
+  j["animation_output_folder"] = settings.animation_output_folder;
+
+  return j;
 }
 
-void ProjectManager::deserializeRenderSettings(const json& j, RenderSettings& settings) {
-    settings.upscale = VulkanRT::deserializeUpscaleSettings(j);
-    settings.realtime_denoiser = VulkanRT::deserializeRealtimeDenoiserSettings(j);
-    if (settings.realtime_denoiser.enabled) {
-        settings.motion_aov_enabled = true;
-    }
-    settings.samples_per_pixel = j.value("samples_per_pixel", 1);
-    settings.samples_per_pass = j.value("samples_per_pass", 1);
-    settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
-    settings.volume_metrics_overlay = j.value("volume_metrics_overlay", false);
-    settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
-    settings.navigation_scale = std::clamp(j.value("navigation_scale", 1.0f), 0.1f, 5.0f);
-    settings.navigation_scale_auto = j.value("navigation_scale_auto", true);
-    settings.pan_sensitivity = std::clamp(j.value("pan_sensitivity", 1.0f), 0.1f, 4.0f);
-    settings.zoom_sensitivity = std::clamp(j.value("zoom_sensitivity", 1.0f), 0.1f, 4.0f);
-    settings.fly_speed_multiplier = std::clamp(j.value("fly_speed_multiplier", 1.0f), 0.1f, 4.0f);
-    settings.max_bounces = j.value("max_bounces", 10);
-    settings.max_bounces = std::max(1, settings.max_bounces);
-    settings.diffuse_bounces = std::clamp(j.value("diffuse_bounces", 4), 1, settings.max_bounces);
-    settings.transmission_bounces = std::clamp(j.value("transmission_bounces", 8), 1, settings.max_bounces);
-    settings.rr_start_bounce = std::clamp(j.value("rr_start_bounce", 3), 1, 64);
-    settings.motion_profile_enabled = j.value("motion_profile_enabled", false);
-    settings.motion_max_bounces = std::clamp(j.value("motion_max_bounces", 2), 1, 64);
-    settings.motion_diffuse_bounces = std::clamp(j.value("motion_diffuse_bounces", 2), 1, settings.motion_max_bounces);
-    settings.motion_transmission_bounces = std::clamp(j.value("motion_transmission_bounces", 2), 1, settings.motion_max_bounces);
-    settings.motion_settle_ms = std::clamp(j.value("motion_settle_ms", 150), 0, 5000);
-    settings.final_render_width = j.value("final_render_width", 1280);
-    settings.final_render_height = j.value("final_render_height", 720);
-    // Backend/device selection is no longer serialized with project files.
-    // Keep current runtime backend choice and ignore legacy fields if present.
-    settings.UI_use_embree = j.value("use_embree", true);
-    // use_denoiser not restored from disk — always starts false to avoid
-    // GPU transition races before the denoiser pipeline is initialized.
-    settings.render_use_denoiser = j.value("render_use_denoiser", true);
-    settings.denoiser_mode = static_cast<DenoiserMode>(j.value("denoiser_mode", static_cast<int>(DenoiserMode::Quality)));
-    settings.denoiser_quality = static_cast<DenoiserQuality>(j.value("denoiser_quality", static_cast<int>(DenoiserQuality::Fast)));
-    settings.denoiser_schedule = static_cast<DenoiserSchedule>(std::clamp(
-        j.value("denoiser_schedule", static_cast<int>(DenoiserSchedule::Progressive)), 0, 2));
-    settings.max_samples = j.value("max_samples", 32);
-    settings.min_samples = j.value("min_samples", 1);
-    settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);
-    settings.variance_threshold = j.value("variance_threshold", 0.1f);
-    // Load additional UI / post-process fields (safe defaults used when missing)
-    settings.denoiser_blend_factor = j.value("denoiser_blend_factor", 1.0f);
-    settings.quality_preset = static_cast<QualityPreset>(j.value("quality_preset", static_cast<int>(QualityPreset::Preview)));
-    // Aralik disi bir deger enum'a cast edilirse switch'lerin hicbir dalina
-    // girmez ve preset SESSIZCE default'a duser -- yani kullanici Full kaydeder,
-    // proje Auto acilir ve bunu soyleyen bir satir olmaz.
-    {
-        settings.viewport_automatic_cutout = j.value("viewport_automatic_cutout", true);
-        const int rq = j.value("raster_viewport_quality_preset",
-                               static_cast<int>(RasterViewportQualityPreset::Auto));
-        settings.raster_viewport_quality_preset =
-            (rq >= static_cast<int>(RasterViewportQualityPreset::Auto) &&
-             rq <= static_cast<int>(RasterViewportQualityPreset::Full))
-                ? static_cast<RasterViewportQualityPreset>(rq)
-                : RasterViewportQualityPreset::Auto;
-    }
-    // Aralik disi bir tam sayi enum'a cast edilirse hicbir switch/if daline
-    // girmez ve preset SESSIZCE varsayilan gibi davranir.
-    {
-        const int pl = j.value("material_preview_lighting_preset",
-                               static_cast<int>(MaterialPreviewLightingPreset::Scene));
-        // Values 1/2 are legacy Studio/Outdoor projects. The simplified UI has
-        // one scene-independent rig, so all three old preview rigs migrate to
-        // Three Point while Scene preserves its real-light meaning.
-        settings.material_preview_lighting_preset =
-            pl == static_cast<int>(MaterialPreviewLightingPreset::Scene)
-                ? MaterialPreviewLightingPreset::Scene
-                : (pl >= static_cast<int>(MaterialPreviewLightingPreset::Classic) &&
-                   pl <= static_cast<int>(MaterialPreviewLightingPreset::Outdoor))
-                    ? MaterialPreviewLightingPreset::Classic
-                    : MaterialPreviewLightingPreset::Scene;
-    }
-    settings.grid_fade_distance = std::clamp(j.value("grid_fade_distance", 1.0f), 0.25f, 4.0f);
-    settings.grid_opacity = std::clamp(j.value("grid_opacity", 1.0f), 0.0f, 1.0f);
-    settings.resolution_source = static_cast<ResolutionSource>(j.value("resolution_source", static_cast<int>(ResolutionSource::Custom)));
-    settings.aspect_base_height = j.value("aspect_base_height", settings.aspect_base_height);
-    settings.aspect_ratio_index = j.value("aspect_ratio_index", settings.aspect_ratio_index);
-    settings.show_background = j.value("show_background", settings.show_background);
-    settings.transparent_background = j.value("transparent_background", false);
-    settings.persistent_tonemap = j.value("persistent_tonemap", settings.persistent_tonemap);
-    
-    // Animation Sequencer Settings
-    settings.animation_start_frame = j.value("animation_start_frame", 0);
-    // Missing fields belong to legacy/incomplete files; authored values are
-    // preserved whenever the serialized key exists.
-    settings.animation_end_frame = j.value("animation_end_frame", 250);
-    settings.animation_fps = j.value("animation_fps", 24);
-    settings.animation_output_folder = j.value("animation_output_folder", "");
-    
-    SCENE_LOG_INFO("[ProjectManager] Loaded render settings.");
+void ProjectManager::deserializeRenderSettings(const json &j,
+                                               RenderSettings &settings) {
+  settings.upscale = VulkanRT::deserializeUpscaleSettings(j);
+  settings.realtime_denoiser = VulkanRT::deserializeRealtimeDenoiserSettings(j);
+  if (settings.realtime_denoiser.enabled) {
+    settings.motion_aov_enabled = true;
+  }
+  settings.samples_per_pixel = j.value("samples_per_pixel", 1);
+  settings.samples_per_pass = j.value("samples_per_pass", 1);
+  settings.show_scene_stats_hud = j.value("show_scene_stats_hud", true);
+  settings.volume_metrics_overlay = j.value("volume_metrics_overlay", false);
+  settings.mouse_sensitivity = j.value("mouse_sensitivity", 0.4f);
+  settings.navigation_scale =
+      std::clamp(j.value("navigation_scale", 1.0f), 0.1f, 5.0f);
+  settings.navigation_scale_auto = j.value("navigation_scale_auto", true);
+  settings.pan_sensitivity =
+      std::clamp(j.value("pan_sensitivity", 1.0f), 0.1f, 4.0f);
+  settings.zoom_sensitivity =
+      std::clamp(j.value("zoom_sensitivity", 1.0f), 0.1f, 4.0f);
+  settings.fly_speed_multiplier =
+      std::clamp(j.value("fly_speed_multiplier", 1.0f), 0.1f, 4.0f);
+  settings.max_bounces = j.value("max_bounces", 10);
+  settings.max_bounces = std::max(1, settings.max_bounces);
+  settings.diffuse_bounces =
+      std::clamp(j.value("diffuse_bounces", 4), 1, settings.max_bounces);
+  settings.transmission_bounces =
+      std::clamp(j.value("transmission_bounces", 8), 1, settings.max_bounces);
+  settings.rr_start_bounce = std::clamp(j.value("rr_start_bounce", 3), 1, 64);
+  settings.motion_profile_enabled = j.value("motion_profile_enabled", false);
+  settings.motion_max_bounces =
+      std::clamp(j.value("motion_max_bounces", 2), 1, 64);
+  settings.motion_diffuse_bounces = std::clamp(
+      j.value("motion_diffuse_bounces", 2), 1, settings.motion_max_bounces);
+  settings.motion_transmission_bounces =
+      std::clamp(j.value("motion_transmission_bounces", 2), 1,
+                 settings.motion_max_bounces);
+  settings.motion_settle_ms =
+      std::clamp(j.value("motion_settle_ms", 150), 0, 5000);
+  settings.final_render_width = j.value("final_render_width", 1280);
+  settings.final_render_height = j.value("final_render_height", 720);
+  // Backend/device selection is no longer serialized with project files.
+  // Keep current runtime backend choice and ignore legacy fields if present.
+  settings.UI_use_embree = j.value("use_embree", true);
+  // use_denoiser not restored from disk — always starts false to avoid
+  // GPU transition races before the denoiser pipeline is initialized.
+  settings.render_use_denoiser = j.value("render_use_denoiser", true);
+  settings.denoiser_mode = static_cast<DenoiserMode>(
+      j.value("denoiser_mode", static_cast<int>(DenoiserMode::Quality)));
+  settings.denoiser_quality = static_cast<DenoiserQuality>(
+      j.value("denoiser_quality", static_cast<int>(DenoiserQuality::Fast)));
+  settings.denoiser_schedule = static_cast<DenoiserSchedule>(
+      std::clamp(j.value("denoiser_schedule",
+                         static_cast<int>(DenoiserSchedule::Progressive)),
+                 0, 2));
+  settings.max_samples = j.value("max_samples", 32);
+  settings.min_samples = j.value("min_samples", 1);
+  settings.use_adaptive_sampling = j.value("use_adaptive_sampling", true);
+  settings.variance_threshold = j.value("variance_threshold", 0.1f);
+  // Load additional UI / post-process fields (safe defaults used when missing)
+  settings.denoiser_blend_factor = j.value("denoiser_blend_factor", 1.0f);
+  settings.quality_preset = static_cast<QualityPreset>(
+      j.value("quality_preset", static_cast<int>(QualityPreset::Preview)));
+  // Aralik disi bir deger enum'a cast edilirse switch'lerin hicbir dalina
+  // girmez ve preset SESSIZCE default'a duser -- yani kullanici Full kaydeder,
+  // proje Auto acilir ve bunu soyleyen bir satir olmaz.
+  {
+    settings.viewport_automatic_cutout =
+        j.value("viewport_automatic_cutout", true);
+    const int rq = j.value("raster_viewport_quality_preset",
+                           static_cast<int>(RasterViewportQualityPreset::Auto));
+    settings.raster_viewport_quality_preset =
+        (rq >= static_cast<int>(RasterViewportQualityPreset::Auto) &&
+         rq <= static_cast<int>(RasterViewportQualityPreset::Full))
+            ? static_cast<RasterViewportQualityPreset>(rq)
+            : RasterViewportQualityPreset::Auto;
+  }
+  // Aralik disi bir tam sayi enum'a cast edilirse hicbir switch/if daline
+  // girmez ve preset SESSIZCE varsayilan gibi davranir.
+  {
+    const int pl =
+        j.value("material_preview_lighting_preset",
+                static_cast<int>(MaterialPreviewLightingPreset::Scene));
+    // Values 1/2 are legacy Studio/Outdoor projects. The simplified UI has
+    // one scene-independent rig, so all three old preview rigs migrate to
+    // Three Point while Scene preserves its real-light meaning.
+    settings.material_preview_lighting_preset =
+        pl == static_cast<int>(MaterialPreviewLightingPreset::Scene)
+            ? MaterialPreviewLightingPreset::Scene
+        : (pl >= static_cast<int>(MaterialPreviewLightingPreset::Classic) &&
+           pl <= static_cast<int>(MaterialPreviewLightingPreset::Outdoor))
+            ? MaterialPreviewLightingPreset::Classic
+            : MaterialPreviewLightingPreset::Scene;
+  }
+  settings.grid_fade_distance =
+      std::clamp(j.value("grid_fade_distance", 1.0f), 0.25f, 4.0f);
+  settings.grid_opacity = std::clamp(j.value("grid_opacity", 1.0f), 0.0f, 1.0f);
+  settings.resolution_source = static_cast<ResolutionSource>(
+      j.value("resolution_source", static_cast<int>(ResolutionSource::Custom)));
+  settings.aspect_base_height =
+      j.value("aspect_base_height", settings.aspect_base_height);
+  settings.aspect_ratio_index =
+      j.value("aspect_ratio_index", settings.aspect_ratio_index);
+  settings.show_background =
+      j.value("show_background", settings.show_background);
+  settings.transparent_background = j.value("transparent_background", false);
+  settings.persistent_tonemap =
+      j.value("persistent_tonemap", settings.persistent_tonemap);
+
+  // Animation Sequencer Settings
+  settings.animation_start_frame = j.value("animation_start_frame", 0);
+  // Missing fields belong to legacy/incomplete files; authored values are
+  // preserved whenever the serialized key exists.
+  settings.animation_end_frame = j.value("animation_end_frame", 250);
+  settings.animation_fps = j.value("animation_fps", 24);
+  settings.animation_output_folder = j.value("animation_output_folder", "");
+
+  SCENE_LOG_INFO("[ProjectManager] Loaded render settings.");
 }
 
 // ============================================================================
 // TEXTURE SERIALIZATION (Path or Embed)
 // ============================================================================
 
-json ProjectManager::serializeTextures(std::ofstream& bin_out, bool embed_textures,
-                                       const std::vector<std::shared_ptr<Texture>>& extra_textures) {
-    ScopedPerfTimer total_timer("serializeTextures total");
-    json arr = json::array();
-    
-    // Get all textures from MaterialManager
-    auto& mgr = MaterialManager::getInstance();
-    std::unordered_map<std::string, uint32_t> texture_map; // path -> id
-    texture_map.reserve(mgr.getMaterialCount() * 4);
-    uint32_t texture_id = 0;
-    size_t embedded_count = 0;
-    size_t referenced_count = 0;
-    size_t png_reencoded_count = 0;
-    size_t file_copied_count = 0;
-    size_t cache_passthrough_count = 0;
-    size_t previous_embed_reused_count = 0;
-    uint64_t texture_bin_bytes_written = 0;
-    uint64_t project_local_bytes_written = 0;
-    std::vector<char> file_copy_buffer(1024 * 1024);
-    // The file being WRITTEN, not the project's identity: a copy (autosave)
-    // must place its generated/local textures next to the copy.
-    const fs::path current_project_path = active_save_path_.empty() ? fs::path() : pathFromUtf8(active_save_path_);
-    const fs::path project_dir = current_project_path.empty() ? fs::path() : current_project_path.parent_path();
-    const fs::path project_local_texture_dir = current_project_path.empty()
-        ? fs::path()
-        : (project_dir / (current_project_path.stem().string() + "_textures"));
-    const fs::path generated_texture_dir = current_project_path.empty()
-        ? fs::path()
-        : (project_dir / (current_project_path.stem().string() + "_generated_textures"));
-    
-    SCENE_LOG_INFO("Starting texture serialization for " + std::to_string(mgr.getMaterialCount()) + " materials.");
+json ProjectManager::serializeTextures(
+    std::ofstream &bin_out, bool embed_textures,
+    const std::vector<std::shared_ptr<Texture>> &extra_textures) {
+  ScopedPerfTimer total_timer("serializeTextures total");
+  json arr = json::array();
 
-    // One pass per material, plus a FINAL pass (i == materialCount) for textures that no
-    // material slot holds — the node graphs' Image Texture nodes. Their texture only feeds a
-    // slot through a manipulation node, so the graph is its only owner; walking material
-    // slots alone wrote projects that came back with an unresolvable texture reference.
-    const size_t materialCount = mgr.getMaterialCount();
-    for (size_t i = 0; i <= materialCount; ++i) {
-        PrincipledBSDF* pbsdf = nullptr;
-        if (i < materialCount) {
-            auto mat = mgr.getMaterial(static_cast<uint16_t>(i));
-            if (!mat) continue;
+  // Get all textures from MaterialManager
+  auto &mgr = MaterialManager::getInstance();
+  std::unordered_map<std::string, uint32_t> texture_map; // path -> id
+  texture_map.reserve(mgr.getMaterialCount() * 4);
+  uint32_t texture_id = 0;
+  size_t embedded_count = 0;
+  size_t referenced_count = 0;
+  size_t png_reencoded_count = 0;
+  size_t file_copied_count = 0;
+  size_t cache_passthrough_count = 0;
+  size_t previous_embed_reused_count = 0;
+  uint64_t texture_bin_bytes_written = 0;
+  uint64_t project_local_bytes_written = 0;
+  std::vector<char> file_copy_buffer(1024 * 1024);
+  // The file being WRITTEN, not the project's identity: a copy (autosave)
+  // must place its generated/local textures next to the copy.
+  const fs::path current_project_path =
+      active_save_path_.empty() ? fs::path() : pathFromUtf8(active_save_path_);
+  const fs::path project_dir = current_project_path.empty()
+                                   ? fs::path()
+                                   : current_project_path.parent_path();
+  const fs::path project_local_texture_dir =
+      current_project_path.empty()
+          ? fs::path()
+          : (project_dir /
+             (current_project_path.stem().string() + "_textures"));
+  const fs::path generated_texture_dir =
+      current_project_path.empty()
+          ? fs::path()
+          : (project_dir /
+             (current_project_path.stem().string() + "_generated_textures"));
 
-            // CRITICAL FIX: Must cast to PrincipledBSDF to access texture properties correctly!
-            // Material base class may have different/shadowed albedoProperty member
-            if (mat->type() != MaterialType::PrincipledBSDF) continue;
+  SCENE_LOG_INFO("Starting texture serialization for " +
+                 std::to_string(mgr.getMaterialCount()) + " materials.");
 
-            pbsdf = dynamic_cast<PrincipledBSDF*>(mat);
-            if (!pbsdf) continue;
-        } else if (extra_textures.empty()) {
-            continue;
+  // One pass per material, plus a FINAL pass (i == materialCount) for textures
+  // that no material slot holds — the node graphs' Image Texture nodes. Their
+  // texture only feeds a slot through a manipulation node, so the graph is its
+  // only owner; walking material slots alone wrote projects that came back with
+  // an unresolvable texture reference.
+  const size_t materialCount = mgr.getMaterialCount();
+  for (size_t i = 0; i <= materialCount; ++i) {
+    PrincipledBSDF *pbsdf = nullptr;
+    if (i < materialCount) {
+      auto mat = mgr.getMaterial(static_cast<uint16_t>(i));
+      if (!mat)
+        continue;
+
+      // CRITICAL FIX: Must cast to PrincipledBSDF to access texture properties
+      // correctly! Material base class may have different/shadowed
+      // albedoProperty member
+      if (mat->type() != MaterialType::PrincipledBSDF)
+        continue;
+
+      pbsdf = dynamic_cast<PrincipledBSDF *>(mat);
+      if (!pbsdf)
+        continue;
+    } else if (extra_textures.empty()) {
+      continue;
+    }
+
+    // Check all texture properties - use PrincipledBSDF pointer for correct
+    // member access
+    auto checkTexture = [&](MaterialProperty &prop, const std::string &usage) {
+      if (prop.texture && prop.texture->is_loaded()) {
+        std::string path = prop.texture->name;
+
+        // Fallback for unnamed textures (embedded or generated)
+        if (path.empty()) {
+          path =
+              "texture_" + std::to_string(texture_id) + ".png"; // Default name
+          SCENE_LOG_WARN("Texture has no name, using fallback: " + path);
         }
 
-        // Check all texture properties - use PrincipledBSDF pointer for correct member access
-        auto checkTexture = [&](MaterialProperty& prop, const std::string& usage) {
-            if (prop.texture && prop.texture->is_loaded()) {
-                std::string path = prop.texture->name;
-                
-                // Fallback for unnamed textures (embedded or generated)
-                if (path.empty()) {
-                    path = "texture_" + std::to_string(texture_id) + ".png"; // Default name
-                    SCENE_LOG_WARN("Texture has no name, using fallback: " + path);
-                }
+        // Skip if already processed
+        if (texture_map.find(path) != texture_map.end())
+          return;
 
-                // Skip if already processed
-                if (texture_map.find(path) != texture_map.end()) return;
-                
-                json tex_entry;
-                tex_entry["id"] = texture_id;
-                tex_entry["usage"] = usage;
-                tex_entry["width"] = prop.texture->width;
-                tex_entry["height"] = prop.texture->height;
-                
-                bool should_embed = embed_textures;
-                if (save_settings.embed_missing_only && !fs::exists(path)) {
-                    should_embed = true;
-                }
-                if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::ProjectLocal ||
-                    save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::KeepOriginalPaths) {
-                    should_embed = false;
-                }
-                
-                // Unnamed/embedded cache textures should only force embedding in explicit Embedded mode.
-                if (prop.texture->name.empty() || prop.texture->name.find("embedded_") == 0) {
-                     should_embed = (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::Embedded);
-                }
+        json tex_entry;
+        tex_entry["id"] = texture_id;
+        tex_entry["usage"] = usage;
+        tex_entry["width"] = prop.texture->width;
+        tex_entry["height"] = prop.texture->height;
 
-                tex_entry["original_name"] = path; // Save Original Name for restoration
+        bool should_embed = embed_textures;
+        if (save_settings.embed_missing_only && !fs::exists(path)) {
+          should_embed = true;
+        }
+        if (save_settings.texture_storage_mode ==
+                ProjectManager::TextureStorageMode::ProjectLocal ||
+            save_settings.texture_storage_mode ==
+                ProjectManager::TextureStorageMode::KeepOriginalPaths) {
+          should_embed = false;
+        }
 
-                // Detect generated/painted texture names so we prefer in-memory pixels
-                bool is_generated_name = (path.find("generated/") != std::string::npos) ||
-                                         (path.find("generated_tex_") != std::string::npos) ||
-                                         (path.find("_generated_textures") != std::string::npos);
+        // Unnamed/embedded cache textures should only force embedding in
+        // explicit Embedded mode.
+        if (prop.texture->name.empty() ||
+            prop.texture->name.find("embedded_") == 0) {
+          should_embed = (save_settings.texture_storage_mode ==
+                          ProjectManager::TextureStorageMode::Embedded);
+        }
 
-                if (should_embed) {
-                    ++embedded_count;
-                    // Embed texture data
-                    tex_entry["mode"] = "embed";
-                    tex_entry["offset"] = static_cast<long long>(bin_out.tellp());
+        tex_entry["original_name"] = path; // Save Original Name for restoration
 
-                    const std::string previous_key = previousEmbeddedTextureKey(
-                        path, usage, prop.texture->width, prop.texture->height);
-                    auto previous_it = g_previous_embedded_texture_entries.find(previous_key);
-                    if (!prop.texture->isSaveDirty() &&
-                        previous_it != g_previous_embedded_texture_entries.end()) {
-                        std::vector<char> prev_blob;
-                        if (readPreviousEmbeddedTextureBlob(previous_it->second, prev_blob)) {
-                            // Byte-for-byte: this blob already went through the
-                            // role-aware encoder when it was first saved. Trying
-                            // the JPG recompression again cost a full PNG decode
-                            // per texture per save for every blob it had already
-                            // declined (alpha, non-colour, did not shrink).
-                            bin_out.write(prev_blob.data(), static_cast<std::streamsize>(prev_blob.size()));
-                            tex_entry["size"] = prev_blob.size();
-                            tex_entry["format"] = previous_it->second.format;
-                            ++previous_embed_reused_count;
-                            texture_bin_bytes_written += static_cast<uint64_t>(prev_blob.size());
-                            if (!active_save_as_copy_) prop.texture->clearSaveDirty();
-                            texture_map[path] = texture_id++;
-                            arr.push_back(tex_entry);
-                            return;
-                        }
-                    }
+        // Detect generated/painted texture names so we prefer in-memory pixels
+        bool is_generated_name =
+            (path.find("generated/") != std::string::npos) ||
+            (path.find("generated_tex_") != std::string::npos) ||
+            (path.find("_generated_textures") != std::string::npos);
 
-                    // If we have in-memory pixels (e.g. painted/generated texture) prefer encoding them
-                    // even if a file exists with the same name. This ensures painted overrides are serialized.
-                    if (fs::exists(path) && prop.texture->pixels.empty() && !is_generated_name) {
-                        // Read the source into memory so we can attempt PNG → JPG
-                        // recompression for color textures; if it doesn't pay off,
-                        // we fall back to byte-for-byte passthrough.
-                        std::ifstream tex_file(path, std::ios::binary | std::ios::ate);
-                        if (tex_file) {
-                            const std::streamoff total_size = tex_file.tellg();
-                            tex_file.seekg(0, std::ios::beg);
-                            std::vector<char> blob;
-                            if (total_size > 0) {
-                                blob.resize(static_cast<size_t>(total_size));
-                                tex_file.read(blob.data(), static_cast<std::streamsize>(blob.size()));
-                                if (tex_file.gcount() != static_cast<std::streamsize>(blob.size())) {
-                                    blob.clear();
-                                }
-                            }
+        if (should_embed) {
+          ++embedded_count;
+          // Embed texture data
+          tex_entry["mode"] = "embed";
+          tex_entry["offset"] = static_cast<long long>(bin_out.tellp());
 
-                            auto recomp = pickColorRecompression(blob.data(), blob.size(), usage);
-                            const char* write_data = recomp.recompressed ? recomp.bytes.data() : blob.data();
-                            const size_t write_size = recomp.recompressed ? recomp.bytes.size() : blob.size();
-                            const std::string write_ext = recomp.recompressed
-                                ? recomp.ext
-                                : fs::path(path).extension().string();
-
-                            bin_out.write(write_data, static_cast<std::streamsize>(write_size));
-                            if (recomp.recompressed) ++png_reencoded_count;
-                            else ++file_copied_count;
-                            texture_bin_bytes_written += static_cast<uint64_t>(write_size);
-
-                            tex_entry["size"] = write_size;
-                            tex_entry["format"] = write_ext;
-                        }
-                    } else if (!prop.texture->pixels.empty()) {
-                         // Encode from in-memory pixels (painted/generated textures).
-                         std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
-
-                         auto linear_to_srgb_byte = [](float lin) -> uint8_t {
-                             lin = std::clamp(lin, 0.0f, 1.0f);
-                             float sr = (lin <= 0.0031308f) ? (lin * 12.92f) : (1.055f * powf(lin, 1.0f / 2.4f) - 0.055f);
-                             return static_cast<uint8_t>(std::roundf(sr * 255.0f));
-                         };
-
-                         bool convert_to_srgb = (usage == "albedo") && (!prop.texture->is_srgb);
-
-                         for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
-                             const auto& px = prop.texture->pixels[pi];
-                             if (convert_to_srgb) {
-                                 // pixels are stored as linear bytes -> convert to sRGB bytes
-                                 float r_lin = px.r / 255.0f;
-                                 float g_lin = px.g / 255.0f;
-                                 float b_lin = px.b / 255.0f;
-                                 raw_pixels[pi * 4 + 0] = linear_to_srgb_byte(r_lin);
-                                 raw_pixels[pi * 4 + 1] = linear_to_srgb_byte(g_lin);
-                                 raw_pixels[pi * 4 + 2] = linear_to_srgb_byte(b_lin);
-                                 raw_pixels[pi * 4 + 3] = px.a;
-                             } else {
-                                 raw_pixels[pi * 4 + 0] = px.r;
-                                 raw_pixels[pi * 4 + 1] = px.g;
-                                 raw_pixels[pi * 4 + 2] = px.b;
-                                 raw_pixels[pi * 4 + 3] = px.a;
-                             }
-                         }
-
-                         std::vector<char> encoded;
-                         std::string encoded_ext;
-                         if (encodeTextureRoleAware(raw_pixels.data(),
-                                                    prop.texture->width, prop.texture->height,
-                                                    usage, encoded, encoded_ext)) {
-                             ++png_reencoded_count;
-                             bin_out.write(encoded.data(), encoded.size());
-                             tex_entry["size"] = encoded.size();
-                             tex_entry["format"] = encoded_ext;
-                             texture_bin_bytes_written += static_cast<uint64_t>(encoded.size());
-                         } else {
-                             SCENE_LOG_ERROR("Failed to encode memory texture: " + path);
-                         }
-
-                    } else if (const auto* cached = getEmbeddedTexture(path)) {
-                        auto recomp = pickColorRecompression(cached->data.data(), cached->data.size(), usage);
-                        const char* write_data = recomp.recompressed ? recomp.bytes.data() : cached->data.data();
-                        const size_t write_size = recomp.recompressed ? recomp.bytes.size() : cached->data.size();
-                        const std::string write_ext = recomp.recompressed
-                            ? recomp.ext
-                            : fs::path(path).extension().string();
-
-                        bin_out.write(write_data, static_cast<std::streamsize>(write_size));
-                        tex_entry["size"] = write_size;
-                        tex_entry["format"] = write_ext;
-                        if (recomp.recompressed) ++png_reencoded_count;
-                        else ++cache_passthrough_count;
-                        texture_bin_bytes_written += static_cast<uint64_t>(write_size);
-                        if (!active_save_as_copy_) prop.texture->clearSaveDirty();
-                        texture_map[path] = texture_id++;
-                        arr.push_back(tex_entry);
-                        return;
-                    } else if (!prop.texture->float_pixels.empty()) {
-                        // Handle Float textures (EXR/HDR) - TODO: Need stbi_write_hdr or similar
-                        // For now, skip or implement later.
-                        SCENE_LOG_WARN("Float texture embedding not fully implemented (skipping encode): " + path);
-                    } 
-                } else {
-                    bool wrote_project_local = false;
-                    // Role-aware encoder: takes a target path WITHOUT extension and
-                    // returns the actual final path (with .jpg or .png suffix), or
-                    // empty fs::path on failure.
-                    auto write_generated_image_from_pixels = [&](const fs::path& target_stem) -> fs::path {
-                        if (prop.texture->pixels.empty()) {
-                            return {};
-                        }
-
-                        auto linear_to_srgb_byte = [](float lin) -> uint8_t {
-                            lin = std::clamp(lin, 0.0f, 1.0f);
-                            float sr = (lin <= 0.0031308f) ? (lin * 12.92f) : (1.055f * powf(lin, 1.0f / 2.4f) - 0.055f);
-                            return static_cast<uint8_t>(std::roundf(sr * 255.0f));
-                        };
-
-                        bool convert_to_srgb = (usage == "albedo") && (!prop.texture->is_srgb);
-
-                        std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
-                        for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
-                            const auto& px = prop.texture->pixels[pi];
-                            if (convert_to_srgb) {
-                                float r_lin = px.r / 255.0f;
-                                float g_lin = px.g / 255.0f;
-                                float b_lin = px.b / 255.0f;
-                                raw_pixels[pi * 4 + 0] = linear_to_srgb_byte(r_lin);
-                                raw_pixels[pi * 4 + 1] = linear_to_srgb_byte(g_lin);
-                                raw_pixels[pi * 4 + 2] = linear_to_srgb_byte(b_lin);
-                                raw_pixels[pi * 4 + 3] = px.a;
-                            } else {
-                                raw_pixels[pi * 4 + 0] = px.r;
-                                raw_pixels[pi * 4 + 1] = px.g;
-                                raw_pixels[pi * 4 + 2] = px.b;
-                                raw_pixels[pi * 4 + 3] = px.a;
-                            }
-                        }
-
-                        std::vector<char> encoded;
-                        std::string encoded_ext;
-                        if (!encodeTextureRoleAware(raw_pixels.data(),
-                                                    prop.texture->width, prop.texture->height,
-                                                    usage, encoded, encoded_ext)) {
-                            return {};
-                        }
-
-                        fs::path local_target = target_stem;
-                        local_target += encoded_ext;
-
-                        std::ofstream local_out(local_target, std::ios::binary);
-                        if (!local_out.is_open()) {
-                            return {};
-                        }
-                        local_out.write(encoded.data(), static_cast<std::streamsize>(encoded.size()));
-                        ++png_reencoded_count;
-                        project_local_bytes_written += static_cast<uint64_t>(encoded.size());
-                        return local_target;
-                    };
-                    if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::ProjectLocal &&
-                        !project_local_texture_dir.empty()) {
-                        try {
-                            fs::create_directories(project_local_texture_dir);
-                            const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string());
-
-                            auto finalize_project_local_path = [&](const fs::path& local_target) {
-                                tex_entry["mode"] = "path";
-                                tex_entry["path"] = fs::relative(local_target, project_dir).generic_string();
-                                wrote_project_local = true;
-                            };
-
-                            auto target_matches_source_file = [&](const fs::path& local_target, const fs::path& source_path) -> bool {
-                                std::error_code ec;
-                                if (!fs::exists(local_target, ec) || !fs::exists(source_path, ec)) return false;
-                                const auto target_size = fs::file_size(local_target, ec);
-                                if (ec) return false;
-                                const auto source_size = fs::file_size(source_path, ec);
-                                if (ec || target_size != source_size) return false;
-                                const auto target_time = fs::last_write_time(local_target, ec);
-                                if (ec) return false;
-                                const auto source_time = fs::last_write_time(source_path, ec);
-                                if (ec) return false;
-                                return target_time >= source_time;
-                            };
-
-                            auto target_matches_cached_bytes = [&](const fs::path& local_target, size_t expected_size) -> bool {
-                                std::error_code ec;
-                                if (!fs::exists(local_target, ec)) return false;
-                                return fs::file_size(local_target, ec) == expected_size;
-                            };
-
-                            if (is_generated_name && !prop.texture->pixels.empty()) {
-                                const fs::path local_target_stem = project_local_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name);
-                                fs::path local_target = write_generated_image_from_pixels(local_target_stem);
-                                if (!local_target.empty() && fs::exists(local_target)) {
-                                    finalize_project_local_path(local_target);
-                                }
-                            } else if (fs::exists(path)) {
-                                const fs::path source_path(path);
-                                const std::string ext_orig = !source_path.extension().string().empty()
-                                    ? source_path.extension().string()
-                                    : std::string(".bin");
-
-                                bool wrote_recompressed = false;
-                                if (isLossyEncodableUsage(usage)) {
-                                    std::ifstream src(source_path, std::ios::binary | std::ios::ate);
-                                    if (src) {
-                                        const std::streamoff sz = src.tellg();
-                                        src.seekg(0, std::ios::beg);
-                                        std::vector<char> blob;
-                                        if (sz > 0) {
-                                            blob.resize(static_cast<size_t>(sz));
-                                            src.read(blob.data(), static_cast<std::streamsize>(blob.size()));
-                                            if (src.gcount() != static_cast<std::streamsize>(blob.size())) {
-                                                blob.clear();
-                                            }
-                                        }
-                                        auto recomp = pickColorRecompression(blob.data(), blob.size(), usage);
-                                        if (recomp.recompressed) {
-                                            const fs::path local_target = project_local_texture_dir /
-                                                (std::to_string(texture_id) + "_" + base_name + recomp.ext);
-                                            std::ofstream out(local_target, std::ios::binary);
-                                            if (out.is_open()) {
-                                                out.write(recomp.bytes.data(), static_cast<std::streamsize>(recomp.bytes.size()));
-                                                ++png_reencoded_count;
-                                                project_local_bytes_written += static_cast<uint64_t>(recomp.bytes.size());
-                                                finalize_project_local_path(local_target);
-                                                wrote_recompressed = true;
-                                            }
-                                        }
-                                    }
-                                }
-
-                                if (!wrote_recompressed) {
-                                    const fs::path local_target = project_local_texture_dir /
-                                        (std::to_string(texture_id) + "_" + base_name + ext_orig);
-                                    if (!target_matches_source_file(local_target, source_path)) {
-                                        fs::copy_file(source_path, local_target, fs::copy_options::overwrite_existing);
-                                        ++file_copied_count;
-                                        std::error_code size_ec;
-                                        project_local_bytes_written += static_cast<uint64_t>(fs::file_size(local_target, size_ec));
-                                    }
-                                    finalize_project_local_path(local_target);
-                                }
-                            } else if (const auto* cached = getEmbeddedTexture(path)) {
-                                auto recomp = pickColorRecompression(cached->data.data(), cached->data.size(), usage);
-                                const std::string ext = recomp.recompressed
-                                    ? recomp.ext
-                                    : chooseMaterializedTextureExtension(fs::path(path), &cached->data);
-                                const fs::path local_target = project_local_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name + ext);
-                                const char* write_data = recomp.recompressed ? recomp.bytes.data() : cached->data.data();
-                                const size_t write_size = recomp.recompressed ? recomp.bytes.size() : cached->data.size();
-                                const bool already_present = !recomp.recompressed &&
-                                    target_matches_cached_bytes(local_target, write_size);
-                                if (!already_present) {
-                                    std::ofstream local_out(local_target, std::ios::binary);
-                                    if (local_out.is_open()) {
-                                        local_out.write(write_data, static_cast<std::streamsize>(write_size));
-                                        if (recomp.recompressed) ++png_reencoded_count;
-                                        else ++cache_passthrough_count;
-                                        project_local_bytes_written += static_cast<uint64_t>(write_size);
-                                    }
-                                }
-                                if (fs::exists(local_target)) {
-                                    finalize_project_local_path(local_target);
-                                }
-                            } else if (!prop.texture->pixels.empty()) {
-                                const fs::path local_target_stem = project_local_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name);
-                                fs::path local_target = write_generated_image_from_pixels(local_target_stem);
-                                if (!local_target.empty() && fs::exists(local_target)) {
-                                    finalize_project_local_path(local_target);
-                                }
-                            }
-                        } catch (const std::exception& e) {
-                            SCENE_LOG_WARN("[ProjectManager] Failed to create project-local texture copy for " + path +
-                                           " | " + e.what());
-                        }
-                    }
-
-                    ++referenced_count;
-                    tex_entry["mode"] = "path";
-                    if (!wrote_project_local) {
-                        bool wrote_generated_keep_path = false;
-                        if (save_settings.texture_storage_mode == ProjectManager::TextureStorageMode::KeepOriginalPaths &&
-                            (is_generated_name || !fs::exists(path)) &&
-                            !generated_texture_dir.empty()) {
-                            try {
-                                fs::create_directories(generated_texture_dir);
-                                const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string().empty()
-                                    ? ("generated_tex_" + std::to_string(texture_id))
-                                    : fs::path(path).stem().string());
-                                const fs::path generated_target_stem = generated_texture_dir /
-                                    (std::to_string(texture_id) + "_" + base_name);
-                                fs::path generated_target = write_generated_image_from_pixels(generated_target_stem);
-                                wrote_generated_keep_path = !generated_target.empty();
-                                if (wrote_generated_keep_path) {
-                                    tex_entry["path"] = fs::relative(generated_target, project_dir).generic_string();
-                                }
-                            } catch (const std::exception& e) {
-                                SCENE_LOG_WARN("[ProjectManager] Failed to materialize generated texture for KeepOriginalPaths: " +
-                                               path + " | " + e.what());
-                            }
-
-                            if (!wrote_generated_keep_path) {
-                                if (const auto* cached = getEmbeddedTexture(path)) {
-                                    try {
-                                        const std::string base_name = sanitizeFilenameComponent(fs::path(path).stem().string().empty()
-                                            ? ("generated_tex_" + std::to_string(texture_id))
-                                            : fs::path(path).stem().string());
-                                        auto recomp = pickColorRecompression(cached->data.data(), cached->data.size(), usage);
-                                        const std::string ext = recomp.recompressed
-                                            ? recomp.ext
-                                            : chooseMaterializedTextureExtension(fs::path(path), &cached->data);
-                                        const fs::path generated_target = generated_texture_dir /
-                                            (std::to_string(texture_id) + "_" + base_name + ext);
-                                        const char* write_data = recomp.recompressed ? recomp.bytes.data() : cached->data.data();
-                                        const size_t write_size = recomp.recompressed ? recomp.bytes.size() : cached->data.size();
-                                        std::ofstream generated_out(generated_target, std::ios::binary);
-                                        if (generated_out.is_open()) {
-                                            generated_out.write(write_data, static_cast<std::streamsize>(write_size));
-                                            project_local_bytes_written += static_cast<uint64_t>(write_size);
-                                            if (recomp.recompressed) ++png_reencoded_count;
-                                            else ++cache_passthrough_count;
-                                        }
-                                        if (fs::exists(generated_target)) {
-                                            wrote_generated_keep_path = true;
-                                            tex_entry["path"] = fs::relative(generated_target, project_dir).generic_string();
-                                        }
-                                    } catch (const std::exception& e) {
-                                        SCENE_LOG_WARN("[ProjectManager] Failed to materialize cached embedded texture for KeepOriginalPaths: " +
-                                                       path + " | " + e.what());
-                                    }
-                                }
-                            }
-                        }
-
-                        if (!wrote_generated_keep_path) {
-                            tex_entry["path"] = path;
-                        }
-                    }
-                }
-                
-                if (!active_save_as_copy_) prop.texture->clearSaveDirty();
-                texture_map[path] = texture_id++;
-                arr.push_back(tex_entry);
+          const std::string previous_key = previousEmbeddedTextureKey(
+              path, usage, prop.texture->width, prop.texture->height);
+          auto previous_it =
+              g_previous_embedded_texture_entries.find(previous_key);
+          if (!prop.texture->isSaveDirty() &&
+              previous_it != g_previous_embedded_texture_entries.end()) {
+            std::vector<char> prev_blob;
+            if (readPreviousEmbeddedTextureBlob(previous_it->second,
+                                                prev_blob)) {
+              // Byte-for-byte: this blob already went through the
+              // role-aware encoder when it was first saved. Trying
+              // the JPG recompression again cost a full PNG decode
+              // per texture per save for every blob it had already
+              // declined (alpha, non-colour, did not shrink).
+              bin_out.write(prev_blob.data(),
+                            static_cast<std::streamsize>(prev_blob.size()));
+              tex_entry["size"] = prev_blob.size();
+              tex_entry["format"] = previous_it->second.format;
+              ++previous_embed_reused_count;
+              texture_bin_bytes_written +=
+                  static_cast<uint64_t>(prev_blob.size());
+              if (!active_save_as_copy_)
+                prop.texture->clearSaveDirty();
+              texture_map[path] = texture_id++;
+              arr.push_back(tex_entry);
+              return;
             }
-        };
-        
-        if (pbsdf) {
-            // Use PrincipledBSDF pointer for correct texture property access.
-            // Wet paint surfaces (overlay tiled base, "@base" hidden picture,
-            // live splats): serialize the clean base texture instead of the
-            // transient transparent or white-washed canvas.
-            std::shared_ptr<Texture> cleanAlbedo =
-                Paint::wetPaintGpu().cleanBaseTextureForSave(static_cast<uint16_t>(i));
-            if (!cleanAlbedo && pbsdf->paintBaseTexture && pbsdf->paintBaseTexture->is_loaded()) {
-                cleanAlbedo = pbsdf->paintBaseTexture;
+          }
+
+          // If we have in-memory pixels (e.g. painted/generated texture) prefer
+          // encoding them even if a file exists with the same name. This
+          // ensures painted overrides are serialized.
+          if (fs::exists(path) && prop.texture->pixels.empty() &&
+              !is_generated_name) {
+            // Read the source into memory so we can attempt PNG → JPG
+            // recompression for color textures; if it doesn't pay off,
+            // we fall back to byte-for-byte passthrough.
+            std::ifstream tex_file(path, std::ios::binary | std::ios::ate);
+            if (tex_file) {
+              const std::streamoff total_size = tex_file.tellg();
+              tex_file.seekg(0, std::ios::beg);
+              std::vector<char> blob;
+              if (total_size > 0) {
+                blob.resize(static_cast<size_t>(total_size));
+                tex_file.read(blob.data(),
+                              static_cast<std::streamsize>(blob.size()));
+                if (tex_file.gcount() !=
+                    static_cast<std::streamsize>(blob.size())) {
+                  blob.clear();
+                }
+              }
+
+              auto recomp =
+                  pickColorRecompression(blob.data(), blob.size(), usage);
+              const char *write_data =
+                  recomp.recompressed ? recomp.bytes.data() : blob.data();
+              const size_t write_size =
+                  recomp.recompressed ? recomp.bytes.size() : blob.size();
+              const std::string write_ext =
+                  recomp.recompressed ? recomp.ext
+                                      : fs::path(path).extension().string();
+
+              bin_out.write(write_data,
+                            static_cast<std::streamsize>(write_size));
+              if (recomp.recompressed)
+                ++png_reencoded_count;
+              else
+                ++file_copied_count;
+              texture_bin_bytes_written += static_cast<uint64_t>(write_size);
+
+              tex_entry["size"] = write_size;
+              tex_entry["format"] = write_ext;
             }
-            if (cleanAlbedo && cleanAlbedo->is_loaded()) {
-                MaterialProperty baseProp = pbsdf->albedoProperty;
-                baseProp.texture = cleanAlbedo;
-                checkTexture(baseProp, "albedo");
+          } else if (!prop.texture->pixels.empty()) {
+            // Encode from in-memory pixels (painted/generated textures).
+            std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
+
+            auto linear_to_srgb_byte = [](float lin) -> uint8_t {
+              lin = std::clamp(lin, 0.0f, 1.0f);
+              float sr = (lin <= 0.0031308f)
+                             ? (lin * 12.92f)
+                             : (1.055f * powf(lin, 1.0f / 2.4f) - 0.055f);
+              return static_cast<uint8_t>(std::roundf(sr * 255.0f));
+            };
+
+            bool convert_to_srgb =
+                (usage == "albedo") && (!prop.texture->is_srgb);
+
+            for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
+              const auto &px = prop.texture->pixels[pi];
+              if (convert_to_srgb) {
+                // pixels are stored as linear bytes -> convert to sRGB bytes
+                float r_lin = px.r / 255.0f;
+                float g_lin = px.g / 255.0f;
+                float b_lin = px.b / 255.0f;
+                raw_pixels[pi * 4 + 0] = linear_to_srgb_byte(r_lin);
+                raw_pixels[pi * 4 + 1] = linear_to_srgb_byte(g_lin);
+                raw_pixels[pi * 4 + 2] = linear_to_srgb_byte(b_lin);
+                raw_pixels[pi * 4 + 3] = px.a;
+              } else {
+                raw_pixels[pi * 4 + 0] = px.r;
+                raw_pixels[pi * 4 + 1] = px.g;
+                raw_pixels[pi * 4 + 2] = px.b;
+                raw_pixels[pi * 4 + 3] = px.a;
+              }
+            }
+
+            std::vector<char> encoded;
+            std::string encoded_ext;
+            if (encodeTextureRoleAware(raw_pixels.data(), prop.texture->width,
+                                       prop.texture->height, usage, encoded,
+                                       encoded_ext)) {
+              ++png_reencoded_count;
+              bin_out.write(encoded.data(), encoded.size());
+              tex_entry["size"] = encoded.size();
+              tex_entry["format"] = encoded_ext;
+              texture_bin_bytes_written +=
+                  static_cast<uint64_t>(encoded.size());
             } else {
-                checkTexture(pbsdf->albedoProperty, "albedo");
+              SCENE_LOG_ERROR("Failed to encode memory texture: " + path);
             }
-            checkTexture(pbsdf->normalProperty, "normal");
-            checkTexture(pbsdf->roughnessProperty, "roughness");
-            checkTexture(pbsdf->metallicProperty, "metallic");
-            checkTexture(pbsdf->emissionProperty, "emission");
-            checkTexture(pbsdf->heightProperty, "height");
-            checkTexture(pbsdf->opacityProperty, "opacity");
-            checkTexture(pbsdf->transmissionProperty, "transmission");
-            continue;
-        }
 
-        // Graph-only textures. `usage` decides the encoder (JPG vs PNG) and the TextureType
-        // the loader rebuilds them with, so it must come from the texture's own role — a
-        // normal/roughness map re-imported as sRGB albedo would come back wrong.
-        for (const auto& tex : extra_textures) {
-            if (!tex || !tex->is_loaded()) continue;
-            std::string usage = "albedo";
-            switch (tex->type) {
-                case TextureType::Normal:       usage = "normal"; break;
-                case TextureType::Roughness:    usage = "roughness"; break;
-                case TextureType::Metallic:     usage = "metallic"; break;
-                case TextureType::Specular:     usage = "specular"; break;
-                case TextureType::Emission:     usage = "emission"; break;
-                case TextureType::Opacity:      usage = "opacity"; break;
-                case TextureType::Transmission: usage = "transmission"; break;
-                default: break;
-            }
-            MaterialProperty prop;   // texture_map already de-dupes against the slot pass
-            prop.texture = tex;
-            checkTexture(prop, usage);
-        }
-    }
-    
-    SCENE_LOG_INFO("[ProjectManager] Serialized " + std::to_string(arr.size()) + " textures.");
-    SCENE_LOG_INFO("[ProjectManager] Texture modes - embedded: " + std::to_string(embedded_count) +
-                   ", path refs: " + std::to_string(referenced_count) +
-                   ", png re-encoded: " + std::to_string(png_reencoded_count) +
-                   ", file-copied-bytesources: " + std::to_string(file_copied_count) +
-                   ", cache-passthrough: " + std::to_string(cache_passthrough_count) +
-                   ", previous-embed-reused: " + std::to_string(previous_embed_reused_count) +
-                   ", bin-bytes: " + std::to_string(texture_bin_bytes_written) +
-                   ", project-local-bytes: " + std::to_string(project_local_bytes_written));
-    return arr;
-}
+          } else if (const auto *cached = getEmbeddedTexture(path)) {
+            auto recomp = pickColorRecompression(cached->data.data(),
+                                                 cached->data.size(), usage);
+            const char *write_data =
+                recomp.recompressed ? recomp.bytes.data() : cached->data.data();
+            const size_t write_size =
+                recomp.recompressed ? recomp.bytes.size() : cached->data.size();
+            const std::string write_ext =
+                recomp.recompressed ? recomp.ext
+                                    : fs::path(path).extension().string();
 
-// Declared in MaterialNodesV2.h (which ProjectManager.h can't include — scene_data.h closes
-// the cycle). A material graph's Image Texture may be the ONLY reference to a texture, so
-// after a load there is no material slot to share an object with and, if the texture was
-// embedded, no file on disk either. This is the one place that can hand it back.
-// The map keeps one Texture per name: without it every node minted its own copy.
-std::shared_ptr<Texture> resolveEmbeddedProjectTexture(const std::string& name) {
-    if (name.empty()) return nullptr;
-
-    static std::mutex cacheMutex;
-    static std::unordered_map<std::string, std::weak_ptr<Texture>> cache;
-    {
-        std::lock_guard<std::mutex> lock(cacheMutex);
-        auto it = cache.find(name);
-        if (it != cache.end()) {
-            if (auto alive = it->second.lock()) return alive;
-            cache.erase(it);
-        }
-    }
-
-    auto& pm = ProjectManager::getInstance();
-    const ProjectManager::EmbeddedTextureData* embedded = pm.getEmbeddedTexture(name);
-    std::shared_ptr<Texture> tex;
-    if (embedded && !embedded->data.empty()) {
-        tex = std::make_shared<Texture>(embedded->data, embedded->type, name);
-    } else if (const std::string* remapped = pm.getTexturePathRemap(name)) {
-        // Saved as a project-local file under a new path; the graph still stores the original name.
-        tex = std::make_shared<Texture>(*remapped, TextureType::Albedo);
-    }
-    if (!tex || !tex->is_loaded()) return nullptr;
-
-    tex->name = name;   // keep the name the graph (and the project manifest) refers to
-    {
-        std::lock_guard<std::mutex> lock(cacheMutex);
-        cache[name] = tex;
-    }
-    return tex;
-}
-
-void ProjectManager::deserializeTextures(const json& j, std::istream& bin_in, const std::string& project_dir) {
-    // Clear previous caches
-    m_embedded_texture_cache.clear();
-    m_texture_path_remap.clear();
-
-    for (const auto& tex : j) {
-        std::string mode = tex.value("mode", "path");
-
-        if (mode == "embed") {
-            // Store embedded texture in memory cache (NO DISK WRITE!)
-            // MaterialManager::deserializeProperty will load from this cache
-            long long offset = tex.value("offset", 0LL);
-            size_t size = tex.value("size", 0);
-            std::string original_name = tex.value("original_name", "");
-            std::string usage = tex.value("usage", "albedo");
-
-            if (size > 0 && bin_in.good() && !original_name.empty()) {
-                bin_in.seekg(offset);
-                std::vector<char> data(size);
-                bin_in.read(data.data(), size);
-
-                // Determine TextureType from usage string
-                TextureType texType = TextureType::Albedo;
-                if (usage == "normal") texType = TextureType::Normal;
-                else if (usage == "roughness") texType = TextureType::Roughness;
-                else if (usage == "metallic") texType = TextureType::Metallic;
-                else if (usage == "specular") texType = TextureType::Specular;
-                else if (usage == "emission") texType = TextureType::Emission;
-                else if (usage == "height") texType = TextureType::Unknown;
-                else if (usage == "opacity") texType = TextureType::Opacity;
-                else if (usage == "transmission") texType = TextureType::Transmission;
-
-                // Store in memory cache - keyed by original_name
-                m_embedded_texture_cache[original_name] = {std::move(data), texType};
-            }
+            bin_out.write(write_data, static_cast<std::streamsize>(write_size));
+            tex_entry["size"] = write_size;
+            tex_entry["format"] = write_ext;
+            if (recomp.recompressed)
+              ++png_reencoded_count;
+            else
+              ++cache_passthrough_count;
+            texture_bin_bytes_written += static_cast<uint64_t>(write_size);
+            if (!active_save_as_copy_)
+              prop.texture->clearSaveDirty();
+            texture_map[path] = texture_id++;
+            arr.push_back(tex_entry);
+            return;
+          } else if (!prop.texture->float_pixels.empty()) {
+            // Handle Float textures (EXR/HDR) - TODO: Need stbi_write_hdr or
+            // similar For now, skip or implement later.
+            SCENE_LOG_WARN("Float texture embedding not fully implemented "
+                           "(skipping encode): " +
+                           path);
+          }
         } else {
-            // Path mode: build a remap from original_name -> resolved disk path.
-            // This is needed when a previously-embedded texture (e.g. "embedded_0") was
-            // saved as a project-local copy. The material JSON still stores the original
-            // embedded name, so without this remap deserializeProperty can't find the file.
-            std::string path = tex.value("path", "");
-            std::string original_name = tex.value("original_name", "");
-            if (!original_name.empty() && !path.empty() && original_name != path) {
-                // Resolve against project_dir if not absolute
-                std::string full_path = path;
-                if (!fs::path(full_path).is_absolute() && !project_dir.empty()) {
-                    full_path = (fs::path(project_dir) / path).generic_string();
-                }
-                if (fs::exists(full_path)) {
-                    m_texture_path_remap[original_name] = full_path;
-                }
+          bool wrote_project_local = false;
+          // Role-aware encoder: takes a target path WITHOUT extension and
+          // returns the actual final path (with .jpg or .png suffix), or
+          // empty fs::path on failure.
+          auto write_generated_image_from_pixels =
+              [&](const fs::path &target_stem) -> fs::path {
+            if (prop.texture->pixels.empty()) {
+              return {};
             }
+
+            auto linear_to_srgb_byte = [](float lin) -> uint8_t {
+              lin = std::clamp(lin, 0.0f, 1.0f);
+              float sr = (lin <= 0.0031308f)
+                             ? (lin * 12.92f)
+                             : (1.055f * powf(lin, 1.0f / 2.4f) - 0.055f);
+              return static_cast<uint8_t>(std::roundf(sr * 255.0f));
+            };
+
+            bool convert_to_srgb =
+                (usage == "albedo") && (!prop.texture->is_srgb);
+
+            std::vector<uint8_t> raw_pixels(prop.texture->pixels.size() * 4);
+            for (size_t pi = 0; pi < prop.texture->pixels.size(); ++pi) {
+              const auto &px = prop.texture->pixels[pi];
+              if (convert_to_srgb) {
+                float r_lin = px.r / 255.0f;
+                float g_lin = px.g / 255.0f;
+                float b_lin = px.b / 255.0f;
+                raw_pixels[pi * 4 + 0] = linear_to_srgb_byte(r_lin);
+                raw_pixels[pi * 4 + 1] = linear_to_srgb_byte(g_lin);
+                raw_pixels[pi * 4 + 2] = linear_to_srgb_byte(b_lin);
+                raw_pixels[pi * 4 + 3] = px.a;
+              } else {
+                raw_pixels[pi * 4 + 0] = px.r;
+                raw_pixels[pi * 4 + 1] = px.g;
+                raw_pixels[pi * 4 + 2] = px.b;
+                raw_pixels[pi * 4 + 3] = px.a;
+              }
+            }
+
+            std::vector<char> encoded;
+            std::string encoded_ext;
+            if (!encodeTextureRoleAware(raw_pixels.data(), prop.texture->width,
+                                        prop.texture->height, usage, encoded,
+                                        encoded_ext)) {
+              return {};
+            }
+
+            fs::path local_target = target_stem;
+            local_target += encoded_ext;
+
+            std::ofstream local_out(local_target, std::ios::binary);
+            if (!local_out.is_open()) {
+              return {};
+            }
+            local_out.write(encoded.data(),
+                            static_cast<std::streamsize>(encoded.size()));
+            ++png_reencoded_count;
+            project_local_bytes_written +=
+                static_cast<uint64_t>(encoded.size());
+            return local_target;
+          };
+          if (save_settings.texture_storage_mode ==
+                  ProjectManager::TextureStorageMode::ProjectLocal &&
+              !project_local_texture_dir.empty()) {
+            try {
+              fs::create_directories(project_local_texture_dir);
+              const std::string base_name =
+                  sanitizeFilenameComponent(fs::path(path).stem().string());
+
+              auto finalize_project_local_path =
+                  [&](const fs::path &local_target) {
+                    tex_entry["mode"] = "path";
+                    tex_entry["path"] = fs::relative(local_target, project_dir)
+                                            .generic_string();
+                    wrote_project_local = true;
+                  };
+
+              auto target_matches_source_file =
+                  [&](const fs::path &local_target,
+                      const fs::path &source_path) -> bool {
+                std::error_code ec;
+                if (!fs::exists(local_target, ec) ||
+                    !fs::exists(source_path, ec))
+                  return false;
+                const auto target_size = fs::file_size(local_target, ec);
+                if (ec)
+                  return false;
+                const auto source_size = fs::file_size(source_path, ec);
+                if (ec || target_size != source_size)
+                  return false;
+                const auto target_time = fs::last_write_time(local_target, ec);
+                if (ec)
+                  return false;
+                const auto source_time = fs::last_write_time(source_path, ec);
+                if (ec)
+                  return false;
+                return target_time >= source_time;
+              };
+
+              auto target_matches_cached_bytes =
+                  [&](const fs::path &local_target,
+                      size_t expected_size) -> bool {
+                std::error_code ec;
+                if (!fs::exists(local_target, ec))
+                  return false;
+                return fs::file_size(local_target, ec) == expected_size;
+              };
+
+              if (is_generated_name && !prop.texture->pixels.empty()) {
+                const fs::path local_target_stem =
+                    project_local_texture_dir /
+                    (std::to_string(texture_id) + "_" + base_name);
+                fs::path local_target =
+                    write_generated_image_from_pixels(local_target_stem);
+                if (!local_target.empty() && fs::exists(local_target)) {
+                  finalize_project_local_path(local_target);
+                }
+              } else if (fs::exists(path)) {
+                const fs::path source_path(path);
+                const std::string ext_orig =
+                    !source_path.extension().string().empty()
+                        ? source_path.extension().string()
+                        : std::string(".bin");
+
+                bool wrote_recompressed = false;
+                if (isLossyEncodableUsage(usage)) {
+                  std::ifstream src(source_path,
+                                    std::ios::binary | std::ios::ate);
+                  if (src) {
+                    const std::streamoff sz = src.tellg();
+                    src.seekg(0, std::ios::beg);
+                    std::vector<char> blob;
+                    if (sz > 0) {
+                      blob.resize(static_cast<size_t>(sz));
+                      src.read(blob.data(),
+                               static_cast<std::streamsize>(blob.size()));
+                      if (src.gcount() !=
+                          static_cast<std::streamsize>(blob.size())) {
+                        blob.clear();
+                      }
+                    }
+                    auto recomp =
+                        pickColorRecompression(blob.data(), blob.size(), usage);
+                    if (recomp.recompressed) {
+                      const fs::path local_target =
+                          project_local_texture_dir /
+                          (std::to_string(texture_id) + "_" + base_name +
+                           recomp.ext);
+                      std::ofstream out(local_target, std::ios::binary);
+                      if (out.is_open()) {
+                        out.write(
+                            recomp.bytes.data(),
+                            static_cast<std::streamsize>(recomp.bytes.size()));
+                        ++png_reencoded_count;
+                        project_local_bytes_written +=
+                            static_cast<uint64_t>(recomp.bytes.size());
+                        finalize_project_local_path(local_target);
+                        wrote_recompressed = true;
+                      }
+                    }
+                  }
+                }
+
+                if (!wrote_recompressed) {
+                  const fs::path local_target =
+                      project_local_texture_dir /
+                      (std::to_string(texture_id) + "_" + base_name + ext_orig);
+                  if (!target_matches_source_file(local_target, source_path)) {
+                    fs::copy_file(source_path, local_target,
+                                  fs::copy_options::overwrite_existing);
+                    ++file_copied_count;
+                    std::error_code size_ec;
+                    project_local_bytes_written += static_cast<uint64_t>(
+                        fs::file_size(local_target, size_ec));
+                  }
+                  finalize_project_local_path(local_target);
+                }
+              } else if (const auto *cached = getEmbeddedTexture(path)) {
+                auto recomp = pickColorRecompression(
+                    cached->data.data(), cached->data.size(), usage);
+                const std::string ext =
+                    recomp.recompressed ? recomp.ext
+                                        : chooseMaterializedTextureExtension(
+                                              fs::path(path), &cached->data);
+                const fs::path local_target =
+                    project_local_texture_dir /
+                    (std::to_string(texture_id) + "_" + base_name + ext);
+                const char *write_data = recomp.recompressed
+                                             ? recomp.bytes.data()
+                                             : cached->data.data();
+                const size_t write_size = recomp.recompressed
+                                              ? recomp.bytes.size()
+                                              : cached->data.size();
+                const bool already_present =
+                    !recomp.recompressed &&
+                    target_matches_cached_bytes(local_target, write_size);
+                if (!already_present) {
+                  std::ofstream local_out(local_target, std::ios::binary);
+                  if (local_out.is_open()) {
+                    local_out.write(write_data,
+                                    static_cast<std::streamsize>(write_size));
+                    if (recomp.recompressed)
+                      ++png_reencoded_count;
+                    else
+                      ++cache_passthrough_count;
+                    project_local_bytes_written +=
+                        static_cast<uint64_t>(write_size);
+                  }
+                }
+                if (fs::exists(local_target)) {
+                  finalize_project_local_path(local_target);
+                }
+              } else if (!prop.texture->pixels.empty()) {
+                const fs::path local_target_stem =
+                    project_local_texture_dir /
+                    (std::to_string(texture_id) + "_" + base_name);
+                fs::path local_target =
+                    write_generated_image_from_pixels(local_target_stem);
+                if (!local_target.empty() && fs::exists(local_target)) {
+                  finalize_project_local_path(local_target);
+                }
+              }
+            } catch (const std::exception &e) {
+              SCENE_LOG_WARN("[ProjectManager] Failed to create project-local "
+                             "texture copy for " +
+                             path + " | " + e.what());
+            }
+          }
+
+          ++referenced_count;
+          tex_entry["mode"] = "path";
+          if (!wrote_project_local) {
+            bool wrote_generated_keep_path = false;
+            if (save_settings.texture_storage_mode ==
+                    ProjectManager::TextureStorageMode::KeepOriginalPaths &&
+                (is_generated_name || !fs::exists(path)) &&
+                !generated_texture_dir.empty()) {
+              try {
+                fs::create_directories(generated_texture_dir);
+                const std::string base_name = sanitizeFilenameComponent(
+                    fs::path(path).stem().string().empty()
+                        ? ("generated_tex_" + std::to_string(texture_id))
+                        : fs::path(path).stem().string());
+                const fs::path generated_target_stem =
+                    generated_texture_dir /
+                    (std::to_string(texture_id) + "_" + base_name);
+                fs::path generated_target =
+                    write_generated_image_from_pixels(generated_target_stem);
+                wrote_generated_keep_path = !generated_target.empty();
+                if (wrote_generated_keep_path) {
+                  tex_entry["path"] =
+                      fs::relative(generated_target, project_dir)
+                          .generic_string();
+                }
+              } catch (const std::exception &e) {
+                SCENE_LOG_WARN("[ProjectManager] Failed to materialize "
+                               "generated texture for KeepOriginalPaths: " +
+                               path + " | " + e.what());
+              }
+
+              if (!wrote_generated_keep_path) {
+                if (const auto *cached = getEmbeddedTexture(path)) {
+                  try {
+                    const std::string base_name = sanitizeFilenameComponent(
+                        fs::path(path).stem().string().empty()
+                            ? ("generated_tex_" + std::to_string(texture_id))
+                            : fs::path(path).stem().string());
+                    auto recomp = pickColorRecompression(
+                        cached->data.data(), cached->data.size(), usage);
+                    const std::string ext =
+                        recomp.recompressed
+                            ? recomp.ext
+                            : chooseMaterializedTextureExtension(fs::path(path),
+                                                                 &cached->data);
+                    const fs::path generated_target =
+                        generated_texture_dir /
+                        (std::to_string(texture_id) + "_" + base_name + ext);
+                    const char *write_data = recomp.recompressed
+                                                 ? recomp.bytes.data()
+                                                 : cached->data.data();
+                    const size_t write_size = recomp.recompressed
+                                                  ? recomp.bytes.size()
+                                                  : cached->data.size();
+                    std::ofstream generated_out(generated_target,
+                                                std::ios::binary);
+                    if (generated_out.is_open()) {
+                      generated_out.write(
+                          write_data, static_cast<std::streamsize>(write_size));
+                      project_local_bytes_written +=
+                          static_cast<uint64_t>(write_size);
+                      if (recomp.recompressed)
+                        ++png_reencoded_count;
+                      else
+                        ++cache_passthrough_count;
+                    }
+                    if (fs::exists(generated_target)) {
+                      wrote_generated_keep_path = true;
+                      tex_entry["path"] =
+                          fs::relative(generated_target, project_dir)
+                              .generic_string();
+                    }
+                  } catch (const std::exception &e) {
+                    SCENE_LOG_WARN(
+                        "[ProjectManager] Failed to materialize cached "
+                        "embedded texture for KeepOriginalPaths: " +
+                        path + " | " + e.what());
+                  }
+                }
+              }
+            }
+
+            if (!wrote_generated_keep_path) {
+              tex_entry["path"] = path;
+            }
+          }
         }
+
+        if (!active_save_as_copy_)
+          prop.texture->clearSaveDirty();
+        texture_map[path] = texture_id++;
+        arr.push_back(tex_entry);
+      }
+    };
+
+    if (pbsdf) {
+      // Use PrincipledBSDF pointer for correct texture property access.
+      // Wet paint surfaces (overlay tiled base, "@base" hidden picture,
+      // live splats): serialize the clean base texture instead of the
+      // transient transparent or white-washed canvas.
+      std::shared_ptr<Texture> cleanAlbedo =
+          Paint::wetPaintGpu().cleanBaseTextureForSave(
+              static_cast<uint16_t>(i));
+      if (!cleanAlbedo && pbsdf->paintBaseTexture &&
+          pbsdf->paintBaseTexture->is_loaded()) {
+        cleanAlbedo = pbsdf->paintBaseTexture;
+      }
+      if (cleanAlbedo && cleanAlbedo->is_loaded()) {
+        MaterialProperty baseProp = pbsdf->albedoProperty;
+        baseProp.texture = cleanAlbedo;
+        checkTexture(baseProp, "albedo");
+      } else {
+        checkTexture(pbsdf->albedoProperty, "albedo");
+      }
+      checkTexture(pbsdf->normalProperty, "normal");
+      checkTexture(pbsdf->roughnessProperty, "roughness");
+      checkTexture(pbsdf->metallicProperty, "metallic");
+      checkTexture(pbsdf->emissionProperty, "emission");
+      checkTexture(pbsdf->heightProperty, "height");
+      checkTexture(pbsdf->opacityProperty, "opacity");
+      checkTexture(pbsdf->transmissionProperty, "transmission");
+      continue;
     }
-    SCENE_LOG_INFO("[ProjectManager] Cached " + std::to_string(m_embedded_texture_cache.size()) +
-                   " embedded textures in memory, " + std::to_string(m_texture_path_remap.size()) +
-                   " path remaps (no temp files).");
+
+    // Graph-only textures. `usage` decides the encoder (JPG vs PNG) and the
+    // TextureType the loader rebuilds them with, so it must come from the
+    // texture's own role — a normal/roughness map re-imported as sRGB albedo
+    // would come back wrong.
+    for (const auto &tex : extra_textures) {
+      if (!tex || !tex->is_loaded())
+        continue;
+      std::string usage = "albedo";
+      switch (tex->type) {
+      case TextureType::Normal:
+        usage = "normal";
+        break;
+      case TextureType::Roughness:
+        usage = "roughness";
+        break;
+      case TextureType::Metallic:
+        usage = "metallic";
+        break;
+      case TextureType::Specular:
+        usage = "specular";
+        break;
+      case TextureType::Emission:
+        usage = "emission";
+        break;
+      case TextureType::Opacity:
+        usage = "opacity";
+        break;
+      case TextureType::Transmission:
+        usage = "transmission";
+        break;
+      default:
+        break;
+      }
+      MaterialProperty
+          prop; // texture_map already de-dupes against the slot pass
+      prop.texture = tex;
+      checkTexture(prop, usage);
+    }
+  }
+
+  SCENE_LOG_INFO("[ProjectManager] Serialized " + std::to_string(arr.size()) +
+                 " textures.");
+  SCENE_LOG_INFO(
+      "[ProjectManager] Texture modes - embedded: " +
+      std::to_string(embedded_count) +
+      ", path refs: " + std::to_string(referenced_count) +
+      ", png re-encoded: " + std::to_string(png_reencoded_count) +
+      ", file-copied-bytesources: " + std::to_string(file_copied_count) +
+      ", cache-passthrough: " + std::to_string(cache_passthrough_count) +
+      ", previous-embed-reused: " +
+      std::to_string(previous_embed_reused_count) +
+      ", bin-bytes: " + std::to_string(texture_bin_bytes_written) +
+      ", project-local-bytes: " + std::to_string(project_local_bytes_written));
+  return arr;
+}
+
+// Declared in MaterialNodesV2.h (which ProjectManager.h can't include —
+// scene_data.h closes the cycle). A material graph's Image Texture may be the
+// ONLY reference to a texture, so after a load there is no material slot to
+// share an object with and, if the texture was embedded, no file on disk
+// either. This is the one place that can hand it back. The map keeps one
+// Texture per name: without it every node minted its own copy.
+std::shared_ptr<Texture>
+resolveEmbeddedProjectTexture(const std::string &name) {
+  if (name.empty())
+    return nullptr;
+
+  static std::mutex cacheMutex;
+  static std::unordered_map<std::string, std::weak_ptr<Texture>> cache;
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    auto it = cache.find(name);
+    if (it != cache.end()) {
+      if (auto alive = it->second.lock())
+        return alive;
+      cache.erase(it);
+    }
+  }
+
+  auto &pm = ProjectManager::getInstance();
+  const ProjectManager::EmbeddedTextureData *embedded =
+      pm.getEmbeddedTexture(name);
+  std::shared_ptr<Texture> tex;
+  if (embedded && !embedded->data.empty()) {
+    tex = std::make_shared<Texture>(embedded->data, embedded->type, name);
+  } else if (const std::string *remapped = pm.getTexturePathRemap(name)) {
+    // Saved as a project-local file under a new path; the graph still stores
+    // the original name.
+    tex = std::make_shared<Texture>(*remapped, TextureType::Albedo);
+  }
+  if (!tex || !tex->is_loaded())
+    return nullptr;
+
+  tex->name =
+      name; // keep the name the graph (and the project manifest) refers to
+  {
+    std::lock_guard<std::mutex> lock(cacheMutex);
+    cache[name] = tex;
+  }
+  return tex;
+}
+
+void ProjectManager::deserializeTextures(const json &j, std::istream &bin_in,
+                                         const std::string &project_dir) {
+  // Clear previous caches
+  m_embedded_texture_cache.clear();
+  m_texture_path_remap.clear();
+
+  for (const auto &tex : j) {
+    std::string mode = tex.value("mode", "path");
+
+    if (mode == "embed") {
+      // Store embedded texture in memory cache (NO DISK WRITE!)
+      // MaterialManager::deserializeProperty will load from this cache
+      long long offset = tex.value("offset", 0LL);
+      size_t size = tex.value("size", 0);
+      std::string original_name = tex.value("original_name", "");
+      std::string usage = tex.value("usage", "albedo");
+
+      if (size > 0 && bin_in.good() && !original_name.empty()) {
+        bin_in.seekg(offset);
+        std::vector<char> data(size);
+        bin_in.read(data.data(), size);
+
+        // Determine TextureType from usage string
+        TextureType texType = TextureType::Albedo;
+        if (usage == "normal")
+          texType = TextureType::Normal;
+        else if (usage == "roughness")
+          texType = TextureType::Roughness;
+        else if (usage == "metallic")
+          texType = TextureType::Metallic;
+        else if (usage == "specular")
+          texType = TextureType::Specular;
+        else if (usage == "emission")
+          texType = TextureType::Emission;
+        else if (usage == "height")
+          texType = TextureType::Unknown;
+        else if (usage == "opacity")
+          texType = TextureType::Opacity;
+        else if (usage == "transmission")
+          texType = TextureType::Transmission;
+
+        // Store in memory cache - keyed by original_name
+        m_embedded_texture_cache[original_name] = {std::move(data), texType};
+      }
+    } else {
+      // Path mode: build a remap from original_name -> resolved disk path.
+      // This is needed when a previously-embedded texture (e.g. "embedded_0")
+      // was saved as a project-local copy. The material JSON still stores the
+      // original embedded name, so without this remap deserializeProperty can't
+      // find the file.
+      std::string path = tex.value("path", "");
+      std::string original_name = tex.value("original_name", "");
+      if (!original_name.empty() && !path.empty() && original_name != path) {
+        // Resolve against project_dir if not absolute
+        std::string full_path = path;
+        if (!fs::path(full_path).is_absolute() && !project_dir.empty()) {
+          full_path = (fs::path(project_dir) / path).generic_string();
+        }
+        if (fs::exists(full_path)) {
+          m_texture_path_remap[original_name] = full_path;
+        }
+      }
+    }
+  }
+  SCENE_LOG_INFO("[ProjectManager] Cached " +
+                 std::to_string(m_embedded_texture_cache.size()) +
+                 " embedded textures in memory, " +
+                 std::to_string(m_texture_path_remap.size()) +
+                 " path remaps (no temp files).");
 }
 
 // ============================================================================
 // VDB SERIALIZATION
 // ============================================================================
 
-json ProjectManager::serializeVDBVolumes(const std::vector<std::shared_ptr<VDBVolume>>& vdb_volumes) {
-    json arr = json::array();
-    
-    for (size_t i = 0; i < vdb_volumes.size(); ++i) {
-        const auto& vdb = vdb_volumes[i];
-        if (!vdb || vdb->transient) {
-            continue; // simulation-owned live volumes are rebuilt at runtime, never saved
-        }
-        json j;
+json ProjectManager::serializeVDBVolumes(
+    const std::vector<std::shared_ptr<VDBVolume>> &vdb_volumes) {
+  json arr = json::array();
 
-        j["id"] = i;
-        j["name"] = vdb->name;
-        j["filepath"] = vdb->getFilePath();
-        j["transform"] = mat4ToJson(vdb->getPivotMatrix());
-        j["density_scale"] = vdb->density_scale;
-        j["pivot_offset"] = {vdb->getPivotOffset().x, vdb->getPivotOffset().y, vdb->getPivotOffset().z};
-        
-        // Animation
-        j["is_sequence"] = vdb->isAnimated();
-        j["current_frame"] = vdb->getCurrentFrame();
-        j["timeline_linked"] = vdb->isLinkedToTimeline();
-        j["frame_offset"] = vdb->getFrameOffset();
+  for (size_t i = 0; i < vdb_volumes.size(); ++i) {
+    const auto &vdb = vdb_volumes[i];
+    if (!vdb || vdb->transient) {
+      continue; // simulation-owned live volumes are rebuilt at runtime, never
+                // saved
+    }
+    json j;
 
-        // Fluid Surface
-        j["render_as_isosurface"] = vdb->render_as_isosurface;
-        j["render_isosurface_ior"] = vdb->render_isosurface_ior;
-        j["render_isosurface_roughness"] = vdb->render_isosurface_roughness;
-        j["render_isosurface_foam"] = vdb->render_isosurface_foam;
-        
-        // Shader
-        if (auto shader = vdb->volume_shader) {
-             json s;
-             s["name"] = shader->name;
-             s["density"] = shader->density.toJson();
-             s["scattering"] = shader->scattering.toJson();
-             s["absorption"] = shader->absorption.toJson();
-             s["emission"] = shader->emission.toJson();
-             s["emission_response"] = shader->emission_response.toJson();
-             s["quality"] = shader->quality.toJson();
-             s["material_program"] = shader->material_program.toJson();
-             s["material_graph"] = shader->material_graph;
-             
-             // Motion blur manual
-             s["motion_blur"] = {
-                 {"enabled", shader->motion_blur.enabled},
-                 {"velocity_channel", shader->motion_blur.velocity_channel},
-                 {"scale", shader->motion_blur.scale}
-             };
-             
-             j["shader"] = s;
-        }
-        
-        arr.push_back(j);
-     }
-    
-     return arr;
+    j["id"] = i;
+    j["name"] = vdb->name;
+    j["filepath"] = vdb->getFilePath();
+    j["transform"] = mat4ToJson(vdb->getPivotMatrix());
+    j["density_scale"] = vdb->density_scale;
+    j["pivot_offset"] = {vdb->getPivotOffset().x, vdb->getPivotOffset().y,
+                         vdb->getPivotOffset().z};
+
+    // Animation
+    j["is_sequence"] = vdb->isAnimated();
+    j["current_frame"] = vdb->getCurrentFrame();
+    j["timeline_linked"] = vdb->isLinkedToTimeline();
+    j["frame_offset"] = vdb->getFrameOffset();
+
+    // Fluid Surface
+    j["render_as_isosurface"] = vdb->render_as_isosurface;
+    j["render_isosurface_ior"] = vdb->render_isosurface_ior;
+    j["render_isosurface_roughness"] = vdb->render_isosurface_roughness;
+    j["render_isosurface_foam"] = vdb->render_isosurface_foam;
+
+    // Shader
+    if (auto shader = vdb->volume_shader) {
+      json s;
+      s["name"] = shader->name;
+      s["density"] = shader->density.toJson();
+      s["scattering"] = shader->scattering.toJson();
+      s["absorption"] = shader->absorption.toJson();
+      s["emission"] = shader->emission.toJson();
+      s["emission_response"] = shader->emission_response.toJson();
+      s["quality"] = shader->quality.toJson();
+      s["material_program"] = shader->material_program.toJson();
+      s["material_graph"] = shader->material_graph;
+
+      // Motion blur manual
+      s["motion_blur"] = {
+          {"enabled", shader->motion_blur.enabled},
+          {"velocity_channel", shader->motion_blur.velocity_channel},
+          {"scale", shader->motion_blur.scale}};
+
+      j["shader"] = s;
+    }
+
+    arr.push_back(j);
+  }
+
+  return arr;
 }
 
-void ProjectManager::deserializeVDBVolumes(const json& j_arr, SceneData& scene) {
-    // VDB volumes are stored in scene.vdb_volumes AND scene.world.objects
-    // We must ensure they are added to both!
-    
-    for (const auto& j : j_arr) {
-      try {
-        std::string filepath = j.value("filepath", "");
-        if (filepath.empty()) continue;
-        
-        auto vdb = std::make_shared<VDBVolume>();
-        
-        bool is_sequence = j.value("is_sequence", false);
-        
-        if (is_sequence) {
-            if (vdb->loadVDBSequence(filepath)) {
-                // Success
-                if (!vdb->uploadToGPU()) SCENE_LOG_WARN("Failed to upload VDB sequence to GPU: " + filepath);
-            } else {
-                 SCENE_LOG_WARN("Failed to load VDB sequence: " + filepath);
-                 continue;
-            }
-        } else {
-             if (vdb->loadVDB(filepath)) {
-                 // Success
-                 if (!vdb->uploadToGPU()) SCENE_LOG_WARN("Failed to upload VDB to GPU: " + filepath);
-             } else {
-                 SCENE_LOG_WARN("Failed to load VDB file: " + filepath);
-                 continue;
-             }
-        }
-        
-        vdb->name = j.value("name", "VDB Volume");
-        if (j.contains("pivot_offset")) {
-            auto po = j["pivot_offset"];
-            vdb->setPivotOffset(Vec3(po[0], po[1], po[2]), false);
-        }
-        if (j.contains("transform")) vdb->setPivotMatrix(jsonToMat4(j["transform"]));
-        vdb->density_scale = j.value("density_scale", 1.0f);
-        
-        vdb->setCurrentFrame(j.value("current_frame", 0));
-        vdb->setLinkedToTimeline(j.value("timeline_linked", true));
-        vdb->setFrameOffset(j.value("frame_offset", 0));
+void ProjectManager::deserializeVDBVolumes(const json &j_arr,
+                                           SceneData &scene) {
+  // VDB volumes are stored in scene.vdb_volumes AND scene.world.objects
+  // We must ensure they are added to both!
 
-        // Fluid Surface
-        vdb->render_as_isosurface = j.value("render_as_isosurface", false);
-        vdb->render_isosurface_ior = j.value("render_isosurface_ior", 1.33f);
-        vdb->render_isosurface_roughness = j.value("render_isosurface_roughness", 0.0f);
-        vdb->render_isosurface_foam = j.value("render_isosurface_foam", 0.0f);
-        
-        // Shader
-        if (j.contains("shader")) {
-            auto j_shader = j["shader"];
-            auto shader = std::make_shared<VolumeShader>();
-            shader->name = j_shader.value("name", "Volume Shader");
-            
-            if (j_shader.contains("density")) shader->density.fromJson(j_shader["density"]);
-            if (j_shader.contains("scattering")) shader->scattering.fromJson(j_shader["scattering"]);
-            if (j_shader.contains("absorption")) shader->absorption.fromJson(j_shader["absorption"]);
-            if (j_shader.contains("emission")) shader->emission.fromJson(j_shader["emission"]);
-            if (j_shader.contains("emission_response")) {
-                shader->emission_response.fromJson(j_shader["emission_response"]);
-            }
-            if (j_shader.contains("quality")) shader->quality.fromJson(j_shader["quality"]);
-            if (j_shader.contains("material_program")) shader->material_program.fromJson(j_shader["material_program"]);
-            shader->material_graph = j_shader.value("material_graph", std::string());
-            
-             if (j_shader.contains("motion_blur")) {
-                 shader->motion_blur.enabled = j_shader["motion_blur"].value("enabled", false);
-                 shader->motion_blur.velocity_channel = j_shader["motion_blur"].value("velocity_channel", "vel");
-                 shader->motion_blur.scale = j_shader["motion_blur"].value("scale", 1.0f);
-             }
-            
-            vdb->setShader(shader);
+  for (const auto &j : j_arr) {
+    try {
+      std::string filepath = j.value("filepath", "");
+      if (filepath.empty())
+        continue;
+
+      auto vdb = std::make_shared<VDBVolume>();
+
+      bool is_sequence = j.value("is_sequence", false);
+
+      if (is_sequence) {
+        if (vdb->loadVDBSequence(filepath)) {
+          // Success
+          if (!vdb->uploadToGPU())
+            SCENE_LOG_WARN("Failed to upload VDB sequence to GPU: " + filepath);
+        } else {
+          SCENE_LOG_WARN("Failed to load VDB sequence: " + filepath);
+          continue;
         }
-        
-        scene.addVDBVolume(vdb);
-        scene.world.objects.push_back(vdb);
-      } catch (const std::exception& e) {
-          SCENE_LOG_ERROR("[ProjectManager] Skipping VDB volume — deserialize failed: " + std::string(e.what()));
-      } catch (...) {
-          SCENE_LOG_ERROR("[ProjectManager] Skipping VDB volume — unknown error during deserialize");
+      } else {
+        if (vdb->loadVDB(filepath)) {
+          // Success
+          if (!vdb->uploadToGPU())
+            SCENE_LOG_WARN("Failed to upload VDB to GPU: " + filepath);
+        } else {
+          SCENE_LOG_WARN("Failed to load VDB file: " + filepath);
+          continue;
+        }
       }
+
+      vdb->name = j.value("name", "VDB Volume");
+      if (j.contains("pivot_offset")) {
+        auto po = j["pivot_offset"];
+        vdb->setPivotOffset(Vec3(po[0], po[1], po[2]), false);
+      }
+      if (j.contains("transform"))
+        vdb->setPivotMatrix(jsonToMat4(j["transform"]));
+      vdb->density_scale = j.value("density_scale", 1.0f);
+
+      vdb->setCurrentFrame(j.value("current_frame", 0));
+      vdb->setLinkedToTimeline(j.value("timeline_linked", true));
+      vdb->setFrameOffset(j.value("frame_offset", 0));
+
+      // Fluid Surface
+      vdb->render_as_isosurface = j.value("render_as_isosurface", false);
+      vdb->render_isosurface_ior = j.value("render_isosurface_ior", 1.33f);
+      vdb->render_isosurface_roughness =
+          j.value("render_isosurface_roughness", 0.0f);
+      vdb->render_isosurface_foam = j.value("render_isosurface_foam", 0.0f);
+
+      // Shader
+      if (j.contains("shader")) {
+        auto j_shader = j["shader"];
+        auto shader = std::make_shared<VolumeShader>();
+        shader->name = j_shader.value("name", "Volume Shader");
+
+        if (j_shader.contains("density"))
+          shader->density.fromJson(j_shader["density"]);
+        if (j_shader.contains("scattering"))
+          shader->scattering.fromJson(j_shader["scattering"]);
+        if (j_shader.contains("absorption"))
+          shader->absorption.fromJson(j_shader["absorption"]);
+        if (j_shader.contains("emission"))
+          shader->emission.fromJson(j_shader["emission"]);
+        if (j_shader.contains("emission_response")) {
+          shader->emission_response.fromJson(j_shader["emission_response"]);
+        }
+        if (j_shader.contains("quality"))
+          shader->quality.fromJson(j_shader["quality"]);
+        if (j_shader.contains("material_program"))
+          shader->material_program.fromJson(j_shader["material_program"]);
+        shader->material_graph =
+            j_shader.value("material_graph", std::string());
+
+        if (j_shader.contains("motion_blur")) {
+          shader->motion_blur.enabled =
+              j_shader["motion_blur"].value("enabled", false);
+          shader->motion_blur.velocity_channel =
+              j_shader["motion_blur"].value("velocity_channel", "vel");
+          shader->motion_blur.scale =
+              j_shader["motion_blur"].value("scale", 1.0f);
+        }
+
+        vdb->setShader(shader);
+      }
+
+      scene.addVDBVolume(vdb);
+      scene.world.objects.push_back(vdb);
+    } catch (const std::exception &e) {
+      SCENE_LOG_ERROR(
+          "[ProjectManager] Skipping VDB volume — deserialize failed: " +
+          std::string(e.what()));
+    } catch (...) {
+      SCENE_LOG_ERROR("[ProjectManager] Skipping VDB volume — unknown error "
+                      "during deserialize");
     }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // GAS VOLUME SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-json ProjectManager::serializeGasVolumes(const std::vector<std::shared_ptr<GasVolume>>& gas_volumes) {
-    (void)gas_volumes;
-    json arr = json::array();
-    return arr;
+json ProjectManager::serializeGasVolumes(
+    const std::vector<std::shared_ptr<GasVolume>> &gas_volumes) {
+  (void)gas_volumes;
+  json arr = json::array();
+  return arr;
 }
 
-void ProjectManager::deserializeGasVolumes(const json& j_arr, SceneData& scene) {
-    (void)scene;
-    if (j_arr.is_array() && !j_arr.empty()) {
-        SCENE_LOG_WARN("[ProjectManager] Ignored retired legacy GasVolume data. Use Simulation Domains.");
+void ProjectManager::deserializeGasVolumes(const json &j_arr,
+                                           SceneData &scene) {
+  (void)scene;
+  if (j_arr.is_array() && !j_arr.empty()) {
+    SCENE_LOG_WARN("[ProjectManager] Ignored retired legacy GasVolume data. "
+                   "Use Simulation Domains.");
+  }
+  return;
+  for (const auto &j : j_arr) {
+    try {
+      auto gas = std::make_shared<GasVolume>();
+      // NOTE: fromJson() calls initialize() internally.
+      // Do NOT call initialize() again afterwards — that causes a double CUDA
+      // alloc / driver deadlock, and is especially dangerous when the original
+      // baked / live VDB data is missing on the current machine.
+      gas->fromJson(j);
+      scene.addGasVolume(gas);
+      scene.world.objects.push_back(gas);
+    } catch (const std::exception &e) {
+      SCENE_LOG_ERROR(
+          "[ProjectManager] Skipping GAS volume — deserialize failed: " +
+          std::string(e.what()));
+    } catch (...) {
+      SCENE_LOG_ERROR("[ProjectManager] Skipping GAS volume — unknown error "
+                      "during deserialize");
     }
-    return;
-    for (const auto& j : j_arr) {
-        try {
-            auto gas = std::make_shared<GasVolume>();
-            // NOTE: fromJson() calls initialize() internally.
-            // Do NOT call initialize() again afterwards — that causes a double CUDA
-            // alloc / driver deadlock, and is especially dangerous when the original
-            // baked / live VDB data is missing on the current machine.
-            gas->fromJson(j);
-            scene.addGasVolume(gas);
-            scene.world.objects.push_back(gas);
-        } catch (const std::exception& e) {
-            SCENE_LOG_ERROR("[ProjectManager] Skipping GAS volume — deserialize failed: " + std::string(e.what()));
-        } catch (...) {
-            SCENE_LOG_ERROR("[ProjectManager] Skipping GAS volume — unknown error during deserialize");
-        }
-    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // FORCE FIELD SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-json ProjectManager::serializeForceFields(const Physics::ForceFieldManager& ffm) {
-    return ffm.toJson();
+json ProjectManager::serializeForceFields(
+    const Physics::ForceFieldManager &ffm) {
+  return ffm.toJson();
 }
 
-void ProjectManager::deserializeForceFields(const json& j, SceneData& scene) {
-    scene.force_field_manager.fromJson(j);
+void ProjectManager::deserializeForceFields(const json &j, SceneData &scene) {
+  scene.force_field_manager.fromJson(j);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // RIGID BODY SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-json ProjectManager::serializeRigidBodies(const SceneData& scene) {
-    json root;
-    root["version"] = 1;
-    root["bodies"] = json::array();
+json ProjectManager::serializeRigidBodies(const SceneData &scene) {
+  json root;
+  root["version"] = 1;
+  root["bodies"] = json::array();
 
-    for (const auto& rb : scene.rigid_bodies) {
-        json b;
-        b["name"] = rb.name;
-        b["source_name"] = rb.source_name;
-        b["collider_name"] = rb.collider_name;
-        b["enabled"] = rb.enabled;
-        b["kind"] = bodyKindToString(rb.kind);
-        b["dynamic"] = rb.dynamic;
-        b["motion_type"] = rigidBodyMotionTypeToString(rb.motion_type);
-        b["shape"] = rigidBodyShapeToString(rb.shape);
-        b["mass"] = rb.mass;
-        b["auto_mass_from_density"] = rb.auto_mass_from_density;
-        b["density"] = rb.density;
-        b["linear_damping"] = rb.linear_damping;
-        b["angular_damping"] = rb.angular_damping;
-        b["gravity_scale"] = rb.gravity_scale;
-        b["friction"] = rb.friction;
-        b["restitution"] = rb.restitution;
-        b["initial_linear_velocity"] = vec3ToJson(rb.initial_linear_velocity);
-        b["initial_angular_velocity"] = vec3ToJson(rb.initial_angular_velocity);
-        b["sleep_enabled"] = rb.sleep_enabled;
-        b["lock_translation_x"] = rb.lock_translation_x;
-        b["lock_translation_y"] = rb.lock_translation_y;
-        b["lock_translation_z"] = rb.lock_translation_z;
-        b["lock_rotation_x"] = rb.lock_rotation_x;
-        b["lock_rotation_y"] = rb.lock_rotation_y;
-        b["lock_rotation_z"] = rb.lock_rotation_z;
-        b["fluid_coupling_enabled"] = rb.fluid_coupling_enabled;
-        b["buoyancy_scale"] = rb.getBuoyancyScale();
-        b["fluid_density"] = rb.getFluidDensity();
-        b["fluid_drag"] = rb.getFluidDrag();
-        b["fluid_quadratic_drag"] = rb.getFluidQuadraticDrag();
-        b["fluid_angular_drag"] = rb.getFluidAngularDrag();
-        b["fluid_max_coupling_speed"] = rb.getFluidMaxCouplingSpeed();
-        // Soft-body / cloth authoring (meaningful when kind != Rigid).
-        b["soft_stiffness"] = rb.getSoftStiffness();
-        b["soft_compliance"] = rb.getSoftCompliance();
-        b["soft_pressure"] = rb.getSoftPressure();
-        b["soft_damping"] = rb.getSoftDamping();
-        b["soft_vertex_radius"] = rb.getSoftVertexRadius();
-        b["soft_iterations"] = rb.getSoftIterations();
-        b["soft_friction"] = rb.getSoftFriction();
-        b["soft_restitution"] = rb.getSoftRestitution();
-        b["soft_gravity_factor"] = rb.getSoftGravityFactor();
-        b["soft_mass"] = rb.getSoftMass();
-        b["soft_two_sided"] = rb.getSoftTwoSided();
-        b["soft_self_collision"] = rb.getSoftSelfCollision();
-        b["force_field_enabled"] = rb.force_field_enabled;
-        b["force_field_scale"] = rb.force_field_scale;
-        RayTrophiSim::serializeThermalFracture(rb, b);
-        // Cloth/soft pin regions (world-space spheres).
-        if (!rb.getSoftPins().empty()) {
-            json pins = json::array();
-            for (const auto& pin : rb.getSoftPins()) {
-                json p;
-                p["center"] = vec3ToJson(pin.center);
-                p["radius"] = pin.radius;
-                p["enabled"] = pin.enabled;
-                pins.push_back(std::move(p));
-            }
-            b["soft_pins"] = std::move(pins);
-        }
-        b["rest_captured"] = rb.rest_captured;
-        if (rb.rest_captured) {
-            b["initial_pivot"] = mat4ToJson(rb.initial_pivot);
-            b["rest_half_extents"] = vec3ToJson(rb.rest_half_extents);
-        }
-        root["bodies"].push_back(std::move(b));
+  for (const auto &rb : scene.rigid_bodies) {
+    json b;
+    b["name"] = rb.name;
+    b["source_name"] = rb.source_name;
+    b["collider_name"] = rb.collider_name;
+    b["enabled"] = rb.enabled;
+    b["kind"] = bodyKindToString(rb.kind);
+    b["dynamic"] = rb.dynamic;
+    b["motion_type"] = rigidBodyMotionTypeToString(rb.motion_type);
+    b["shape"] = rigidBodyShapeToString(rb.shape);
+    b["mass"] = rb.mass;
+    b["auto_mass_from_density"] = rb.auto_mass_from_density;
+    b["density"] = rb.density;
+    b["linear_damping"] = rb.linear_damping;
+    b["angular_damping"] = rb.angular_damping;
+    b["gravity_scale"] = rb.gravity_scale;
+    b["friction"] = rb.friction;
+    b["restitution"] = rb.restitution;
+    b["initial_linear_velocity"] = vec3ToJson(rb.initial_linear_velocity);
+    b["initial_angular_velocity"] = vec3ToJson(rb.initial_angular_velocity);
+    b["sleep_enabled"] = rb.sleep_enabled;
+    b["lock_translation_x"] = rb.lock_translation_x;
+    b["lock_translation_y"] = rb.lock_translation_y;
+    b["lock_translation_z"] = rb.lock_translation_z;
+    b["lock_rotation_x"] = rb.lock_rotation_x;
+    b["lock_rotation_y"] = rb.lock_rotation_y;
+    b["lock_rotation_z"] = rb.lock_rotation_z;
+    b["fluid_coupling_enabled"] = rb.fluid_coupling_enabled;
+    b["buoyancy_scale"] = rb.getBuoyancyScale();
+    b["fluid_density"] = rb.getFluidDensity();
+    b["fluid_drag"] = rb.getFluidDrag();
+    b["fluid_quadratic_drag"] = rb.getFluidQuadraticDrag();
+    b["fluid_angular_drag"] = rb.getFluidAngularDrag();
+    b["fluid_max_coupling_speed"] = rb.getFluidMaxCouplingSpeed();
+    // Soft-body / cloth authoring (meaningful when kind != Rigid).
+    b["soft_stiffness"] = rb.getSoftStiffness();
+    b["soft_compliance"] = rb.getSoftCompliance();
+    b["soft_pressure"] = rb.getSoftPressure();
+    b["soft_damping"] = rb.getSoftDamping();
+    b["soft_vertex_radius"] = rb.getSoftVertexRadius();
+    b["soft_iterations"] = rb.getSoftIterations();
+    b["soft_friction"] = rb.getSoftFriction();
+    b["soft_restitution"] = rb.getSoftRestitution();
+    b["soft_gravity_factor"] = rb.getSoftGravityFactor();
+    b["soft_mass"] = rb.getSoftMass();
+    b["soft_two_sided"] = rb.getSoftTwoSided();
+    b["soft_self_collision"] = rb.getSoftSelfCollision();
+    b["force_field_enabled"] = rb.force_field_enabled;
+    b["force_field_scale"] = rb.force_field_scale;
+    RayTrophiSim::serializeThermalFracture(rb, b);
+    // Cloth/soft pin regions (world-space spheres).
+    if (!rb.getSoftPins().empty()) {
+      json pins = json::array();
+      for (const auto &pin : rb.getSoftPins()) {
+        json p;
+        p["center"] = vec3ToJson(pin.center);
+        p["radius"] = pin.radius;
+        p["enabled"] = pin.enabled;
+        pins.push_back(std::move(p));
+      }
+      b["soft_pins"] = std::move(pins);
     }
-
-    // ★ group -> source object, and it does NOT follow from the bodies above.
-    //
-    // A structural cluster is a piece of an object, so its group name and the
-    // object's name are different strings. MSF fields are keyed by OBJECT; every
-    // per-region integrity lookup goes through this map to get from one to the
-    // other. Drop it and each cluster looks itself up under its own name, finds
-    // nothing, and reports integrity 1.0 — full strength, no thermal weakening,
-    // silently, because 1.0 is exactly what an undamaged object reports. That
-    // bug was found and fixed once; leaving the map out of the project simply
-    // reintroduced it on the far side of a save.
-    if (!scene.fractureGroupSources().empty()) {
-        json sources = json::object();
-        for (const auto& entry : scene.fractureGroupSources())
-            sources[entry.first] = entry.second;
-        root["fracture_group_sources"] = std::move(sources);
+    b["rest_captured"] = rb.rest_captured;
+    if (rb.rest_captured) {
+      b["initial_pivot"] = mat4ToJson(rb.initial_pivot);
+      b["rest_half_extents"] = vec3ToJson(rb.rest_half_extents);
     }
+    root["bodies"].push_back(std::move(b));
+  }
 
-    // ★ How the shards themselves come back. They are not written — they CANNOT
-    // be, the format has no geometry section — so each fractured node stores the
-    // recipe and the load re-cuts. The site list is the bulky part and the
-    // indispensable one; see SceneData::FractureRecipe for why it cannot be
-    // re-derived from seed and pattern.
-    if (!scene.fracture_recipes.empty()) {
-        json recipes = json::array();
-        for (const auto& entry : scene.fracture_recipes) {
-            const SceneData::FractureRecipe& recipe = entry.second;
-            json r;
-            r["node"] = entry.first;
-            r["site_count"] = recipe.site_count;
-            r["seed"] = recipe.seed;
-            r["pattern"] = recipe.pattern;
-            r["cluster_count"] = recipe.cluster_count;
-            r["exact_surface"] = recipe.exact_surface;
-            r["preview_gap"] = recipe.preview_gap;
-            json sites = json::array();
-            for (const Vec3& site : recipe.sites) {
-                sites.push_back(site.x);
-                sites.push_back(site.y);
-                sites.push_back(site.z);
-            }
-            r["sites"] = std::move(sites);
-            // What the load ADOPTS. The shard meshes themselves come back from
-            // the geometry sidecar; these names are how the fracture is matched
-            // to them again, and the cluster indices are the part no amount of
-            // geometry can reconstruct.
-            r["shard_nodes"] = recipe.shard_nodes;
-            r["shard_clusters"] = recipe.shard_clusters;
-            recipes.push_back(std::move(r));
-        }
-        root["fracture_recipes"] = std::move(recipes);
+  // ★ group -> source object, and it does NOT follow from the bodies above.
+  //
+  // A structural cluster is a piece of an object, so its group name and the
+  // object's name are different strings. MSF fields are keyed by OBJECT; every
+  // per-region integrity lookup goes through this map to get from one to the
+  // other. Drop it and each cluster looks itself up under its own name, finds
+  // nothing, and reports integrity 1.0 — full strength, no thermal weakening,
+  // silently, because 1.0 is exactly what an undamaged object reports. That
+  // bug was found and fixed once; leaving the map out of the project simply
+  // reintroduced it on the far side of a save.
+  if (!scene.fractureGroupSources().empty()) {
+    json sources = json::object();
+    for (const auto &entry : scene.fractureGroupSources())
+      sources[entry.first] = entry.second;
+    root["fracture_group_sources"] = std::move(sources);
+  }
+
+  // ★ How the shards themselves come back. They are not written — they CANNOT
+  // be, the format has no geometry section — so each fractured node stores the
+  // recipe and the load re-cuts. The site list is the bulky part and the
+  // indispensable one; see SceneData::FractureRecipe for why it cannot be
+  // re-derived from seed and pattern.
+  if (!scene.fracture_recipes.empty()) {
+    json recipes = json::array();
+    for (const auto &entry : scene.fracture_recipes) {
+      const SceneData::FractureRecipe &recipe = entry.second;
+      json r;
+      r["node"] = entry.first;
+      r["site_count"] = recipe.site_count;
+      r["seed"] = recipe.seed;
+      r["pattern"] = recipe.pattern;
+      r["cluster_count"] = recipe.cluster_count;
+      r["exact_surface"] = recipe.exact_surface;
+      r["preview_gap"] = recipe.preview_gap;
+      json sites = json::array();
+      for (const Vec3 &site : recipe.sites) {
+        sites.push_back(site.x);
+        sites.push_back(site.y);
+        sites.push_back(site.z);
+      }
+      r["sites"] = std::move(sites);
+      // What the load ADOPTS. The shard meshes themselves come back from
+      // the geometry sidecar; these names are how the fracture is matched
+      // to them again, and the cluster indices are the part no amount of
+      // geometry can reconstruct.
+      r["shard_nodes"] = recipe.shard_nodes;
+      r["shard_clusters"] = recipe.shard_clusters;
+      recipes.push_back(std::move(r));
     }
+    root["fracture_recipes"] = std::move(recipes);
+  }
 
-    return root;
+  return root;
 }
 
-void ProjectManager::deserializeRigidBodies(const json& j, SceneData& scene) {
-    if (!j.is_object() && !j.is_array()) {
-        return;
+void ProjectManager::deserializeRigidBodies(const json &j, SceneData &scene) {
+  if (!j.is_object() && !j.is_array()) {
+    return;
+  }
+
+  scene.rigid_bodies.clear();
+
+  if (j.is_object() && j.contains("fracture_recipes") &&
+      j["fracture_recipes"].is_array()) {
+    scene.fracture_recipes.clear();
+    for (const auto &r : j["fracture_recipes"]) {
+      if (!r.is_object())
+        continue;
+      const std::string node = r.value("node", std::string());
+      if (node.empty())
+        continue;
+      SceneData::FractureRecipe recipe;
+      recipe.site_count = r.value("site_count", recipe.site_count);
+      recipe.seed = r.value("seed", recipe.seed);
+      recipe.pattern = r.value("pattern", recipe.pattern);
+      recipe.cluster_count = r.value("cluster_count", recipe.cluster_count);
+      recipe.exact_surface = r.value("exact_surface", recipe.exact_surface);
+      recipe.preview_gap = r.value("preview_gap", recipe.preview_gap);
+      if (r.contains("sites") && r["sites"].is_array()) {
+        const auto &sites = r["sites"];
+        recipe.sites.reserve(sites.size() / 3u);
+        for (std::size_t i = 0; i + 2 < sites.size(); i += 3) {
+          recipe.sites.push_back(Vec3(sites[i].get<float>(),
+                                      sites[i + 1].get<float>(),
+                                      sites[i + 2].get<float>()));
+        }
+      }
+      if (r.contains("shard_nodes") && r["shard_nodes"].is_array())
+        recipe.shard_nodes = r["shard_nodes"].get<std::vector<std::string>>();
+      if (r.contains("shard_clusters") && r["shard_clusters"].is_array())
+        recipe.shard_clusters = r["shard_clusters"].get<std::vector<int>>();
+      // ★ A recipe with neither shard names nor sites can do nothing: it
+      // cannot adopt (no names to match) and re-cutting it would scatter
+      // afresh, producing a DIFFERENT break wearing the saved one's shard
+      // names — with the rigid bodies silently rebinding to it. An
+      // un-fractured mesh is the safe failure; a wrong one is not.
+      if (recipe.shard_nodes.empty() && recipe.sites.empty()) {
+        SCENE_LOG_WARN("[Fracture] Saved recipe for '" + node +
+                       "' has neither shard names nor sites; skipping "
+                       "rather than cutting it differently.");
+        continue;
+      }
+      scene.fracture_recipes[node] = std::move(recipe);
+    }
+  }
+
+  if (j.is_object() && j.contains("fracture_group_sources") &&
+      j["fracture_group_sources"].is_object()) {
+    for (auto it = j["fracture_group_sources"].begin();
+         it != j["fracture_group_sources"].end(); ++it) {
+      if (it.value().is_string())
+        scene.setFractureGroupSource(it.key(), it.value().get<std::string>());
+    }
+  }
+
+  const json *bodies = nullptr;
+  if (j.contains("bodies") && j["bodies"].is_array()) {
+    bodies = &j["bodies"];
+  } else if (j.is_array()) {
+    bodies = &j;
+  }
+  if (!bodies) {
+    return;
+  }
+
+  scene.rigid_bodies.reserve(bodies->size());
+  for (const auto &item : *bodies) {
+    if (!item.is_object())
+      continue;
+
+    RayTrophiSim::RigidBodyObject rb;
+    rb.name = item.value("name", rb.name);
+    rb.source_name = item.value("source_name", rb.source_name);
+    rb.collider_name = item.value("collider_name", rb.collider_name);
+    rb.enabled = item.value("enabled", rb.enabled);
+    rb.kind = bodyKindFromString(item.value("kind", std::string("Rigid")));
+    rb.motion_type = rigidBodyMotionTypeFromString(item.value(
+        "motion_type", std::string(rb.dynamic ? "Dynamic" : "Static")));
+    rb.dynamic = item.value(
+        "dynamic", rb.motion_type != RayTrophiSim::RigidBodyMotionType::Static);
+    rb.shape =
+        rigidBodyShapeFromString(item.value("shape", std::string("Box")));
+    rb.mass = item.value("mass", rb.mass);
+    rb.auto_mass_from_density =
+        item.value("auto_mass_from_density", rb.auto_mass_from_density);
+    rb.density = item.value("density", rb.density);
+    rb.linear_damping = item.value("linear_damping", rb.linear_damping);
+    rb.angular_damping = item.value("angular_damping", rb.angular_damping);
+    rb.gravity_scale = item.value("gravity_scale", rb.gravity_scale);
+    rb.friction = item.value("friction", rb.friction);
+    rb.restitution = item.value("restitution", rb.restitution);
+    if (item.contains("initial_linear_velocity"))
+      rb.initial_linear_velocity = jsonToVec3(item["initial_linear_velocity"]);
+    if (item.contains("initial_angular_velocity"))
+      rb.initial_angular_velocity =
+          jsonToVec3(item["initial_angular_velocity"]);
+    rb.sleep_enabled = item.value("sleep_enabled", rb.sleep_enabled);
+    rb.lock_translation_x =
+        item.value("lock_translation_x", rb.lock_translation_x);
+    rb.lock_translation_y =
+        item.value("lock_translation_y", rb.lock_translation_y);
+    rb.lock_translation_z =
+        item.value("lock_translation_z", rb.lock_translation_z);
+    rb.lock_rotation_x = item.value("lock_rotation_x", rb.lock_rotation_x);
+    rb.lock_rotation_y = item.value("lock_rotation_y", rb.lock_rotation_y);
+    rb.lock_rotation_z = item.value("lock_rotation_z", rb.lock_rotation_z);
+    rb.fluid_coupling_enabled =
+        item.value("fluid_coupling_enabled", rb.fluid_coupling_enabled);
+    rb.setBuoyancyScale(item.value("buoyancy_scale", rb.getBuoyancyScale()));
+    rb.setFluidDensity(item.value("fluid_density", rb.getFluidDensity()));
+    rb.setFluidDrag(item.value("fluid_drag", rb.getFluidDrag()));
+    rb.setFluidQuadraticDrag(
+        item.value("fluid_quadratic_drag", rb.getFluidQuadraticDrag()));
+    rb.setFluidAngularDrag(
+        item.value("fluid_angular_drag", rb.getFluidAngularDrag()));
+    rb.setFluidMaxCouplingSpeed(
+        item.value("fluid_max_coupling_speed", rb.getFluidMaxCouplingSpeed()));
+    rb.setSoftStiffness(item.value("soft_stiffness", rb.getSoftStiffness()));
+    rb.setSoftCompliance(item.value("soft_compliance", rb.getSoftCompliance()));
+    rb.setSoftPressure(item.value("soft_pressure", rb.getSoftPressure()));
+    rb.setSoftDamping(item.value("soft_damping", rb.getSoftDamping()));
+    rb.setSoftVertexRadius(
+        item.value("soft_vertex_radius", rb.getSoftVertexRadius()));
+    rb.setSoftIterations(item.value("soft_iterations", rb.getSoftIterations()));
+    rb.setSoftFriction(item.value("soft_friction", rb.getSoftFriction()));
+    rb.setSoftRestitution(
+        item.value("soft_restitution", rb.getSoftRestitution()));
+    rb.setSoftGravityFactor(
+        item.value("soft_gravity_factor", rb.getSoftGravityFactor()));
+    rb.setSoftMass(item.value("soft_mass", rb.getSoftMass()));
+    rb.setSoftTwoSided(item.value("soft_two_sided", rb.getSoftTwoSided()));
+    rb.setSoftSelfCollision(
+        item.value("soft_self_collision", rb.getSoftSelfCollision()));
+    rb.force_field_enabled =
+        item.value("force_field_enabled", rb.force_field_enabled);
+    rb.force_field_scale =
+        item.value("force_field_scale", rb.force_field_scale);
+    RayTrophiSim::deserializeThermalFracture(item, rb);
+    if (item.contains("soft_pins") && item["soft_pins"].is_array()) {
+      auto &pins = rb.getSoftPinsMut();
+      pins.clear();
+      for (const auto &p : item["soft_pins"]) {
+        if (!p.is_object())
+          continue;
+        RayTrophiSim::SoftPinRegion pin;
+        if (p.contains("center"))
+          pin.center = jsonToVec3(p["center"]);
+        pin.radius = p.value("radius", pin.radius);
+        pin.enabled = p.value("enabled", pin.enabled);
+        pins.push_back(pin);
+      }
+    }
+    const bool hasSerializedRest =
+        item.value("rest_captured", false) && item.contains("initial_pivot");
+    if (hasSerializedRest) {
+      rb.rest_captured = true;
+      rb.initial_pivot = jsonToMat4(item["initial_pivot"]);
+      if (item.contains("rest_half_extents"))
+        rb.rest_half_extents = jsonToVec3(item["rest_half_extents"]);
+    } else {
+      rb.rest_captured = false;
     }
 
-    scene.rigid_bodies.clear();
+    // Runtime/Jolt state is intentionally not serialized.
+    rb.handle = 0xffffffffu;
+    rb.created = false;
+    rb.has_written = false;
+    scene.rigid_bodies.push_back(std::move(rb));
+  }
 
-    if (j.is_object() && j.contains("fracture_recipes") &&
-        j["fracture_recipes"].is_array()) {
-        scene.fracture_recipes.clear();
-        for (const auto& r : j["fracture_recipes"]) {
-            if (!r.is_object()) continue;
-            const std::string node = r.value("node", std::string());
-            if (node.empty()) continue;
-            SceneData::FractureRecipe recipe;
-            recipe.site_count    = r.value("site_count", recipe.site_count);
-            recipe.seed          = r.value("seed", recipe.seed);
-            recipe.pattern       = r.value("pattern", recipe.pattern);
-            recipe.cluster_count = r.value("cluster_count", recipe.cluster_count);
-            recipe.exact_surface = r.value("exact_surface", recipe.exact_surface);
-            recipe.preview_gap   = r.value("preview_gap", recipe.preview_gap);
-            if (r.contains("sites") && r["sites"].is_array()) {
-                const auto& sites = r["sites"];
-                recipe.sites.reserve(sites.size() / 3u);
-                for (std::size_t i = 0; i + 2 < sites.size(); i += 3) {
-                    recipe.sites.push_back(Vec3(sites[i].get<float>(),
-                                                sites[i + 1].get<float>(),
-                                                sites[i + 2].get<float>()));
-                }
-            }
-            if (r.contains("shard_nodes") && r["shard_nodes"].is_array())
-                recipe.shard_nodes = r["shard_nodes"].get<std::vector<std::string>>();
-            if (r.contains("shard_clusters") && r["shard_clusters"].is_array())
-                recipe.shard_clusters = r["shard_clusters"].get<std::vector<int>>();
-            // ★ A recipe with neither shard names nor sites can do nothing: it
-            // cannot adopt (no names to match) and re-cutting it would scatter
-            // afresh, producing a DIFFERENT break wearing the saved one's shard
-            // names — with the rigid bodies silently rebinding to it. An
-            // un-fractured mesh is the safe failure; a wrong one is not.
-            if (recipe.shard_nodes.empty() && recipe.sites.empty()) {
-                SCENE_LOG_WARN("[Fracture] Saved recipe for '" + node +
-                               "' has neither shard names nor sites; skipping "
-                               "rather than cutting it differently.");
-                continue;
-            }
-            scene.fracture_recipes[node] = std::move(recipe);
-        }
+  if (!scene.rigid_bodies.empty()) {
+    scene.ensureRigidBodySystem();
+    if (scene.rigid_body_system) {
+      scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+      scene.rigid_body_system->resetRuntime(true);
     }
-
-    if (j.is_object() && j.contains("fracture_group_sources") &&
-        j["fracture_group_sources"].is_object()) {
-        for (auto it = j["fracture_group_sources"].begin();
-             it != j["fracture_group_sources"].end(); ++it) {
-            if (it.value().is_string())
-                scene.setFractureGroupSource(it.key(), it.value().get<std::string>());
-        }
+    scene.syncRigidBodyProxyColliders();
+    for (auto &rb : scene.rigid_bodies) {
+      if (!rb.rest_captured) {
+        scene.captureRigidBodyRestPose(rb);
+      }
     }
-
-    const json* bodies = nullptr;
-    if (j.contains("bodies") && j["bodies"].is_array()) {
-        bodies = &j["bodies"];
-    } else if (j.is_array()) {
-        bodies = &j;
+    if (scene.rigid_body_system) {
+      scene.rigid_body_system->resetRuntime(true);
+      scene.rigid_body_system->setBodies(&scene.rigid_bodies);
     }
-    if (!bodies) {
-        return;
-    }
-
-    scene.rigid_bodies.reserve(bodies->size());
-    for (const auto& item : *bodies) {
-        if (!item.is_object()) continue;
-
-        RayTrophiSim::RigidBodyObject rb;
-        rb.name = item.value("name", rb.name);
-        rb.source_name = item.value("source_name", rb.source_name);
-        rb.collider_name = item.value("collider_name", rb.collider_name);
-        rb.enabled = item.value("enabled", rb.enabled);
-        rb.kind = bodyKindFromString(item.value("kind", std::string("Rigid")));
-        rb.motion_type = rigidBodyMotionTypeFromString(
-            item.value("motion_type", std::string(rb.dynamic ? "Dynamic" : "Static")));
-        rb.dynamic = item.value("dynamic", rb.motion_type != RayTrophiSim::RigidBodyMotionType::Static);
-        rb.shape = rigidBodyShapeFromString(item.value("shape", std::string("Box")));
-        rb.mass = item.value("mass", rb.mass);
-        rb.auto_mass_from_density = item.value("auto_mass_from_density", rb.auto_mass_from_density);
-        rb.density = item.value("density", rb.density);
-        rb.linear_damping = item.value("linear_damping", rb.linear_damping);
-        rb.angular_damping = item.value("angular_damping", rb.angular_damping);
-        rb.gravity_scale = item.value("gravity_scale", rb.gravity_scale);
-        rb.friction = item.value("friction", rb.friction);
-        rb.restitution = item.value("restitution", rb.restitution);
-        if (item.contains("initial_linear_velocity")) rb.initial_linear_velocity = jsonToVec3(item["initial_linear_velocity"]);
-        if (item.contains("initial_angular_velocity")) rb.initial_angular_velocity = jsonToVec3(item["initial_angular_velocity"]);
-        rb.sleep_enabled = item.value("sleep_enabled", rb.sleep_enabled);
-        rb.lock_translation_x = item.value("lock_translation_x", rb.lock_translation_x);
-        rb.lock_translation_y = item.value("lock_translation_y", rb.lock_translation_y);
-        rb.lock_translation_z = item.value("lock_translation_z", rb.lock_translation_z);
-        rb.lock_rotation_x = item.value("lock_rotation_x", rb.lock_rotation_x);
-        rb.lock_rotation_y = item.value("lock_rotation_y", rb.lock_rotation_y);
-        rb.lock_rotation_z = item.value("lock_rotation_z", rb.lock_rotation_z);
-        rb.fluid_coupling_enabled = item.value("fluid_coupling_enabled", rb.fluid_coupling_enabled);
-        rb.setBuoyancyScale(item.value("buoyancy_scale", rb.getBuoyancyScale()));
-        rb.setFluidDensity(item.value("fluid_density", rb.getFluidDensity()));
-        rb.setFluidDrag(item.value("fluid_drag", rb.getFluidDrag()));
-        rb.setFluidQuadraticDrag(item.value("fluid_quadratic_drag", rb.getFluidQuadraticDrag()));
-        rb.setFluidAngularDrag(item.value("fluid_angular_drag", rb.getFluidAngularDrag()));
-        rb.setFluidMaxCouplingSpeed(item.value("fluid_max_coupling_speed", rb.getFluidMaxCouplingSpeed()));
-        rb.setSoftStiffness(item.value("soft_stiffness", rb.getSoftStiffness()));
-        rb.setSoftCompliance(item.value("soft_compliance", rb.getSoftCompliance()));
-        rb.setSoftPressure(item.value("soft_pressure", rb.getSoftPressure()));
-        rb.setSoftDamping(item.value("soft_damping", rb.getSoftDamping()));
-        rb.setSoftVertexRadius(item.value("soft_vertex_radius", rb.getSoftVertexRadius()));
-        rb.setSoftIterations(item.value("soft_iterations", rb.getSoftIterations()));
-        rb.setSoftFriction(item.value("soft_friction", rb.getSoftFriction()));
-        rb.setSoftRestitution(item.value("soft_restitution", rb.getSoftRestitution()));
-        rb.setSoftGravityFactor(item.value("soft_gravity_factor", rb.getSoftGravityFactor()));
-        rb.setSoftMass(item.value("soft_mass", rb.getSoftMass()));
-        rb.setSoftTwoSided(item.value("soft_two_sided", rb.getSoftTwoSided()));
-        rb.setSoftSelfCollision(item.value("soft_self_collision", rb.getSoftSelfCollision()));
-        rb.force_field_enabled = item.value("force_field_enabled", rb.force_field_enabled);
-        rb.force_field_scale = item.value("force_field_scale", rb.force_field_scale);
-        RayTrophiSim::deserializeThermalFracture(item, rb);
-        if (item.contains("soft_pins") && item["soft_pins"].is_array()) {
-            auto& pins = rb.getSoftPinsMut();
-            pins.clear();
-            for (const auto& p : item["soft_pins"]) {
-                if (!p.is_object()) continue;
-                RayTrophiSim::SoftPinRegion pin;
-                if (p.contains("center")) pin.center = jsonToVec3(p["center"]);
-                pin.radius = p.value("radius", pin.radius);
-                pin.enabled = p.value("enabled", pin.enabled);
-                pins.push_back(pin);
-            }
-        }
-        const bool hasSerializedRest = item.value("rest_captured", false) && item.contains("initial_pivot");
-        if (hasSerializedRest) {
-            rb.rest_captured = true;
-            rb.initial_pivot = jsonToMat4(item["initial_pivot"]);
-            if (item.contains("rest_half_extents")) rb.rest_half_extents = jsonToVec3(item["rest_half_extents"]);
-        } else {
-            rb.rest_captured = false;
-        }
-
-        // Runtime/Jolt state is intentionally not serialized.
-        rb.handle = 0xffffffffu;
-        rb.created = false;
-        rb.has_written = false;
-        scene.rigid_bodies.push_back(std::move(rb));
-    }
-
-    if (!scene.rigid_bodies.empty()) {
-        scene.ensureRigidBodySystem();
-        if (scene.rigid_body_system) {
-            scene.rigid_body_system->setBodies(&scene.rigid_bodies);
-            scene.rigid_body_system->resetRuntime(true);
-        }
-        scene.syncRigidBodyProxyColliders();
-        for (auto& rb : scene.rigid_bodies) {
-            if (!rb.rest_captured) {
-                scene.captureRigidBodyRestPose(rb);
-            }
-        }
-        if (scene.rigid_body_system) {
-            scene.rigid_body_system->resetRuntime(true);
-            scene.rigid_body_system->setBodies(&scene.rigid_bodies);
-        }
-    } else if (scene.rigid_body_system) {
-        scene.rigid_body_system->resetRuntime(false);
-        scene.rigid_body_system->setBodies(&scene.rigid_bodies);
-    }
-    scene.invalidateRigidBodySimulationCache();
+  } else if (scene.rigid_body_system) {
+    scene.rigid_body_system->resetRuntime(false);
+    scene.rigid_body_system->setBodies(&scene.rigid_bodies);
+  }
+  scene.invalidateRigidBodySimulationCache();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
 // PARTICLE SIMULATION SERIALIZATION
 // ═══════════════════════════════════════════════════════════════════════════
 
-json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
-    json root;
-    // 3: appearance profiles per system; emitters reference them by id and
-    //    carry no start/end appearance fields (those are migrated on load).
-    root["version"] = 3;
-    root["active_system_index"] = scene.active_particle_system_index;
-    root["next_system_id"] = scene.next_particle_system_id;
-    root["systems"] = json::array();
-    root["ash_debris"] = RayTrophiSim::serializeAshDebris(scene.ashDebrisSystem());
+json ProjectManager::serializeParticleSimulation(const SceneData &scene) {
+  json root;
+  // 3: appearance profiles per system; emitters reference them by id and
+  //    carry no start/end appearance fields (those are migrated on load).
+  root["version"] = 3;
+  root["active_system_index"] = scene.active_particle_system_index;
+  root["next_system_id"] = scene.next_particle_system_id;
+  root["systems"] = json::array();
+  root["ash_debris"] =
+      RayTrophiSim::serializeAshDebris(scene.ashDebrisSystem());
 
-    auto serializeEmitter = [](const RayTrophiSim::ParticleEmitterDesc& emitter) {
-        json e;
-        e["name"] = emitter.name;
-        e["source_mode"] = particleEmitterSourceModeToString(emitter.source_mode);
-        e["spawn_mode"] = particleEmitterSpawnModeToString(emitter.spawn_mode);
-        e["source_name"] = emitter.source_name;
-        e["point"] = vec3ToJson(emitter.point);
-        e["local_offset"] = vec3ToJson(emitter.local_offset);
-        e["direction"] = vec3ToJson(emitter.direction);
-        e["surface_offset"] = emitter.surface_offset;
-        e["rate_per_second"] = emitter.rate_per_second;
-        e["speed"] = emitter.speed;
-        e["spread"] = emitter.spread;
-        e["lifetime_seconds"] = emitter.lifetime_seconds;
-        e["mass"] = emitter.mass;
-        RayTrophiSim::serializeEmitterAppearance(emitter, e);
-        e["size_jitter"] = emitter.size_jitter;
-        e["angular_velocity"] = emitter.angular_velocity;
-        e["angular_jitter"] = emitter.angular_jitter;
-        e["enabled"] = emitter.enabled;
-        e["seed"] = emitter.seed;
-        e["burst_count"] = emitter.burst_count;
-        e["timeline_uid"] = emitter.timeline_uid;
-        e["parent_object"] = emitter.parent_object;
-        e["velocity_space"] = static_cast<int>(emitter.velocity_space);
-        e["inherit_velocity"] = emitter.inherit_velocity;
-        e["override_grid_deposit"] = emitter.override_grid_deposit;
-        e["grid_density_deposit"] = emitter.grid_density_deposit;
-        e["grid_temperature_deposit"] = emitter.grid_temperature_deposit;
-        e["grid_fuel_deposit"] = emitter.grid_fuel_deposit;
-        e["keyframes"] = json::array();
-        for (const auto& [frame, key] : emitter.keyframes) {
-            e["keyframes"].push_back({
-                {"frame", frame},
-                {"has_enabled", key.has_enabled},
-                {"has_rate", key.has_rate},
-                {"has_speed", key.has_speed},
-                {"has_spread", key.has_spread},
-                {"has_point", key.has_point},
-                {"has_direction", key.has_direction},
-                {"enabled", key.enabled},
-                {"rate_per_second", key.rate_per_second},
-                {"speed", key.speed},
-                {"spread", key.spread},
-                {"point", vec3ToJson(key.point)},
-                {"direction", vec3ToJson(key.direction)}
-            });
-        }
-        return e;
-    };
+  auto serializeEmitter = [](const RayTrophiSim::ParticleEmitterDesc &emitter) {
+    json e;
+    e["name"] = emitter.name;
+    e["source_mode"] = particleEmitterSourceModeToString(emitter.source_mode);
+    e["spawn_mode"] = particleEmitterSpawnModeToString(emitter.spawn_mode);
+    e["source_name"] = emitter.source_name;
+    e["point"] = vec3ToJson(emitter.point);
+    e["local_offset"] = vec3ToJson(emitter.local_offset);
+    e["direction"] = vec3ToJson(emitter.direction);
+    e["surface_offset"] = emitter.surface_offset;
+    e["rate_per_second"] = emitter.rate_per_second;
+    e["speed"] = emitter.speed;
+    e["spread"] = emitter.spread;
+    e["lifetime_seconds"] = emitter.lifetime_seconds;
+    e["mass"] = emitter.mass;
+    RayTrophiSim::serializeEmitterAppearance(emitter, e);
+    e["size_jitter"] = emitter.size_jitter;
+    e["angular_velocity"] = emitter.angular_velocity;
+    e["angular_jitter"] = emitter.angular_jitter;
+    e["enabled"] = emitter.enabled;
+    e["seed"] = emitter.seed;
+    e["burst_count"] = emitter.burst_count;
+    e["timeline_uid"] = emitter.timeline_uid;
+    e["parent_object"] = emitter.parent_object;
+    e["velocity_space"] = static_cast<int>(emitter.velocity_space);
+    e["inherit_velocity"] = emitter.inherit_velocity;
+    e["override_grid_deposit"] = emitter.override_grid_deposit;
+    e["grid_density_deposit"] = emitter.grid_density_deposit;
+    e["grid_temperature_deposit"] = emitter.grid_temperature_deposit;
+    e["grid_fuel_deposit"] = emitter.grid_fuel_deposit;
+    e["keyframes"] = json::array();
+    for (const auto &[frame, key] : emitter.keyframes) {
+      e["keyframes"].push_back({{"frame", frame},
+                                {"has_enabled", key.has_enabled},
+                                {"has_rate", key.has_rate},
+                                {"has_speed", key.has_speed},
+                                {"has_spread", key.has_spread},
+                                {"has_point", key.has_point},
+                                {"has_direction", key.has_direction},
+                                {"enabled", key.enabled},
+                                {"rate_per_second", key.rate_per_second},
+                                {"speed", key.speed},
+                                {"spread", key.spread},
+                                {"point", vec3ToJson(key.point)},
+                                {"direction", vec3ToJson(key.direction)}});
+    }
+    return e;
+  };
 
-    auto serializeCollider = [](const RayTrophiSim::ParticleColliderDesc& collider) {
+  auto serializeCollider =
+      [](const RayTrophiSim::ParticleColliderDesc &collider) {
         json c;
         c["name"] = collider.name;
-        c["source_mode"] = particleColliderSourceModeToString(collider.source_mode);
+        c["source_mode"] =
+            particleColliderSourceModeToString(collider.source_mode);
         c["source_name"] = collider.source_name;
         c["sdf_resolution_mode"] = collider.sdf_resolution_mode;
         c["enabled"] = collider.enabled;
@@ -5927,26 +6854,32 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         c["msf_override_ignition"] = collider.msf_override.override_ignition;
         c["msf_ignition_kelvin"] = collider.msf_override.ignition_kelvin;
         c["msf_burn_rate_scale"] = collider.msf_override.burn_rate_scale;
-        c["msf_fuel_capacity_scale"] = collider.msf_override.fuel_capacity_scale;
+        c["msf_fuel_capacity_scale"] =
+            collider.msf_override.fuel_capacity_scale;
         c["msf_mask_resolution"] = collider.msf_mask_resolution;
         c["msf_generate_char_mask"] = collider.msf_generate_char_mask;
         c["msf_auto_transfer"] = collider.msf_auto_transfer;
         c["msf_transfer_domain"] = collider.msf_transfer_domain;
         c["msf_transfer_rate_kg_s"] = collider.msf_transfer_rate_kg_s;
         c["msf_transfer_min_mass_kg"] = collider.msf_transfer_min_mass_kg;
-        c["msf_transfer_particles_per_kg"] = collider.msf_transfer_particles_per_kg;
-        c["msf_transfer_max_batch_particles"] = collider.msf_transfer_max_batch_particles;
+        c["msf_transfer_particles_per_kg"] =
+            collider.msf_transfer_particles_per_kg;
+        c["msf_transfer_max_batch_particles"] =
+            collider.msf_transfer_max_batch_particles;
         c["msf_transfer_velocity"] = vec3ToJson(collider.msf_transfer_velocity);
         c["msf_melt_flow_enabled"] = collider.msf_melt_flow_enabled;
         c["msf_melt_height_loss"] = collider.msf_melt_height_loss;
         c["msf_melt_spread"] = collider.msf_melt_spread;
         c["msf_melt_sdf_refresh"] = collider.msf_melt_sdf_refresh;
-        c["msf_melt_sdf_revision_interval"] = collider.msf_melt_sdf_revision_interval;
-        c["msf_melt_sdf_change_threshold"] = collider.msf_melt_sdf_change_threshold;
+        c["msf_melt_sdf_revision_interval"] =
+            collider.msf_melt_sdf_revision_interval;
+        c["msf_melt_sdf_change_threshold"] =
+            collider.msf_melt_sdf_change_threshold;
         return c;
-    };
+      };
 
-    auto serializeFlowSource = [](const RayTrophiSim::SimulationFlowSourceDesc& source) {
+  auto serializeFlowSource =
+      [](const RayTrophiSim::SimulationFlowSourceDesc &source) {
         json f;
         f["name"] = source.name;
         f["timeline_uid"] = source.timeline_uid;
@@ -5982,1232 +6915,1583 @@ json ProjectManager::serializeParticleSimulation(const SceneData& scene) {
         f["use_mass_limit"] = source.use_mass_limit;
         f["max_emitted_mass_kg"] = source.max_emitted_mass_kg;
         f["keyframes"] = json::array();
-        for (const auto& [frame, key] : source.keyframes) {
-            f["keyframes"].push_back({
-                {"frame", frame},
-                {"has_enabled", key.has_enabled},
-                {"has_position", key.has_position},
-                {"has_velocity", key.has_velocity},
-                {"has_radius", key.has_radius},
-                {"has_density", key.has_density},
-                {"has_temperature", key.has_temperature},
-                {"has_fuel", key.has_fuel},
-                {"has_falloff", key.has_falloff},
-                {"has_velocity_coupling", key.has_velocity_coupling},
-                {"has_flow_rate", key.has_flow_rate},
-                {"flow_rate", key.flow_rate},
-                {"enabled", key.enabled},
-                {"position", vec3ToJson(key.position)},
-                {"velocity", vec3ToJson(key.velocity)},
-                {"radius", key.radius},
-                {"density", key.density},
-                {"temperature", key.temperature},
-                {"fuel", key.fuel},
-                {"falloff", key.falloff},
-                {"velocity_coupling", key.velocity_coupling}
-            });
+        for (const auto &[frame, key] : source.keyframes) {
+          f["keyframes"].push_back(
+              {{"frame", frame},
+               {"has_enabled", key.has_enabled},
+               {"has_position", key.has_position},
+               {"has_velocity", key.has_velocity},
+               {"has_radius", key.has_radius},
+               {"has_density", key.has_density},
+               {"has_temperature", key.has_temperature},
+               {"has_fuel", key.has_fuel},
+               {"has_falloff", key.has_falloff},
+               {"has_velocity_coupling", key.has_velocity_coupling},
+               {"has_flow_rate", key.has_flow_rate},
+               {"flow_rate", key.flow_rate},
+               {"enabled", key.enabled},
+               {"position", vec3ToJson(key.position)},
+               {"velocity", vec3ToJson(key.velocity)},
+               {"radius", key.radius},
+               {"density", key.density},
+               {"temperature", key.temperature},
+               {"fuel", key.fuel},
+               {"falloff", key.falloff},
+               {"velocity_coupling", key.velocity_coupling}});
         }
         return f;
-    };
+      };
 
-    auto serializeDomain = [](const RayTrophiSim::SimulationGridDomainDesc& domain) {
-        json d;
-        d["name"] = domain.name;
-        // Gas vs Fluid — was NOT serialized, so every domain reloaded as the
-        // default (Gas), losing fluid sims entirely. THIS is the fluid→gas bug.
-        d["type"] = simulationDomainTypeToString(domain.type);
-        d["backend"] = static_cast<int>(domain.backend);
-        d["source_mode"] = simulationGridDomainSourceModeToString(domain.source_mode);
-        d["boundary_mode"] = simulationGridDomainBoundaryModeToString(domain.boundary_mode);
-        d["source_name"] = domain.source_name;
-        d["enabled"] = domain.enabled;
-        d["preserve_voxel_size_on_resize"] = domain.preserve_voxel_size_on_resize;
-        d["adaptive_lock_floor"] = domain.adaptive_lock_floor;
-        d["adaptive_floor_y"] = domain.adaptive_floor_y;
-        d["use_sparse_tiles"] = domain.use_sparse_tiles;
-        d["render_to_nanovdb"] = domain.render_to_nanovdb;
-        d["bounds_min"] = vec3ToJson(domain.bounds_min);
-        d["phase_grids"] = RayTrophiSim::Fluid::phaseSettingsJson(domain);
-        d["bounds_max"] = vec3ToJson(domain.bounds_max);
-        d["resolution"] = { domain.resolution_x, domain.resolution_y, domain.resolution_z };
-        d["max_auto_resolution"] = domain.max_auto_resolution;
-        d["quality_profile"] = static_cast<uint32_t>(domain.quality_profile);
-        d["resource_budget_mb"] = domain.resource_budget_mb;
-        d["enforce_resource_budget"] = domain.enforce_resource_budget;
-        d["voxel_size"] = domain.voxel_size;
-        d["padding"] = domain.padding;
-        d["channels"] = domain.channels;
-        // Thermal boundary override (Phase 4). No kelvin_per_unit here on
-        // purpose — that is a global calibration, see WorldThermalState.
-        d["thermal_override_enabled"] = domain.thermal_override_enabled;
-        d["thermal_ambient_kelvin"] = domain.thermal_ambient_kelvin;
-        d["thermal_oxygen"] = domain.thermal_oxygen;
-        d["fluid"] = {
-            {"seed_min", vec3ToJson(domain.fluid_seed_min)},
-            {"seed_max", vec3ToJson(domain.fluid_seed_max)},
-            {"seed_particles_per_cell", domain.fluid_seed_particles_per_cell},
-            {"seed_grain_saturation", domain.fluid_seed_grain_saturation},
-            {"reseed_on_reset", domain.fluid_reseed_on_reset},
-            {"max_particles", domain.fluid_max_particles},
-            {"replace_on_seed", domain.fluid_replace_on_seed},
-            {"seed_mode", (int)domain.fluid_seed_mode},
-            {"seed_mesh_object", domain.fluid_seed_mesh_object},
-            {"fill_level", domain.fluid_fill_level},
-            {"fill_wall_margin", domain.fluid_fill_wall_margin},
-            {"seed_settle", domain.fluid_seed_settle},
-            {"settle_max_steps", domain.fluid_settle_max_steps},
-            {"settle_displacement_m", domain.fluid_settle_displacement_m},
-            {"gravity", vec3ToJson(domain.fluid_params.gravity)},
-            {"particles_per_cell", domain.fluid_params.particles_per_cell},
-            {"cfl", domain.fluid_params.cfl},
-            {"max_substeps", domain.fluid_params.max_substeps},
-            {"pressure_iterations", domain.fluid_params.pressure_iterations},
-            {"pressure_iterations_grid_scaled", domain.fluid_params.pressure_iterations_grid_scaled},
-            {"pressure_relative_residual", domain.fluid_params.pressure_relative_residual},
-            {"pressure_multigrid_preconditioner", domain.fluid_params.pressure_multigrid_preconditioner},
-            {"sor_omega", domain.fluid_params.sor_omega},
-            {"apic_blend", domain.fluid_params.apic_blend},
-            {"max_velocity", domain.fluid_params.max_velocity},
-            {"velocity_damping", domain.fluid_params.velocity_damping},
-            {"wall_damping", domain.fluid_params.wall_damping},
-            {"wall_friction", domain.fluid_params.wall_friction},
-            {"wall_adhesion_pa", domain.fluid_params.wall_adhesion_pa},
-            {"domain_motion_coupling", domain.fluid_params.domain_motion_coupling},
-            // Renamed keys, deliberately not aliased to the old ones: the old
-            // `viscosity` was a unitless 0..200 dial, and reading 20.0 back as
-            // 20 m²/s would load lava where honey was authored.
-            {"viscosity_sweeps", domain.fluid_params.viscosity_sweeps},
-            {"viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip},
-            {"affine_damping", domain.fluid_params.affine_damping},
-            {"max_affine", domain.fluid_params.max_affine},
-            {"cpu_threads", domain.fluid_params.cpu_threads},
-            {"parallel_particle_threshold", domain.fluid_params.parallel_particle_threshold},
-            {"free_surface", domain.fluid_params.free_surface},
-            {"ghost_fluid_surface", domain.fluid_params.ghost_fluid_surface},
-            {"variational_solids", domain.fluid_params.variational_solids},
-            {"flip_blend", domain.fluid_params.flip_blend},
-            {"reseed_enabled", domain.fluid_params.reseed_enabled},
-            {"reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell},
-            {"reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell},
-            {"reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell},
-            {"uvw_refresh_period", domain.fluid_params.uvw_refresh_period},
-            {"internal_friction", domain.fluid_params.internal_friction},
-            {"air_drag", domain.fluid_params.air_drag},
-            {"liquid_physics_substance", domain.fluid_params.liquid_physics_substance},
-            {"inherit_atmosphere", domain.fluid_params.inherit_atmosphere},
-            {"density_relaxation_s", domain.fluid_params.density_relaxation_s},
-            // ★ The domain's material is its Default Substance. Viscosity, the
-            // granular skeleton, the freeze point, conduction and the fuel
-            // profile are resolved from it every step and are NOT stored here:
-            // a stored copy is exactly the second definition that drifted from
-            // the substance table (docs/dev/MADDE_TIPLERI_TASARIMI.md). Only
-            // numerical settings (the substance's solver hints, editable here)
-            // are domain data.
-            {"default_substance", domain.fluid_params.default_substance},
-            {"granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps},
-            {"thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled},
-            {"fog_autoconversion_kg_m3", domain.fluid_params.fog_autoconversion_kg_m3},
-            {"fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate},
-            {"fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3},
-            {"flammable", domain.fluid_flammable},
-            {"auto_ignite", domain.fluid_auto_ignite},
-            {"ignition_temperature", domain.fluid_ignition_temperature},
-            {"evaporation_rate", domain.fluid_evaporation_rate},
-            {"surface_fuel_capacity", domain.fluid_surface_fuel_capacity},
-            {"combustion_heat_release", domain.fluid_combustion_heat_release},
-            {"combustion_smoke_yield", domain.fluid_combustion_smoke_yield},
-            {"surface_cooling", domain.fluid_surface_cooling}
-        };
+  auto serializeDomain = [](const RayTrophiSim::SimulationGridDomainDesc
+                                &domain) {
+    json d;
+    d["name"] = domain.name;
+    // Gas vs Fluid — was NOT serialized, so every domain reloaded as the
+    // default (Gas), losing fluid sims entirely. THIS is the fluid→gas bug.
+    d["type"] = simulationDomainTypeToString(domain.type);
+    d["backend"] = static_cast<int>(domain.backend);
+    d["source_mode"] =
+        simulationGridDomainSourceModeToString(domain.source_mode);
+    d["boundary_mode"] =
+        simulationGridDomainBoundaryModeToString(domain.boundary_mode);
+    d["source_name"] = domain.source_name;
+    d["enabled"] = domain.enabled;
+    d["preserve_voxel_size_on_resize"] = domain.preserve_voxel_size_on_resize;
+    d["adaptive_lock_floor"] = domain.adaptive_lock_floor;
+    d["adaptive_floor_y"] = domain.adaptive_floor_y;
+    d["use_sparse_tiles"] = domain.use_sparse_tiles;
+    d["render_to_nanovdb"] = domain.render_to_nanovdb;
+    d["bounds_min"] = vec3ToJson(domain.bounds_min);
+    d["phase_grids"] = RayTrophiSim::Fluid::phaseSettingsJson(domain);
+    d["bounds_max"] = vec3ToJson(domain.bounds_max);
+    d["resolution"] = {domain.resolution_x, domain.resolution_y,
+                       domain.resolution_z};
+    d["max_auto_resolution"] = domain.max_auto_resolution;
+    d["quality_profile"] = static_cast<uint32_t>(domain.quality_profile);
+    d["resource_budget_mb"] = domain.resource_budget_mb;
+    d["enforce_resource_budget"] = domain.enforce_resource_budget;
+    d["voxel_size"] = domain.voxel_size;
+    d["padding"] = domain.padding;
+    d["channels"] = domain.channels;
+    // Thermal boundary override (Phase 4). No kelvin_per_unit here on
+    // purpose — that is a global calibration, see WorldThermalState.
+    d["thermal_override_enabled"] = domain.thermal_override_enabled;
+    d["thermal_ambient_kelvin"] = domain.thermal_ambient_kelvin;
+    d["thermal_oxygen"] = domain.thermal_oxygen;
+    d["fluid"] = {
+        {"seed_min", vec3ToJson(domain.fluid_seed_min)},
+        {"seed_max", vec3ToJson(domain.fluid_seed_max)},
+        {"seed_particles_per_cell", domain.fluid_seed_particles_per_cell},
+        {"seed_grain_saturation", domain.fluid_seed_grain_saturation},
+        {"reseed_on_reset", domain.fluid_reseed_on_reset},
+        {"max_particles", domain.fluid_max_particles},
+        {"replace_on_seed", domain.fluid_replace_on_seed},
+        {"seed_mode", (int)domain.fluid_seed_mode},
+        {"seed_mesh_object", domain.fluid_seed_mesh_object},
+        {"fill_level", domain.fluid_fill_level},
+        {"fill_wall_margin", domain.fluid_fill_wall_margin},
+        {"seed_settle", domain.fluid_seed_settle},
+        {"settle_max_steps", domain.fluid_settle_max_steps},
+        {"settle_displacement_m", domain.fluid_settle_displacement_m},
+        {"gravity", vec3ToJson(domain.fluid_params.gravity)},
+        {"particles_per_cell", domain.fluid_params.particles_per_cell},
+        {"cfl", domain.fluid_params.cfl},
+        {"max_substeps", domain.fluid_params.max_substeps},
+        {"pressure_iterations", domain.fluid_params.pressure_iterations},
+        {"pressure_iterations_grid_scaled",
+         domain.fluid_params.pressure_iterations_grid_scaled},
+        {"pressure_relative_residual",
+         domain.fluid_params.pressure_relative_residual},
+        {"pressure_multigrid_preconditioner",
+         domain.fluid_params.pressure_multigrid_preconditioner},
+        {"sor_omega", domain.fluid_params.sor_omega},
+        {"apic_blend", domain.fluid_params.apic_blend},
+        {"max_velocity", domain.fluid_params.max_velocity},
+        {"velocity_damping", domain.fluid_params.velocity_damping},
+        {"wall_damping", domain.fluid_params.wall_damping},
+        {"wall_friction", domain.fluid_params.wall_friction},
+        {"wall_adhesion_pa", domain.fluid_params.wall_adhesion_pa},
+        {"domain_motion_coupling", domain.fluid_params.domain_motion_coupling},
+        // Renamed keys, deliberately not aliased to the old ones: the old
+        // `viscosity` was a unitless 0..200 dial, and reading 20.0 back as
+        // 20 m²/s would load lava where honey was authored.
+        {"viscosity_sweeps", domain.fluid_params.viscosity_sweeps},
+        {"viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip},
+        {"affine_damping", domain.fluid_params.affine_damping},
+        {"max_affine", domain.fluid_params.max_affine},
+        {"cpu_threads", domain.fluid_params.cpu_threads},
+        {"parallel_particle_threshold",
+         domain.fluid_params.parallel_particle_threshold},
+        {"free_surface", domain.fluid_params.free_surface},
+        {"ghost_fluid_surface", domain.fluid_params.ghost_fluid_surface},
+        {"variational_solids", domain.fluid_params.variational_solids},
+        {"flip_blend", domain.fluid_params.flip_blend},
+        {"reseed_enabled", domain.fluid_params.reseed_enabled},
+        {"reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell},
+        {"reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell},
+        {"reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell},
+        {"uvw_refresh_period", domain.fluid_params.uvw_refresh_period},
+        {"internal_friction", domain.fluid_params.internal_friction},
+        {"air_drag", domain.fluid_params.air_drag},
+        {"liquid_physics_substance",
+         domain.fluid_params.liquid_physics_substance},
+        {"inherit_atmosphere", domain.fluid_params.inherit_atmosphere},
+        {"density_relaxation_s", domain.fluid_params.density_relaxation_s},
+        // ★ The domain's material is its Default Substance. Viscosity, the
+        // granular skeleton, the freeze point, conduction and the fuel
+        // profile are resolved from it every step and are NOT stored here:
+        // a stored copy is exactly the second definition that drifted from
+        // the substance table (docs/dev/MADDE_TIPLERI_TASARIMI.md). Only
+        // numerical settings (the substance's solver hints, editable here)
+        // are domain data.
+        {"default_substance", domain.fluid_params.default_substance},
+        {"granular_max_solver_substeps",
+         domain.fluid_params.granular_max_solver_substeps},
+        {"thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled},
+        {"fog_autoconversion_kg_m3",
+         domain.fluid_params.fog_autoconversion_kg_m3},
+        {"fog_autoconversion_rate",
+         domain.fluid_params.fog_autoconversion_rate},
+        {"fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3},
+        {"flammable", domain.fluid_flammable},
+        {"auto_ignite", domain.fluid_auto_ignite},
+        {"ignition_temperature", domain.fluid_ignition_temperature},
+        {"evaporation_rate", domain.fluid_evaporation_rate},
+        {"surface_fuel_capacity", domain.fluid_surface_fuel_capacity},
+        {"combustion_heat_release", domain.fluid_combustion_heat_release},
+        {"combustion_smoke_yield", domain.fluid_combustion_smoke_yield},
+        {"surface_cooling", domain.fluid_surface_cooling}};
 
-        d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
-        d["fluid_fog_spread_voxels"] = domain.fluid_fog_spread_voxels;
-        d["fluid_fog_erosion_strength"] = domain.fluid_fog_erosion_strength;
-        d["fluid_fog_erosion_size"] = domain.fluid_fog_erosion_size;
-        d["fluid_fog_erosion_detail"] = domain.fluid_fog_erosion_detail;
-        d["fluid_fog_erosion_seed"] = domain.fluid_fog_erosion_seed;
-        d["fluid_fog_erosion_depth"] = domain.fluid_fog_erosion_depth;
-        d["fluid_fog_resolution_multiplier"] = domain.fluid_fog_resolution_multiplier;
-        {
-            json routes = json::object();
-            for (const auto& kv : RayTrophiSim::Fluid::labelRoutesToNames(domain.fluid_label_routes))
-                routes[kv.first] = kv.second;
-            d["fluid_label_routes"] = routes;
-        }
-        d["fluid_particle_color"] = vec3ToJson(domain.fluid_particle_color);
-        d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
-        d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
-        d["fluid_particle_visual_children"] =
-            domain.fluid_particle_visual_children;
-        d["fluid_particle_visual_size_variation"] =
-            domain.fluid_particle_visual_size_variation;
-        d["fluid_granular_physical_carriers"] =
-            domain.fluid_granular_physical_carriers;
-        d["fluid_particle_visual_budget"] =
-            domain.fluid_particle_visual_budget;
-        d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
-        d["fluid_particle_geometry_mode"] = domain.fluid_particle_geometry_mode;
-        d["fluid_particle_geometry_source"] = domain.fluid_particle_geometry_source;
-        d["fluid_substance_splat_geometry"] = domain.fluid_substance_splat_geometry;
-        d["fluid_phase_output"] = domain.fluid_phase_output;
-        d["fluid_visual_samples"] = domain.fluid_visual_samples;
-        d["matter_fog_streams"] = RayTrophiSim::Fluid::writeFogAppearances(domain.matter_fog_streams);
-        d["fluid_grain_mesh_near_enabled"] = domain.fluid_grain_mesh_near_enabled;
-        d["fluid_grain_mesh_near_shape"] = domain.fluid_grain_mesh_near_shape;
-        d["fluid_grain_mesh_near_source_materials"] = domain.fluid_grain_mesh_near_source_materials;
-        d["fluid_grain_mesh_near_sources"] = domain.fluid_grain_mesh_near_sources;
-        d["fluid_grain_mesh_near_distance"] = domain.fluid_grain_mesh_near_distance;
-        d["fluid_grain_mesh_near_budget"] = domain.fluid_grain_mesh_near_budget;
-        d["fluid_particle_emissive"] = domain.fluid_particle_emissive;
-        d["fluid_particle_emission"] = domain.fluid_particle_emission;
-        d["fluid_particle_material_id"] = domain.fluid_particle_material_id;
+    d["fluid_render_mode"] = static_cast<int>(domain.fluid_render_mode);
+    d["fluid_fog_spread_voxels"] = domain.fluid_fog_spread_voxels;
+    d["fluid_fog_erosion_strength"] = domain.fluid_fog_erosion_strength;
+    d["fluid_fog_erosion_size"] = domain.fluid_fog_erosion_size;
+    d["fluid_fog_erosion_detail"] = domain.fluid_fog_erosion_detail;
+    d["fluid_fog_erosion_seed"] = domain.fluid_fog_erosion_seed;
+    d["fluid_fog_erosion_depth"] = domain.fluid_fog_erosion_depth;
+    d["fluid_fog_resolution_multiplier"] =
+        domain.fluid_fog_resolution_multiplier;
+    {
+      json routes = json::object();
+      for (const auto &kv :
+           RayTrophiSim::Fluid::labelRoutesToNames(domain.fluid_label_routes))
+        routes[kv.first] = kv.second;
+      d["fluid_label_routes"] = routes;
+    }
+    d["fluid_particle_color"] = vec3ToJson(domain.fluid_particle_color);
+    d["fluid_particle_radius_factor"] = domain.fluid_particle_radius_factor;
+    d["fluid_particle_size_multiplier"] = domain.fluid_particle_size_multiplier;
+    d["fluid_particle_visual_children"] = domain.fluid_particle_visual_children;
+    d["fluid_particle_visual_size_variation"] =
+        domain.fluid_particle_visual_size_variation;
+    d["fluid_granular_physical_carriers"] =
+        domain.fluid_granular_physical_carriers;
+    d["fluid_particle_visual_budget"] = domain.fluid_particle_visual_budget;
+    d["fluid_particle_subdivisions"] = domain.fluid_particle_subdivisions;
+    d["fluid_particle_geometry_mode"] = domain.fluid_particle_geometry_mode;
+    d["fluid_particle_geometry_source"] = domain.fluid_particle_geometry_source;
+    d["fluid_substance_splat_geometry"] = domain.fluid_substance_splat_geometry;
+    d["fluid_phase_output"] = domain.fluid_phase_output;
+    d["fluid_visual_samples"] = domain.fluid_visual_samples;
+    d["matter_fog_streams"] =
+        RayTrophiSim::Fluid::writeFogAppearances(domain.matter_fog_streams);
+    d["fluid_grain_mesh_near_enabled"] = domain.fluid_grain_mesh_near_enabled;
+    d["fluid_grain_mesh_near_shape"] = domain.fluid_grain_mesh_near_shape;
+    d["fluid_grain_mesh_near_source_materials"] =
+        domain.fluid_grain_mesh_near_source_materials;
+    d["fluid_grain_mesh_near_sources"] = domain.fluid_grain_mesh_near_sources;
+    d["fluid_grain_mesh_near_distance"] = domain.fluid_grain_mesh_near_distance;
+    d["fluid_grain_mesh_near_budget"] = domain.fluid_grain_mesh_near_budget;
+    d["fluid_particle_emissive"] = domain.fluid_particle_emissive;
+    d["fluid_particle_emission"] = domain.fluid_particle_emission;
+    d["fluid_particle_material_id"] = domain.fluid_particle_material_id;
 
-        d["fluid_level_set_params"] = {
-            {"narrow_band_voxels", domain.fluid_level_set_params.narrow_band_voxels},
-            {"kernel_radius_voxels", domain.fluid_level_set_params.kernel_radius_voxels},
-            {"particle_radius_voxels", domain.fluid_level_set_params.particle_radius_voxels},
-            {"surface_offset_voxels", domain.fluid_level_set_params.surface_offset_voxels},
-            {"smoothing_iterations", domain.fluid_level_set_params.smoothing_iterations},
-            {"surface_resolution_multiplier", domain.fluid_level_set_params.surface_resolution_multiplier},
-            {"anisotropy_enabled", domain.fluid_level_set_params.anisotropy_enabled},
-            {"anisotropy_radius_voxels", domain.fluid_level_set_params.anisotropy_radius_voxels},
-            {"anisotropy_max_stretch", domain.fluid_level_set_params.anisotropy_max_stretch},
-            {"anisotropy_neighbor_min", domain.fluid_level_set_params.anisotropy_neighbor_min},
-            {"position_smoothing", domain.fluid_level_set_params.position_smoothing},
-            {"gpu_build", domain.fluid_level_set_params.gpu_build}
-        };
+    d["fluid_level_set_params"] = {
+        {"narrow_band_voxels",
+         domain.fluid_level_set_params.narrow_band_voxels},
+        {"kernel_radius_voxels",
+         domain.fluid_level_set_params.kernel_radius_voxels},
+        {"particle_radius_voxels",
+         domain.fluid_level_set_params.particle_radius_voxels},
+        {"surface_offset_voxels",
+         domain.fluid_level_set_params.surface_offset_voxels},
+        {"smoothing_iterations",
+         domain.fluid_level_set_params.smoothing_iterations},
+        {"surface_resolution_multiplier",
+         domain.fluid_level_set_params.surface_resolution_multiplier},
+        {"anisotropy_enabled",
+         domain.fluid_level_set_params.anisotropy_enabled},
+        {"anisotropy_radius_voxels",
+         domain.fluid_level_set_params.anisotropy_radius_voxels},
+        {"anisotropy_max_stretch",
+         domain.fluid_level_set_params.anisotropy_max_stretch},
+        {"anisotropy_neighbor_min",
+         domain.fluid_level_set_params.anisotropy_neighbor_min},
+        {"position_smoothing",
+         domain.fluid_level_set_params.position_smoothing},
+        {"gpu_build", domain.fluid_level_set_params.gpu_build}};
 
-        d["fluid_surface_band_voxels"] = domain.fluid_surface_band_voxels;
-        d["fluid_surface_ior"] = domain.fluid_surface_ior;
-        d["fluid_surface_roughness"] = domain.fluid_surface_roughness;
-        d["fluid_surface_foam"] = domain.fluid_surface_foam;
-        d["fluid_surface_material_id"] = domain.fluid_surface_material_id;
-        d["fluid_surface_pore_amount"] = domain.fluid_surface_pore_amount;
-        d["fluid_surface_pore_scale"] = domain.fluid_surface_pore_scale;
-        d["fluid_surface_pore_detail"] = domain.fluid_surface_pore_detail;
-        d["fluid_surface_coord_space"] = domain.fluid_surface_coord_space;
-        {
-            // Substance -> material bindings. Stored by material ID like every
-            // other material reference in this file; the substance is the NAME,
-            // because that is the identity the liquid carries.
-            nlohmann::json binds = nlohmann::json::array();
-            for (const auto& b : domain.fluid_substance_materials) {
-                binds.push_back({{"substance", b.substance},
-                                 {"material_id", b.material_id},
-                                 {"representation", static_cast<int>(b.representation)},
-                                 // Physics, alongside the shading binding: one
-                                 // substance is one authored thing, and splitting
-                                 // it across two records would let a project load
-                                 // half a definition.
-                                 {"kinematic_viscosity", b.kinematic_viscosity},
-                                 {"miscibility", b.miscibility},
-                                 // ★ Written as a STRING, unlike representation
-                                 // next to it. Phase decides whether matter
-                                 // blocks flow, and a bare 0/1 in a project file
-                                 // is a value nobody reading the file can check;
-                                 // if the enum ever grows, a stale integer would
-                                 // silently mean something else.
-                                 {"phase",
-                                  b.phase == RayTrophiSim::Fluid::SubstancePhase::Solid
-                                      ? "solid" : "liquid"}});
-            }
-            d["fluid_substance_materials"] = binds;
-            d["matter_pore_exchange"] = RayTrophiSim::Fluid::matterPoreParamsToJson(domain.fluid_params.pore_exchange);
-            // The grain owner and its material. Missing here, a reopened
-            // project lost "Enable discrete grains" and its sand ran as MPM.
-            d["matter_grain"] = RayTrophiSim::Fluid::matterGrainParamsToJson(domain.fluid_params.grain);
-            d["fluid_solid_phase_enabled"] = domain.fluid_solid_phase_enabled;
-            d["fluid_solid_phase_fill"] = domain.fluid_solid_phase_fill;
-        }
-        d["fluid_debug_overlay"] = domain.fluid_debug_overlay;
+    d["fluid_surface_band_voxels"] = domain.fluid_surface_band_voxels;
+    d["fluid_surface_ior"] = domain.fluid_surface_ior;
+    d["fluid_surface_roughness"] = domain.fluid_surface_roughness;
+    d["fluid_surface_foam"] = domain.fluid_surface_foam;
+    d["fluid_surface_material_id"] = domain.fluid_surface_material_id;
+    d["fluid_surface_pore_amount"] = domain.fluid_surface_pore_amount;
+    d["fluid_surface_pore_scale"] = domain.fluid_surface_pore_scale;
+    d["fluid_surface_pore_detail"] = domain.fluid_surface_pore_detail;
+    d["fluid_surface_coord_space"] = domain.fluid_surface_coord_space;
+    {
+      // Substance -> material bindings. Stored by material ID like every
+      // other material reference in this file; the substance is the NAME,
+      // because that is the identity the liquid carries.
+      nlohmann::json binds = nlohmann::json::array();
+      for (const auto &b : domain.fluid_substance_materials) {
+        binds.push_back(
+            {{"substance", b.substance},
+             {"material_id", b.material_id},
+             {"representation", static_cast<int>(b.representation)},
+             // Physics, alongside the shading binding: one
+             // substance is one authored thing, and splitting
+             // it across two records would let a project load
+             // half a definition.
+             {"kinematic_viscosity", b.kinematic_viscosity},
+             {"miscibility", b.miscibility},
+             // ★ Written as a STRING, unlike representation
+             // next to it. Phase decides whether matter
+             // blocks flow, and a bare 0/1 in a project file
+             // is a value nobody reading the file can check;
+             // if the enum ever grows, a stale integer would
+             // silently mean something else.
+             {"phase", b.phase == RayTrophiSim::Fluid::SubstancePhase::Solid
+                           ? "solid"
+                           : "liquid"}});
+      }
+      d["fluid_substance_materials"] = binds;
+      d["matter_pore_exchange"] = RayTrophiSim::Fluid::matterPoreParamsToJson(
+          domain.fluid_params.pore_exchange);
+      // The grain owner and its material. Missing here, a reopened
+      // project lost "Enable discrete grains" and its sand ran as MPM.
+      d["matter_grain"] = RayTrophiSim::Fluid::matterGrainParamsToJson(
+          domain.fluid_params.grain);
+      d["fluid_solid_phase_enabled"] = domain.fluid_solid_phase_enabled;
+      d["fluid_solid_phase_fill"] = domain.fluid_solid_phase_fill;
+    }
+    d["fluid_debug_overlay"] = domain.fluid_debug_overlay;
 
-        const auto& fo = domain.fluid_foam_params;
-        d["foam"] = {
-            {"enabled", fo.enabled},
-            {"trapped_air_rate", fo.trapped_air_rate},
-            {"wave_crest_rate", fo.wave_crest_rate},
-            {"ta_min", fo.ta_min},
-            {"ta_max", fo.ta_max},
-            {"wc_min", fo.wc_min},
-            {"wc_max", fo.wc_max},
-            {"ke_min", fo.ke_min},
-            {"ke_max", fo.ke_max},
-            {"crest_cos", fo.crest_cos},
-            {"neighbor_radius_voxels", fo.neighbor_radius_voxels},
-            {"spray_max_neighbors", fo.spray_max_neighbors},
-            {"bubble_min_neighbors", fo.bubble_min_neighbors},
-            {"lifetime", fo.lifetime},
-            {"buoyancy", fo.buoyancy},
-            {"fluid_drag", fo.fluid_drag},
-            {"spray_drag", fo.spray_drag},
-            {"spawn_jitter_voxels", fo.spawn_jitter_voxels},
-            {"max_foam", static_cast<uint64_t>(fo.max_foam)},
-            {"render_radius_voxels", fo.render_radius_voxels},
-            {"foam_sphere_subdivisions", fo.foam_sphere_subdivisions},
-            {"volume_density", fo.volume_density},
-            {"volume_color", { fo.volume_color.x, fo.volume_color.y, fo.volume_color.z }},
-            {"volume_opacity", fo.volume_opacity},
-            {"volume_bubble_strength", fo.volume_bubble_strength},
-            {"volume_spray_strength", fo.volume_spray_strength},
-            {"foam_material_id", fo.foam_material_id},
-            {"spray_material_id", fo.spray_material_id},
-            {"bubble_material_id", fo.bubble_material_id}
-        };
-        d["fire_enabled"] = domain.fire_enabled;
-        d["ignition_temperature"] = domain.ignition_temperature;
-        d["burn_rate"] = domain.burn_rate;
-        d["heat_release"] = domain.heat_release;
-        d["smoke_generation"] = domain.smoke_generation;
-        d["flame_dissipation"] = domain.flame_dissipation;
-        d["fire_max_temperature"] = domain.fire_max_temperature;
-        d["structural_coupling_enabled"] = domain.structural_coupling_enabled;
-        d["structural_pressure_scale"] = domain.structural_pressure_scale;
-        d["structural_min_intensity"] = domain.structural_min_intensity;
-        d["structural_event_interval"] = domain.structural_event_interval;
-        d["fire_expansion"] = domain.fire_expansion;
-        d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
-        d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
-        d["gas_ambient_stratification"] = domain.gas_ambient_stratification;
-        d["gas_inherit_atmosphere"] = domain.gas_inherit_atmosphere;
-        d["gas_pressure_iterations"] = domain.gas_pressure_iterations;
-        d["gas_surface_dust_enabled"] = domain.gas_surface_dust_enabled;
-        d["gas_surface_dust_threshold"] = domain.gas_surface_dust_threshold;
-        d["gas_surface_dust_emission"] = domain.gas_surface_dust_emission;
-        d["gas_surface_dust_temperature"] = domain.gas_surface_dust_temperature;
-        d["gas_surface_dust_max_density"] = domain.gas_surface_dust_max_density;
-        d["gas_surface_dust_supply"] = domain.gas_surface_dust_supply;
-        d["gas_dissipation_override"] = domain.gas_dissipation_override;
-        d["gas_density_dissipation"] = domain.gas_density_dissipation;
-        d["gas_temperature_dissipation"] = domain.gas_temperature_dissipation;
-        d["gas_fuel_dissipation"] = domain.gas_fuel_dissipation;
-        d["gas_vorticity"] = domain.gas_vorticity;
-        d["gas_maccormack_advection"] = domain.gas_maccormack_advection;
-        d["turbulence_strength"] = domain.turbulence_strength;
-        d["turbulence_scale"] = domain.turbulence_scale;
-        d["turbulence_octaves"] = domain.turbulence_octaves;
-        d["turbulence_lacunarity"] = domain.turbulence_lacunarity;
-        d["turbulence_persistence"] = domain.turbulence_persistence;
-        d["turbulence_speed"] = domain.turbulence_speed;
-        if (domain.shader) {
-            d["shader"] = domainVolumeShaderToJson(*domain.shader);
-        }
-        if (domain.fluid_fog_shader) {
-            d["fluid_fog_shader"] = domainVolumeShaderToJson(*domain.fluid_fog_shader);
-        }
-        RayTrophiSim::Fluid::writeMatterSeedSources(d, domain);
-        return d;
-    };
+    const auto &fo = domain.fluid_foam_params;
+    d["foam"] = {{"enabled", fo.enabled},
+                 {"trapped_air_rate", fo.trapped_air_rate},
+                 {"wave_crest_rate", fo.wave_crest_rate},
+                 {"ta_min", fo.ta_min},
+                 {"ta_max", fo.ta_max},
+                 {"wc_min", fo.wc_min},
+                 {"wc_max", fo.wc_max},
+                 {"ke_min", fo.ke_min},
+                 {"ke_max", fo.ke_max},
+                 {"crest_cos", fo.crest_cos},
+                 {"neighbor_radius_voxels", fo.neighbor_radius_voxels},
+                 {"spray_max_neighbors", fo.spray_max_neighbors},
+                 {"bubble_min_neighbors", fo.bubble_min_neighbors},
+                 {"lifetime", fo.lifetime},
+                 {"buoyancy", fo.buoyancy},
+                 {"fluid_drag", fo.fluid_drag},
+                 {"spray_drag", fo.spray_drag},
+                 {"spawn_jitter_voxels", fo.spawn_jitter_voxels},
+                 {"max_foam", static_cast<uint64_t>(fo.max_foam)},
+                 {"render_radius_voxels", fo.render_radius_voxels},
+                 {"foam_sphere_subdivisions", fo.foam_sphere_subdivisions},
+                 {"volume_density", fo.volume_density},
+                 {"volume_color",
+                  {fo.volume_color.x, fo.volume_color.y, fo.volume_color.z}},
+                 {"volume_opacity", fo.volume_opacity},
+                 {"volume_bubble_strength", fo.volume_bubble_strength},
+                 {"volume_spray_strength", fo.volume_spray_strength},
+                 {"foam_material_id", fo.foam_material_id},
+                 {"spray_material_id", fo.spray_material_id},
+                 {"bubble_material_id", fo.bubble_material_id}};
+    d["fire_enabled"] = domain.fire_enabled;
+    d["ignition_temperature"] = domain.ignition_temperature;
+    d["burn_rate"] = domain.burn_rate;
+    d["heat_release"] = domain.heat_release;
+    d["smoke_generation"] = domain.smoke_generation;
+    d["flame_dissipation"] = domain.flame_dissipation;
+    d["fire_max_temperature"] = domain.fire_max_temperature;
+    d["structural_coupling_enabled"] = domain.structural_coupling_enabled;
+    d["structural_pressure_scale"] = domain.structural_pressure_scale;
+    d["structural_min_intensity"] = domain.structural_min_intensity;
+    d["structural_event_interval"] = domain.structural_event_interval;
+    d["fire_expansion"] = domain.fire_expansion;
+    d["gas_buoyancy_heat"] = domain.gas_buoyancy_heat;
+    d["gas_buoyancy_density"] = domain.gas_buoyancy_density;
+    d["gas_ambient_stratification"] = domain.gas_ambient_stratification;
+    d["gas_inherit_atmosphere"] = domain.gas_inherit_atmosphere;
+    d["gas_pressure_iterations"] = domain.gas_pressure_iterations;
+    d["gas_surface_dust_enabled"] = domain.gas_surface_dust_enabled;
+    d["gas_surface_dust_threshold"] = domain.gas_surface_dust_threshold;
+    d["gas_surface_dust_emission"] = domain.gas_surface_dust_emission;
+    d["gas_surface_dust_temperature"] = domain.gas_surface_dust_temperature;
+    d["gas_surface_dust_max_density"] = domain.gas_surface_dust_max_density;
+    d["gas_surface_dust_supply"] = domain.gas_surface_dust_supply;
+    d["gas_dissipation_override"] = domain.gas_dissipation_override;
+    d["gas_density_dissipation"] = domain.gas_density_dissipation;
+    d["gas_temperature_dissipation"] = domain.gas_temperature_dissipation;
+    d["gas_fuel_dissipation"] = domain.gas_fuel_dissipation;
+    d["gas_vorticity"] = domain.gas_vorticity;
+    d["gas_maccormack_advection"] = domain.gas_maccormack_advection;
+    d["turbulence_strength"] = domain.turbulence_strength;
+    d["turbulence_scale"] = domain.turbulence_scale;
+    d["turbulence_octaves"] = domain.turbulence_octaves;
+    d["turbulence_lacunarity"] = domain.turbulence_lacunarity;
+    d["turbulence_persistence"] = domain.turbulence_persistence;
+    d["turbulence_speed"] = domain.turbulence_speed;
+    if (domain.shader) {
+      d["shader"] = domainVolumeShaderToJson(*domain.shader);
+    }
+    if (domain.fluid_fog_shader) {
+      d["fluid_fog_shader"] =
+          domainVolumeShaderToJson(*domain.fluid_fog_shader);
+    }
+    RayTrophiSim::Fluid::writeMatterSeedSources(d, domain);
+    return d;
+  };
 
-    auto serializeRuntimeSettings = [](const RayTrophiSim::ParticleSimulationSystem& runtime) {
-        const auto& physics = runtime.physicsSettings();
-        const auto& thermal = runtime.worldThermal();
+  auto serializeRuntimeSettings =
+      [](const RayTrophiSim::ParticleSimulationSystem &runtime) {
+        const auto &physics = runtime.physicsSettings();
+        const auto &thermal = runtime.worldThermal();
         return json{
             {"gravity", vec3ToJson(runtime.gravity())},
             // World thermal boundary conditions (Phase 4). Before this the
             // Kelvin calibration was runtime-only and silently reset on every
             // project load, so a scene tuned to ignite came back not igniting.
-            {"world_thermal", {
-                {"ambient_kelvin", thermal.ambient_kelvin},
-                {"reference_kelvin", thermal.reference_kelvin},
-                {"inherit_atmosphere", thermal.inherit_atmosphere},
-                {"kelvin_per_unit", thermal.kelvin_per_unit},
-                {"convection_coefficient", thermal.convection_coefficient},
-                {"oxygen_availability", thermal.oxygen_availability}
-            }},
+            {"world_thermal",
+             {{"ambient_kelvin", thermal.ambient_kelvin},
+              {"reference_kelvin", thermal.reference_kelvin},
+              {"inherit_atmosphere", thermal.inherit_atmosphere},
+              {"kelvin_per_unit", thermal.kelvin_per_unit},
+              {"convection_coefficient", thermal.convection_coefficient},
+              {"oxygen_availability", thermal.oxygen_availability}}},
             {"linear_drag", runtime.linearDrag()},
             {"collision_plane_enabled", runtime.collisionPlaneEnabled()},
             {"collision_plane_y", runtime.collisionPlaneY()},
             {"collision_restitution", runtime.collisionRestitution()},
-            {"physics", {
-                {"mode", particlePhysicsModeToString(physics.mode)},
-                {"quality", particleQualityModeToString(physics.quality)},
-                {"execution_policy", particleExecutionPolicyToString(physics.execution_policy)},
-                {"particle_radius", physics.particle_radius},
-                {"self_collision_enabled", physics.self_collision_enabled},
-                {"solver_iterations", physics.solver_iterations},
-                {"max_neighbors_per_particle", physics.max_neighbors_per_particle},
-                {"viscosity", physics.viscosity},
-                {"inherit_atmosphere", physics.inherit_atmosphere},
-                {"cohesion", physics.cohesion},
-                {"pressure_stiffness", physics.pressure_stiffness},
-                {"rest_density", physics.rest_density},
-                {"buoyancy", physics.buoyancy},
-                {"gravity_scale", physics.gravity_scale},
-                {"grid_density_deposit", physics.grid_density_deposit},
-                {"grid_temperature_deposit", physics.grid_temperature_deposit},
-                {"grid_fuel_deposit", physics.grid_fuel_deposit},
-                {"grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age},
-                {"collision_response",
-                 physics.collision_response == RayTrophiSim::ParticleCollisionResponse::Die
-                     ? "die" : "bounce"},
-                {"record_collision_events", physics.record_collision_events},
-                {"collision_event_capacity", physics.collision_event_capacity},
-                {"vorticity", physics.vorticity}
-            }}
-        };
-    };
+            {"physics",
+             {{"mode", particlePhysicsModeToString(physics.mode)},
+              {"quality", particleQualityModeToString(physics.quality)},
+              {"execution_policy",
+               particleExecutionPolicyToString(physics.execution_policy)},
+              {"particle_radius", physics.particle_radius},
+              {"self_collision_enabled", physics.self_collision_enabled},
+              {"solver_iterations", physics.solver_iterations},
+              {"max_neighbors_per_particle",
+               physics.max_neighbors_per_particle},
+              {"viscosity", physics.viscosity},
+              {"inherit_atmosphere", physics.inherit_atmosphere},
+              {"cohesion", physics.cohesion},
+              {"pressure_stiffness", physics.pressure_stiffness},
+              {"rest_density", physics.rest_density},
+              {"buoyancy", physics.buoyancy},
+              {"gravity_scale", physics.gravity_scale},
+              {"grid_density_deposit", physics.grid_density_deposit},
+              {"grid_temperature_deposit", physics.grid_temperature_deposit},
+              {"grid_fuel_deposit", physics.grid_fuel_deposit},
+              {"grid_deposit_fade_with_age",
+               physics.grid_deposit_fade_with_age},
+              {"collision_response",
+               physics.collision_response ==
+                       RayTrophiSim::ParticleCollisionResponse::Die
+                   ? "die"
+                   : "bounce"},
+              {"record_collision_events", physics.record_collision_events},
+              {"collision_event_capacity", physics.collision_event_capacity},
+              {"vorticity", physics.vorticity}}}};
+      };
 
-    for (const auto& system : scene.particle_systems) {
-        json s;
-        s["id"] = system.id;
-        s["name"] = system.name;
-        s["visible"] = system.visible;
-        s["enabled"] = system.enabled;
-        s["emitter_only"] = system.render.emitter_only;
-        s["emitters"] = json::array();
-        s["colliders"] = json::array();
-        s["domains"] = json::array();
-        s["flow_sources"] = json::array();
-        if (system.runtime) {
-            s["settings"] = serializeRuntimeSettings(*system.runtime);
-            RayTrophiSim::serializeParticleAppearanceProfiles(*system.runtime, s);
-            for (const auto& emitter : system.runtime->emitters()) {
-                s["emitters"].push_back(serializeEmitter(emitter));
-            }
-            for (const auto& collider : system.runtime->colliders()) {
-                s["colliders"].push_back(serializeCollider(collider));
-            }
-            for (const auto& domain : system.runtime->gridDomains()) {
-                s["domains"].push_back(serializeDomain(domain));
-            }
-            for (const auto& source : system.runtime->flowSources()) {
-                s["flow_sources"].push_back(serializeFlowSource(source));
-            }
-        }
-        root["systems"].push_back(std::move(s));
+  for (const auto &system : scene.particle_systems) {
+    json s;
+    s["id"] = system.id;
+    s["name"] = system.name;
+    s["visible"] = system.visible;
+    s["enabled"] = system.enabled;
+    s["emitter_only"] = system.render.emitter_only;
+    s["emitters"] = json::array();
+    s["colliders"] = json::array();
+    s["domains"] = json::array();
+    s["flow_sources"] = json::array();
+    if (system.runtime) {
+      s["settings"] = serializeRuntimeSettings(*system.runtime);
+      RayTrophiSim::serializeParticleAppearanceProfiles(*system.runtime, s);
+      for (const auto &emitter : system.runtime->emitters()) {
+        s["emitters"].push_back(serializeEmitter(emitter));
+      }
+      for (const auto &collider : system.runtime->colliders()) {
+        s["colliders"].push_back(serializeCollider(collider));
+      }
+      for (const auto &domain : system.runtime->gridDomains()) {
+        s["domains"].push_back(serializeDomain(domain));
+      }
+      for (const auto &source : system.runtime->flowSources()) {
+        s["flow_sources"].push_back(serializeFlowSource(source));
+      }
     }
+    root["systems"].push_back(std::move(s));
+  }
 
-    return root;
+  return root;
 }
 
-void ProjectManager::deserializeParticleSimulation(const json& j, SceneData& scene) {
-    if (!j.is_object()) {
-        return;
+void ProjectManager::deserializeParticleSimulation(const json &j,
+                                                   SceneData &scene) {
+  if (!j.is_object()) {
+    return;
+  }
+  RayTrophiSim::deserializeAshDebris(j, scene.ashDebrisSystem());
+
+  auto parseEmitter = [](const json &item) {
+    RayTrophiSim::ParticleEmitterDesc emitter;
+    if (!item.is_object()) {
+      return emitter;
     }
-    RayTrophiSim::deserializeAshDebris(j, scene.ashDebrisSystem());
+    emitter.name = item.value("name", emitter.name);
+    emitter.source_mode = particleEmitterSourceModeFromString(
+        item.value("source_mode", std::string("Point")));
+    emitter.spawn_mode = particleEmitterSpawnModeFromString(
+        item.value("spawn_mode", std::string("Center")));
+    emitter.source_name = item.value("source_name", emitter.source_name);
+    if (item.contains("point"))
+      emitter.point = jsonToVec3(item["point"]);
+    if (item.contains("local_offset"))
+      emitter.local_offset = jsonToVec3(item["local_offset"]);
+    if (item.contains("direction"))
+      emitter.direction = jsonToVec3(item["direction"]);
+    emitter.surface_offset =
+        item.value("surface_offset", emitter.surface_offset);
+    emitter.rate_per_second =
+        item.value("rate_per_second", emitter.rate_per_second);
+    emitter.speed = item.value("speed", emitter.speed);
+    emitter.spread = item.value("spread", emitter.spread);
+    emitter.lifetime_seconds =
+        item.value("lifetime_seconds", emitter.lifetime_seconds);
+    emitter.mass = item.value("mass", emitter.mass);
+    // appearance_profile_id is read in adoptSystem (it may need migration).
+    emitter.size_jitter = item.value("size_jitter", emitter.size_jitter);
+    emitter.angular_velocity =
+        item.value("angular_velocity", emitter.angular_velocity);
+    emitter.angular_jitter =
+        item.value("angular_jitter", emitter.angular_jitter);
+    emitter.enabled = item.value("enabled", emitter.enabled);
+    emitter.seed = item.value("seed", emitter.seed);
+    emitter.accumulator = 0.0f;
+    emitter.burst_count = item.value("burst_count", 0);
+    emitter.timeline_uid = item.value("timeline_uid", emitter.timeline_uid);
+    emitter.parent_object = item.value("parent_object", emitter.parent_object);
+    emitter.velocity_space =
+        static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(item.value(
+            "velocity_space", static_cast<int>(emitter.velocity_space)));
+    emitter.inherit_velocity =
+        item.value("inherit_velocity", emitter.inherit_velocity);
+    emitter.override_grid_deposit =
+        item.value("override_grid_deposit", emitter.override_grid_deposit);
+    emitter.grid_density_deposit =
+        item.value("grid_density_deposit", emitter.grid_density_deposit);
+    emitter.grid_temperature_deposit = item.value(
+        "grid_temperature_deposit", emitter.grid_temperature_deposit);
+    emitter.grid_fuel_deposit =
+        item.value("grid_fuel_deposit", emitter.grid_fuel_deposit);
+    if (item.contains("keyframes") && item["keyframes"].is_array()) {
+      for (const auto &key_item : item["keyframes"]) {
+        if (!key_item.is_object())
+          continue;
+        const int frame = key_item.value("frame", 0);
+        RayTrophiSim::ParticleEmitterDesc::Keyframe key;
+        key.has_enabled = key_item.value("has_enabled", false);
+        key.has_rate = key_item.value("has_rate", false);
+        key.has_speed = key_item.value("has_speed", false);
+        key.has_spread = key_item.value("has_spread", false);
+        key.has_point = key_item.value("has_point", false);
+        key.has_direction = key_item.value("has_direction", false);
+        key.enabled = key_item.value("enabled", key.enabled);
+        key.rate_per_second =
+            key_item.value("rate_per_second", key.rate_per_second);
+        key.speed = key_item.value("speed", key.speed);
+        key.spread = key_item.value("spread", key.spread);
+        if (key_item.contains("point"))
+          key.point = jsonToVec3(key_item["point"]);
+        if (key_item.contains("direction"))
+          key.direction = jsonToVec3(key_item["direction"]);
+        emitter.keyframes[frame] = key;
+      }
+    }
+    // Motion state is runtime-only — arm the sentinel (see the desc).
+    emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+    emitter.parent_velocity = Vec3(0.0f);
+    return emitter;
+  };
 
-    auto parseEmitter = [](const json& item) {
-        RayTrophiSim::ParticleEmitterDesc emitter;
-        if (!item.is_object()) {
-            return emitter;
-        }
-        emitter.name = item.value("name", emitter.name);
-        emitter.source_mode = particleEmitterSourceModeFromString(item.value("source_mode", std::string("Point")));
-        emitter.spawn_mode = particleEmitterSpawnModeFromString(item.value("spawn_mode", std::string("Center")));
-        emitter.source_name = item.value("source_name", emitter.source_name);
-        if (item.contains("point")) emitter.point = jsonToVec3(item["point"]);
-        if (item.contains("local_offset")) emitter.local_offset = jsonToVec3(item["local_offset"]);
-        if (item.contains("direction")) emitter.direction = jsonToVec3(item["direction"]);
-        emitter.surface_offset = item.value("surface_offset", emitter.surface_offset);
-        emitter.rate_per_second = item.value("rate_per_second", emitter.rate_per_second);
-        emitter.speed = item.value("speed", emitter.speed);
-        emitter.spread = item.value("spread", emitter.spread);
-        emitter.lifetime_seconds = item.value("lifetime_seconds", emitter.lifetime_seconds);
-        emitter.mass = item.value("mass", emitter.mass);
-        // appearance_profile_id is read in adoptSystem (it may need migration).
-        emitter.size_jitter = item.value("size_jitter", emitter.size_jitter);
-        emitter.angular_velocity = item.value("angular_velocity", emitter.angular_velocity);
-        emitter.angular_jitter = item.value("angular_jitter", emitter.angular_jitter);
-        emitter.enabled = item.value("enabled", emitter.enabled);
-        emitter.seed = item.value("seed", emitter.seed);
-        emitter.accumulator = 0.0f;
-        emitter.burst_count = item.value("burst_count", 0);
-        emitter.timeline_uid = item.value("timeline_uid", emitter.timeline_uid);
-        emitter.parent_object = item.value("parent_object", emitter.parent_object);
-        emitter.velocity_space =
-            static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(
-                item.value("velocity_space",
-                           static_cast<int>(emitter.velocity_space)));
-        emitter.inherit_velocity = item.value("inherit_velocity", emitter.inherit_velocity);
-        emitter.override_grid_deposit =
-            item.value("override_grid_deposit", emitter.override_grid_deposit);
-        emitter.grid_density_deposit =
-            item.value("grid_density_deposit", emitter.grid_density_deposit);
-        emitter.grid_temperature_deposit =
-            item.value("grid_temperature_deposit", emitter.grid_temperature_deposit);
-        emitter.grid_fuel_deposit =
-            item.value("grid_fuel_deposit", emitter.grid_fuel_deposit);
-        if (item.contains("keyframes") && item["keyframes"].is_array()) {
-            for (const auto& key_item : item["keyframes"]) {
-                if (!key_item.is_object()) continue;
-                const int frame = key_item.value("frame", 0);
-                RayTrophiSim::ParticleEmitterDesc::Keyframe key;
-                key.has_enabled = key_item.value("has_enabled", false);
-                key.has_rate = key_item.value("has_rate", false);
-                key.has_speed = key_item.value("has_speed", false);
-                key.has_spread = key_item.value("has_spread", false);
-                key.has_point = key_item.value("has_point", false);
-                key.has_direction = key_item.value("has_direction", false);
-                key.enabled = key_item.value("enabled", key.enabled);
-                key.rate_per_second = key_item.value("rate_per_second", key.rate_per_second);
-                key.speed = key_item.value("speed", key.speed);
-                key.spread = key_item.value("spread", key.spread);
-                if (key_item.contains("point")) key.point = jsonToVec3(key_item["point"]);
-                if (key_item.contains("direction")) key.direction = jsonToVec3(key_item["direction"]);
-                emitter.keyframes[frame] = key;
-            }
-        }
-        // Motion state is runtime-only — arm the sentinel (see the desc).
-        emitter.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
-        emitter.parent_velocity = Vec3(0.0f);
-        return emitter;
-    };
+  auto parseCollider = [](const json &item) {
+    RayTrophiSim::ParticleColliderDesc collider;
+    if (!item.is_object()) {
+      return collider;
+    }
+    collider.name = item.value("name", collider.name);
+    collider.source_mode = particleColliderSourceModeFromString(
+        item.value("source_mode", std::string("PlaneY")));
+    collider.source_name = item.value("source_name", collider.source_name);
+    collider.sdf_resolution_mode = std::clamp(
+        item.value("sdf_resolution_mode", collider.sdf_resolution_mode), 0, 4);
+    collider.enabled = item.value("enabled", collider.enabled);
+    collider.fluid_collision_enabled =
+        item.value("fluid_collision_enabled", collider.fluid_collision_enabled);
+    collider.plane_y = item.value("plane_y", collider.plane_y);
+    if (item.contains("sphere_center"))
+      collider.sphere_center = jsonToVec3(item["sphere_center"]);
+    collider.sphere_radius =
+        item.value("sphere_radius", collider.sphere_radius);
+    if (item.contains("capsule_start"))
+      collider.capsule_start = jsonToVec3(item["capsule_start"]);
+    if (item.contains("capsule_end"))
+      collider.capsule_end = jsonToVec3(item["capsule_end"]);
+    collider.capsule_radius =
+        item.value("capsule_radius", collider.capsule_radius);
+    if (item.contains("bounds_min"))
+      collider.bounds_min = jsonToVec3(item["bounds_min"]);
+    if (item.contains("bounds_max"))
+      collider.bounds_max = jsonToVec3(item["bounds_max"]);
+    collider.restitution = item.value("restitution", collider.restitution);
+    collider.friction = item.value("friction", collider.friction);
+    collider.thickness = item.value("thickness", collider.thickness);
+    collider.contact_friction =
+        item.value("contact_friction", collider.contact_friction);
+    collider.contact_adhesion_pa =
+        item.value("contact_adhesion_pa", collider.contact_adhesion_pa);
+    collider.gas_interaction_enabled =
+        item.value("gas_interaction_enabled", collider.gas_interaction_enabled);
+    collider.gas_density_rate =
+        item.value("gas_density_rate", collider.gas_density_rate);
+    collider.gas_temperature_rate =
+        item.value("gas_temperature_rate", collider.gas_temperature_rate);
+    collider.gas_fuel_rate =
+        item.value("gas_fuel_rate", collider.gas_fuel_rate);
+    collider.gas_flame_rate =
+        item.value("gas_flame_rate", collider.gas_flame_rate);
+    collider.gas_surface_band_voxels =
+        item.value("gas_surface_band_voxels", collider.gas_surface_band_voxels);
+    collider.gas_ignite_on_contact =
+        item.value("gas_ignite_on_contact", collider.gas_ignite_on_contact);
+    // Absent in projects saved before Phase 2 -> "Custom", which keeps the
+    // free floats authoritative and reproduces the old behaviour exactly.
+    collider.msf_substance =
+        item.value("msf_substance", collider.msf_substance);
+    collider.msf_override.override_ignition = item.value(
+        "msf_override_ignition", collider.msf_override.override_ignition);
+    collider.msf_override.ignition_kelvin = item.value(
+        "msf_ignition_kelvin", collider.msf_override.ignition_kelvin);
+    collider.msf_override.burn_rate_scale = item.value(
+        "msf_burn_rate_scale", collider.msf_override.burn_rate_scale);
+    collider.msf_override.fuel_capacity_scale = item.value(
+        "msf_fuel_capacity_scale", collider.msf_override.fuel_capacity_scale);
+    collider.msf_mask_resolution =
+        item.value("msf_mask_resolution", collider.msf_mask_resolution);
+    collider.msf_generate_char_mask =
+        item.value("msf_generate_char_mask", collider.msf_generate_char_mask);
+    collider.msf_auto_transfer =
+        item.value("msf_auto_transfer", collider.msf_auto_transfer);
+    collider.msf_transfer_domain =
+        item.value("msf_transfer_domain", collider.msf_transfer_domain);
+    collider.msf_transfer_rate_kg_s =
+        item.value("msf_transfer_rate_kg_s", collider.msf_transfer_rate_kg_s);
+    collider.msf_transfer_min_mass_kg = item.value(
+        "msf_transfer_min_mass_kg", collider.msf_transfer_min_mass_kg);
+    collider.msf_transfer_particles_per_kg =
+        item.value("msf_transfer_particles_per_kg",
+                   collider.msf_transfer_particles_per_kg);
+    collider.msf_transfer_max_batch_particles =
+        item.value("msf_transfer_max_batch_particles",
+                   collider.msf_transfer_max_batch_particles);
+    if (item.contains("msf_transfer_velocity"))
+      collider.msf_transfer_velocity =
+          jsonToVec3(item["msf_transfer_velocity"]);
+    collider.msf_melt_flow_enabled =
+        item.value("msf_melt_flow_enabled", collider.msf_melt_flow_enabled);
+    collider.msf_melt_height_loss =
+        item.value("msf_melt_height_loss", collider.msf_melt_height_loss);
+    collider.msf_melt_spread =
+        item.value("msf_melt_spread", collider.msf_melt_spread);
+    collider.msf_melt_sdf_refresh =
+        item.value("msf_melt_sdf_refresh", collider.msf_melt_sdf_refresh);
+    collider.msf_melt_sdf_revision_interval = std::clamp<uint32_t>(
+        item.value("msf_melt_sdf_revision_interval",
+                   collider.msf_melt_sdf_revision_interval),
+        1u, 60u);
+    collider.msf_melt_sdf_change_threshold =
+        std::clamp(item.value("msf_melt_sdf_change_threshold",
+                              collider.msf_melt_sdf_change_threshold),
+                   0.001f, 0.25f);
+    return collider;
+  };
 
-    auto parseCollider = [](const json& item) {
-        RayTrophiSim::ParticleColliderDesc collider;
-        if (!item.is_object()) {
-            return collider;
-        }
-        collider.name = item.value("name", collider.name);
-        collider.source_mode = particleColliderSourceModeFromString(item.value("source_mode", std::string("PlaneY")));
-        collider.source_name = item.value("source_name", collider.source_name);
-        collider.sdf_resolution_mode = std::clamp(
-            item.value("sdf_resolution_mode", collider.sdf_resolution_mode), 0, 4);
-        collider.enabled = item.value("enabled", collider.enabled);
-        collider.fluid_collision_enabled = item.value("fluid_collision_enabled", collider.fluid_collision_enabled);
-        collider.plane_y = item.value("plane_y", collider.plane_y);
-        if (item.contains("sphere_center")) collider.sphere_center = jsonToVec3(item["sphere_center"]);
-        collider.sphere_radius = item.value("sphere_radius", collider.sphere_radius);
-        if (item.contains("capsule_start")) collider.capsule_start = jsonToVec3(item["capsule_start"]);
-        if (item.contains("capsule_end")) collider.capsule_end = jsonToVec3(item["capsule_end"]);
-        collider.capsule_radius = item.value("capsule_radius", collider.capsule_radius);
-        if (item.contains("bounds_min")) collider.bounds_min = jsonToVec3(item["bounds_min"]);
-        if (item.contains("bounds_max")) collider.bounds_max = jsonToVec3(item["bounds_max"]);
-        collider.restitution = item.value("restitution", collider.restitution);
-        collider.friction = item.value("friction", collider.friction);
-        collider.thickness = item.value("thickness", collider.thickness);
-        collider.contact_friction = item.value("contact_friction", collider.contact_friction);
-        collider.contact_adhesion_pa =
-            item.value("contact_adhesion_pa", collider.contact_adhesion_pa);
-        collider.gas_interaction_enabled = item.value("gas_interaction_enabled", collider.gas_interaction_enabled);
-        collider.gas_density_rate = item.value("gas_density_rate", collider.gas_density_rate);
-        collider.gas_temperature_rate = item.value("gas_temperature_rate", collider.gas_temperature_rate);
-        collider.gas_fuel_rate = item.value("gas_fuel_rate", collider.gas_fuel_rate);
-        collider.gas_flame_rate = item.value("gas_flame_rate", collider.gas_flame_rate);
-        collider.gas_surface_band_voxels = item.value("gas_surface_band_voxels", collider.gas_surface_band_voxels);
-        collider.gas_ignite_on_contact = item.value("gas_ignite_on_contact", collider.gas_ignite_on_contact);
-        // Absent in projects saved before Phase 2 -> "Custom", which keeps the
-        // free floats authoritative and reproduces the old behaviour exactly.
-        collider.msf_substance = item.value("msf_substance", collider.msf_substance);
-        collider.msf_override.override_ignition = item.value("msf_override_ignition", collider.msf_override.override_ignition);
-        collider.msf_override.ignition_kelvin = item.value("msf_ignition_kelvin", collider.msf_override.ignition_kelvin);
-        collider.msf_override.burn_rate_scale = item.value("msf_burn_rate_scale", collider.msf_override.burn_rate_scale);
-        collider.msf_override.fuel_capacity_scale = item.value("msf_fuel_capacity_scale", collider.msf_override.fuel_capacity_scale);
-        collider.msf_mask_resolution = item.value("msf_mask_resolution", collider.msf_mask_resolution);
-        collider.msf_generate_char_mask = item.value("msf_generate_char_mask", collider.msf_generate_char_mask);
-        collider.msf_auto_transfer = item.value("msf_auto_transfer", collider.msf_auto_transfer);
-        collider.msf_transfer_domain = item.value("msf_transfer_domain", collider.msf_transfer_domain);
-        collider.msf_transfer_rate_kg_s = item.value("msf_transfer_rate_kg_s", collider.msf_transfer_rate_kg_s);
-        collider.msf_transfer_min_mass_kg = item.value("msf_transfer_min_mass_kg", collider.msf_transfer_min_mass_kg);
-        collider.msf_transfer_particles_per_kg = item.value("msf_transfer_particles_per_kg", collider.msf_transfer_particles_per_kg);
-        collider.msf_transfer_max_batch_particles = item.value("msf_transfer_max_batch_particles", collider.msf_transfer_max_batch_particles);
-        if (item.contains("msf_transfer_velocity"))
-            collider.msf_transfer_velocity = jsonToVec3(item["msf_transfer_velocity"]);
-        collider.msf_melt_flow_enabled = item.value("msf_melt_flow_enabled", collider.msf_melt_flow_enabled);
-        collider.msf_melt_height_loss = item.value("msf_melt_height_loss", collider.msf_melt_height_loss);
-        collider.msf_melt_spread = item.value("msf_melt_spread", collider.msf_melt_spread);
-        collider.msf_melt_sdf_refresh = item.value("msf_melt_sdf_refresh", collider.msf_melt_sdf_refresh);
-        collider.msf_melt_sdf_revision_interval = std::clamp<uint32_t>(item.value(
-            "msf_melt_sdf_revision_interval", collider.msf_melt_sdf_revision_interval), 1u, 60u);
-        collider.msf_melt_sdf_change_threshold = std::clamp(item.value(
-            "msf_melt_sdf_change_threshold", collider.msf_melt_sdf_change_threshold), 0.001f, 0.25f);
-        return collider;
-    };
+  auto parseFlowSource = [](const json &item) {
+    RayTrophiSim::SimulationFlowSourceDesc source;
+    if (!item.is_object()) {
+      return source;
+    }
+    source.name = item.value("name", source.name);
+    source.timeline_uid = item.value("timeline_uid", source.timeline_uid);
+    source.source_mode = static_cast<RayTrophiSim::SimulationFlowSourceMode>(
+        item.value("source_mode", static_cast<int>(source.source_mode)));
+    source.source_name = item.value("source_name", source.source_name);
+    source.domain_index = item.value("domain_index", source.domain_index);
+    source.phase = static_cast<RayTrophiSim::SimulationFlowSourceDesc::Phase>(
+        item.value("phase", static_cast<int>(source.phase)));
+    source.enabled = item.value("enabled", source.enabled);
+    source.parent_object = item.value("parent_object", source.parent_object);
+    source.velocity_space =
+        static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(item.value(
+            "velocity_space", static_cast<int>(source.velocity_space)));
+    source.inherit_velocity =
+        item.value("inherit_velocity", source.inherit_velocity);
+    if (item.contains("position"))
+      source.position = jsonToVec3(item["position"]);
+    if (item.contains("velocity"))
+      source.velocity = jsonToVec3(item["velocity"]);
+    source.velocity_coupling =
+        item.value("velocity_coupling", source.velocity_coupling);
+    source.radius = item.value("radius", source.radius);
+    source.density = item.value("density", source.density);
+    source.temperature = item.value("temperature", source.temperature);
+    source.fuel = item.value("fuel", source.fuel);
+    source.falloff = item.value("falloff", source.falloff);
+    RayTrophiSim::Fluid::readLiquidEmission(item, source);
+    source.fluid_particles_per_second = item.value(
+        "fluid_particles_per_second", source.fluid_particles_per_second);
+    source.fluid_velocity_spread =
+        item.value("fluid_velocity_spread", source.fluid_velocity_spread);
+    source.fluid_emit_along_normal =
+        item.value("fluid_emit_along_normal", source.fluid_emit_along_normal);
+    // Absent in older files -> empty -> untagged -> the domain material, i.e.
+    // exactly how the scene rendered before substances existed.
+    source.fluid_substance =
+        item.value("fluid_substance", source.fluid_substance);
+    source.particle_pool_weight = item.value("particle_pool_weight", 1.0f);
+    source.fluid_temperature_override = item.value(
+        "fluid_temperature_override", source.fluid_temperature_override);
+    source.fluid_temperature_kelvin =
+        std::max(1.0f, item.value("fluid_temperature_kelvin",
+                                  source.fluid_temperature_kelvin));
+    source.splat_geometry = RayTrophiSim::Fluid::readSourceSplatGeometry(item);
+    source.grain_birth_saturation =
+        std::clamp(item.value("grain_birth_saturation", 0.0f), 0.0f, 1.0f);
+    source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
+    source.start_time = item.value("start_time", source.start_time);
+    source.end_time = item.value("end_time", source.end_time);
+    source.use_mass_limit = item.value("use_mass_limit", source.use_mass_limit);
+    source.max_emitted_mass_kg =
+        item.value("max_emitted_mass_kg", source.max_emitted_mass_kg);
+    // The count budget is not converted: a parcel's mass depends on the
+    // voxel, PPC and substance at the time it was born. Say it was dropped.
+    if (item.value("use_particle_limit", false)) {
+      SCENE_LOG_WARN("[ProjectManager] Flow source '" + source.name +
+                     "': its particle "
+                     "budget (" +
+                     std::to_string(item.value("max_emitted_particles", 0)) +
+                     " particles) was retired; the source budget is mass now. "
+                     "Set Max Emitted "
+                     "Mass (kg) on the source to limit it again.");
+    }
+    if (item.contains("keyframes") && item["keyframes"].is_array()) {
+      for (const auto &key_item : item["keyframes"]) {
+        if (!key_item.is_object())
+          continue;
+        const int frame = key_item.value("frame", 0);
+        RayTrophiSim::SimulationFlowSourceDesc::Keyframe key;
+        // Presence defaults preserve projects written by the first
+        // all-properties flow-key implementation.
+        key.has_enabled =
+            key_item.value("has_enabled", key_item.contains("enabled"));
+        key.has_position =
+            key_item.value("has_position", key_item.contains("position"));
+        key.has_velocity =
+            key_item.value("has_velocity", key_item.contains("velocity"));
+        key.has_radius =
+            key_item.value("has_radius", key_item.contains("radius"));
+        key.has_density =
+            key_item.value("has_density", key_item.contains("density"));
+        key.has_temperature =
+            key_item.value("has_temperature", key_item.contains("temperature"));
+        key.has_fuel = key_item.value("has_fuel", key_item.contains("fuel"));
+        key.has_falloff =
+            key_item.value("has_falloff", key_item.contains("falloff"));
+        key.has_velocity_coupling = key_item.value(
+            "has_velocity_coupling", key_item.contains("velocity_coupling"));
+        key.enabled = key_item.value("enabled", key.enabled);
+        if (key_item.contains("position"))
+          key.position = jsonToVec3(key_item["position"]);
+        if (key_item.contains("velocity"))
+          key.velocity = jsonToVec3(key_item["velocity"]);
+        key.radius = key_item.value("radius", key.radius);
+        key.density = key_item.value("density", key.density);
+        key.temperature = key_item.value("temperature", key.temperature);
+        key.fuel = key_item.value("fuel", key.fuel);
+        key.falloff = key_item.value("falloff", key.falloff);
+        key.velocity_coupling =
+            key_item.value("velocity_coupling", key.velocity_coupling);
+        key.has_flow_rate = key_item.value("has_flow_rate", false);
+        key.flow_rate = key_item.value("flow_rate", key.flow_rate);
+        source.keyframes[frame] = key;
+      }
+    }
+    source.fluid_emit_accumulator = 0.0f;
+    source.total_emitted_particles = 0;
+    source.total_emitted_mass_kg = 0.0;
+    source.withheld_mass_kg_step = 0.0;
+    source.withheld_mass_kg_total = 0.0;
+    // Motion state is runtime-only: arm the sentinel so the first step
+    // after load inherits zero rather than differencing against a
+    // default-constructed position.
+    source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
+    source.parent_velocity = Vec3(0.0f);
+    return source;
+  };
 
-    auto parseFlowSource = [](const json& item) {
-        RayTrophiSim::SimulationFlowSourceDesc source;
-        if (!item.is_object()) {
-            return source;
+  auto parseDomain = [](const json &item) {
+    RayTrophiSim::SimulationGridDomainDesc domain;
+    if (!item.is_object()) {
+      return domain;
+    }
+    domain.name = item.value("name", domain.name);
+    // Restore Gas/Fluid type (default Gas for pre-fix projects that lack it).
+    domain.type =
+        simulationDomainTypeFromString(item.value("type", std::string("Gas")));
+    domain.backend = static_cast<RayTrophiSim::SimulationDomainBackend>(
+        item.value("backend", static_cast<int>(domain.backend)));
+    domain.source_mode = simulationGridDomainSourceModeFromString(
+        item.value("source_mode", std::string("ManualBox")));
+    domain.boundary_mode = simulationGridDomainBoundaryModeFromString(
+        item.value("boundary_mode", std::string("Open")));
+    domain.source_name = item.value("source_name", domain.source_name);
+    domain.enabled = item.value("enabled", domain.enabled);
+    domain.preserve_voxel_size_on_resize = item.value(
+        "preserve_voxel_size_on_resize", domain.preserve_voxel_size_on_resize);
+    domain.adaptive_lock_floor =
+        item.value("adaptive_lock_floor", domain.adaptive_lock_floor);
+    domain.adaptive_floor_y =
+        item.value("adaptive_floor_y", domain.adaptive_floor_y);
+    domain.use_sparse_tiles =
+        item.value("use_sparse_tiles", domain.use_sparse_tiles);
+    domain.render_to_nanovdb =
+        item.value("render_to_nanovdb", domain.render_to_nanovdb);
+    if (item.contains("bounds_min"))
+      domain.bounds_min = jsonToVec3(item["bounds_min"]);
+    if (item.contains("bounds_max"))
+      domain.bounds_max = jsonToVec3(item["bounds_max"]);
+    if (item.contains("resolution") && item["resolution"].is_array() &&
+        item["resolution"].size() >= 3) {
+      domain.resolution_x = item["resolution"][0].get<int>();
+      domain.resolution_y = item["resolution"][1].get<int>();
+      domain.resolution_z = item["resolution"][2].get<int>();
+    }
+    domain.max_auto_resolution =
+        item.value("max_auto_resolution", domain.max_auto_resolution);
+    domain.quality_profile =
+        static_cast<RayTrophiSim::SimulationDomainQualityProfile>(std::clamp(
+            item.value("quality_profile",
+                       static_cast<uint32_t>(domain.quality_profile)),
+            0u, 4u));
+    domain.resource_budget_mb =
+        std::clamp(item.value("resource_budget_mb", domain.resource_budget_mb),
+                   64u, 65536u);
+    domain.enforce_resource_budget =
+        item.value("enforce_resource_budget", domain.enforce_resource_budget);
+    domain.voxel_size = item.value("voxel_size", domain.voxel_size);
+    domain.padding = item.value("padding", domain.padding);
+    RayTrophiSim::Fluid::loadPhaseSettings(item, domain);
+    domain.channels = item.value("channels", domain.channels);
+    domain.thermal_override_enabled =
+        item.value("thermal_override_enabled", domain.thermal_override_enabled);
+    domain.thermal_ambient_kelvin =
+        item.value("thermal_ambient_kelvin", domain.thermal_ambient_kelvin);
+    domain.thermal_oxygen = item.value("thermal_oxygen", domain.thermal_oxygen);
+    if (item.contains("fluid") && item["fluid"].is_object()) {
+      const auto &f = item["fluid"];
+      if (f.contains("seed_min"))
+        domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
+      if (f.contains("seed_max"))
+        domain.fluid_seed_max = jsonToVec3(f["seed_max"]);
+      domain.fluid_seed_box_initialized =
+          f.contains("seed_min") && f.contains("seed_max");
+      domain.fluid_seed_particles_per_cell = f.value(
+          "seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
+      domain.fluid_seed_grain_saturation = std::clamp(
+          f.value("seed_grain_saturation", domain.fluid_seed_grain_saturation),
+          0.0f, 1.0f);
+      domain.fluid_reseed_on_reset =
+          f.value("reseed_on_reset", domain.fluid_reseed_on_reset);
+      domain.fluid_max_particles =
+          f.value("max_particles", domain.fluid_max_particles);
+      domain.fluid_replace_on_seed =
+          f.value("replace_on_seed", domain.fluid_replace_on_seed);
+      domain.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)f.value(
+          "seed_mode", (int)domain.fluid_seed_mode);
+      domain.fluid_seed_mesh_object =
+          f.value("seed_mesh_object", domain.fluid_seed_mesh_object);
+      domain.fluid_fill_level = f.value("fill_level", domain.fluid_fill_level);
+      domain.fluid_fill_wall_margin =
+          f.value("fill_wall_margin", domain.fluid_fill_wall_margin);
+      domain.fluid_seed_settle =
+          f.value("seed_settle", domain.fluid_seed_settle);
+      domain.fluid_settle_max_steps =
+          f.value("settle_max_steps", domain.fluid_settle_max_steps);
+      domain.fluid_settle_displacement_m =
+          f.value("settle_displacement_m", domain.fluid_settle_displacement_m);
+      if (f.contains("gravity"))
+        domain.fluid_params.gravity = jsonToVec3(f["gravity"]);
+      domain.fluid_params.particles_per_cell =
+          f.value("particles_per_cell", domain.fluid_params.particles_per_cell);
+      domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);
+      domain.fluid_params.max_substeps =
+          f.value("max_substeps", domain.fluid_params.max_substeps);
+      domain.fluid_params.pressure_iterations = f.value(
+          "pressure_iterations", domain.fluid_params.pressure_iterations);
+      domain.fluid_params.pressure_iterations_grid_scaled =
+          f.value("pressure_iterations_grid_scaled",
+                  domain.fluid_params.pressure_iterations_grid_scaled);
+      domain.fluid_params.pressure_relative_residual =
+          f.value("pressure_relative_residual",
+                  domain.fluid_params.pressure_relative_residual);
+      domain.fluid_params.pressure_multigrid_preconditioner =
+          f.value("pressure_multigrid_preconditioner",
+                  domain.fluid_params.pressure_multigrid_preconditioner);
+      domain.fluid_params.sor_omega =
+          f.value("sor_omega", domain.fluid_params.sor_omega);
+      domain.fluid_params.apic_blend =
+          f.value("apic_blend", domain.fluid_params.apic_blend);
+      domain.fluid_params.max_velocity =
+          f.value("max_velocity", domain.fluid_params.max_velocity);
+      domain.fluid_params.velocity_damping =
+          f.value("velocity_damping", domain.fluid_params.velocity_damping);
+      domain.fluid_params.wall_damping =
+          f.value("wall_damping", domain.fluid_params.wall_damping);
+      domain.fluid_params.wall_friction =
+          f.value("wall_friction", domain.fluid_params.wall_friction);
+      domain.fluid_params.wall_adhesion_pa = f.value("wall_adhesion_pa", 0.0f);
+      domain.fluid_params.domain_motion_coupling = f.value(
+          "domain_motion_coupling", domain.fluid_params.domain_motion_coupling);
+      domain.fluid_params.viscosity_sweeps =
+          f.value("viscosity_sweeps", domain.fluid_params.viscosity_sweeps);
+      domain.fluid_params.viscosity_wall_slip = f.value(
+          "viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip);
+      domain.fluid_params.affine_damping =
+          f.value("affine_damping", domain.fluid_params.affine_damping);
+      domain.fluid_params.max_affine =
+          f.value("max_affine", domain.fluid_params.max_affine);
+      domain.fluid_params.cpu_threads =
+          f.value("cpu_threads", domain.fluid_params.cpu_threads);
+      domain.fluid_params.parallel_particle_threshold =
+          f.value("parallel_particle_threshold",
+                  domain.fluid_params.parallel_particle_threshold);
+      domain.fluid_params.free_surface =
+          f.value("free_surface", domain.fluid_params.free_surface);
+      domain.fluid_params.ghost_fluid_surface = f.value(
+          "ghost_fluid_surface", domain.fluid_params.ghost_fluid_surface);
+      domain.fluid_params.variational_solids =
+          f.value("variational_solids", domain.fluid_params.variational_solids);
+      // New params (added with FLIP + reseed). value() falls back to the
+      // struct default if the project file predates them — old projects
+      // load with sane defaults, no migration step needed.
+      domain.fluid_params.flip_blend =
+          f.value("flip_blend", domain.fluid_params.flip_blend);
+      domain.fluid_params.reseed_enabled =
+          f.value("reseed_enabled", domain.fluid_params.reseed_enabled);
+      domain.fluid_params.reseed_target_per_cell = f.value(
+          "reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell);
+      domain.fluid_params.reseed_min_per_cell = f.value(
+          "reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell);
+      domain.fluid_params.reseed_max_per_cell = f.value(
+          "reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell);
+      // Absent in older files, and the default is the shipped behaviour.
+      domain.fluid_params.uvw_refresh_period =
+          f.value("uvw_refresh_period", domain.fluid_params.uvw_refresh_period);
+      domain.fluid_params.internal_friction =
+          f.value("internal_friction", domain.fluid_params.internal_friction);
+      domain.fluid_params.air_drag =
+          f.value("air_drag", domain.fluid_params.air_drag);
+      // Which liquid's solver hints the domain holds
+      // (adoptParcelLiquidSubstance).
+      if (f.contains("liquid_physics_substance") &&
+          f["liquid_physics_substance"].is_string()) {
+        domain.fluid_params.liquid_physics_substance =
+            f["liquid_physics_substance"].get<std::string>();
+      }
+      domain.fluid_params.inherit_atmosphere =
+          f.value("inherit_atmosphere", true);
+      domain.fluid_params.density_relaxation_s = f.value(
+          "density_relaxation_s", domain.fluid_params.density_relaxation_s);
+      // Numerical settings (the substance's solver hints, editable on the
+      // domain).
+      domain.fluid_params.granular_max_solver_substeps =
+          f.value("granular_max_solver_substeps",
+                  domain.fluid_params.granular_max_solver_substeps);
+      domain.fluid_params.thermal_liquid_enabled = f.value(
+          "thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled);
+      domain.fluid_params.fog_autoconversion_kg_m3 =
+          f.value("fog_autoconversion_kg_m3",
+                  domain.fluid_params.fog_autoconversion_kg_m3);
+      domain.fluid_params.fog_autoconversion_rate =
+          f.value("fog_autoconversion_rate",
+                  domain.fluid_params.fog_autoconversion_rate);
+      domain.fluid_params.fog_ceiling_kg_m3 =
+          f.value("fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3);
+      domain.fluid_params.sanitizeThermalLiquid();
+      // ★ The material. A file written before 2026-10-07 has no
+      // default_substance; it stored a FluidPreset/FluidChemistryPreset
+      // pair plus a copy of the physics. The migration picks the substance
+      // and, where the stored physics differ from it (a hand-tuned
+      // domain), derives "<domain> material" so nothing is lost silently.
+      if (f.contains("default_substance") &&
+          f["default_substance"].is_string()) {
+        domain.fluid_params.default_substance =
+            f["default_substance"].get<std::string>();
+      } else {
+        std::string migrated, migration_error;
+        if (RayTrophiSim::Fluid::migrateLegacyDomainMaterial(
+                f, domain.name, domain.voxel_size, migrated, migration_error)) {
+          domain.fluid_params.default_substance = migrated;
+          SCENE_LOG_INFO("[ProjectManager] Domain '" + domain.name +
+                         "' material migrated to substance '" + migrated + "'");
+        } else {
+          SCENE_LOG_ERROR("[ProjectManager] Domain '" + domain.name +
+                          "' material could not be migrated (" +
+                          migration_error + "); it keeps '" +
+                          domain.fluid_params.default_substance + "'");
         }
-        source.name = item.value("name", source.name);
-        source.timeline_uid =
-            item.value("timeline_uid", source.timeline_uid);
-        source.source_mode = static_cast<RayTrophiSim::SimulationFlowSourceMode>(item.value("source_mode", static_cast<int>(source.source_mode)));
-        source.source_name = item.value("source_name", source.source_name);
-        source.domain_index = item.value("domain_index", source.domain_index);
-        source.phase = static_cast<RayTrophiSim::SimulationFlowSourceDesc::Phase>(
-            item.value("phase", static_cast<int>(source.phase)));
-        source.enabled = item.value("enabled", source.enabled);
-        source.parent_object = item.value("parent_object", source.parent_object);
-        source.velocity_space =
-            static_cast<RayTrophiSim::SimulationEmissionVelocitySpace>(
-                item.value("velocity_space",
-                           static_cast<int>(source.velocity_space)));
-        source.inherit_velocity = item.value("inherit_velocity", source.inherit_velocity);
-        if (item.contains("position")) source.position = jsonToVec3(item["position"]);
-        if (item.contains("velocity")) source.velocity = jsonToVec3(item["velocity"]);
-        source.velocity_coupling = item.value("velocity_coupling", source.velocity_coupling);
-        source.radius = item.value("radius", source.radius);
-        source.density = item.value("density", source.density);
-        source.temperature = item.value("temperature", source.temperature);
-        source.fuel = item.value("fuel", source.fuel);
-        source.falloff = item.value("falloff", source.falloff);
-        RayTrophiSim::Fluid::readLiquidEmission(item, source);
-        source.fluid_particles_per_second = item.value("fluid_particles_per_second", source.fluid_particles_per_second);
-        source.fluid_velocity_spread = item.value("fluid_velocity_spread", source.fluid_velocity_spread);
-        source.fluid_emit_along_normal = item.value("fluid_emit_along_normal", source.fluid_emit_along_normal);
-        // Absent in older files -> empty -> untagged -> the domain material, i.e.
-        // exactly how the scene rendered before substances existed.
-        source.fluid_substance = item.value("fluid_substance", source.fluid_substance);
-        source.particle_pool_weight = item.value("particle_pool_weight", 1.0f);
-        source.fluid_temperature_override = item.value("fluid_temperature_override", source.fluid_temperature_override);
-        source.fluid_temperature_kelvin = std::max(1.0f, item.value("fluid_temperature_kelvin", source.fluid_temperature_kelvin));
-        source.splat_geometry = RayTrophiSim::Fluid::readSourceSplatGeometry(item);
-        source.grain_birth_saturation = std::clamp(item.value("grain_birth_saturation", 0.0f), 0.0f, 1.0f);
-        source.use_time_limit = item.value("use_time_limit", source.use_time_limit);
-        source.start_time = item.value("start_time", source.start_time);
-        source.end_time = item.value("end_time", source.end_time);
-        source.use_mass_limit = item.value("use_mass_limit", source.use_mass_limit);
-        source.max_emitted_mass_kg = item.value("max_emitted_mass_kg", source.max_emitted_mass_kg);
-        // The count budget is not converted: a parcel's mass depends on the
-        // voxel, PPC and substance at the time it was born. Say it was dropped.
-        if (item.value("use_particle_limit", false)) {
-            SCENE_LOG_WARN("[ProjectManager] Flow source '" + source.name + "': its particle "
-                "budget (" + std::to_string(item.value("max_emitted_particles", 0)) +
-                " particles) was retired; the source budget is mass now. Set Max Emitted "
-                "Mass (kg) on the source to limit it again.");
+      }
+      {
+        std::string resolve_error;
+        if (!RayTrophiSim::Fluid::resolveDomainSubstancePhysics(
+                domain.fluid_params, domain.voxel_size,
+                RayTrophiSim::MaterialTemperatureScale{}, resolve_error)) {
+          SCENE_LOG_ERROR("[ProjectManager] Domain '" + domain.name +
+                          "': " + resolve_error);
         }
-        if (item.contains("keyframes") && item["keyframes"].is_array()) {
-            for (const auto& key_item : item["keyframes"]) {
-                if (!key_item.is_object()) continue;
-                const int frame = key_item.value("frame", 0);
-                RayTrophiSim::SimulationFlowSourceDesc::Keyframe key;
-                // Presence defaults preserve projects written by the first
-                // all-properties flow-key implementation.
-                key.has_enabled = key_item.value("has_enabled", key_item.contains("enabled"));
-                key.has_position = key_item.value("has_position", key_item.contains("position"));
-                key.has_velocity = key_item.value("has_velocity", key_item.contains("velocity"));
-                key.has_radius = key_item.value("has_radius", key_item.contains("radius"));
-                key.has_density = key_item.value("has_density", key_item.contains("density"));
-                key.has_temperature = key_item.value("has_temperature", key_item.contains("temperature"));
-                key.has_fuel = key_item.value("has_fuel", key_item.contains("fuel"));
-                key.has_falloff = key_item.value("has_falloff", key_item.contains("falloff"));
-                key.has_velocity_coupling = key_item.value(
-                    "has_velocity_coupling", key_item.contains("velocity_coupling"));
-                key.enabled = key_item.value("enabled", key.enabled);
-                if (key_item.contains("position"))
-                    key.position = jsonToVec3(key_item["position"]);
-                if (key_item.contains("velocity"))
-                    key.velocity = jsonToVec3(key_item["velocity"]);
-                key.radius = key_item.value("radius", key.radius);
-                key.density = key_item.value("density", key.density);
-                key.temperature =
-                    key_item.value("temperature", key.temperature);
-                key.fuel = key_item.value("fuel", key.fuel);
-                key.falloff = key_item.value("falloff", key.falloff);
-                key.velocity_coupling =
-                    key_item.value("velocity_coupling",
-                                   key.velocity_coupling);
-                key.has_flow_rate = key_item.value("has_flow_rate", false);
-                key.flow_rate = key_item.value("flow_rate", key.flow_rate);
-                source.keyframes[frame] = key;
-            }
-        }
-        source.fluid_emit_accumulator = 0.0f;
-        source.total_emitted_particles = 0;
-        source.total_emitted_mass_kg = 0.0;
-        source.withheld_mass_kg_step = 0.0;
-        source.withheld_mass_kg_total = 0.0;
-        // Motion state is runtime-only: arm the sentinel so the first step
-        // after load inherits zero rather than differencing against a
-        // default-constructed position.
-        source.parent_prev_position = Vec3(-1.0e10f, 0.0f, 0.0f);
-        source.parent_velocity = Vec3(0.0f);
-        return source;
-    };
-
-    auto parseDomain = [](const json& item) {
-        RayTrophiSim::SimulationGridDomainDesc domain;
-        if (!item.is_object()) {
-            return domain;
-        }
-        domain.name = item.value("name", domain.name);
-        // Restore Gas/Fluid type (default Gas for pre-fix projects that lack it).
-        domain.type = simulationDomainTypeFromString(item.value("type", std::string("Gas")));
-        domain.backend = static_cast<RayTrophiSim::SimulationDomainBackend>(item.value("backend", static_cast<int>(domain.backend)));
-        domain.source_mode = simulationGridDomainSourceModeFromString(item.value("source_mode", std::string("ManualBox")));
-        domain.boundary_mode = simulationGridDomainBoundaryModeFromString(item.value("boundary_mode", std::string("Open")));
-        domain.source_name = item.value("source_name", domain.source_name);
-        domain.enabled = item.value("enabled", domain.enabled);
-        domain.preserve_voxel_size_on_resize = item.value("preserve_voxel_size_on_resize", domain.preserve_voxel_size_on_resize);
-        domain.adaptive_lock_floor = item.value("adaptive_lock_floor", domain.adaptive_lock_floor);
-        domain.adaptive_floor_y = item.value("adaptive_floor_y", domain.adaptive_floor_y);
-        domain.use_sparse_tiles = item.value("use_sparse_tiles", domain.use_sparse_tiles);
-        domain.render_to_nanovdb = item.value("render_to_nanovdb", domain.render_to_nanovdb);
-        if (item.contains("bounds_min")) domain.bounds_min = jsonToVec3(item["bounds_min"]);
-        if (item.contains("bounds_max")) domain.bounds_max = jsonToVec3(item["bounds_max"]);
-        if (item.contains("resolution") && item["resolution"].is_array() && item["resolution"].size() >= 3) {
-            domain.resolution_x = item["resolution"][0].get<int>();
-            domain.resolution_y = item["resolution"][1].get<int>();
-            domain.resolution_z = item["resolution"][2].get<int>();
-        }
-        domain.max_auto_resolution = item.value("max_auto_resolution", domain.max_auto_resolution);
-        domain.quality_profile = static_cast<RayTrophiSim::SimulationDomainQualityProfile>(
-            std::clamp(item.value("quality_profile", static_cast<uint32_t>(domain.quality_profile)), 0u, 4u));
-        domain.resource_budget_mb = std::clamp(
-            item.value("resource_budget_mb", domain.resource_budget_mb), 64u, 65536u);
-        domain.enforce_resource_budget =
-            item.value("enforce_resource_budget", domain.enforce_resource_budget);
-        domain.voxel_size = item.value("voxel_size", domain.voxel_size);
-        domain.padding = item.value("padding", domain.padding);
-        RayTrophiSim::Fluid::loadPhaseSettings(item, domain);
-        domain.channels = item.value("channels", domain.channels);
-        domain.thermal_override_enabled =
-            item.value("thermal_override_enabled", domain.thermal_override_enabled);
-        domain.thermal_ambient_kelvin =
-            item.value("thermal_ambient_kelvin", domain.thermal_ambient_kelvin);
-        domain.thermal_oxygen = item.value("thermal_oxygen", domain.thermal_oxygen);
-        if (item.contains("fluid") && item["fluid"].is_object()) {
-            const auto& f = item["fluid"];
-            if (f.contains("seed_min")) domain.fluid_seed_min = jsonToVec3(f["seed_min"]);
-            if (f.contains("seed_max")) domain.fluid_seed_max = jsonToVec3(f["seed_max"]);
-            domain.fluid_seed_box_initialized = f.contains("seed_min") && f.contains("seed_max");
-            domain.fluid_seed_particles_per_cell = f.value("seed_particles_per_cell", domain.fluid_seed_particles_per_cell);
-            domain.fluid_seed_grain_saturation = std::clamp(
-                f.value("seed_grain_saturation", domain.fluid_seed_grain_saturation), 0.0f, 1.0f);
-            domain.fluid_reseed_on_reset = f.value("reseed_on_reset", domain.fluid_reseed_on_reset);
-            domain.fluid_max_particles = f.value("max_particles", domain.fluid_max_particles);
-            domain.fluid_replace_on_seed = f.value("replace_on_seed", domain.fluid_replace_on_seed);
-            domain.fluid_seed_mode = (RayTrophiSim::FluidSeedMode)f.value("seed_mode", (int)domain.fluid_seed_mode);
-            domain.fluid_seed_mesh_object = f.value("seed_mesh_object", domain.fluid_seed_mesh_object);
-            domain.fluid_fill_level = f.value("fill_level", domain.fluid_fill_level);
-            domain.fluid_fill_wall_margin = f.value("fill_wall_margin", domain.fluid_fill_wall_margin);
-            domain.fluid_seed_settle = f.value("seed_settle", domain.fluid_seed_settle);
-            domain.fluid_settle_max_steps = f.value("settle_max_steps", domain.fluid_settle_max_steps);
-            domain.fluid_settle_displacement_m = f.value("settle_displacement_m", domain.fluid_settle_displacement_m);
-            if (f.contains("gravity")) domain.fluid_params.gravity = jsonToVec3(f["gravity"]);
-            domain.fluid_params.particles_per_cell = f.value("particles_per_cell", domain.fluid_params.particles_per_cell);
-            domain.fluid_params.cfl = f.value("cfl", domain.fluid_params.cfl);
-            domain.fluid_params.max_substeps = f.value("max_substeps", domain.fluid_params.max_substeps);
-            domain.fluid_params.pressure_iterations = f.value("pressure_iterations", domain.fluid_params.pressure_iterations);
-            domain.fluid_params.pressure_iterations_grid_scaled = f.value("pressure_iterations_grid_scaled", domain.fluid_params.pressure_iterations_grid_scaled);
-            domain.fluid_params.pressure_relative_residual = f.value("pressure_relative_residual", domain.fluid_params.pressure_relative_residual);
-            domain.fluid_params.pressure_multigrid_preconditioner = f.value("pressure_multigrid_preconditioner", domain.fluid_params.pressure_multigrid_preconditioner);
-            domain.fluid_params.sor_omega = f.value("sor_omega", domain.fluid_params.sor_omega);
-            domain.fluid_params.apic_blend = f.value("apic_blend", domain.fluid_params.apic_blend);
-            domain.fluid_params.max_velocity = f.value("max_velocity", domain.fluid_params.max_velocity);
-            domain.fluid_params.velocity_damping = f.value("velocity_damping", domain.fluid_params.velocity_damping);
-            domain.fluid_params.wall_damping = f.value("wall_damping", domain.fluid_params.wall_damping);
-            domain.fluid_params.wall_friction = f.value("wall_friction", domain.fluid_params.wall_friction);
-            domain.fluid_params.wall_adhesion_pa = f.value("wall_adhesion_pa", 0.0f);
-            domain.fluid_params.domain_motion_coupling = f.value("domain_motion_coupling", domain.fluid_params.domain_motion_coupling);
-            domain.fluid_params.viscosity_sweeps = f.value("viscosity_sweeps", domain.fluid_params.viscosity_sweeps);
-            domain.fluid_params.viscosity_wall_slip = f.value("viscosity_wall_slip", domain.fluid_params.viscosity_wall_slip);
-            domain.fluid_params.affine_damping = f.value("affine_damping", domain.fluid_params.affine_damping);
-            domain.fluid_params.max_affine = f.value("max_affine", domain.fluid_params.max_affine);
-            domain.fluid_params.cpu_threads = f.value("cpu_threads", domain.fluid_params.cpu_threads);
-            domain.fluid_params.parallel_particle_threshold = f.value("parallel_particle_threshold", domain.fluid_params.parallel_particle_threshold);
-            domain.fluid_params.free_surface = f.value("free_surface", domain.fluid_params.free_surface);
-            domain.fluid_params.ghost_fluid_surface = f.value("ghost_fluid_surface", domain.fluid_params.ghost_fluid_surface);
-            domain.fluid_params.variational_solids = f.value("variational_solids", domain.fluid_params.variational_solids);
-            // New params (added with FLIP + reseed). value() falls back to the
-            // struct default if the project file predates them — old projects
-            // load with sane defaults, no migration step needed.
-            domain.fluid_params.flip_blend = f.value("flip_blend", domain.fluid_params.flip_blend);
-            domain.fluid_params.reseed_enabled = f.value("reseed_enabled", domain.fluid_params.reseed_enabled);
-            domain.fluid_params.reseed_target_per_cell = f.value("reseed_target_per_cell", domain.fluid_params.reseed_target_per_cell);
-            domain.fluid_params.reseed_min_per_cell = f.value("reseed_min_per_cell", domain.fluid_params.reseed_min_per_cell);
-            domain.fluid_params.reseed_max_per_cell = f.value("reseed_max_per_cell", domain.fluid_params.reseed_max_per_cell);
-            // Absent in older files, and the default is the shipped behaviour.
-            domain.fluid_params.uvw_refresh_period = f.value("uvw_refresh_period", domain.fluid_params.uvw_refresh_period);
-            domain.fluid_params.internal_friction = f.value("internal_friction", domain.fluid_params.internal_friction);
-            domain.fluid_params.air_drag = f.value("air_drag", domain.fluid_params.air_drag);
-            // Which liquid's solver hints the domain holds (adoptParcelLiquidSubstance).
-            if (f.contains("liquid_physics_substance") && f["liquid_physics_substance"].is_string()) {
-                domain.fluid_params.liquid_physics_substance =
-                    f["liquid_physics_substance"].get<std::string>();
-            }
-            domain.fluid_params.inherit_atmosphere = f.value("inherit_atmosphere", true);
-            domain.fluid_params.density_relaxation_s = f.value("density_relaxation_s", domain.fluid_params.density_relaxation_s);
-            // Numerical settings (the substance's solver hints, editable on the
-            // domain).
-            domain.fluid_params.granular_max_solver_substeps = f.value("granular_max_solver_substeps", domain.fluid_params.granular_max_solver_substeps);
-            domain.fluid_params.thermal_liquid_enabled = f.value("thermal_liquid_enabled", domain.fluid_params.thermal_liquid_enabled);
-            domain.fluid_params.fog_autoconversion_kg_m3 = f.value("fog_autoconversion_kg_m3", domain.fluid_params.fog_autoconversion_kg_m3);
-            domain.fluid_params.fog_autoconversion_rate = f.value("fog_autoconversion_rate", domain.fluid_params.fog_autoconversion_rate);
-            domain.fluid_params.fog_ceiling_kg_m3 = f.value("fog_ceiling_kg_m3", domain.fluid_params.fog_ceiling_kg_m3);
-            domain.fluid_params.sanitizeThermalLiquid();
-            // ★ The material. A file written before 2026-10-07 has no
-            // default_substance; it stored a FluidPreset/FluidChemistryPreset
-            // pair plus a copy of the physics. The migration picks the substance
-            // and, where the stored physics differ from it (a hand-tuned
-            // domain), derives "<domain> material" so nothing is lost silently.
-            if (f.contains("default_substance") && f["default_substance"].is_string()) {
-                domain.fluid_params.default_substance = f["default_substance"].get<std::string>();
-            } else {
-                std::string migrated, migration_error;
-                if (RayTrophiSim::Fluid::migrateLegacyDomainMaterial(f, domain.name,
-                        domain.voxel_size, migrated, migration_error)) {
-                    domain.fluid_params.default_substance = migrated;
-                    SCENE_LOG_INFO("[ProjectManager] Domain '" + domain.name +
-                                   "' material migrated to substance '" + migrated + "'");
-                } else {
-                    SCENE_LOG_ERROR("[ProjectManager] Domain '" + domain.name +
-                                    "' material could not be migrated (" + migration_error +
-                                    "); it keeps '" + domain.fluid_params.default_substance + "'");
-                }
-            }
-            {
-                std::string resolve_error;
-                if (!RayTrophiSim::Fluid::resolveDomainSubstancePhysics(domain.fluid_params,
-                        domain.voxel_size, RayTrophiSim::MaterialTemperatureScale{}, resolve_error)) {
-                    SCENE_LOG_ERROR("[ProjectManager] Domain '" + domain.name + "': " + resolve_error);
-                }
-            }
-            SCENE_LOG_INFO("[ProjectManager] parseDomain '" + domain.name +
-                           "' material=" + domain.fluid_params.default_substance +
-                           " visc=" + std::to_string(domain.fluid_params.kinematic_viscosity) +
-                           " sweeps=" + std::to_string(domain.fluid_params.viscosity_sweeps) +
-                           " granular_on=" + (domain.fluid_params.granular_enabled ? "1" : "0"));
-            domain.fluid_flammable = f.value("flammable", domain.fluid_flammable);
-            domain.fluid_auto_ignite = f.value("auto_ignite", domain.fluid_auto_ignite);
-            domain.fluid_ignition_temperature = f.value("ignition_temperature", domain.fluid_ignition_temperature);
-            domain.fluid_evaporation_rate = f.value("evaporation_rate", domain.fluid_evaporation_rate);
-            domain.fluid_surface_fuel_capacity = f.value("surface_fuel_capacity", domain.fluid_surface_fuel_capacity);
-            domain.fluid_combustion_heat_release = f.value("combustion_heat_release", domain.fluid_combustion_heat_release);
-            domain.fluid_combustion_smoke_yield = f.value("combustion_smoke_yield", domain.fluid_combustion_smoke_yield);
-            domain.fluid_surface_cooling = f.value("surface_cooling", domain.fluid_surface_cooling);
-        }
-
-        if (item.contains("fluid_render_mode")) domain.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(item["fluid_render_mode"].get<int>());
-        domain.fluid_fog_spread_voxels = item.value("fluid_fog_spread_voxels", domain.fluid_fog_spread_voxels);
-        domain.fluid_fog_erosion_strength = std::clamp(
-            item.value("fluid_fog_erosion_strength", domain.fluid_fog_erosion_strength), 0.0f, 1.0f);
-        domain.fluid_fog_erosion_size = std::clamp(
-            item.value("fluid_fog_erosion_size", domain.fluid_fog_erosion_size),
-            RayTrophiSim::Fluid::kFogErosionMinSize, RayTrophiSim::Fluid::kFogErosionMaxSize);
-        domain.fluid_fog_erosion_detail = std::clamp(
-            item.value("fluid_fog_erosion_detail", domain.fluid_fog_erosion_detail),
-            1, RayTrophiSim::Fluid::kFogErosionMaxDetail);
-        domain.fluid_fog_erosion_seed = item.value("fluid_fog_erosion_seed", domain.fluid_fog_erosion_seed);
-        domain.fluid_fog_erosion_depth = std::clamp(
-            item.value("fluid_fog_erosion_depth", domain.fluid_fog_erosion_depth),
-            0.0f, RayTrophiSim::Fluid::kFogErosionMaxDepth);
-        domain.fluid_fog_resolution_multiplier = std::clamp(
-            item.value("fluid_fog_resolution_multiplier", domain.fluid_fog_resolution_multiplier),
-            1, RayTrophiSim::Fluid::kFogMaxResolutionMultiplier);
-        if (item.contains("fluid_label_routes") && item["fluid_label_routes"].is_object()) {
-            for (auto it = item["fluid_label_routes"].begin(); it != item["fluid_label_routes"].end(); ++it) {
-                if (it.value().is_string())
-                    RayTrophiSim::Fluid::setLabelRouteByName(
-                        domain.fluid_label_routes, it.key(), it.value().get<std::string>());
-            }
-        }
-        if (item.contains("fluid_particle_color")) domain.fluid_particle_color = jsonToVec3(item["fluid_particle_color"]);
-        domain.fluid_particle_radius_factor = item.value("fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
-        domain.fluid_particle_size_multiplier = item.value("fluid_particle_size_multiplier", domain.fluid_particle_size_multiplier);
-        domain.fluid_particle_visual_children = item.value(
-            "fluid_particle_visual_children",
-            item.value(
-                "fluid_granular_visual_children",
-                domain.fluid_particle_visual_children));
-        domain.fluid_particle_visual_size_variation = item.value(
-            "fluid_particle_visual_size_variation",
-            item.value(
-                "fluid_granular_visual_size_variation",
-                domain.fluid_particle_visual_size_variation));
-        domain.fluid_particle_visual_budget = item.value(
-            "fluid_particle_visual_budget",
-            domain.fluid_particle_visual_budget);
-        domain.fluid_granular_physical_carriers = item.value(
-            "fluid_granular_physical_carriers",
-            domain.fluid_granular_physical_carriers);
-        domain.fluid_particle_subdivisions = item.value("fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
-        domain.fluid_particle_geometry_mode = item.value("fluid_particle_geometry_mode", domain.fluid_particle_geometry_mode);
-        domain.fluid_particle_geometry_source = item.value("fluid_particle_geometry_source", domain.fluid_particle_geometry_source);
-        domain.fluid_phase_output = RayTrophiSim::Fluid::readMatterPhaseOutput(item);
-        domain.fluid_visual_samples = item.value("fluid_visual_samples",
-            RayTrophiSim::Fluid::DomainVisualSettings{});
-        domain.matter_fog_streams = RayTrophiSim::Fluid::readFogAppearances(item);
-        domain.fluid_substance_splat_geometry =
-            RayTrophiSim::Fluid::readSubstanceSplatGeometries(item);
-        domain.fluid_grain_mesh_near_enabled = item.value("fluid_grain_mesh_near_enabled", domain.fluid_grain_mesh_near_enabled);
-        domain.fluid_grain_mesh_near_shape = item.value("fluid_grain_mesh_near_shape", "scene");
-        domain.fluid_grain_mesh_near_source_materials =
-            item.value("fluid_grain_mesh_near_source_materials", false);
-        if (item.contains("fluid_grain_mesh_near_sources") && item["fluid_grain_mesh_near_sources"].is_array())
-            domain.fluid_grain_mesh_near_sources = item["fluid_grain_mesh_near_sources"].get<std::vector<std::string>>();
-        domain.fluid_grain_mesh_near_distance = item.value("fluid_grain_mesh_near_distance", domain.fluid_grain_mesh_near_distance);
-        domain.fluid_grain_mesh_near_budget = item.value("fluid_grain_mesh_near_budget", domain.fluid_grain_mesh_near_budget);
-        domain.fluid_particle_emissive = item.value("fluid_particle_emissive", domain.fluid_particle_emissive);
-        domain.fluid_particle_emission = item.value("fluid_particle_emission", domain.fluid_particle_emission);
-        domain.fluid_particle_material_id = item.value("fluid_particle_material_id", domain.fluid_particle_material_id);
-
-        if (item.contains("fluid_level_set_params") && item["fluid_level_set_params"].is_object()) {
-            const auto& lsp = item["fluid_level_set_params"];
-            domain.fluid_level_set_params.narrow_band_voxels = lsp.value("narrow_band_voxels", domain.fluid_level_set_params.narrow_band_voxels);
-            domain.fluid_level_set_params.kernel_radius_voxels = lsp.value("kernel_radius_voxels", domain.fluid_level_set_params.kernel_radius_voxels);
-            domain.fluid_level_set_params.particle_radius_voxels = lsp.value("particle_radius_voxels", domain.fluid_level_set_params.particle_radius_voxels);
-            domain.fluid_level_set_params.surface_offset_voxels = lsp.value("surface_offset_voxels", domain.fluid_level_set_params.surface_offset_voxels);
-            domain.fluid_level_set_params.smoothing_iterations = lsp.value("smoothing_iterations", domain.fluid_level_set_params.smoothing_iterations);
-            domain.fluid_level_set_params.surface_resolution_multiplier = lsp.value("surface_resolution_multiplier", domain.fluid_level_set_params.surface_resolution_multiplier);
-            domain.fluid_level_set_params.anisotropy_enabled = lsp.value("anisotropy_enabled", domain.fluid_level_set_params.anisotropy_enabled);
-            domain.fluid_level_set_params.anisotropy_radius_voxels = lsp.value("anisotropy_radius_voxels", domain.fluid_level_set_params.anisotropy_radius_voxels);
-            domain.fluid_level_set_params.anisotropy_max_stretch = lsp.value("anisotropy_max_stretch", domain.fluid_level_set_params.anisotropy_max_stretch);
-            domain.fluid_level_set_params.anisotropy_neighbor_min = lsp.value("anisotropy_neighbor_min", domain.fluid_level_set_params.anisotropy_neighbor_min);
-            domain.fluid_level_set_params.position_smoothing = lsp.value("position_smoothing", domain.fluid_level_set_params.position_smoothing);
-            domain.fluid_level_set_params.gpu_build = lsp.value("gpu_build", domain.fluid_level_set_params.gpu_build);
-        }
-
-        domain.fluid_surface_band_voxels = item.value("fluid_surface_band_voxels", domain.fluid_surface_band_voxels);
-        domain.fluid_surface_ior = item.value("fluid_surface_ior", domain.fluid_surface_ior);
-        domain.fluid_surface_roughness = item.value("fluid_surface_roughness", domain.fluid_surface_roughness);
-        domain.fluid_surface_foam = item.value("fluid_surface_foam", domain.fluid_surface_foam);
-        domain.fluid_surface_material_id =
-            item.value("fluid_surface_material_id", domain.fluid_surface_material_id);
-        domain.fluid_surface_pore_amount =
-            item.value("fluid_surface_pore_amount", domain.fluid_surface_pore_amount);
-        domain.fluid_surface_pore_scale =
-            item.value("fluid_surface_pore_scale", domain.fluid_surface_pore_scale);
-        domain.fluid_surface_pore_detail =
-            item.value("fluid_surface_pore_detail", domain.fluid_surface_pore_detail);
-        // Absent in projects saved before coordinate spaces existed. The default
-        // is Material, which is IDENTICAL to the old world anchoring for
-        // anything that has not moved (the coordinate is seeded with the birth
-        // position), so an old file opens looking exactly as it was saved.
-        domain.fluid_surface_coord_space =
-            item.value("fluid_surface_coord_space", domain.fluid_surface_coord_space);
-        // `fluid_blend_substance_materials` is gone — it was a domain-wide
-        // shading switch whose "off" state produced voxelised material patches,
-        // not a dominant material. Sharpness is now per-substance `miscibility`
-        // below. An old project has neither key: the flag is ignored and
-        // miscibility defaults to 1.0, which is what the flag's default meant.
-        if (item.contains("matter_pore_exchange")) {
-            domain.fluid_params.pore_exchange = RayTrophiSim::Fluid::matterPoreParamsFromJson(item.at("matter_pore_exchange"));
-        }
-        if (item.contains("matter_grain")) {
-            std::string dropped;
-            domain.fluid_params.grain = RayTrophiSim::Fluid::matterGrainParamsFromJson(
-                item.at("matter_grain"), &dropped);
-            if (!dropped.empty()) {
-                SCENE_LOG_WARN("[ProjectManager] Domain '" + domain.name + "': saved grain material (" +
-                    dropped + ") ignored; the grain substance owns it now. Derive a substance "
-                    "to keep custom values.");
-            }
-        }
-        domain.fluid_substance_materials.clear();
-        if (item.contains("fluid_substance_materials") &&
-            item["fluid_substance_materials"].is_array()) {
-            for (const auto& b : item["fluid_substance_materials"]) {
-                RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial entry;
-                entry.substance = b.value("substance", std::string());
-                entry.material_id = b.value("material_id", -1);
-                int representation = b.value("representation", 0);
-                if (representation < 0 || representation > 3) representation = 0;
-                entry.representation = static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(representation);
-                // ★ Default -1 = INHERIT the domain viscosity, not 0. Reading a
-                // missing key as 0 would turn every substance in every project
-                // saved before this feature into an inviscid one — a scene that
-                // opens thinner than it was saved, with nothing to point at.
-                entry.kinematic_viscosity = b.value("kinematic_viscosity", -1.0f);
-                entry.miscibility = std::clamp(b.value("miscibility", 1.0f), 0.0f, 1.0f);
-                // ★ Missing key = LIQUID, and that is the only safe default: a
-                // project saved before phases existed described liquid, so
-                // reading anything else would freeze scenes that never asked to
-                // be frozen. An unrecognised string falls back the same way
-                // rather than guessing — the panel and the script both report
-                // what was loaded, so a silent demotion is visible.
-                entry.phase = (b.value("phase", std::string("liquid")) == "solid")
-                    ? RayTrophiSim::Fluid::SubstancePhase::Solid
-                    : RayTrophiSim::Fluid::SubstancePhase::Liquid;
-                if (!entry.substance.empty())
-                    domain.fluid_substance_materials.push_back(entry);
-            }
-        }
-        // Absent in projects saved before the solid phase existed. Enabled is
-        // the safe default there BECAUSE no substance in such a file is solid:
-        // the switch gates a path that has nothing to do until a phase is
-        // authored, so defaulting it off would ship a control that starts in
-        // the state the user has to discover before the feature works at all.
-        domain.fluid_solid_phase_enabled =
-            item.value("fluid_solid_phase_enabled", domain.fluid_solid_phase_enabled);
-        domain.fluid_solid_phase_fill =
-            std::clamp(item.value("fluid_solid_phase_fill", domain.fluid_solid_phase_fill),
-                       0.01f, 4.0f);
-        domain.fluid_debug_overlay = item.value("fluid_debug_overlay", domain.fluid_debug_overlay);
-
-        if (item.contains("foam") && item["foam"].is_object()) {
-            const auto& fo_js = item["foam"];
-            auto& fo = domain.fluid_foam_params;
-            fo.enabled = fo_js.value("enabled", fo.enabled);
-            fo.trapped_air_rate = fo_js.value("trapped_air_rate", fo.trapped_air_rate);
-            fo.wave_crest_rate = fo_js.value("wave_crest_rate", fo.wave_crest_rate);
-            fo.ta_min = fo_js.value("ta_min", fo.ta_min);
-            fo.ta_max = fo_js.value("ta_max", fo.ta_max);
-            fo.wc_min = fo_js.value("wc_min", fo.wc_min);
-            fo.wc_max = fo_js.value("wc_max", fo.wc_max);
-            fo.ke_min = fo_js.value("ke_min", fo.ke_min);
-            fo.ke_max = fo_js.value("ke_max", fo.ke_max);
-            fo.crest_cos = fo_js.value("crest_cos", fo.crest_cos);
-            fo.neighbor_radius_voxels = fo_js.value("neighbor_radius_voxels", fo.neighbor_radius_voxels);
-            fo.spray_max_neighbors = fo_js.value("spray_max_neighbors", fo.spray_max_neighbors);
-            fo.bubble_min_neighbors = fo_js.value("bubble_min_neighbors", fo.bubble_min_neighbors);
-            fo.lifetime = fo_js.value("lifetime", fo.lifetime);
-            fo.buoyancy = fo_js.value("buoyancy", fo.buoyancy);
-            fo.fluid_drag = fo_js.value("fluid_drag", fo.fluid_drag);
-            fo.spray_drag = fo_js.value("spray_drag", fo.spray_drag);
-            fo.spawn_jitter_voxels = fo_js.value("spawn_jitter_voxels", fo.spawn_jitter_voxels);
-            fo.max_foam = fo_js.value("max_foam", fo.max_foam);
-            fo.render_radius_voxels = fo_js.value("render_radius_voxels", fo.render_radius_voxels);
-            fo.foam_sphere_subdivisions = fo_js.value("foam_sphere_subdivisions", fo.foam_sphere_subdivisions);
-            fo.volume_density = fo_js.value("volume_density", fo.volume_density);
-            if (fo_js.contains("volume_color") && fo_js["volume_color"].is_array() &&
-                fo_js["volume_color"].size() == 3) {
-                fo.volume_color = Vec3(fo_js["volume_color"][0].get<float>(),
-                                       fo_js["volume_color"][1].get<float>(),
-                                       fo_js["volume_color"][2].get<float>());
-            }
-            fo.volume_opacity = fo_js.value("volume_opacity", fo.volume_opacity);
-            fo.volume_bubble_strength = fo_js.value("volume_bubble_strength", fo.volume_bubble_strength);
-            fo.volume_spray_strength = fo_js.value("volume_spray_strength", fo.volume_spray_strength);
-            fo.foam_material_id = fo_js.value("foam_material_id", fo.foam_material_id);
-            fo.spray_material_id = fo_js.value("spray_material_id", fo.spray_material_id);
-            fo.bubble_material_id = fo_js.value("bubble_material_id", fo.bubble_material_id);
-        }
-        domain.fire_enabled = item.value("fire_enabled", domain.fire_enabled);
-        domain.ignition_temperature = item.value("ignition_temperature", domain.ignition_temperature);
-        domain.burn_rate = item.value("burn_rate", domain.burn_rate);
-        domain.heat_release = item.value("heat_release", domain.heat_release);
-        domain.smoke_generation = item.value("smoke_generation", domain.smoke_generation);
-        domain.flame_dissipation = item.value("flame_dissipation", domain.flame_dissipation);
-        domain.fire_max_temperature = item.value("fire_max_temperature", domain.fire_max_temperature);
-        domain.structural_coupling_enabled = item.value("structural_coupling_enabled", domain.structural_coupling_enabled);
-        domain.structural_pressure_scale = item.value("structural_pressure_scale", domain.structural_pressure_scale);
-        domain.structural_min_intensity = item.value("structural_min_intensity", domain.structural_min_intensity);
-        domain.structural_event_interval = item.value("structural_event_interval", domain.structural_event_interval);
-        domain.fire_expansion = item.value("fire_expansion", domain.fire_expansion);
-        domain.gas_buoyancy_heat = item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
-        domain.gas_buoyancy_density = item.value("gas_buoyancy_density", domain.gas_buoyancy_density);
-        domain.gas_ambient_stratification = item.value("gas_ambient_stratification", domain.gas_ambient_stratification);
-        domain.gas_inherit_atmosphere = item.value("gas_inherit_atmosphere", false);
-        domain.gas_pressure_iterations =
-            item.value("gas_pressure_iterations", domain.gas_pressure_iterations);
-        domain.gas_surface_dust_enabled = item.value("gas_surface_dust_enabled", domain.gas_surface_dust_enabled);
-        domain.gas_surface_dust_threshold = item.value("gas_surface_dust_threshold", domain.gas_surface_dust_threshold);
-        domain.gas_surface_dust_emission = item.value("gas_surface_dust_emission", domain.gas_surface_dust_emission);
-        domain.gas_surface_dust_temperature =
-            item.value("gas_surface_dust_temperature", domain.gas_surface_dust_temperature);
-        domain.gas_surface_dust_max_density = item.value("gas_surface_dust_max_density", domain.gas_surface_dust_max_density);
-        domain.gas_surface_dust_supply = item.value("gas_surface_dust_supply", domain.gas_surface_dust_supply);
-        domain.gas_dissipation_override = item.value("gas_dissipation_override", domain.gas_dissipation_override);
-        domain.gas_density_dissipation = item.value("gas_density_dissipation", domain.gas_density_dissipation);
-        domain.gas_temperature_dissipation = item.value("gas_temperature_dissipation", domain.gas_temperature_dissipation);
-        domain.gas_fuel_dissipation = item.value("gas_fuel_dissipation", domain.gas_fuel_dissipation);
-        domain.gas_vorticity = item.value("gas_vorticity", domain.gas_vorticity);
-        domain.gas_maccormack_advection =
-            item.value("gas_maccormack_advection", domain.gas_maccormack_advection);
-        domain.turbulence_strength = item.value("turbulence_strength", domain.turbulence_strength);
-        domain.turbulence_scale = item.value("turbulence_scale", domain.turbulence_scale);
-        domain.turbulence_octaves = item.value("turbulence_octaves", domain.turbulence_octaves);
-        domain.turbulence_lacunarity = item.value("turbulence_lacunarity", domain.turbulence_lacunarity);
-        domain.turbulence_persistence = item.value("turbulence_persistence", domain.turbulence_persistence);
-        domain.turbulence_speed = item.value("turbulence_speed", domain.turbulence_speed);
-        if (item.contains("shader")) {
-            domain.shader = domainVolumeShaderFromJson(item["shader"]);
-        }
-        if (item.contains("fluid_fog_shader")) {
-            domain.fluid_fog_shader = domainVolumeShaderFromJson(item["fluid_fog_shader"]);
-        } else if (RayTrophiSim::simulationDomainHasLiquid(domain) &&
-                   domain.fluid_render_mode == RayTrophiSim::Fluid::FluidRenderMode::VolumeFog &&
-                   domain.shader) {
-            // Saved before the fog view had its own shader: a fog-mode liquid
-            // kept its fog look in `shader`. Carry it over instead of letting the
-            // fog volume start from the preset.
-            domain.fluid_fog_shader = std::make_shared<VolumeShader>(*domain.shader);
-        }
-        RayTrophiSim::Fluid::readMatterSeedSources(item, domain);
-        return domain;
-    };
-
-    auto parseSettingsInto = [](const json& settings, RayTrophiSim::ParticleSimulationSystem& runtime) {
-        if (!settings.is_object()) {
-            return;
-        }
-        if (settings.contains("gravity")) runtime.setGravity(jsonToVec3(settings["gravity"]));
-        runtime.setLinearDrag(settings.value("linear_drag", runtime.linearDrag()));
-        const bool plane_enabled = settings.value("collision_plane_enabled", runtime.collisionPlaneEnabled());
-        const float plane_y = settings.value("collision_plane_y", runtime.collisionPlaneY());
-        const float restitution = settings.value("collision_restitution", runtime.collisionRestitution());
-        runtime.setCollisionPlane(plane_y, plane_enabled, restitution);
-        if (settings.contains("physics") && settings["physics"].is_object()) {
-            const auto& p = settings["physics"];
-            auto& physics = runtime.physicsSettings();
-            physics.mode = particlePhysicsModeFromString(p.value("mode", std::string("Spark")));
-            physics.quality = particleQualityModeFromString(p.value("quality", std::string("Realtime")));
-            physics.execution_policy = particleExecutionPolicyFromString(
-                p.value("execution_policy", std::string("Auto")));
-            physics.particle_radius = p.value("particle_radius", physics.particle_radius);
-            physics.self_collision_enabled = p.value("self_collision_enabled", physics.self_collision_enabled);
-            physics.solver_iterations = p.value("solver_iterations", physics.solver_iterations);
-            physics.max_neighbors_per_particle = p.value("max_neighbors_per_particle", physics.max_neighbors_per_particle);
-            physics.viscosity = p.value("viscosity", physics.viscosity);
-            physics.inherit_atmosphere = p.value("inherit_atmosphere", true);
-            physics.cohesion = p.value("cohesion", physics.cohesion);
-            physics.pressure_stiffness = p.value("pressure_stiffness", physics.pressure_stiffness);
-            physics.rest_density = p.value("rest_density", physics.rest_density);
-            physics.buoyancy = p.value("buoyancy", physics.buoyancy);
-            physics.gravity_scale = p.value("gravity_scale", physics.gravity_scale);
-            physics.grid_density_deposit =
-                p.value("grid_density_deposit", physics.grid_density_deposit);
-            physics.grid_temperature_deposit =
-                p.value("grid_temperature_deposit", physics.grid_temperature_deposit);
-            physics.grid_fuel_deposit =
-                p.value("grid_fuel_deposit", physics.grid_fuel_deposit);
-            physics.grid_deposit_fade_with_age =
-                p.value("grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age);
-            // Contact behaviour (absent in older projects = bounce, no events).
-            if (p.contains("collision_response") && p["collision_response"].is_string()) {
-                physics.collision_response = p["collision_response"].get<std::string>() == "die"
-                    ? RayTrophiSim::ParticleCollisionResponse::Die
-                    : RayTrophiSim::ParticleCollisionResponse::Bounce;
-            }
-            if (p.contains("record_collision_events") && p["record_collision_events"].is_boolean()) {
-                physics.record_collision_events = p["record_collision_events"].get<bool>();
-            }
-            if (p.contains("collision_event_capacity") &&
-                p["collision_event_capacity"].is_number_unsigned()) {
-                physics.collision_event_capacity = std::max<uint32_t>(
-                    1u, p["collision_event_capacity"].get<uint32_t>());
-            }
-            physics.vorticity = p.value("vorticity", physics.vorticity);
-        }
-        if (settings.contains("world_thermal") && settings["world_thermal"].is_object()) {
-            const auto& t = settings["world_thermal"];
-            auto& thermal = runtime.worldThermal();
-            thermal.ambient_kelvin = t.value("ambient_kelvin", thermal.ambient_kelvin);
-            // Saved before the zero/ambient split: the ambient WAS the zero.
-            thermal.reference_kelvin = t.value("reference_kelvin", thermal.ambient_kelvin);
-            thermal.inherit_atmosphere = t.value("inherit_atmosphere", false);
-            thermal.kelvin_per_unit = t.value("kelvin_per_unit", thermal.kelvin_per_unit);
-            thermal.convection_coefficient =
-                t.value("convection_coefficient", thermal.convection_coefficient);
-            thermal.oxygen_availability =
-                t.value("oxygen_availability", thermal.oxygen_availability);
-        }
-    };
-
-    // Build one ParticleSystemObject with its own registered runtime, populated
-    // straight from JSON (runtime is the source of truth — no descriptor staging).
-    // `legacy_blend` is the pre-profile per-system blend_mode (0 additive,
-    // 1 alpha); it only feeds the migration of emitters saved before profiles.
-    auto adoptSystem = [&](uint32_t id, const std::string& name, bool visible,
-                           bool enabled, int legacy_blend, bool emitter_only,
-                           const json* system_json,
-                           const json* settings, const json* emitters,
-                           const json* colliders, const json* domains,
-                           const json* flow_sources) {
-        SceneData::ParticleSystemObject system;
-        system.id = id;
-        system.name = name;
-        system.visible = visible;
-        system.enabled = enabled;
-        system.render.emitter_only = emitter_only;
-        system.runtime = scene.createParticleRuntime();
-        if (settings) parseSettingsInto(*settings, *system.runtime);
-        if (system_json) {
-            RayTrophiSim::deserializeParticleAppearanceProfiles(*system_json, *system.runtime);
-        }
-        if (emitters && emitters->is_array()) {
-            for (const auto& emitter_item : *emitters) {
-                if (!emitter_item.is_object()) continue;
-                RayTrophiSim::ParticleEmitterDesc emitter = parseEmitter(emitter_item);
-                RayTrophiSim::readEmitterAppearance(emitter_item, legacy_blend,
-                                                    *system.runtime, emitter);
-                system.runtime->addEmitter(emitter);
-            }
-        }
-        if (colliders && colliders->is_array()) {
-            for (const auto& collider_item : *colliders) {
-                if (!collider_item.is_object()) continue;
-                auto& added_col = system.runtime->addCollider(parseCollider(collider_item));
-                // ObjectConvexDecomp / ObjectMeshBVH are deprecated — consolidated
-                // onto the SDF collider. Migrate legacy projects so they keep
-                // colliding (the enum values are still parsed for compatibility).
-                if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
-                    added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
-                    added_col.source_mode = RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
-                }
-                // Voxel colliders don't serialize their SDF grid — rebuild it from
-                // the source mesh on load. Pass THIS system's runtime explicitly
-                // (it is not the active system yet during load).
-                if (added_col.source_mode == RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
-                    !added_col.source_name.empty()) {
-                    scene.rebuildSDFColliderAsync(added_col, system.runtime);
-                }
-            }
-        }
-        if (domains && domains->is_array()) {
-            for (const auto& domain_item : *domains) {
-                if (domain_item.is_object()) system.runtime->addGridDomain(parseDomain(domain_item));
-            }
-        }
-        if (flow_sources && flow_sources->is_array()) {
-            for (const auto& flow_item : *flow_sources) {
-                if (flow_item.is_object()) system.runtime->addFlowSource(parseFlowSource(flow_item));
-            }
-        }
-        // Legacy type migration must see all sources before becoming Matter.
-        system.runtime->synchronizeGridDomainsNow();
-        SceneData::applyParticleSystemEnabledState(system);
-        scene.particle_systems.push_back(std::move(system));
-    };
-
-    scene.clearParticleSystemObjects();
-
-    if (j.contains("systems") && j["systems"].is_array()) {
-        uint32_t max_id = 0;
-        for (const auto& item : j["systems"]) {
-            if (!item.is_object()) {
-                continue;
-            }
-
-            SceneData::ParticleSystemObject defaults;
-            const uint32_t id = item.value("id", defaults.id);
-            const std::string name = item.value("name", defaults.name);
-            const bool visible = item.value("visible", defaults.visible);
-            const bool enabled = item.value("enabled", defaults.enabled);
-            // Read only for migrating pre-profile emitters; never written.
-            const int legacy_blend = item.value("blend_mode", 0);
-            // Systems saved before this setting existed displayed particles.
-            const bool emitter_only = item.value("emitter_only", false);
-            const json* settings = item.contains("settings") ? &item["settings"] : nullptr;
-            const json* emitters = item.contains("emitters") ? &item["emitters"] : nullptr;
-            const json* colliders = item.contains("colliders") ? &item["colliders"] : nullptr;
-            const json* domains = item.contains("domains") ? &item["domains"] : nullptr;
-            const json* flow_sources = item.contains("flow_sources") ? &item["flow_sources"] : nullptr;
-            adoptSystem(id, name, visible, enabled, legacy_blend, emitter_only,
-                        &item, settings, emitters, colliders, domains, flow_sources);
-            max_id = std::max(max_id, id);
-        }
-
-        scene.next_particle_system_id = std::max(j.value("next_system_id", max_id + 1u), max_id + 1u);
-        scene.active_particle_system_index = j.value("active_system_index", 0);
-        if (scene.active_particle_system_index < 0 ||
-            scene.active_particle_system_index >= static_cast<int>(scene.particle_systems.size())) {
-            scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
-        }
-    } else {
-        // Legacy single-system project file.
-        const json* settings = j.contains("settings") ? &j["settings"] : nullptr;
-        const json* emitters = j.contains("emitters") ? &j["emitters"] : nullptr;
-        const json* colliders = j.contains("colliders") ? &j["colliders"] : nullptr;
-        const json* domains = j.contains("domains") ? &j["domains"] : nullptr;
-        const json* flow_sources = j.contains("flow_sources") ? &j["flow_sources"] : nullptr;
-        adoptSystem(1u, "Particle System 1", true, true, 0, false,
-                    nullptr, settings, emitters, colliders, domains, flow_sources);
-        scene.next_particle_system_id = 2u;
-        scene.active_particle_system_index = scene.particle_systems.empty() ? -1 : 0;
+      }
+      SCENE_LOG_INFO(
+          "[ProjectManager] parseDomain '" + domain.name +
+          "' material=" + domain.fluid_params.default_substance +
+          " visc=" + std::to_string(domain.fluid_params.kinematic_viscosity) +
+          " sweeps=" + std::to_string(domain.fluid_params.viscosity_sweeps) +
+          " granular_on=" + (domain.fluid_params.granular_enabled ? "1" : "0"));
+      domain.fluid_flammable = f.value("flammable", domain.fluid_flammable);
+      domain.fluid_auto_ignite =
+          f.value("auto_ignite", domain.fluid_auto_ignite);
+      domain.fluid_ignition_temperature =
+          f.value("ignition_temperature", domain.fluid_ignition_temperature);
+      domain.fluid_evaporation_rate =
+          f.value("evaporation_rate", domain.fluid_evaporation_rate);
+      domain.fluid_surface_fuel_capacity =
+          f.value("surface_fuel_capacity", domain.fluid_surface_fuel_capacity);
+      domain.fluid_combustion_heat_release = f.value(
+          "combustion_heat_release", domain.fluid_combustion_heat_release);
+      domain.fluid_combustion_smoke_yield = f.value(
+          "combustion_smoke_yield", domain.fluid_combustion_smoke_yield);
+      domain.fluid_surface_cooling =
+          f.value("surface_cooling", domain.fluid_surface_cooling);
     }
 
-    scene.pruneInvalidParticleObjectBindings();
-
-    if (auto particles = scene.getParticleSimulationSystem()) {
-        SCENE_LOG_INFO("[ProjectManager] Loaded " +
-                       std::to_string(scene.particle_systems.size()) + " particle system(s); active has " +
-                       std::to_string(particles->emitters().size()) + " emitters and " +
-                       std::to_string(particles->colliders().size()) + " colliders.");
-    } else {
-        SCENE_LOG_INFO("[ProjectManager] Loaded empty particle simulation.");
+    if (item.contains("fluid_render_mode"))
+      domain.fluid_render_mode = RayTrophiSim::Fluid::fluidRenderModeFromStored(
+          item["fluid_render_mode"].get<int>());
+    domain.fluid_fog_spread_voxels =
+        item.value("fluid_fog_spread_voxels", domain.fluid_fog_spread_voxels);
+    domain.fluid_fog_erosion_strength =
+        std::clamp(item.value("fluid_fog_erosion_strength",
+                              domain.fluid_fog_erosion_strength),
+                   0.0f, 1.0f);
+    domain.fluid_fog_erosion_size = std::clamp(
+        item.value("fluid_fog_erosion_size", domain.fluid_fog_erosion_size),
+        RayTrophiSim::Fluid::kFogErosionMinSize,
+        RayTrophiSim::Fluid::kFogErosionMaxSize);
+    domain.fluid_fog_erosion_detail = std::clamp(
+        item.value("fluid_fog_erosion_detail", domain.fluid_fog_erosion_detail),
+        1, RayTrophiSim::Fluid::kFogErosionMaxDetail);
+    domain.fluid_fog_erosion_seed =
+        item.value("fluid_fog_erosion_seed", domain.fluid_fog_erosion_seed);
+    domain.fluid_fog_erosion_depth = std::clamp(
+        item.value("fluid_fog_erosion_depth", domain.fluid_fog_erosion_depth),
+        0.0f, RayTrophiSim::Fluid::kFogErosionMaxDepth);
+    domain.fluid_fog_resolution_multiplier =
+        std::clamp(item.value("fluid_fog_resolution_multiplier",
+                              domain.fluid_fog_resolution_multiplier),
+                   1, RayTrophiSim::Fluid::kFogMaxResolutionMultiplier);
+    if (item.contains("fluid_label_routes") &&
+        item["fluid_label_routes"].is_object()) {
+      for (auto it = item["fluid_label_routes"].begin();
+           it != item["fluid_label_routes"].end(); ++it) {
+        if (it.value().is_string())
+          RayTrophiSim::Fluid::setLabelRouteByName(
+              domain.fluid_label_routes, it.key(),
+              it.value().get<std::string>());
+      }
     }
-    // NOTE: the on-disk bake cache is bound in loadProject AFTER
-    // g_project.current_file_path is assigned (it is still empty/stale here).
+    if (item.contains("fluid_particle_color"))
+      domain.fluid_particle_color = jsonToVec3(item["fluid_particle_color"]);
+    domain.fluid_particle_radius_factor = item.value(
+        "fluid_particle_radius_factor", domain.fluid_particle_radius_factor);
+    domain.fluid_particle_size_multiplier =
+        item.value("fluid_particle_size_multiplier",
+                   domain.fluid_particle_size_multiplier);
+    domain.fluid_particle_visual_children =
+        item.value("fluid_particle_visual_children",
+                   item.value("fluid_granular_visual_children",
+                              domain.fluid_particle_visual_children));
+    domain.fluid_particle_visual_size_variation =
+        item.value("fluid_particle_visual_size_variation",
+                   item.value("fluid_granular_visual_size_variation",
+                              domain.fluid_particle_visual_size_variation));
+    domain.fluid_particle_visual_budget = item.value(
+        "fluid_particle_visual_budget", domain.fluid_particle_visual_budget);
+    domain.fluid_granular_physical_carriers =
+        item.value("fluid_granular_physical_carriers",
+                   domain.fluid_granular_physical_carriers);
+    domain.fluid_particle_subdivisions = item.value(
+        "fluid_particle_subdivisions", domain.fluid_particle_subdivisions);
+    domain.fluid_particle_geometry_mode = item.value(
+        "fluid_particle_geometry_mode", domain.fluid_particle_geometry_mode);
+    domain.fluid_particle_geometry_source =
+        item.value("fluid_particle_geometry_source",
+                   domain.fluid_particle_geometry_source);
+    domain.fluid_phase_output =
+        RayTrophiSim::Fluid::readMatterPhaseOutput(item);
+    domain.fluid_visual_samples = item.value(
+        "fluid_visual_samples", RayTrophiSim::Fluid::DomainVisualSettings{});
+    domain.matter_fog_streams = RayTrophiSim::Fluid::readFogAppearances(item);
+    domain.fluid_substance_splat_geometry =
+        RayTrophiSim::Fluid::readSubstanceSplatGeometries(item);
+    domain.fluid_grain_mesh_near_enabled = item.value(
+        "fluid_grain_mesh_near_enabled", domain.fluid_grain_mesh_near_enabled);
+    domain.fluid_grain_mesh_near_shape =
+        item.value("fluid_grain_mesh_near_shape", "scene");
+    domain.fluid_grain_mesh_near_source_materials =
+        item.value("fluid_grain_mesh_near_source_materials", false);
+    if (item.contains("fluid_grain_mesh_near_sources") &&
+        item["fluid_grain_mesh_near_sources"].is_array())
+      domain.fluid_grain_mesh_near_sources =
+          item["fluid_grain_mesh_near_sources"].get<std::vector<std::string>>();
+    domain.fluid_grain_mesh_near_distance =
+        item.value("fluid_grain_mesh_near_distance",
+                   domain.fluid_grain_mesh_near_distance);
+    domain.fluid_grain_mesh_near_budget = item.value(
+        "fluid_grain_mesh_near_budget", domain.fluid_grain_mesh_near_budget);
+    domain.fluid_particle_emissive =
+        item.value("fluid_particle_emissive", domain.fluid_particle_emissive);
+    domain.fluid_particle_emission =
+        item.value("fluid_particle_emission", domain.fluid_particle_emission);
+    domain.fluid_particle_material_id = item.value(
+        "fluid_particle_material_id", domain.fluid_particle_material_id);
+
+    if (item.contains("fluid_level_set_params") &&
+        item["fluid_level_set_params"].is_object()) {
+      const auto &lsp = item["fluid_level_set_params"];
+      domain.fluid_level_set_params.narrow_band_voxels =
+          lsp.value("narrow_band_voxels",
+                    domain.fluid_level_set_params.narrow_band_voxels);
+      domain.fluid_level_set_params.kernel_radius_voxels =
+          lsp.value("kernel_radius_voxels",
+                    domain.fluid_level_set_params.kernel_radius_voxels);
+      domain.fluid_level_set_params.particle_radius_voxels =
+          lsp.value("particle_radius_voxels",
+                    domain.fluid_level_set_params.particle_radius_voxels);
+      domain.fluid_level_set_params.surface_offset_voxels =
+          lsp.value("surface_offset_voxels",
+                    domain.fluid_level_set_params.surface_offset_voxels);
+      domain.fluid_level_set_params.smoothing_iterations =
+          lsp.value("smoothing_iterations",
+                    domain.fluid_level_set_params.smoothing_iterations);
+      domain.fluid_level_set_params.surface_resolution_multiplier = lsp.value(
+          "surface_resolution_multiplier",
+          domain.fluid_level_set_params.surface_resolution_multiplier);
+      domain.fluid_level_set_params.anisotropy_enabled =
+          lsp.value("anisotropy_enabled",
+                    domain.fluid_level_set_params.anisotropy_enabled);
+      domain.fluid_level_set_params.anisotropy_radius_voxels =
+          lsp.value("anisotropy_radius_voxels",
+                    domain.fluid_level_set_params.anisotropy_radius_voxels);
+      domain.fluid_level_set_params.anisotropy_max_stretch =
+          lsp.value("anisotropy_max_stretch",
+                    domain.fluid_level_set_params.anisotropy_max_stretch);
+      domain.fluid_level_set_params.anisotropy_neighbor_min =
+          lsp.value("anisotropy_neighbor_min",
+                    domain.fluid_level_set_params.anisotropy_neighbor_min);
+      domain.fluid_level_set_params.position_smoothing =
+          lsp.value("position_smoothing",
+                    domain.fluid_level_set_params.position_smoothing);
+      domain.fluid_level_set_params.gpu_build =
+          lsp.value("gpu_build", domain.fluid_level_set_params.gpu_build);
+    }
+
+    domain.fluid_surface_band_voxels = item.value(
+        "fluid_surface_band_voxels", domain.fluid_surface_band_voxels);
+    domain.fluid_surface_ior =
+        item.value("fluid_surface_ior", domain.fluid_surface_ior);
+    domain.fluid_surface_roughness =
+        item.value("fluid_surface_roughness", domain.fluid_surface_roughness);
+    domain.fluid_surface_foam =
+        item.value("fluid_surface_foam", domain.fluid_surface_foam);
+    domain.fluid_surface_material_id = item.value(
+        "fluid_surface_material_id", domain.fluid_surface_material_id);
+    domain.fluid_surface_pore_amount = item.value(
+        "fluid_surface_pore_amount", domain.fluid_surface_pore_amount);
+    domain.fluid_surface_pore_scale =
+        item.value("fluid_surface_pore_scale", domain.fluid_surface_pore_scale);
+    domain.fluid_surface_pore_detail = item.value(
+        "fluid_surface_pore_detail", domain.fluid_surface_pore_detail);
+    // Absent in projects saved before coordinate spaces existed. The default
+    // is Material, which is IDENTICAL to the old world anchoring for
+    // anything that has not moved (the coordinate is seeded with the birth
+    // position), so an old file opens looking exactly as it was saved.
+    domain.fluid_surface_coord_space = item.value(
+        "fluid_surface_coord_space", domain.fluid_surface_coord_space);
+    // `fluid_blend_substance_materials` is gone — it was a domain-wide
+    // shading switch whose "off" state produced voxelised material patches,
+    // not a dominant material. Sharpness is now per-substance `miscibility`
+    // below. An old project has neither key: the flag is ignored and
+    // miscibility defaults to 1.0, which is what the flag's default meant.
+    if (item.contains("matter_pore_exchange")) {
+      domain.fluid_params.pore_exchange =
+          RayTrophiSim::Fluid::matterPoreParamsFromJson(
+              item.at("matter_pore_exchange"));
+    }
+    if (item.contains("matter_grain")) {
+      std::string dropped;
+      domain.fluid_params.grain =
+          RayTrophiSim::Fluid::matterGrainParamsFromJson(
+              item.at("matter_grain"), &dropped);
+      if (!dropped.empty()) {
+        SCENE_LOG_WARN(
+            "[ProjectManager] Domain '" + domain.name +
+            "': saved grain material (" + dropped +
+            ") ignored; the grain substance owns it now. Derive a substance "
+            "to keep custom values.");
+      }
+    }
+    domain.fluid_substance_materials.clear();
+    if (item.contains("fluid_substance_materials") &&
+        item["fluid_substance_materials"].is_array()) {
+      for (const auto &b : item["fluid_substance_materials"]) {
+        RayTrophiSim::SimulationGridDomainDesc::SubstanceMaterial entry;
+        entry.substance = b.value("substance", std::string());
+        entry.material_id = b.value("material_id", -1);
+        int representation = b.value("representation", 0);
+        if (representation < 0 || representation > 3)
+          representation = 0;
+        entry.representation =
+            static_cast<RayTrophiSim::Fluid::SubstanceRepresentation>(
+                representation);
+        // ★ Default -1 = INHERIT the domain viscosity, not 0. Reading a
+        // missing key as 0 would turn every substance in every project
+        // saved before this feature into an inviscid one — a scene that
+        // opens thinner than it was saved, with nothing to point at.
+        entry.kinematic_viscosity = b.value("kinematic_viscosity", -1.0f);
+        entry.miscibility =
+            std::clamp(b.value("miscibility", 1.0f), 0.0f, 1.0f);
+        // ★ Missing key = LIQUID, and that is the only safe default: a
+        // project saved before phases existed described liquid, so
+        // reading anything else would freeze scenes that never asked to
+        // be frozen. An unrecognised string falls back the same way
+        // rather than guessing — the panel and the script both report
+        // what was loaded, so a silent demotion is visible.
+        entry.phase = (b.value("phase", std::string("liquid")) == "solid")
+                          ? RayTrophiSim::Fluid::SubstancePhase::Solid
+                          : RayTrophiSim::Fluid::SubstancePhase::Liquid;
+        if (!entry.substance.empty())
+          domain.fluid_substance_materials.push_back(entry);
+      }
+    }
+    // Absent in projects saved before the solid phase existed. Enabled is
+    // the safe default there BECAUSE no substance in such a file is solid:
+    // the switch gates a path that has nothing to do until a phase is
+    // authored, so defaulting it off would ship a control that starts in
+    // the state the user has to discover before the feature works at all.
+    domain.fluid_solid_phase_enabled = item.value(
+        "fluid_solid_phase_enabled", domain.fluid_solid_phase_enabled);
+    domain.fluid_solid_phase_fill = std::clamp(
+        item.value("fluid_solid_phase_fill", domain.fluid_solid_phase_fill),
+        0.01f, 4.0f);
+    domain.fluid_debug_overlay =
+        item.value("fluid_debug_overlay", domain.fluid_debug_overlay);
+
+    if (item.contains("foam") && item["foam"].is_object()) {
+      const auto &fo_js = item["foam"];
+      auto &fo = domain.fluid_foam_params;
+      fo.enabled = fo_js.value("enabled", fo.enabled);
+      fo.trapped_air_rate =
+          fo_js.value("trapped_air_rate", fo.trapped_air_rate);
+      fo.wave_crest_rate = fo_js.value("wave_crest_rate", fo.wave_crest_rate);
+      fo.ta_min = fo_js.value("ta_min", fo.ta_min);
+      fo.ta_max = fo_js.value("ta_max", fo.ta_max);
+      fo.wc_min = fo_js.value("wc_min", fo.wc_min);
+      fo.wc_max = fo_js.value("wc_max", fo.wc_max);
+      fo.ke_min = fo_js.value("ke_min", fo.ke_min);
+      fo.ke_max = fo_js.value("ke_max", fo.ke_max);
+      fo.crest_cos = fo_js.value("crest_cos", fo.crest_cos);
+      fo.neighbor_radius_voxels =
+          fo_js.value("neighbor_radius_voxels", fo.neighbor_radius_voxels);
+      fo.spray_max_neighbors =
+          fo_js.value("spray_max_neighbors", fo.spray_max_neighbors);
+      fo.bubble_min_neighbors =
+          fo_js.value("bubble_min_neighbors", fo.bubble_min_neighbors);
+      fo.lifetime = fo_js.value("lifetime", fo.lifetime);
+      fo.buoyancy = fo_js.value("buoyancy", fo.buoyancy);
+      fo.fluid_drag = fo_js.value("fluid_drag", fo.fluid_drag);
+      fo.spray_drag = fo_js.value("spray_drag", fo.spray_drag);
+      fo.spawn_jitter_voxels =
+          fo_js.value("spawn_jitter_voxels", fo.spawn_jitter_voxels);
+      fo.max_foam = fo_js.value("max_foam", fo.max_foam);
+      fo.render_radius_voxels =
+          fo_js.value("render_radius_voxels", fo.render_radius_voxels);
+      fo.foam_sphere_subdivisions =
+          fo_js.value("foam_sphere_subdivisions", fo.foam_sphere_subdivisions);
+      fo.volume_density = fo_js.value("volume_density", fo.volume_density);
+      if (fo_js.contains("volume_color") && fo_js["volume_color"].is_array() &&
+          fo_js["volume_color"].size() == 3) {
+        fo.volume_color = Vec3(fo_js["volume_color"][0].get<float>(),
+                               fo_js["volume_color"][1].get<float>(),
+                               fo_js["volume_color"][2].get<float>());
+      }
+      fo.volume_opacity = fo_js.value("volume_opacity", fo.volume_opacity);
+      fo.volume_bubble_strength =
+          fo_js.value("volume_bubble_strength", fo.volume_bubble_strength);
+      fo.volume_spray_strength =
+          fo_js.value("volume_spray_strength", fo.volume_spray_strength);
+      fo.foam_material_id =
+          fo_js.value("foam_material_id", fo.foam_material_id);
+      fo.spray_material_id =
+          fo_js.value("spray_material_id", fo.spray_material_id);
+      fo.bubble_material_id =
+          fo_js.value("bubble_material_id", fo.bubble_material_id);
+    }
+    domain.fire_enabled = item.value("fire_enabled", domain.fire_enabled);
+    domain.ignition_temperature =
+        item.value("ignition_temperature", domain.ignition_temperature);
+    domain.burn_rate = item.value("burn_rate", domain.burn_rate);
+    domain.heat_release = item.value("heat_release", domain.heat_release);
+    domain.smoke_generation =
+        item.value("smoke_generation", domain.smoke_generation);
+    domain.flame_dissipation =
+        item.value("flame_dissipation", domain.flame_dissipation);
+    domain.fire_max_temperature =
+        item.value("fire_max_temperature", domain.fire_max_temperature);
+    domain.structural_coupling_enabled = item.value(
+        "structural_coupling_enabled", domain.structural_coupling_enabled);
+    domain.structural_pressure_scale = item.value(
+        "structural_pressure_scale", domain.structural_pressure_scale);
+    domain.structural_min_intensity =
+        item.value("structural_min_intensity", domain.structural_min_intensity);
+    domain.structural_event_interval = item.value(
+        "structural_event_interval", domain.structural_event_interval);
+    domain.fire_expansion = item.value("fire_expansion", domain.fire_expansion);
+    domain.gas_buoyancy_heat =
+        item.value("gas_buoyancy_heat", domain.gas_buoyancy_heat);
+    domain.gas_buoyancy_density =
+        item.value("gas_buoyancy_density", domain.gas_buoyancy_density);
+    domain.gas_ambient_stratification = item.value(
+        "gas_ambient_stratification", domain.gas_ambient_stratification);
+    domain.gas_inherit_atmosphere = item.value("gas_inherit_atmosphere", false);
+    domain.gas_pressure_iterations =
+        item.value("gas_pressure_iterations", domain.gas_pressure_iterations);
+    domain.gas_surface_dust_enabled =
+        item.value("gas_surface_dust_enabled", domain.gas_surface_dust_enabled);
+    domain.gas_surface_dust_threshold = item.value(
+        "gas_surface_dust_threshold", domain.gas_surface_dust_threshold);
+    domain.gas_surface_dust_emission = item.value(
+        "gas_surface_dust_emission", domain.gas_surface_dust_emission);
+    domain.gas_surface_dust_temperature = item.value(
+        "gas_surface_dust_temperature", domain.gas_surface_dust_temperature);
+    domain.gas_surface_dust_max_density = item.value(
+        "gas_surface_dust_max_density", domain.gas_surface_dust_max_density);
+    domain.gas_surface_dust_supply =
+        item.value("gas_surface_dust_supply", domain.gas_surface_dust_supply);
+    domain.gas_dissipation_override =
+        item.value("gas_dissipation_override", domain.gas_dissipation_override);
+    domain.gas_density_dissipation =
+        item.value("gas_density_dissipation", domain.gas_density_dissipation);
+    domain.gas_temperature_dissipation = item.value(
+        "gas_temperature_dissipation", domain.gas_temperature_dissipation);
+    domain.gas_fuel_dissipation =
+        item.value("gas_fuel_dissipation", domain.gas_fuel_dissipation);
+    domain.gas_vorticity = item.value("gas_vorticity", domain.gas_vorticity);
+    domain.gas_maccormack_advection =
+        item.value("gas_maccormack_advection", domain.gas_maccormack_advection);
+    domain.turbulence_strength =
+        item.value("turbulence_strength", domain.turbulence_strength);
+    domain.turbulence_scale =
+        item.value("turbulence_scale", domain.turbulence_scale);
+    domain.turbulence_octaves =
+        item.value("turbulence_octaves", domain.turbulence_octaves);
+    domain.turbulence_lacunarity =
+        item.value("turbulence_lacunarity", domain.turbulence_lacunarity);
+    domain.turbulence_persistence =
+        item.value("turbulence_persistence", domain.turbulence_persistence);
+    domain.turbulence_speed =
+        item.value("turbulence_speed", domain.turbulence_speed);
+    if (item.contains("shader")) {
+      domain.shader = domainVolumeShaderFromJson(item["shader"]);
+    }
+    if (item.contains("fluid_fog_shader")) {
+      domain.fluid_fog_shader =
+          domainVolumeShaderFromJson(item["fluid_fog_shader"]);
+    } else if (RayTrophiSim::simulationDomainHasLiquid(domain) &&
+               domain.fluid_render_mode ==
+                   RayTrophiSim::Fluid::FluidRenderMode::VolumeFog &&
+               domain.shader) {
+      // Saved before the fog view had its own shader: a fog-mode liquid
+      // kept its fog look in `shader`. Carry it over instead of letting the
+      // fog volume start from the preset.
+      domain.fluid_fog_shader = std::make_shared<VolumeShader>(*domain.shader);
+    }
+    RayTrophiSim::Fluid::readMatterSeedSources(item, domain);
+    return domain;
+  };
+
+  auto parseSettingsInto = [](const json &settings,
+                              RayTrophiSim::ParticleSimulationSystem &runtime) {
+    if (!settings.is_object()) {
+      return;
+    }
+    if (settings.contains("gravity"))
+      runtime.setGravity(jsonToVec3(settings["gravity"]));
+    runtime.setLinearDrag(settings.value("linear_drag", runtime.linearDrag()));
+    const bool plane_enabled = settings.value("collision_plane_enabled",
+                                              runtime.collisionPlaneEnabled());
+    const float plane_y =
+        settings.value("collision_plane_y", runtime.collisionPlaneY());
+    const float restitution =
+        settings.value("collision_restitution", runtime.collisionRestitution());
+    runtime.setCollisionPlane(plane_y, plane_enabled, restitution);
+    if (settings.contains("physics") && settings["physics"].is_object()) {
+      const auto &p = settings["physics"];
+      auto &physics = runtime.physicsSettings();
+      physics.mode =
+          particlePhysicsModeFromString(p.value("mode", std::string("Spark")));
+      physics.quality = particleQualityModeFromString(
+          p.value("quality", std::string("Realtime")));
+      physics.execution_policy = particleExecutionPolicyFromString(
+          p.value("execution_policy", std::string("Auto")));
+      physics.particle_radius =
+          p.value("particle_radius", physics.particle_radius);
+      physics.self_collision_enabled =
+          p.value("self_collision_enabled", physics.self_collision_enabled);
+      physics.solver_iterations =
+          p.value("solver_iterations", physics.solver_iterations);
+      physics.max_neighbors_per_particle = p.value(
+          "max_neighbors_per_particle", physics.max_neighbors_per_particle);
+      physics.viscosity = p.value("viscosity", physics.viscosity);
+      physics.inherit_atmosphere = p.value("inherit_atmosphere", true);
+      physics.cohesion = p.value("cohesion", physics.cohesion);
+      physics.pressure_stiffness =
+          p.value("pressure_stiffness", physics.pressure_stiffness);
+      physics.rest_density = p.value("rest_density", physics.rest_density);
+      physics.buoyancy = p.value("buoyancy", physics.buoyancy);
+      physics.gravity_scale = p.value("gravity_scale", physics.gravity_scale);
+      physics.grid_density_deposit =
+          p.value("grid_density_deposit", physics.grid_density_deposit);
+      physics.grid_temperature_deposit =
+          p.value("grid_temperature_deposit", physics.grid_temperature_deposit);
+      physics.grid_fuel_deposit =
+          p.value("grid_fuel_deposit", physics.grid_fuel_deposit);
+      physics.grid_deposit_fade_with_age = p.value(
+          "grid_deposit_fade_with_age", physics.grid_deposit_fade_with_age);
+      // Contact behaviour (absent in older projects = bounce, no events).
+      if (p.contains("collision_response") &&
+          p["collision_response"].is_string()) {
+        physics.collision_response =
+            p["collision_response"].get<std::string>() == "die"
+                ? RayTrophiSim::ParticleCollisionResponse::Die
+                : RayTrophiSim::ParticleCollisionResponse::Bounce;
+      }
+      if (p.contains("record_collision_events") &&
+          p["record_collision_events"].is_boolean()) {
+        physics.record_collision_events =
+            p["record_collision_events"].get<bool>();
+      }
+      if (p.contains("collision_event_capacity") &&
+          p["collision_event_capacity"].is_number_unsigned()) {
+        physics.collision_event_capacity = std::max<uint32_t>(
+            1u, p["collision_event_capacity"].get<uint32_t>());
+      }
+      physics.vorticity = p.value("vorticity", physics.vorticity);
+    }
+    if (settings.contains("world_thermal") &&
+        settings["world_thermal"].is_object()) {
+      const auto &t = settings["world_thermal"];
+      auto &thermal = runtime.worldThermal();
+      thermal.ambient_kelvin =
+          t.value("ambient_kelvin", thermal.ambient_kelvin);
+      // Saved before the zero/ambient split: the ambient WAS the zero.
+      thermal.reference_kelvin =
+          t.value("reference_kelvin", thermal.ambient_kelvin);
+      thermal.inherit_atmosphere = t.value("inherit_atmosphere", false);
+      thermal.kelvin_per_unit =
+          t.value("kelvin_per_unit", thermal.kelvin_per_unit);
+      thermal.convection_coefficient =
+          t.value("convection_coefficient", thermal.convection_coefficient);
+      thermal.oxygen_availability =
+          t.value("oxygen_availability", thermal.oxygen_availability);
+    }
+  };
+
+  RayTrophiSim::ParticleSdfLoadDeduplicator sdf_dedup;
+
+  // Build one ParticleSystemObject with its own registered runtime, populated
+  // straight from JSON (runtime is the source of truth — no descriptor
+  // staging). `legacy_blend` is the pre-profile per-system blend_mode (0
+  // additive, 1 alpha); it only feeds the migration of emitters saved before
+  // profiles.
+  auto adoptSystem = [&](uint32_t id, const std::string &name, bool visible,
+                         bool enabled, int legacy_blend, bool emitter_only,
+                         const json *system_json, const json *settings,
+                         const json *emitters, const json *colliders,
+                         const json *domains, const json *flow_sources) {
+    SceneData::ParticleSystemObject system;
+    system.id = id;
+    system.name = name;
+    system.visible = visible;
+    system.enabled = enabled;
+    system.render.emitter_only = emitter_only;
+    system.runtime = scene.createParticleRuntime();
+    if (settings)
+      parseSettingsInto(*settings, *system.runtime);
+    if (system_json) {
+      RayTrophiSim::deserializeParticleAppearanceProfiles(*system_json,
+                                                          *system.runtime);
+    }
+    if (emitters && emitters->is_array()) {
+      for (const auto &emitter_item : *emitters) {
+        if (!emitter_item.is_object())
+          continue;
+        RayTrophiSim::ParticleEmitterDesc emitter = parseEmitter(emitter_item);
+        RayTrophiSim::readEmitterAppearance(emitter_item, legacy_blend,
+                                            *system.runtime, emitter);
+        system.runtime->addEmitter(emitter);
+      }
+    }
+    if (colliders && colliders->is_array()) {
+      for (const auto &collider_item : *colliders) {
+        if (!collider_item.is_object())
+          continue;
+        auto &added_col =
+            system.runtime->addCollider(parseCollider(collider_item));
+        // ObjectConvexDecomp / ObjectMeshBVH are deprecated — consolidated
+        // onto the SDF collider. Migrate legacy projects so they keep
+        // colliding (the enum values are still parsed for compatibility).
+        if (added_col.source_mode ==
+                RayTrophiSim::ParticleColliderSourceMode::ObjectConvexDecomp ||
+            added_col.source_mode ==
+                RayTrophiSim::ParticleColliderSourceMode::ObjectMeshBVH) {
+          added_col.source_mode =
+              RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF;
+        }
+        // Voxel colliders don't serialize their SDF grid — rebuild it from
+        // the source mesh on load. Pass THIS system's runtime explicitly
+        // (it is not the active system yet during load).
+        if (added_col.source_mode ==
+                RayTrophiSim::ParticleColliderSourceMode::ObjectMeshSDF &&
+            !added_col.source_name.empty()) {
+          const bool has_domains =
+              domains && domains->is_array() && !domains->empty();
+          const std::size_t col_idx = system.runtime->colliders().size() - 1;
+          sdf_dedup.enqueue(scene, added_col, system.runtime, col_idx,
+                            has_domains);
+        }
+      }
+    }
+    if (domains && domains->is_array()) {
+      for (const auto &domain_item : *domains) {
+        if (domain_item.is_object())
+          system.runtime->addGridDomain(parseDomain(domain_item));
+      }
+    }
+    if (flow_sources && flow_sources->is_array()) {
+      for (const auto &flow_item : *flow_sources) {
+        if (flow_item.is_object())
+          system.runtime->addFlowSource(parseFlowSource(flow_item));
+      }
+    }
+    // Legacy type migration must see all sources before becoming Matter.
+    system.runtime->synchronizeGridDomainsNow();
+    SceneData::applyParticleSystemEnabledState(system);
+    scene.particle_systems.push_back(std::move(system));
+  };
+
+  scene.clearParticleSystemObjects();
+
+  if (j.contains("systems") && j["systems"].is_array()) {
+    uint32_t max_id = 0;
+    for (const auto &item : j["systems"]) {
+      if (!item.is_object()) {
+        continue;
+      }
+
+      SceneData::ParticleSystemObject defaults;
+      const uint32_t id = item.value("id", defaults.id);
+      const std::string name = item.value("name", defaults.name);
+      const bool visible = item.value("visible", defaults.visible);
+      const bool enabled = item.value("enabled", defaults.enabled);
+      // Read only for migrating pre-profile emitters; never written.
+      const int legacy_blend = item.value("blend_mode", 0);
+      // Systems saved before this setting existed displayed particles.
+      const bool emitter_only = item.value("emitter_only", false);
+      const json *settings =
+          item.contains("settings") ? &item["settings"] : nullptr;
+      const json *emitters =
+          item.contains("emitters") ? &item["emitters"] : nullptr;
+      const json *colliders =
+          item.contains("colliders") ? &item["colliders"] : nullptr;
+      const json *domains =
+          item.contains("domains") ? &item["domains"] : nullptr;
+      const json *flow_sources =
+          item.contains("flow_sources") ? &item["flow_sources"] : nullptr;
+      adoptSystem(id, name, visible, enabled, legacy_blend, emitter_only, &item,
+                  settings, emitters, colliders, domains, flow_sources);
+      max_id = std::max(max_id, id);
+    }
+
+    scene.next_particle_system_id =
+        std::max(j.value("next_system_id", max_id + 1u), max_id + 1u);
+    scene.active_particle_system_index = j.value("active_system_index", 0);
+    if (scene.active_particle_system_index < 0 ||
+        scene.active_particle_system_index >=
+            static_cast<int>(scene.particle_systems.size())) {
+      scene.active_particle_system_index =
+          scene.particle_systems.empty() ? -1 : 0;
+    }
+  } else {
+    // Legacy single-system project file.
+    const json *settings = j.contains("settings") ? &j["settings"] : nullptr;
+    const json *emitters = j.contains("emitters") ? &j["emitters"] : nullptr;
+    const json *colliders = j.contains("colliders") ? &j["colliders"] : nullptr;
+    const json *domains = j.contains("domains") ? &j["domains"] : nullptr;
+    const json *flow_sources =
+        j.contains("flow_sources") ? &j["flow_sources"] : nullptr;
+    adoptSystem(1u, "Particle System 1", true, true, 0, false, nullptr,
+                settings, emitters, colliders, domains, flow_sources);
+    scene.next_particle_system_id = 2u;
+    scene.active_particle_system_index =
+        scene.particle_systems.empty() ? -1 : 0;
+  }
+
+  sdf_dedup.resolveDuplicates(scene);
+  scene.pruneInvalidParticleObjectBindings();
+
+  if (auto particles = scene.getParticleSimulationSystem()) {
+    SCENE_LOG_INFO(
+        "[ProjectManager] Loaded " +
+        std::to_string(scene.particle_systems.size()) +
+        " particle system(s); active has " +
+        std::to_string(particles->emitters().size()) + " emitters and " +
+        std::to_string(particles->colliders().size()) + " colliders.");
+  } else {
+    SCENE_LOG_INFO("[ProjectManager] Loaded empty particle simulation.");
+  }
+  // NOTE: the on-disk bake cache is bound in loadProject AFTER
+  // g_project.current_file_path is assigned (it is still empty/stale here).
 }

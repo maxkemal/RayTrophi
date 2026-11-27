@@ -19,10 +19,24 @@ public:
     VkSampler sampler = VK_NULL_HANDLE;
     VkRenderPass loadRenderPass = VK_NULL_HANDLE;
     VkFramebuffer loadFramebuffer = VK_NULL_HANDLE;
+    VkPipeline transmissionPipeline = VK_NULL_HANDLE; // non-owning; managed by VulkanViewportBackend
     uint32_t width = 0;
     uint32_t height = 0;
     bool snapshotValid = false;
 };
+
+VkRenderPass getMaterialPreviewTransmissionLoadRenderPass(
+    const std::shared_ptr<MaterialPreviewTransmissionResources>& r) {
+    return r ? r->loadRenderPass : VK_NULL_HANDLE;
+}
+
+void setMaterialPreviewTransmissionPipeline(
+    const std::shared_ptr<MaterialPreviewTransmissionResources>& r,
+    VkPipeline pipeline) {
+    if (r) {
+        r->transmissionPipeline = pipeline;
+    }
+}
 
 namespace {
 
@@ -330,7 +344,9 @@ void VulkanBackendAdapter::recordMaterialPreviewTransmissionPass(
         cmd, viewProj, view, width, height, true);
 
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                      m_interactiveViewport.materialPreviewPipeline);
+                      r.transmissionPipeline != VK_NULL_HANDLE
+                          ? r.transmissionPipeline
+                          : m_interactiveViewport.materialPreviewPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             m_interactiveViewport.materialPreviewPipelineLayout,
                             0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);

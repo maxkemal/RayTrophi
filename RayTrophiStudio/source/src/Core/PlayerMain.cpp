@@ -29,10 +29,16 @@
 #include "Core/Localization.h"
 #include "Core/PlayerSceneLoad.h"
 #include "Core/PlayerBalloonInput.h"
+#include "Core/PlayerBoundedCamera.h"
+#include "Paint/BalloonInteraction.h"
+#include "Paint/BalloonMilestoneRewards.h"
 #include "PlayerStartupFailureTouch.h"
 #include "PlayerOperatorTouch.h"
 #include "UI/PlayerOperatorUI.h"
 #include "UI/PlayerKidLauncher.h"
+#ifdef __ANDROID__
+#include "UI/AndroidPerfHud.h"
+#endif
 #include "Api/RtApiPlayerOperator.h"
 
 #include "globals.h"
@@ -604,6 +610,7 @@ public:
                 if (!result.ok) {
                     SCENE_LOG_WARN("[Player] room reset: " + result.error);
                 }
+                AppRuntime::boundedCamera().returnHome();
                 return true;
             }
             default: return false;
@@ -690,6 +697,13 @@ bool isFatalStartupNotice(StartupNotice kind) {
 
 void showFatalStartupDialog(const StartupNoticeInfo& info) {
     logAndroidStartupError(info.headline.c_str(), info.detail.c_str());
+    // The native dialog blocks the main thread that services IPC requests.
+    for (const std::string& line : info.log) {
+        const int priority = line.rfind("[ERROR]", 0) == 0
+            ? ANDROID_LOG_ERROR
+            : ANDROID_LOG_WARN;
+        __android_log_write(priority, kAndroidStartupLogTag, line.c_str());
+    }
     std::string body = info.headline;
     if (!info.detail.empty()) body += "\n" + info.detail;
     if (!info.log.empty()) {
@@ -920,16 +934,10 @@ int main(int argc, char* argv[]) {
 #endif
     }
 
-    // An explicit project bypasses the library. Multiple bundled games need
-    // a selection first.
+    // An explicit project bypasses the library. Packaged games always start
+    // on the game library / kid launcher card screen (even with a single game).
     const std::vector<PlayerSceneEntry> packaged_scenes = loadPackagedSceneList();
-    const bool open_library = launch_project.empty() && packaged_scenes.size() > 1;
-    const bool auto_open_packaged_scene = launch_project.empty() && packaged_scenes.size() == 1;
-#ifndef __ANDROID__
-    if (auto_open_packaged_scene) {
-        launch_project = packaged_scenes.front().path_utf8;
-    }
-#endif
+    const bool open_library = launch_project.empty() && !packaged_scenes.empty();
 
     if (!AppRuntime::initPlatform(startup_log)) {
 #ifdef __ANDROID__
@@ -1064,10 +1072,7 @@ int main(int argc, char* argv[]) {
     logAndroidStartup("Player operator preferences loaded");
 #endif
 #ifdef __ANDROID__
-    if (auto_open_packaged_scene) {
-        AppRuntime::kidLauncherAutoOpen(AppRuntime::playerScenePathKey(
-            AppRuntime::projectPathFromUtf8(packaged_scenes.front().path_utf8)));
-    } else if (open_library) {
+    if (open_library) {
         std::string launcher_error;
         AppRuntime::kidLauncherShow("library", launcher_error);
     }
@@ -1122,8 +1127,21 @@ int main(int argc, char* argv[]) {
     AppRuntime::PlayerOperatorTouch operatorTouch;
     StartupNotice startupNotice = StartupNotice::None;
 #endif
+    auto syncBoundedCameraHome = [&viewer, &state]() {
+        auto& cam_ctrl = AppRuntime::boundedCamera();
+        if (!viewer->hasScene() || !state->scene.camera || active_model_path.empty()) {
+            if (cam_ctrl.home_captured) {
+                cam_ctrl.clearHome();
+            }
+            return;
+        }
+        if (!cam_ctrl.home_captured || cam_ctrl.home_project != active_model_path) {
+            cam_ctrl.resetHome(active_model_path, *state->scene.camera);
+        }
+    };
     while (running) {
         frame_cycle.beginIteration();
+        syncBoundedCameraHome();
         const auto iteration_start = Clock::now();
         while (frame_cycle.pollEvent(event, event_info)) {
 #ifdef __ANDROID__
@@ -1185,10 +1203,62 @@ int main(int argc, char* argv[]) {
                 SCENE_LOG_INFO(std::string("[Player] Debug camera ") +
                                (debug_camera ? "on" : "off"));
             }
+            const bool is_keyboard_event =
+                (event.type == SDL_KEYDOWN || event.type == SDL_KEYUP);
+            const bool ui_blocks_bounded_cam = is_keyboard_event
+                ? ImGui::GetIO().WantCaptureKeyboard
+                : ImGui::GetIO().WantCaptureMouse;
+            if (debug_camera || display.resolution_menu ||
+                AppRuntime::playerOperatorOpen() || AppRuntime::playerVideoCardEnabled()) {
+                AppRuntime::boundedCamera().rmb_dragging = false;
+            }
+            bool bounded_cam_consumed = false;
+            if (!debug_camera && !display.resolution_menu &&
+                !AppRuntime::playerOperatorOpen() &&
+                !AppRuntime::playerVideoCardEnabled() &&
+                !AppRuntime::playerSceneLoad().busy() &&
+                !ui_blocks_bounded_cam) {
+                bounded_cam_consumed = AppRuntime::boundedCamera().handleEvent(
+                    event, Paint::heldBalloon() >= 0);
+                if (bounded_cam_consumed) {
+                    frame_cycle.requestRedraw();
+                }
+            }
+            // Direct touch/mouse hit test for the floating 3D gift box (required on Android where
+            // SDL_FINGERDOWN bypasses ImGui::InvisibleButton).
+            bool gift_box_consumed = false;
+            if (!bounded_cam_consumed && !debug_camera && !display.resolution_menu &&
+                !AppRuntime::playerOperatorOpen() && !AppRuntime::playerSceneLoad().busy() &&
+                Paint::balloonMilestones().gift_box_active) {
+                float hit_nx = -1.0f;
+                float hit_ny = -1.0f;
+                if (event.type == SDL_FINGERDOWN) {
+                    hit_nx = event.tfinger.x;
+                    hit_ny = event.tfinger.y;
+                } else if (event.type == SDL_MOUSEBUTTONDOWN &&
+                           event.button.button == SDL_BUTTON_LEFT && window) {
+                    int win_w = 0;
+                    int win_h = 0;
+                    SDL_GetWindowSize(window, &win_w, &win_h);
+                    if (win_w > 0 && win_h > 0) {
+                        hit_nx = static_cast<float>(event.button.x) / static_cast<float>(win_w);
+                        hit_ny = static_cast<float>(event.button.y) / static_cast<float>(win_h);
+                    }
+                }
+                if (hit_nx >= 0.0f &&
+                    Paint::balloonMilestones().hitTestGiftBoxNormalized(hit_nx, hit_ny)) {
+                    std::string gift_out;
+                    (void)rtapi::wetPaintDemoCommand("claim_gift", "{}", gift_out);
+                    gift_box_consumed = true;
+                    frame_cycle.requestRedraw();
+                }
+            }
             // Mouse and future tracked pointers share the balloon interaction service.
-            AppRuntime::queuePlayerBalloonInput(event, window,
-                !debug_camera && !display.resolution_menu && !AppRuntime::playerOperatorOpen() &&
-                !ImGui::GetIO().WantCaptureMouse);
+            if (!bounded_cam_consumed && !gift_box_consumed) {
+                AppRuntime::queuePlayerBalloonInput(event, window,
+                    !debug_camera && !display.resolution_menu &&
+                    !AppRuntime::playerOperatorOpen() && !ImGui::GetIO().WantCaptureMouse);
+            }
             // Only ACCUMULATED here. A mouse reports far more often than the
             // loop iterates; applying each event as its own camera update made
             // hand-driven motion stutter while one IPC orbit per iteration was
@@ -1254,6 +1324,21 @@ int main(int argc, char* argv[]) {
             static_cast<double>(now_tick - previous_tick) /
             static_cast<double>(SDL_GetPerformanceFrequency()));
         previous_tick = now_tick;
+        syncBoundedCameraHome();
+        const bool gameplay_paused =
+#ifdef __ANDROID__
+            AppRuntime::kidLauncherPaused();
+#else
+            false;
+#endif
+        if (!gameplay_paused && !debug_camera && viewer->hasScene() && state->scene.camera) {
+            if (AppRuntime::boundedCamera().tick(
+                    dt_seconds, *state->scene.camera, AppRuntime::playerVideoCardEnabled())) {
+                g_camera_dirty = true;
+                viewer->requestFrame();
+                frame_cycle.requestRedraw();
+            }
+        }
         const auto advance_start = Clock::now();
 #ifdef __ANDROID__
         // The pause screen and the library freeze the game clock (kid launcher).
@@ -1343,6 +1428,17 @@ int main(int argc, char* argv[]) {
             startupNotice = notice.kind;
             if (display.hud && startupNotice == StartupNotice::None) {
                 drawHud(rtipc::isRunning(), *viewer, display);
+            } else if (!display.hud && startupNotice == StartupNotice::None &&
+                       !AppRuntime::kidLauncherActive() && !AppRuntime::playerConsoleOpen() &&
+                       viewer->hasScene()) {
+                int render_w = original_surface ? original_surface->w : 0;
+                int render_h = original_surface ? original_surface->h : 0;
+                if (render_w <= 0 || render_h <= 0) {
+                    const auto extent = display.render_extent.scaled(display.render_scale);
+                    render_w = extent.first;
+                    render_h = extent.second;
+                }
+                AppRuntime::drawAndroidPerfHud(display.frameStats(), render_w, render_h);
             }
             drawStartupFailureNotice(notice);
             if (!isFatalStartupNotice(startupNotice)) {
@@ -1389,9 +1485,16 @@ int main(int argc, char* argv[]) {
 #endif
         if (display.publish(Clock::now())) {
             viewer->setLoopStatus(display.displayStatus());
+#ifdef __ANDROID__
+            if (display.hud || (!AppRuntime::kidLauncherActive() &&
+                                !AppRuntime::playerConsoleOpen() && viewer->hasScene())) {
+                frame_cycle.requestRedraw();  // refresh the numbers once a second
+            }
+#else
             if (display.hud) {
                 frame_cycle.requestRedraw();  // refresh the numbers once a second
             }
+#endif
         }
 
         // Pacing. Foreground: the configured rate, or none at all when uncapped
@@ -1415,18 +1518,45 @@ int main(int argc, char* argv[]) {
         display.recordIterationBreakdown(breakdown);
     }
 
+    // Hide the window immediately on quit so the user does not see a frozen
+    // window or Windows wait cursor while Vulkan/scene teardown runs. The HWND
+    // stays valid until destroyMainWindowAndImGui() destroys it after Vulkan.
+    const auto shutdown_t0 = Clock::now();
+    if (window) {
+        SDL_HideWindow(window);
+    }
+
     // Same order as Studio: IPC stops before the facade it enqueues into.
     AppRuntime::cancelPlayerBalloonInput();
     rtipc::stop();
+    const auto shutdown_t1 = Clock::now();
     AppRuntime::playerSceneLoad().setPresenter({});
     AppRuntime::shutdownPlayerOperator();
     AppRuntime::releasePlayerOperatorUI();
+    const auto shutdown_t2 = Clock::now();
     viewer.reset();
     rtapi::unbind();
+    const auto shutdown_t3 = Clock::now();
     state.reset();
+    const auto shutdown_t4 = Clock::now();
 
     AppRuntime::destroyMainWindowAndImGui();
+    const auto shutdown_t5 = Clock::now();
     AppRuntime::shutdownPlatform();
+    const auto shutdown_t6 = Clock::now();
+
+    char shutdown_buf[256];
+    std::snprintf(
+        shutdown_buf, sizeof(shutdown_buf),
+        "[PlayerShutdown] total=%.1f ms (ipc=%.1f, op=%.1f, viewer=%.1f, state=%.1f, win=%.1f, sdl=%.1f)",
+        millisecondsBetween(shutdown_t0, shutdown_t6),
+        millisecondsBetween(shutdown_t0, shutdown_t1),
+        millisecondsBetween(shutdown_t1, shutdown_t2),
+        millisecondsBetween(shutdown_t2, shutdown_t3),
+        millisecondsBetween(shutdown_t3, shutdown_t4),
+        millisecondsBetween(shutdown_t4, shutdown_t5),
+        millisecondsBetween(shutdown_t5, shutdown_t6));
+    SCENE_LOG_INFO(shutdown_buf);
     g_sceneLog.closeLogFile();
     return 0;
 }

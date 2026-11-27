@@ -84,7 +84,11 @@ vec4 sampleMaterialTextureLod(uint slot, vec2 uv, float lod) {
     const uint ref = materialTextureRef(slot);
     vec3 coord = vec3(uv, float(ref & 0xffffu));
     switch (ref >> 16u) {
+#ifdef RT_SPEC_HAS_TEX_PAGES
+#define SAMPLE_PAGE(i) case i: return (uint(i) < RT_SPEC_TEX_PAGES) ? textureLod(materialTexturePages[i], coord, lod) : vec4(1.0);
+#else
 #define SAMPLE_PAGE(i) case i: return textureLod(materialTexturePages[i], coord, lod);
+#endif
         MATERIAL_TEXTURE_CASES(SAMPLE_PAGE)
 #undef SAMPLE_PAGE
     default: return vec4(1.0);
@@ -96,7 +100,11 @@ vec4 sampleMaterialTextureGrad(uint slot, vec2 uv, vec2 dx, vec2 dy) {
     const uint ref = materialTextureRef(slot);
     vec3 coord = vec3(uv, float(ref & 0xffffu));
     switch (ref >> 16u) {
+#ifdef RT_SPEC_HAS_TEX_PAGES
+#define SAMPLE_PAGE(i) case i: return (uint(i) < RT_SPEC_TEX_PAGES) ? textureGrad(materialTexturePages[i], coord, dx, dy) : vec4(1.0);
+#else
 #define SAMPLE_PAGE(i) case i: return textureGrad(materialTexturePages[i], coord, dx, dy);
+#endif
         MATERIAL_TEXTURE_CASES(SAMPLE_PAGE)
 #undef SAMPLE_PAGE
     default: return vec4(1.0);

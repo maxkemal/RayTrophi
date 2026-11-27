@@ -12,6 +12,8 @@ struct RasterGlobalInstanceBuffer::Impl {
     VulkanRT::BufferHandle  buffer;
     VulkanRT::BufferHandle previous;
     bool previousValid = false;
+    bool dirtySinceLastRecord = true;
+    bool previousDiffers = true;
     uint32_t                capacity = 0;   // in instances
     void*                   mapped   = nullptr;
 };
@@ -49,6 +51,8 @@ bool RasterGlobalInstanceBuffer::ensure(VulkanRT::VulkanDevice& device,
         impl_->previous = {};
     }
     impl_->previousValid = false;
+    impl_->dirtySinceLastRecord = true;
+    impl_->previousDiffers = true;
     if (impl_->buffer.buffer) {
         if (impl_->mapped) {
             device.unmapBuffer(impl_->buffer);
@@ -110,12 +114,22 @@ bool RasterGlobalInstanceBuffer::previousValid() const {
     return impl_->previousValid && impl_->previous.buffer;
 }
 
+bool RasterGlobalInstanceBuffer::hasMotion() const {
+    return impl_ && impl_->previousDiffers;
+}
+
 void RasterGlobalInstanceBuffer::invalidatePrevious() {
     impl_->previousValid = false;
+    impl_->dirtySinceLastRecord = true;
+    impl_->previousDiffers = true;
 }
 
 void RasterGlobalInstanceBuffer::recordPrevious(void* commandBuffer) {
     if (!impl_->previous.buffer || !impl_->buffer.buffer || !commandBuffer) {
+        return;
+    }
+    if (impl_->previousValid && !impl_->dirtySinceLastRecord) {
+        impl_->previousDiffers = false;
         return;
     }
     const auto cmd = static_cast<VkCommandBuffer>(commandBuffer);
@@ -133,6 +147,8 @@ void RasterGlobalInstanceBuffer::recordPrevious(void* commandBuffer) {
         VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         0, 1, &barrier, 0, nullptr, 0, nullptr);
     impl_->previousValid = true;
+    impl_->dirtySinceLastRecord = false;
+    impl_->previousDiffers = false;
 }
 
 void RasterGlobalInstanceBuffer::write(uint32_t instanceOffset,
@@ -145,6 +161,8 @@ void RasterGlobalInstanceBuffer::write(uint32_t instanceOffset,
                 static_cast<size_t>(instanceOffset) * kInstanceStride;
     std::memcpy(dst, matrices4x4,
                 static_cast<size_t>(count) * kInstanceStride);
+    impl_->dirtySinceLastRecord = true;
+    impl_->previousDiffers = true;
 }
 
 void RasterGlobalInstanceBuffer::zero(uint32_t instanceOffset,
@@ -155,6 +173,8 @@ void RasterGlobalInstanceBuffer::zero(uint32_t instanceOffset,
     void* dst = static_cast<uint8_t*>(impl_->mapped) +
                 static_cast<size_t>(instanceOffset) * kInstanceStride;
     std::memset(dst, 0, static_cast<size_t>(count) * kInstanceStride);
+    impl_->dirtySinceLastRecord = true;
+    impl_->previousDiffers = true;
 }
 
 void* RasterGlobalInstanceBuffer::vkBuffer() const {
@@ -176,6 +196,8 @@ void RasterGlobalInstanceBuffer::destroy() {
         impl_->previous = {};
     }
     impl_->previousValid = false;
+    impl_->dirtySinceLastRecord = true;
+    impl_->previousDiffers = true;
     if (impl_->buffer.buffer && impl_->device) {
         if (impl_->mapped) {
             impl_->device->unmapBuffer(impl_->buffer);

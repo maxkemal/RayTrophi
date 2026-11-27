@@ -1,6 +1,357 @@
 # Player Android performansı — kod optimizasyon raporu (Mali-G52 MC2)
 
-> **Durum:** AKTİF — 2026-11-23 (Claude): Lenovo TB330FU üzerindeki iki ajan ölçümünün koddaki karşılığı ve sıralı optimizasyon planı. Kod değişikliği YOK; bu not plan. Kural: kalite düşürülmez, ikinci render yolu açılmaz. Görüntüyü değiştirmeden aynı işi daha ucuza yap.
+> **Durum:** AKTİF — 2026-11-26 (Antigravity): Lenovo TB330FU (Mali-G52 MC2) Tur 4–6 canlı ölçümleri eklendi.
+
+## Lenovo TB330FU — 26 Kasım 18:02 ARM64 Release APK (Tur 4 + Tur 5 + Tur 6)
+
+Workshop, 960 × 600, Hızlı (Performance) kalite, Vulkan swapchain, kernel zamanlaması kapalı.
+
+| Ölçüm | 25 Kasım 19:08 | Tur 3 öncesi taban | Tur 4 (`1742`) | Tur 5 (`1755`) | **Tur 6 (`1802`)** |
+|---|---:|---:|---:|---:|---:|
+| **Boşta FPS** | 17,17 | 27,1–27,9 | 30,34 | 30,19–30,38 | **30,27** |
+| **Boşta raster GPU ort.** | 51,88 ms | ~32,3 ms | 29,95 ms | 29,88 ms | **30,00 ms** (`sky+main_pass 21,59`, `post 5,75`, `shadow_atlas 1,57`, `overlay 0,75`) |
+| **4 balon patlaması (512²)** | — | 3,35 FPS | 5,37–9,64 FPS | 7,39–18,73 FPS | **10,91–20,95 FPS** (dip 10,91; `t=6..8s` 19,1–21,0 FPS) |
+| **Workshop → ilk kare** | 16,15 / 12,55 sn | 19,60 sn (ilk) | 19,60 sn | 18,92 sn | **9,25 sn** (−10,35 sn, 2,1×) |
+| **`prepare_particles`** | 0,21–0,28 sn | 8,01 sn | 8,01 sn | 7,35 sn | **5,68 sn** (21 → 3 `ObjectMeshSDF` pişirmesi) |
+| **`game_design`** | 10,83 / 9,79 sn | 10,70 sn | 7,91 sn | 7,91 sn | **1,76 sn** (`7 yüzey 217 ms`, `sdf_wait 0`, `demo 991 ms`) |
+| **`first_frame`** | 3,40 / 0,54 sn | 2,52 sn | 2,51 sn | 2,52 sn | **0,75 sn** |
+
+Öne çıkan değişiklikler (Tur 4–6):
+- **Faz 1 / Tur 5 (`paint_wet.comp`, `paint_wet_channels.glsl`, `WetPaintMobileBudget.h`, `BalloonPlayerDefaults.h`):** `stampTile` `count==0` erken çıkış + LUT/`pow`'suz `sourceCullAt` + `STAMP_BATCH=16` `shared` bellek olay/parmak ön-hesaplama; `tickTexel` `sampleStateXYZ` + `candTargetsTexel` ön-eleme (stack 128 → 64 B); sıfır-`pow` FMA/sqrt sRGB polinomu; `coverageTile` `shared` indirgeme (256× daha az global atomic); `channelTile` `!forced` iken yinelenen `surfaceOutput` atlama; Android uyarlamalı adım (`15 Hz` / `active_tiles > 256` iken `10 Hz`), `max_events_per_tick <= 512`, `particles_per_balloon <= 700`.
+- **Faz 2 (`material_preview_frag.frag`, `material_preview_shadow_data.glsl`):** Erişilemez `reflectionRoughness <= 0.025` dalı kaldırıldı, `mat`/`outPreviousClip`/`specularLit` yaşam aralıkları kısaltıldı, hedefli `mediump` FP16 (%0 → %25). `malioc` Mali-G52: `material_preview_frag` stack **112 → 24 B (−79%)**, LS **44,0 → 39,2 (−10,9%)**; `covered` stack **144 → 16 B (−89%)**, LS **46,5 → 38,8 (−16,6%)**.
+- **Faz 3 / Tur 6 (`GameDesignStartupHelper.h`, `WetPaintGeometryBake.cpp`, `ParticleSdfLoadDeduplicator.h`):** Android `1024↔512` `mesh_paint_layer_stacks` yeniden örnekleme fırtınası kaldırıldı, yüksek-poligon UV rasterizasyonu 16-satır şerit bölme OpenMP ile paralelleştirildi ve proje yüklemede 7 parçacık sistemindeki aynı 3 oyuncağın `ObjectMeshSDF` pişirmesi 21 → 3'e tekilleştirildi.
+- **Skinning + Opak/Cam Ayrımı + Android HUD (2026-11-27, CANLI PASS — Windows Player + Lenovo TB330FU):**
+  - `include/Viewport/RasterSkinningBatch.h` + `Backend/VulkanViewportBackend.cpp` + `Viewport/MaterialPreviewShadow.cpp`: RT kapalıyken `ensureRayFusionSceneAS()` / BLAS refit / TLAS yenilemesi kapatıldı; GPU skinning tüm mesh'leri tek `GPU_ONLY` ortak kemik tamponu + satır-içi `vkCmdUpdateBuffer` + önbellekli descriptor + tek `endSingleTimeCommandsAsync` ile çalıştırıyor. **Windows Player (`skin_animation.rtp`, RTX 3060, 720p):** **363,5 → 840,6 FPS (2,31×)**, `render_ms` **0,794 → 0,150 ms**, `advance_ms` **1,461 → 0,608 ms**, `rayfusion.tlas.recorded_refresh` **367,4 → 0 Hz**.
+  - `Viewport/MaterialPreviewCoverage.cpp` + `Viewport/MaterialPreviewTransmission.cpp` + `shaders/material_preview_frag.frag`: opak `main_pass` her zaman `RT_SPEC_GLASS=false` pipeline kullanır; transmissive mesh'ler ayrı cam pipeline'ı, `transmission` geçişi 1 renk ekli `r->loadRenderPass` uyumlu pipeline kullanır + `RGBA16F` highp/NaN koruması eklendi. **Lenovo TB330FU (`skin_animation.rtp`, `960×600`, `Performance`):** **11,24 → 38,99 FPS (3,47×)**, `sky+main_pass` **74,62 → 10,63 ms (7,02×)**, toplam GPU **86,08 → 22,33 ms**, gözlük/puro yeşil pikselleri giderildi.
+  - `include/UI/AndroidPerfHud.h` + `Core/PlayerMain.cpp`: Android oyun içi sol-üst şeffaf FPS + çözünürlük göstergesi eklendi.
+  - **Büyük sahne gözlemi (`old_room.rtp`, 1,25 GB `.bin`, 64 doku — 51×4K + 3×8K = 4,19 GB CPU / ~11,1 GB unified RAM):** 8 GB tablette `lmkd` OOM; sonraki adım olarak Android Player doku yükleme tavanı (`1024×1024` otomatik downsample) not edildi.
+  - **Workshop Mali-G52 kapanış kararı:** `1465 ms → 30,0 ms` (49×), açılış `63,8 → 9,25 sn` ile 2 çekirdekli Mali-G52 MC2'nin görsel tavizsiz silikon sınırının ~%85–90'ına ulaşıldı; Workshop özelinde optimizasyon tamamlandı.
+
+## Lenovo TB330FU — 25 Kasım 19:08 ARM64 Release APK
+
+Workshop, 960 × 600, Hızlı kalite, Vulkan swapchain. Önceki kayıtlar aynı
+çözünürlükte; kamera, kalite ve balon profili eşleşmesi doğrulanmadı.
+
+| Ölçüm | 23 Kasım, APK 2257 | 25 Kasım önceki kayıt | 19:08 APK |
+|---|---:|---:|---:|
+| Boşta raster GPU ortalaması | 696,68 ms | 138,05 ms | **51,88 ms** (104 kare, P95 54,34 ms) |
+| Boşta FPS | — | 6,85 | **17,17** |
+| Workshop seçimi → ilk kare | 46,88 sn | ~15,4 sn (sıcak) | 16,15 sn / **12,55 sn** (tekrar) |
+| `prepare_particles` | 22,58 sn | 0,173 sn | 0,212 / 0,284 sn |
+| `game_design` | 21,60 sn | — | 10,83 / 9,79 sn |
+| `first_frame` aşaması | — | 0,513 sn (sıcak) | 3,40 / 0,54 sn |
+| Patlama GPU `paint_wet.tick` / dispatch | 174,49 ms | — | **15,22 ms** (135 çağrı) |
+| Patlama GPU `paint_wet.channels` / dispatch | 96,21 ms | — | **7,09 ms** (135 çağrı) |
+
+Önceki Lenovo kaydına göre raster GPU süresi %62,4 düştü ve FPS 2,51 katına
+çıktı. 19:08 paketinde `glass=False`, varyant yeniden kurulumu 0. Tek
+balon patlamasından sonraki 15 sn'de oyun döngüsü 9,04 kare/sn ve
+`paint.wet.submit` ortalaması 87,51 ms (136 çağrı, GPU kernel zamanlaması açık).
+İlk geçerli açılışta disk önbelleği silinmedi. Doğrudan `project.open` arayüzü
+kütüphanede oyun saatini başlatmadığı için iki geçerli süreyi Android oyun
+kartından aldık.
+
+Eski ham ölçümlerin özeti [Lenovo 2257 profili](PLAYER_ANDROID_LENOVO_2257_PROFILE.md).
+25 Kasım önceki ölçüm [ajan koordinasyon kaydında](AJAN_KOORDINASYON.md).
+
+### Tek balon patlaması — GPU kernel zamanlaması A/B
+
+İki temiz Workshop oturumu, aynı APK, 960 × 600, Hızlı kalite, balon ID 0.
+Her koşulda 6 sn boşta ve patlamadan itibaren 15 sn örnek alındı.
+
+| Ölçüm | Kernel zamanlaması kapalı | Kernel zamanlaması açık |
+|---|---:|---:|
+| `paint.wet.submit` ortalaması | **0,22 ms** (146 çağrı) | **82,05 ms** (121 çağrı) |
+| `simulation.wet_paint` ortalaması | 0,67 ms | 59,73 ms |
+| `player.advance.simulation_tick` ortalaması | 2,43 ms | 60,98 ms |
+| Patlama penceresinde oyun döngüsü | 10,60 kare/sn | 11,03 kare/sn |
+| Raster GPU ortalaması | 55,57 ms | 52,41 ms |
+
+`SimulationComputeVulkan::submitWithReadback`, kernel zamanlaması açıkken
+`synchronize()` ile aynı gönderimin fence'ini bekliyor ve sonra query pool'u
+okuyor. Kapalıyken `submitRecordingAsync()` ile ilerliyor ve ancak tekrar
+kullanacağı ring slotu hâlâ uçuşta ise eski fence'i bekliyor. Bu A/B'de
+zamanlamayı açmak scope'a **81,83 ms/çağrı** ekledi.
+
+Açık koşulunda 121 gönderim için `paint_wet` GPU toplamı 3751,99 ms,
+gönderim başına **31,01 ms**. Ağırlıklı katkılar tick 12,31, channels 6,04,
+stamp 4,71, resolve 4,25 ve coverage 3,64 ms/gönderim. İlk ölçümde bu toplam
+35,36 ms/gönderim idi. Host scope ile aynı pencerenin kernel toplamı arasındaki
+fark sırasıyla **51,04** ve **52,16 ms/gönderim**. Bu fark, mevcut sayaçlarla
+GPU kuyruğunda önceki işin bitmesi, barrier/kopya, fence ve query toplama
+arasında paylaştırılamıyor. İlgili raster ortalaması farkla benzer büyüklükte,
+ancak ayrı sayaçlar doğrudan kuyruk bağımlılığını göstermiyor.
+
+Zamanlama kapatıldığında host beklemesi bu scope'tan çıktı; 15 sn'lik patlama
+penceresinde FPS artışı gözlenmedi. İki koşulda farklı sayıda boya adımı
+çalıştı. Kapalı koşuldaki 0,22 ms normal gönderimin host maliyeti olarak
+kullanılabilir; açık koşuldaki GPU süreleri shader teşhisi içindir.
+
+### Normal mod — raster ve swapchain beklemeleri
+
+19:08 APK, Workshop, 960 × 600, aynı balon ID 0. Kernel zamanlaması kaynakta
+varsayılan olarak kapalı. IPC'de sahne compute bağlamında `supported=true`,
+`enabled=false`; ayrı boya bağlamı mevcut değildi. Raster timestamp'leri
+açık kaldı. Yakalama kullanılmadı.
+
+| Ölçüm | Boşta | Tek balon patlaması |
+|---|---:|---:|
+| Raster GPU ortalaması | 50,11 ms (114 kare) | 51,15 ms (137 kare) |
+| Raster GPU P95 | 50,90 ms | 52,09 ms |
+| Viewport slot fence, host | ~0,008 ms | ~0,007 ms |
+| Viewport queue submit, host | ~0,41 ms | ~0,41 ms |
+| UI + swapchain sunumu, host | ~39–40 ms | 105,86 ms |
+| Boya submit, host | — | 0,262 ms (136 çağrı) |
+| Simülasyon tick, host | 0,88 ms | 3,77 ms |
+
+Patlamadan sonraki 15,13 sn'de 136 simülasyon tick'i alındı (~9,0/s).
+Bir saniyelik sunum pencereleri 5,8 FPS'ye kadar indi ve 11,2–12,4 FPS'ye
+toparlandı. Patlama için host viewport ve sunum ortalamaları 1,5–14 sn
+arasındaki 12 tamamlanmış pencerenin kare sayısıyla ağırlıklı ortalaması.
+En uzun kare 190,31 ms sürdü ve 173,12 ms'si sunumdaydı. Raster GPU ve
+host sunum süresi eşzamanlı işleri kapsayabilir; birbirine eklenmez.
+
+19:08 APK'da `present_ms_avg`, UI işini ve swapchain fence/acquire/submit/
+present çağrılarını birlikte ölçüyor. Yeni Player derlemesinde `perf.list`
+üzerinden `player.swapchain.fence_wait`, `player.swapchain.acquire`,
+`player.swapchain.queue_submit` ve `player.swapchain.queue_present`
+satırlarının patlama öncesi/sonrası `total_ms` farkını `count` farkına böl.
+Bunlar host çağrı süreleri. GPU kuyruğunda bir işin çalışmaya başlamadan
+önce geçirdiği süre için ayrıca cihaz zaman çizelgesi gerekir.
+
+### 22:50 ARM64 Release — swapchain sayaçları Lenovo canlı testi
+
+Workshop, 960 × 600, Hızlı kalite, Vulkan swapchain. Kernel zamanlaması
+kapalı. İki temiz oturumda balon ID 0 patlatıldı.
+
+| Ortalama | Boşta (6,05 sn) | Patlama 1 (15,08 sn) | Patlama 2, ilk 6 sn | Patlama 2, sonraki 9 sn |
+|---|---:|---:|---:|---:|
+| Raster GPU | 52,87 ms | 55,80 ms | 64,62 ms | 57,31 ms |
+| Swapchain fence bekleme, host | 0,009 ms | 0,010 ms | 0,014 ms | 0,012 ms |
+| Görüntü edinme, host | 0,23 ms | 0,34 ms | 0,31 ms | 0,40 ms |
+| Swapchain queue submit, host | 0,10 ms | 0,16 ms | 0,13 ms | 0,17 ms |
+| Swapchain `vkQueuePresentKHR`, host | 1,74 ms | **37,57 ms** | **132,05 ms** | **98,61 ms** |
+| Boya submit, host | — | 0,22 ms | 0,20 ms | 0,30 ms |
+
+İlk turda boşta ~16,8 FPS ve tam patlama penceresinde ~10,5 oyun döngüsü/sn
+(159 tick) ölçüldü. Bir saniyelik sunum pencerelerinde dip 4,8 FPS. İkinci
+turda 118 tick (~7,7/sn), pencere dibi 4,9 FPS. İlk turun erken düşüşünde
+toplam sunum scope'u bazı pencerelerde ~2 ms kaldı. İkinci turda aynı erken
+düşüşle birlikte sunum çağrısı belirgin uzadı. Bu yüzden ilk turun erken
+karelerinin süresini yalnız sunuma yazamayız. İkinci turdaki en büyük
+ölçülen host beklemesi `vkQueuePresentKHR` içindeydi. Vulkan/Android
+sürücüsünde bunun GPU kuyruğu, kompozitör veya ekran pacing payı için
+cihaz zaman çizelgesi gerekir.
+
+### 22:50 ARM64 Release — Lenovo Perfetto izi
+
+25 sn iz, Workshop 960 × 600, kernel zamanlaması kapalı, balon ID 0 IPC ile
+patlatıldı. Yerel, git tarafından dışlanan ham iz
+`docs/dev/.captures/lenovo-2250-balloon.pftrace`, IPC kare özeti yanında.
+
+- İz zamanında 5,8–16,0 sn arasında 104 sunum: `QueuePresentKHR` 79,33 ms,
+  içindeki `queueBuffer → queueBuffer → waitForever` 77,41 ms (%97,58).
+  98/104 bekleme bitişi uygulamanın `GPU completion` izindeki bir bitişle
+  0,5 ms içinde eşleşti. Aynı aralıkta SurfaceFlinger `composite` 5,62 ms
+  ortalama, 8,68 ms tepe (106 kayıt). Bulgular GPU tamamlanmasına bağlı
+  Android BufferQueue beklemesini gösteriyor. Mali yürütme ve dma_fence
+  olayları gelmedi; Vulkan kuyruk gecikmesi ile GPU iş süresi ayrılamıyor.
+  Trace Processor bir negatif zaman damgası düşürdü ve Android log
+  işaretleri kayda girmedi. Kare eşlemesi SDLThread izine ve IPC özetine dayanıyor.
+- Patlama anında en uzun ilk kare 227,96 ms. `pumpMainThreadWork` 205,33 ms,
+  sunum 2,94 ms. Önceki sunumdan sonraki ilk compute submit'e kadarki yaklaşık
+  218 ms'lik iz aralığında SDLThread 156,60 ms uyuyor ve 56,95 ms CPU'da
+  çalışıyor. Art arda ~20 ms uykular var. İz, patlama IPC komutunun ana
+  iş parçacığındaki hangi alt fonksiyonunun beklediğini göstermiyor.
+- İzde boşta ~17,2–17,7 FPS, patlamadan sonra 1 sn'lik pencerelerde ~7–13 FPS.
+  Önceki 52,87 ms raster ölçümü tek başına yaklaşık 19 FPS tavanı veriyor.
+  Bugünkü iş yükünde 30 FPS için 33,3 ms toplam kare bütçesi gerekiyor.
+  720p masaüstü ile kıyaslarken `capacity_fps` yalnızca render + upload host
+  sürelerinin tersidir; gerçek sunum veya simülasyon hızını göstermez.
+
+### Lenovo A/B — 22:50 ve 23:25 ARM64 Release
+
+Workshop 960 × 600, Hızlı kalite, kernel zamanlaması kapalı. Temiz sahnede
+balon ID 0 bir kez patlatıldı (her iki pakette 3586 damla). APK içindeki
+410 varlığın CRC ve boyutları eşleşti. İki çalışma tek geçişli ve sıralı.
+
+| Ölçüm | 22:50 | 23:25 |
+|---|---:|---:|
+| Boşta raster kare/sn | 17,32 | 17,62 |
+| Patlama raster kare/sn (~15 sn) | 9,63 | 10,87 |
+| Patlama raster GPU ortalaması | 58,15 ms | 51,48 ms |
+| Patlama raster GPU P95 | 58,19 ms | 53,78 ms |
+| Patlamada `vkQueuePresentKHR` host ortalaması | 77,56 ms | 73,00 ms |
+| Patlama overlay GPU ortalaması | 0,974 ms | 0,968 ms |
+| İlk patlamada örneklenen tepe canlı parçacık | 6705 | 6726 |
+
+İki paket de boşta 5 canlı parçacık seviyesine döndü. Balon yeniden şişti;
+tekrar patlatmada parçacıklar yeniden göründü (23:25'te örneklenen tepe 9018).
+Aynı kamera pivotundan 1,25× geri çekilince boya iki pakette de zemin ve
+sağ duvarda okunur kaldı. Yeni pakette belirgin mip kaybı görülmedi.
+Sıçrama şekli ve kaplanan alan farklıydı (41913 / 36633 texel); bu yüzden
+görsel kabul piksel eşitliği veya FPS farkının optimizasyonlara tek başına
+atfedilmesi anlamına gelmez. 23:25 APK Lenovo'ya kurulu ve temiz sahne açık.
+
+### GPU-resident billboard — canlı slot sıkıştırma
+
+Ortak Vulkan raster yolu, aynı VkDevice üzerindeki parçacık sistemleri için
+canlı slotları GPU'da sayar, blok önek toplamlarını çıkarır ve alpha / additive
+listelerini artan slot sırasıyla yazar. Her liste kendi `VkDrawIndirectCommand`
+sayacını kullanır. Bilinmeyen profil önceki gibi additive LUT satırı 0'a düşer.
+CPU canlı slot listesini veya indirect sayacı okumaz. Boş sistemlerde dispatch
+ve draw yapılmaz, descriptor yuvası ve LUT satırları respawn için kalır.
+
+Windows Player, Android Player ve Studio'nun aynı cihazlı Vulkan Play viewport
+yolu bu kodu paylaşır. Shader veya geçici tampon oluşturulamayan cihaz eski
+vertex-pull yoluna devam eder. GPU'da olmayan sistemler mevcut CPU quad
+yolunu kullanır. Yeni shaderlar Windows Vulkan 1.2 ve Android Vulkan 1.1
+için doğrulandı ve Player shader manifestine eklendi.
+
+Canlı kabul: 23:25 paketi ile yeni paket aynı sahne ve kalite ayarında.
+Tek patlama, sönme ve respawn; karışık alpha/additive efektlerin görünümü;
+sonra iki hızlı patlama. Lenovo ve Windows Player'da raster GPU, FPS ve
+P95; Studio Play aynı VkDevice üzerinde aynı efekt kontrolü. GPU capture
+uygunsa canlı liste başına indirect vertexCount = canlı slot × 6 ve iki
+blend listesinin artan slot sırası kontrol edilir.
+
+### Lenovo A/B — billboard sıkıştırma, 23:25 ve 23:46 ARM64
+
+Workshop, 960 × 600, Hızlı kalite, kernel zamanlaması kapalı. Her patlama
+temiz başlatılan sahnede yaklaşık 15 sn izlendi. FPS ve kare aralığı P95
+Perfetto `QueuePresentKHR` tamamlanmalarından, raster P95 Player IPC'den.
+Her pencerede bir ADB ekran görüntüsü alındı.
+
+| Senaryo | 23:25 FPS | 23:46 FPS | 23:25 / 23:46 sunum P95 | 23:25 / 23:46 raster GPU P95 |
+|---|---:|---:|---:|---:|
+| Tek, balon 0, 3586 damla | 10,12 (158 sunum) | 7,69 (116 sunum) | 206,05 / 194,72 ms | 53,74 / 54,85 ms |
+| Çift, balon 0 + 1, 9815 damla | 6,80 (103 sunum) | 7,69 (118 sunum) | 243,31 / 254,10 ms | 72,45 / 56,69 ms |
+
+İlk rastgele çift patlamada balonlar farklı geldi. Karşılaştırma için iki
+pakette de 0 ve 1 art arda tetiklendi (IPC yanıtları arası 117,7 / 118,6 ms).
+İki turda da ikinci balon sürprizdi. Yeni pakette yakalanan karelerde tek
+patlamanın turuncu damlaları ve çift patlamanın çok renkli damlaları ile
+kıvılcımları görünüyor; belirgin kayıp veya bozulma gözlenmedi. Kareler
+hareketin farklı anlarından, piksel eşitliği denetlenmedi. Yeni pakette
+canlı parçacık sayısı iki pencerenin sonunda başlangıçtaki 5'e döndü.
+
+Tek turda uçtan uca sonuç karışık. Yeni paketin tek patlama ortalama FPS'si
+düştü. Çiftte FPS ve raster P95 iyileşti, sunum aralığı P95 yükseldi.
+Ölçüm kod farkını tek başına ayırmıyor. Ham iz ve IPC özetleri
+git dışında `docs/dev/.captures/particle-comp-*` altında.
+
+### 26 Kasım — ilk ve ısınmış tek patlama
+
+Lenovo, Workshop 960 × 600, Hızlı, GPU kernel timing kapalı. Ölçülen
+patlama her seferinde balon 0, 3586 damla. İlk koşul temiz süreçte ilk
+patlama. Isınmış koşulda aynı süreçte önce balon 2 patlatıldı, efektler
+söndükten sonra `paint.wet_reset` uygulanıp balon 0 ölçüldü. Pencereler
+yaklaşık 15 sn ve ekran görüntüsü alınmadı. Disk önbelleği silinmedi.
+
+| APK | İlk sunum FPS / P95 | Isınmış sunum FPS / P95 |
+|---|---:|---:|
+| 23:25 | 10,37 / 155,79 ms | 14,30 / 126,11 ms |
+| 23:46 | 10,11 / 168,05 ms | 10,48 / 143,23 ms |
+
+Önceki 23:46 ilk patlama 7,69 FPS sonucu tekrar etmedi. Ön patlama iki
+pakette de P95'i iyileştirdi. Isınmış 23:46 raster GPU ortalaması 50,18 ms
+(23:25 50,03 ms) olmasına rağmen sunum FPS farkı kaldı. İlk kullanım etkisi
+ve koşular arası değişkenlik ölçümde var; ikisi de farkın tek başına
+nedenini göstermiyor.
+
+Cihazın iki termal anlık okumasında HAL CPU/GPU 54,0–78,3 C, kasa 40–41 C,
+BatteryService pil 38,3–38,5 C, Android termal durum 0. USB takılı, pil %82.
+Pil akım sensörü -0,365 ile -0,783 A ve yaklaşık 4 V raporladı.
+USB anlık giriş gücü veya Player'a özgü watt ölçülemedi.
+
+### 26 Kasım — compaction senkronizasyon kapsamı
+
+Kayıtlı ısınmış tek patlama izleri tekrar incelendi. Lenovo Workshop 960 ×
+600, kernel zamanlaması kapalı, iki pakette 3586 damla. Raster GPU
+ortalamaları 50,03 / 50,18 ms (23:25 / 23:46).
+
+| SDL iş parçacığı ortalaması | 23:25 | 23:46 |
+|---|---:|---:|
+| Vulkan QueueSubmit | 0,272 ms | 0,285 ms |
+| Vulkan AcquireNextImageKHR | 0,439 ms | 0,469 ms |
+| Vulkan QueuePresentKHR | 54,149 ms | 77,763 ms |
+| İçindeki Android waitForever | 52,145 ms | 75,792 ms |
+
+Fark sunum fence'i beklenirken görünüyor. Eldeki iz komut tamponunun içindeki
+compaction dispatch ve bariyerlerini ayrı göstermiyor. 23:46 kodu
+compaction'ı gölge/kalınlık hazırlığı sonrasında kaydedip GPU çıktısını ana
+HDR geçişinden önce tüm sonraki indirect ve vertex işlerine yayıyordu.
+
+Yeni kaynakta compaction GPU culling sonrasında, gölge ve ana rasterdan önce
+kaydediliyor. Giriş bağımlılığı transfer/compute yazarları ile önceki
+indirect/vertex okuyucularına daraltıldı. HDR yolunda sonuç görünürlüğü,
+billboard listesini okuyan LDR overlay önüne taşındı. HDR'siz tek render
+pass yolunda bariyer pass önünde. Blend sırası ve shaderlar aynı.
+
+Yeni derlemede `viewport.frame_timings` içinde `particle_compaction`
+satırı dispatch'leri ve giriş/faz bariyerlerini kapsayan GPU stage penceresini
+gösterir. Kernel zamanlaması kapalıyken 23:46 ile aynı ısınmış tek patlamada
+bu satırı, raster P95'i ve Perfetto sunum aralığı P95'ini birlikte kontrol et.
+Giriş beklemeleri ve GPU işinin örtüşmesi stage penceresini etkileyebilir.
+
+### Lenovo A/B — compaction bariyeri, 23:46 ve 00:18 ARM64
+
+26 Kasım, Workshop 960 × 600, Hızlı kalite, GPU kernel zamanlaması kapalı.
+Her koşu yeni süreçte başladı. Balon 2 ile ön patlamadan sonra boya sıfırlandı;
+her ölçümde balon 0 ve 3586 damla. İki paket için ikişer ~15 sn koşu.
+Yalnız Player IPC sayaçları kullanıldı. FPS, tamamlanmış Player sunum
+pencerelerinin süre ağırlıklı ortalaması; P95 raster GPU karesine ait.
+İki APK'nın 412 varlığı CRC ve boyut olarak aynı.
+
+| APK / koşu | Sunum FPS | Raster GPU ortalama / P95 | queue_present host ortalaması | particle_compaction GPU ortalama / P95 |
+|---|---:|---:|---:|---:|
+| 23:46 / 1 | 12,76 | 50,21 / 51,31 ms | 60,78 ms | — |
+| 23:46 / 2 | 11,24 | 50,10 / 51,68 ms | 67,79 ms | — |
+| 00:18 / 1 | 13,09 | 49,98 / 50,99 ms | 60,14 ms | 0,37 / 1,70 ms |
+| 00:18 / 2 | 13,66 | 50,36 / 51,17 ms | 56,49 ms | 0,33 / 1,65 ms |
+
+00:18 paketinde compaction her koşuda 85 karede kaydedildi. Stage
+istatistiğinin penceresi çalışmayan kareleri de kapsıyor. İki koşu
+ortalamasında FPS 12,00'dan 13,38'e çıktı ve host sunum çağrısı yaklaşık
+6 ms kısaldı. Boya tick sayıları ve örneklenen canlı parçacık zirveleri
+koşular arasında farklıydı; bu ölçüm yalnızca gözlenen A/B farkı.
+Çalışma sonunda 00:18 APK kurulu ve temiz Workshop, beş balon şişik.
+
+Derlemeye 17 raster aşaması için RasterStageAccumulator::kStageCount
+düzeltmesi dahil edildi. Ham IPC ölçümleri git dışındaki
+`docs/dev/.captures/particle-barrier-*.json` dosyalarında.
+
+### 26 Kasım 00:57 ve 01:16 ARM64 Release — Paket 3 + `shadow_atlas` (Lenovo TB330FU canlı PASS)
+
+Workshop, 960 × 600, Hızlı kalite, Vulkan swapchain, kernel zamanlaması kapalı.
+Balon ID 0 (3586 damla), 6 sn boşta + 15 sn patlama.
+
+| Ölçüm | `00:18` / `23:25` | `00:57` (Paket 3) | **`01:16` (Tur 2: `shadow_atlas` + `post` + TBDR)** |
+|---|---:|---:|---:|
+| Boşta Raster GPU (ort / P95) | 50,69–52,87 / 51,07 ms | 47,00 / 47,48 ms | **40,63 / 41,41 ms** |
+| Boşta FPS | 17,3–17,6 | ~19 | **21,30** |
+| Patlama Raster GPU (ort / P95) | 50,17–51,48 / 51,1–53,8 ms | 47,11 / 48,66 ms | **40,09 / 41,39 ms** |
+| Patlama FPS (15 sn, balon 0) | 10,87–13,38 | — | **15,92** |
+| `shadow_atlas` GPU (boşta / patlama) | ~11,7 ms | 11,74 / 10,75 ms | **3,93 / 3,02 ms** (**3,0–3,5×**) |
+| `sky` (TBDR `sky+prepass+main_pass`) | — | 27,39 / 27,81 ms | **28,76 / 28,60 ms** |
+| `post` (`raster_post` + alt bariyerler) | — | 5,07 / 5,12 ms | **5,24 / 5,30 ms** |
+| `taa` / `overlay` / `particle_compaction` | — / 0,97 / 0,35 ms | 1,52 / 0,87 / 0,26 ms | **1,44 / 0,87 / 0,21 ms** (P95 0,77) |
+
+**Sıradaki hedefler (40,6 ms → < 33 ms / 30 FPS için) — ✔ Tur 3 YAZILDI (2026-11-26 sabah, ARTIMLI derleme + APK ölçümü bekliyor):**
+1. **✔ `sky` (28,76 ms):** `objectPreviousClipImage` `RGBA32F` (128 bpp) → `RG16F` (32 bpp) 2D UV hareket vektörü + `SHADER_READ_ONLY_OPTIMAL` (HDR renk tile RAM **192 → 96 bpp**, Mali-G52 128 bpp 16×16 tile bütçesine sığar), `hdrColorImage` `!supportsRayQuery && !m_cloudRtRendering` iken `STORAGE_BIT` kaldırıldı (Mali AFBC geri açıldı), TBDR `Performance` kalitede `!rtShadowFrame` iken yinelenen `depth_prepass` kapatıldı.
+2. **✔ `post` (5,24 ms):** `raster_post_fast.vert` + `raster_post_fast_frag.frag` (`malioc` Mali-G52: **32 reg %100 occupancy, 0 B stack, A 12,75, LS 0,00, T 0,50**) doğrudan LDR render pass'i (`colorImage` `LOAD_OP_DONT_CARE`) içine alındı; compute↔grafik geçişi, 4,6 MB `colorImage` yaz/oku ve gereksiz derinlik bariyerleri kaldırıldı (DoF/Aerial/LensWeather için `raster_post.comp` yedeği korunur).
+3. **✔ Çoklu ışık gölge örneklemesi:** `sampler2DShadow` donanım PCF (`compareEnable = VK_TRUE`, `VK_COMPARE_OP_LESS_OR_EQUAL`; `VUID-vkCmdDraw-magFilter-04553` düzeltildi): `Performance` 9→1 tap (alan ışığı 4 tap), `Balanced` 9→4 tap, `Quality` 25→9 tap. 8/8 shader vk1.2 + vk1.1 `spirv-val` PASS; 5/5 C++ `/Zs` PASS.
+4. **✔ P0/P1 Varsayılan Maliyet Temizliği + F2 Render & Aydınlatma Paneli (2026-11-26 öğlen, 7/7 C++ `/Zs` PASS):**
+   - `VulkanGpuBreadcrumbs.cpp`: `RT_PLAYER`'da varsayılan kapalı (`RAYTROPHI_GPU_BREADCRUMBS=1` ile açılır) — Mali-G52'de her kare çalışan 6–8 tam `ALL_COMMANDS_BIT` GPU boşaltma bariyeri kalktı.
+   - `VulkanViewportBackend.cpp`: `transmission_prep` yalnız `kMpSpecGlass` aktifse çalışır; `#ifdef RT_PLAYER` TAA/DoF canlı senkronizasyonu eklendi.
+   - `MaterialPreviewShadow.cpp`: Android gölge atlası 4096² (64 MB) → **2048² (16 MB)**.
+   - `PlayerOperator.cpp` + `PlayerOperatorSettingsUI.cpp` + `MaterialPreviewProbeField.cpp` + `MaterialPreviewCoverage.cpp`: F2 → Display & performance altında **Render & lighting** bölümü (`render.status / render.configure / render.reset` + `player_operator.json` kalıcı kayıt); `RT_PLAYER` varsayılanları `rt_shadow=false`, `probe_enabled=false` (Android'de ek `quality=performance`, `taa=false`, `dof=false`).
+   - **Canlı PC Player ölçümü (RTX 3060, 1280×720, Workshop):** Varsayılan **1.548,7 FPS / 0,437 ms GPU** (P95 0,442 ms; `shadow_atlas` 0,011 ms, `post` 0,064 ms); `RT Shadows ON` 1.397 FPS / 0,760 ms; `Light Probe sky_bake` 990 FPS / 0,962 ms; `Light Probe traced` 513 FPS / 1,916 ms (4,4×).
+
+**Sonraki oturum devri (akşam tablet ölçümü + yeni dalga):**
+1. **Lenovo TB330FU Tur 3 APK canlı ölçümü:** `40,63 ms → < 33 ms (30+ FPS)` doğrulaması + `sampler2DShadow` HW PCF görsel kabulü.
+2. **Yeni optimizasyon dalgası (ayrı planlanacak):** Volume (VDB/SDF), Atmosfer & Bulut (`aerial_froxel`, `cloud_*`, `lens_weather` lazy-load), ve Skinning / Karakter Animasyonu maliyet analizi & optimizasyonu.
+
 
 ## 1. Ölçümler (iki rapor, aynı tablet)
 

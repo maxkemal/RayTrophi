@@ -199,6 +199,7 @@ void channelTile(uint tile_index, bool edited) {
     // Normals (and their height cache) only where a height near this tile
     // moved: a drying, still stain changes roughness, not its relief.
     const bool redo_height = height_normal && (needs & CHANGED_HEIGHT) != 0u;
+    const bool redo_content = forced || (needs & CHANGED_CONTENT) != 0u;
     if (redo_height && (planes & 8u) != 0u) cacheAddedHeight(t, s);
     for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
         int x,y; tileTexel(t,k,x,y);
@@ -207,10 +208,12 @@ void channelTile(uint tile_index, bool edited) {
         vec4 layer = unpackColor(color[ti]);
         float coverage = clamp(layer.a/255.0,0.0,1.0);
         // Recreate colour also after lazy atlas expansion, preserving old paint.
-        if ((planes & 1u) != 0u) {
+        // On normal simulation steps (!forced), resolveTile/resetTile already
+        // wrote out_color[ti] for every tile whose colour changed.
+        if (forced && (planes & 1u) != 0u) {
             out_color[ti] = surfaceOutput(s, ti, layer, state[ti].w);
         }
-        if ((planes & 2u) != 0u) {
+        if (redo_content && (planes & 2u) != 0u) {
             uint roughness = sourceChannel(1u, ti);
             if ((s.flags & SURFACE_ROUGHNESS) != 0u && coverage > 0.0) {
                 float wet = float(s.pbr_params & 255u) / 255.0;
@@ -236,7 +239,7 @@ void channelTile(uint tile_index, bool edited) {
                                                         : sourceChannel(3u, ti);
             }
         }
-        if ((planes & 16u) != 0u && (pc._p1 & 2u) != 0u) {
+        if (redo_content && (planes & 16u) != 0u && (pc._p1 & 2u) != 0u) {
             uint originalOpacity = 0xFFFFFFFFu;
             uint opacity = originalOpacity;
             if ((s.flags & SURFACE_REVEAL_OPACITY) != 0u) {

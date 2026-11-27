@@ -61,9 +61,25 @@ vec3 skyRadiance(vec3 dir) {
     float Rg = atmoPlanetRadius();
     float Rt = atmoTopRadius();
     vec3 sunDir = atmoSunDirection();
-    vec3 camPos = vec3(0.0, Rg + atmoAltitudeOffset(), 0.0);
+    // Use at least a 10 m eye height so rays grazing just below the horizon
+    // still integrate realistic horizon mist before meeting the ground sphere,
+    // while steeper downward rays stop at the planet instead of marching
+    // through the Earth's core at sea-level Rayleigh density.
+    float alt = max(atmoAltitudeOffset(), 10.0);
+    vec3 camPos = vec3(0.0, Rg + alt, 0.0);
     float dist = raySphereExitDistance(camPos, dir, Rt);
     if (dist <= 0.0) return vec3(0.0);
+
+    // Planet/ground sphere intersection: |camPos + t * dir|^2 = Rg^2.
+    // c = (Rg + alt)^2 - Rg^2 = alt * (2*Rg + alt) avoids Rg^2 cancellation.
+    float b = dot(camPos, dir);
+    float c = alt * (2.0 * Rg + alt);
+    float disc = b * b - c;
+    bool hitGround = (b < 0.0 && disc >= 0.0);
+    if (hitGround) {
+        float tGround = max(-b - sqrt(disc), 0.0);
+        dist = min(dist, tGround);
+    }
 
     vec3 radiance = vec3(0.0);
     vec3 opticalDepth = vec3(0.0);
@@ -83,6 +99,19 @@ vec3 skyRadiance(vec3 dir) {
         radiance += inScat * transSun * stepSize * currentTrans;
         opticalDepth += (scatR + scatM) * stepSize;
     }
+
+    if (hitGround) {
+        vec3 groundPos = camPos + dir * dist;
+        vec3 groundNormal = normalize(groundPos);
+        float sunNdotL = max(dot(groundNormal, sunDir), 0.0);
+        vec3 transSunG = sampleComputedTransmittance(groundPos, sunDir);
+        // Physically-based neutral earth bounce (18% albedo / PI) lit by the
+        // transmitted sun, attenuated by the remaining view-path transmittance.
+        const vec3 kGroundAlbedo = vec3(0.18, 0.17, 0.15);
+        vec3 groundRadiance = (kGroundAlbedo / PI) * transSunG * sunNdotL;
+        radiance += groundRadiance * exp(-opticalDepth);
+    }
+
     return min(max(radiance * atmoIntensity(), vec3(0.0)), vec3(128.0));
 }
 

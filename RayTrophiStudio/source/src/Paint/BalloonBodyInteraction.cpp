@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <stdexcept>
+#include <vector>
 
 namespace Paint {
 namespace {
@@ -18,16 +19,24 @@ constexpr double kTouchDelay = 0.24;
 constexpr double kGripDelay = 0.12;
 constexpr double kReleaseDelay = 0.15;
 constexpr double kLossSeconds = 0.80;
+constexpr double kMinSweepDt = 0.005;
+constexpr double kMaxSweepDt = 0.20;
+constexpr float kSwingSpeed = 1.2f;
 
 struct PersonState {
     Clock::time_point sample{};
     Clock::time_point valid{};
     Clock::time_point pending_since{};
     Clock::time_point releasing_since{};
+    Clock::time_point prev_time{};
     int candidate = -1;
     bool grip = false;
     bool touch_left = false;
     bool latched = false;
+    bool has_prev_l = false;
+    bool has_prev_r = false;
+    Vec3 prev_l_wrist;
+    Vec3 prev_r_wrist;
     Vec3 latch_position;
     float latch_radius = 0.4f;
     Vec3 smooth;
@@ -88,11 +97,27 @@ json coordinates(const Vec3& point) {
     return json::array({point.x, point.y, point.z});
 }
 
+bool segmentIntersectsSphere(const Vec3& a, const Vec3& b, const Vec3& center, float radius) {
+    if (radius < 0.0f) {
+        return false;
+    }
+    const Vec3 ab = b - a;
+    const float len_sq = ab.length_squared();
+    float t = 0.0f;
+    if (len_sq > 1e-10f) {
+        t = std::clamp(Vec3::dot(center - a, ab) / len_sq, 0.0f, 1.0f);
+    }
+    const Vec3 closest = a + ab * t;
+    return (closest - center).length_squared() <= radius * radius;
+}
+
 void latch(PersonState& state, const BalloonInteractionTarget& target) {
     state.latched = true;
     state.latch_position = target.position;
     state.latch_radius = target.radius + 0.25f;
     state.candidate = -1;
+    state.grip = false;
+    state.pending_since = {};
     state.phase = "latched";
     state.releasing_since = {};
 }
@@ -188,6 +213,11 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
         return; // Loss timers above still run; pose maps are copied only on new input.
     }
     last_packet = input.packetCount();
+    std::vector<int> popped_this_tick;
+    const auto already_popped = [&](int balloon_id) {
+        return std::find(popped_this_tick.begin(), popped_this_tick.end(), balloon_id) !=
+            popped_this_tick.end();
+    };
     for (const auto& entry : input.persons()) {
         const int id = entry.first;
         const auto& person = entry.second;
@@ -210,6 +240,18 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
         const bool right_valid = person.confidence >= kConfidence && r[3] >= kConfidence;
         const Vec3 left = position(l), right = position(r);
         const Vec3 middle = (left + right) * 0.5f;
+        const Vec3 prev_l = state.prev_l_wrist;
+        const Vec3 prev_r = state.prev_r_wrist;
+        const bool had_prev_l = state.has_prev_l;
+        const bool had_prev_r = state.has_prev_r;
+        const double sweep_dt = state.prev_time == Clock::time_point{}
+            ? 0.0
+            : age(received, state.prev_time);
+        state.prev_l_wrist = left;
+        state.prev_r_wrist = right;
+        state.has_prev_l = left_valid;
+        state.has_prev_r = right_valid;
+        state.prev_time = (left_valid || right_valid) ? received : Clock::time_point{};
         if (active_person == id) {
             if (!left_valid || !right_valid) {
                 state.phase = "tracking_lost";
@@ -226,7 +268,8 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
             }
             state.latch_position = target->position;
             state.latch_radius = target->radius + 0.25f;
-            const float release_span = std::max(state.span + 0.25f, state.span * 1.65f);
+            const float release_span = std::min(
+                std::max(state.span + 0.25f, state.span * 1.45f), state.span + 0.55f);
             if ((left - right).length() > release_span) {
                 state.phase = "release_pending";
                 if (gap || state.releasing_since == Clock::time_point{}) {
@@ -256,17 +299,59 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
             }
             continue;
         }
-        if (heldBalloon() >= 0) {
-            state.candidate = -1;
-            continue; // Mouse/another person owns the shared single hold.
-        }
+        bool unlatched_this_tick = false;
         if (state.latched) {
             if ((left_valid || right_valid) &&
                 (!left_valid || (left - state.latch_position).length() > state.latch_radius) &&
                 (!right_valid || (right - state.latch_position).length() > state.latch_radius)) {
                 state.latched = false;
                 state.phase = "idle";
+                unlatched_this_tick = true;
             } else {
+                continue;
+            }
+        }
+        const int held_id = heldBalloon();
+        if (sweep_dt >= kMinSweepDt && sweep_dt <= kMaxSweepDt) {
+            const auto find_swing_target = [&](const Vec3& prev_pos, const Vec3& curr_pos)
+                -> const BalloonInteractionTarget* {
+                const float speed =
+                    (curr_pos - prev_pos).length() / static_cast<float>(sweep_dt);
+                if (speed < kSwingSpeed) {
+                    return nullptr;
+                }
+                const BalloonInteractionTarget* hit = nullptr;
+                float best_dist_sq = 1e9f;
+                for (const auto& target : targets) {
+                    if (target.id == held_id || already_popped(target.id)) {
+                        continue;
+                    }
+                    if (unlatched_this_tick &&
+                        (target.position - state.latch_position).length_squared() < 1e-4f) {
+                        continue;
+                    }
+                    const float reach = target.radius + 0.10f;
+                    if (segmentIntersectsSphere(prev_pos, curr_pos, target.position, reach)) {
+                        const float dist_sq = (target.position - prev_pos).length_squared();
+                        if (dist_sq < best_dist_sq) {
+                            best_dist_sq = dist_sq;
+                            hit = &target;
+                        }
+                    }
+                }
+                return hit;
+            };
+            const BalloonInteractionTarget* swing_target = nullptr;
+            if (had_prev_l && left_valid) {
+                swing_target = find_swing_target(prev_l, left);
+            }
+            if (!swing_target && had_prev_r && right_valid) {
+                swing_target = find_swing_target(prev_r, right);
+            }
+            if (swing_target && command(scene, "pop", {{"balloon", swing_target->id}})) {
+                popped_this_tick.push_back(swing_target->id);
+                ++taps;
+                latch(state, *swing_target);
                 continue;
             }
         }
@@ -274,12 +359,15 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
         bool grip = false;
         float nearest = 1e9f;
         for (const auto& target : targets) {
+            if (target.id == held_id || already_popped(target.id)) {
+                continue;
+            }
             const float reach = target.radius + 0.10f;
             const Vec3 a = left - target.position, b = right - target.position;
             const float dl = a.length(), dr = b.length();
             const bool lc = left_valid && dl <= reach;
             const bool rc = right_valid && dr <= reach;
-            const bool pair = lc && rc && (left - right).length() >= 0.15f &&
+            const bool pair = held_id < 0 && lc && rc && (left - right).length() >= 0.15f &&
                 Vec3::dot(a, b) < -0.2f * dl * dr;
             const bool single = lc != rc;
             if (!(pair || single)) {
@@ -292,26 +380,11 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
                 grip = pair;
             }
         }
-        // A quick touch may already have withdrawn or reached another object.
-        // Preserve its edge unless the second hand encloses that SAME balloon.
-        // Fresh wrist confidence is still required; missing data never fires it.
-        if (candidate != state.candidate && !gap && state.candidate >= 0 && !state.grip &&
-            state.phase == "touch_pending" &&
-            (state.touch_left ? left_valid : right_valid)) {
-            const auto touched = std::find_if(targets.begin(), targets.end(),
-                [&](const auto& value) { return value.id == state.candidate; });
-            if (touched != targets.end()) {
-                if (age(now, state.pending_since) >= kTouchDelay &&
-                    command(scene, "pop", {{"balloon", state.candidate}})) {
-                    ++taps;
-                    latch(state, *touched);
-                }
-                continue;
-            }
-        }
         if (candidate < 0) {
             state.candidate = -1;
+            state.grip = false;
             state.phase = "idle";
+            state.pending_since = {};
             continue;
         }
         if (gap || candidate != state.candidate || grip != state.grip) {
@@ -343,6 +416,7 @@ void tickBalloonBodyInteraction(SceneData& scene, bool enabled,
                 ++grabs;
             }
         } else if (command(scene, "pop", {{"balloon", candidate}})) {
+            popped_this_tick.push_back(candidate);
             ++taps;
             latch(state, *target);
         }

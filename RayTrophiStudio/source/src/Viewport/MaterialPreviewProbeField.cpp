@@ -11,6 +11,11 @@
 #include <string>
 #include <vector>
 
+namespace RayFusion {
+bool playerProbeFieldEnabled();
+void setPlayerProbeFieldEnabled(bool enabled);
+} // namespace RayFusion
+
 namespace Backend {
 namespace {
 
@@ -459,6 +464,16 @@ void VulkanBackendAdapter::applyMaterialPreviewProbeAutoFit(
 void VulkanBackendAdapter::serviceMaterialPreviewProbeField() {
     auto state = m_materialPreviewProbes;
     if (state) state->pump = false;
+    if (!::RayFusion::playerProbeFieldEnabled()) {
+        if (state && state->ready && state->uploaded && m_device) {
+            ProbeGridParams params{};
+            params.spacing[0] = state->spacing;
+            m_device->uploadBuffer(state->gridParams, &params, sizeof(params));
+            state->uploaded = false;
+            m_interactiveViewport.dirty = true;
+        }
+        return;
+    }
     if (!state || !state->ready || !m_device) return;
     // The project-carried setting is the authority; follow it before anything
     // is scheduled so a project that stores "sky bake" never traces a batch.
@@ -1106,3 +1121,23 @@ void VulkanBackendAdapter::destroyMaterialPreviewProbeResources() {
 }
 
 } // namespace Backend
+
+namespace RayFusion {
+
+namespace {
+#ifdef RT_PLAYER
+std::atomic<bool> g_playerProbeFieldEnabled{false};
+#else
+std::atomic<bool> g_playerProbeFieldEnabled{true};
+#endif
+} // namespace
+
+bool playerProbeFieldEnabled() {
+    return g_playerProbeFieldEnabled.load(std::memory_order_relaxed);
+}
+
+void setPlayerProbeFieldEnabled(bool enabled) {
+    g_playerProbeFieldEnabled.store(enabled, std::memory_order_relaxed);
+}
+
+} // namespace RayFusion

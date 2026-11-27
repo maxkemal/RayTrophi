@@ -22,6 +22,7 @@
 #undef max
 #endif
 #endif
+#include "Paint/HiddenGameObjects.h"
 
 namespace Backend {
 
@@ -51,7 +52,10 @@ public:
         slots_.clear();
         pipeline_ = VK_NULL_HANDLE;
         layout_ = VK_NULL_HANDLE;
+        buffer_ = VK_NULL_HANDLE;
         device_ = nullptr;
+        data_.clear();
+        shown_ = {};
         ready_ = false;
         closeMapping();
     }
@@ -62,33 +66,52 @@ public:
 #ifdef _WIN32
         if (!enabled) {
             closeMapping();
+            shown_ = {};
+            data_.clear();
             return false;
         }
-        if (!pixels_) {
+        const auto openNow = GetTickCount64();
+        if (!pixels_ && openNow >= next_open_ms_) {
+            next_open_ms_ = openNow + kOpenRetryMs;
             openMapping();
         }
-        if (!pixels_) return false;
-        const auto locked = WaitForSingleObject(lock_, 0);
-        if (locked != WAIT_OBJECT_0 && locked != WAIT_ABANDONED) return false;
-        Header header{};
-        if (locked == WAIT_OBJECT_0) std::memcpy(&header, pixels_, sizeof(header));
-        const auto now = GetTickCount64();
-        const bool valid = header.magic == kMagic && header.received <= now &&
-            now - header.received <= 300 && header.width > 0 && header.height > 0 &&
-            header.width <= 640 && header.height <= 640 &&
-            std::isfinite(header.x) && std::abs(header.x) <= 10000.0f &&
-            std::isfinite(header.z) && std::abs(header.z) <= 10000.0f &&
-            header.physicalHeight >= 0.3f && header.physicalHeight <= 3.2f;
-        if (valid && shown_.serial != header.serial) {
-            const auto bytes = static_cast<size_t>(header.width) * header.height * 8;
-            data_.resize(bytes);
-            std::memcpy(data_.data(), pixels_ + sizeof(Header), bytes);
-            shown_ = header;
+        if (!pixels_) {
+            return false;
         }
-        ReleaseMutex(lock_);
-        if (!valid) return false;
+        const auto locked = WaitForSingleObject(lock_, 0);
+        if (locked == WAIT_OBJECT_0 || locked == WAIT_ABANDONED) {
+            Header header{};
+            if (locked == WAIT_OBJECT_0) {
+                std::memcpy(&header, pixels_, sizeof(header));
+            }
+            const auto now = GetTickCount64();
+            const bool valid = isValidHeader(header, now);
+            if (valid && shown_.serial != header.serial) {
+                const auto bytes = static_cast<size_t>(header.width) * header.height * 8;
+                data_.resize(bytes);
+                std::memcpy(data_.data(), pixels_ + sizeof(Header), bytes);
+                shown_ = header;
+            }
+            ReleaseMutex(lock_);
+            if (!valid) {
+                shown_ = {};
+                data_.clear();
+                return false;
+            }
+        } else if (locked == WAIT_TIMEOUT) {
+            const auto now = GetTickCount64();
+            if (!isValidHeader(shown_, now) || data_.empty()) {
+                shown_ = {};
+                data_.clear();
+                return false;
+            }
+        } else {
+            return false;
+        }
         device_ = &device;
-        if (!pipeline_ && !createPipeline(pass, shaderDir)) return false;
+        if (!pipeline_ && !createPipeline(pass, shaderDir)) {
+            return false;
+        }
         auto& entry = slots_[slot];
         auto& buffer = entry.buffer;
         if (!buffer.buffer) {
@@ -98,11 +121,17 @@ public:
             info.location = VulkanRT::MemoryLocation::CPU_TO_GPU;
             buffer = device.createBuffer(info);
         }
-        if (!buffer.buffer) return false;
+        if (!buffer.buffer) {
+            return false;
+        }
         // CPU_TO_GPU is HOST_VISIBLE | HOST_COHERENT; no transfer queue or wait.
-        if (!buffer.mappedPtr) buffer.mappedPtr = device.mapBuffer(buffer);
+        if (!buffer.mappedPtr) {
+            buffer.mappedPtr = device.mapBuffer(buffer);
+        }
         void* mapped = buffer.mappedPtr;
-        if (!mapped) return false;
+        if (!mapped) {
+            return false;
+        }
         if (entry.serial != shown_.serial) {
             std::memcpy(mapped, data_.data(), data_.size());
             entry.serial = shown_.serial;
@@ -114,15 +143,20 @@ public:
     }
 
     void draw(VkCommandBuffer cmd, const float* viewProj, const float* view) const {
-        if (!ready_) return;
+        if (!ready_) {
+            return;
+        }
+        const Vec3 anchor = Paint::constrainHiddenPlayerAnchor(
+            "depth_card", Vec3(shown_.x, 0.0f, shown_.z), 0.25f, shown_.physicalHeight);
         Push push{};
         std::memcpy(push.viewProj, viewProj, sizeof(push.viewProj));
         for (int i = 0; i < 3; ++i) {
             push.right[i] = view[i * 4];
             push.up[i] = view[i * 4 + 1];
         }
-        push.anchor[0] = shown_.x;
-        push.anchor[2] = shown_.z;
+        push.anchor[0] = anchor.x;
+        push.anchor[1] = anchor.y;
+        push.anchor[2] = anchor.z;
         push.anchor[3] = shown_.physicalHeight;
         push.image[0] = static_cast<float>(shown_.width);
         push.image[1] = static_cast<float>(shown_.height);
@@ -142,6 +176,17 @@ private:
     static_assert(sizeof(Header) == 40);
     static constexpr uint32_t kMagic = 0x31445452; // RTD1
     static constexpr size_t kBytes = sizeof(Header) + 640 * 640 * 8;
+    static constexpr uint64_t kExpiryMs = 300;
+    static constexpr uint64_t kOpenRetryMs = 200;
+
+    static bool isValidHeader(const Header& header, uint64_t now) {
+        return header.magic == kMagic && header.received <= now &&
+            now - header.received <= kExpiryMs && header.width > 0 && header.height > 0 &&
+            header.width <= 640 && header.height <= 640 &&
+            std::isfinite(header.x) && std::abs(header.x) <= 10000.0f &&
+            std::isfinite(header.z) && std::abs(header.z) <= 10000.0f &&
+            header.physicalHeight >= 0.3f && header.physicalHeight <= 3.2f;
+    }
 
     bool createPipeline(VkRenderPass pass, const std::string& directory) {
         const VkDevice device = device_->getDevice();
@@ -270,6 +315,7 @@ private:
 #ifdef _WIN32
     HANDLE mapping_ = nullptr, lock_ = nullptr;
     const unsigned char* pixels_ = nullptr;
+    uint64_t next_open_ms_ = 0;
 #endif
 };
 

@@ -1,5 +1,6 @@
 #include "Paint/MeshPaintAdapter.h"
 #include "Paint/PaintHeightNormalMath.h"
+#include "Paint/PaintRoughnessSeed.h"
 
 #include "scene_data.h"
 #include "Triangle.h"
@@ -2692,23 +2693,23 @@ bool MeshPaintAdapter::assignTextureToChannel(PaintChannel channel) {
         const std::string texture_name = std::string("generated/") + baseName + ".png";
         bool seeded = false;
         std::shared_ptr<Texture> source_texture = getChannelSourceTexture(channel);
-        // ★ A flat-colour or transparent generated paint canvas is never a
-        // SOURCE: seeding from it froze a flat material's old colour forever
-        // after it was recoloured. A generated canvas that carries real image
-        // data (e.g. a wall/floor texture baked into a saved project) IS kept
-        // so opening the project in Player/Studio does not wipe wall textures.
-        if (source_texture && isGeneratedPaintTexture(*source_texture) &&
+        // A flat generated colour canvas would freeze the old material colour
+        // after recolouring. Keep real image data and saved roughness maps,
+        // whose effective values can be uniform after baking the factor.
+        if (channel != PaintChannel::Roughness && source_texture &&
+            isGeneratedPaintTexture(*source_texture) &&
             isUniformOrEmptyPaintTexture(*source_texture)) {
             source_texture.reset();
         }
         target_texture = cloneTextureForPaint(source_texture, texture_name, set.resolution, toTextureType(channel), channel, seeded);
         if (!seeded && target_texture) {
-            fillTextureDefault(*target_texture, channel);
-            // No texture under the paint: the canvas starts as the material's
-            // own colour (overlay over the colour, as over a texture).
             std::shared_ptr<Material> material = triangle_ ? triangle_->getMaterial() : nullptr;
             if (channel == PaintChannel::BaseColor && material) {
                 fillTextureWithLinearColor(*target_texture, material->albedoProperty.color);
+            } else if (channel == PaintChannel::Roughness && material) {
+                seedUntexturedRoughness(*target_texture, material->roughnessProperty.color.x);
+            } else {
+                fillTextureDefault(*target_texture, channel);
             }
         }
         set.setSourceInfo(channel, seeded, (source_texture && !source_texture->name.empty()) ? source_texture->name : "");

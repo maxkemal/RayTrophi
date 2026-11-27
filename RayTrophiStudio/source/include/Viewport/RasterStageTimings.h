@@ -133,7 +133,7 @@ public:
     // icindeki static_assert onu RasterStage::Count ile karsilastirir -- yeni
     // bir stage ekleyip burayi unutmak DERLEME hatasi verir, sessiz bir kayma
     // degil. (Bu satir 2026-09-14'te tam olarak oyle yakalandi.)
-    static constexpr std::size_t kStageCount = 16; // RasterStage::Count
+    static constexpr std::size_t kStageCount = 17; // RasterStage::Count
 
     void reset(std::uint64_t lastRecordedGpuFrame);
     // One frame. `gpuAvailable` false means this frame's marks had not retired

@@ -96,6 +96,7 @@ void queueFingerInput(const SDL_TouchFingerEvent& event, float aspect) {
         if (isPrimary) {
             enqueue({{"action", "up"}, {"screen", screen}, {"owner", fingerOwner(event)}});
             primaryFinger.reset();
+            pinchFinger.reset();
         } else if (isPinch) {
             pinchFinger.reset();
         }

@@ -89,7 +89,11 @@ __device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color,
         if (light.type == 0) { // Point Light
             light_dir = normalize(light.position - ray.origin);
             distance = length(light.position - ray.origin);
-            light_intensity = 1.0f / (distance * distance);
+            const float dist_sq = fmaxf(distance * distance, 1e-6f);
+            const float falloff = light.distance_falloff;
+            light_intensity = (falloff >= 1.9999f)
+                ? (1.0f / dist_sq)
+                : ((falloff <= 1e-4f) ? 1.0f : powf(dist_sq, -0.5f * falloff));
         }
         else if (light.type == 1) { // Directional Light
             light_dir = normalize(light.direction);
@@ -101,8 +105,11 @@ __device__ bool scatter_volume_step(Ray& ray, float3& throughput, float3& color,
         }
 
         // Gölge kontrolü
-        Ray shadow_ray(ray.origin, light_dir);
-        unsigned int shadow_hit = trace_shadow_ray(shadow_ray, 0.01f, distance);
+        unsigned int shadow_hit = 0;
+        if (light.cast_shadows != 0) {
+            Ray shadow_ray(ray.origin, light_dir);
+            shadow_hit = trace_shadow_ray(shadow_ray, 0.01f, distance);
+        }
 
         if (!shadow_hit) { // Eğer ışık görünüyorsa
             float phase = compute_phase_function(-ray.direction, light_dir, anisotropy);

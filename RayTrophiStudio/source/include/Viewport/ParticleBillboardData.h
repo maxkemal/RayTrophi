@@ -46,6 +46,7 @@ enum ParticlePulledStream : uint32_t {
 struct ParticlePulledDraw {
     uint64_t buffers[kPulledStreamCount] = {};  // VkBuffer handles, simulation-owned
     uint32_t particle_count = 0;                // device slots (dead ones collapse)
+    uint32_t slot_capacity = 0;                 // reserve compaction before the first birth
     uint32_t lookup_offset = 0;                 // into ParticleBillboardUpload::row_lookup
     uint32_t lookup_count = 0;                  // entries = profile ids covered
     bool has_alpha = false;                     // any profile with alpha blend

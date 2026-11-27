@@ -8,6 +8,8 @@
 #include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiPlayerOperator.h"
 #include "UI/PlayerOperatorUI.h"
+#include "Api/RtApi.h"
+#include "Api/RtApiRayFusion.h"
 #include "Api/RtApiBodyPose.h"
 #include "Api/RtApiExternalBody.h"
 #include "Api/RtApiGame.h"
@@ -37,6 +39,12 @@
 #include <stdexcept>
 
 extern SDL_Window *window;
+
+namespace RayFusion {
+bool playerProbeFieldEnabled();
+void setPlayerProbeFieldEnabled(bool enabled);
+} // namespace RayFusion
+
 namespace AppRuntime {
 namespace {
 using json = nlohmann::json;
@@ -208,6 +216,7 @@ struct State {
                         {"avatar_profiles", json::object()},
                         {"avatar_assignments", json::object()},
                         {"display", json::object()},
+                        {"render", json::object()},
                         {"audio", json::object()},
                         {"monitor", json::object()}};
     json launch_display = json::object();
@@ -218,11 +227,18 @@ struct State {
     std::string current_project;
     std::string error;
     bool display_restored = false;
+    bool render_restored = false;
     bool loaded = false;
     bool saved_locale = false;
     bool camera_was_active = false;
     bool camera_owns_card = false;
+#ifdef __ANDROID__
+    bool dof_enabled = false;
+#else
+    bool dof_enabled = true;
+#endif
     std::string audio_project;
+    std::string render_project;
     UIContext *context = nullptr;
     fs::path settings = fs::absolute("player_operator.json");
     void load() {
@@ -236,7 +252,8 @@ struct State {
             if (saved.is_object() && saved.contains("version") &&
                 saved["version"].is_number_integer() && saved["version"].get<int>() == 1) {
                 for (const char *name : {"roots", "appearance", "avatar_profiles",
-                                         "avatar_assignments", "display", "audio", "monitor", "locale"}) {
+                                         "avatar_assignments", "display", "render", "audio",
+                                         "monitor", "locale"}) {
                     if (saved.contains(name) && saved[name].type() == preferences[name].type()) {
                         preferences[name] = saved[name];
                         saved_locale |= std::string(name) == "locale";
@@ -352,6 +369,152 @@ json characters(State &s, UIContext &context) {
     }
     return result;
 }
+
+json renderStatusSnapshot(const State &s) {
+    const auto quality = rtapi::viewportQuality();
+    const auto lighting = rtapi::viewportPreviewLighting();
+    const auto taa = rtapi::viewportTaa();
+    const auto rtShadow = rtapi::rtShadow();
+    const auto probe = rtapi::rayFusionProbeFieldStatus();
+    return {
+        {"quality", quality.preset.empty() ? "auto" : quality.preset},
+        {"preview_lighting", lighting.preset.empty() ? "scene" : lighting.preset},
+        {"taa", taa.enabled},
+        {"taa_samples", taa.target_samples},
+        {"taa_supported", taa.supported},
+        {"dof", s.dof_enabled},
+        {"rt_shadow", rtShadow.enabled},
+        {"rt_shadow_supported", rtShadow.supported},
+        {"rt_shadow_ready", rtShadow.ready},
+        {"depth_prepass", rtapi::rasterDepthPrepass()},
+        {"probe_enabled", RayFusion::playerProbeFieldEnabled()},
+        {"probe_supported", probe.supported},
+        {"probe_producer", probe.producer_traced_requested ? "traced" : "sky_bake"},
+        {"probe_producer_actual", probe.producer},
+        {"probe_follow_camera", probe.follow_camera},
+        {"probe_bounce", probe.bounce.requested},
+        {"saved", s.preferences["render"]},
+    };
+}
+
+void validateRenderConfig(const json &config) {
+    keys(config, {"quality", "preview_lighting", "taa", "taa_samples", "dof",
+                  "rt_shadow", "depth_prepass", "probe_enabled", "probe_producer",
+                  "probe_follow_camera", "probe_bounce"});
+    if (config.contains("quality")) {
+        require(config["quality"].is_string(), "quality must be a string");
+        const auto q = config["quality"].get<std::string>();
+        require(q == "auto" || q == "performance" || q == "balanced" ||
+                    q == "quality" || q == "full",
+                "quality must be auto, performance, balanced, quality, or full");
+    }
+    if (config.contains("preview_lighting")) {
+        require(config["preview_lighting"].is_string(), "preview_lighting must be a string");
+        const auto p = config["preview_lighting"].get<std::string>();
+        require(p == "scene" || p == "three_point",
+                "preview_lighting must be scene or three_point");
+    }
+    if (config.contains("taa")) {
+        require(config["taa"].is_boolean(), "taa must be a boolean");
+    }
+    if (config.contains("taa_samples")) {
+        require(config["taa_samples"].is_number_integer(), "taa_samples must be an integer");
+        const int n = config["taa_samples"].get<int>();
+        require(n >= 1 && n <= 256, "taa_samples must be between 1 and 256");
+    }
+    if (config.contains("dof")) {
+        require(config["dof"].is_boolean(), "dof must be a boolean");
+    }
+    if (config.contains("rt_shadow")) {
+        require(config["rt_shadow"].is_boolean(), "rt_shadow must be a boolean");
+    }
+    if (config.contains("depth_prepass")) {
+        require(config["depth_prepass"].is_boolean(), "depth_prepass must be a boolean");
+    }
+    if (config.contains("probe_enabled")) {
+        require(config["probe_enabled"].is_boolean(), "probe_enabled must be a boolean");
+    }
+    if (config.contains("probe_producer")) {
+        require(config["probe_producer"].is_string(), "probe_producer must be a string");
+        const auto p = config["probe_producer"].get<std::string>();
+        require(p == "sky_bake" || p == "traced",
+                "probe_producer must be sky_bake or traced");
+    }
+    if (config.contains("probe_follow_camera")) {
+        require(config["probe_follow_camera"].is_boolean(),
+                "probe_follow_camera must be a boolean");
+    }
+    if (config.contains("probe_bounce")) {
+        require(config["probe_bounce"].is_boolean(), "probe_bounce must be a boolean");
+    }
+}
+
+void applyRenderSettings(State &s, const json &patch) {
+    if (patch.contains("quality")) {
+        const auto res = rtapi::setViewportQuality(patch["quality"].get<std::string>());
+        require(res.ok, res.error);
+    }
+    if (patch.contains("preview_lighting")) {
+        const auto res =
+            rtapi::setViewportPreviewLighting(patch["preview_lighting"].get<std::string>());
+        require(res.ok, res.error);
+    }
+    if (patch.contains("taa") || patch.contains("taa_samples")) {
+        const auto cur = rtapi::viewportTaa();
+        const bool enabled = patch.contains("taa") ? patch["taa"].get<bool>() : cur.enabled;
+        const int samples = patch.contains("taa_samples")
+            ? patch["taa_samples"].get<int>()
+            : (cur.target_samples > 0 ? cur.target_samples : 16);
+        const auto res = rtapi::setViewportTaa(enabled, samples);
+        require(res.ok, res.error);
+    }
+    if (patch.contains("dof")) {
+        const bool dof = patch["dof"].get<bool>();
+        const auto res = rtapi::setViewportDepthOfField(dof, 24.0f, 32);
+        require(res.ok, res.error);
+        s.dof_enabled = dof;
+    }
+    if (patch.contains("rt_shadow")) {
+        const auto res = rtapi::setRtShadow(patch["rt_shadow"].get<bool>());
+        require(res.ok, res.error);
+    }
+    if (patch.contains("depth_prepass")) {
+        const auto res = rtapi::setRasterDepthPrepass(patch["depth_prepass"].get<bool>());
+        require(res.ok, res.error);
+    }
+    if (patch.contains("probe_enabled")) {
+        RayFusion::setPlayerProbeFieldEnabled(patch["probe_enabled"].get<bool>());
+    }
+    if (patch.contains("probe_producer")) {
+        rtapi::setRayFusionProbeProducer(patch["probe_producer"].get<std::string>() == "traced");
+    }
+    if (patch.contains("probe_follow_camera")) {
+        rtapi::setRayFusionProbeFollowCamera(patch["probe_follow_camera"].get<bool>());
+    }
+    if (patch.contains("probe_bounce")) {
+        rtapi::setRayFusionProbeBounce(patch["probe_bounce"].get<bool>());
+    }
+}
+
+void restoreRenderSettings(State &s) {
+    json effective = json::object();
+    effective["rt_shadow"] = false;
+    effective["probe_enabled"] = false;
+#ifdef __ANDROID__
+    effective["quality"] = "performance";
+    effective["taa"] = false;
+    effective["dof"] = false;
+#endif
+    if (s.preferences.contains("render") && s.preferences["render"].is_object()) {
+        effective.update(s.preferences["render"]);
+    }
+    try {
+        validateRenderConfig(effective);
+        applyRenderSettings(s, effective);
+    } catch (const std::exception &error) {
+        s.error = std::string("Saved render setting unavailable: ") + error.what();
+    }
+}
 } // namespace
 
 void tickPlayerOperator() {
@@ -442,6 +605,11 @@ void tickPlayerOperator() {
                 s.error = std::string("Saved room audio setting unavailable: ") + error.what();
             }
         }
+    }
+    if (!s.render_restored || s.render_project != s.current_project) {
+        s.render_restored = true;
+        s.render_project = s.current_project;
+        restoreRenderSettings(s);
     }
     if (!s.pending_open.empty()) {
         const auto path = std::exchange(s.pending_open, std::string());
@@ -581,6 +749,7 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
                       {"scanning", s.scanning.valid()},
                       {"camera", s.camera.status()},
                       {"display", display},
+                      {"render", renderStatusSnapshot(s)},
                       {"body", poses},
                       {"characters", characters(s, context)},
                       {"project", s.current_project},
@@ -764,6 +933,38 @@ rtapi::Result playerOperatorCommand(UIContext &context, const std::string &opera
             }
             s.preferences["display"].update(config);
             s.save();
+        } else if (operation == "render.status") {
+            keys(config, {});
+            output = renderStatusSnapshot(s);
+        } else if (operation == "render.configure") {
+            validateRenderConfig(config);
+            applyRenderSettings(s, config);
+            s.preferences["render"].update(config);
+            s.save();
+            output = renderStatusSnapshot(s);
+        } else if (operation == "render.reset") {
+            keys(config, {});
+            s.preferences["render"] = json::object();
+            s.save();
+            json resetDefaults = {
+#ifdef __ANDROID__
+                {"quality", "performance"},
+                {"taa", false},
+                {"dof", false},
+#else
+                {"quality", "auto"},
+                {"taa", true},
+                {"dof", true},
+#endif
+                {"preview_lighting", "scene"},
+                {"depth_prepass", true},
+                {"rt_shadow", false},
+                {"probe_enabled", false},
+                {"probe_follow_camera", false},
+                {"probe_bounce", false},
+            };
+            applyRenderSettings(s, resetDefaults);
+            output = renderStatusSnapshot(s);
         } else if (operation == "display.monitor") {
             keys(config, {"index"});
             require(config.contains("index") && config["index"].is_number_integer(),

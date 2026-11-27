@@ -44,6 +44,7 @@ enum class RasterStage : std::uint32_t {
     // "GPU culling silently never enabled" is a fault this repo has already
     // shipped once, and a cost of exactly 0 here is how it looks.
     GpuCull = 0,
+    ParticleCompaction,
     // RT shadow preparation + cascade depth atlas + deep (volume) shadow
     // compute. Measured 2026-09-09: this used to swallow the transmission
     // thickness prepass too and reported 38 ms for an atlas that drew NOTHING.

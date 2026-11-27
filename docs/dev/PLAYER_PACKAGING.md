@@ -16,8 +16,8 @@ Aktif çıktı **`dist/RayTrophiPlayer/`**, arşiv dosyası
 içindir. Önceki `Player-depth-2026-11-18` dağıtımı `.archive` altına taşındı;
 güncel çalıştırma yolu ana klasördeki `RayTrophiPlayer.exe` dosyasıdır.
 
-Varsayılan yük mevcut Release exe ve bağımlılıkları, shaderlar, Gizli Renkler
-ve Pastel Oyun Odası sahneleri, sahne kartları, sahne sesleri, taşınabilir
+Varsayılan yük mevcut Release exe ve bağımlılıkları, shaderlar, Gizli Oyuncaklar
+sahnesi (`hidden-pictures/hidden_pictures.rtp`), sahne sesleri, taşınabilir
 Python, algı köprüsü, MediaPipe/OpenCV ve model içerir. Birden fazla oyun
 paketlendiğinde Player açılışta oyun kütüphanesini gösterir. Tek oyunlu paket
 doğrudan sahneyi açar. `--project` ile verilen proje doğrudan yüklenir.

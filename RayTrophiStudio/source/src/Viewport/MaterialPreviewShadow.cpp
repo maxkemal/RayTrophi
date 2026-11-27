@@ -3,6 +3,7 @@
 #include "Viewport/ViewportPipelineCache.h"
 #include "Viewport/RasterGpuCull.h"
 #include "Viewport/RasterInstanceUpload.h"
+#include "Viewport/RasterMaterialVisibility.h"
 #include "Viewport/MaterialPreviewVolumeShadow.h"
 #include "AreaLight.h"
 #include "SpotLight.h"
@@ -16,10 +17,20 @@
 #include <filesystem>
 #include <fstream>
 
+namespace RayFusion {
+bool playerProbeFieldEnabled();
+} // namespace RayFusion
+
 namespace Backend {
 namespace {
 
+#ifdef __ANDROID__
+// 2048x2048 D32_SFLOAT = 16 MB (vs 64 MB at 4096): fits 64x 256px or 16x 512px
+// tiles while slashing unified RAM and improving Mali L2 cache hit rate.
+constexpr uint32_t kAtlasSize = 2048u;
+#else
 constexpr uint32_t kAtlasSize = 4096u;
+#endif
 constexpr uint32_t kMaxLights = static_cast<uint32_t>(::kMaterialPreviewMaxSceneLights);
 constexpr uint32_t kShadowRecordCount = kMaxLights + 1u;
 constexpr uint32_t kMaxFaces = 6u;
@@ -161,6 +172,35 @@ VkShaderModule makeModule(VkDevice device, const std::vector<uint32_t>& words) {
         ? module : VK_NULL_HANDLE;
 }
 
+template<class Materials>
+bool shadowMeshNeedsAlphaTest(bool hasMatIdBuffer,
+                              const RasterMaterialUsage& usage,
+                              const std::vector<uint32_t>& stream,
+                              uint32_t vertexCount,
+                              const Materials& materials,
+                              uint32_t boundCount,
+                              const RasterMaterialPrograms& programs,
+                              bool externalMaterials) {
+    if (!hasMatIdBuffer) return false;
+    if (!rasterMeshHasExactCoverage(usage, stream, vertexCount,
+                                    materials, boundCount, programs, externalMaterials)) {
+        return true;
+    }
+    // rasterMeshHasExactCoverage allows MATERIAL_FLAGS_PREVIEW_CUTOUT because
+    // the camera depth prepass runs alpha-test discard; opaquePipeline has no
+    // fragment shader, so cutout materials with opacity maps or opacity < 1
+    // must remain on alphaPipeline for bit-identical shadows.
+    for (uint32_t encoded : usage.ids(stream)) {
+        if ((encoded & 0x80000000u) != 0u) continue;
+        const uint32_t id = (std::min)(encoded & 0x7fffffffu, boundCount - 1u);
+        const auto& m = materials[id];
+        if (m.opacity_tex != 0u || !(m.opacity >= 0.999f)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 // Declared by hand in VulkanViewportBackend.cpp: adding it to VulkanBackend.h
@@ -199,6 +239,8 @@ class MaterialPreviewShadowResources {
 public:
     VulkanRT::ImageHandle atlas;
     VkSampler sampler = VK_NULL_HANDLE;
+    VulkanRT::ImageHandle fallbackAtlas;
+    VkSampler fallbackSampler = VK_NULL_HANDLE;
     VulkanRT::BufferHandle records;
     VkRenderPass renderPass = VK_NULL_HANDLE;
     VkFramebuffer framebuffer = VK_NULL_HANDLE;
@@ -279,6 +321,8 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
     sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     sci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+    sci.compareEnable = VK_TRUE;
+    sci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
     sci.maxLod = 0.0f;
     if (vkCreateSampler(device, &sci, nullptr, &state->sampler) != VK_SUCCESS) {
         m_device->destroyImage(state->atlas);
@@ -301,9 +345,10 @@ bool VulkanBackendAdapter::ensureMaterialPreviewShadowResources(const std::strin
     VkAttachmentDescription attachment{};
     attachment.format = VK_FORMAT_D32_SFLOAT;
     attachment.samples = VK_SAMPLE_COUNT_1_BIT;
-    // LOAD, not CLEAR: only the tiles whose view changed are redrawn, each
-    // cleared on its own with vkCmdClearAttachments.
-    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+    // CLEAR with initialLayout = DEPTH_STENCIL_ATTACHMENT_OPTIMAL and a tight
+    // per-tile renderArea: clears only the dirty tile while preserving all
+    // untouched tiles outside renderArea without a full-atlas LOAD/STORE.
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
     attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
     attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
@@ -541,6 +586,8 @@ void VulkanBackendAdapter::destroyMaterialPreviewShadowResources() {
     if (s.framebuffer) vkDestroyFramebuffer(device, s.framebuffer, nullptr);
     if (s.renderPass) vkDestroyRenderPass(device, s.renderPass, nullptr);
     if (s.records.buffer) m_device->destroyBuffer(s.records);
+    if (s.fallbackSampler) vkDestroySampler(device, s.fallbackSampler, nullptr);
+    if (s.fallbackAtlas.image) m_device->destroyImage(s.fallbackAtlas);
     if (s.sampler) vkDestroySampler(device, s.sampler, nullptr);
     if (s.atlas.image) m_device->destroyImage(s.atlas);
     m_materialPreviewShadows.reset();
@@ -762,6 +809,10 @@ void VulkanBackendAdapter::prepareMaterialPreviewShadowFrame() {
     for (const auto& light : m_cachedLights) {
         if (!light || !light->visible) continue;
         if (gpuLightIndex >= kMaxLights) break;
+        if (!light->cast_shadows) {
+            ++gpuLightIndex;
+            continue;
+        }
         ShadowRecordGPU& record = state->cpuRecords[gpuLightIndex];
         const LightType type = light->type();
         const uint32_t faces = type == LightType::Point ? 6u :
@@ -863,10 +914,58 @@ void VulkanBackendAdapter::updateMaterialPreviewShadowWorldBindings() {
             ? state->records.buffer : m_interactiveViewport.materialPreviewSceneGlobals.buffer;
         shadowBuffer.range = VK_WHOLE_SIZE;
         VkDescriptorImageInfo shadowImage{};
-        shadowImage.sampler = state && state->sampler ? state->sampler : world.sampler;
-        shadowImage.imageView = state && state->atlas.view ? state->atlas.view : world.view;
-        shadowImage.imageLayout = state && state->atlas.view
-            ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        if (state && state->sampler && state->atlas.view) {
+            shadowImage.sampler = state->sampler;
+            shadowImage.imageView = state->atlas.view;
+            shadowImage.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        } else {
+            if (!state) {
+                m_materialPreviewShadows = std::make_shared<MaterialPreviewShadowResources>();
+                state = m_materialPreviewShadows;
+            }
+            if (!state->fallbackAtlas.image) {
+                state->fallbackAtlas = m_device->createImage2D(
+                    1u, 1u, VK_FORMAT_D32_SFLOAT,
+                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                    VK_IMAGE_ASPECT_DEPTH_BIT);
+                if (state->fallbackAtlas.image) {
+                    VkCommandBuffer initCmd = m_device->beginSingleTimeCommands();
+                    if (initCmd) {
+                        VkImageMemoryBarrier b{};
+                        b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+                        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                        b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                        b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                        b.image = state->fallbackAtlas.image;
+                        b.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0u, 1u, 0u, 1u};
+                        b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                        vkCmdPipelineBarrier(initCmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                                             0, nullptr, 0, nullptr, 1, &b);
+                        m_device->endSingleTimeCommands(initCmd);
+                    }
+                }
+            }
+            if (!state->fallbackSampler) {
+                VkSamplerCreateInfo fsci{};
+                fsci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+                fsci.magFilter = VK_FILTER_LINEAR;
+                fsci.minFilter = VK_FILTER_LINEAR;
+                fsci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                fsci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+                fsci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+                fsci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+                fsci.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+                fsci.compareEnable = VK_TRUE;
+                fsci.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+                fsci.maxLod = 0.0f;
+                vkCreateSampler(m_device->getDevice(), &fsci, nullptr, &state->fallbackSampler);
+            }
+            shadowImage.sampler = state->fallbackSampler ? state->fallbackSampler : world.sampler;
+            shadowImage.imageView = state->fallbackAtlas.view ? state->fallbackAtlas.view : world.view;
+            shadowImage.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
         VkDescriptorImageInfo worldImage{};
         worldImage.sampler = world.sampler;
         worldImage.imageView = world.view;
@@ -910,10 +1009,20 @@ void VulkanBackendAdapter::updateMaterialPreviewShadowWorldBindings() {
     // RayFusion step 1a. The service call is budget-limited, so the field fills
     // over a few frames and the counters actually move -- which is the only way
     // to see that this pipe is alive, since the image is meant to look the same.
-    // Step 2: keep an acceleration structure resident. Gated on the raster
-    // geometry generation, so camera motion costs a comparison and a scene edit
-    // costs a rebuild -- which is exactly the bill that has to be measured.
-    ensureRayFusionSceneAS();
+    // Step 2: keep an acceleration structure resident only when at least one
+    // RayFusion RT consumer (RT shadows, Screen GI, RT reflections, traced
+    // probe field, or GPU acoustics) is actually enabled. When all are off
+    // (the default Player raster path), skip BLAS refit and TLAS refresh
+    // completely; turning any feature on later lazily rebuilds on that frame.
+    const bool needsRayFusionAS =
+        m_rtShadowAllowed ||
+        m_screenGiSettings.enabled ||
+        m_reflectionSettings.enabled ||
+        RayFusion::playerProbeFieldEnabled() ||
+        (m_device && m_device->acousticPass != nullptr);
+    if (needsRayFusionAS) {
+        ensureRayFusionSceneAS();
+    }
     serviceMaterialPreviewProbeField();
     bindMaterialPreviewProbeDescriptors(set);
 
@@ -1028,29 +1137,41 @@ void VulkanBackendAdapter::recordMaterialPreviewSkyPass(
 void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) {
     auto state = m_materialPreviewShadows;
     g_shadowAtlasDrawnLastRecord = false;
-    if (!state || !state->ready || state->views.empty() || cmd == VK_NULL_HANDLE) return;
+    if (!state || !state->ready || cmd == VK_NULL_HANDLE) return;
+
+    if (state->records.buffer != VK_NULL_HANDLE) {
+        VkBufferMemoryBarrier recordsBarrier{};
+        recordsBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+        recordsBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        recordsBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        recordsBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        recordsBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        recordsBarrier.buffer = state->records.buffer;
+        recordsBarrier.offset = 0;
+        recordsBarrier.size = VK_WHOLE_SIZE;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 1, &recordsBarrier, 0, nullptr);
+        vkCmdUpdateBuffer(cmd, state->records.buffer, 0,
+                          sizeof(state->cpuRecords), state->cpuRecords.data());
+        const uint32_t deepMeta[4] = {state->deepSide, state->deepLayers, state->deepEnabled ? 1u : 0u, 0u};
+        vkCmdUpdateBuffer(cmd, state->records.buffer, sizeof(state->cpuRecords), sizeof(deepMeta), deepMeta);
+        recordsBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        recordsBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             0, nullptr, 1, &recordsBarrier, 0, nullptr);
+    }
+
+    if (state->views.empty()) return;
 
     VkBufferMemoryBarrier recordsBarrier{};
     recordsBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
-    recordsBarrier.srcAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    recordsBarrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     recordsBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     recordsBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     recordsBarrier.buffer = state->records.buffer;
     recordsBarrier.offset = 0;
     recordsBarrier.size = VK_WHOLE_SIZE;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
-                         0, nullptr, 1, &recordsBarrier, 0, nullptr);
-    vkCmdUpdateBuffer(cmd, state->records.buffer, 0,
-                      sizeof(state->cpuRecords), state->cpuRecords.data());
-    const uint32_t deepMeta[4] = {state->deepSide, state->deepLayers, state->deepEnabled ? 1u : 0u, 0u};
-    vkCmdUpdateBuffer(cmd, state->records.buffer, sizeof(state->cpuRecords), sizeof(deepMeta), deepMeta);
-    recordsBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    recordsBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
-                         0, nullptr, 1, &recordsBarrier, 0, nullptr);
     if (state->deepEnabled) {
         const uint32_t tileSize = state->deepSide / state->frameTilesPerRow;
         for (const auto& shadowView : state->views) {
@@ -1202,7 +1323,10 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
         const RasterMeshBuffer* mesh = nullptr;
         AABB bounds;
         bool cullable = false;
+        bool alpha = false;
     };
+    const uint32_t boundMatCount = m_interactiveViewport.materialPreviewBoundMaterialCount;
+    const bool externalMat = m_interactiveViewport.materialPreviewUsesExternalMaterials;
     static constexpr size_t kMaxInstancesForBounds = 4096u;
     std::vector<ShadowCaster> casters;
     casters.reserve(m_rasterMeshes.size());
@@ -1210,6 +1334,11 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
         if (!mesh.vertexBuffer.buffer || mesh.vertexCount == 0u) continue;
         ShadowCaster caster;
         caster.mesh = &mesh;
+        caster.alpha = shadowMeshNeedsAlphaTest(
+            mesh.matIdBuffer.buffer != VK_NULL_HANDLE,
+            mesh.materialUsage, mesh.cpuMatIds, mesh.vertexCount,
+            m_cachedGpuMaterials, boundMatCount,
+            m_rasterMaterialPrograms, externalMat);
         if (!mesh.hasSkinning && !mesh.isScatterGroup && !mesh.isScatterProxy &&
             !mesh.instanceIndices.empty() &&
             mesh.instanceIndices.size() <= kMaxInstancesForBounds) {
@@ -1231,48 +1360,50 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
         casters.push_back(caster);
     }
 
-    VkClearValue clear{};
-    clear.depthStencil = {1.0f, 0u};
-    VkRenderPassBeginInfo begin{};
-    begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    begin.renderPass = state->renderPass;
-    begin.framebuffer = state->framebuffer;
-    begin.renderArea.extent = {kAtlasSize, kAtlasSize};
-    begin.clearValueCount = 1;
-    begin.pClearValues = &clear;
-    vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
-    vkCmdSetDepthBias(cmd, 1.25f, 0.0f, 1.75f);
+    VkClearValue clearValue{};
+    clearValue.depthStencil = {1.0f, 0u};
 
     RayFusionDrawPush push{};
-    push.materialMeta[0] = m_interactiveViewport.materialPreviewBoundMaterialCount;
+    push.materialMeta[0] = boundMatCount;
     push.materialMeta[3] = m_interactiveViewport.materialPreviewTextureArrayLen;
     for (const ShadowView* dirtyView : dirtyViews) {
         const ShadowView& shadowView = *dirtyView;
         const uint32_t tileX = shadowView.tile % state->frameTilesPerRow;
         const uint32_t tileY = shadowView.tile / state->frameTilesPerRow;
+        const uint32_t areaX = (std::min)(tileX * state->frameTileSize, kAtlasSize);
+        const uint32_t areaY = (std::min)(tileY * state->frameTileSize, kAtlasSize);
+        const uint32_t areaW = (std::min)(state->frameTileSize, kAtlasSize - areaX);
+        const uint32_t areaH = (std::min)(state->frameTileSize, kAtlasSize - areaY);
+        if (areaW == 0u || areaH == 0u) continue;
+
+        VkRenderPassBeginInfo begin{};
+        begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+        begin.renderPass = state->renderPass;
+        begin.framebuffer = state->framebuffer;
+        begin.renderArea = {{static_cast<int32_t>(areaX), static_cast<int32_t>(areaY)},
+                            {areaW, areaH}};
+        begin.clearValueCount = 1;
+        begin.pClearValues = &clearValue;
+        vkCmdBeginRenderPass(cmd, &begin, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdSetDepthBias(cmd, 1.25f, 0.0f, 1.75f);
+
         VkViewport viewport{};
-        viewport.x = static_cast<float>(tileX * state->frameTileSize);
-        viewport.y = static_cast<float>(tileY * state->frameTileSize);
-        viewport.width = static_cast<float>(state->frameTileSize);
-        viewport.height = static_cast<float>(state->frameTileSize);
-        viewport.minDepth = 0.0f; viewport.maxDepth = 1.0f;
-        VkRect2D scissor{{static_cast<int32_t>(tileX * state->frameTileSize),
-                          static_cast<int32_t>(tileY * state->frameTileSize)},
-                         {state->frameTileSize, state->frameTileSize}};
+        viewport.x = static_cast<float>(areaX);
+        viewport.y = static_cast<float>(areaY);
+        viewport.width = static_cast<float>(areaW);
+        viewport.height = static_cast<float>(areaH);
+        viewport.minDepth = 0.0f;
+        viewport.maxDepth = 1.0f;
+        const VkRect2D scissor = begin.renderArea;
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &scissor);
-        VkClearAttachment clearTile{};
-        clearTile.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        clearTile.clearValue.depthStencil = {1.0f, 0u};
-        VkClearRect clearRect{};
-        clearRect.rect = scissor;
-        clearRect.layerCount = 1;
-        vkCmdClearAttachments(cmd, 1, &clearTile, 1, &clearRect);
         matrixToGL(shadowView.viewProj, push.viewProj);
         vkCmdPushConstants(cmd, m_interactiveViewport.materialPreviewPipelineLayout,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(push), &push);
 
+        VkPipeline boundPipeline = VK_NULL_HANDLE;
+        bool descBound = false;
         const ShadowFrustum frustum(shadowView.viewProj);
         for (const ShadowCaster& caster : casters) {
             if (caster.cullable && frustum.rejects(caster.bounds)) continue;
@@ -1287,26 +1418,36 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
             if (!cullDriven && mesh.instanceCount == 0u) continue;
             const VkDeviceSize instanceOffset = cullDriven
                 ? static_cast<VkDeviceSize>(mesh.cullOutBase) * 64ull : 0ull;
-            // Any mesh with material IDs takes the alpha-aware path so scalar
-            // opacity also controls casting. UV-less geometry falls back to a
-            // dummy stream; its coordinates are only observed if a texture is
-            // actually assigned.
-            const bool alpha = mesh.matIdBuffer.buffer != VK_NULL_HANDLE;
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              alpha ? state->alphaPipeline : state->opaquePipeline);
-            if (alpha) {
+
+            const bool alpha = caster.alpha;
+            const VkPipeline targetPipeline = alpha ? state->alphaPipeline : state->opaquePipeline;
+            if (targetPipeline != boundPipeline) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, targetPipeline);
+                boundPipeline = targetPipeline;
+            }
+            if (alpha && !descBound) {
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         m_interactiveViewport.materialPreviewPipelineLayout,
-                                        0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
+                                        0, 1, &m_interactiveViewport.materialPreviewDescSet,
+                                        0, nullptr);
+                descBound = true;
             }
-            VkBuffer buffers[5] = {
-                mesh.vertexBuffer.buffer,
-                mesh.normalBuffer.buffer ? mesh.normalBuffer.buffer : mesh.vertexBuffer.buffer,
-                mesh.matIdBuffer.buffer ? mesh.matIdBuffer.buffer : mesh.vertexBuffer.buffer,
-                instanceBuffer,
-                mesh.uvBuffer.buffer ? mesh.uvBuffer.buffer : mesh.vertexBuffer.buffer};
-            VkDeviceSize offsets[5] = {0, 0, 0, instanceOffset, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 5, buffers, offsets);
+            if (alpha) {
+                const VkBuffer buffers[5] = {
+                    mesh.vertexBuffer.buffer,
+                    mesh.normalBuffer.buffer ? mesh.normalBuffer.buffer : mesh.vertexBuffer.buffer,
+                    mesh.matIdBuffer.buffer ? mesh.matIdBuffer.buffer : mesh.vertexBuffer.buffer,
+                    instanceBuffer,
+                    mesh.uvBuffer.buffer ? mesh.uvBuffer.buffer : mesh.vertexBuffer.buffer};
+                const VkDeviceSize offsets[5] = {0, 0, 0, instanceOffset, 0};
+                vkCmdBindVertexBuffers(cmd, 0, 5, buffers, offsets);
+            } else {
+                // opaquePipeline only declares vertex input bindings 0 (position)
+                // and 3 (instance transform).
+                const VkDeviceSize zeroOffset = 0;
+                vkCmdBindVertexBuffers(cmd, 0, 1, &mesh.vertexBuffer.buffer, &zeroOffset);
+                vkCmdBindVertexBuffers(cmd, 3, 1, &instanceBuffer, &instanceOffset);
+            }
             if (cullDriven) {
                 VkBuffer indirect = static_cast<VkBuffer>(m_rasterGpuCull->commandBuffer());
                 VkDeviceSize commandOffset = RasterGpuCull::commandOffset(mesh.cullDrawSlot);
@@ -1326,8 +1467,8 @@ void VulkanBackendAdapter::recordMaterialPreviewShadowPass(VkCommandBuffer cmd) 
                 }
             }
         }
+        vkCmdEndRenderPass(cmd);
     }
-    vkCmdEndRenderPass(cmd);
 
     VkImageMemoryBarrier toSample = toDepth;
     toSample.oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;

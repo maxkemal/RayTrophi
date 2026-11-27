@@ -1,4 +1,5 @@
 #include "Paint/BalloonPaintDemo.h"
+#include "Paint/BalloonMilestoneRewards.h"
 #include "Paint/BalloonPopTiming.h"
 #include "Paint/BalloonBirthAnimation.h"
 #include "Paint/BalloonInteraction.h"
@@ -7,6 +8,7 @@
 #include "Core/StudioPlayPaint.h"
 #endif
 #include "Paint/BalloonPlayerDefaults.h"
+#include "Paint/GameDesignStartupHelper.h"
 #include "Paint/BalloonJoltMotion.h"
 #include "Paint/BalloonSoftBody.h"
 #include "Paint/BalloonBodyInteraction.h"
@@ -218,98 +220,7 @@ std::vector<std::string> surfaceNames(const json& config) {
 }
 
 void validateMeshVisuals(SceneData& scene, const json& config) {
-    if (!config.contains("visual_nodes")) {
-        return;
-    }
-    const auto& nodes = config["visual_nodes"];
-    if (!nodes.is_array() || nodes.size() > 24 || nodes.size() < config["balloons"].get<size_t>()) {
-        throw std::runtime_error("visual_nodes must cover every active balloon, with up to 24 meshes");
-    }
-    auto* context = rtapi::boundContext();
-    if (!context || &context->scene != &scene) {
-        throw std::runtime_error("mesh balloon visuals require the bound scene context");
-    }
-    std::vector<std::string> names;
-    std::vector<uint16_t> materials;
-    for (const auto& value : nodes) {
-        if (!value.is_string() || value.get<std::string>().empty()) {
-            throw std::runtime_error("visual_nodes entries must be non-empty strings");
-        }
-        const auto name = value.get<std::string>();
-        if (std::find(names.begin(), names.end(), name) != names.end()) {
-            throw std::runtime_error("duplicate visual node: " + name);
-        }
-        for (const auto& target : surfaceNames(config)) {
-            if (target == name) {
-                throw std::runtime_error("balloon visual cannot also be a paint surface: " + name);
-            }
-        }
-        auto* mesh = scene.getFlatNodeMesh(name);
-        if (!mesh || !mesh->geometry || !mesh->transform || !mesh->num_triangles()) {
-            throw std::runtime_error("flat balloon mesh not found: " + name);
-        }
-        for (const auto& weights : mesh->geometry->skin_weights) {
-            if (!weights.empty()) {
-                throw std::runtime_error("balloon visual must be a rigid flat mesh: " + name);
-            }
-        }
-        const auto* ids = mesh->geometry->get_material_ids();
-        const size_t material_count =
-            mesh->geometry->get_core_attribute_count(DNA::Attr::MaterialID);
-        if (!ids || material_count != mesh->geometry->get_vertex_count() || material_count == 0) {
-            throw std::runtime_error("balloon mesh needs a material: " + name);
-        }
-        const uint16_t material = ids[0];
-        for (size_t i = 0; i < material_count; ++i) {
-            if (ids[i] != material) {
-                throw std::runtime_error("balloon mesh must use one material: " + name);
-            }
-        }
-        if (std::find(materials.begin(), materials.end(), material) != materials.end()) {
-            throw std::runtime_error("balloon meshes must have distinct materials");
-        }
-        size_t node_entries = 0;
-        for (const auto& object : scene.world.objects) {
-            auto other = std::dynamic_pointer_cast<TriangleMesh>(object);
-            if (!other || !other->geometry) {
-                continue;
-            }
-            if (other->nodeName == name) {
-                ++node_entries;
-                continue;
-            }
-            const auto* other_ids = other->geometry->get_material_ids();
-            const size_t other_count =
-                other->geometry->get_core_attribute_count(DNA::Attr::MaterialID);
-            for (size_t i = 0; other_ids && i < other_count; ++i) {
-                if (other_ids[i] == material) {
-                    throw std::runtime_error(
-                        "balloon material is shared with another object: " + name);
-                }
-            }
-        }
-        if (node_entries != 1) {
-            throw std::runtime_error("balloon visual must resolve to exactly one flat mesh: " + name);
-        }
-        rtapi::MaterialParamValue color;
-        const auto result = rtapi::getMaterialParam(name, "base_color", color);
-        if (!result.ok || !color.is_color) {
-            throw std::runtime_error("balloon mesh needs an editable color material: " + name);
-        }
-        // A base colour texture overrides the colour the demo sets: material.get
-        // reports the balloon red while it renders the texture (a white paint
-        // texture left by making the balloon a paint surface once). Refuse it.
-        if (const Material* bound = MaterialManager::getInstance().getMaterial(material);
-            bound && bound->albedoProperty.texture) {
-            throw std::runtime_error(
-                "balloon material has a base colour texture (" +
-                bound->albedoProperty.texture->name +
-                "), so the balloon colour cannot show; clear it (material.clear_texture "
-                "slot base_color): " + name);
-        }
-        names.push_back(name);
-        materials.push_back(material);
-    }
+    validateMeshVisualsFast(scene, config, surfaceNames(config));
 }
 
 // Instance transform to the viewport and render backends, as a gizmo drag does
@@ -967,7 +878,11 @@ void inflate(SceneData& scene, Balloon& balloon) {
     balloon.phase = randomRange(0.0f, 6.28318530718f);
     balloon.color = std::uniform_int_distribution<int>(
         0, static_cast<int>(state.palette.size()) - 1)(state.random);
-    balloon.surprise = randomRange(0.0f, 1.0f) < state.config["surprise_chance"].get<float>();
+    float surprise_chance = state.config["surprise_chance"].get<float>();
+    if (balloonMilestones().partyModeActive()) {
+        surprise_chance = std::max(surprise_chance, 0.55f);
+    }
+    balloon.surprise = randomRange(0.0f, 1.0f) < surprise_chance;
     ParticleSpawnDesc visual;
     visual.position = balloon.position;
     visual.velocity = Vec3(0.0f);
@@ -1036,19 +951,47 @@ void playCelebrateSound(SceneData& scene, int level) {
         scene.audio->invoke("play_at", {{"id", state.config["celebrate_sound"]},
                                         {"position", {0.0f, 1.6f, 0.0f}},
                                         {"pitch", 0.9f + 0.1f * static_cast<float>(level)},
-                                        {"gain", level >= 4 ? 1.0f : 0.8f}});
+                                        {"gain", level >= 5 ? 1.0f : 0.8f}});
     } catch (const std::exception& e) {
         state.pop_sound_error = e.what();
     }
 }
 
-// Milestone show: level 1..3 = that many confetti bursts in the air; level 4
+void upgradeSurpriseBalloons(int limit) {
+    int upgraded = 0;
+    for (Balloon& b : state.balloons) {
+        if (upgraded >= limit) {
+            break;
+        }
+        if (b.inflated && !b.surprise) {
+            b.surprise = true;
+            ++upgraded;
+        }
+    }
+}
+
+// Milestone show: level 1..4 = confetti bursts + milestone rewards; level 5
 // (goal reached) = confetti rain, four bursts and every balloon popping in a
 // cascade, then (finale_reset_seconds) a clean room for the next children.
 // No flashes: the show is paper, paint, sound and slowly fading sparkles (their
 // emission only decays - nothing strobes, nothing lights the whole screen).
 void celebrate(SceneData& scene, int level) {
     ++state.shows;
+    balloonMilestones().triggerMilestone(level);
+    if (level == 1) {
+        upgradeSurpriseBalloons(2);
+    } else if (level == 3) {
+        int enlarged = 0;
+        for (size_t i = 0; i < state.balloons.size() && enlarged < 2; ++i) {
+            Balloon& b = state.balloons[i];
+            if (b.inflated && !balloonIsHeld(static_cast<int>(i))) {
+                b.size = std::min(b.size * 1.35f, 2.0f);
+                b.surprise = true;
+                moveMeshVisual(scene, i, b);
+                ++enlarged;
+            }
+        }
+    }
     const int bursts = std::min(level, 4);
     for (int i = 0; i < bursts; ++i) {
         const Vec3 centre(randomRange(-2.5f, 2.5f), randomRange(1.6f, 2.6f),
@@ -1064,7 +1007,7 @@ void celebrate(SceneData& scene, int level) {
                             {"frame_interval_ms_max", 0.0},
                             {"sources_dropped_start", wetPaintGpu().stats().sources_dropped},
                             {"sources_dropped", 0}});
-    if (level >= 4) {
+    if (level >= 5) {
         balloonConfettiRain(scene, state.spawn_min, state.spawn_max, kConfettiPerSurprise * 3);
         state.cascade.clear();
         for (size_t i = 0; i < state.balloons.size(); ++i) {
@@ -1075,6 +1018,21 @@ void celebrate(SceneData& scene, int level) {
         const double reset_after = state.config["finale_reset_seconds"].get<double>();
         state.finale_reset_at = reset_after > 0.0 ? state.seconds + reset_after : -1.0;
     }
+}
+
+bool claimActiveGift(SceneData& scene) {
+    if (!balloonMilestones().claimGift()) {
+        return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+        const Vec3 centre(randomRange(-2.2f, 2.2f), randomRange(1.5f, 2.5f),
+                          randomRange(-2.2f, 1.8f));
+        balloonConfettiBurst(scene, centre, 0.25f, kConfettiPerSurprise, 2.2f, 4.8f);
+        balloonSparkles(scene, centre, 0.2f);
+    }
+    playCelebrateSound(scene, 3);
+    upgradeSurpriseBalloons(2);
+    return true;
 }
 
 void clearPendingDrops() {
@@ -1153,7 +1111,8 @@ void emitPendingDrops(SceneData& scene) {
     }
 }
 
-void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
+void popBalloons(SceneData& scene, const std::vector<size_t>& available,
+                 const Vec3* directed_target = nullptr) {
     validateMeshVisuals(scene, state.config);
     const int count = static_cast<int>(available.size());
     if (count == 0) {
@@ -1182,7 +1141,9 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         if (state.jolt_motion) state.jolt_motion->remove(available[b]);
         system(scene, kVisualSystem)->kill(balloon.visual_slot);
         balloon.inflated = false;
-        balloon.respawn_at = state.seconds + state.config.value("respawn_seconds", 3.5);
+        const double respawn_seconds = state.config.value("respawn_seconds", 3.5);
+        balloon.respawn_at = state.seconds +
+            (balloonMilestones().partyModeActive() ? 0.5 * respawn_seconds : respawn_seconds);
         // A surprise throws half as much paint again, in every palette colour.
         const int particles = dropsFor(balloon.size) * (balloon.surprise ? 3 : 2) / 2;
         int emitted = 0;
@@ -1192,7 +1153,8 @@ void popBalloons(SceneData& scene, const std::vector<size_t>& available) {
         std::vector<BalloonBurstDrop> pattern;
         BalloonBurstSummary burst;
         timing.measure(timing.pattern, [&] {
-            burst = balloonBurstPattern(state.random, particles, balloon.size, shape, pattern);
+            burst = balloonBurstPattern(state.random, particles, balloon.size, shape, pattern,
+                                        directed_target);
         });
         // A rainbow surprise colours a whole clump alike: it lands as one splat.
         // Colours are drawn in pattern order (clumps are consecutive), then the
@@ -1299,6 +1261,7 @@ void resetRoom(SceneData& scene) {
     // A new round: the room goal starts again.
     state.room_progress = 0.0;
     state.milestones = 0;
+    balloonMilestones().reset();
     state.cascade.clear();
     state.finale_reset_at = -1.0;
 }
@@ -1399,6 +1362,7 @@ json status() {
             {"jolt_motion", balloonJoltMotionStatus(state.jolt_motion.get())},
             {"resets", state.resets}, {"dirty", state.dirty}, {"surprise_pops", state.surprise_pops},
             {"room_progress", state.room_progress}, {"milestones", state.milestones},
+            {"milestones_ui", balloonMilestones().statusJson()},
             {"shows", state.shows}, {"finale_cascade_left", state.cascade.size()},
             {"pending_drops", state.pending_drops.size() - state.pending_cursor},
             {"spawn_frames_max", state.spawn_frames_max},
@@ -1588,6 +1552,7 @@ void prepare(SceneData& scene, const json& config) {
     // Warm the resident collision/spawn/ballistic buffers at full pool capacity.
     // Warm the largest same-colour triple burst, including slot-record capacity.
     // Kill sacrificial drops before gameplay; keep allocation and pipelines.
+    const auto warmup_start = Clock::now();
     RayTrophiSim::SimulationContext context;
     context.dt = 1.0f / 60.0f;
     context.compute = &scene.getSimulationWorld().compute();
@@ -1617,6 +1582,8 @@ void prepare(SceneData& scene, const json& config) {
         runtime->kill(slots.back());
     }
     context.compute->synchronize();
+    const double warmup_ms = elapsedMs(warmup_start);
+    const auto inflate_start = Clock::now();
     resolveSpawnVolume(scene);
     state.balloons.resize(config["balloons"].get<size_t>());
     state.visual_base.clear();
@@ -1658,6 +1625,12 @@ void prepare(SceneData& scene, const json& config) {
     // the generic setup-signature invalidation can rewind away our balloons.
     scene.preserveScriptSimulationPreview();
     state.prepare_ms = elapsedMs(start);
+    const double inflate_ms = elapsedMs(inflate_start);
+    SCENE_LOG_INFO("[BalloonDemo] prepare total=" +
+                   std::to_string(static_cast<int>(state.prepare_ms + 0.5)) +
+                   " ms (atlas=" + std::to_string(static_cast<int>(state.atlas_ms + 0.5)) +
+                   " ms, warmup=" + std::to_string(static_cast<int>(warmup_ms + 0.5)) +
+                   " ms, inflate=" + std::to_string(static_cast<int>(inflate_ms + 0.5)) + " ms)");
 }
 
 } // namespace
@@ -1669,6 +1642,7 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
             return hiddenGameObjectsCommand(scene, input, output, error);
         }
         int popped_balloon = -1;
+        bool gift_claimed = false;
         if (operation == "body") {
             if ((!state.prepared || state.scene != &scene) && !input.empty()) {
                 error = "configure the demo before enabling body controls";
@@ -1756,7 +1730,7 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
             throw std::runtime_error("demo input must be an object");
         }
         if (operation != "configure" && operation != "burst" && operation != "pop" &&
-            operation != "set_collider" && !input.empty()) {
+            operation != "set_collider" && operation != "trigger_milestone" && !input.empty()) {
             throw std::runtime_error("this demo operation takes an empty config");
         }
         if (operation == "configure") {
@@ -1877,15 +1851,33 @@ bool balloonPaintCommand(SceneData& scene, const std::string& operation,
                 state.last_activity = state.seconds;
                 state.dirty = true;
             }
+        } else if (operation == "claim_gift") {
+            if (!state.prepared || state.scene != &scene) {
+                throw std::runtime_error("configure the demo before claiming gift");
+            }
+            gift_claimed = claimActiveGift(scene);
+        } else if (operation == "trigger_milestone") {
+            if (!state.prepared || state.scene != &scene) {
+                throw std::runtime_error("configure the demo before triggering milestone");
+            }
+            if (input.contains("level") && !input["level"].is_number_integer()) {
+                throw std::runtime_error("trigger_milestone level must be an integer 1..5");
+            }
+            const int lvl = std::clamp(input.value("level", 1), 1, 5);
+            state.milestones = std::max(state.milestones, lvl);
+            celebrate(scene, lvl);
         } else {
             throw std::runtime_error(
-                "unknown demo operation; use configure/status/start/stop/burst/pop/reset/set_collider");
+                "unknown demo operation; use "
+                "configure/status/start/stop/burst/pop/reset/set_collider/claim_gift/trigger_milestone");
         }
         output = status();
         output["colliders"] = balloonPaintColliders(scene);
         if (operation == "pop") {
             // -1: nothing under the point, or that balloon is not inflated.
             output["popped"] = popped_balloon;
+        } else if (operation == "claim_gift") {
+            output["gift_claimed"] = gift_claimed;
         }
         return true;
     } catch (const std::exception& e) {
@@ -2039,6 +2031,8 @@ void resetBalloonPaintDemo() {
     cancelBalloonInteraction();
     resetBalloonBodyInteraction();
     state = State{};
+    balloonMilestones().reset();
+    balloonMilestones().active = false;
     resetBalloonEffects();
     wetPaintGpu().clear();
 }
@@ -2096,7 +2090,13 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
             moveMeshVisual(scene, static_cast<size_t>(released), state.balloons[released]);
         }
         if (const int crushed = updateBalloonCrush(dt); crushed >= 0) {
-            popBalloons(scene, {static_cast<size_t>(crushed)});
+            const Vec3 wall_normal = balloonCrushNormal();
+            if (wall_normal.length_squared() > 1e-6f) {
+                const Vec3 into_wall = -wall_normal.normalize();
+                popBalloons(scene, {static_cast<size_t>(crushed)}, &into_wall);
+            } else {
+                popBalloons(scene, {static_cast<size_t>(crushed)});
+            }
             state.dirty = true;
         }
         if (state.soft_body) {
@@ -2129,15 +2129,31 @@ void tickBalloonPaintDemo(SceneData& scene, float dt) {
                 state.coverage_clock = 0.0;
                 WetPaintCoverage coverage;
                 if (wetPaintGpu().coverage(scene, coverage, /*allow_stale=*/true)) {
-                    state.room_progress = std::clamp(coverage.ratio / goal, 0.0, 1.0);
-                    while (state.milestones < 4 &&
-                           state.room_progress >= 0.25 * (state.milestones + 1) - 1e-9) {
+                    // Diminishing returns make the final ~10% of random coverage feel stuck at 95-99%.
+                    // Scale progress so visually complete rooms (~88% of goal) reach 100% smoothly.
+                    const double effective_goal = std::max(0.05, goal * 0.88);
+                    double progress = std::clamp(coverage.ratio / effective_goal, 0.0, 1.0);
+                    if (progress >= 0.985) {
+                        progress = 1.0;
+                    }
+                    state.room_progress = progress;
+                    if (state.milestones > 0 && state.room_progress < 0.05) {
+                        // Paint was cleared externally (e.g. F8 / clear_paint): restart milestones.
+                        state.milestones = 0;
+                        state.finale_reset_at = -1.0;
+                        state.cascade.clear();
+                        balloonMilestones().reset();
+                    }
+                    while (state.milestones < 5 &&
+                           state.room_progress >= 0.20 * (state.milestones + 1) - 1e-9) {
                         ++state.milestones;
                         celebrate(scene, state.milestones);
                     }
                 }
             }
         }
+        balloonMilestones().tick(std::min(dt, 0.25f), state.prepared && goal > 0.0,
+                                 state.room_progress);
         if (!state.cascade.empty() && state.seconds >= state.next_cascade) {
             const size_t next = state.cascade.back();
             state.cascade.pop_back();

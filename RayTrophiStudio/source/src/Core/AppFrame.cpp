@@ -10,6 +10,8 @@
 #ifdef RT_PLAYER
 #include "Core/PlayerVideoCard.h"
 #include "Core/RuntimeProjectHost.h"
+#include "UI/BalloonMilestoneHud.h"
+#include "UI/PlayerOperatorUI.h"
 #endif
 
 #include <SDL.h>
@@ -117,6 +119,9 @@ void FrameCycle::beginUiFrame(bool draw_runtime_overlays) {
     ImGui_ImplSDL2_NewFrame();
     ImGui::NewFrame();
 #ifdef RT_PLAYER
+    if (draw_runtime_overlays && !playerOperatorOpen()) {
+        Paint::drawBalloonMilestoneHud();
+    }
     if (draw_runtime_overlays && original_surface &&
         (playerBodyOverlayEnabled() || playerVideoCardEnabled())) {
         const PlayerOverlayProjection projection(original_surface->w, original_surface->h);

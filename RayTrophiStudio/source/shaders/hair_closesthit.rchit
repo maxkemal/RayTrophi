@@ -595,8 +595,19 @@ void shadeHairHit()
             if (lightDist < 1e-4) continue;
             lightDir = toLight / lightDist;
 
-            // Inverse-square falloff (parity with CPU getIntensity)
-            atten = 1.0 / max(lightDist * lightDist, 1e-4);
+            // Distance falloff (fast path 1/d^2 when area_v.w <= 1e-4)
+            float d2 = max(lightDist * lightDist, 1e-4);
+            if (lightType == 2) {
+                atten = 1.0 / d2;
+            } else {
+                float falloffSoft = light.area_v.w;
+                if (falloffSoft <= 1e-4) {
+                    atten = 1.0 / d2;
+                } else {
+                    float falloffExp = max(2.0 - falloffSoft, 0.0);
+                    atten = (falloffExp <= 1e-4) ? 1.0 : pow(d2, -0.5 * falloffExp);
+                }
+            }
 
             if (lightType == 3) {
                 // Spot light: cone falloff using inner/outer cosines
@@ -614,37 +625,40 @@ void shadeHairHit()
         if (dot(lightDir, lightDir) < 0.5) continue;
 
         // Shadow ray
-        vec3 shadowOrig = offset_ray(hitPoint, normal);
-        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+        vec3 shadowVis = vec3(1.0);
+        if (light.area_u.w < 0.5) {
+            vec3 shadowOrig = offset_ray(hitPoint, normal);
+            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
 
-        // Two shadow paths, chosen per-material by mat.selfShadow. Both use the
-        // direct-shadow mask: authored triangles/hair plus transient splats,
-        // while volume AABBs remain excluded from hard-shadow traversal.
-        //  - selfShadow > 0 → DEEP self-shadow. Drop OpaqueEXT so hair_shadow_anyhit
-        //    runs (accumulating transmittance) and drop TerminateOnFirstHit so the ray
-        //    passes through successive hair layers, each multiplying shadowPayload.rgb.
-        //    Opaque triangles still stop it (baked VK_GEOMETRY_OPAQUE_BIT → committed
-        //    opaque hit ends traversal, closesthit skipped → w stays 0 = occluded), so
-        //    hard shadows from solid geometry are preserved. This is what turns hair
-        //    from a flat bright fuzz into a soft, dense, volumetric mass.
-        //  - selfShadow == 0 → original fast path: hardware TerminateOnFirstHit + force
-        //    OpaqueEXT, so every hair hit is a hard binary occluder (fastest).
-        uint shadowFlags;
-        if (mat.selfShadow > 0.001) {
-            shadowFlags = gl_RayFlagsSkipClosestHitShaderEXT;
-        } else {
-            shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT |
-                          gl_RayFlagsSkipClosestHitShaderEXT |
-                          gl_RayFlagsOpaqueEXT;
+            // Two shadow paths, chosen per-material by mat.selfShadow. Both use the
+            // direct-shadow mask: authored triangles/hair plus transient splats,
+            // while volume AABBs remain excluded from hard-shadow traversal.
+            //  - selfShadow > 0 → DEEP self-shadow. Drop OpaqueEXT so hair_shadow_anyhit
+            //    runs (accumulating transmittance) and drop TerminateOnFirstHit so the ray
+            //    passes through successive hair layers, each multiplying shadowPayload.rgb.
+            //    Opaque triangles still stop it (baked VK_GEOMETRY_OPAQUE_BIT → committed
+            //    opaque hit ends traversal, closesthit skipped → w stays 0 = occluded), so
+            //    hard shadows from solid geometry are preserved. This is what turns hair
+            //    from a flat bright fuzz into a soft, dense, volumetric mass.
+            //  - selfShadow == 0 → original fast path: hardware TerminateOnFirstHit + force
+            //    OpaqueEXT, so every hair hit is a hard binary occluder (fastest).
+            uint shadowFlags;
+            if (mat.selfShadow > 0.001) {
+                shadowFlags = gl_RayFlagsSkipClosestHitShaderEXT;
+            } else {
+                shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT |
+                              gl_RayFlagsSkipClosestHitShaderEXT |
+                              gl_RayFlagsOpaqueEXT;
+            }
+            traceRayEXT(
+                topLevelAS, shadowFlags,
+                RT_MASK_DIRECT_SHADOW, 0, 0, 1,
+                shadowOrig, HAIR_SHADOW_TMIN, lightDir, lightDist - 0.002,
+                1
+            );
+            if (shadowPayload.w < 0.5) continue;      // fully occluded by an opaque blocker
+            shadowVis = shadowPayload.rgb;            // accumulated transmittance (1,1,1 = clear)
         }
-        traceRayEXT(
-            topLevelAS, shadowFlags,
-            RT_MASK_DIRECT_SHADOW, 0, 0, 1,
-            shadowOrig, HAIR_SHADOW_TMIN, lightDir, lightDist - 0.002,
-            1
-        );
-        if (shadowPayload.w < 0.5) continue;      // fully occluded by an opaque blocker
-        vec3 shadowVis = shadowPayload.rgb;       // accumulated transmittance (1,1,1 = clear)
 
         // Marschner BSDF evaluation
         vec3 bsdf = hair_bsdf_eval(V, lightDir, tangent, mat, sigma_a, h, vStrand);

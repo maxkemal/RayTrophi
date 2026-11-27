@@ -38,8 +38,15 @@ vec3 cloudSkyAmbient(vec3 direction) {
 void main() {
     ivec2 px = ivec2(gl_GlobalInvocationID.xy);
     if (px.x >= int(pc.width) || px.y >= int(pc.height) || !cloudRtEnabled()) return;
+    bool hasLightning = cloudParams.lightning[0].start.w > 0.0 ||
+                        cloudParams.lightning[1].start.w > 0.0 ||
+                        cloudParams.lightning[2].start.w > 0.0 ||
+                        cloudParams.lightning[3].start.w > 0.0;
+    bool hasNearPrecip = cloudNearPrecipRange() > 0.0 &&
+                         cloudParams.nearState.state[0].x > 0.0;
     float depth = texelFetch(sceneDepth, px, 0).r;
     bool skyPixel = depth >= 1.0;
+    if (skyPixel && !hasLightning && !hasNearPrecip) return;
     vec2 ndc = (vec2(px) + vec2(0.5)) / vec2(pc.width, pc.height) * 2.0 - 1.0;
     float tanH = worldData.camPos.w;
     vec3 direction = normalize(worldData.camFwd.xyz +
@@ -58,16 +65,22 @@ void main() {
     // Stable per-pixel stratification. This pass precedes post/DoF, not the
     // sky temporal history; a changing seed would flicker on opaque surfaces.
     uint seed = uint(px.x) * 1973u ^ uint(px.y) * 9277u ^ 0x68bc21ebu;
+    bool didMarch = false;
     if (!skyPixel && cloudSegmentMayContain(worldData.camPos.xyz, direction, distance)) {
         cloudMarchLimited(worldData.camPos.xyz, direction, distance, int(pc.steps), seed,
                           inscatter, T, cloudDepth);
+        didMarch = true;
     }
+    bool cloudHit = didMarch && (T < 1.0 || any(notEqual(inscatter, vec3(0.0))));
+    if (!cloudHit && !hasLightning && !hasNearPrecip) return;
     vec4 surface = imageLoad(sceneHDR, px);
     vec3 color = surface.rgb * T + inscatter;
-    color = cloudApplyLightning(color, worldData.camPos.xyz, direction, distance);
+    if (hasLightning) {
+        color = cloudApplyLightning(color, worldData.camPos.xyz, direction, distance);
+    }
     // Near-camera drops (docs/dev/ATMOSPHERE_NEAR_PRECIP.md), the same
     // function as RT; the curtain above started at their range.
-    if (cloudNearPrecipRange() > 0.0 && cloudParams.nearState.state[0].x > 0.0) {
+    if (hasNearPrecip) {
         vec3 nearIn;
         float nearT;
         float pixelAngle = 2.0 * tanH / float(pc.height);

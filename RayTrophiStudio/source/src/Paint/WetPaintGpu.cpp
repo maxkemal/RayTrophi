@@ -3,6 +3,7 @@
 
 #include "Paint/WetPaintGpu.h"
 #include "Paint/WetPaintGeometryBake.h"
+#include "Paint/WetPaintMobileBudget.h"
 #include "WetPaintChannelEdits.h"
 #include "Paint/HiddenGameObjects.h"
 
@@ -58,7 +59,7 @@ constexpr uint32_t kTile = 32u;
 // STAMP and CONSUME still run every frame (contact events must not pile up);
 // a stamp shows at the next step, at most one 60 Hz step later. Below 60 fps
 // every frame is a step, exactly as before.
-constexpr double kWetStepSeconds = 1.0 / 60.0;
+constexpr double kWetStepSeconds = WetPaintMobileBudget::kStepSeconds;
 constexpr uint32_t kStatsStride = 18u;
 constexpr uint32_t kBindingCount = 17u;
 constexpr int kGutterTexels = 2;
@@ -155,8 +156,10 @@ bool loadPictureImage(const std::string& path, uint32_t width, uint32_t height,
         return false;
     }
     const int sw = image.width, sh = image.height;
-    out.resize(static_cast<size_t>(width) * height);
-    for (uint32_t y = 0; y < height; ++y) {
+    const int dst_h = static_cast<int>(height);
+    out.resize(static_cast<std::size_t>(width) * height);
+#pragma omp parallel for schedule(static)
+    for (int y = 0; y < dst_h; ++y) {
         const float fy = std::clamp((static_cast<float>(y) + 0.5f) * sh / height - 0.5f, 0.0f,
                                     static_cast<float>(sh - 1));
         const int y0 = static_cast<int>(fy), y1 = std::min(y0 + 1, sh - 1);
@@ -429,6 +432,12 @@ struct WetPaintGpu::Surface {
     int uv_set = 0;
     uint16_t paint_material = 0;
     std::array<double, 24> geometry_key{};   // geometryKey() at the last bake
+    struct CachedMeshTransform {
+        const TriangleMesh* mesh = nullptr;
+        Matrix4x4 transform = Matrix4x4::identity();
+    };
+    std::vector<CachedMeshTransform> cached_transforms;
+    bool geometry_fast_valid = false;
     // Dirty texel rectangle not yet in each backend (0 render, 1 viewport).
     struct Rect { bool any = false; int x0 = 0, y0 = 0, x1 = -1, y1 = -1; };
     Rect pending[2];
@@ -482,11 +491,23 @@ struct WetPaintGpu::Device {
     // next dispatch (once per readback window, NOT per frame: stamp-only
     // frames add their counters into the window the next step reads back).
     double step_clock = 0.0;
+    double stamp_clock = WetPaintMobileBudget::kStampIntervalSeconds;
+    double coverage_clock = WetPaintMobileBudget::kMinCoverageIntervalSeconds;
     bool stats_reset_needed = true;
     bool zero_init_needed = false;
+    uint64_t last_scene_geometry_gen = ~0ull;
+    std::size_t last_world_object_count = 0;
+    std::size_t last_surface_count = 0;
+    std::vector<const Surface*> last_geometry_surfaces;
+    std::vector<uint32_t> stats_prev_scratch;
+    std::vector<uint32_t> stats_init_scratch;
 
     void release() {
         stats_pending.clear();   // a dropped ticket's slot is reused by the backend
+        last_scene_geometry_gen = ~0ull;
+        last_world_object_count = 0;
+        last_surface_count = 0;
+        last_geometry_surfaces.clear();
         if (compute) {
             for (auto& entry : appearance_tables) {
                 entry.second.release(*compute);
@@ -588,6 +609,7 @@ std::array<double, 24> WetPaintGpu::geometryKey(SceneData& scene, const std::str
 // geometryKey reads that same world space to trigger rebaking after a move.
 bool WetPaintGpu::bakeGeometry(SceneData& scene, Surface& s, std::string& error) {
     s.geometry_key = geometryKey(scene, s.object);
+    s.geometry_fast_valid = false;
     const int uv_set = s.uv_set;
     const auto faces = paintFaces(scene, s.object, s.paint_material, uv_set);
     std::vector<WetPaintBakeFace> bake_faces;
@@ -814,7 +836,8 @@ bool WetPaintGpu::setSurfaceSettings(const std::string& object, int material_id,
 
 void WetPaintGpu::setSplatSettings(const WetPaintSplatSettings& settings) {
     splat_ = settings;
-    splat_.max_events_per_tick = std::max<uint32_t>(1u, splat_.max_events_per_tick);
+    splat_.max_events_per_tick =
+        WetPaintMobileBudget::clampMaxEventsPerTick(splat_.max_events_per_tick);
 }
 
 void WetPaintGpu::queueDab(const WetPaintDab& dab) { pending_dabs_.push_back(dab); }
@@ -1356,7 +1379,9 @@ bool WetPaintGpu::prepareChannels(SceneData& scene) {
         }
         auto material = triangle->getMaterial();
         auto principled = std::dynamic_pointer_cast<PrincipledBSDF>(material);
-        const bool had_roughness = material->roughnessProperty.texture != nullptr;
+        const auto& roughness_source = material->roughnessProperty.texture;
+        const bool had_roughness = roughness_source && roughness_source->is_loaded() &&
+                                   !roughness_source->pixels.empty();
         const float roughness_scalar = material->roughnessProperty.color.x *
                                        material->roughnessProperty.intensity;
         const float roughness_factor = material->roughnessProperty.intensity;
@@ -1633,31 +1658,99 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     geometry_check_clock_ += std::clamp(dt, 0.0f, 0.25f);
     if (geometry_check_clock_ >= 0.5f) {
         geometry_check_clock_ = 0.0f;
-        for (auto& surface : surfaces_) {
-            const auto key = geometryKey(scene, surface->object);
-            bool changed = false;
-            for (size_t k = 0; k < key.size(); ++k) {
-                if (std::abs(key[k] - surface->geometry_key[k]) >
-                    1e-4 * std::max(1.0, std::abs(key[k]))) {
-                    changed = true;
+        const uint64_t scene_gen =
+            g_scene_geometry_generation.load(std::memory_order_acquire);
+        const std::size_t world_count = scene.world.objects.size();
+        const auto surfaceTransformsMatch = [&](const Surface& s) -> bool {
+            if (!s.geometry_fast_valid) return false;
+            std::size_t idx = 0;
+            for (const auto& obj : scene.world.objects) {
+                const auto* mesh = dynamic_cast<const TriangleMesh*>(obj.get());
+                if (!mesh || mesh->nodeName != s.object || !mesh->geometry) continue;
+                const Matrix4x4 world =
+                    mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+                if (idx >= s.cached_transforms.size() ||
+                    s.cached_transforms[idx].mesh != mesh ||
+                    !(s.cached_transforms[idx].transform == world)) {
+                    return false;
+                }
+                ++idx;
+            }
+            return idx == s.cached_transforms.size();
+        };
+        const auto captureSurfaceTransforms = [&](Surface& s) {
+            s.cached_transforms.clear();
+            for (const auto& obj : scene.world.objects) {
+                const auto* mesh = dynamic_cast<const TriangleMesh*>(obj.get());
+                if (!mesh || mesh->nodeName != s.object || !mesh->geometry) continue;
+                const Matrix4x4 world =
+                    mesh->transform ? mesh->transform->getFinal() : Matrix4x4::identity();
+                s.cached_transforms.push_back({mesh, world});
+            }
+            s.geometry_fast_valid = true;
+        };
+
+        bool skip_geometry_check = false;
+        if (device_ &&
+            device_->last_scene_geometry_gen == scene_gen &&
+            device_->last_world_object_count == world_count &&
+            device_->last_surface_count == surfaces_.size() &&
+            device_->last_geometry_surfaces.size() == surfaces_.size()) {
+            skip_geometry_check = true;
+            for (std::size_t si = 0; si < surfaces_.size(); ++si) {
+                if (device_->last_geometry_surfaces[si] != surfaces_[si].get() ||
+                    !surfaceTransformsMatch(*surfaces_[si])) {
+                    skip_geometry_check = false;
+                    break;
                 }
             }
-            if (!changed) continue;
-            std::string error;
-            const size_t previous_tiles = surface->tiles.size();
-            const size_t previous_texels = surface->pos_valid.size();
-            if (bakeGeometry(scene, *surface, error)) {
-                ++stats_.geometry_rebakes;
-                if (!layout_dirty_ && device_ && device_->compute &&
-                    previous_tiles == surface->tiles.size() &&
-                    previous_texels == surface->pos_valid.size()) {
-                    surface->geometry_upload = true;
-                } else {
-                    layout_dirty_ = true;
+        }
+        if (!skip_geometry_check) {
+            for (auto& surface : surfaces_) {
+                if (device_ &&
+                    device_->last_scene_geometry_gen == scene_gen &&
+                    device_->last_world_object_count == world_count &&
+                    surfaceTransformsMatch(*surface)) {
+                    continue;
                 }
-            } else {
-                stats_.status = "rebake_failed: " + surface->object + ": " + error;
-                surface->geometry_key = key;   // do not retry every check
+                const auto key = geometryKey(scene, surface->object);
+                bool changed = false;
+                for (size_t k = 0; k < key.size(); ++k) {
+                    if (std::abs(key[k] - surface->geometry_key[k]) >
+                        1e-4 * std::max(1.0, std::abs(key[k]))) {
+                        changed = true;
+                    }
+                }
+                if (!changed) {
+                    captureSurfaceTransforms(*surface);
+                    continue;
+                }
+                std::string error;
+                const size_t previous_tiles = surface->tiles.size();
+                const size_t previous_texels = surface->pos_valid.size();
+                if (bakeGeometry(scene, *surface, error)) {
+                    ++stats_.geometry_rebakes;
+                    if (!layout_dirty_ && device_ && device_->compute &&
+                        previous_tiles == surface->tiles.size() &&
+                        previous_texels == surface->pos_valid.size()) {
+                        surface->geometry_upload = true;
+                    } else {
+                        layout_dirty_ = true;
+                    }
+                } else {
+                    stats_.status = "rebake_failed: " + surface->object + ": " + error;
+                    surface->geometry_key = key;   // do not retry every check
+                }
+                captureSurfaceTransforms(*surface);
+            }
+            if (device_) {
+                device_->last_scene_geometry_gen = scene_gen;
+                device_->last_world_object_count = world_count;
+                device_->last_surface_count = surfaces_.size();
+                device_->last_geometry_surfaces.resize(surfaces_.size());
+                for (std::size_t si = 0; si < surfaces_.size(); ++si) {
+                    device_->last_geometry_surfaces[si] = surfaces_[si].get();
+                }
             }
         }
         // A surface painted over its material COLOUR (no texture underneath)
@@ -1820,10 +1913,12 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         constexpr std::size_t kMaxPendingStats = 3;   // backend keeps 4 readback slots
         while (!d.stats_pending.empty()) {
             const auto p = d.stats_pending.front();
-            std::vector<uint32_t> prev(static_cast<std::size_t>(p.surfaces) * kStatsStride, 0u);
+            d.stats_prev_scratch.assign(
+                static_cast<std::size_t>(p.surfaces) * kStatsStride, 0u);
             const bool must_wait = d.stats_pending.size() >= kMaxPendingStats;
-            if (!c.collectReadback(p.ticket, prev.data(),
-                                   prev.size() * sizeof(uint32_t), must_wait)) {
+            if (!c.collectReadback(p.ticket, d.stats_prev_scratch.data(),
+                                   d.stats_prev_scratch.size() * sizeof(uint32_t),
+                                   must_wait)) {
                 if (!must_wait) break;               // not ready yet: next tick
                 d.stats_pending.pop_front();         // waited and still failed
                 ++stats_.stats_readbacks_lost;
@@ -1831,7 +1926,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             }
             d.stats_pending.pop_front();
             if (p.surfaces == n) {
-                applyStats(prev, p.force, p.coverage, p.serial);
+                applyStats(d.stats_prev_scratch, p.force, p.coverage, p.serial);
             } else {
                 ++stats_.stats_readbacks_lost;
             }
@@ -1862,7 +1957,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     k.splat_amount = std::clamp(splat_.amount, 0.0f, 1.0f);
     k.splat_min_speed = std::max(0.0f, splat_.min_speed);
     k.facing_min = std::clamp(splat_.facing_min, -1.0f, 1.0f);
-    k.max_events = splat_.max_events_per_tick;
+    k.max_events = WetPaintMobileBudget::clampMaxEventsPerTick(splat_.max_events_per_tick);
 
     ComputeBufferHandle bindings[kBindingCount] = {
         d.surfaces, d.tiles, d.pos_valid, d.flow_normal, d.base, d.color, d.state,
@@ -1950,8 +2045,10 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
             host_events.clear();
             if (system.runtime->takeHostCollisionEvents(host_events) == 0) continue;
             // CPU-reference contacts: the same splat, coloured on the host.
+            const uint32_t max_host_events =
+                WetPaintMobileBudget::clampMaxEventsPerTick(splat_.max_events_per_tick);
             for (const auto& e : host_events) {
-                if (e.speed < splat_.min_speed || host_taken >= splat_.max_events_per_tick) continue;
+                if (e.speed < splat_.min_speed || host_taken >= max_host_events) continue;
                 ++host_taken;
                 const float* row = system.runtime->appearanceLutRow(e.profile);
                 float rgb[3] = {1.0f, 1.0f, 1.0f};
@@ -1995,15 +2092,19 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     // Step decision (kWetStepSeconds). Resets, a fresh layout and a forced
     // channel pass are one-shot work that must not wait for the cadence.
     d.step_clock += frame_dt;
+    d.stamp_clock += frame_dt;
     const bool force_step = layout_fresh || reset_requested_ || !base_resets.empty() ||
                             d.channels_force || edited_channels;
-    const bool step = force_step || d.step_clock >= kWetStepSeconds - 1e-6;
+    const double step_interval = WetPaintMobileBudget::stepIntervalSeconds(stats_.active_tiles);
+    const bool step = force_step || d.step_clock >= step_interval - 1e-6;
+    const bool stamp_events = !device_sources.empty() &&
+        (step || d.stamp_clock >= WetPaintMobileBudget::stampIntervalSeconds() - 1e-6);
     // The step simulates all the time since the last one (rates are per
     // second), clamped as before so a stall cannot launch a huge step.
-    const float step_dt = static_cast<float>(
-        d.step_clock > 0.0 ? std::min(d.step_clock, 2.5 / 60.0) : 1.0 / 60.0);
+    const float step_dt = WetPaintMobileBudget::computeStepDt(d.step_clock);
     if (step) d.step_clock = 0.0;
-    if (!step && dabs.empty() && device_sources.empty()) {
+    if (stamp_events) d.stamp_clock = 0.0;
+    if (!step && dabs.empty() && !stamp_events) {
         // Drying between two steps: nothing to stamp, nothing to simulate yet.
         stats_.status = "between_steps";
         stats_.last_tick_ms = msSince(t0);
@@ -2015,12 +2116,13 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     // window - a stamp-only frame adds its counters (sources dropped, stamped
     // texels) into the window the next step reads back.
     if (d.stats_reset_needed) {
-        std::vector<uint32_t> stats_init(static_cast<std::size_t>(n) * kStatsStride, 0u);
+        d.stats_init_scratch.assign(static_cast<std::size_t>(n) * kStatsStride, 0u);
         for (uint32_t si = 0; si < n; ++si) {
-            stats_init[si * kStatsStride + kStDirtyMinX] = 0xFFFFFFFFu;
-            stats_init[si * kStatsStride + kStDirtyMinY] = 0xFFFFFFFFu;
+            d.stats_init_scratch[si * kStatsStride + kStDirtyMinX] = 0xFFFFFFFFu;
+            d.stats_init_scratch[si * kStatsStride + kStDirtyMinY] = 0xFFFFFFFFu;
         }
-        c.uploadBuffer(d.stats, stats_init.data(), stats_init.size() * 4);
+        c.uploadBuffer(d.stats, d.stats_init_scratch.data(),
+                       d.stats_init_scratch.size() * 4);
         d.stats_reset_needed = false;
     }
     // MODE_RESET reads source_count as its first tile (paint_wet.comp).
@@ -2053,6 +2155,7 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
         run(kModeStamp, d.tile_count);
         bindings[12] = d.dummy_events;
     }
+    if (stamp_events)
     for (const auto& system : device_sources) {
         RayTrophiSim::ParticleDeviceEventView view;
         if (!system->deviceCollisionEventView(c, view)) continue;
@@ -2152,7 +2255,8 @@ bool WetPaintGpu::tick(SceneData& scene, float dt) {
     // A periodic reader got a stale coverage: measure it here, after this
     // tick's final state, inside the readback this tick pays anyway (the
     // stats_init upload above zeroed the coverage slots too).
-    const bool measure_coverage = coverage_requested_;
+    const bool measure_coverage = WetPaintMobileBudget::allowPeriodicCoverage(
+        coverage_requested_, d.coverage_clock, step_dt);
     if (measure_coverage) run(kModeCoverage, d.tile_count);
 
     const bool force = d.channels_force;

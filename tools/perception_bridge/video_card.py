@@ -14,12 +14,15 @@ HEADER = struct.Struct("<QQfffIII")
 MAGIC = 0x31565452  # RTV1
 
 
+def _target_size(width, height):
+    scale = min(1.0, MAX_SIDE / max(height, width))
+    return tuple(max(16, round(side * scale / 16) * 16) for side in (width, height))
+
+
 def mask_input(rgb, cv2):
     # Aligned rows let MediaPipe expose its float mask without repacking it.
     height, width = rgb.shape[:2]
-    scale = min(1.0, MAX_SIDE / max(height, width))
-    size = tuple(max(16, round(side * scale / 16) * 16) for side in (width, height))
-    return cv2.resize(rgb, size, interpolation=cv2.INTER_AREA)
+    return cv2.resize(rgb, _target_size(width, height), interpolation=cv2.INTER_AREA)
 
 
 def cutout(rgb, mask, image_points, person, confidence, cv2, np):
@@ -27,9 +30,9 @@ def cutout(rgb, mask, image_points, person, confidence, cv2, np):
     if person["confidence"] < 0.5:
         return None
     source_height, source_width = rgb.shape[:2]
-    scale = min(1.0, MAX_SIDE / max(source_height, source_width))
-    width, height = max(1, round(source_width * scale)), max(1, round(source_height * scale))
-    alpha = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
+    width, height = _target_size(source_width, source_height)
+    alpha = (mask if mask.shape[:2] == (height, width)
+             else cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR))
     # Keep antialiased edges while suppressing low-confidence background pixels.
     alpha = np.uint8(np.clip((alpha - 0.35) / 0.45, 0.0, 1.0) * 255)
     x, y, w, h = cv2.boundingRect(alpha)
@@ -49,7 +52,8 @@ def cutout(rgb, mask, image_points, person, confidence, cv2, np):
     if not math.isfinite(card_height) or not 0.3 <= card_height <= 3.2:
         return None
 
-    small = cv2.resize(rgb, (width, height), interpolation=cv2.INTER_AREA)
+    small = (rgb if rgb.shape[:2] == (height, width)
+             else cv2.resize(rgb, (width, height), interpolation=cv2.INTER_AREA))
     rgba = cv2.cvtColor(small[y:y+h, x:x+w], cv2.COLOR_RGB2RGBA)
     rgba[:, :, 3] = alpha[y:y+h, x:x+w]
     rgba[rgba[:, :, 3] == 0, :3] = 0

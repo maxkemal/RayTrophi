@@ -23,7 +23,12 @@ namespace Paint {
 bool resizeGamePaintSurfaces(SceneData& scene, int resolution, std::string& error);
 
 // Null when the scene has no wet paint surface and no prepared demo.
-nlohmann::json saveGameDesign();
+// When project_filepath is non-empty, external hidden picture files are copied
+// into "<project stem>_pictures/" next to the project and stored as relative paths.
+nlohmann::json saveGameDesign(const std::string& project_filepath = {},
+                             const std::string& source_project_filepath = {});
+// Rebase live picture references only after the main project save succeeds.
+void adoptSavedGamePicturePaths(const nlohmann::json& saved_design);
 // Project load: the document to apply at the next simulation clock tick.
 void queueGameDesign(const nlohmann::json& design);
 // Project replacement: drop a queued document and the last apply report.

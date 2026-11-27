@@ -567,6 +567,8 @@ void prepareBalloonEffects(SceneData& scene, const BalloonEffectsSetup& setup) {
     sparkles->physicsSettings().collision_response = RayTrophiSim::ParticleCollisionResponse::Die;
     auto* trails = effectSystem(scene, kTrailSystem, Vec3(0.0f, -0.5f, 0.0f), 6.0f, 16384,
                                 SceneData::ParticleRenderShape::Sphere, true, true);
+    // Trails have 0 colliders and billboard-only rendering, so Auto lets them run on GPU.
+    trails->physicsSettings().execution_policy = RayTrophiSim::ParticleExecutionPolicy::Auto;
     // Drop ghosts: the droplets' own gravity and drag, Die on contact, never
     // drawn (emitter_only keeps them simulating; visible=false would stop them).
     Vec3 drop_gravity(0.0f, -9.81f, 0.0f);
@@ -680,7 +682,8 @@ void balloonConfettiRain(SceneData& scene, const Vec3& spawn_min, const Vec3& sp
 
 BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float balloon_size,
                                         const BalloonBurstShape& shape,
-                                        std::vector<BalloonBurstDrop>& out) {
+                                        std::vector<BalloonBurstDrop>& out,
+                                        const Vec3* directed_target) {
     out.clear();
     BalloonBurstSummary summary;
     if (drops <= 0) return summary;
@@ -721,14 +724,19 @@ BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float b
 
     const float clump = std::clamp(shape.clumpiness, 0.0f, 1.0f);
     const float radius = 0.22f * balloon_size;
-    const Vec3 tear = sphere();
+    const bool directed = directed_target != nullptr && directed_target->length_squared() > 1e-6f;
+    const Vec3 tear = directed ? directed_target->normalize() : sphere();
+    const float directed_half_angle = std::acos(0.78f);
     summary.tear = tear;
     // Hardness of a direction: the tear side bursts up to 1.4x, the far side 0.6x.
     auto hardness = [&](const Vec3& dir) { return 1.0f + 0.4f * Vec3::dot(dir, tear); };
 
-    // Shares, drawn per pop.
-    const float spray_share =
-        clump <= 0.0f ? 1.0f : std::clamp((1.0f - clump) * uni(0.75f, 1.25f) + 0.06f, 0.0f, 1.0f);
+    // Shares, drawn per pop. When crushed against a wall, ~75-80% of drops form
+    // heavy blobs and main jets directed into the wall while ~20-25% mist naturally.
+    const float spray_share = clump <= 0.0f
+        ? 1.0f
+        : (directed ? uni(0.20f, 0.25f)
+                    : std::clamp((1.0f - clump) * uni(0.75f, 1.25f) + 0.06f, 0.0f, 1.0f));
     const int spray = std::min(drops, static_cast<int>(std::lround(drops * spray_share)));
     int rest = drops - spray;
     const int blobs = rest >= 32 ? uniInt(1, 3) : 0;
@@ -766,10 +774,12 @@ BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float b
     for (int n_k : jet_sizes) {
         if (n_k <= 0) continue;
         ++summary.jets;
-        Vec3 axis = sphere();
-        if (uni(0.0f, 1.0f) < 0.5f) axis = (axis + tear * uni(0.3f, 1.2f)).normalize();
+        Vec3 axis = directed ? cone(tear, directed_half_angle * 0.8f) : sphere();
+        if (!directed && uni(0.0f, 1.0f) < 0.5f) {
+            axis = (axis + tear * uni(0.3f, 1.2f)).normalize();
+        }
         const float speed = uni(4.5f, 8.0f) * hardness(axis);
-        const float half_angle = uni(0.05f, 0.25f);
+        const float half_angle = directed ? uni(0.05f, 0.16f) : uni(0.05f, 0.25f);
         for (int i = 0; i < n_k;) {
             // Clump size: geometric, mostly single beads, sometimes eight.
             int m = 1;
@@ -793,7 +803,8 @@ BalloonBurstSummary balloonBurstPattern(std::mt19937& random, int drops, float b
     // Heavy blobs: the paint pooled low in the balloon, slow, tight, falling.
     for (int n : blob_sizes) {
         ++summary.blobs;
-        const Vec3 dir = (sphere() + Vec3(0.0f, -0.6f, 0.0f)).normalize();
+        const Vec3 dir = directed ? cone(tear, directed_half_angle)
+                                  : (sphere() + Vec3(0.0f, -0.6f, 0.0f)).normalize();
         const Vec3 v = dir * (uni(2.0f, 4.5f) * hardness(dir));
         const Vec3 at = dir * (radius * 0.6f);
         const float size = uni(1.3f, 1.9f);

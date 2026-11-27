@@ -5,6 +5,7 @@
 #include "Backend/VulkanBackend.h"
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanGpuBreadcrumbs.h"
+#include "PerfProfile.h"
 #include "imgui/imgui_impl_vulkan.h"
 #include "imgui/imgui_internal.h"
 
@@ -680,15 +681,23 @@ bool PlayerSwapchainPresenter::present() {
     }
 
     auto& frame = s.frames[s.nextFrame];
-    if (VulkanRT::waitFenceBounded(s.device, frame.fence, "Player wait for frame") !=
-        VK_SUCCESS) {
+    VkResult fenceResult;
+    {
+        RTPERF_FRAME_SCOPE("player.swapchain.fence_wait");
+        fenceResult = VulkanRT::waitFenceBounded(s.device, frame.fence, "Player wait for frame");
+    }
+    if (fenceResult != VK_SUCCESS) {
         s.failed = true;
         return false;
     }
     uint32_t index = 0;
     constexpr uint64_t acquireTimeoutNs = 16'000'000;
-    const VkResult acquired = vkAcquireNextImageKHR(s.device, s.swapchain, acquireTimeoutNs,
-                                                    frame.acquired, VK_NULL_HANDLE, &index);
+    VkResult acquired;
+    {
+        RTPERF_FRAME_SCOPE("player.swapchain.acquire");
+        acquired = vkAcquireNextImageKHR(s.device, s.swapchain, acquireTimeoutNs,
+                                         frame.acquired, VK_NULL_HANDLE, &index);
+    }
     if (acquired == VK_TIMEOUT || acquired == VK_NOT_READY) {
         return false;
     }
@@ -733,7 +742,12 @@ bool PlayerSwapchainPresenter::present() {
     submit.pCommandBuffers = &frame.command;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &target.rendered;
-    if (!check(vkQueueSubmit(s.queue, 1, &submit, frame.fence), "Player submit presentation")) {
+    VkResult submitResult;
+    {
+        RTPERF_FRAME_SCOPE("player.swapchain.queue_submit");
+        submitResult = vkQueueSubmit(s.queue, 1, &submit, frame.fence);
+    }
+    if (!check(submitResult, "Player submit presentation")) {
         s.failed = true;
         return false;
     }
@@ -746,7 +760,11 @@ bool PlayerSwapchainPresenter::present() {
     present.swapchainCount = 1;
     present.pSwapchains = &s.swapchain;
     present.pImageIndices = &index;
-    const VkResult result = vkQueuePresentKHR(s.queue, &present);
+    VkResult result;
+    {
+        RTPERF_FRAME_SCOPE("player.swapchain.queue_present");
+        result = vkQueuePresentKHR(s.queue, &present);
+    }
     if (result == VK_SUBOPTIMAL_KHR && s.transformMismatch) {
         return true;  // compositor rotation, not a stale swapchain
     }

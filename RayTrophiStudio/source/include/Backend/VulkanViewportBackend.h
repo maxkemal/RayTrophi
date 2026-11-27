@@ -3,6 +3,7 @@
 #include "Backend/VulkanBackend.h"
 #include "Viewport/RasterViewportFrameRing.h"
 #include "Viewport/ParticleBillboardFrameBuffer.h"
+#include "Viewport/RayFusionViewportPasses.h"
 #ifdef RT_PLAYER
 #include "Viewport/PlayerDepthCard.h"
 #endif
@@ -35,6 +36,8 @@ private:
     void recordRayFusionProbeOverlay(VkCommandBuffer cmd, const Matrix4x4& viewProj);
     // Particle billboards (VulkanViewportParticles.cpp).
     void ensureParticleBillboardPipelines(const std::string& shaderDir);
+    bool recordParticleBillboardCompaction(VkCommandBuffer cmd);
+    void makeParticleBillboardCompactionVisible(VkCommandBuffer cmd);
     void recordParticleBillboards(VkCommandBuffer cmd, const float viewProjGL[16],
                                   const float viewGL[16], bool usingFrameRing);
     void destroyParticleBillboardResources(bool keepPipeline);
@@ -72,38 +75,55 @@ private:
     // can reach, and rebuilt when a new one appears.
     // Implementation: Viewport/MaterialPreviewCoverage.cpp.
 public:
-    static constexpr uint32_t kMpSpecTerrain     = 1u << 0;
-    static constexpr uint32_t kMpSpecGraph       = 1u << 1;
-    static constexpr uint32_t kMpSpecWeather     = 1u << 2;
-    static constexpr uint32_t kMpSpecGlass       = 1u << 3;
-    static constexpr uint32_t kMpSpecExtLobes    = 1u << 4;
-    static constexpr uint32_t kMpSpecAltLighting = 1u << 5;
-    static constexpr uint32_t kMpSpecFallbackSky = 1u << 6;
-    static constexpr uint32_t kMpSpecRayFusionGi = 1u << 7;
-    static constexpr uint32_t kMpSpecOptTex      = 1u << 8;
-    static constexpr uint32_t kMpSpecClearcoat   = 1u << 9;
-    static constexpr uint32_t kMpSpecAll         = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather |
-                                                   kMpSpecGlass | kMpSpecExtLobes |
-                                                   kMpSpecAltLighting | kMpSpecFallbackSky |
-                                                   kMpSpecRayFusionGi | kMpSpecOptTex |
-                                                   kMpSpecClearcoat;
-    static constexpr uint32_t kMpSpecCount       = 10;
+    static constexpr uint32_t kMpSpecTerrain       = 1u << 0;
+    static constexpr uint32_t kMpSpecGraph         = 1u << 1;
+    static constexpr uint32_t kMpSpecWeather       = 1u << 2;
+    static constexpr uint32_t kMpSpecGlass         = 1u << 3;
+    static constexpr uint32_t kMpSpecExtLobes      = 1u << 4;
+    static constexpr uint32_t kMpSpecAltLighting   = 1u << 5;
+    static constexpr uint32_t kMpSpecFallbackSky   = 1u << 6;
+    static constexpr uint32_t kMpSpecRayFusionGi   = 1u << 7;
+    static constexpr uint32_t kMpSpecOptTex        = 1u << 8;
+    static constexpr uint32_t kMpSpecClearcoat     = 1u << 9;
+    static constexpr uint32_t kMpSpecPaintCanvas   = 1u << 10;
+    static constexpr uint32_t kMpSpecClearcoatIrid = 1u << 11;
+    static constexpr uint32_t kMpSpecAll           = kMpSpecTerrain | kMpSpecGraph | kMpSpecWeather |
+                                                     kMpSpecGlass | kMpSpecExtLobes |
+                                                     kMpSpecAltLighting | kMpSpecFallbackSky |
+                                                     kMpSpecRayFusionGi | kMpSpecOptTex |
+                                                     kMpSpecClearcoat | kMpSpecPaintCanvas |
+                                                     kMpSpecClearcoatIrid;
+    static constexpr uint32_t kMpSpecCount         = 13; // 0..9 bool, 10 uint texPages, 11..12 bool
     struct MaterialPreviewSpecStorage {
         VkSpecializationMapEntry entries[kMpSpecCount]{};
-        VkBool32 values[kMpSpecCount]{};
+        uint32_t values[kMpSpecCount]{};
         VkSpecializationInfo info{};
     };
-    static void fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out);
+    static void fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out,
+                                        uint32_t texPages = 32u);
 private:
     struct MaterialPreviewSpecRecipe;
     std::shared_ptr<MaterialPreviewSpecRecipe> m_mpSpecRecipe;
+    VkPipeline m_mpGlassOpaquePipeline = VK_NULL_HANDLE;
+    VkPipeline m_mpGlassTransmissionPipeline = VK_NULL_HANDLE;
+    VkRenderPass m_mpGlassTransmissionRenderPass = VK_NULL_HANDLE;
+    uint32_t m_mpGlassMask = 0;
+    uint32_t m_mpGlassTexPages = 0;
     uint32_t m_mpSpecMask = kMpSpecAll;      // what the live pipelines were built with
+    uint32_t m_mpSpecTexPages = 32u;         // active material texture array pages (1..32)
     uint32_t m_mpSpecShrinkFrames = 0;       // debounce before dropping a feature
     uint32_t m_mpSpecRebuilds = 0;
     bool m_mpSpecFailed = false;
+    VkPipeline m_postPipelineFast = VK_NULL_HANDLE;
+    VkRenderPass m_hdrRenderPassNoMotion = VK_NULL_HANDLE;
+    RasterPostFastResources m_postFast{};
     uint32_t materialPreviewSceneFeatureMask() const;
+    uint32_t materialPreviewActiveTexPages() const;
     void captureMaterialPreviewSpecRecipe(const VkGraphicsPipelineCreateInfo& info,
-                                          const std::string& shaderDir, uint32_t mask);
+                                          const std::string& shaderDir, uint32_t mask,
+                                          uint32_t texPages = 32u);
+    void ensureMaterialPreviewGlassPipelines();
+    void destroyMaterialPreviewGlassPipelines();
     void serviceMaterialPreviewFeatureSpec();
 protected:
     RasterAppliedState sampleRasterAppliedState() const override;
@@ -152,7 +172,8 @@ protected:
     //   kayit (dispatch). Ayri tutuluyorlar cunku descriptor'lar YENIDEN
     //   BOYUTLANDIRMADA, dispatch ise HER KAREDE kosar.
     bool updateRasterPostDescriptors();
-    void recordRasterPostPass(VkCommandBuffer cmd, uint32_t width, uint32_t height);
+    bool recordRasterPostPass(VkCommandBuffer cmd, uint32_t width, uint32_t height,
+                              const VkViewport& viewport, const VkRect2D& scissor);
 
     // ── TAA (raster_taa.comp) ───────────────────────────────────────────────
     // Ayni ikilik: kaynak kurulumu yeniden boyutlandirmada, kayit her karede.
@@ -163,6 +184,8 @@ protected:
     // `blend` ve gecerlilik cagiranda hesaplanir; bu fonksiyon yalnizca kaydeder.
     void recordRasterTaaPass(VkCommandBuffer cmd, uint32_t width, uint32_t height,
                              const Matrix4x4& invViewProjUnjittered);
+
+    std::shared_ptr<struct RasterSkinningBatchState> m_rasterSkinningBatch;
 };
 
 } // namespace Backend

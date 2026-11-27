@@ -389,7 +389,14 @@ bool evaluateLight(uint index, vec3 p, out vec3 l, out vec3 radiance) {
     float d2 = dot(toLight, toLight);
     if (d2 < 1e-6) return false;
     l = toLight * inversesqrt(d2);
-    float attenuation = 1.0 / d2;
+    float falloffSoft = light.area_v.w;
+    float attenuation;
+    if (falloffSoft <= 1e-4) {
+        attenuation = 1.0 / d2;
+    } else {
+        float falloffExp = max(2.0 - falloffSoft, 0.0);
+        attenuation = (falloffExp <= 1e-4) ? 1.0 : pow(d2, -0.5 * falloffExp);
+    }
     if (type == 2) {
         vec3 ln = normalize(cross(light.area_u.xyz, light.area_v.xyz));
         attenuation *= max(dot(-l, ln), 0.0) * max(light.params.y * light.params.z, 0.0);
@@ -409,7 +416,8 @@ uint pointShadowFace(vec3 d) {
 }
 
 float evaluateShadow(uint recordIndex, int lightType, vec3 lightPosition,
-                     vec3 p, vec3 n, vec3 l) {
+                     bool castShadow, vec3 p, vec3 n, vec3 l) {
+    if (!castShadow) return 1.0;
     float visibility = rtPreviewShadow(recordIndex, p, n, l, lightPosition,
                                        pc.materialMeta.y & 0xffu);
     if ((sceneFlags & 1u) != 0u && visibility > 0.0 && pc.materialMeta.w > 0u) {
@@ -613,8 +621,9 @@ void main() {
         vec3 kd = (vec3(1.0) - f) * (1.0 - metallic) * (1.0 - transmission);
         LightData sourceLight = sceneLights[li];
         int lightType = int(sourceLight.position.w + 0.5);
+        bool castShadow = (sourceLight.area_u.w < 0.5);
         float shadow = evaluateShadow(li, lightType, sourceLight.position.xyz,
-                                      p, n, l);
+                                      castShadow, p, n, l);
         direct += (kd * diffuseAlbedo / PI + spec) * radiance * ndl * shadow;
     }
 

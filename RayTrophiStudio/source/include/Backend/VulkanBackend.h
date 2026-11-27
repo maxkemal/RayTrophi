@@ -3110,6 +3110,12 @@ protected:
         // own storage buffers, one descriptor set per pulled system.
         VkPipeline particlePullAddPipeline = VK_NULL_HANDLE;
         VkPipeline particlePullAlphaPipeline = VK_NULL_HANDLE;
+        VkPipeline particleCompactPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout particleCompactLayout = VK_NULL_HANDLE;
+        VkPipeline particleCompactAddPipeline = VK_NULL_HANDLE;
+        VkPipeline particleCompactAlphaPipeline = VK_NULL_HANDLE;
+        bool particleCompactAttempted = false;
+        bool particleCompactSupported = false;
         VkPipelineLayout particlePullPipelineLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout particlePullDescLayout = VK_NULL_HANDLE;
         VkDescriptorPool particlePullDescPool = VK_NULL_HANDLE;
@@ -3117,6 +3123,9 @@ protected:
         struct ParticlePullSlot {
             VkDescriptorSet set = VK_NULL_HANDLE;
             uint64_t buffers[kPulledStreamCount] = {};  // what `set` points at
+            VulkanRT::BufferHandle compactBuffers[3];  // slots, block offsets, indirect draws
+            uint32_t compactCapacity = 0;
+            uint32_t compactAttemptedCapacity = 0;
         };
         std::vector<ParticlePullSlot> particlePullSlots;
         std::vector<ParticlePulledDraw> particlePulledDraws;

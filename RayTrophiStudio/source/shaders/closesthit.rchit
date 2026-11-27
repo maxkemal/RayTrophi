@@ -178,8 +178,8 @@ struct LightData {
     vec4 color;       // rgb + intensity
     vec4 params;      // radius, width, height, inner_angle
     vec4 direction;   // xyz + outer_angle
-    vec4 area_u;      // xyz: AreaLight u-axis (unit)
-    vec4 area_v;      // xyz: AreaLight v-axis (unit)
+    vec4 area_u;      // xyz: AreaLight u-axis (unit), w: no_shadow flag
+    vec4 area_v;      // xyz: AreaLight v-axis (unit), w: 2.0 - distance_falloff
 };
 
 struct VkGeometryData {
@@ -2331,7 +2331,6 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
                         // any-hit transmissive → rgb *= tint + ignoreIntersection (coloured glass shadow)
                         // any-hit with terminateRayEXT → w stays 0 (opaque shadow)
                         // SkipClosestHit: geometry hit without opacity test → w stays 0 (solid shadow)
-                        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
                         // ULP-based offset: self-intersection-safe on thin/distant geometry
                         const uint FLAG_TERRAIN = (1u << 16);
                         bool useTerrainShadowNormal = (mat.flags & FLAG_TERRAIN) != 0u;
@@ -2341,27 +2340,34 @@ if (emissionTexID > 0 && (mpWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
                         vec3 shadowOrigin = hitPos + shadowNormal * SHADOW_TMIN;
                         float tmin = SHADOW_TMIN;
                         float tmax = min(max(0.0, dist - 1e-3), 10000.0);
-                        if (tmax > tmin) {
-                            // No OpaqueEXT → any-hit shader tests transparency per pixel
-                            // SkipClosestHit → no closest-hit overhead; shadow value set by any-hit/miss only
-                            // missIndex=1 → shadow_miss.rmiss sets shadowPayload.w=1 when ray escapes
-                            uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                                             | gl_RayFlagsSkipClosestHitShaderEXT;
-                            // Authored triangles and transient splats cast hard
-                            // shadows; volume AABBs remain on soft transmittance.
-                            traceRayEXT(topLevelAS, shadowFlags, RT_MASK_DIRECT_SHADOW,
-                                        0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
-                        }
-                        vec3 shadowVisibility = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
-                        // Directional light = the sun (sun rule): the clouds shade it.
-                        if (int(lights.l[lightIdx].position.w + 0.5) == 1 &&
-                            any(greaterThan(shadowVisibility, vec3(1e-4)))) {
-                            shadowVisibility *= cloudCallSunTransmittance(shadowOrigin, wi, payload.seed);
+                        bool castShadow = (lights.l[lightIdx].area_u.w < 0.5);
+                        vec3 shadowVisibility = vec3(1.0);
+                        if (castShadow) {
+                            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+                            if (tmax > tmin) {
+                                // No OpaqueEXT → any-hit shader tests transparency per pixel
+                                // SkipClosestHit → no closest-hit overhead; shadow value set by any-hit/miss only
+                                // missIndex=1 → shadow_miss.rmiss sets shadowPayload.w=1 when ray escapes
+                                uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
+                                                 | gl_RayFlagsSkipClosestHitShaderEXT;
+                                // Authored triangles and transient splats cast hard
+                                // shadows; volume AABBs remain on soft transmittance.
+                                traceRayEXT(topLevelAS, shadowFlags, RT_MASK_DIRECT_SHADOW,
+                                            0, 1, 1, shadowOrigin, tmin, wi, tmax, 1);
+                            }
+                            shadowVisibility = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+                            // Directional light = the sun (sun rule): the clouds shade it.
+                            if (int(lights.l[lightIdx].position.w + 0.5) == 1 &&
+                                any(greaterThan(shadowVisibility, vec3(1e-4)))) {
+                                shadowVisibility *= cloudCallSunTransmittance(shadowOrigin, wi, payload.seed);
+                            }
                         }
                         if (any(greaterThan(shadowVisibility, vec3(1e-4)))) {
                             // Volumetric soft shadow: march through any volume AABB between surface and light.
                             // cam.pad0 carries float(volumeCount) from C++ renderProgressive each frame.
-                            float volShadowTr = computeVolumeShadowTransmittance(shadowOrigin, wi, tmax, lightIdx);
+                            float volShadowTr = castShadow
+                                ? computeVolumeShadowTransmittance(shadowOrigin, wi, tmax, lightIdx)
+                                : 1.0;
                             vec3 V = normalize(-rayDir);
                             vec3 brdf = evaluate_brdf_gl(worldNormal, V, wi, albedo, roughness, metallic, specular, transmission);
                             vec3 Li = lights.l[lightIdx].color.rgb * lights.l[lightIdx].color.a * lightAtten;

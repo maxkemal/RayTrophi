@@ -8,7 +8,11 @@
 #include "ParticleSimulation.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <unordered_map>
 #include <vector>
 
 namespace RayTrophiSim {
@@ -16,6 +20,8 @@ namespace RayTrophiSim {
 struct CachedColliderTransform {
     bool valid = false;
     Matrix4x4 world_to_local = Matrix4x4::identity();
+    Vec3 world_bounds_min = Vec3(0.0f, 0.0f, 0.0f);
+    Vec3 world_bounds_max = Vec3(0.0f, 0.0f, 0.0f);
     Vec3 scale = Vec3(1.0f, 1.0f, 1.0f);
     float cooked_avg_scale = 1.0f;
     float avg_scale = 1.0f;
@@ -27,6 +33,29 @@ struct CachedColliderTransform {
     float step_y = 0.0f;
     float step_z = 0.0f;
 };
+
+inline void computeExpandedWorldBounds(const Matrix4x4& local_to_world,
+                                       const Vec3& local_min,
+                                       const Vec3& local_max,
+                                       float world_margin,
+                                       Vec3& out_world_min,
+                                       Vec3& out_world_max) {
+    const Vec3 mn = Vec3::min(local_min, local_max);
+    const Vec3 mx = Vec3::max(local_min, local_max);
+    Vec3 wmin(1e30f, 1e30f, 1e30f);
+    Vec3 wmax(-1e30f, -1e30f, -1e30f);
+    for (int corner = 0; corner < 8; ++corner) {
+        const Vec3 p(
+            (corner & 1) ? mx.x : mn.x,
+            (corner & 2) ? mx.y : mn.y,
+            (corner & 4) ? mx.z : mn.z);
+        const Vec3 wp = local_to_world.transform_point(p);
+        wmin = Vec3::min(wmin, wp);
+        wmax = Vec3::max(wmax, wp);
+    }
+    out_world_min = wmin - Vec3(world_margin);
+    out_world_max = wmax + Vec3(world_margin);
+}
 
 template <typename ResolvedT>
 inline void prepareColliderTransforms(const std::vector<ResolvedT>& resolved,
@@ -46,6 +75,17 @@ inline void prepareColliderTransforms(const std::vector<ResolvedT>& resolved,
         cache.valid = true;
         cache.world_to_local = rc.obb.local_to_world.inverse();
         if (mode != ParticleColliderSourceMode::ObjectMeshSDF) {
+            // Swept AABB expands local bounds by thickness + max(thickness, 0.001f);
+            // discrete AABB uses thickness (already includes particle_radius).
+            const float thick = std::max(0.0f, rc.desc.thickness);
+            const float local_pad = thick + std::max(thick, 0.001f);
+            computeExpandedWorldBounds(
+                rc.obb.local_to_world,
+                Vec3::min(rc.obb.local_bounds_min, rc.obb.local_bounds_max) - Vec3(local_pad),
+                Vec3::max(rc.obb.local_bounds_min, rc.obb.local_bounds_max) + Vec3(local_pad),
+                1e-4f,
+                cache.world_bounds_min,
+                cache.world_bounds_max);
             continue;
         }
         const Vec3 cooked_size = rc.desc.sdf_mesh_size;
@@ -78,6 +118,13 @@ inline void prepareColliderTransforms(const std::vector<ResolvedT>& resolved,
             std::max(1.0f, static_cast<float>(rc.desc.sdf_ny - 1));
         cache.step_z = cache.sdf_extents_scaled.z /
             std::max(1.0f, static_cast<float>(rc.desc.sdf_nz - 1));
+        computeExpandedWorldBounds(
+            rc.obb.local_to_world,
+            cache.sdf_origin_scaled - Vec3(cache.local_thick),
+            cache.sdf_origin_scaled + cache.sdf_extents_scaled + Vec3(cache.local_thick),
+            1e-4f,
+            cache.world_bounds_min,
+            cache.world_bounds_max);
     }
 }
 
@@ -88,6 +135,11 @@ inline void resolveOBBCollisionCached(const ParticleColliderDesc& collider,
                                       Vec3& position,
                                       Vec3& velocity,
                                       ResolveAabbFn&& resolve_aabb) {
+    if (position.x < cache.world_bounds_min.x || position.x > cache.world_bounds_max.x ||
+        position.y < cache.world_bounds_min.y || position.y > cache.world_bounds_max.y ||
+        position.z < cache.world_bounds_min.z || position.z > cache.world_bounds_max.z) {
+        return;
+    }
     Vec3 local_position = cache.world_to_local.transform_point(position);
     Vec3 local_velocity = cache.world_to_local.transform_vector(velocity);
 
@@ -118,6 +170,13 @@ inline bool resolveSweptOBBCollisionCached(const ParticleColliderDesc& collider,
                                            Vec3& position,
                                            Vec3& velocity,
                                            ResolveSweptAabbFn&& resolve_swept_aabb) {
+    const Vec3 seg_min = Vec3::min(previous_position, position);
+    const Vec3 seg_max = Vec3::max(previous_position, position);
+    if (seg_max.x < cache.world_bounds_min.x || seg_min.x > cache.world_bounds_max.x ||
+        seg_max.y < cache.world_bounds_min.y || seg_min.y > cache.world_bounds_max.y ||
+        seg_max.z < cache.world_bounds_min.z || seg_min.z > cache.world_bounds_max.z) {
+        return false;
+    }
     const Vec3 local_previous = cache.world_to_local.transform_point(previous_position);
     Vec3 local_position = cache.world_to_local.transform_point(position);
     Vec3 local_velocity = cache.world_to_local.transform_vector(velocity);
@@ -142,6 +201,11 @@ inline void resolveSDFCollisionCached(const ParticleColliderDesc& collider,
                                       Vec3& velocity,
                                       ResolveVelocityFn&& resolve_vel) {
     if (!collider.sdf_grid_data || collider.sdf_grid_data->empty()) return;
+    if (position.x < cache.world_bounds_min.x || position.x > cache.world_bounds_max.x ||
+        position.y < cache.world_bounds_min.y || position.y > cache.world_bounds_max.y ||
+        position.z < cache.world_bounds_min.z || position.z > cache.world_bounds_max.z) {
+        return;
+    }
 
     const Vec3 local_pos = cache.world_to_local.transform_point(position);
     const Vec3 sdf_local_pos = local_pos - cache.sdf_origin_scaled;
@@ -224,6 +288,50 @@ inline void resolveSDFCollisionCached(const ParticleColliderDesc& collider,
     const float penetration = cache.world_thick - world_dist;
     position = position + world_normal * penetration;
     resolve_vel(collider, world_normal, velocity);
+}
+
+// Throttles redundant resolved-collider OBB rebuilds at uncapped high FPS
+// (e.g. 900+ FPS on PC, where static colliders were otherwise resolved 24,000+
+// times/sec). Refreshes immediately whenever the collider list, enabled flags,
+// SDF grid pointers, or particle radius change, and at least every ~8.3 ms
+// (120 Hz) for moving/animated objects.
+inline bool shouldSkipColliderRefresh(const void* system_key,
+                                      const std::vector<ParticleColliderDesc>& colliders,
+                                      float particle_radius,
+                                      bool has_resolved_colliders) {
+    if (!has_resolved_colliders) {
+        return false;
+    }
+    uint64_t sig = 14695981039346656037ull;
+    auto mix = [&](uint64_t v) {
+        sig ^= v;
+        sig *= 1099511628211ull;
+    };
+    uint32_t radius_bits = 0u;
+    std::memcpy(&radius_bits, &particle_radius, sizeof(radius_bits));
+    mix(radius_bits);
+    mix(static_cast<uint64_t>(colliders.size()));
+    for (const auto& c : colliders) {
+        mix(static_cast<uint64_t>(c.enabled ? 1u : 0u) |
+            (static_cast<uint64_t>(static_cast<uint32_t>(c.source_mode)) << 1u));
+        mix(reinterpret_cast<uint64_t>(c.sdf_grid_data.get()));
+        mix(static_cast<uint64_t>(c.source_name.size()));
+    }
+
+    struct Entry {
+        uint64_t sig = 0u;
+        std::chrono::steady_clock::time_point last_refresh{};
+    };
+    static thread_local std::unordered_map<const void*, Entry> memo;
+    const auto now = std::chrono::steady_clock::now();
+    auto& entry = memo[system_key];
+    constexpr auto kMinInterval = std::chrono::microseconds(8333); // 120 Hz
+    if (entry.sig == sig && (now - entry.last_refresh) < kMinInterval) {
+        return true;
+    }
+    entry.sig = sig;
+    entry.last_refresh = now;
+    return false;
 }
 
 } // namespace RayTrophiSim

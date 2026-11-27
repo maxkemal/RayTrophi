@@ -2363,7 +2363,9 @@ json dispatchMethod(const std::string& method, const json& params) {
             for (const rtapi::LightInfo& info : rtapi::listLights()) {
                 result.push_back(json{
                     {"index", info.index}, {"name", info.name},
-                    {"type", info.type}, {"position", vec3ToJson(info.position)}
+                    {"type", info.type}, {"position", vec3ToJson(info.position)},
+                    {"cast_shadows", info.cast_shadows},
+                    {"distance_falloff", info.distance_falloff}
                 });
             }
             return result;
@@ -2406,7 +2408,9 @@ json dispatchMethod(const std::string& method, const json& params) {
                         {"intensity", info.intensity}, {"radius", info.radius},
                         {"spot_angle", info.spot_angle}, {"spot_falloff", info.spot_falloff},
                         {"width", info.width}, {"height", info.height},
-                        {"visible", info.visible}};
+                        {"visible", info.visible},
+                        {"cast_shadows", info.cast_shadows},
+                        {"distance_falloff", info.distance_falloff}};
         });
     }
     if (method == "lights.set_direction") {
@@ -2435,6 +2439,20 @@ json dispatchMethod(const std::string& method, const json& params) {
         bool visible = requireBool(params, "visible");
         return enqueueResult([index, visible](UIContext&) {
             return rtapi::setLightVisible(index, visible);
+        });
+    }
+    if (method == "lights.set_cast_shadows") {
+        int index = requireInt(params, "index");
+        bool cast_shadows = requireBool(params, "cast_shadows");
+        return enqueueResult([index, cast_shadows](UIContext&) {
+            return rtapi::setLightCastShadows(index, cast_shadows);
+        });
+    }
+    if (method == "lights.set_distance_falloff") {
+        int index = requireInt(params, "index");
+        float distance_falloff = requireFloat(params, "distance_falloff");
+        return enqueueResult([index, distance_falloff](UIContext&) {
+            return rtapi::setLightDistanceFalloff(index, distance_falloff);
         });
     }
     if (method == "lights.set_param") {

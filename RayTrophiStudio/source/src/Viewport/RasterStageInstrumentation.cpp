@@ -29,6 +29,7 @@ VulkanRT::GpuBreadcrumbTrail& g_rasterBreadcrumbs = VulkanRT::rasterFrameBreadcr
 bool rasterStageMarkIsOutsideRenderPass(RasterStage stage) {
     switch (stage) {
         case RasterStage::GpuCull:
+        case RasterStage::ParticleCompaction:
         case RasterStage::ShadowAtlas:
         case RasterStage::TransmissionPrep:
         // Compute dispatches between the depth prepass and the main pass:

@@ -179,7 +179,22 @@ void gameSettings() {
             "Player mode uses mouse or body input. Automatic demo also pops random balloons."));
         ImGui::Separator();
         label(tr("player.balloon_controls", "BALLOON CONTROLS"), mint);
-        if (draft.values.value("interaction_mode", std::string("carry")) == "carry") {
+        const bool supports_carry = status.value("supports_carry", false);
+        const std::string mode =
+            supports_carry ? draft.values.value("interaction_mode", std::string("carry"))
+                           : std::string("pop");
+        if (ImGui::RadioButton(trId("player.game_mode_pop", "Touch and pop"), mode == "pop")) {
+            change("interaction_mode", "pop");
+        }
+        if (ImGui::GetContentRegionAvail().x >= 430) {
+            ImGui::SameLine();
+        }
+        ImGui::BeginDisabled(!supports_carry);
+        if (ImGui::RadioButton(trId("player.game_mode_carry", "Hold to carry"), mode == "carry")) {
+            change("interaction_mode", "carry");
+        }
+        ImGui::EndDisabled();
+        if (mode == "carry") {
             hint(tr("player.carry_help",
                     "Click to pop. Hold the left mouse button to carry. Wheel moves in/out. "
                     "Release pops. Escape or opening a menu cancels without popping."));
@@ -187,8 +202,9 @@ void gameSettings() {
             hint(tr("player.touch_pop", "Touch and pop"));
         }
         ImGui::Separator();
+#ifndef __ANDROID__
         bool body_controls = draft.values.value("body_controls", false);
-        ImGui::BeginDisabled(!status.value("supports_carry", false));
+        ImGui::BeginDisabled(!supports_carry);
         if (ImGui::Checkbox(trId("player.two_hand_controls", "Two-hand body controls"),
                              &body_controls)) {
             change("body_controls", body_controls);
@@ -197,6 +213,7 @@ void gameSettings() {
         hint(tr("player.two_hand_help",
                 "One hand touches to pop. Two hands hold and carry; separate to release. "
                 "Lost tracking cancels without popping."));
+#endif
         label(tr("player.balloons", "BALLOONS"), violet);
         int count = static_cast<int>(number("balloons", 5));
         label(tr("player.balloon_count", "Balloon count"));
@@ -207,6 +224,16 @@ void gameSettings() {
         }
         hint(tr("player.limited_by_the_scene_s_prepared_balloon_meshes_and_particle_budget",
                 "Limited by the scene's prepared balloon meshes and particle budget."));
+        const int max_particles = std::max(300, status.value("max_particles_per_balloon", 2400));
+        int particles = std::clamp(static_cast<int>(number("particles_per_balloon", 1100.0f)),
+                                   300, max_particles);
+        label(tr("player.game_paint_amount", "Paint amount"));
+        ImGui::SetNextItemWidth(std::min(S(330.0f), ImGui::GetContentRegionAvail().x));
+        if (ImGui::SliderInt("##particles_per_balloon", &particles, 300, max_particles, "%d")) {
+            change("particles_per_balloon", particles);
+        }
+        hint(tr("player.game_paint_amount_hint",
+                "Paint drops released by each popped balloon."));
         if (draft.values.contains("wind_strength")) {
             const bool jolt = draft.values.value("jolt_motion", false);
             ImGui::BeginDisabled(!jolt);
@@ -248,6 +275,16 @@ void gameSettings() {
                  "Must be at least the minimum interval."));
         ImGui::EndDisabled();
     }
+    if (draft.values.contains("bounded_camera")) {
+        ImGui::Separator();
+        bool bounded_cam = draft.values.value("bounded_camera", true);
+        if (ImGui::Checkbox(trId("player.game_bounded_camera", "Bounded camera look"),
+                            &bounded_cam)) {
+            change("bounded_camera", bounded_cam);
+        }
+        hint(tr("player.game_bounded_camera_help",
+                "Right-drag to look around, wheel to zoom (R to recenter)."));
+    }
     if (draft.values.contains("lifetime_seconds")) {
         ImGui::Separator();
         label(tr("player.paint_feel_all_surfaces", "PAINT FEEL / ALL SURFACES"), mint);
@@ -266,6 +303,7 @@ void gameSettings() {
               tr("player.higher_makes_wet_paint_flow_more_strongly_along_surfaces",
                  "Higher makes wet paint flow more strongly along surfaces."));
         const int sizes[] = {512, 1024, 2048};
+        const int max_resolution = status.value("max_resolution", 2048);
         const auto current = draft.values["resolution"];
         const auto title =
             current.is_null() ? std::string(tr("player.mixed_surface_sizes", "Mixed surface sizes"))
@@ -274,9 +312,11 @@ void gameSettings() {
         if (ImGui::BeginCombo(trId("player.texture_resolution", "Texture resolution"),
                               title.c_str())) {
             for (int size : sizes) {
+                ImGui::BeginDisabled(size > max_resolution);
                 if (ImGui::Selectable(std::to_string(size).c_str(), current == size)) {
                     change("resolution", size);
                 }
+                ImGui::EndDisabled();
             }
             ImGui::EndCombo();
         }

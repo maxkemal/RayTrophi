@@ -58,10 +58,15 @@ AerialSample afSample(sampler2D atlas, vec2 screenUV, float viewDepth, bool fogO
 
     // Continuous slice-END coordinate: f == k means "exactly at the end of
     // slice k"; f in [-1, 0) lerps from the camera (nothing) to slice 0.
-    float f = sqrt(clamp(viewDepth / AF_MAX_DEPTH, 0.0, 1.0)) * float(AF_SLICES) - 1.0;
+    // Interpolate linearly in viewDepth within [d0, d1] so near-field objects
+    // do not inherit sqrt(viewDepth) inflation.
+    float clampedDepth = clamp(viewDepth, 0.0, AF_MAX_DEPTH);
+    float f  = sqrt(clampedDepth / AF_MAX_DEPTH) * float(AF_SLICES) - 1.0;
     int   k0 = int(floor(f));
-    float w  = f - float(k0);
     int   k1 = min(k0 + 1, AF_SLICES - 1);
+    float d0 = (k0 >= 0) ? afSliceEndDepth(k0) : 0.0;
+    float d1 = afSliceEndDepth(k1);
+    float w  = (k1 > k0) ? clamp((clampedDepth - d0) / max(d1 - d0, 1e-5), 0.0, 1.0) : 0.0;
 
     vec3 s0 = vec3(0.0), t0 = vec3(1.0);
     if (k0 >= 0) {

@@ -33,6 +33,15 @@ layout(location = 7) flat out vec3 vWorldToObject1;
 layout(location = 8) flat out vec3 vWorldToObject2;
 layout(location = 9) flat out float vObjectRandom;
 layout(location = 10) out vec4 vPreviousClip;
+layout(location = 11) out vec4 vCurrentClip;
+
+layout(std140, set = 0, binding = 28) uniform RayFusionFrameUniform {
+    mat4 view;
+    vec4 lightDir2;
+    mat4 curViewProj;
+    mat4 prevViewProj;
+    vec4 motionMeta;
+} rayFusionFrame;
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
     mat4 viewProj;
@@ -55,8 +64,10 @@ void main() {
     previous0.w = 0.0;
     mat4 previousModel = mat4(previous0, inPreviousModel1,
         inPreviousModel2, inPreviousModel3);
-    vPreviousClip = pc.cameraPos.w > 0.5 ?
-        pc.viewProj * previousModel * vec4(inPosition, 1.0) : vec4(0.0);
+    vPreviousClip = (pc.cameraPos.w > 0.5 && rayFusionFrame.motionMeta.x > 0.5)
+        ? (rayFusionFrame.prevViewProj * previousModel * vec4(inPosition, 1.0))
+        : vec4(0.0);
+    vCurrentClip = rayFusionFrame.curViewProj * worldPos;
 
     mat3 worldToObject = inverse(mat3(model));
     mat3 normalMatrix = transpose(worldToObject);

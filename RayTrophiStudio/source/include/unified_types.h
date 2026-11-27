@@ -325,10 +325,10 @@ struct alignas(16) UnifiedLight {
     float area_height;                // 4 bytes
     
     Vec3f area_u;                     // 12 bytes - area light U vector
-    float _padding1;                  // 4 bytes
+    int cast_shadows = 1;             // 4 bytes - 1=cast shadows, 0=skip shadows
     
     Vec3f area_v;                     // 12 bytes - area light V vector
-    float _padding2;                  // 4 bytes
+    float distance_falloff = 2.0f;    // 4 bytes - 2.0=inverse-square, 1.0=linear, 0.0=constant
     
     // Default constructor
     UNIFIED_FUNC UnifiedLight() :
@@ -343,9 +343,9 @@ struct alignas(16) UnifiedLight {
         area_width(1.0f),
         area_height(1.0f),
         area_u(1.0f, 0.0f, 0.0f),
-        _padding1(0.0f),
+        cast_shadows(1),
         area_v(0.0f, 0.0f, 1.0f),
-        _padding2(0.0f)
+        distance_falloff(2.0f)
     {}
     
     UNIFIED_FUNC UnifiedLightType getType() const {

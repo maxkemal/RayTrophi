@@ -16,6 +16,7 @@
 #include "SpotLight.h"
 #include "AreaLight.h"
 #include "ProjectManager.h"
+#include "Api/RtApi.h"
 #include <Backend/VulkanBackend.h>
 
 extern std::unique_ptr<Backend::IViewportBackend> g_viewport_backend;
@@ -98,6 +99,9 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                         new_light->intensity = inten;
                         new_light->direction = dir;
                         new_light->setRadius(light->getRadius());
+                        new_light->cast_shadows = light->cast_shadows;
+                        new_light->distance_falloff = light->distance_falloff;
+                        new_light->visible = light->visible;
 
                         // Route through command pattern for undo/redo
                         auto cmd = std::make_unique<ChangeLightTypeCommand>(i, light, new_light);
@@ -219,6 +223,27 @@ void SceneUI::drawLightsContent(UIContext& ctx)
                 if (ImGui::DragFloat("Height", &h, 0.05f, 0.01f, 100.0f)) {
                     al->setHeight(h);
                     changed = true;
+                }
+            }
+
+            bool cast_shadows = light->cast_shadows;
+            if (ImGui::Checkbox("Cast Shadows", &cast_shadows)) {
+                if (rtapi::setLightCastShadows(static_cast<int>(i), cast_shadows)) {
+                    g_lights_dirty = true;
+                }
+            }
+
+            if (light->type() != LightType::Directional) {
+                float distance_falloff = light->distance_falloff;
+                if (ImGui::SliderFloat("Distance Falloff", &distance_falloff, 0.0f, 2.0f,
+                                       "%.2f")) {
+                    if (rtapi::setLightDistanceFalloff(static_cast<int>(i), distance_falloff)) {
+                        g_lights_dirty = true;
+                    }
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip(
+                        "2.0 = physical inverse-square, 1.0 = linear fill, 0.0 = constant");
                 }
             }
 

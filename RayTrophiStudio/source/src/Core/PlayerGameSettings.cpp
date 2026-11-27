@@ -1,4 +1,6 @@
 #include "Core/PlayerGameSettings.h"
+#include "Core/PlayerBoundedCamera.h"
+#include "Paint/BalloonPlayerDefaults.h"
 #include "Paint/HiddenGameObjects.h"
 #include "Core/RuntimeProjectHost.h"
 #include "Api/RtApiPaintWet.h"
@@ -118,6 +120,9 @@ int capacity(const json &config) {
     }
     return maximum;
 }
+int maxParticlesPerBalloon() {
+    return (std::min)(2400, Paint::effectiveMaxParticlesPerBalloon());
+}
 bool ensureSession(UIContext &context) {
     loadProfiles();
     const auto host = runtimeStatus(context);
@@ -155,7 +160,8 @@ bool ensureSession(UIContext &context) {
     return true;
 }
 json values() {
-    json result = {{"hidden_objects", Paint::hiddenGameObjectsDesign()}};
+    json result = {{"hidden_objects", Paint::hiddenGameObjectsDesign()},
+                   {"bounded_camera", AppRuntime::boundedCamera().enabled}};
     const auto state = demo();
     if (state.value("prepared", false)) {
         const auto &config = state["config"];
@@ -168,6 +174,12 @@ json values() {
         result["body_controls"] = config.value("body_controls", false);
         result["respawn_seconds"] = config.value("respawn_seconds", 3.5);
         result["birth_seconds"] = config.value("birth_seconds", 0.75);
+        const int raw_particles =
+            config.contains("particles_per_balloon") &&
+                    config["particles_per_balloon"].is_number_integer()
+                ? config["particles_per_balloon"].get<int>()
+                : 1100;
+        result["particles_per_balloon"] = std::clamp(raw_particles, 300, maxParticlesPerBalloon());
     }
     rtapi::WetPaintStatusInfo paint;
     check(rtapi::getWetPaintStatus(paint));
@@ -231,7 +243,7 @@ void validate(const json &patch, const json &current) {
     if (patch.contains("autostart")) {
         require(patch["autostart"].is_boolean(), "autostart must be boolean");
     }
-    for (const auto* key : {"jolt_motion", "impact_soft_body"}) {
+    for (const auto* key : {"bounded_camera", "jolt_motion", "impact_soft_body"}) {
         if (patch.contains(key)) {
             require(patch[key].is_boolean(), std::string(key) + " must be boolean");
         }
@@ -241,10 +253,16 @@ void validate(const json &patch, const json &current) {
                     patch["balloons"].get<double>() <= capacity(session.authored_demo),
                 "balloons exceeds the prepared scene capacity or particle budget");
     }
+    if (patch.contains("particles_per_balloon")) {
+        const auto &particles = patch["particles_per_balloon"];
+        require(particles.is_number_integer() && particles.get<long long>() >= 300 &&
+                    particles.get<long long>() <= 2400,
+                "particles_per_balloon must be an integer in 300..2400");
+    }
     if (patch.contains("resolution")) {
         const auto &size = patch["resolution"];
         require(size.is_number_integer() && (size == 512 || size == 1024 || size == 2048),
-                "Personnel texture resolution must be 512, 1024 or 2048");
+                "Paint texture resolution must be 512, 1024 or 2048");
     }
     scalar(patch, "respawn_seconds", 0.25, 60);
     scalar(patch, "birth_seconds", 0, 3);
@@ -287,6 +305,14 @@ json apply(const json &patch) {
             const std::string field(key);
             rebuild_demo = rebuild_demo || (field != "interaction_mode" &&
                                             field != "body_controls" && field != "wind_strength");
+        }
+    }
+    if (patch.contains("particles_per_balloon")) {
+        const int target = std::clamp(patch["particles_per_balloon"].get<int>(), 300,
+                                      maxParticlesPerBalloon());
+        if (target != current["particles_per_balloon"].get<int>()) {
+            config["particles_per_balloon"] = target;
+            rebuild_demo = true;
         }
     }
     rtapi::WetPaintStatusInfo paint;
@@ -337,9 +363,13 @@ json apply(const json &patch) {
             json{{"wind_strength", patch["wind_strength"]}}.dump(), output));
     }
     bool resized = false;
-    if (patch.contains("resolution") && patch["resolution"] != current["resolution"]) {
-        check(rtapi::resizeWetPaintSurfaces(patch["resolution"].get<int>()));
-        resized = true;
+    if (patch.contains("resolution")) {
+        const int target = std::min(patch["resolution"].get<int>(),
+                                    Paint::effectiveMaxPaintResolution());
+        if (current["resolution"].is_null() || target != current["resolution"].get<int>()) {
+            check(rtapi::resizeWetPaintSurfaces(target));
+            resized = true;
+        }
     }
     for (const auto &surface : updated) {
         check(rtapi::setWetPaintSurfaceSettings(surface.object, surface.material_id,
@@ -350,21 +380,29 @@ json apply(const json &patch) {
         require(Paint::configureHiddenGameObjects(rtapi::boundContext()->scene,
                     patch["hidden_objects"], error), error);
     }
+    if (patch.contains("bounded_camera")) {
+        AppRuntime::boundedCamera().setEnabled(patch["bounded_camera"].get<bool>());
+    }
     return {{"ok", true}, {"balloons_reprepared", rebuild_demo}, {"wet_paint_cleared", resized}};
 }
 json preset(const std::string &name) {
     int count = 0;
+    int particles = 0;
+    const int max_particles = maxParticlesPerBalloon();
     json result;
     if (name == "calm") {
         count = 6;
+        particles = (std::min)(600, max_particles);
         result = {{"respawn_seconds", 6.0},   {"interval_min", 6.0}, {"interval_max", 9.0},
                   {"lifetime_seconds", 20.0}, {"diffusion", 0.12},   {"runoff", 0.15}};
     } else if (name == "balanced") {
         count = 12;
+        particles = (std::min)(1100, max_particles);
         result = {{"respawn_seconds", 3.5},   {"interval_min", 2.5}, {"interval_max", 5.0},
                   {"lifetime_seconds", 12.0}, {"diffusion", 0.24},   {"runoff", 0.35}};
     } else if (name == "lively") {
         count = 18;
+        particles = (std::min)(1800, max_particles);
         result = {{"respawn_seconds", 2.0},  {"interval_min", 2.0}, {"interval_max", 3.0},
                   {"lifetime_seconds", 8.0}, {"diffusion", 0.35},   {"runoff", 0.55}};
     } else {
@@ -373,6 +411,9 @@ json preset(const std::string &name) {
     const auto current = values();
     if (current.contains("balloons")) {
         result["balloons"] = std::min(count, capacity(session.authored_demo));
+    }
+    if (current.contains("particles_per_balloon")) {
+        result["particles_per_balloon"] = particles;
     }
     for (auto it = result.begin(); it != result.end();) {
         if (!current.contains(it.key())) {
@@ -389,6 +430,8 @@ json status() {
             {"revision", session.revision},
             {"values", session.ready ? values() : json::object()},
             {"max_balloons", capacity(session.authored_demo)},
+            {"max_particles_per_balloon", maxParticlesPerBalloon()},
+            {"max_resolution", Paint::effectiveMaxPaintResolution()},
             {"supports_carry", session.authored_demo.contains("visual_nodes")},
             {"saved", profiles["games"].contains(session.project)},
             {"error", session.error},

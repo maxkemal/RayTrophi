@@ -115,7 +115,20 @@
                             vec3 toL = lt.position.xyz - fpos;
                             float dL = length(toL);
                             ldir = (dL > EPSILON) ? (toL / dL) : vec3(0.0, 1.0, 0.0);
-                            if (dL > EPSILON) latten = 1.0 / (dL * dL);
+                            if (dL > EPSILON) {
+                                float d2 = dL * dL;
+                                if (lty == 2) {
+                                    latten = 1.0 / d2;
+                                } else {
+                                    float falloffSoft = lt.area_v.w;
+                                    if (falloffSoft <= 1e-4) {
+                                        latten = 1.0 / d2;
+                                    } else {
+                                        float falloffExp = max(2.0 - falloffSoft, 0.0);
+                                        latten = (falloffExp <= 1e-4) ? 1.0 : pow(d2, -0.5 * falloffExp);
+                                    }
+                                }
+                            }
                         }
                         float lph = henyeyGreenstein(dot(rayDir, ldir), 0.35);  // per-light silver lining
                         Lf += float(cam.lightCount) * lt.color.rgb * lt.color.a * latten
@@ -1029,22 +1042,25 @@
                         wi = normalize(wi);
                         float NdotL = max(dot(N, wi), 0.0);
                         if (NdotL > 1e-6) {
-                            // Outward-going by construction (NdotL > 0), so the
-                            // band probe inside the helper returns immediately —
-                            // this costs nothing but keeps the ONE exit-push rule
-                            // rather than inventing a second epsilon here.
-                            bool sHandOff = false;
-                            vec3 shadowOrigin =
-                                seatOutsideBand(hitPos, wi, Ng, exitPush, sHandOff);
+                            vec3 vis = vec3(1.0);
+                            if (lights.l[lightIdx].area_u.w < 0.5) {
+                                // Outward-going by construction (NdotL > 0), so the
+                                // band probe inside the helper returns immediately —
+                                // this costs nothing but keeps the ONE exit-push rule
+                                // rather than inventing a second epsilon here.
+                                bool sHandOff = false;
+                                vec3 shadowOrigin =
+                                    seatOutsideBand(hitPos, wi, Ng, exitPush, sHandOff);
 
-                            shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
-                            float tmax = max(dist - 1e-3, 1e-3);
-                            traceRayEXT(topLevelAS,
-                                        gl_RayFlagsTerminateOnFirstHitEXT
-                                      | gl_RayFlagsSkipClosestHitShaderEXT,
-                                        RT_MASK_DIRECT_SHADOW, 0, 1, 1,
-                                        shadowOrigin, 1e-4, wi, tmax, 1);
-                            vec3 vis = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+                                shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+                                float tmax = max(dist - 1e-3, 1e-3);
+                                traceRayEXT(topLevelAS,
+                                            gl_RayFlagsTerminateOnFirstHitEXT
+                                          | gl_RayFlagsSkipClosestHitShaderEXT,
+                                            RT_MASK_DIRECT_SHADOW, 0, 1, 1,
+                                            shadowOrigin, 1e-4, wi, tmax, 1);
+                                vis = (shadowPayload.w > 0.5) ? shadowPayload.rgb : vec3(0.0);
+                            }
 
                             if (any(greaterThan(vis, vec3(1e-4)))) {
                                 vec3 V    = normalize(-rayDir);

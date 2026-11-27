@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Builds a self-contained RayTrophi Player folder (and optional zip) from the
   current Release output and a list of .rtp scenes.
@@ -30,11 +30,10 @@
 param(
     # Scene order determines the order of cards in the library.
     [string[]]$Scenes = @(
-        'RayTrophiStudio\assets\scenes\pastel-paint-workshop\workshop.rtp',
-        'RayTrophiStudio\assets\scenes\kids-play-room\kids-play-room.rtp'
+        'RayTrophiStudio\assets\scenes\hidden-pictures\hidden_pictures_oval_toys.rtp'
     ),
     # Display names for the F6 list, same order as -Scenes. Empty = file name.
-    [string[]]$SceneNames = @('Gizli Oyuncaklar', 'Pastel Oyun Odası'),
+    [string[]]$SceneNames = @('Gizli Resimler'),
     # Canonical shared output. Use other destinations only for explicit diagnostics.
     [string]$OutDir = 'dist\RayTrophiPlayer',
     [switch]$Zip,
@@ -242,6 +241,28 @@ for ($i = 0; $i -lt $Scenes.Count; $i++) {
     # World HDRI / sky overlay images saved next to the project (ProjectManager).
     $envDir = Join-Path $src "${stem}_environment"
     if (Test-Path $envDir) { Copy-Item $envDir (Join-Path $dst "${stem}_environment") -Recurse }
+    # Hidden reveal pictures saved next to the project (GameDesign).
+    $picDir = Join-Path $src "${stem}_pictures"
+    if (Test-Path $picDir) { Copy-Item $picDir (Join-Path $dst "${stem}_pictures") -Recurse }
+    $packagedRtpPath = Join-Path $dst $file
+    $packagedScene = Get-Content -LiteralPath $packagedRtpPath -Raw | ConvertFrom-Json
+    $sceneRoot = [IO.Path]::GetFullPath($dst).TrimEnd('\') + '\'
+    if ($packagedScene.game_design -and $packagedScene.game_design.wet_paint -and $packagedScene.game_design.wet_paint.surfaces) {
+        foreach ($surf in $packagedScene.game_design.wet_paint.surfaces) {
+            $pic = $surf.settings.reveal_picture
+            if (-not $pic -or $pic -eq '@base') { continue }
+            if ([IO.Path]::IsPathRooted($pic)) {
+                throw "Hidden picture must be scene-relative before packaging: $file / $($surf.object) -> $pic"
+            }
+            $picFile = [IO.Path]::GetFullPath((Join-Path $dst $pic))
+            if (-not $picFile.StartsWith($sceneRoot, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "Hidden picture escapes its packaged scene: $file / $($surf.object) -> $pic"
+            }
+            if (-not (Test-Path -LiteralPath $picFile -PathType Leaf)) {
+                throw "Packaged hidden picture missing: $file / $($surf.object) -> $pic"
+            }
+        }
+    }
     $audio = Join-Path $src "${stem}_audio"
     if ((Test-Path $audio) -and -not $NoSceneAudio) {
         Copy-Item $audio (Join-Path $dst "${stem}_audio") -Recurse

@@ -1,4 +1,6 @@
 #include "Backend/VulkanBackend.h"
+#include "Backend/VulkanMaterialTextureBinding.h"
+#include "Backend/VulkanMaterialTextureStorage.h"
 #include "Viewport/ViewportPipelineCache.h"
 #include "Backend/VulkanViewportBackend.h"
 #include "PerfProfile.h"
@@ -11,7 +13,17 @@
 #include <string>
 #include <vector>
 
+namespace RayFusion {
+bool playerProbeFieldEnabled();
+} // namespace RayFusion
+
 namespace Backend {
+VkRenderPass getMaterialPreviewTransmissionLoadRenderPass(
+    const std::shared_ptr<MaterialPreviewTransmissionResources>& r);
+void setMaterialPreviewTransmissionPipeline(
+    const std::shared_ptr<MaterialPreviewTransmissionResources>& r,
+    VkPipeline pipeline);
+
 void VulkanBackendAdapter::createMaterialPreviewCoveredPipeline(
     const VkGraphicsPipelineCreateInfo& base, const std::string& shaderDir) {
     if (!m_device || base.stageCount != 2 || !base.pDepthStencilState) return;
@@ -66,22 +78,51 @@ void VulkanBackendAdapter::destroyMaterialPreviewCoveredPipeline() {
 //   branch. Each test below is the shader's own gate, evaluated over every
 //   bound material; when the CPU copy cannot prove it (external material
 //   buffer, short cache) the bit stays on.
-void VulkanViewportBackend::fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out) {
-    const uint32_t bits[kMpSpecCount] = {
+void VulkanViewportBackend::fillMaterialPreviewSpec(uint32_t mask, MaterialPreviewSpecStorage& out,
+                                                    uint32_t texPages) {
+    const uint32_t clampedPages = (std::max)(1u, (std::min)(texPages, Backend::MaterialTextureBinding::kPageCount));
+    const uint32_t boolBits[10] = {
         kMpSpecTerrain, kMpSpecGraph, kMpSpecWeather, kMpSpecGlass,
         kMpSpecExtLobes, kMpSpecAltLighting, kMpSpecFallbackSky, kMpSpecRayFusionGi,
         kMpSpecOptTex, kMpSpecClearcoat
     };
-    for (uint32_t i = 0; i < kMpSpecCount; ++i) {
-        out.values[i] = (mask & bits[i]) ? VK_TRUE : VK_FALSE;
+    for (uint32_t i = 0; i < 10u; ++i) {
+        out.values[i] = (mask & boolBits[i]) ? VK_TRUE : VK_FALSE;
         out.entries[i].constantID = i;
-        out.entries[i].offset = static_cast<uint32_t>(i * sizeof(VkBool32));
-        out.entries[i].size = sizeof(VkBool32);
+        out.entries[i].offset = static_cast<uint32_t>(i * sizeof(uint32_t));
+        out.entries[i].size = sizeof(uint32_t);
     }
+    // constant_id = 10: RT_SPEC_TEX_PAGES (uint, 1..32)
+    out.values[10] = clampedPages;
+    out.entries[10].constantID = 10u;
+    out.entries[10].offset = static_cast<uint32_t>(10u * sizeof(uint32_t));
+    out.entries[10].size = sizeof(uint32_t);
+    // constant_id = 11: RT_SPEC_PAINT_CANVAS (bool)
+    out.values[11] = (mask & kMpSpecPaintCanvas) ? VK_TRUE : VK_FALSE;
+    out.entries[11].constantID = 11u;
+    out.entries[11].offset = static_cast<uint32_t>(11u * sizeof(uint32_t));
+    out.entries[11].size = sizeof(uint32_t);
+    // constant_id = 12: RT_SPEC_CLEARCOAT_IRID (bool)
+    out.values[12] = (mask & kMpSpecClearcoatIrid) ? VK_TRUE : VK_FALSE;
+    out.entries[12].constantID = 12u;
+    out.entries[12].offset = static_cast<uint32_t>(12u * sizeof(uint32_t));
+    out.entries[12].size = sizeof(uint32_t);
+
     out.info.mapEntryCount = kMpSpecCount;
     out.info.pMapEntries = out.entries;
     out.info.dataSize = sizeof(out.values);
     out.info.pData = out.values;
+}
+
+uint32_t VulkanViewportBackend::materialPreviewActiveTexPages() const {
+    if (m_externalMaterialBuffer != VK_NULL_HANDLE) {
+        return Backend::MaterialTextureBinding::kPageCount;
+    }
+    if (!m_textureStorage) {
+        return 1u;
+    }
+    const uint32_t pages = static_cast<uint32_t>(m_textureStorage->pages().size());
+    return (std::max)(1u, (std::min)(pages, Backend::MaterialTextureBinding::kPageCount));
 }
 
 uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
@@ -121,7 +162,8 @@ uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
     //     transmission), and transmission_density <= 0.
     // Negated comparisons keep NaN on the "glass" side.
     if (external || m_cachedGpuMaterials.size() < count) {
-        mask |= kMpSpecGlass | kMpSpecExtLobes | kMpSpecOptTex | kMpSpecClearcoat;
+        mask |= kMpSpecGlass | kMpSpecExtLobes | kMpSpecOptTex | kMpSpecClearcoat |
+                kMpSpecPaintCanvas | kMpSpecClearcoatIrid;
     } else if (count > 0u) {
         auto materialNeedsGlass = [&](uint32_t i) -> bool {
             const auto& m = m_cachedGpuMaterials[i];
@@ -145,18 +187,28 @@ uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
             const auto& m = m_cachedGpuMaterials[i];
             return !(m.clearcoat <= 0.001f) || m_rasterMaterialPrograms.hasProgram(i);
         };
+        auto materialNeedsClearcoatIrid = [&](uint32_t i) -> bool {
+            const auto& m = m_cachedGpuMaterials[i];
+            return !(m.clearcoat <= 0.001f) && !(m.clearcoat_iridescence <= 0.001f);
+        };
+        auto materialNeedsPaintCanvas = [&](uint32_t i) -> bool {
+            return m_cachedGpuMaterials[i].paint_base_tex != 0u;
+        };
         auto materialNeedsOptTex = [&](uint32_t i) -> bool {
             const auto& m = m_cachedGpuMaterials[i];
             return m.metallic_tex != 0u || m.specular_tex != 0u ||
                    m.emission_tex != 0u || m_rasterMaterialPrograms.hasProgram(i);
         };
         constexpr uint32_t kAllMatBits =
-            kMpSpecGlass | kMpSpecExtLobes | kMpSpecOptTex | kMpSpecClearcoat;
+            kMpSpecGlass | kMpSpecExtLobes | kMpSpecOptTex | kMpSpecClearcoat |
+            kMpSpecPaintCanvas | kMpSpecClearcoatIrid;
         if (m_rasterMeshes.empty()) {
             for (uint32_t i = 0; i < count; ++i) {
                 if (materialNeedsGlass(i)) mask |= kMpSpecGlass;
                 if (materialNeedsExtLobes(i)) mask |= kMpSpecExtLobes;
                 if (materialNeedsClearcoat(i)) mask |= kMpSpecClearcoat;
+                if (materialNeedsClearcoatIrid(i)) mask |= kMpSpecClearcoatIrid;
+                if (materialNeedsPaintCanvas(i)) mask |= kMpSpecPaintCanvas;
                 if (materialNeedsOptTex(i)) mask |= kMpSpecOptTex;
                 if ((mask & kAllMatBits) == kAllMatBits) {
                     break;
@@ -178,6 +230,8 @@ uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
                     if (materialNeedsGlass(id)) mask |= kMpSpecGlass;
                     if (materialNeedsExtLobes(id)) mask |= kMpSpecExtLobes;
                     if (materialNeedsClearcoat(id)) mask |= kMpSpecClearcoat;
+                    if (materialNeedsClearcoatIrid(id)) mask |= kMpSpecClearcoatIrid;
+                    if (materialNeedsPaintCanvas(id)) mask |= kMpSpecPaintCanvas;
                     if (materialNeedsOptTex(id)) mask |= kMpSpecOptTex;
                     if ((mask & kAllMatBits) == kAllMatBits) {
                         break;
@@ -202,7 +256,15 @@ uint32_t VulkanViewportBackend::materialPreviewSceneFeatureMask() const {
     // off only when the device has no ray query AND the scene has no volumes.
     const bool hasRayQuery = m_device && m_device->getCapabilities().supportsRayQuery;
     const bool hasVolumes = m_device && m_device->m_volumeCount > 0u;
-    if (hasRayQuery || hasVolumes) {
+#ifdef RT_PLAYER
+    const bool needRfGi =
+        (hasRayQuery && (m_rtShadowAllowed || m_screenGiSettings.enabled ||
+                         RayFusion::playerProbeFieldEnabled())) ||
+        hasVolumes;
+#else
+    const bool needRfGi = hasRayQuery || hasVolumes;
+#endif
+    if (needRfGi) {
         mask |= kMpSpecRayFusionGi;
     }
     return mask;
@@ -245,9 +307,11 @@ struct VulkanViewportBackend::MaterialPreviewSpecRecipe {
 };
 
 void VulkanViewportBackend::captureMaterialPreviewSpecRecipe(
-    const VkGraphicsPipelineCreateInfo& base, const std::string& shaderDir, uint32_t mask) {
+    const VkGraphicsPipelineCreateInfo& base, const std::string& shaderDir, uint32_t mask,
+    uint32_t texPages) {
     m_mpSpecRecipe.reset();
     m_mpSpecMask = mask;
+    m_mpSpecTexPages = (std::max)(1u, (std::min)(texPages, Backend::MaterialTextureBinding::kPageCount));
     m_mpSpecShrinkFrames = 0;
     // Deep copy of the state blocks the material pipeline is built from. Any
     // extension chain or pointer this copy does not own disables the rebuild
@@ -305,7 +369,10 @@ void VulkanViewportBackend::captureMaterialPreviewSpecRecipe(
                    " fb_sky=" + std::to_string((mask & kMpSpecFallbackSky) != 0) +
                    " rf_gi=" + std::to_string((mask & kMpSpecRayFusionGi) != 0) +
                    " opt_tex=" + std::to_string((mask & kMpSpecOptTex) != 0) +
-                   " cc=" + std::to_string((mask & kMpSpecClearcoat) != 0));
+                   " cc=" + std::to_string((mask & kMpSpecClearcoat) != 0) +
+                   " paint_cv=" + std::to_string((mask & kMpSpecPaintCanvas) != 0) +
+                   " cc_irid=" + std::to_string((mask & kMpSpecClearcoatIrid) != 0) +
+                   " tex_pages=" + std::to_string(m_mpSpecTexPages));
 }
 
 namespace {
@@ -332,6 +399,8 @@ std::string specMaskName(uint32_t mask) {
     if (mask & Backend::VulkanViewportBackend::kMpSpecRayFusionGi) name += "rf_gi+";
     if (mask & Backend::VulkanViewportBackend::kMpSpecOptTex) name += "opt_tex+";
     if (mask & Backend::VulkanViewportBackend::kMpSpecClearcoat) name += "cc+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecPaintCanvas) name += "paint_cv+";
+    if (mask & Backend::VulkanViewportBackend::kMpSpecClearcoatIrid) name += "cc_irid+";
     if (name.empty()) return "none";
     name.pop_back();
     return name;
@@ -350,25 +419,31 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
         return;
     }
     const uint32_t want = materialPreviewSceneFeatureMask();
+    const uint32_t wantPages = materialPreviewActiveTexPages();
     uint32_t next = m_mpSpecMask;
-    if (want & ~m_mpSpecMask) {
-        // A branch the live pipeline lacks is reachable NOW: rebuild before
-        // this frame records, never draw it with the old pipeline.
+    uint32_t nextPages = m_mpSpecTexPages;
+    if ((want & ~m_mpSpecMask) != 0u || wantPages > m_mpSpecTexPages) {
+        // A branch or texture page the live pipeline lacks is reachable NOW:
+        // rebuild before this frame records, never draw with the old pipeline.
         next = m_mpSpecMask | want;
+        nextPages = (std::max)(m_mpSpecTexPages, wantPages);
         m_mpSpecShrinkFrames = 0;
-    } else if (want != m_mpSpecMask) {
-        // Dropping a feature only saves time; wait until the scene settles so
-        // a slider crossing zero does not recompile every frame. Exception:
-        // initial IBL readiness (kMpSpecFallbackSky) is a one-time startup
-        // transition and should take effect immediately rather than waiting 240 frames.
+    } else if (want != m_mpSpecMask || wantPages != m_mpSpecTexPages) {
+        // Dropping a feature or page count only saves time; wait until the scene
+        // settles so a slider crossing zero does not recompile every frame.
+        // Exception: initial IBL readiness (kMpSpecFallbackSky) is a one-time
+        // startup transition and takes effect immediately.
         const uint32_t dropped = m_mpSpecMask & ~want;
         const uint32_t shrinkDelay =
-            (m_mpSpecRebuilds == 0u && dropped == kMpSpecFallbackSky) ? 0u : 240u;
+            (m_mpSpecRebuilds == 0u && dropped == kMpSpecFallbackSky && wantPages == m_mpSpecTexPages)
+                ? 0u : 240u;
         if (++m_mpSpecShrinkFrames < shrinkDelay) return;
         next = want;
+        nextPages = wantPages;
         m_mpSpecShrinkFrames = 0;
     } else {
         m_mpSpecShrinkFrames = 0;
+        ensureMaterialPreviewGlassPipelines();
         return;
     }
 
@@ -395,9 +470,14 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
     VkShaderModule vert = makeModule(vertWords);
     VkShaderModule frag = makeModule(fragWords);
 
-    auto build = [&](uint32_t mask, VkPipeline& out) -> VkResult {
+    auto build = [&](uint32_t mask, uint32_t pages, VkPipeline& out) -> VkResult {
+        // Purely opaque meshes never execute the glass/transmission branch:
+        // keep RT_SPEC_GLASS=false on the primary opaque pipeline so a single
+        // transmissive accessory does not blow up register pressure for every
+        // opaque floor/character pixel on Mali-G52. Transmissive meshes bind
+        // m_mpGlassOpaquePipeline / m_mpGlassTransmissionPipeline instead.
         MaterialPreviewSpecStorage spec{};
-        fillMaterialPreviewSpec(mask, spec);
+        fillMaterialPreviewSpec(mask & ~kMpSpecGlass, spec, pages);
         VkPipelineShaderStageCreateInfo stages[2]{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -419,6 +499,7 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
             drainInteractiveViewportInFlight();
             if (iv.materialPreviewPipeline) vkDestroyPipeline(device, iv.materialPreviewPipeline, nullptr);
             destroyMaterialPreviewCoveredPipeline();
+            destroyMaterialPreviewGlassPipelines();
             iv.materialPreviewPipeline = out;
             recipe.pipeline = out;
             // Copies stages[1] (and with it the specialization) into the
@@ -430,12 +511,14 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
     };
 
     VkPipeline pipeline = VK_NULL_HANDLE;
-    VkResult result = (vert && frag) ? build(next, pipeline) : VK_ERROR_INITIALIZATION_FAILED;
-    if (result != VK_SUCCESS && next != kMpSpecAll && vert && frag) {
+    VkResult result = (vert && frag) ? build(next, nextPages, pipeline) : VK_ERROR_INITIALIZATION_FAILED;
+    if (result != VK_SUCCESS && (next != kMpSpecAll || nextPages != Backend::MaterialTextureBinding::kPageCount) &&
+        vert && frag) {
         // The full shader is what the session ran before O3; prefer it over a
         // pipeline that lacks a reachable branch.
         next = kMpSpecAll;
-        result = build(next, pipeline);
+        nextPages = Backend::MaterialTextureBinding::kPageCount;
+        result = build(next, nextPages, pipeline);
     }
     if (vert) vkDestroyShaderModule(device, vert, nullptr);
     if (frag) vkDestroyShaderModule(device, frag, nullptr);
@@ -450,7 +533,9 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
         return;
     }
     m_mpSpecMask = next;
+    m_mpSpecTexPages = nextPages;
     ++m_mpSpecRebuilds;
+    ensureMaterialPreviewGlassPipelines();
     iv.dirty = true;
     m_currentSamples = 0;
     // IPC surface until the frame-timing `applied` block carries it (that is a
@@ -460,8 +545,138 @@ void VulkanViewportBackend::serviceMaterialPreviewFeatureSpec() {
     rtperf::recordFast("viewport.material_spec.rebuild", ms);
     rtperf::recordFast("viewport.material_spec.mask." + specMaskName(next), 0.0);
     SCENE_LOG_INFO("[MaterialSpec] material pipeline rebuilt for " + specMaskName(next) +
+                   " (tex_pages=" + std::to_string(m_mpSpecTexPages) + ")" +
                    " in " + std::to_string(static_cast<int>(ms)) + " ms (rebuild #" +
                    std::to_string(m_mpSpecRebuilds) + ")");
+}
+
+void VulkanViewportBackend::destroyMaterialPreviewGlassPipelines() {
+    setMaterialPreviewTransmissionPipeline(m_materialPreviewTransmission, VK_NULL_HANDLE);
+    if (m_device && m_device->getDevice()) {
+        VkDevice device = m_device->getDevice();
+        if (m_mpGlassOpaquePipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, m_mpGlassOpaquePipeline, nullptr);
+        }
+        if (m_mpGlassTransmissionPipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device, m_mpGlassTransmissionPipeline, nullptr);
+        }
+    }
+    m_mpGlassOpaquePipeline = VK_NULL_HANDLE;
+    m_mpGlassTransmissionPipeline = VK_NULL_HANDLE;
+    m_mpGlassTransmissionRenderPass = VK_NULL_HANDLE;
+    m_mpGlassMask = 0u;
+    m_mpGlassTexPages = 0u;
+}
+
+void VulkanViewportBackend::ensureMaterialPreviewGlassPipelines() {
+    if (!m_mpSpecRecipe || m_mpSpecFailed || !m_device || !m_device->getDevice()) {
+        return;
+    }
+    if ((m_mpSpecMask & kMpSpecGlass) == 0u) {
+        if (m_mpGlassOpaquePipeline != VK_NULL_HANDLE ||
+            m_mpGlassTransmissionPipeline != VK_NULL_HANDLE) {
+            drainInteractiveViewportInFlight();
+            destroyMaterialPreviewGlassPipelines();
+        }
+        return;
+    }
+    const VkRenderPass transRp =
+        getMaterialPreviewTransmissionLoadRenderPass(m_materialPreviewTransmission);
+    const bool opaqueReady =
+        m_mpGlassOpaquePipeline != VK_NULL_HANDLE &&
+        m_mpGlassMask == m_mpSpecMask &&
+        m_mpGlassTexPages == m_mpSpecTexPages;
+    const bool transReady =
+        transRp == VK_NULL_HANDLE ||
+        (m_mpGlassTransmissionPipeline != VK_NULL_HANDLE &&
+         m_mpGlassTransmissionRenderPass == transRp &&
+         m_mpGlassMask == m_mpSpecMask &&
+         m_mpGlassTexPages == m_mpSpecTexPages);
+    if (opaqueReady && transReady) {
+        setMaterialPreviewTransmissionPipeline(
+            m_materialPreviewTransmission, m_mpGlassTransmissionPipeline);
+        return;
+    }
+
+    MaterialPreviewSpecRecipe& recipe = *m_mpSpecRecipe;
+    const std::filesystem::path dir(recipe.shaderDir);
+    std::vector<uint32_t> vertWords, fragWords;
+    VkDevice device = m_device->getDevice();
+    if (!readSpirv(dir / "material_preview.spv", vertWords) ||
+        !readSpirv(dir / "material_preview_frag.spv", fragWords)) {
+        return;
+    }
+    auto makeModule = [&](const std::vector<uint32_t>& words) {
+        VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        ci.codeSize = words.size() * sizeof(uint32_t);
+        ci.pCode = words.data();
+        VkShaderModule module = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device, &ci, nullptr, &module) != VK_SUCCESS) {
+            return VkShaderModule(VK_NULL_HANDLE);
+        }
+        return module;
+    };
+    VkShaderModule vert = makeModule(vertWords);
+    VkShaderModule frag = makeModule(fragWords);
+    if (!vert || !frag) {
+        if (vert) vkDestroyShaderModule(device, vert, nullptr);
+        if (frag) vkDestroyShaderModule(device, frag, nullptr);
+        return;
+    }
+
+    MaterialPreviewSpecStorage spec{};
+    fillMaterialPreviewSpec(m_mpSpecMask | kMpSpecGlass, spec, m_mpSpecTexPages);
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+    stages[1].pSpecializationInfo = &spec.info;
+
+    VkPipeline newOpaque = VK_NULL_HANDLE;
+    VkGraphicsPipelineCreateInfo opaqueInfo = recipe.info;
+    opaqueInfo.stageCount = 2;
+    opaqueInfo.pStages = stages;
+    const VkResult opaqueRes = vkCreateGraphicsPipelines(
+        device, Backend::currentViewportPipelineCache(device), 1, &opaqueInfo, nullptr, &newOpaque);
+
+    VkPipeline newTrans = VK_NULL_HANDLE;
+    if (opaqueRes == VK_SUCCESS && transRp != VK_NULL_HANDLE && !recipe.blendAttachments.empty()) {
+        VkPipelineColorBlendStateCreateInfo transBlend = recipe.colorBlend;
+        transBlend.attachmentCount = 1u;
+        transBlend.pAttachments = recipe.blendAttachments.data();
+        VkGraphicsPipelineCreateInfo transInfo = opaqueInfo;
+        transInfo.renderPass = transRp;
+        transInfo.pColorBlendState = &transBlend;
+        if (vkCreateGraphicsPipelines(
+                device, Backend::currentViewportPipelineCache(device), 1,
+                &transInfo, nullptr, &newTrans) != VK_SUCCESS) {
+            newTrans = VK_NULL_HANDLE;
+        }
+    }
+
+    vkDestroyShaderModule(device, vert, nullptr);
+    vkDestroyShaderModule(device, frag, nullptr);
+
+    if (opaqueRes == VK_SUCCESS && newOpaque != VK_NULL_HANDLE) {
+        Backend::markViewportPipelineCacheDirty(device);
+        drainInteractiveViewportInFlight();
+        destroyMaterialPreviewGlassPipelines();
+        m_mpGlassOpaquePipeline = newOpaque;
+        m_mpGlassTransmissionPipeline = newTrans;
+        m_mpGlassTransmissionRenderPass = (newTrans != VK_NULL_HANDLE) ? transRp : VK_NULL_HANDLE;
+        m_mpGlassMask = m_mpSpecMask;
+        m_mpGlassTexPages = m_mpSpecTexPages;
+        setMaterialPreviewTransmissionPipeline(
+            m_materialPreviewTransmission, m_mpGlassTransmissionPipeline);
+        Backend::saveViewportPipelineCache(device);
+    } else if (newTrans != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device, newTrans, nullptr);
+    }
 }
 
 RasterAppliedState VulkanViewportBackend::sampleRasterAppliedState() const {

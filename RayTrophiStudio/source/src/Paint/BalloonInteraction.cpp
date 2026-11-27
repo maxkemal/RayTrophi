@@ -53,6 +53,7 @@ struct Hold {
 };
 Hold hold;
 int released_compressed_balloon = -1;
+Vec3 last_crush_normal = Vec3(0.0f);
 
 void require(bool condition, const char* error) {
     if (!condition) {
@@ -62,7 +63,7 @@ void require(bool condition, const char* error) {
 
 Ray screenRay(SceneData& scene, float x, float y) {
     require(scene.camera != nullptr, "pointer input requires a scene camera");
-    const auto ray = scene.camera->get_ray(x, 1.0f - y);
+    const auto ray = scene.camera->get_viewport_ray(x, 1.0f - y);
     return Ray(ray.origin, ray.direction.normalize());
 }
 
@@ -626,6 +627,7 @@ BalloonInteractionResult balloonPointerCommand(
             }
         }
         hold = std::move(next);
+        last_crush_normal = Vec3(0.0f);
         return result;
     }
     if (hold.id < 0) {
@@ -761,6 +763,17 @@ int updateBalloonCrush(float dt) {
         return -1;
     }
     hold.crush_seconds += std::min(dt, 0.05f);
-    return hold.crush_seconds >= 0.28f ? hold.id : -1;
+    if (hold.crush_seconds >= 0.28f) {
+        last_crush_normal = hold.wall_normal;
+        return hold.id;
+    }
+    return -1;
+}
+
+Vec3 balloonCrushNormal() {
+    if (hold.crushing && hold.wall_normal.length_squared() > 1e-6f) {
+        return hold.wall_normal;
+    }
+    return last_crush_normal;
 }
 } // namespace Paint

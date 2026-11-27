@@ -3198,6 +3198,9 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                             new_light->intensity = inten;
                             new_light->direction = dir;
                             new_light->setRadius(radius);
+                            new_light->cast_shadows = light.cast_shadows;
+                            new_light->distance_falloff = light.distance_falloff;
+                            new_light->visible = light.visible;
 
                             // Resolve scene index (selection.light_index may be stale)
                             size_t idx = 0;
@@ -3279,9 +3282,50 @@ void SceneUI::drawSceneHierarchy(UIContext& ctx) {
                     }
                 }
 
-                if (light_changed && ctx.backend_ptr && g_hasOptix) {
-                    ctx.backend_ptr->setLights(ctx.scene.lights);
-                    ctx.backend_ptr->resetAccumulation();
+                auto find_selected_light_index = [&]() -> int {
+                    for (size_t k = 0; k < ctx.scene.lights.size(); ++k) {
+                        if (ctx.scene.lights[k] == sel.selected.light) {
+                            return static_cast<int>(k);
+                        }
+                    }
+                    return -1;
+                };
+
+                bool cast_shadows = light.cast_shadows;
+                if (ImGui::Checkbox("Cast Shadows", &cast_shadows)) {
+                    const int light_index = find_selected_light_index();
+                    if (light_index >= 0) {
+                        if (rtapi::setLightCastShadows(light_index, cast_shadows)) {
+                            g_lights_dirty = true;
+                        }
+                    }
+                }
+
+                if (light.type() != LightType::Directional) {
+                    float distance_falloff = light.distance_falloff;
+                    if (ImGui::SliderFloat("Distance Falloff", &distance_falloff, 0.0f, 2.0f,
+                                           "%.2f")) {
+                        const int light_index = find_selected_light_index();
+                        if (light_index >= 0) {
+                            if (rtapi::setLightDistanceFalloff(light_index, distance_falloff)) {
+                                g_lights_dirty = true;
+                            }
+                        }
+                    }
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip(
+                            "2.0 = physical inverse-square, 1.0 = linear fill, 0.0 = constant");
+                    }
+                }
+
+                if (light_changed) {
+                    ctx.renderer.resetCPUAccumulation();
+                    if (ctx.backend_ptr) {
+                        ctx.backend_ptr->setLights(ctx.scene.lights);
+                        ctx.backend_ptr->resetAccumulation();
+                    }
+                    g_lights_dirty = true;
+                    ProjectManager::getInstance().markModified();
                 }
             }
 

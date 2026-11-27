@@ -88,7 +88,14 @@ bool GpuBreadcrumbTrail::ensure(VkPhysicalDevice physical, VkDevice device) {
     }
 
     const int forced = breadcrumbOverride();
+#ifdef RT_PLAYER
+    // In Player, breadcrumbs insert full ALL_COMMANDS_BIT pipeline barriers on
+    // every stage boundary (severe on Mali/TBDR). Keep opt-in via
+    // RAYTROPHI_GPU_BREADCRUMBS=1 for device-lost diagnostics.
+    const bool want = forced == 1;
+#else
     const bool want = forced == 1 || (forced == -1 && !vulkanDeviceHasFaultReporting(device));
+#endif
     m_disabledForDevice = !want;
     if (!want) return false;
 

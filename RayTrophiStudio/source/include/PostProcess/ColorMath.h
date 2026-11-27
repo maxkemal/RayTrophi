@@ -92,11 +92,19 @@ RT_PC RtColor rtPcGrade(RtColor c,int type,float kelvin,float saturation,float g
     c=RtColor(rtPcSafe(c.x),rtPcSafe(c.y),rtPcSafe(c.z));
     c=rtPcWhiteBalance(c,kelvin);
     c=rtPcTone(c,type);
-    float lum=.2126f*c.x+.7152f*c.y+.0722f*c.z;
-    float invGamma=1.0f/RT_MAX(gamma,.1f);
-    return rtPcClip(RtColor(RT_POW(RT_MAX(lum+(c.x-lum)*saturation,0.0f),invGamma),
-        RT_POW(RT_MAX(lum+(c.y-lum)*saturation,0.0f),invGamma),
-        RT_POW(RT_MAX(lum+(c.z-lum)*saturation,0.0f),invGamma)));
+    if (saturation != 1.0f) {
+        float lum=.2126f*c.x+.7152f*c.y+.0722f*c.z;
+        c=RtColor(RT_MAX(lum+(c.x-lum)*saturation,0.0f),
+                  RT_MAX(lum+(c.y-lum)*saturation,0.0f),
+                  RT_MAX(lum+(c.z-lum)*saturation,0.0f));
+    } else {
+        c=RtColor(RT_MAX(c.x,0.0f),RT_MAX(c.y,0.0f),RT_MAX(c.z,0.0f));
+    }
+    if (gamma != 1.0f) {
+        float invGamma=1.0f/RT_MAX(gamma,.1f);
+        c=RtColor(RT_POW(c.x,invGamma),RT_POW(c.y,invGamma),RT_POW(c.z,invGamma));
+    }
+    return rtPcClip(c);
 }
 #undef RT_PC
 #undef RT_POW

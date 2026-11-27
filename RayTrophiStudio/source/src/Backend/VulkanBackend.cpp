@@ -4,6 +4,8 @@
 #endif
 #include "Backend/VulkanMaterialTextureStorage.h"
 #include "Backend/WetPaintTexturePolicy.h"
+#include "Paint/WetPaintMobileBudget.h"
+#include "Backend/TextureMipRegion.h"
 #include "Backend/VulkanFsrLoader.h"
 #include "PostProcess/Exposure.h"
 #include "Viewport/AutomaticCutout.h"
@@ -1566,6 +1568,8 @@ bool VulkanDevice::selectPhysicalDevice(bool preferHardwareRT) {
     Backend::clearRayFusionDeviceRejections();
 #endif
     Backend::notePlayerVulkanSelection(props);
+    Paint::WetPaintMobileBudget::setLowPowerGpu(
+        props.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU);
 #endif
     VK_INFO() << "[VulkanDevice] Selected: " << props.deviceName << std::endl;
     return true;
@@ -8360,6 +8364,17 @@ VulkanBackendAdapter::VulkanBackendAdapter()
     // Overrides the header's `= false` initializer; move it there the next time
     // VulkanBackend.h changes anyway (95 includers, not worth a rebuild alone).
     m_rasterDepthPrepassAllowed = true;
+#ifdef RT_PLAYER
+    // Player uses the hardware-PCF shadow atlas (sampler2DShadow) by default:
+    // avoids splitting the HDR render pass and TLAS overhead (still toggleable via IPC).
+    m_rtShadowAllowed = false;
+#ifdef __ANDROID__
+    // On mobile TBDR GPUs, default DoF and TAA off so authored camera apertures
+    // or idle motion buffers never silently bypass the fast LDR fragment path.
+    m_rasterDepthOfField = false;
+    m_taaEnabled = false;
+#endif
+#endif
 }
 
 VulkanBackendAdapter::~VulkanBackendAdapter() {
@@ -15035,137 +15050,10 @@ void VulkanBackendAdapter::destroyTexture(int64_t texID) {
     }
 }
 
-namespace {
-// Rebuilds the mip chain of ONE array layer after mip 0 changed inside
-// [x, x+w) x [y, y+h). Only the region each level actually depends on is
-// blitted (2026-11-24): wet paint publishes a dirty rectangle of up to 7
-// surfaces x 5 planes per tick, and the full-chain blit of a 1024^2 page per
-// copy was the largest unmeasured GPU cost of a multi-balloon pop. With an
-// exact 2:1 step a LINEAR blit samples each 2x2 source block at its centre,
-// so a rectangle aligned to even texels reproduces the full blit's texels
-// exactly; a level with an odd extent (non-power-of-two image, or the 1-texel
-// tail) is blitted whole from there on, as before. Layout transitions stay
-// whole-level (a layout belongs to the subresource, not to a region).
-void regenerateMipChainRegion(VkCommandBuffer cmd, const VulkanRT::ImageHandle& img,
-                              int32_t x, int32_t y, int32_t w, int32_t h) {
-    if (cmd == VK_NULL_HANDLE || !img.image || img.mipLevels <= 1) return;
-
-    VkImageMemoryBarrier b{};
-    b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    b.image = img.image;
-    b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    b.subresourceRange.baseArrayLayer = img.arrayLayer;
-    b.subresourceRange.layerCount = 1;
-    b.subresourceRange.levelCount = 1;
-
-    // Step 1: mip 0 GENERAL -> TRANSFER_SRC_OPTIMAL (it just received a
-    // copyBufferToImage in GENERAL layout; we now use it as a blit source).
-    b.subresourceRange.baseMipLevel = 0;
-    b.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-    b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-        0, 0, nullptr, 0, nullptr, 1, &b);
-
-    int32_t mipW = static_cast<int32_t>(img.width);
-    int32_t mipH = static_cast<int32_t>(img.height);
-    // Region on the current SOURCE level, half-open.
-    int32_t rx0 = std::clamp(x, 0, mipW), ry0 = std::clamp(y, 0, mipH);
-    int32_t rx1 = std::clamp(x + w, rx0, mipW), ry1 = std::clamp(y + h, ry0, mipH);
-    bool wholeLevels = false;
-
-    for (uint32_t i = 1; i < img.mipLevels; ++i) {
-        // Step 2a: mip i SHADER_READ_ONLY -> TRANSFER_DST_OPTIMAL (blit dst).
-        b.subresourceRange.baseMipLevel = i;
-        b.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-        b.srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
-        b.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(cmd,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-            VK_PIPELINE_STAGE_TRANSFER_BIT,
-            0, 0, nullptr, 0, nullptr, 1, &b);
-
-        const int32_t nextW = std::max(1, mipW / 2);
-        const int32_t nextH = std::max(1, mipH / 2);
-        // Exact 2:1 only on even extents; anything else is blitted whole.
-        if ((mipW & 1) || (mipH & 1)) wholeLevels = true;
-        int32_t sx0 = 0, sy0 = 0, sx1 = mipW, sy1 = mipH;
-        int32_t dx0 = 0, dy0 = 0, dx1 = nextW, dy1 = nextH;
-        if (!wholeLevels) {
-            sx0 = rx0 & ~1; sy0 = ry0 & ~1;
-            sx1 = std::min(mipW, (rx1 + 1) & ~1); sy1 = std::min(mipH, (ry1 + 1) & ~1);
-            dx0 = sx0 / 2; dy0 = sy0 / 2; dx1 = sx1 / 2; dy1 = sy1 / 2;
-        }
-
-        if (sx1 > sx0 && sy1 > sy0) {
-            VkImageBlit blit{};
-            blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, img.arrayLayer, 1};
-            blit.srcOffsets[0] = {sx0, sy0, 0};
-            blit.srcOffsets[1] = {sx1, sy1, 1};
-            blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, img.arrayLayer, 1};
-            blit.dstOffsets[0] = {dx0, dy0, 0};
-            blit.dstOffsets[1] = {dx1, dy1, 1};
-            vkCmdBlitImage(cmd,
-                img.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                1, &blit, VK_FILTER_LINEAR);
-        }
-        rx0 = dx0; ry0 = dy0; rx1 = dx1; ry1 = dy1;
-
-        // Step 2b: mip i TRANSFER_DST -> TRANSFER_SRC (next iteration's
-        // source) for non-final levels; final level goes straight to
-        // SHADER_READ_ONLY in the closing barrier below.
-        if (i + 1 < img.mipLevels) {
-            b.subresourceRange.baseMipLevel = i;
-            b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-            b.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-            b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-            b.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-            vkCmdPipelineBarrier(cmd,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                0, 0, nullptr, 0, nullptr, 1, &b);
-        }
-
-        mipW = nextW;
-        mipH = nextH;
-    }
-
-    // Step 3a: mips 0 .. N-2 are in TRANSFER_SRC_OPTIMAL — flip them all to
-    // SHADER_READ_ONLY_OPTIMAL in a single barrier.
-    b.subresourceRange.baseMipLevel = 0;
-    b.subresourceRange.levelCount = img.mipLevels - 1;
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
-    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        0, 0, nullptr, 0, nullptr, 1, &b);
-
-    // Step 3b: final mip is in TRANSFER_DST_OPTIMAL.
-    b.subresourceRange.baseMipLevel = img.mipLevels - 1;
-    b.subresourceRange.levelCount = 1;
-    b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    b.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd,
-        VK_PIPELINE_STAGE_TRANSFER_BIT,
-        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
-        0, 0, nullptr, 0, nullptr, 1, &b);
-}
-} // namespace
-
 void VulkanBackendAdapter::regenerateMipChainAfterPartialUpdate(VkCommandBuffer cmd,
                                                                  const VulkanRT::ImageHandle& img) {
-    regenerateMipChainRegion(cmd, img, 0, 0, static_cast<int32_t>(img.width),
-                             static_cast<int32_t>(img.height));
+    Backend::regenerateMipChainRegion(cmd, img, 0, 0, static_cast<int32_t>(img.width),
+                                      static_cast<int32_t>(img.height));
 }
 
 bool VulkanBackendAdapter::updateTexture2DInPlace(int64_t textureID, const void* data,
@@ -15404,7 +15292,8 @@ int VulkanBackendAdapter::copyDeviceBufferToTexture(const Texture* texture, void
     if (img.mipLevels > 1) {
         // Same reason as updateTexture2DRegion: upper mips would keep the old
         // fill. Only the copied rectangle's footprint in each level.
-        regenerateMipChainRegion(cmd, img, x, y, static_cast<int32_t>(w), static_cast<int32_t>(h));
+        Backend::regenerateMipChainRegion(cmd, img, x, y,
+                                          static_cast<int32_t>(w), static_cast<int32_t>(h));
     } else {
         // Explicit stages: transitionImageLayout(GENERAL -> ...) assumes a
         // COMPUTE writer, and this one is the TRANSFER above.
@@ -15507,9 +15396,12 @@ void VulkanBackendAdapter::setLights(const std::vector<std::shared_ptr<Light>>& 
         // AreaLight has its own width/height that shadow Light:: base members — must access via derived
         float w = 1.0f;
         float h = 1.0f;
-        // Default u/v axes (overwritten for Area lights)
-        gl.area_u[0] = 1.0f; gl.area_u[1] = 0.0f; gl.area_u[2] = 0.0f; gl.area_u[3] = 0.0f;
-        gl.area_v[0] = 0.0f; gl.area_v[1] = 1.0f; gl.area_v[2] = 0.0f; gl.area_v[3] = 0.0f;
+        // Default u/v axes (overwritten for Area lights; area_u[3] encodes no_shadow,
+        // area_v[3] encodes 2.0 - distance_falloff so zero-init = physical 1/d^2)
+        gl.area_u[0] = 1.0f; gl.area_u[1] = 0.0f; gl.area_u[2] = 0.0f;
+        gl.area_u[3] = l->cast_shadows ? 0.0f : 1.0f;
+        gl.area_v[0] = 0.0f; gl.area_v[1] = 1.0f; gl.area_v[2] = 0.0f;
+        gl.area_v[3] = std::clamp(2.0f - l->distance_falloff, 0.0f, 2.0f);
         if (l->type() == LightType::Area) {
             if (auto al = std::dynamic_pointer_cast<AreaLight>(l)) {
                 w = al->getWidth();
@@ -17991,7 +17883,8 @@ bool VulkanBackendAdapter::ensureInteractiveViewportResourcesImpl(const std::str
                     mpDslBindings[27].descriptorCount = 1;
                     mpDslBindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpDslBindings[28] = {kRayFusionFrameUniformBinding,
-                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
                     mpDslBindings[29] = Backend::MaterialTextureBinding::refTableBinding(
                         29, VK_SHADER_STAGE_FRAGMENT_BIT);
                     const uint32_t mpFit = rayFusionMaterialTextureCapacity(

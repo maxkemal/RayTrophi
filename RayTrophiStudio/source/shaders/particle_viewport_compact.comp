@@ -1,0 +1,90 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 1, std430) readonly buffer Lookup { uint rows[]; };
+layout(set = 1, binding = 5, std430) readonly buffer Alive { uint alive[]; };
+layout(set = 1, binding = 6, std430) readonly buffer Profile { uint profile[]; };
+layout(set = 1, binding = 8, std430) writeonly buffer Slots { uint slots[]; };
+layout(set = 1, binding = 9, std430) buffer Blocks { uvec2 blocks[]; };
+layout(set = 1, binding = 10, std430) writeonly buffer Commands { uvec4 commands[2]; };
+
+layout(push_constant) uniform Params {
+    uint capacity;
+    uint lookupOffset;
+    uint lookupCount;
+    uint phase;
+} pc;
+
+shared uvec2 scan[64];
+
+uvec2 inclusiveScan(uint lane) {
+    for (uint span = 1u; span < 64u; span <<= 1u) {
+        uvec2 earlier = lane >= span ? scan[lane - span] : uvec2(0);
+        barrier();
+        scan[lane] += earlier;
+        barrier();
+    }
+    return scan[lane];
+}
+
+void main() {
+    uint lane = gl_LocalInvocationID.x;
+    uint group = gl_WorkGroupID.x;
+    uint slot = gl_GlobalInvocationID.x;
+    if (pc.phase == 1u) {
+        // One ordered prefix per blend. The groups are contiguous in original
+        // slot order, so alpha compositing preserves the previous primitive order.
+        uint groups = (pc.capacity + 63u) / 64u;
+        uint perLane = (groups + 63u) / 64u;
+        uint begin = lane * perLane;
+        uint end = min(begin + perLane, groups);
+        uvec2 subtotal = uvec2(0);
+        for (uint i = begin; i < end; ++i) {
+            subtotal += blocks[i];
+        }
+        scan[lane] = subtotal;
+        barrier();
+        uvec2 total = inclusiveScan(lane);
+        if (lane == 63u) {
+            commands[0] = uvec4(total.x * 6u, 1u, 0u, 0u);
+            commands[1] = uvec4(total.y * 6u, 1u, 0u, 0u);
+        }
+        uvec2 offset = total - subtotal;
+        for (uint i = begin; i < end; ++i) {
+            uvec2 count = blocks[i];
+            blocks[i] = offset;
+            offset += count;
+        }
+        return;
+    }
+
+    uvec2 live = uvec2(0);
+    if (slot < pc.capacity && alive[slot] != 0u) {
+        uint id = profile[slot];
+        uint row = id < pc.lookupCount ? rows[pc.lookupOffset + id] : 0u;
+        live = (row & 0x80000000u) == 0u ? uvec2(1, 0) : uvec2(0, 1);
+    }
+    scan[lane] = live;
+    barrier();
+
+    if (pc.phase == 0u) {
+        for (uint span = 32u; span > 0u; span >>= 1u) {
+            if (lane < span) {
+                scan[lane] += scan[lane + span];
+            }
+            barrier();
+        }
+        if (lane == 0u) {
+            blocks[group] = scan[0];
+        }
+        return;
+    }
+
+    uvec2 index = blocks[group] + inclusiveScan(lane);
+    if (live.x != 0u) {
+        slots[index.x - 1u] = slot;
+    } else if (live.y != 0u) {
+        slots[pc.capacity + index.y - 1u] = slot;
+    }
+}

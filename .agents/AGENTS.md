@@ -1,6 +1,6 @@
 # Workspace instructions
 
-- Do not run C++ project/application builds (including MSBuild, CMake build, or IDE builds). The user performs C++ builds.
+- Do not run Windows C++ project/application builds (including MSBuild, Visual Studio, or Windows IDE builds). The user performs Windows C++ builds. Android Player APK builds (Gradle / NDK CMake) are permitted when requested or needed for tablet verification.
 - Compile and validate only the shaders you write/change, using their bulk-script command; copy their SPIR-V files to both source/shaders and x64/Release/shaders. Register new shaders in the bulk script. Do not compile another agent's shaders or compile while the user is building. Coordinate through docs/dev/AJAN_KOORDINASYON.md.
 - Do not launch the RayTrophi Studio application for verification unless the user explicitly asks in that turn.
 - Codex may perform read-only inspection, static audits, and non-build source checks, then hand the exact build/test checklist to the user.

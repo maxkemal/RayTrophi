@@ -75,7 +75,8 @@ inline bool supportsMethod(const std::string& method) {
            method == "viewport.set_preview_lighting" ||
            method == "viewport.taa" || method == "viewport.set_taa" ||
            method == "lights.list" || method == "lights.get" ||
-           method == "lights.set_intensity" ||
+           method == "lights.set_intensity" || method == "lights.set_cast_shadows" ||
+           method == "lights.set_distance_falloff" ||
            // Scene audio state (read-only): the Player ticks audio on its game clock.
            method == "audio.status" || method == "audio.list" ||
            method == "audio.source_runtime" || method == "audio.mixer_get" ||

@@ -9,6 +9,8 @@
       "particle_viewport_frag.spv",
       "particle_viewport.spv",
       "particle_viewport_pull.spv",
+      "particle_viewport_pull_compact.spv",
+      "particle_viewport_compact.spv",
       "sim_particle_ballistic.spv",
       "sim_particle_spawn.spv",
       "sim_particle_collide.spv",
@@ -27,6 +29,8 @@
       "material_preview_shadow_frag.spv",
       "material_preview_shadow_opaque.spv",
       "raster_cull.spv",
+      "raster_post_fast.spv",
+      "raster_post_fast_frag.spv",
       "raster_taa.spv",
       "reflection_trace.spv",
       "reflection_filter.spv"

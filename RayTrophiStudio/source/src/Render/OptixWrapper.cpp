@@ -2602,6 +2602,8 @@ void OptixWrapper::setLightParams(const std::vector<std::shared_ptr<Light>>& lig
         l.area_height = 0.0f;
         l.area_u = make_float3(1, 0, 0);
         l.area_v = make_float3(0, 1, 0);
+        l.cast_shadows = light->cast_shadows ? 1 : 0;
+        l.distance_falloff = std::clamp(light->distance_falloff, 0.0f, 2.0f);
 
         if (auto pointLight = std::dynamic_pointer_cast<PointLight>(light)) {
             const Vec3& pos = pointLight->position;

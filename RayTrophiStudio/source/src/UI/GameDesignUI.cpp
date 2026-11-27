@@ -70,6 +70,8 @@ struct DemoDraft {
     int seed = 417;
     float interval_min = 2.5f;
     float interval_max = 5.0f;
+    float respawn_seconds = 3.5f;
+    float birth_seconds = 0.75f;
     bool autostart = false;
     std::string interaction_mode = "carry";
     bool body_controls = false;
@@ -133,6 +135,8 @@ void syncDraft(const json& config) {
     draft.seed = config.value("seed", draft.seed);
     draft.interval_min = config.value("interval_min", draft.interval_min);
     draft.interval_max = config.value("interval_max", draft.interval_max);
+    draft.respawn_seconds = config.value("respawn_seconds", 3.5f);
+    draft.birth_seconds = config.value("birth_seconds", 0.75f);
     draft.autostart = config.value("autostart", draft.autostart);
     draft.body_controls = config.value("body_controls", false);
     draft.jolt_motion = config.value("jolt_motion", false);
@@ -187,8 +191,12 @@ json draftConfig() {
                    {"seed", draft.seed},
                    {"interval_min", draft.interval_min},
                    {"interval_max", draft.interval_max},
+                   {"respawn_seconds", std::clamp(draft.respawn_seconds, 0.25f, 60.0f)},
+                   {"birth_seconds", std::clamp(draft.birth_seconds, 0.0f, 3.0f)},
                    {"autostart", draft.autostart},
-                   {"interaction_mode", draft.visual_nodes.empty() ? "pop" : draft.interaction_mode},
+                   {"interaction_mode",
+                    (!draft.visual_nodes.empty() && draft.interaction_mode == "carry")
+                        ? "carry" : "pop"},
                    {"body_controls", !draft.visual_nodes.empty() && draft.body_controls},
                    {"size_min", draft.size_min},
                    {"size_max", draft.size_max},
@@ -580,7 +588,32 @@ void drawDemo(const std::string& selected_object, const std::vector<std::string>
     ImGui::DragInt("Seed", &draft.seed, 1.0f, 0, 2147483647);
     ImGui::DragFloatRange2("Pop interval (s)", &draft.interval_min, &draft.interval_max,
                            0.05f, 2.0f, 30.0f, "%.1f", "%.1f");
+    ImGui::DragFloat("Respawn delay (s)", &draft.respawn_seconds, 0.1f, 0.25f, 60.0f, "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("How long a popped balloon waits before appearing again (0.25..60 s).");
+    }
+    ImGui::DragFloat("Inflate / birth time (s)", &draft.birth_seconds, 0.05f, 0.0f, 3.0f,
+                     draft.birth_seconds <= 0.0f ? "instant" : "%.2f");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Mesh balloons grow from tiny, bounce and settle.\n"
+                          "0 means an instant appearance.");
+    }
     ImGui::Checkbox("Start automatically", &draft.autostart);
+    {
+        const bool has_meshes = !draft.visual_nodes.empty();
+        int mode_index = (has_meshes && draft.interaction_mode == "carry") ? 1 : 0;
+        static const char* modes[] = {"pop", "carry"};
+        ImGui::BeginDisabled(!has_meshes);
+        if (ImGui::Combo("Interaction mode", &mode_index, modes, 2)) {
+            draft.interaction_mode = modes[mode_index];
+        }
+        ImGui::EndDisabled();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip("pop: click or touch pops balloons.\n"
+                              "carry: click pops, hold drags mesh balloons\n"
+                              "(requires balloon meshes).");
+        }
+    }
     ImGui::BeginDisabled(draft.visual_nodes.empty());
     ImGui::Checkbox("Two-hand body balloon controls", &draft.body_controls);
     ImGui::EndDisabled();
@@ -786,6 +819,15 @@ void drawSection(const std::string& selected_object) {
     const std::vector<rtapi::WetPaintSurfaceRuntimeInfo> no_surfaces;
     const auto& listed = have_status ? status.surface_list : no_surfaces;
     const auto materials = rtapi::listMaterials();
+    static std::string inspected_object;
+    static int inspected_material = -1;
+    const auto surface_label = [&](const auto& surface) {
+        const auto material = std::find_if(materials.begin(), materials.end(), [&](const auto& m) {
+            return m.id == surface.material_id;
+        });
+        return surface.object + " / " +
+            (material == materials.end() ? std::to_string(surface.material_id) : material->name);
+    };
     const auto is_registered = [&](const std::string& object, int material_id) {
         return std::any_of(listed.begin(), listed.end(), [&](const auto& surface) {
             return surface.object == object && surface.material_id == material_id;
@@ -808,30 +850,55 @@ void drawSection(const std::string& selected_object) {
             }
         }
     };
-    if (!listed.empty() && beginListBox("##surface_list", listed.size())) {
-    for (const auto& surface : listed) {
-        ImGui::PushID(surface.object.c_str());
-        ImGui::PushID(surface.material_id);
-        if (ImGui::SmallButton("x")) {
-            report(rtapi::removeWetPaintSurface(surface.object, surface.material_id));
+    if (!listed.empty()) {
+        ImGui::TextDisabled("%zu material slots. Select a row to edit its paint settings.",
+                            listed.size());
+        if (beginListBox("##surface_list", listed.size())) {
+            for (const auto& surface : listed) {
+                ImGui::PushID(surface.object.c_str());
+                ImGui::PushID(surface.material_id);
+                const bool inspecting = inspected_object == surface.object &&
+                    inspected_material == surface.material_id;
+                if (ImGui::SmallButton("x")) {
+                    const auto result =
+                        rtapi::removeWetPaintSurface(surface.object, surface.material_id);
+                    report(result);
+                    if (result.ok && inspecting) {
+                        inspected_object.clear();
+                        inspected_material = -1;
+                    }
+                }
+                ImGui::SameLine();
+                const std::string label = surface_label(surface);
+                if (ImGui::Selectable(label.c_str(), inspecting)) {
+                    inspected_object = surface.object;
+                    inspected_material = surface.material_id;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("%s", label.c_str());
+                }
+                ImGui::PopID();
+                ImGui::PopID();
+            }
         }
-        ImGui::SameLine();
-        const auto material = std::find_if(materials.begin(), materials.end(), [&](const auto& m) {
-            return m.id == surface.material_id;
-        });
-        const std::string label = surface.object + " / " +
-            (material == materials.end() ? std::to_string(surface.material_id) : material->name);
-        if (surface.object == selected_object) {
-            ImGui::TextColored(ImGui::GetStyle().Colors[ImGuiCol_CheckMark], "%s (selected)",
-                               label.c_str());
-        } else {
-            ImGui::TextUnformatted(label.c_str());
-        }
+        ImGui::EndChild();
+    }
+    const auto inspected = std::find_if(listed.begin(), listed.end(), [&](const auto& surface) {
+        return surface.object == inspected_object && surface.material_id == inspected_material;
+    });
+    if (inspected != listed.end()) {
+        ImGui::TextWrapped("%s (%d px)", surface_label(*inspected).c_str(), inspected->resolution);
+        ImGui::PushID("registered_paint_slot");
+        ImGui::PushID(inspected->object.c_str());
+        ImGui::PushID(inspected->material_id);
+        drawSurfaceSettings(*inspected);
         ImGui::PopID();
         ImGui::PopID();
+        ImGui::PopID();
+    } else {
+        inspected_object.clear();
+        inspected_material = -1;
     }
-    }
-    if (!listed.empty()) ImGui::EndChild();
     if (surface_names.empty()) {
         ImGui::TextDisabled("None yet. Droplets paint only these surfaces.");
     }

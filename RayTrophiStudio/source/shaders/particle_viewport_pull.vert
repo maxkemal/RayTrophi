@@ -37,6 +37,9 @@ layout(set = 1, binding = 4) readonly buffer Lifetime { float lifetime[]; };
 layout(set = 1, binding = 5) readonly buffer Alive { uint alive[]; };
 layout(set = 1, binding = 6) readonly buffer Profile { uint profile[]; };
 layout(set = 1, binding = 7) readonly buffer SizeScale { float sizeScale[]; };
+#ifdef RT_PARTICLE_COMPACT
+layout(set = 1, binding = 8) readonly buffer LiveSlots { uint liveSlots[]; };
+#endif
 
 #include "include/particle_appearance_lut.glsl"
 
@@ -58,17 +61,23 @@ void collapse() {
 void main() {
     uint p = uint(gl_VertexIndex) / 6u;
     vec2 corner = kCorners[uint(gl_VertexIndex) % 6u];
+#ifdef RT_PARTICLE_COMPACT
+    p = liveSlots[p + (pc.draw.w == 1u ? pc.draw.z : 0u)];
+#else
     if (p >= pc.draw.z || alive[p] == 0u) {
         collapse();
         return;
     }
+#endif
     uint id = profile[p];
     uint entry = id < pc.draw.y ? rowLookup[pc.draw.x + id] : 0u;
     bool alphaBlend = (entry & 0x80000000u) != 0u;
+#ifndef RT_PARTICLE_COMPACT
     if (alphaBlend != (pc.draw.w == 1u)) {
         collapse();
         return;
     }
+#endif
     vec3 center = vec3(px[p], py[p], pz[p]);
     if (any(isnan(center)) || any(isinf(center))) {
         collapse();

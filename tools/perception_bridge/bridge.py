@@ -38,23 +38,81 @@ def convert_pose(image_points, world_points, calibration, min_confidence=0.5):
     """Ground feet anchor + metric hip-relative MP skeleton (approximate yaw).
 
     Homography is valid on the floor only. Do not project hands through it.
-    Reject missing feet rather than moving the person to a made-up origin.
+    Falls back to knees or hips when ankles are occluded or out of frame.
     """
     if len(image_points) != 33 or len(world_points) != 33:
         return None
-    feet = [i for i in (27, 28) if confidence(image_points[i]) >= min_confidence]
-    if not feet:
-        return None
-    u = sum(image_points[i].x for i in feet)/len(feet)*calibration.width
-    v = sum(image_points[i].y for i in feet)/len(feet)*calibration.height
-    if not 0 <= u < calibration.width or not 0 <= v < calibration.height:
-        return None
+
+    def in_frame(index):
+        pt = image_points[index]
+        if confidence(pt) < min_confidence:
+            return False
+        u_pt = pt.x * calibration.width
+        v_pt = pt.y * calibration.height
+        return 0 <= u_pt < calibration.width and 0 <= v_pt < calibration.height
+
+    feet = [i for i in (27, 28) if in_frame(i)]
+    if feet:
+        anchor_tier = "ankle"
+        u = sum(image_points[i].x for i in feet) / len(feet) * calibration.width
+        v = sum(image_points[i].y for i in feet) / len(feet) * calibration.height
+        anchor = [sum(getattr(world_points[i], axis) for i in feet) / len(feet)
+                  for axis in ("x", "y", "z")]
+    else:
+        knees = [i for i in (25, 26) if in_frame(i)]
+        hips = [] if knees else [i for i in (23, 24) if in_frame(i)]
+        if knees:
+            anchors = knees
+            anchor_tier = "knee"
+        elif hips:
+            anchors = hips
+            anchor_tier = "hip"
+        else:
+            return None
+
+        u_anchor = sum(image_points[i].x for i in anchors) / len(anchors) * calibration.width
+        v_anchor = sum(image_points[i].y for i in anchors) / len(anchors) * calibration.height
+
+        shoulders = [i for i in (11, 12) if confidence(image_points[i]) >= min_confidence]
+        hips_conf = [i for i in (23, 24) if confidence(image_points[i]) >= min_confidence]
+        v_sh = (sum(image_points[i].y for i in shoulders) / len(shoulders) * calibration.height
+                if shoulders else None)
+        v_hp = (sum(image_points[i].y for i in hips_conf) / len(hips_conf) * calibration.height
+                if hips_conf else None)
+
+        delta_v = None
+        if v_sh is not None and v_hp is not None and v_hp - v_sh > 1e-3:
+            torso_px = v_hp - v_sh
+            delta_v = (0.85 if anchor_tier == "knee" else 1.6) * torso_px
+        elif anchor_tier == "knee" and v_sh is not None and v_anchor - v_sh > 1e-3:
+            delta_v = 0.5 * (v_anchor - v_sh)
+        elif anchor_tier == "knee" and v_hp is not None and v_anchor - v_hp > 1e-3:
+            delta_v = 1.05 * (v_anchor - v_hp)
+        if delta_v is None:
+            return None
+
+        u = max(0.0, min(float(calibration.width - 1), u_anchor))
+        v = max(0.0, min(float(calibration.height - 1), v_anchor + delta_v))
+
+        ax = sum(world_points[i].x for i in anchors) / len(anchors)
+        ay = sum(world_points[i].y for i in anchors) / len(anchors)
+        az = sum(world_points[i].z for i in anchors) / len(anchors)
+        fallback_offset = 0.45 if anchor_tier == "knee" else 0.85
+        world_ankles = [
+            i for i in (27, 28)
+            if confidence(world_points[i]) >= min_confidence and math.isfinite(world_points[i].y)
+        ]
+        if world_ankles:
+            ankle_y = sum(world_points[i].y for i in world_ankles) / len(world_ankles)
+            floor_y = ankle_y if ankle_y > ay + 0.1 else ay + fallback_offset
+        else:
+            floor_y = ay + fallback_offset
+        anchor = [ax, floor_y, az]
+
     try:
         x, z = calibration.project(u, v)
     except ValueError:
         return None
-    anchor = [sum(getattr(world_points[i], axis) for i in feet)/len(feet)
-              for axis in ("x", "y", "z")]
     joints = {}
     for name, index in LANDMARKS.items():
         point = world_points[index]
@@ -70,9 +128,17 @@ def convert_pose(image_points, world_points, calibration, min_confidence=0.5):
         return None
     if any(abs(value) > 10000 for joint in joints.values() for value in joint[:3]):
         return None
-    return {"id": 0, "confidence": min(joints["pelvis"][3],
-                                        max(joints[f"{s}_ankle"][3] for s in ("l", "r"))),
+    anchor_conf = max(joints[f"{s}_{anchor_tier}"][3] for s in ("l", "r"))
+    return {"id": 0, "confidence": min(joints["pelvis"][3], anchor_conf),
             "joints": joints}
+
+
+def should_send_pose_packet(persons, t, last_sent_empty, last_empty_t, empty_interval=0.25):
+    if persons:
+        return True
+    if not last_sent_empty or last_empty_t is None:
+        return True
+    return (t - last_empty_t) >= empty_interval
 
 
 def run(args):
@@ -142,6 +208,8 @@ def run(args):
         start = time.perf_counter()
         previous_ms = -1
         previous_t = None
+        last_sent_empty = False
+        last_empty_t = None
         while not stop.is_set() and not getattr(args, "stop_requested", lambda: False)():
             source_time = counts["frames"] / fps if replay else time.perf_counter() - start
             if args.seconds and source_time >= args.seconds:
@@ -183,16 +251,19 @@ def run(args):
                         card = cutout(rgb, result.segmentation_masks[0].numpy_view(),
                                       image_points, person, confidence, cv2, np)
             t = timestamp/1000
-            ids = tracker.update([(p["joints"]["pelvis"][0], p["joints"]["pelvis"][2])
-                                  for p in persons], t)
-            for person, pid in zip(persons, ids):
-                person["id"] = pid
+            tracker.update_poses(persons, t)
             packet = validate_pose({"t": t, "persons": persons}, previous_t)
             previous_t = t
             mapped = time.perf_counter()
-            if ipc is not None:
+            if ipc is not None and should_send_pose_packet(
+                    persons, t, last_sent_empty, last_empty_t):
                 pose_sent = True
                 ipc.call("input.set_body_poses", **packet)
+                if persons:
+                    last_sent_empty = False
+                else:
+                    last_sent_empty = True
+                    last_empty_t = t
             if video_card:
                 counts["card_frames"] += card is not None
                 if publisher is not None:

@@ -9707,6 +9707,10 @@ void ParticleSimulationSystem::step(const SimulationContext& context) {
 }
 
 void ParticleSimulationSystem::refreshResolvedColliders(float particle_radius) {
+    if (shouldSkipColliderRefresh(this, colliders_, particle_radius,
+                                  !resolved_colliders_.empty())) {
+        return;
+    }
     resolved_colliders_.clear();
     resolved_colliders_.reserve(colliders_.size());
 
@@ -9930,7 +9934,9 @@ void ParticleSimulationSystem::applyColliders(Vec3& position, Vec3& velocity,
         if (dp.length_squared() <= 0.0f && dv.length_squared() <= 0.0f) return;
         hit->hit = true;
         hit->collider = collider_index;
-        hit->normal = surfaceNormal(rc, dp, dv);
+        if (physics_settings_.record_collision_events) {
+            hit->normal = surfaceNormal(rc, dp, dv);
+        }
     };
     const float particle_radius = std::max(0.0f, physics_settings_.particle_radius);
     {

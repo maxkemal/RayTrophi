@@ -54,6 +54,8 @@ class Light {
 public:
     std::string nodeName;
     bool visible = true;
+    bool cast_shadows = true;
+    float distance_falloff = 2.0f;
     Vec3 position;
     Vec3 direction;
     Vec3 initialDirection;

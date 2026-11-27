@@ -15,8 +15,8 @@
 #include <algorithm>
 #include <cmath>
 #include <new>
+#include <string>
 #include <string_view>
-#include <unordered_map>
 #include <unordered_set>
 
 namespace ParticleBillboardBuilder {
@@ -71,12 +71,25 @@ LitShading litShadingFor(const SceneData::ParticleRenderSettings &render) {
 }
 
 struct LitLight {
-  Vec3 position;
-  Vec3 radiance; // colour * intensity (RT units, / d^2 at the particle)
+    Vec3 position;
+    Vec3 radiance; // colour * intensity (RT units, / d^2 at the particle)
+
+    bool operator==(const LitLight& other) const {
+        return position.x == other.position.x &&
+               position.y == other.position.y &&
+               position.z == other.position.z &&
+               radiance.x == other.radiance.x &&
+               radiance.y == other.radiance.y &&
+               radiance.z == other.radiance.z;
+    }
 };
 struct LitLights {
-  std::vector<LitLight> lights;
-  float reference_e = 1.0f;
+    std::vector<LitLight> lights;
+    float reference_e = 1.0f;
+
+    bool operator==(const LitLights& other) const {
+        return reference_e == other.reference_e && lights == other.lights;
+    }
 };
 
 float luminance(const Vec3 &c) {
@@ -200,159 +213,311 @@ void markParticleRow(std::vector<float> &lut, uint32_t row,
   }
 }
 
-void pushQuad(std::vector<ParticleBillboardVertex> &out, float x, float y,
+void pushQuad(std::vector<ParticleBillboardVertex>& out, float x, float y,
               float z, float age, uint32_t lut_row, float size_scale) {
-  static constexpr float kCorners[6][2] = {
-      {-1.f, -1.f}, {1.f, -1.f}, {1.f, 1.f},
-      {-1.f, -1.f}, {1.f, 1.f},  {-1.f, 1.f},
-  };
-  for (const auto &c : kCorners) {
-    ParticleBillboardVertex v{};
-    v.center[0] = x;
-    v.center[1] = y;
-    v.center[2] = z;
-    v.corner[0] = c[0];
-    v.corner[1] = c[1];
-    v.age = age;
-    v.lut_row = static_cast<float>(lut_row);
-    v.size_scale = size_scale;
-    out.push_back(v);
-  }
+    static constexpr float kCorners[6][2] = {
+        {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f},
+        {-1.0f, -1.0f}, {1.0f, 1.0f},  {-1.0f, 1.0f},
+    };
+    const float row = static_cast<float>(lut_row);
+    const std::size_t base = out.size();
+    out.resize(base + 6);
+    for (std::size_t k = 0; k < 6; ++k) {
+        ParticleBillboardVertex& v = out[base + k];
+        v.center[0] = x;
+        v.center[1] = y;
+        v.center[2] = z;
+        v.corner[0] = kCorners[k][0];
+        v.corner[1] = kCorners[k][1];
+        v.age = age;
+        v.lut_row = row;
+        v.size_scale = size_scale;
+    }
 }
 
-// A device-resident system on the viewport's own VkDevice is drawn from the
-// simulation buffers (vertex pulling). Its profile rows go into the LUT like
-// any other system's; the id -> row map goes into row_lookup.
-bool appendPulledSystem(const RayTrophiSim::ParticleSimulationSystem &runtime,
-                        std::string_view system_name, void *viewport_device,
-                        const LitShading &shading, const LitLights &lights,
-                        ParticleBillboardUpload &out) {
-  RayTrophiSim::ParticleResidentDrawBuffers device;
-  if (!viewport_device || !runtime.residentDrawBuffers(device) ||
-      device.device != viewport_device || device.capacity == 0) {
-    return false;
-  }
-  ParticlePulledDraw draw;
-  for (uint32_t i = 0; i < kPulledStreamCount; ++i) {
-    draw.buffers[i] =
-        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(device.buffers[i]));
-  }
-  draw.particle_count = device.capacity;
-  draw.state_version = device.state_version;
-  uint32_t max_id = 0;
-  for (const auto &profile : runtime.appearanceProfiles()) {
-    max_id = std::max(max_id, profile.id);
-  }
-  draw.lookup_offset = static_cast<uint32_t>(out.row_lookup.size());
-  draw.lookup_count = max_id + 1;
-  out.row_lookup.resize(out.row_lookup.size() + draw.lookup_count,
-                        0u); // 0 = fallback row
-  for (const auto &profile : runtime.appearanceProfiles()) {
-    const bool alpha =
-        profile.blend == RayTrophiSim::ParticleAppearanceBlend::Alpha;
-    draw.has_alpha = draw.has_alpha || alpha;
-    const uint32_t row = rowCount(out.lut);
-    out.row_lookup[draw.lookup_offset + profile.id] =
-        row | (alpha ? 0x80000000u : 0u);
-    appendRow(out.lut, runtime.appearanceLutRow(profile.id));
-    markParticleRow(out.lut, row, shading, lights, system_name, profile);
-  }
-  out.pulled.push_back(draw);
-  return true;
+const float* fallbackLutRow() {
+    // Row 0: the fallback appearance, for particles whose profile id resolves
+    // to nothing. Always present so the LUT binding is never empty.
+    static const std::vector<float> kFallbackRow = [] {
+        std::vector<float> baked;
+        RayTrophiSim::bakeParticleAppearanceLut(
+            RayTrophiSim::fallbackParticleAppearance(), baked);
+        return baked;
+    }();
+    return kFallbackRow.data();
 }
 
-void appendParticleSystems(const SceneData &scene, void *viewport_device,
-                           ParticleBillboardUpload &out, std::size_t &drawn) {
-  using RayTrophiSim::ParticleAppearanceBlend;
-  struct RowInfo {
+struct RowInfo {
     uint32_t row = 0;
     bool alpha = false;
-  };
-  std::unordered_map<uint32_t, RowInfo> rows;
-  const LitLights lights = litLightsFor(scene);
+};
 
-  for (const auto &system : scene.particle_systems) {
-    if (!system.visible || !system.runtime || system.render.emitter_only) {
-      continue;
-    }
-    auto &runtime = *system.runtime;
-    const LitShading shading = litShadingFor(system.render);
-    if (appendPulledSystem(runtime, system.name, viewport_device, shading,
-                           lights, out)) {
-      continue;
-    }
-    // Not pullable: either the host already holds the state, or the
-    // simulation runs on ANOTHER VkDevice and its buffers cannot be bound
-    // here. The second is a counted snapshot (particle.stats), the same
-    // consequence live gas has on a foreign device.
-    if (runtime.kinematicResidency() !=
-        RayTrophiSim::ParticleKinematicResidency::Host) {
-      runtime.syncHostState("foreign_device");
-    }
-    // ★ Rows BEFORE the alive check (2026-11-24): a dead system keeps its
-    // LUT rows. Skipping them made the LUT's content follow which effect
-    // systems were alive, and every change of the LUT is a viewport drain
-    // (uploadParticleBillboards waits for every in-flight frame). A balloon
-    // pop starts and ends trails/sparkles/confetti: ~5 drains of 1-2.4 ms
-    // per pop, on the frames the child watches.
-    rows.clear();
-    for (const auto &profile : runtime.appearanceProfiles()) {
-      RowInfo info;
-      info.row = rowCount(out.lut);
-      info.alpha = profile.blend == ParticleAppearanceBlend::Alpha;
-      appendRow(out.lut, runtime.appearanceLutRow(profile.id));
-      markParticleRow(out.lut, info.row, shading, lights, system.name, profile);
-      rows[profile.id] = info;
-    }
-    std::size_t remaining = runtime.aliveCount();
-    if (remaining == 0) {
-      continue;
-    }
+struct SystemLutKey {
+    const void* runtime_ptr = nullptr;
+    std::string name;
+    uint64_t appearance_revision = 0;
+    SceneData::ParticleRenderShape shape = SceneData::ParticleRenderShape::Sphere;
+    bool emissive = false;
+    float roughness = 0.0f;
+    bool pulled = false;
+};
 
-    const auto &buf = runtime.buffers();
-    const std::size_t cap = buf.alive.size();
-    bool have_cached_row = false;
-    uint32_t cached_profile_id = 0;
-    RowInfo cached_info;
-    for (std::size_t i = 0; i < cap && drawn < kMaxBillboards; ++i) {
-      if (buf.alive[i] == 0u)
-        continue;
-      const bool last_alive = (--remaining == 0);
-      const float x = buf.position_x[i];
-      const float y = buf.position_y[i];
-      const float z = buf.position_z[i];
-      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
-        if (last_alive)
-          break;
-        continue;
-      }
+struct CachedSystemMeta {
+    bool pulled = false;
+    uint32_t lookup_offset = 0;
+    uint32_t lookup_count = 0;
+    bool has_alpha = false;
+    // Reusable flat lookup indexed by profile.id (default RowInfo{0, false}).
+    std::vector<RowInfo> host_rows;
+};
 
-      const float life = buf.lifetime_seconds[i];
-      const float age = life > 1e-6f
-                            ? std::clamp(buf.age_seconds[i] / life, 0.0f, 1.0f)
-                            : 0.0f;
-      const uint32_t id =
-          i < buf.appearance_profile.size() ? buf.appearance_profile[i] : 0u;
-      const float scale = i < buf.size_scale.size() ? buf.size_scale[i] : 1.0f;
+struct FrameSystemProbe {
+    std::size_t scene_index = 0;
+    bool pulled = false;
+    RayTrophiSim::ParticleResidentDrawBuffers device{};
+};
 
-      // Unknown / zero id -> row 0, the fallback (additive).
-      if (!have_cached_row || id != cached_profile_id) {
-        cached_profile_id = id;
-        cached_info = RowInfo{};
-        if (auto it = rows.find(id); it != rows.end()) {
-          cached_info = it->second;
+struct LutBuildCache {
+    bool valid = false;
+    std::vector<SystemLutKey> keys;
+    LitLights lights;
+    std::vector<float> lut;
+    std::vector<uint32_t> row_lookup;
+    std::vector<CachedSystemMeta> systems;
+
+    const ParticleBillboardUpload* last_out = nullptr;
+    const float* last_lut_ptr = nullptr;
+    const uint32_t* last_row_lookup_ptr = nullptr;
+
+    std::vector<FrameSystemProbe> frame_probes;
+};
+
+bool keyMatches(const SystemLutKey& key,
+                const SceneData::ParticleSystemObject& system,
+                const RayTrophiSim::ParticleSimulationSystem& runtime,
+                bool pulled) {
+    return key.runtime_ptr == system.runtime.get() &&
+           key.appearance_revision == runtime.appearanceRevision() &&
+           key.shape == system.render.shape &&
+           key.emissive == system.render.emissive &&
+           key.roughness == system.render.roughness &&
+           key.pulled == pulled &&
+           key.name == system.name;
+}
+
+SystemLutKey makeSystemKey(const SceneData::ParticleSystemObject& system,
+                           const RayTrophiSim::ParticleSimulationSystem& runtime,
+                           bool pulled) {
+    SystemLutKey key;
+    key.runtime_ptr = system.runtime.get();
+    key.name = system.name;
+    key.appearance_revision = runtime.appearanceRevision();
+    key.shape = system.render.shape;
+    key.emissive = system.render.emissive;
+    key.roughness = system.render.roughness;
+    key.pulled = pulled;
+    return key;
+}
+
+void rebuildLutCache(const SceneData& scene, const LitLights& lights,
+                     LutBuildCache& cache) {
+    using RayTrophiSim::ParticleAppearanceBlend;
+
+    cache.keys.clear();
+    cache.systems.clear();
+    cache.lut.clear();
+    cache.lights = lights;
+    appendRow(cache.lut, fallbackLutRow());
+    cache.row_lookup.assign(1, 0u); // never empty: keeps the binding valid
+    cache.keys.reserve(cache.frame_probes.size());
+    cache.systems.reserve(cache.frame_probes.size());
+
+    for (const FrameSystemProbe& probe : cache.frame_probes) {
+        const auto& system = scene.particle_systems[probe.scene_index];
+        const auto& runtime = *system.runtime;
+        const LitShading shading = litShadingFor(system.render);
+        cache.keys.push_back(makeSystemKey(system, runtime, probe.pulled));
+
+        CachedSystemMeta meta;
+        meta.pulled = probe.pulled;
+        const auto& profiles = runtime.appearanceProfiles();
+        uint32_t max_id = 0;
+        for (const auto& profile : profiles) {
+            max_id = std::max(max_id, profile.id);
         }
-        have_cached_row = true;
-      }
-      pushQuad(cached_info.alpha ? out.alpha : out.additive, x, y, z, age,
-               cached_info.row, scale);
-      ++drawn;
-      if (last_alive)
-        break;
+
+        if (probe.pulled) {
+            meta.lookup_offset = static_cast<uint32_t>(cache.row_lookup.size());
+            meta.lookup_count = max_id + 1u;
+            cache.row_lookup.resize(cache.row_lookup.size() + meta.lookup_count, 0u);
+            for (const auto& profile : profiles) {
+                const bool alpha = profile.blend == ParticleAppearanceBlend::Alpha;
+                meta.has_alpha = meta.has_alpha || alpha;
+                const uint32_t row = rowCount(cache.lut);
+                cache.row_lookup[meta.lookup_offset + profile.id] =
+                    row | (alpha ? 0x80000000u : 0u);
+                appendRow(cache.lut, runtime.appearanceLutRow(profile.id));
+                markParticleRow(cache.lut, row, shading, lights, system.name, profile);
+            }
+        } else {
+            // ★ Rows BEFORE the alive check (2026-11-24): a dead system keeps its
+            // LUT rows so starting/ending effect systems never triggers a drain.
+            meta.host_rows.assign(static_cast<std::size_t>(max_id) + 1u, RowInfo{});
+            for (const auto& profile : profiles) {
+                RowInfo info;
+                info.row = rowCount(cache.lut);
+                info.alpha = profile.blend == ParticleAppearanceBlend::Alpha;
+                appendRow(cache.lut, runtime.appearanceLutRow(profile.id));
+                markParticleRow(cache.lut, info.row, shading, lights, system.name,
+                                profile);
+                meta.host_rows[profile.id] = info;
+            }
+        }
+        cache.systems.push_back(std::move(meta));
     }
-    if (drawn >= kMaxBillboards)
-      break;
-  }
+    cache.valid = true;
+}
+
+void appendParticleSystems(const SceneData& scene, void* viewport_device,
+                           ParticleBillboardUpload& out, std::size_t& drawn) {
+    static LutBuildCache cache;
+    const LitLights lights = litLightsFor(scene);
+
+    cache.frame_probes.clear();
+    bool keys_match = cache.valid && (cache.lights == lights);
+    std::size_t key_idx = 0;
+    for (std::size_t idx = 0; idx < scene.particle_systems.size(); ++idx) {
+        const auto& system = scene.particle_systems[idx];
+        if (!system.visible || !system.runtime || system.render.emitter_only) {
+            continue;
+        }
+        const auto& runtime = *system.runtime;
+        FrameSystemProbe probe;
+        probe.scene_index = idx;
+        probe.pulled = viewport_device &&
+                       runtime.residentDrawBuffers(probe.device) &&
+                       probe.device.device == viewport_device &&
+                       probe.device.capacity != 0;
+        if (keys_match) {
+            if (key_idx >= cache.keys.size() ||
+                !keyMatches(cache.keys[key_idx], system, runtime, probe.pulled)) {
+                keys_match = false;
+            }
+        }
+        ++key_idx;
+        cache.frame_probes.push_back(probe);
+    }
+    if (key_idx != cache.keys.size()) {
+        keys_match = false;
+    }
+
+    if (!keys_match) {
+        rebuildLutCache(scene, lights, cache);
+        out.lut = cache.lut;
+        out.row_lookup = cache.row_lookup;
+        cache.last_out = &out;
+        cache.last_lut_ptr = out.lut.data();
+        cache.last_row_lookup_ptr = out.row_lookup.data();
+    } else {
+        const bool out_in_sync =
+            (&out == cache.last_out) &&
+            out.lut.size() == cache.lut.size() &&
+            out.row_lookup.size() == cache.row_lookup.size() &&
+            out.lut.data() == cache.last_lut_ptr &&
+            out.row_lookup.data() == cache.last_row_lookup_ptr;
+        if (!out_in_sync) {
+            out.lut = cache.lut;
+            out.row_lookup = cache.row_lookup;
+            cache.last_out = &out;
+            cache.last_lut_ptr = out.lut.data();
+            cache.last_row_lookup_ptr = out.row_lookup.data();
+        }
+    }
+
+    for (std::size_t idx = 0; idx < cache.frame_probes.size(); ++idx) {
+        if (drawn >= kMaxBillboards) {
+            break;
+        }
+        const FrameSystemProbe& probe = cache.frame_probes[idx];
+        const CachedSystemMeta& meta = cache.systems[idx];
+        auto& runtime = *scene.particle_systems[probe.scene_index].runtime;
+
+        if (meta.pulled) {
+            ParticlePulledDraw draw;
+            for (uint32_t i = 0; i < kPulledStreamCount; ++i) {
+                draw.buffers[i] = static_cast<uint64_t>(
+                    reinterpret_cast<uintptr_t>(probe.device.buffers[i]));
+            }
+            // Births are host-owned. A zero host count means there is nothing to
+            // draw, while the stable descriptor slot and LUT rows still serve respawn.
+            const bool has_live_particles = runtime.aliveCount() != 0;
+            draw.slot_capacity = probe.device.capacity;
+            draw.particle_count = has_live_particles ? probe.device.capacity : 0;
+            draw.state_version = has_live_particles ? probe.device.state_version : 0;
+            draw.lookup_offset = meta.lookup_offset;
+            draw.lookup_count = meta.lookup_count;
+            draw.has_alpha = meta.has_alpha;
+            out.pulled.push_back(draw);
+            continue;
+        }
+
+        // Not pullable: either the host already holds the state, or the
+        // simulation runs on ANOTHER VkDevice and its buffers cannot be bound
+        // here. The second is a counted snapshot (particle.stats), the same
+        // consequence live gas has on a foreign device.
+        if (runtime.kinematicResidency() !=
+            RayTrophiSim::ParticleKinematicResidency::Host) {
+            runtime.syncHostState("foreign_device");
+        }
+        std::size_t remaining = runtime.aliveCount();
+        if (remaining == 0) {
+            continue;
+        }
+
+        const auto& buf = runtime.buffers();
+        const std::size_t cap = buf.alive.size();
+        bool have_cached_row = false;
+        uint32_t cached_profile_id = 0;
+        RowInfo cached_info;
+        for (std::size_t i = 0; i < cap && drawn < kMaxBillboards; ++i) {
+            if (buf.alive[i] == 0u) {
+                continue;
+            }
+            const bool last_alive = (--remaining == 0);
+            const float x = buf.position_x[i];
+            const float y = buf.position_y[i];
+            const float z = buf.position_z[i];
+            if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+                if (last_alive) {
+                    break;
+                }
+                continue;
+            }
+
+            const float life = buf.lifetime_seconds[i];
+            const float age = life > 1e-6f
+                                  ? std::clamp(buf.age_seconds[i] / life, 0.0f, 1.0f)
+                                  : 0.0f;
+            const uint32_t id =
+                i < buf.appearance_profile.size() ? buf.appearance_profile[i] : 0u;
+            const float scale = i < buf.size_scale.size() ? buf.size_scale[i] : 1.0f;
+
+            // Unknown / zero id -> row 0, the fallback (additive).
+            if (!have_cached_row || id != cached_profile_id) {
+                cached_profile_id = id;
+                cached_info = id < meta.host_rows.size()
+                                  ? meta.host_rows[id]
+                                  : RowInfo{};
+                have_cached_row = true;
+            }
+            pushQuad(cached_info.alpha ? out.alpha : out.additive, x, y, z, age,
+                     cached_info.row, scale);
+            ++drawn;
+            if (last_alive) {
+                break;
+            }
+        }
+    }
 }
 
 void appendFluidSphereProxies(const SceneData &scene, void *viewport_device,
@@ -563,15 +728,7 @@ void build(const SceneData &scene, void *viewport_device,
   }
   out.additive.clear();
   out.alpha.clear();
-  out.lut.clear();
   out.pulled.clear();
-  out.row_lookup.assign(1, 0u); // never empty: keeps the binding valid
-  // Row 0: the fallback appearance, for particles whose profile id resolves
-  // to nothing. Always present so the LUT binding is never empty.
-  std::vector<float> fallback;
-  RayTrophiSim::bakeParticleAppearanceLut(
-      RayTrophiSim::fallbackParticleAppearance(), fallback);
-  appendRow(out.lut, fallback.data());
 
   std::size_t drawn = 0;
   appendParticleSystems(scene, viewport_device, out, drawn);

@@ -58,6 +58,7 @@ public:
     void* vkBuffer() const;
     void* previousBuffer() const;
     bool previousValid() const;
+    bool hasMotion() const;
     void invalidatePrevious();
     void recordPrevious(void* commandBuffer);
     uint32_t capacity() const;

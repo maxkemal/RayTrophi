@@ -149,15 +149,20 @@ layout(set=0, binding=16) readonly buffer Lookup { uint lookup[]; };
 
 float srgbToLinear01(float v) {
     v = clamp(v, 0.0, 1.0);
-    return v <= 0.04045 ? v / 12.92 : pow((v + 0.055) / 1.055, 2.4);
+    return v * (v * (v * 0.305306011 + 0.682171111) + 0.012522878);
 }
 float linearToSrgb01(float v) {
     v = clamp(v, 0.0, 1.0);
-    return v <= 0.0031308 ? v * 12.92 : 1.055 * pow(v, 1.0 / 2.4) - 0.055;
+    float s1 = sqrt(v);
+    float s2 = sqrt(s1);
+    float s3 = sqrt(s2);
+    return clamp(0.585122381 * s1 + 0.783140355 * s2 - 0.368262736 * s3, 0.0, 1.0);
 }
 // Colours are carried as byte-valued floats (0..255), like CompactVec4.
 float blendChannelLinear(float dst, float target, float alpha) {
     float t = clamp(alpha, 0.0, 1.0);
+    if (t <= 0.0 || dst == target) return dst;
+    if (t >= 1.0) return target;
     float c = srgbToLinear01(dst / 255.0);
     float g = srgbToLinear01(target / 255.0);
     return clamp(floor(linearToSrgb01(c + (g - c) * t) * 255.0 + 0.5), 0.0, 255.0);
@@ -243,15 +248,15 @@ bool inSurface(Surface s, int x, int y) {
 }
 
 // Bilinear reads of the previous step (CPU: sampleSourceScalar / sampleSourcePixel).
-float sampleScalar(Surface s, uint channel, float gx, float gy) {
+vec3 sampleStateXYZ(Surface s, float gx, float gy) {
     gx = clamp(gx, 0.0, float(s.width - 1u));
     gy = clamp(gy, 0.0, float(s.height - 1u));
     int x0 = int(floor(gx)); int y0 = int(floor(gy));
     float fx = gx - float(x0); float fy = gy - float(y0);
-    float a = state[texelIndex(s, x0, y0)][channel];
-    float b = state[texelIndex(s, x0 + 1, y0)][channel];
-    float c = state[texelIndex(s, x0, y0 + 1)][channel];
-    float d = state[texelIndex(s, x0 + 1, y0 + 1)][channel];
+    vec3 a = state[texelIndex(s, x0, y0)].xyz;
+    vec3 b = state[texelIndex(s, x0 + 1, y0)].xyz;
+    vec3 c = state[texelIndex(s, x0, y0 + 1)].xyz;
+    vec3 d = state[texelIndex(s, x0 + 1, y0 + 1)].xyz;
     return mix(mix(a, b, fx), mix(c, d, fx), fy);
 }
 vec4 sampleColor(Surface s, float gx, float gy) {
@@ -352,17 +357,30 @@ float pictureRevealTarget(Surface s, uint pic, vec4 paint) {
 
 // ── STAMP ───────────────────────────────────────────────────────────────────
 
+const uint STAMP_BATCH = 16u;
 shared uint s_list[MAX_TILE_SOURCES];
 shared uint s_count;
 shared uint s_flag;
 shared uint s_sum[4];
-shared uint s_pic[2];
+shared uint s_pic[4];
 // Workgroup-uniform activity gate (one tile per workgroup). See
 // workgroupDilatedActive: the neighbourhood flags are read ONCE per tile, not
 // once per thread. Idle tiles were the bulk of paint_wet's cost: every mode
 // launches one workgroup per tile of all surfaces (8 x 1024^2 -> 32768 groups),
 // and each of the 256 threads re-read 9 (tick/resolve) or 25 (channels) flags.
 shared uint s_gate;
+// Per-batch source cache for STAMP: constant event/dab fields and precomputed
+// finger capsules are loaded once per workgroup instead of per texel.
+shared vec4 s_pos_r[STAMP_BATCH];       // p.xyz, bound radius r
+shared vec4 s_norm_face[STAMP_BATCH];   // n.xyz (unit for events), facing (0/1)
+shared vec4 s_col_amt[STAMP_BATCH];     // srgb255.rgb, amount
+shared vec4 s_u_g[STAMP_BATCH];         // u.xyz, graze g
+shared vec4 s_w_cr[STAMP_BATCH];        // w.xyz, core_r
+shared vec4 s_ph[STAMP_BATCH];          // ph.xyzw
+shared vec4 s_misc[STAMP_BATCH];        // load_base, jag, inv_stretch_cr, inv_cr
+shared uvec2 s_seed_f[STAMP_BATCH];     // seed, uint(fingers)
+shared vec4 s_f0[STAMP_BATCH * 8u];     // finger dir.xy, len, root
+shared float s_fbead[STAMP_BATCH * 8u]; // finger bead_r
 
 // ── Event splat shape (2026-11-18) ──────────────────────────────────────────
 // A drop hitting a wall is not a disc. sim_particle_collide.comp packs the
@@ -420,16 +438,45 @@ float eventGraze(CollisionEvent e, vec3 n, out vec3 u) {
     u = a * cos(phi) + b * sin(phi);
     return 0.0;
 }
-// Bounding radius (tile culling, early reject): rim lobes/spikes reach ~2 core
-// radii, satellites 1.95, all stretched by up to 1.9 and shifted 0.3 forward.
-float eventBoundRadius(CollisionEvent e) {
-    vec3 n = normalize(vec3(e.normal[0], e.normal[1], e.normal[2]));
-    vec3 u;
-    float g = eventGraze(e, n, u);
-    return eventCoreRadius(e) * (2.0 * (1.0 + 0.9 * g) + 0.3);
+// Tangential graze magnitude only (for lightweight tile culling without seed/sin/cos).
+float eventGrazeFactor(uint flags, vec3 n) {
+    vec3 v;
+    if (eventImpactDir(flags, v)) {
+        vec3 vt = v - n * dot(v, n);
+        float g = length(vt);
+        if (g > 0.05) return g;
+    }
+    return 0.0;
 }
-// Weight of event e at texel position tp; load = paint carried there.
-float eventSplatWeight(CollisionEvent e, vec3 tp, float falloff, out float load) {
+// Lightweight tile culling info: avoids LUT lookups, linearToSrgb01 pow(),
+// eventSeed, and tangent-frame trig during the per-tile source scan.
+bool sourceCullAt(uint idx, out vec3 p, out float r) {
+    if (pc.source_kind == SOURCE_DABS) {
+        Dab d = dabs[idx];
+        p = d.pos_radius.xyz;
+        r = d.pos_radius.w;
+        return r > 0.0 && d.color_amount.a > 0.0;
+    }
+    CollisionEvent e = events[idx];
+    p = vec3(e.position[0], e.position[1], e.position[2]);
+    if (e.speed < pc.splat_min_speed || pc.splat_radius <= 0.0 || pc.splat_amount <= 0.0) {
+        r = 0.0;
+        return false;
+    }
+    vec3 n = normalize(vec3(e.normal[0], e.normal[1], e.normal[2]));
+    float g = eventGrazeFactor(e.flags, n);
+    r = eventCoreRadius(e) * (2.0 * (1.0 + 0.9 * g) + 0.3);
+    return r > 0.0;
+}
+void loadBatchSource(uint slot, uint idx) {
+    if (pc.source_kind == SOURCE_DABS) {
+        Dab d = dabs[idx];
+        s_pos_r[slot] = d.pos_radius;
+        s_norm_face[slot] = vec4(d.normal_facing.xyz, d.normal_facing.w > 0.5 ? 1.0 : 0.0);
+        s_col_amt[slot] = vec4(clamp(d.color_amount.rgb, 0.0, 1.0) * 255.0, d.color_amount.a);
+        return;
+    }
+    CollisionEvent e = events[idx];
     vec3 p = vec3(e.position[0], e.position[1], e.position[2]);
     vec3 n = normalize(vec3(e.normal[0], e.normal[1], e.normal[2]));
     uint seed = eventSeed(e);
@@ -438,96 +485,8 @@ float eventSplatWeight(CollisionEvent e, vec3 tp, float falloff, out float load)
     vec3 u;
     float g = eventGraze(e, n, u);
     vec3 w = cross(n, u);
-    vec3 d = tp - p;
-    float x = (dot(d, u) - 0.3 * g * core_r) / (1.0 + 0.9 * g) / core_r;
-    float y = dot(d, w) / core_r;
-    // ★ Distance OFF the contact plane counts too. Without it a floor splat
-    // weighed only in the floor plane, so a wall texel straight above the hit
-    // was "at the centre": every drop landing along a wall's foot painted a
-    // full-weight band up the wall as high as the bound radius (~0.5 m), a
-    // rectangle along the bottom of every vertical wall (2026-11-18).
-    float h = dot(d, n) / core_r;
-    float rho = length(vec3(x, y, h));
-    load = clamp(size * size, 0.3, 3.0) * (0.85 + 0.3 * hash01(seed + 6u));
-    if (rho > 2.1) return 0.0;
-    // atan(0, 0) is undefined in GLSL (NaN on some drivers): the texel AT the
-    // contact point used to seed NaN paint that ran black down the wall.
-    float th = rho > 1e-5 ? atan(y, x) : 0.0;
-    vec4 ph = vec4(hash01(seed + 1u), hash01(seed + 2u), hash01(seed + 3u), hash01(seed + 4u)) * 6.2831853;
-    float jag = clamp(0.25 + 0.03 * e.speed, 0.25, 0.7) * (0.7 + 0.6 * hash01(seed + 5u));
-    // ★ Splatter, not a snowflake (2026-11-24). The rim used to add
-    //   pow(sin(14 th), 8): fourteen evenly spaced needle spikes, which read as
-    //   hard ice crystals on the wall. Paint throws a FEW irregular fingers
-    //   instead - thick at the root, tapering, each ending in a round bead -
-    //   around a softly lobed body. The body keeps the low lobes (3/5/7 th,
-    //   random phases); the fingers are tapered capsules from the centre.
-    float rim = 1.0 + 0.14 * sin(3.0 * th + ph.x) + 0.09 * sin(5.0 * th + ph.y) +
-                0.05 * sin(7.0 * th + ph.z);
-    float weight = brushWeight(rho / max(0.4, rim), 2.0, falloff);
-    // Fingers: 3..8, more with a faster hit; angles evenly spread then jittered
-    // (never a regular star), and a grazing hit pulls them forward (+x, the
-    // direction the drop was travelling) and makes the forward ones longer.
-    // Length <= 1.85 core radii + bead: inside the 2.1 reject radius above.
-    int fingers = min(8, 3 + int(floor(hash01(seed + 9u) * (1.0 + 7.0 * jag))));
-    vec2 q2 = vec2(x, y);
-    for (int i = 0; i < 8; ++i) {
-        if (i >= fingers) break;
-        uint fs = hashU(seed ^ (uint(i + 1) * 0x9E3779B9u));
-        float ang = (float(i) + 0.2 + 0.6 * hash01(fs)) / float(fingers) * 6.2831853 + ph.w;
-        ang = atan(sin(ang), cos(ang)) * (1.0 - 0.55 * g);
-        vec2 dir = vec2(cos(ang), sin(ang));
-        float len = min(1.85, 1.1 + (0.3 + 0.55 * jag) * hash01(fs + 1u) + 0.35 * g * max(0.0, dir.x));
-        float root = 0.17 + 0.12 * hash01(fs + 2u);           // half-width at the body
-        float t = clamp(dot(q2, dir), 0.0, len);
-        float half_w = mix(root, root * 0.4, t / len);          // tapering
-        float wf = brushWeight(length(vec3(q2 - dir * t, h)) / half_w, 2.0, falloff);
-        // The bead: paint runs to the tip of a finger and collects there.
-        float bead_r = root * (0.55 + 0.35 * hash01(fs + 3u));
-        float wb = brushWeight(length(vec3(q2 - dir * len, h)) / bead_r, 2.0, falloff);
-        float wfinger = max(wf, wb);
-        if (wfinger > weight) { weight = wfinger; load *= (wb > wf ? 0.85 : 0.6); }
-    }
-    // Satellites: one candidate per angular sector (11 sectors), centred well
-    // inside its sector so a texel only ever needs its own sector's. Flung
-    // droplets are teardrops stretched ALONG their flight (radially), of
-    // mixed sizes, and not perfect dots.
-    const float K = 11.0;
-    float sector = clamp(floor((th + 3.14159265) / 6.2831853 * K), 0.0, K - 1.0);
-    uint sh = hashU(seed ^ (uint(sector) * 2654435761u));
-    if (hash01(sh) < clamp(jag * 0.9, 0.2, 0.6)) {
-        float tc = (sector + 0.25 + 0.5 * hash01(sh + 1u)) / K * 6.2831853 - 3.14159265;
-        float rc = 1.25 + 0.55 * hash01(sh + 2u);
-        float sr = 0.05 + 0.10 * hash01(sh + 3u) * hash01(sh + 4u);   // mostly small, a few larger
-        vec2 radial = vec2(cos(tc), sin(tc));
-        vec2 rel = q2 - rc * radial;
-        float along = dot(rel, radial);
-        float across = dot(rel, vec2(-radial.y, radial.x));
-        float stretch = 1.4 + 0.8 * hash01(sh + 5u);
-        float ds = length(vec3(along / stretch, across, h)) / sr;
-        float ws = brushWeight(ds, 2.0, falloff) * 0.9;
-        if (ws > weight) { weight = ws; load *= 0.5; }
-    }
-    return weight;
-}
-
-bool sourceAt(uint idx, out vec3 p, out float r, out vec3 n, out bool facing,
-              out vec3 srgb255, out float amount) {
-    if (pc.source_kind == SOURCE_DABS) {
-        Dab d = dabs[idx];
-        p = d.pos_radius.xyz; r = d.pos_radius.w;
-        n = d.normal_facing.xyz; facing = d.normal_facing.w > 0.5;
-        srgb255 = clamp(d.color_amount.rgb, 0.0, 1.0) * 255.0;
-        amount = d.color_amount.a;
-        return r > 0.0 && amount > 0.0;
-    }
-    CollisionEvent e = events[idx];
-    p = vec3(e.position[0], e.position[1], e.position[2]);
-    n = vec3(e.normal[0], e.normal[1], e.normal[2]);
-    facing = true;
-    r = pc.splat_radius > 0.0 ? eventBoundRadius(e) : 0.0;
-    amount = pc.splat_amount;
-    if (e.speed < pc.splat_min_speed) return false;
-    // Colour: the particle's appearance LUT at its age (linear rgb).
+    float r = core_r * (2.0 * (1.0 + 0.9 * g) + 0.3);
+    // Colour: the particle's appearance LUT at its age (linear rgb -> sRGB 0..255).
     vec3 lin = vec3(1.0);
     uint row = e.profile < pc.lookup_count ? lookup[e.profile] : 0xFFFFFFFFu;
     if (row < pc.lut_rows) {
@@ -538,8 +497,99 @@ bool sourceAt(uint idx, out vec3 p, out float r, out vec3 n, out bool facing,
         vec3 c1 = vec3(lut[base + i1 * 8u], lut[base + i1 * 8u + 1u], lut[base + i1 * 8u + 2u]);
         lin = mix(c0, c1, f);
     }
-    srgb255 = vec3(linearToSrgb01(lin.r), linearToSrgb01(lin.g), linearToSrgb01(lin.b)) * 255.0;
-    return r > 0.0 && amount > 0.0;
+    vec3 srgb255 = vec3(linearToSrgb01(lin.r), linearToSrgb01(lin.g), linearToSrgb01(lin.b)) * 255.0;
+    float load_base = clamp(size * size, 0.3, 3.0) * (0.85 + 0.3 * hash01(seed + 6u));
+    vec4 ph = vec4(hash01(seed + 1u), hash01(seed + 2u), hash01(seed + 3u), hash01(seed + 4u)) * 6.2831853;
+    float jag = clamp(0.25 + 0.03 * e.speed, 0.25, 0.7) * (0.7 + 0.6 * hash01(seed + 5u));
+    uint fingers = uint(min(8, 3 + int(floor(hash01(seed + 9u) * (1.0 + 7.0 * jag)))));
+    s_pos_r[slot] = vec4(p, r);
+    s_norm_face[slot] = vec4(n, 1.0);
+    s_col_amt[slot] = vec4(srgb255, pc.splat_amount);
+    s_u_g[slot] = vec4(u, g);
+    s_w_cr[slot] = vec4(w, core_r);
+    s_ph[slot] = ph;
+    s_misc[slot] = vec4(load_base, jag, 1.0 / ((1.0 + 0.9 * g) * core_r), 1.0 / core_r);
+    s_seed_f[slot] = uvec2(seed, fingers);
+}
+void loadBatchFinger(uint slot, uint fi) {
+    uvec2 sf = s_seed_f[slot];
+    if (fi >= sf.y) return;
+    uint seed = sf.x;
+    float g = s_u_g[slot].w;
+    float phw = s_ph[slot].w;
+    float jag = s_misc[slot].y;
+    uint fs = hashU(seed ^ ((fi + 1u) * 0x9E3779B9u));
+    float ang = (float(fi) + 0.2 + 0.6 * hash01(fs)) / float(sf.y) * 6.2831853 + phw;
+    ang = atan(sin(ang), cos(ang)) * (1.0 - 0.55 * g);
+    vec2 dir = vec2(cos(ang), sin(ang));
+    float len = min(1.85, 1.1 + (0.3 + 0.55 * jag) * hash01(fs + 1u) + 0.35 * g * max(0.0, dir.x));
+    float root = 0.17 + 0.12 * hash01(fs + 2u);
+    float bead_r = root * (0.55 + 0.35 * hash01(fs + 3u));
+    uint fidx = slot * 8u + fi;
+    s_f0[fidx] = vec4(dir, len, root);
+    s_fbead[fidx] = bead_r;
+}
+// Weight of cached batch event `slot` at offset `dv = tp - p`; load = paint carried there.
+float eventSplatWeightBatch(uint slot, vec3 dv, float falloff, out float load) {
+    vec4 ug = s_u_g[slot];
+    vec4 wcr = s_w_cr[slot];
+    vec4 misc = s_misc[slot];
+    vec3 n = s_norm_face[slot].xyz;
+    float x = (dot(dv, ug.xyz) - 0.3 * ug.w * wcr.w) * misc.z;
+    float y = dot(dv, wcr.xyz) * misc.w;
+    // Distance OFF the contact plane counts too (prevents floor splats painting wall foot).
+    float h = dot(dv, n) * misc.w;
+    float rho2 = x * x + y * y + h * h;
+    load = misc.x;
+    if (rho2 > 4.41) return 0.0;   // 2.1^2
+    float rho = sqrt(rho2);
+    // atan(0, 0) is undefined in GLSL (NaN on some drivers).
+    float th = rho > 1e-5 ? atan(y, x) : 0.0;
+    vec4 ph = s_ph[slot];
+    float rim = 1.0 + 0.14 * sin(3.0 * th + ph.x) + 0.09 * sin(5.0 * th + ph.y) +
+                0.05 * sin(7.0 * th + ph.z);
+    float weight = brushWeight(rho / max(0.4, rim), 2.0, falloff);
+    uvec2 sf = s_seed_f[slot];
+    uint fbase = slot * 8u;
+    vec2 q2 = vec2(x, y);
+    float h2 = h * h;
+    for (uint i = 0u; i < sf.y; ++i) {
+        vec4 f0 = s_f0[fbase + i];
+        float bead_r = s_fbead[fbase + i];
+        vec2 dir = f0.xy;
+        float len = f0.z;
+        float root = f0.w;
+        float t = clamp(dot(q2, dir), 0.0, len);
+        float half_w = mix(root, root * 0.4, t / len);
+        vec2 df = q2 - dir * t;
+        float d2f = dot(df, df) + h2;
+        float wf = d2f < half_w * half_w ? brushWeight(sqrt(d2f) / half_w, 2.0, falloff) : 0.0;
+        vec2 db = q2 - dir * len;
+        float d2b = dot(db, db) + h2;
+        float wb = d2b < bead_r * bead_r ? brushWeight(sqrt(d2b) / bead_r, 2.0, falloff) : 0.0;
+        float wfinger = max(wf, wb);
+        if (wfinger > weight) { weight = wfinger; load *= (wb > wf ? 0.85 : 0.6); }
+    }
+    const float K = 11.0;
+    float sector = clamp(floor((th + 3.14159265) / 6.2831853 * K), 0.0, K - 1.0);
+    uint sh = hashU(sf.x ^ (uint(sector) * 2654435761u));
+    if (hash01(sh) < clamp(misc.y * 0.9, 0.2, 0.6)) {
+        float tc = (sector + 0.25 + 0.5 * hash01(sh + 1u)) / K * 6.2831853 - 3.14159265;
+        float rc = 1.25 + 0.55 * hash01(sh + 2u);
+        float sr = 0.05 + 0.10 * hash01(sh + 3u) * hash01(sh + 4u);
+        vec2 radial = vec2(cos(tc), sin(tc));
+        vec2 rel = q2 - rc * radial;
+        float along = dot(rel, radial);
+        float across = dot(rel, vec2(-radial.y, radial.x));
+        float stretch = 1.4 + 0.8 * hash01(sh + 5u);
+        float al_s = along / stretch;
+        float d2s = al_s * al_s + across * across + h2;
+        if (d2s < sr * sr) {
+            float ws = brushWeight(sqrt(d2s) / sr, 2.0, falloff) * 0.9;
+            if (ws > weight) { weight = ws; load *= 0.5; }
+        }
+    }
+    return weight;
 }
 
 float paintHeightGain(Surface s) {
@@ -558,22 +608,25 @@ float buildPaintHeight(float current, float ceiling, float load) {
 }
 
 void stampTile(uint tile_index) {
-    Tile t = tiles[tile_index];
-    if (t.valid_texels == 0u) return;
-    Surface s = surfaces[t.surface];
-    uint lid = gl_LocalInvocationIndex;
-
     uint count = pc.source_count;
-    if (pc.source_kind == SOURCE_EVENTS) {
+    const bool splat = pc.source_kind == SOURCE_EVENTS;
+    if (splat) {
+        if (pc.splat_radius <= 0.0 || pc.splat_amount <= 0.0) return;
         count = min(min(counter[0], pc.event_capacity), pc.max_events);
     }
+    if (count == 0u) return;
+
+    Tile t = tiles[tile_index];
+    if (t.valid_texels == 0u) return;
+    uint lid = gl_LocalInvocationIndex;
+
     if (lid == 0u) { s_count = 0u; s_flag = 0u; }
     barrier();
     for (uint base = 0u; base < count; base += 256u) {
         uint idx = base + lid;
         if (idx < count) {
-            vec3 p; float r; vec3 n; bool facing; vec3 c; float a;
-            if (sourceAt(idx, p, r, n, facing, c, a)) {
+            vec3 p; float r;
+            if (sourceCullAt(idx, p, r)) {
                 vec3 d = max(t.bmin.xyz - p, vec3(0.0)) + max(p - t.bmax.xyz, vec3(0.0));
                 if (dot(d, d) <= r * r) {
                     uint slot = atomicAdd(s_count, 1u);
@@ -588,103 +641,126 @@ void stampTile(uint tile_index) {
         atomicAdd(stats[t.surface * STATS_STRIDE + ST_SOURCES_DROPPED], s_count - MAX_TILE_SOURCES);
     }
     if (listed == 0u) return;
+    Surface s = surfaces[t.surface];
 
     // The stroke terms of the CPU Wet/Oil brush (scene_ui_modifiers.cpp) at the
     // start of a stroke: loaded paint = the splat colour, load = paint_load.
     const bool oil = (s.flags & SURFACE_OIL) != 0u;
-    const float load = clamp(s.paint_load, 0.0, 1.0);
+    const float surf_load = clamp(s.paint_load, 0.0, 1.0);
     const float wetness = clamp(s.wetness, 0.0, 1.0);
     const float pickup = clamp(s.pickup_rate, 0.0, 1.0);
     const float fresh_bias = clamp(clamp(s.deposit_rate, 0.0, 1.0) * (0.82 + 0.18 * wetness) *
-                                   (0.78 + 0.22 * load), 0.0, 1.0);
-    const float deposit_ratio = clamp(fresh_bias * (0.78 + 0.22 * load), 0.0, 1.0);
-    // noteWetDab, per texel, sources applied in order.
-    const float deposited = deposit_ratio * (0.25 + load * 0.75);
+                                   (0.78 + 0.22 * surf_load), 0.0, 1.0);
+    const float deposit_ratio = clamp(fresh_bias * (0.78 + 0.22 * surf_load), 0.0, 1.0);
+    const float deposited = deposit_ratio * (0.25 + surf_load * 0.75);
+    const float surf_falloff = clamp(s.falloff, 0.0, 1.0);
+    const float surf_act_scale = wetness * (0.04 + deposited * 0.96);
+    const float underpaint_k = wetness * (1.0 - fresh_bias * (oil ? 0.92 : 0.82)) *
+                               ((oil ? 0.08 : 0.18) + pickup * (oil ? 0.18 : 0.34));
     const float height_gain = paintHeightGain(s);
     const bool deposit_height = (s.flags & SURFACE_HEIGHT_NORMAL) != 0u &&
                                 pc._p0 != 0u && height_gain > 0.0;
-    uint touched = 0u;
-    for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
-        int x, y; tileTexel(t, k, x, y);
-        if (!inSurface(s, x, y)) continue;
-        uint ti = texelIndex(s, x, y);
-        vec4 pv = pos_valid[ti];
-        if (pv.w < 0.5) continue;
-        vec3 tn = octDecode(flow_normal[ti].w);
-        vec4 st = state[ti];
-        vec4 px = unpackColor(color[ti]);
-        bool hit = false;
-        float height_ceiling = 0.0;
-        for (uint j = 0u; j < listed; ++j) {
-            vec3 p; float r; vec3 n; bool facing; vec3 c; float a;
-            sourceAt(s_list[j], p, r, n, facing, c, a);
-            float dist_norm = length(pv.xyz - p) / r;
-            if (dist_norm > 1.0) continue;
-            if (facing && dot(tn, n) < pc.facing_min) continue;
-            float activation = clamp(clamp(a, 0.0, 1.0) * clamp(s.wetness, 0.0, 1.0) *
-                                     (0.04 + deposited * 0.96), 0.0, 1.0);
-            if (activation <= 0.001) continue;
-            const bool splat = pc.source_kind == SOURCE_EVENTS;
-            float load = 1.0;
-            float weight = splat
-                ? eventSplatWeight(events[s_list[j]], pv.xyz, clamp(s.falloff, 0.0, 1.0), load)
-                : brushWeight(dist_norm, 2.0, clamp(s.falloff, 0.0, 1.0));
-            if (!(weight > 0.001) || isinf(weight)) continue;   // also skips NaN
-            // A drop's paint load scales what it leaves: wetness drives the
-            // TICK's runoff, so a heavy drop runs a little and a fine one stays.
-            float wet_add = min(weight * activation * load, 1.0);
-            if (wet_add <= 0.001) continue;
-            float pigment_add = wet_add * deposited;
-            st.x = clamp(st.x + wet_add * (0.18 + deposited * 0.82), 0.0, 1.0);
-            st.y = clamp(st.y + pigment_add, 0.0, 1.0);
-            if (deposit_height) {
-                if (!hit) {
-                    float base_height = paintBaseHeight(ti);
-                    height_ceiling = mix(base_height, 1.0, height_gain);
-                    st.z = max(st.z, base_height);
+    uint touched_mask = 0u;
+
+    for (uint b = 0u; b < listed; b += STAMP_BATCH) {
+        uint batch_n = min(STAMP_BATCH, listed - b);
+        if (lid < batch_n) {
+            loadBatchSource(lid, s_list[b + lid]);
+        }
+        barrier();
+        if (splat && lid < batch_n * 8u) {
+            loadBatchFinger(lid >> 3u, lid & 7u);
+        }
+        barrier();
+
+        for (uint k = 0u; k < TEXELS_PER_THREAD; ++k) {
+            int x, y; tileTexel(t, k, x, y);
+            if (!inSurface(s, x, y)) continue;
+            uint ti = texelIndex(s, x, y);
+            vec4 pv = pos_valid[ti];
+            if (pv.w < 0.5) continue;
+            bool tn_loaded = false;
+            vec3 tn = vec3(0.0);
+            bool hit = false;
+            vec4 st = vec4(0.0);
+            vec4 px = vec4(0.0);
+            uint base_packed = 0u;
+            float height_ceiling = 0.0;
+
+            for (uint j = 0u; j < batch_n; ++j) {
+                vec4 pr = s_pos_r[j];
+                vec3 dv = pv.xyz - pr.xyz;
+                float d2 = dot(dv, dv);
+                if (d2 > pr.w * pr.w) continue;
+                vec4 nf = s_norm_face[j];
+                if (nf.w > 0.5) {
+                    if (!tn_loaded) {
+                        tn = octDecode(flow_normal[ti].w);
+                        tn_loaded = true;
+                    }
+                    if (dot(tn, nf.xyz) < pc.facing_min) continue;
                 }
-                st.z = buildPaintHeight(st.z, height_ceiling, pigment_add);
+                vec4 ca = s_col_amt[j];
+                float activation = clamp(clamp(ca.a, 0.0, 1.0) * surf_act_scale, 0.0, 1.0);
+                if (activation <= 0.001) continue;
+                float drop_load = 1.0;
+                float weight = splat
+                    ? eventSplatWeightBatch(j, dv, surf_falloff, drop_load)
+                    : brushWeight(sqrt(d2) / pr.w, 2.0, surf_falloff);
+                if (!(weight > 0.001) || isinf(weight)) continue;   // also skips NaN
+                float wet_add = min(weight * activation * drop_load, 1.0);
+                if (wet_add <= 0.001) continue;
+
+                if (!hit) {
+                    st = state[ti];
+                    px = unpackColor(color[ti]);
+                    base_packed = base_color[ti];
+                    if (deposit_height) {
+                        float base_height = paintBaseHeight(ti);
+                        height_ceiling = mix(base_height, 1.0, height_gain);
+                        st.z = max(st.z, base_height);
+                    }
+                    hit = true;
+                }
+                float pigment_add = wet_add * deposited;
+                st.x = clamp(st.x + wet_add * (0.18 + deposited * 0.82), 0.0, 1.0);
+                st.y = clamp(st.y + pigment_add, 0.0, 1.0);
+                if (deposit_height) {
+                    st.z = buildPaintHeight(st.z, height_ceiling, pigment_add);
+                }
+                float seed = max(clamp(weight * clamp(ca.a * (splat ? 0.85 + 0.25 * drop_load : 1.0), 0.0, 1.0), 0.0, 1.0),
+                                 clamp(wet_add * (0.22 + deposited * 0.78), 0.0, 1.0));
+                float wet_gate = clamp((st.x - 0.04) / 0.28, 0.0, 1.0);
+                float pigment_gate = clamp((st.y - 0.02) / 0.20, 0.0, 1.0);
+                float reservoir = clamp(wet_gate * (0.30 + pigment_gate * 0.70), 0.0, 1.0);
+                float underpaint_mix = clamp(reservoir * underpaint_k *
+                                             ((oil ? 0.36 : 0.55) - drop_load * (oil ? 0.10 : 0.18)),
+                                             0.0, oil ? 0.20 : 0.42) *
+                                       (splat ? 1.0 - 0.7 * clamp(drop_load * 0.5, 0.0, 1.0) : 1.0);
+                vec3 sampled = mix(unpackColor(base_packed).rgb, px.rgb, px.a / 255.0);
+                vec3 c = mix(ca.rgb, sampled, underpaint_mix);
+                float dst_a = px.a / 255.0;
+                float out_a = seed + dst_a * (1.0 - seed);
+                if (out_a > 1e-6) {
+                    float keep = dst_a * (1.0 - seed);
+                    px.rgb = clamp((c * seed + px.rgb * keep) / out_a, 0.0, 255.0);
+                    px.a = clamp(out_a * 255.0, 0.0, 255.0);
+                }
             }
-            // Deposit. On the CPU noteWetDab is the wet half of a stroke whose
-            // colour comes from a paintLayerAtUV dab (Normal brush: alpha =
-            // falloff weight x strength, alpha-over); noteWetDab itself only
-            // seeds ~0.5 alpha where the layer is still empty. A splat here is
-            // the whole stroke, so the brush deposit is applied (alpha-over in
-            // byte space, the CPU layer blend) and the seed is its floor.
-            // A fresh drop's core covers fully (vivid paint, not a tint of the
-            // wall): its opacity rises with the load it carries.
-            float seed = max(clamp(weight * clamp(a * (splat ? 0.85 + 0.25 * load : 1.0), 0.0, 1.0), 0.0, 1.0),
-                             clamp(wet_add * (0.22 + deposited * 0.78), 0.0, 1.0));
-            // Pickup: the brush colour takes on the wet paint under it
-            // (sampleWetPickupReservoir + underpaint_mix of the CPU brush). The
-            // "sampled" colour is what the surface shows: layer over base.
-            float wet_gate = clamp((st.x - 0.04) / 0.28, 0.0, 1.0);
-            float pigment_gate = clamp((st.y - 0.02) / 0.20, 0.0, 1.0);
-            float reservoir = clamp(wet_gate * (0.30 + pigment_gate * 0.70), 0.0, 1.0);
-            float underpaint_mix = clamp(reservoir * wetness * (1.0 - fresh_bias * (oil ? 0.92 : 0.82)) *
-                                         ((oil ? 0.08 : 0.18) + pickup * (oil ? 0.18 : 0.34)) *
-                                         ((oil ? 0.36 : 0.55) - load * (oil ? 0.10 : 0.18)),
-                                         0.0, oil ? 0.20 : 0.42) *
-                                   (splat ? 1.0 - 0.7 * clamp(load * 0.5, 0.0, 1.0) : 1.0);
-            vec3 sampled = mix(unpackColor(base_color[ti]).rgb, px.rgb, px.a / 255.0);
-            c = mix(c, sampled, underpaint_mix);
-            float dst_a = px.a / 255.0;
-            float out_a = seed + dst_a * (1.0 - seed);
-            if (out_a > 1e-6) {
-                float keep = dst_a * (1.0 - seed);
-                px.rgb = clamp((c * seed + px.rgb * keep) / out_a, 0.0, 255.0);
-                px.a = clamp(out_a * 255.0, 0.0, 255.0);
+            if (hit) {
+                state[ti] = cleanState(st);
+                color[ti] = packColor(px);
+                touched_mask |= (1u << k);
             }
-            hit = true;
         }
-        if (hit) {
-            state[ti] = cleanState(st);
-            color[ti] = packColor(px);
-            ++touched;
-        }
+        barrier();
     }
-    if (touched > 0u) {
-        atomicAdd(stats[t.surface * STATS_STRIDE + ST_STAMPED_TEXELS], touched);
+
+    uint touched = bitCount(touched_mask);
+    if (touched > 0u) atomicAdd(s_flag, touched);
+    barrier();
+    if (lid == 0u && s_flag > 0u) {
+        atomicAdd(stats[t.surface * STATS_STRIDE + ST_STAMPED_TEXELS], s_flag);
         tile_flags[2u * tile_index] = 1u;
         // Stamps write colour/state directly, before the step's RESOLVE
         // compares old with new: without this a fresh splat on a still tile
@@ -746,9 +822,10 @@ FlowEval evalFlow(Surface s, int px, int py, bool oil) {
         f.flow_scale = min(6.0, s.runoff * effective_slope * metric * max(f.wet, 0.05) * pc.dt * 60.0 * 1.65);
         if (f.flow_scale > 0.001) {
             f.advected_src = vec2(px, py) - f.dir * f.flow_scale;
-            f.advected_wet = sampleScalar(s, 0u, f.advected_src.x, f.advected_src.y);
-            f.advected_pigment = sampleScalar(s, 1u, f.advected_src.x, f.advected_src.y);
-            f.advected_thickness = sampleScalar(s, 2u, f.advected_src.x, f.advected_src.y);
+            vec3 adv = sampleStateXYZ(s, f.advected_src.x, f.advected_src.y);
+            f.advected_wet = adv.x;
+            f.advected_pigment = adv.y;
+            f.advected_thickness = adv.z;
             f.runoff_alpha = clamp(f.flow_scale * (0.26 + (metric - 1.0) * 0.12), 0.0, 1.0);
             float drip_bias = clamp(f.advected_wet - f.wet * 0.25, 0.0, 1.0);
             f.drip_head_alpha = clamp(f.runoff_alpha * s.drip_head * (0.35 + drip_bias), 0.0, 1.0);
@@ -765,16 +842,27 @@ FlowEval evalFlow(Surface s, int px, int py, bool oil) {
     return f;
 }
 
-float trailDistance(Surface s, FlowEval f) {
-    return min(s.brush_radius_px * 0.6 + 2.0,
-               max(f.flow_scale * 0.95, s.brush_radius_px * clamp(f.wet, 0.15, 1.0) * 0.22));
-}
-ivec2 transportTarget(Surface s, int px, int py, FlowEval f) {
-    vec2 t = vec2(px, py) + f.dir * trailDistance(s, f);
-    return clamp(ivec2(round(t)), ivec2(0), ivec2(int(s.width) - 1, int(s.height) - 1));
-}
-bool transports(FlowEval f) {
-    return f.has_downhill && f.flow_scale > 0.02 && f.runoff_alpha > 0.01;
+// Fast pre-check for downstream gather: decides whether `cand` transports and
+// targets `target` using only cand's own state + flow_normal (2 loads),
+// avoiding bilinear advection loads for non-matching candidates.
+bool candTargetsTexel(Surface s, ivec2 cand, ivec2 target) {
+    uint ti = texelIndex(s, cand.x, cand.y);
+    vec4 fl = flow_normal[ti];
+    float flow_len = length(fl.xy);
+    if (flow_len <= 1e-6 || fl.z <= 0.0) return false;
+    float wet = state[ti].x;
+    float effective_slope = max(0.18, fl.z);
+    float metric = clamp(1.0 + log(1.0 + max(0.0, flow_len)) * 0.85, 1.0, 4.0);
+    float flow_scale = min(6.0, s.runoff * effective_slope * metric * max(wet, 0.05) * pc.dt * 60.0 * 1.65);
+    if (flow_scale <= 0.02) return false;
+    float runoff_alpha = clamp(flow_scale * (0.26 + (metric - 1.0) * 0.12), 0.0, 1.0);
+    if (runoff_alpha <= 0.01) return false;
+    float trail = min(s.brush_radius_px * 0.6 + 2.0,
+                      max(flow_scale * 0.95, s.brush_radius_px * clamp(wet, 0.15, 1.0) * 0.22));
+    vec2 dir = fl.xy / flow_len;
+    ivec2 tgt = clamp(ivec2(round(vec2(cand) + dir * trail)),
+                      ivec2(0), ivec2(int(s.width) - 1, int(s.height) - 1));
+    return tgt == target;
 }
 
 void tickTexel(Surface s, int px, int py) {
@@ -856,41 +944,35 @@ void tickTexel(Surface s, int px, int py) {
     // dry texel ahead of a stain has a ~0.3 px trail, so a search seeded by it
     // never leaves the texel and the wet front can never advance.
     if (f.has_downhill) {
-        ivec2 q = ivec2(px, py);
-        FlowEval fq = f;
-        bool found = false;
+        ivec2 self_xy = ivec2(px, py);
         int max_back = min(int(ceil(s.brush_radius_px * 0.6 + 2.0)), 12);
-        for (int k = 1; k <= max_back && !found; ++k) {
+        for (int k = 1; k <= max_back; ++k) {
             ivec2 cand = clamp(ivec2(round(vec2(px, py) - f.dir * float(k))),
                                ivec2(0), ivec2(int(s.width) - 1, int(s.height) - 1));
-            if (cand == ivec2(px, py)) continue;
-            FlowEval fc = evalFlow(s, cand.x, cand.y, oil);
-            if (transports(fc) && (fc.wet > 0.001 || fc.advected_wet > 0.001) &&
-                transportTarget(s, cand.x, cand.y, fc) == ivec2(px, py)) {
-                q = cand;
-                fq = fc;
-                found = true;
+            if (cand == self_xy) continue;
+            if (!candTargetsTexel(s, cand, self_xy)) continue;
+            FlowEval fq = evalFlow(s, cand.x, cand.y, oil);
+            if (fq.wet > 0.001 || fq.advected_wet > 0.001) {
+                vec4 source_px = unpackColor(color[texelIndex(s, cand.x, cand.y)]);
+                float transport_alpha = clamp(fq.runoff_alpha * (oil ? 0.24 : 0.55) +
+                                              fq.drip_head_alpha * (oil ? 0.12 : 0.35), 0.0, 1.0);
+                float transported_wet = max(fq.wet * (oil ? (0.18 + transport_alpha * 0.08) : (0.55 + transport_alpha * 0.25)),
+                                            fq.advected_wet * fq.runoff_alpha * (oil ? 0.32 : 1.0));
+                float transported_pigment = clamp(max(
+                    fq.pigment * (oil ? (0.58 + transport_alpha * 0.22) : (0.44 + transport_alpha * 0.28)),
+                    fq.advected_pigment * (oil ? fq.color_runoff_alpha : (0.24 + fq.color_runoff_alpha * 0.76))), 0.0, 1.0);
+                float pigment_transport_alpha = clamp(oil
+                    ? (transport_alpha * (0.24 + transported_pigment * 0.76) + fq.color_runoff_alpha * 0.08) *
+                          clamp((transported_pigment - 0.015) / 0.22, 0.0, 1.0)
+                    : transport_alpha * (0.18 + transported_pigment * 0.82), 0.0, 1.0);
+                if (pigment_transport_alpha > 0.001) {
+                    dst = carryPaint(dst, source_px, pigment_transport_alpha);
+                    liftLayerAlpha(dst, transported_pigment, transported_wet, source_px.a / 255.0, pigment_transport_alpha);
+                }
+                next_wet = max(next_wet, transported_wet * (0.16 + transported_pigment * 0.84));
+                next_pigment = max(next_pigment, transported_pigment * (0.70 + pigment_transport_alpha * 0.20));
+                break;
             }
-        }
-        if (found) {
-            vec4 source_px = unpackColor(color[texelIndex(s, q.x, q.y)]);
-            float transport_alpha = clamp(fq.runoff_alpha * (oil ? 0.24 : 0.55) +
-                                          fq.drip_head_alpha * (oil ? 0.12 : 0.35), 0.0, 1.0);
-            float transported_wet = max(fq.wet * (oil ? (0.18 + transport_alpha * 0.08) : (0.55 + transport_alpha * 0.25)),
-                                        fq.advected_wet * fq.runoff_alpha * (oil ? 0.32 : 1.0));
-            float transported_pigment = clamp(max(
-                fq.pigment * (oil ? (0.58 + transport_alpha * 0.22) : (0.44 + transport_alpha * 0.28)),
-                fq.advected_pigment * (oil ? fq.color_runoff_alpha : (0.24 + fq.color_runoff_alpha * 0.76))), 0.0, 1.0);
-            float pigment_transport_alpha = clamp(oil
-                ? (transport_alpha * (0.24 + transported_pigment * 0.76) + fq.color_runoff_alpha * 0.08) *
-                      clamp((transported_pigment - 0.015) / 0.22, 0.0, 1.0)
-                : transport_alpha * (0.18 + transported_pigment * 0.82), 0.0, 1.0);
-            if (pigment_transport_alpha > 0.001) {
-                dst = carryPaint(dst, source_px, pigment_transport_alpha);
-                liftLayerAlpha(dst, transported_pigment, transported_wet, source_px.a / 255.0, pigment_transport_alpha);
-            }
-            next_wet = max(next_wet, transported_wet * (0.16 + transported_pigment * 0.84));
-            next_pigment = max(next_pigment, transported_pigment * (0.70 + pigment_transport_alpha * 0.20));
         }
     }
 
@@ -934,8 +1016,10 @@ void tickTile(uint tile_index) {
 // ── RESOLVE / composite ─────────────────────────────────────────────────────
 
 uint composite(uint base_packed, vec4 paint) {
-    vec4 b = unpackColor(base_packed);
     float a = clamp(paint.a / 255.0, 0.0, 1.0);
+    if (a <= 0.0) return base_packed;
+    vec4 b = unpackColor(base_packed);
+    if (a >= 1.0) return packColor(vec4(paint.rgb, b.a));
     vec3 o;
     for (int c = 0; c < 3; ++c) {
         float bl = srgbToLinear01(b[c] / 255.0);
@@ -1004,6 +1088,10 @@ uint overlayComposite(Surface s, uint ti, vec4 layer, float revealed) {
         }
     }
     float a = clamp(layer.a / 255.0, 0.0, 1.0);
+    if (ap <= 0.0) {
+        if (a <= 0.0) return 0u;
+        if (a >= 1.0) return packColor(vec4(layer.rgb, 255.0));
+    }
     float alpha = a + ap * (1.0 - a);
     vec3 o;
     for (int c = 0; c < 3; ++c) {
@@ -1050,8 +1138,8 @@ void resolveTile(uint tile_index) {
         uint old_c = color[ti];
         if (c != old_c || st.x != old_st.x || st.w != old_st.w) changed |= CHANGED_CONTENT;
         if (st.z != old_st.z || (c >> 24u) != (old_c >> 24u)) changed |= CHANGED_HEIGHT;
-        state[ti] = st;
-        color[ti] = c;
+        if (st != old_st) state[ti] = st;
+        if (c != old_c) color[ti] = c;
         out_color[ti] = surfaceOutput(s, ti, unpackColor(c), st.w);
         if (st.x > 0.001) wet = true;
     }
@@ -1088,8 +1176,7 @@ void coverageTile(uint tile_index) {
     if (t.valid_texels == 0u) return;
     Surface s = surfaces[t.surface];
     uint lid = gl_LocalInvocationIndex;
-    if (lid < 4u) s_sum[lid] = 0u;
-    if (lid < 2u) s_pic[lid] = 0u;
+    if (lid < 4u) { s_sum[lid] = 0u; s_pic[lid] = 0u; }
     if (lid == 0u) { s_count = 0u; s_flag = 0u; }
     barrier();
     uint covered = 0u, valid = 0u, wet = 0u;
@@ -1114,32 +1201,45 @@ void coverageTile(uint tile_index) {
         }
         if (state[ti].x > 0.001) ++wet;
         if (pc._p0 != 0u) {
-            vec3 r = abs(unpackColor(out_color[pc._p0+ti]).rgb -
-                         unpackColor(sourceChannel(1u,ti)).rgb);
-            vec3 n = abs(unpackColor(out_color[3u*pc._p0+ti]).rgb -
-                         unpackColor(sourceChannel(3u,ti)).rgb);
-            if (max(max(r.x,r.y),r.z)>1.0) ++roughness_changed;
-            if (max(max(n.x,n.y),n.z)>1.0) ++normal_changed;
+            uint r_out = out_color[pc._p0 + ti];
+            uint r_src = sourceChannel(1u, ti);
+            if (r_out != r_src) {
+                vec3 r = abs(unpackColor(r_out).rgb - unpackColor(r_src).rgb);
+                if (max(max(r.x, r.y), r.z) > 1.0) ++roughness_changed;
+            }
+            uint n_out = out_color[3u * pc._p0 + ti];
+            uint n_src = sourceChannel(3u, ti);
+            if (n_out != n_src) {
+                vec3 n = abs(unpackColor(n_out).rgb - unpackColor(n_src).rgb);
+                if (max(max(n.x, n.y), n.z) > 1.0) ++normal_changed;
+            }
         }
     }
-    atomicAdd(stats[t.surface*STATS_STRIDE+ST_ROUGHNESS_TEXELS],roughness_changed);
-    atomicAdd(stats[t.surface*STATS_STRIDE+ST_NORMAL_TEXELS],normal_changed);
-    atomicAdd(s_count, covered);
-    atomicAdd(s_flag, valid);
-    atomicAdd(s_sum[0], sum.r); atomicAdd(s_sum[1], sum.g); atomicAdd(s_sum[2], sum.b);
-    atomicAdd(s_sum[3], wet);
-    atomicAdd(s_pic[0], picture_texels); atomicAdd(s_pic[1], picture_revealed);
+    if (covered != 0u) {
+        atomicAdd(s_count, covered);
+        atomicAdd(s_sum[0], sum.r); atomicAdd(s_sum[1], sum.g); atomicAdd(s_sum[2], sum.b);
+    }
+    if (valid != 0u) atomicAdd(s_flag, valid);
+    if (wet != 0u) atomicAdd(s_sum[3], wet);
+    if (picture_texels != 0u) atomicAdd(s_pic[0], picture_texels);
+    if (picture_revealed != 0u) atomicAdd(s_pic[1], picture_revealed);
+    if (roughness_changed != 0u) atomicAdd(s_pic[2], roughness_changed);
+    if (normal_changed != 0u) atomicAdd(s_pic[3], normal_changed);
     barrier();
     if (lid == 0u) {
         uint base = t.surface * STATS_STRIDE;
-        atomicAdd(stats[base + ST_COVERED_TEXELS], s_count);
-        atomicAdd(stats[base + ST_VALID_TEXELS], s_flag);
-        atomicAdd(stats[base + ST_SUM_R], s_sum[0]);
-        atomicAdd(stats[base + ST_SUM_G], s_sum[1]);
-        atomicAdd(stats[base + ST_SUM_B], s_sum[2]);
-        atomicAdd(stats[base + ST_WET_TEXELS], s_sum[3]);
-        atomicAdd(stats[base + ST_PICTURE_TEXELS], s_pic[0]);
-        atomicAdd(stats[base + ST_PICTURE_REVEALED], s_pic[1]);
+        if (s_count != 0u) {
+            atomicAdd(stats[base + ST_COVERED_TEXELS], s_count);
+            atomicAdd(stats[base + ST_SUM_R], s_sum[0]);
+            atomicAdd(stats[base + ST_SUM_G], s_sum[1]);
+            atomicAdd(stats[base + ST_SUM_B], s_sum[2]);
+        }
+        if (s_flag != 0u) atomicAdd(stats[base + ST_VALID_TEXELS], s_flag);
+        if (s_sum[3] != 0u) atomicAdd(stats[base + ST_WET_TEXELS], s_sum[3]);
+        if (s_pic[0] != 0u) atomicAdd(stats[base + ST_PICTURE_TEXELS], s_pic[0]);
+        if (s_pic[1] != 0u) atomicAdd(stats[base + ST_PICTURE_REVEALED], s_pic[1]);
+        if (s_pic[2] != 0u) atomicAdd(stats[base + ST_ROUGHNESS_TEXELS], s_pic[2]);
+        if (s_pic[3] != 0u) atomicAdd(stats[base + ST_NORMAL_TEXELS], s_pic[3]);
     }
 }
 

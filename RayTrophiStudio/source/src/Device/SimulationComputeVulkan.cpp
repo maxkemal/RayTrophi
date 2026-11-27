@@ -33,6 +33,7 @@
 
 #include "Backend/VulkanFailureReporting.h"
 #include "Backend/VulkanGpuBreadcrumbs.h"
+#include "Device/SimulationComputeDescriptorCache.h"
 #include "Device/SimulationPipelineCache.h"
 #include "SimulationCompute.h"
 #include "SimulationComputeVulkanContext.h"
@@ -124,6 +125,8 @@ public:
     if (m_queue)
       vkQueueWaitIdle(m_queue);
 
+    m_paintWetPipelines.clear();
+    m_descriptorCache.clear();
     for (auto &kv : m_pipelines) {
       vkDestroyPipeline(m_device, kv.second.pipeline, nullptr);
       vkDestroyPipelineLayout(m_device, kv.second.layout, nullptr);
@@ -856,37 +859,23 @@ public:
     if (!resolveIndirectDispatchBuffer(cmd, m_buffers, indirect))
       return false;
 
-    std::string kernel(cmd.kernel ? cmd.kernel : "");
-    if (kernel == "paint_wet" && cmd.constants_size >= sizeof(uint32_t)) {
-      uint32_t mode = 0;
-      std::memcpy(&mode, cmd.constants, sizeof(uint32_t));
-      if (mode <= 10u) {
-        kernel = "paint_wet." + std::to_string(mode);
-      }
-    }
-    auto pit = m_pipelines.find(kernel);
-    if (pit == m_pipelines.end()) {
-      pit = ensurePipeline(kernel);
-      if (pit == m_pipelines.end() && kernel.rfind("paint_wet.", 0) == 0) {
-        kernel = "paint_wet";
-        pit = m_pipelines.find(kernel);
-        if (pit == m_pipelines.end()) {
-          pit = ensurePipeline(kernel);
-        }
-      }
-      if (pit == m_pipelines.end())
-        return false;
-    }
-    const PipelineEntry &pe = pit->second;
+    std::string_view kernel;
+    const PipelineEntry *pe_ptr = m_paintWetPipelines.resolveAndFind(
+        cmd, kernel, m_pipelines,
+        [this](std::string_view k) { return ensurePipeline(k); });
+    if (!pe_ptr)
+      return false;
+    const PipelineEntry &pe = *pe_ptr;
     // The descriptor set is allocated for cmd.buffer_count bindings, the
     // pipeline layout for the kernel table's count. A mismatch binds an
     // incompatible set: undefined behaviour that NVIDIA happens to tolerate
     // and validation reports as VUID-...-layout-07988. Refuse it by name.
     if (cmd.buffer_count != pe.buffer_count) {
       static std::unordered_set<std::string> reported;
-      if (reported.insert(kernel).second) {
+      std::string kernel_str(kernel);
+      if (reported.insert(kernel_str).second) {
         SCENE_LOG_ERROR(
-            "[SimCompute] kernel '" + kernel + "' dispatched with " +
+            "[SimCompute] kernel '" + kernel_str + "' dispatched with " +
             std::to_string(cmd.buffer_count) +
             " buffers but its table entry declares " +
             std::to_string(pe.buffer_count) + "; dispatch refused.");
@@ -923,14 +912,8 @@ public:
     // recording a set with identical bindings is reused: sets are never
     // updated after recording, the pool reset in synchronize() drops the
     // cache, and destroy/resize synchronize before a handle can change.
-    std::vector<uint64_t> set_key(cmd.buffer_count);
-    for (uint32_t b = 0; b < cmd.buffer_count; ++b)
-      set_key[b] = cmd.buffers[b].id;
     VkDescriptorSet ds = VK_NULL_HANDLE;
-    if (const auto cached = m_descriptorCache.find(set_key);
-        cached != m_descriptorCache.end()) {
-      ds = cached->second;
-    } else {
+    if (!m_descriptorCache.find(cmd.buffers, cmd.buffer_count, ds)) {
       std::array<VkDescriptorBufferInfo, MAX_BINDINGS> bufInfos{};
       std::array<VkWriteDescriptorSet, MAX_BINDINGS> writes{};
       for (uint32_t b = 0; b < cmd.buffer_count; ++b) {
@@ -960,7 +943,7 @@ public:
       }
       vkUpdateDescriptorSets(m_device, cmd.buffer_count, writes.data(), 0,
                              nullptr);
-      m_descriptorCache.emplace(std::move(set_key), ds);
+      m_descriptorCache.insert(cmd.buffers, cmd.buffer_count, ds);
     }
     ++m_recordedDispatches;
 
@@ -969,9 +952,8 @@ public:
     // so by the time this one starts recording the previous kernel has
     // already drained. TOP_OF_PIPE here therefore marks this dispatch's
     // start rather than an overlapped predecessor's.
-    const auto timing_label = cmd.timing_label
-                                  ? std::string_view(cmd.timing_label)
-                                  : std::string_view(kernel);
+    const auto timing_label =
+        cmd.timing_label ? std::string_view(cmd.timing_label) : kernel;
     const bool ts_this_dispatch = beginKernelTimestamp(timing_label);
 
     // Record pipeline bind + descriptor bind + push constants + dispatch.
@@ -1089,13 +1071,14 @@ private:
   VkDescriptorPool m_descPool = VK_NULL_HANDLE;
   uint32_t m_recordedDispatches = 0;
   // Descriptor sets written in the current recording, keyed by buffer ids.
-  std::map<std::vector<uint64_t>, VkDescriptorSet> m_descriptorCache;
+  SimulationComputeDescriptorCache<VkDescriptorSet> m_descriptorCache;
 
   // One desc layout per buffer count (index = count, 0 unused).
   std::array<VkDescriptorSetLayout, MAX_BINDINGS + 1> m_descLayouts{};
 
-  std::unordered_map<std::string, PipelineEntry> m_pipelines;
-  std::unordered_map<std::string, KernelSpec> m_kernelSpecs;
+  std::map<std::string, PipelineEntry, std::less<>> m_pipelines;
+  std::map<std::string, KernelSpec, std::less<>> m_kernelSpecs;
+  PaintWetPipelineLookup<PipelineEntry> m_paintWetPipelines;
   SimulationPipelineCache m_pipelineCache;
   std::unordered_map<uint64_t, Buf> m_buffers;
 
@@ -1436,16 +1419,17 @@ private:
     return true;
   }
 
-  auto ensurePipeline(const std::string &kernelName)
-      -> std::unordered_map<std::string, PipelineEntry>::iterator {
+  auto ensurePipeline(std::string_view kernelName)
+      -> std::map<std::string, PipelineEntry, std::less<>>::iterator {
     auto sit = m_kernelSpecs.find(kernelName);
     if (sit == m_kernelSpecs.end() || sit->second.attempted) {
       return m_pipelines.end();
     }
     sit->second.attempted = true;
     if (!createPipeline(
-            kernelName, sit->second.spv_path, sit->second.buffer_count,
-            sit->second.push_constant_size, true, sit->second.spec_const0)) {
+            std::string(kernelName), sit->second.spv_path,
+            sit->second.buffer_count, sit->second.push_constant_size, true,
+            sit->second.spec_const0)) {
       return m_pipelines.end();
     }
     return m_pipelines.find(kernelName);
@@ -1983,7 +1967,6 @@ private:
         m_has_float_atomics && supportsSharedFloatAtomicAdd();
     std::vector<std::string> spvFiles;
     spvFiles.reserve(std::size(defs));
-    m_kernelSpecs.reserve(std::size(defs));
     for (const auto &d : defs) {
       std::string spv = d.spv;
       if (clustered && (std::string(d.name) == "sim_matter_p2g" ||

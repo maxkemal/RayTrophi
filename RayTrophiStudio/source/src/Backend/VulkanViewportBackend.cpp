@@ -17,6 +17,7 @@
 #include "Viewport/RasterBackground.h"
 #include "Viewport/RasterImageBarrier.h"
 #include "Viewport/RasterInstanceUpload.h"
+#include "Viewport/RasterSkinningBatch.h"
 #include "Viewport/RasterViewportFrameRing.h"
 #include "PerfProfile.h"
 #include "HittableInstance.h"
@@ -286,7 +287,12 @@ static std::vector<float> bakeEnvMap(bool outdoor) {
 } // namespace
 
 VulkanViewportBackend::~VulkanViewportBackend() {
-    if (m_device) m_syncBillboardVertices.release(*m_device);
+    if (m_device) {
+        m_syncBillboardVertices.release(*m_device);
+        if (m_rasterSkinningBatch) {
+            m_rasterSkinningBatch->reset(m_device.get());
+        }
+    }
 #ifdef RT_PLAYER
     drainInteractiveViewportInFlight();
     m_playerDepthCard.reset();
@@ -756,6 +762,9 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         destroyMaterialPreviewIblResources();
         destroyMaterialPreviewProbeResources();
         destroyRayFusionSceneAS();
+        if (m_rasterSkinningBatch) {
+            m_rasterSkinningBatch->reset(m_device.get());
+        }
     }
     if (m_rasterFrameRing) {
         m_rasterFrameRing->reset();
@@ -795,6 +804,10 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
         vkDestroyRenderPass(vkDevice, m_interactiveViewport.hdrRenderPass, nullptr);
         m_interactiveViewport.hdrRenderPass = VK_NULL_HANDLE;
     }
+    if (m_hdrRenderPassNoMotion != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyRenderPass(vkDevice, m_hdrRenderPassNoMotion, nullptr);
+        m_hdrRenderPassNoMotion = VK_NULL_HANDLE;
+    }
     if (!keepPipeline) {
         Backend::closeViewportPipelineCache(vkDevice);
     }
@@ -807,6 +820,13 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     if (m_interactiveViewport.postPipeline != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.postPipeline, nullptr);
         m_interactiveViewport.postPipeline = VK_NULL_HANDLE;
+    }
+    if (m_postPipelineFast != VK_NULL_HANDLE && !keepPipeline) {
+        vkDestroyPipeline(vkDevice, m_postPipelineFast, nullptr);
+        m_postPipelineFast = VK_NULL_HANDLE;
+    }
+    if (!keepPipeline) {
+        destroyRasterPostFastResources(vkDevice, m_postFast);
     }
     if (m_interactiveViewport.postPipelineLayout != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipelineLayout(vkDevice, m_interactiveViewport.postPipelineLayout, nullptr);
@@ -865,7 +885,10 @@ void VulkanViewportBackend::destroyInteractiveViewportResourcesImpl(bool keepPip
     // ★ RT golge kaynaklari pipeline korunsa bile maske goruntusu boyuta bagli;
     //   destroy tarafi kendi icinde ayirt ediyor.
     if (!keepPipeline) destroyRtShadowResources();
-    if (!keepPipeline) destroyMaterialPreviewCoveredPipeline();
+    if (!keepPipeline) {
+        destroyMaterialPreviewCoveredPipeline();
+        destroyMaterialPreviewGlassPipelines();
+    }
     if (m_interactiveViewport.materialPreviewDepthPrepassPipeline != VK_NULL_HANDLE && !keepPipeline) {
         vkDestroyPipeline(vkDevice, m_interactiveViewport.materialPreviewDepthPrepassPipeline, nullptr);
         m_interactiveViewport.materialPreviewDepthPrepassPipeline = VK_NULL_HANDLE;
@@ -1110,11 +1133,17 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
 
     const bool storeReflectionGbuffer =
         m_device && m_device->getCapabilities().supportsRayQuery;
+    const bool storePreviousClip = m_taaEnabled;
     if (!ensureRayFusionViewportPasses(
             vkDevice, m_interactiveViewport.renderPass,
             m_interactiveViewport.renderPassLoad, m_interactiveViewport.hdrRenderPass,
-            m_interactiveViewport.hdrRenderPassLoad, storeReflectionGbuffer)) {
+            m_interactiveViewport.hdrRenderPassLoad, storeReflectionGbuffer,
+            storePreviousClip)) {
         return false;
+    }
+    if (m_hdrRenderPassNoMotion == VK_NULL_HANDLE) {
+        m_hdrRenderPassNoMotion = createHdrNoMotionRenderPass(
+            vkDevice, storeReflectionGbuffer, false);
     }
 
 #ifndef RT_PLAYER
@@ -1531,6 +1560,30 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                 ok = Backend::vulkanStartupResult(
                     "raster_post.spv / vkCreateComputePipelines", vkCreateComputePipelines(vkDevice, Backend::currentViewportPipelineCache(vkDevice), 1, &cpci, nullptr,
                                               &m_interactiveViewport.postPipeline)) == VK_SUCCESS;
+                if (ok && m_postPipelineFast == VK_NULL_HANDLE) {
+                    const VkBool32 fastVals[3] = { VK_FALSE, VK_FALSE, VK_FALSE };
+                    const VkSpecializationMapEntry fastEntries[3] = {
+                        { 0u, 0u, sizeof(VkBool32) },
+                        { 1u, sizeof(VkBool32), sizeof(VkBool32) },
+                        { 2u, 2u * sizeof(VkBool32), sizeof(VkBool32) }
+                    };
+                    VkSpecializationInfo fastSpec{};
+                    fastSpec.mapEntryCount = 3u;
+                    fastSpec.pMapEntries = fastEntries;
+                    fastSpec.dataSize = sizeof(fastVals);
+                    fastSpec.pData = fastVals;
+                    cpci.stage.pSpecializationInfo = &fastSpec;
+                    if (vkCreateComputePipelines(
+                            vkDevice, Backend::currentViewportPipelineCache(vkDevice),
+                            1, &cpci, nullptr, &m_postPipelineFast) != VK_SUCCESS) {
+                        m_postPipelineFast = VK_NULL_HANDLE;
+                    }
+                }
+                if (ok && m_postFast.pipeline == VK_NULL_HANDLE) {
+                    ensureRasterPostFastResources(
+                        vkDevice, shaderDir, static_cast<uint32_t>(sizeof(RasterPostPush)),
+                        m_postFast);
+                }
             }
             if (postModule != VK_NULL_HANDLE) vkDestroyShaderModule(vkDevice, postModule, nullptr);
             if (!ok) {
@@ -1747,7 +1800,8 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     mpDslBindings[27].descriptorCount = 1;
                     mpDslBindings[27].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
                     mpDslBindings[28] = {kRayFusionFrameUniformBinding,
-                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
+                        VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr};
 
                     mpDslBindings[29] = Backend::MaterialTextureBinding::refTableBinding(
                         29, VK_SHADER_STAGE_FRAGMENT_BIT);
@@ -1860,7 +1914,8 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     // appears later rebuilds both (serviceMaterialPreviewFeatureSpec).
                     MaterialPreviewSpecStorage mpSpec{};
                     const uint32_t mpSpecMask = materialPreviewSceneFeatureMask();
-                    fillMaterialPreviewSpec(mpSpecMask, mpSpec);
+                    const uint32_t mpSpecTexPages = materialPreviewActiveTexPages();
+                    fillMaterialPreviewSpec(mpSpecMask & ~kMpSpecGlass, mpSpec, mpSpecTexPages);
                     mpStages[1].pSpecializationInfo = &mpSpec.info;
 
                     VkVertexInputBindingDescription mpBindings[6]{};
@@ -1942,9 +1997,10 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                     VkPipelineColorBlendAttachmentState mpAttachments[4]{};
                     mpAttachments[0] = mpCBA;
                     for (uint32_t g = 1; g < 4; ++g) {
-                        mpAttachments[g].colorWriteMask =
-                            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+                        mpAttachments[g].colorWriteMask = (g == 3)
+                            ? (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT)
+                            : (VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                               VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
                         mpAttachments[g].blendEnable = VK_FALSE;
                     }
 
@@ -1990,7 +2046,7 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
                                                                      &m_interactiveViewport.materialPreviewPipeline);
                         if (mpResult == VK_SUCCESS) {
                             createMaterialPreviewCoveredPipeline(mpPCI, shaderDir);
-                            captureMaterialPreviewSpecRecipe(mpPCI, shaderDir, mpSpecMask);
+                            captureMaterialPreviewSpecRecipe(mpPCI, shaderDir, mpSpecMask, mpSpecTexPages);
                         }
                         if (mpResult != VK_SUCCESS) {
                             SCENE_LOG_WARN("[RayFusion] Material pipeline creation failed, VkResult " +
@@ -3049,10 +3105,16 @@ bool VulkanViewportBackend::ensureInteractiveViewportResourcesImpl(const std::st
     //   kopya daha ve ikinci bir "kim ne zaman okudu" sorusu demek olurdu.
     //   R16G16B16A16_SFLOAT'in storage-image destegi Vulkan'in zorunlu format
     //   listesindedir.
+    // TBDR (Mali-G52): STORAGE_BIT disables AFBC on the 64 bpp HDR target.
+    // Only request it when ray-query reflections or volumetric clouds need
+    // compute imageStore writes to hdrColorImage.
+    const VkImageUsageFlags hdrStorageUsage =
+        (m_device->getCapabilities().supportsRayQuery || m_cloudRtRendering)
+            ? VK_IMAGE_USAGE_STORAGE_BIT : 0u;
     m_interactiveViewport.hdrColorImage = m_device->createImage2D(
         (uint32_t)width, (uint32_t)height, VK_FORMAT_R16G16B16A16_SFLOAT,
         VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
-        VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT,
+        VK_IMAGE_USAGE_TRANSFER_DST_BIT | hdrStorageUsage,
         VK_IMAGE_ASPECT_COLOR_BIT);
     // ★★★ Reflection G-buffer. STORAGE degil SAMPLED: yansima compute'u bunu
     //   texelFetch ile okur, uzerine yazmaz. Basarisizligi olumcul DEGIL --
@@ -3701,6 +3763,20 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     //   cizilenden ayirirdi ve belirti "bazen kayiyor" olurdu.
     m_rasterPickViewProj = viewProjUnjittered;
     m_rasterPickHasViewProj = true;
+#ifdef RT_PLAYER
+    if (m_taaEnabled != ::render_settings.realtime_taa) {
+        m_taaEnabled = ::render_settings.realtime_taa;
+        m_taaFrameIndex = 0u;
+        m_taaHasPrevViewProj = false;
+        m_taaPrevDValid = false;
+    }
+    const uint32_t targetTaa = static_cast<uint32_t>(
+        (std::max)(1, ::render_settings.realtime_taa_samples));
+    if (m_taaTargetSamples != targetTaa) {
+        m_taaTargetSamples = targetTaa;
+    }
+    m_rasterDepthOfField = ::render_settings.realtime_depth_of_field;
+#endif
     if (m_taaEnabled && m_interactiveViewport.taaPipeline != VK_NULL_HANDLE &&
         width > 0 && height > 0) {
         // Halton(2,3): dusuk tutarsizlikli, piksel icinde duzgun yayilir ve
@@ -3711,7 +3787,10 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             while (i > 0u) { f /= float(base); r += f * float(i % base); i /= base; }
             return r;
         };
-        const uint32_t idx = (m_taaFrameIndex % 16u) + 1u;
+        // Advance Halton(2,3) phase on every rendered frame so continuous TAA
+        // keeps visiting all 16 sub-pixel offsets during camera/scene motion
+        // and Player gameplay (not only when idle accumulation increments).
+        const uint32_t idx = (static_cast<uint32_t>(m_rasterFrameCounter) % 16u) + 1u;
         proj.m[0][2] += (halton(idx, 2u) - 0.5f) * 2.0f / static_cast<float>(width);
         proj.m[1][2] += (halton(idx, 3u) - 0.5f) * 2.0f / static_cast<float>(height);
     }
@@ -3968,6 +4047,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         // rejected frame acquisition is unsafe and was the step preceding TDR.
         m_rasterFrameRing->reset();
         m_rasterFrameRing.reset();
+#ifdef RT_PLAYER
+        m_playerDepthCard.reset();
+#endif
         scheduleFrameRingRetry(2);
         frameRingReady = false;
         SCENE_LOG_WARN(
@@ -4009,6 +4091,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     }
     markRasterStage(cmd, RasterStage::GpuCull,
                     m_rasterGpuCullActive && m_rasterGpuCull != nullptr);
+    const bool particlesCompacted = recordParticleBillboardCompaction(cmd);
+    markRasterStage(cmd, RasterStage::ParticleCompaction, particlesCompacted);
 
     // ★★★★ Bu bayrak render pass'in BASLAMASINDAN once biliniyor olmali:
     //   hangi hedefe (HDR mi 8-bit mi) cizilecegine o karar veriyor. Eskiden
@@ -4064,6 +4148,8 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     //   ayna" ilan etmek olurdu -- gokyuzunun kendisi dahil.
     clearValues[2].color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
     clearValues[3].color = { { 0.0f, 0.0f, 0.0f, 0.0f } };
+    // Finite FP16 sentinel (>1000): untouched/sky pixels use camera-only TAA reprojection.
+    clearValues[4].color = { { 65504.0f, 0.0f, 0.0f, 0.0f } };
 
     VkRenderPassBeginInfo renderPassInfo{};
     renderPassInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -4078,7 +4164,13 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     //   (postPipeline null) HDR gecisi ACILMAZ, yoksa ekranda ham scene-linear
     //   goruntu kalirdi -- "viewport asiri parlak" diye raporlanan, sebebi
     //   goruntude yazmayan bir ariza.
-    renderPassInfo.renderPass = hdrPassActive ? m_interactiveViewport.hdrRenderPass
+    const bool hdrNeedObjectMotion =
+        m_taaEnabled && (!m_rasterGlobalInstBuf || m_rasterGlobalInstBuf->hasMotion());
+    const VkRenderPass activeHdrPass =
+        (!hdrNeedObjectMotion && m_hdrRenderPassNoMotion != VK_NULL_HANDLE)
+            ? m_hdrRenderPassNoMotion
+            : m_interactiveViewport.hdrRenderPass;
+    renderPassInfo.renderPass = hdrPassActive ? activeHdrPass
                                               : m_interactiveViewport.renderPass;
     renderPassInfo.framebuffer = hdrPassActive ? m_interactiveViewport.hdrFramebuffer
                                                : m_interactiveViewport.framebuffer;
@@ -4121,7 +4213,16 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     uint32_t shadowAtlasLights = 0;
     materialPreviewShadowAtlasState(shadowAtlasRan, shadowAtlasLights);
     if (hdrPassActive) {
-        recordMaterialPreviewFrameUniform(cmd, view);
+        const Matrix4x4 viewT = view.transpose();
+        const Matrix4x4 curVpT = viewProjUnjittered.transpose();
+        const Matrix4x4 prevVpT = m_taaPrevViewProj.transpose();
+        float viewCol[16]{}, curVpCol[16]{}, prevVpCol[16]{};
+        std::memcpy(viewCol, viewT.m, sizeof(viewCol));
+        std::memcpy(curVpCol, curVpT.m, sizeof(curVpCol));
+        std::memcpy(prevVpCol, prevVpT.m, sizeof(prevVpCol));
+        recordRayFusionFrameUniform(
+            cmd, m_interactiveViewport.materialPreviewFrameUniform.buffer,
+            viewCol, curVpCol, prevVpCol, m_taaHasPrevViewProj);
     }
     recordMaterialPreviewShadowPass(cmd);
     // A cached atlas was not rasterised this frame; report it as not run so
@@ -4131,12 +4232,16 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
     // composites the result.
     recordCloudRasterPass(cmd, static_cast<uint32_t>(width), static_cast<uint32_t>(height));
     markRasterStage(cmd, RasterStage::ShadowAtlas, shadowAtlasRan);
-    if (m_materialPreviewTransmission) {
+    const bool hasTransmissionWork =
+        m_materialPreviewTransmission && ((m_mpSpecMask & kMpSpecGlass) != 0u);
+    if (hasTransmissionWork) {
         prepareMaterialPreviewTransmissionThickness(cmd);
     }
-    markRasterStage(cmd, RasterStage::TransmissionPrep,
-                    m_materialPreviewTransmission != nullptr);
+    markRasterStage(cmd, RasterStage::TransmissionPrep, hasTransmissionWork);
 
+    if (!hdrPassActive && particlesCompacted) {
+        makeParticleBillboardCompactionVisible(cmd);
+    }
     vkCmdBeginRenderPass(cmd, &renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
     // ★★★ Gokyuzu pipeline'i HDR gecisine baglidir, ve kendi kapisi
     //   (`m_viewportMode == MaterialPreview`) `hdrPassActive`ten DAHA GENISTIR:
@@ -4195,8 +4300,19 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
 
     // ★★★ DERINLIK ON GECISI. Kol acik olsa bile pipeline kurulmamis olabilir;
     //   telemetriye ISTENEN degil UYGULANAN yazilir.
+    // On TBDR GPUs (Mali/Adreno/PowerVR) in Performance quality without RT shadows,
+    // hardware Forward Pixel Kill / Early-ZS avoids doubling vertex+tiler work.
+    const VulkanRT::GPUVendor gpuVendor = m_device->getCapabilities().vendor;
+    const bool isTiledGpu = gpuVendor == VulkanRT::GPUVendor::ARM_MALI ||
+                            gpuVendor == VulkanRT::GPUVendor::QUALCOMM ||
+                            gpuVendor == VulkanRT::GPUVendor::APPLE;
+    const bool skipPrepassOnTiled =
+        isTiledGpu &&
+        ::render_settings.raster_viewport_quality_preset ==
+            RasterViewportQualityPreset::Performance;
     const bool depthPrepassActive =
-        useMaterialPreview && (m_rasterDepthPrepassAllowed || rtShadowFrame) &&
+        useMaterialPreview &&
+        ((m_rasterDepthPrepassAllowed && !skipPrepassOnTiled) || rtShadowFrame) &&
         m_interactiveViewport.materialPreviewDepthPrepassPipeline != VK_NULL_HANDLE;
 
     // ★★★★★ Closed HERE when the prepass does not run, not left to be filled by
@@ -4321,7 +4437,10 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                   depthOnlyPass
                                       ? m_interactiveViewport.materialPreviewDepthPrepassPipeline
-                                      : materialPreviewShadingPipeline(rmb, depthPrepassActive));
+                                      : ((materialPreviewMeshNeedsTransmission(rmb) &&
+                                          m_mpGlassOpaquePipeline != VK_NULL_HANDLE)
+                                             ? m_mpGlassOpaquePipeline
+                                             : materialPreviewShadingPipeline(rmb, depthPrepassActive)));
                 vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         m_interactiveViewport.materialPreviewPipelineLayout,
                                         0, 1, &m_interactiveViewport.materialPreviewDescSet, 0, nullptr);
@@ -4607,20 +4726,26 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
             if (syncAerialFroxel(plane, /*world_buffer_reads_flag=*/false))
                 m_device->recordAerialFroxelPass(cmd);
         }
-        recordRasterPostPass(cmd, (uint32_t)width, (uint32_t)height);
+        if (particlesCompacted) {
+            makeParticleBillboardCompactionVisible(cmd);
+        }
+        const bool postOpenedLdrPass =
+            recordRasterPostPass(cmd, (uint32_t)width, (uint32_t)height, viewport, scissor);
         markRasterStage(cmd, RasterStage::Post, true);
 
-        VkRenderPassBeginInfo ldrRPBI{};
-        ldrRPBI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        ldrRPBI.renderPass = m_interactiveViewport.renderPassLoad;
-        ldrRPBI.framebuffer = m_interactiveViewport.framebuffer;
-        ldrRPBI.renderArea.offset = { 0, 0 };
-        ldrRPBI.renderArea.extent = { (uint32_t)width, (uint32_t)height };
-        // LOAD varyanti: temizleme YOK, post'un yazdigi kare korunur.
-        ldrRPBI.clearValueCount = 0;
-        vkCmdBeginRenderPass(cmd, &ldrRPBI, VK_SUBPASS_CONTENTS_INLINE);
-        vkCmdSetViewport(cmd, 0, 1, &viewport);
-        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        if (!postOpenedLdrPass) {
+            VkRenderPassBeginInfo ldrRPBI{};
+            ldrRPBI.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            ldrRPBI.renderPass = m_interactiveViewport.renderPassLoad;
+            ldrRPBI.framebuffer = m_interactiveViewport.framebuffer;
+            ldrRPBI.renderArea.offset = { 0, 0 };
+            ldrRPBI.renderArea.extent = { (uint32_t)width, (uint32_t)height };
+            // LOAD varyanti: temizleme YOK, post'un yazdigi kare korunur.
+            ldrRPBI.clearValueCount = 0;
+            vkCmdBeginRenderPass(cmd, &ldrRPBI, VK_SUBPASS_CONTENTS_INLINE);
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+        }
     }
 
 #ifndef RT_PLAYER
@@ -4974,7 +5099,9 @@ void VulkanViewportBackend::renderInteractiveViewportImpl(void* s, int width, in
         matrixToGL(viewProj, particleViewProj);
         matrixToGL(view, particleView);
 #ifdef RT_PLAYER
-        m_playerDepthCard.draw(cmd, particleViewProj, particleView);
+        float depthCardViewProj[16];
+        matrixToGL(viewProjUnjittered, depthCardViewProj);
+        m_playerDepthCard.draw(cmd, depthCardViewProj, particleView);
 #endif
         recordParticleBillboards(cmd, particleViewProj, particleView, usingFrameRing);
     }
@@ -7970,9 +8097,41 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
     if (m_viewportMode != ViewportMode::Solid &&
         m_viewportMode != ViewportMode::Matcap &&
         m_viewportMode != ViewportMode::MaterialPreview) return;
-    drainInteractiveViewportInFlight();
+
+    static bool loggedGpuViewportSkinning = false;
+    static bool loggedCpuViewportSkinningFallback = false;
+    static bool loggedMixedViewportSkinningPath = false;
 
     uint32_t skinnedMeshCount = 0;
+    if (m_device) {
+        if (!m_rasterSkinningBatch) {
+            m_rasterSkinningBatch = std::make_shared<RasterSkinningBatchState>();
+        }
+        const bool batchOk = dispatchRasterSkinningBatchAsync(
+            *m_device,
+            *m_rasterSkinningBatch,
+            m_rasterMeshes,
+            boneMatrices,
+            [this]() { drainInteractiveViewportInFlight(); },
+            skinnedMeshCount);
+        if (batchOk && skinnedMeshCount > 0) {
+            if (!loggedGpuViewportSkinning) {
+                VK_INFO() << "[ViewportSkinning] Using batched async GPU compute skinning for "
+                          << skinnedMeshCount << " raster mesh(es)" << std::endl;
+                loggedGpuViewportSkinning = true;
+            }
+            noteSkinnedPose(boneMatrices);
+            m_interactiveViewport.dirty = true;
+            return;
+        }
+        if (batchOk && skinnedMeshCount == 0) {
+            return;
+        }
+    }
+
+    drainInteractiveViewportInFlight();
+
+    skinnedMeshCount = 0;
     uint32_t gpuDispatchCount = 0;
     for (auto& [meshKey, mesh] : m_rasterMeshes) {
         if (!mesh.hasSkinning) continue;
@@ -7993,10 +8152,6 @@ void VulkanViewportBackend::syncRasterSkinnedVertices(
             ++gpuDispatchCount;
         }
     }
-
-    static bool loggedGpuViewportSkinning = false;
-    static bool loggedCpuViewportSkinningFallback = false;
-    static bool loggedMixedViewportSkinningPath = false;
 
     if (skinnedMeshCount > 0 && gpuDispatchCount == skinnedMeshCount) {
         if (!loggedGpuViewportSkinning) {
@@ -8884,42 +9039,25 @@ bool VulkanViewportBackend::updateRasterPostDescriptors() {
     writes[3].pImageInfo = &froxelInfo;
 
     vkUpdateDescriptorSets(vkDevice, 4, writes, 0, nullptr);
+    updateRasterPostFastDescriptor(
+        vkDevice, m_postFast, m_interactiveViewport.postSampler,
+        m_interactiveViewport.hdrColorImage.view);
     m_interactiveViewport.postFroxelBound = haveFroxel;
     return true;
 }
 
-void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
-                                                uint32_t width, uint32_t height) {
+bool VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
+                                                 uint32_t width, uint32_t height,
+                                                 const VkViewport& viewport,
+                                                 const VkRect2D& scissor) {
     if (!cmd || m_interactiveViewport.postPipeline == VK_NULL_HANDLE ||
         width == 0 || height == 0) {
-        return;
+        return false;
     }
-
-    // Derinlik: attachment -> ornekleme. Post'tan sonra GERI alinir, cunku
-    // secim maskesi gecisi ve LDR overlay gecisi ayni derinligi tekrar
-    // attachment olarak baglar.
-    rasterImageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
-                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                       VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                       VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                 VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    // HDR hedefi: cizim -> ornekleme (layout ayni, gorunurluk bariyeri sart).
-    rasterImageBarrier(cmd, m_interactiveViewport.hdrColorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
-    // 8-bit hedef: onceki karenin okumasi bitti -> storage yazimi.
-    rasterImageBarrier(cmd, m_interactiveViewport.colorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                 VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
-                 0, VK_ACCESS_SHADER_WRITE_BIT,
-                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
 
     RasterPostPush pc{};
     pc.width = width;
     pc.height = height;
-    // *** Post ayarlari `g_display_post` AYNASINDAN okunur -- Rendered yolunun
-    //   (tonemap.comp) okudugu ayni alanlar. Backend'ler `g_ctx`'i gormez;
-    //   ayna olmadan `post.*` GPU'ya HIC ulasmaz.
     pc.postExposure         = g_display_post.exposure;
     pc.postGamma            = g_display_post.gamma;
     pc.postSaturation       = g_display_post.saturation;
@@ -8929,15 +9067,6 @@ void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
     pc.postVignetteEnabled  = static_cast<uint32_t>(g_display_post.vignette_enabled);
     pc.postCameraExposure   = g_display_post.camera_exposure;
 
-    // -- Alan derinligi ------------------------------------------------------
-    // *** `lensRadius` path tracer ile AYNI buyukluk: Camera::lens_radius,
-    //   yani aperture * 0.5. Rendered ile Realtime ayni sahnede farkli
-    //   bulaniklik verirse belirti "onizleme yalan soyluyor" olur -- bu
-    //   deponun en pahali hata sinifi. Ortografik kamerada lens yoktur.
-    // ★★★ `m_camera.aperture` ETKIN acikliktir: kameranin `depth_of_field`
-    //   anahtari tasima katmaninda (syncCamera) zaten uygulanmistir. Burada
-    //   ikinci bir kapi kurmuyoruz -- ayni kosulu iki yerde tutmak, birinin
-    //   guncellenmedigi gunu garanti eder.
     const float fovDeg = m_camera.fov > 1.0f ? m_camera.fov : 60.0f;
     const bool dofUsable = !m_camera.orthographic &&
                            m_rasterDepthOfField &&
@@ -8946,25 +9075,91 @@ void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
     pc.focusDist   = m_camera.focusDistance;
     pc.lensRadius  = dofUsable ? (m_camera.aperture * 0.5f) : 0.0f;
     pc.tanHalfFovY = std::tan(fovDeg * 0.5f * 3.14159265358979f / 180.0f);
-    // t = A / (d*B + C), makePerspectiveMatrix ile AYNI zNear/zFar.
     constexpr float kNear = 0.01f, kFar = 1000000.0f;
     pc.depthA = kFar * kNear;
     pc.depthB = kNear - kFar;
     pc.depthC = kFar;
     pc.maxCoC = m_rasterDofMaxCoCPixels;
     pc.maxTaps = m_rasterDofMaxTaps;
-
-    // Aerial froxel: built (or rebuilt) just before this pass in the same
-    // command buffer; see the call site. Orthographic views have no view
-    // frustum to slice.
     pc.aerialEnabled = (m_aerialFroxelActive && m_interactiveViewport.postFroxelBound &&
                         !m_camera.orthographic) ? 1u : 0u;
     pc.fogDistance = m_cachedWorld.nishita.fog_distance;
 
+    const bool lensWeatherActive = m_device && m_device->m_lensWeatherCamera.settings.enabled;
+    const bool canUseFastFrag =
+        !dofUsable && pc.aerialEnabled == 0u && !lensWeatherActive &&
+        !m_cloudRtRendering &&
+        m_postFast.pipeline != VK_NULL_HANDLE &&
+        m_postFast.renderPass != VK_NULL_HANDLE &&
+        m_interactiveViewport.framebuffer != VK_NULL_HANDLE;
+
+    if (canUseFastFrag) {
+        // Fast tonemap-only fragment path merged directly into the LDR render pass:
+        // avoids compute context switch, depth layout transitions, and 4.6 MB of
+        // colorImage compute-write + renderPassLoad DRAM round-trip on TBDR GPUs.
+        rasterImageBarrier(cmd, m_interactiveViewport.hdrColorImage.image,
+                           VK_IMAGE_ASPECT_COLOR_BIT,
+                           VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                           VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                           VK_ACCESS_SHADER_READ_BIT,
+                           VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                           VK_PIPELINE_STAGE_TRANSFER_BIT,
+                           VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        VkRenderPassBeginInfo rpbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rpbi.renderPass = m_postFast.renderPass;
+        rpbi.framebuffer = m_interactiveViewport.framebuffer;
+        rpbi.renderArea.offset = { 0, 0 };
+        rpbi.renderArea.extent = { width, height };
+        rpbi.clearValueCount = 0;
+        vkCmdBeginRenderPass(cmd, &rpbi, VK_SUBPASS_CONTENTS_INLINE);
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, m_postFast.pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                m_postFast.pipelineLayout, 0u, 1u,
+                                &m_postFast.descSet, 0u, nullptr);
+        vkCmdPushConstants(cmd, m_postFast.pipelineLayout,
+                           VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(pc), &pc);
+        vkCmdDraw(cmd, 3u, 1u, 0u, 0u);
+        return true;
+    }
+
+    const bool needDepthRead = dofUsable || pc.aerialEnabled != 0u ||
+                               lensWeatherActive || m_cloudRtRendering;
+    if (needDepthRead) {
+        rasterImageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                           VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    }
+    rasterImageBarrier(cmd, m_interactiveViewport.hdrColorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                       VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+                       VK_ACCESS_SHADER_READ_BIT,
+                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+    rasterImageBarrier(cmd, m_interactiveViewport.colorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
+                       VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL,
+                       VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT |
+                       VK_ACCESS_TRANSFER_READ_BIT,
+                       VK_ACCESS_SHADER_WRITE_BIT,
+                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                       VK_PIPELINE_STAGE_TRANSFER_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+
     recordCloudScenePass(cmd, width, height, pc.depthA, pc.depthB, pc.depthC);
 
     m_device->recordLensWeather(cmd, m_interactiveViewport.postPipelineLayout, width, height);
-    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_interactiveViewport.postPipeline);
+    const VkPipeline activePostPipeline =
+        (m_postPipelineFast != VK_NULL_HANDLE && !dofUsable &&
+         pc.aerialEnabled == 0u && !lensWeatherActive)
+            ? m_postPipelineFast
+            : m_interactiveViewport.postPipeline;
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, activePostPipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE,
                             m_interactiveViewport.postPipelineLayout, 0, 1,
                             &m_interactiveViewport.postDescSet, 0, nullptr);
@@ -8972,24 +9167,24 @@ void VulkanViewportBackend::recordRasterPostPass(VkCommandBuffer cmd,
                        VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
     vkCmdDispatch(cmd, (width + 7u) / 8u, (height + 7u) / 8u, 1u);
 
-    // Compute yazimi -> sonraki tuketiciler (LDR overlay gecisi, secim
-    // kompoziti, kare halkasinin kopyasi).
     rasterImageBarrier(cmd, m_interactiveViewport.colorImage.image, VK_IMAGE_ASPECT_COLOR_BIT,
-                 VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
-                 VK_ACCESS_SHADER_WRITE_BIT,
-                 VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
-                 VK_ACCESS_TRANSFER_READ_BIT,
-                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-                 VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
-    // Derinlik geri: overlay gecisi ve secim maskesi onu attachment olarak
-    // baglayacak.
-    rasterImageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
-                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
-                 VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-                 VK_ACCESS_SHADER_READ_BIT,
-                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
-                 VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
-                 VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+                       VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_LAYOUT_GENERAL,
+                       VK_ACCESS_SHADER_WRITE_BIT,
+                       VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                       VK_ACCESS_TRANSFER_READ_BIT,
+                       VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT);
+    if (needDepthRead) {
+        rasterImageBarrier(cmd, m_interactiveViewport.depthImage.image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_READ_ONLY_OPTIMAL,
+                           VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                           VK_ACCESS_SHADER_READ_BIT,
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+                           VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+    }
+    return false;
 }
 
 } // namespace Backend

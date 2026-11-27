@@ -52,5 +52,6 @@ void applyBalloonCarryCompression(int id, Matrix4x4& transform,
                                   float axial = 0.0f, float lateral = 1.0f);
 int takeReleasedCompressedBalloon();
 int updateBalloonCrush(float dt);
+Vec3 balloonCrushNormal();
 
 } // namespace Paint

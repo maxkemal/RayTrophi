@@ -42,6 +42,40 @@ uint32_t rayFusionMaterialTextureCapacity(
 
 inline constexpr VkFormat kRfGbufferNormalFormat = VK_FORMAT_R16G16_SFLOAT;
 inline constexpr VkFormat kRfGbufferSpecularFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+inline constexpr VkFormat kRfObjectMotionFormat = VK_FORMAT_R16G16_SFLOAT;
+
+void recordRayFusionFrameUniform(
+    VkCommandBuffer cmd,
+    VkBuffer buffer,
+    const float viewColMajor[16],
+    const float curViewProjColMajor[16],
+    const float prevViewProjColMajor[16],
+    bool hasPrevViewProj);
+
+struct RasterPostFastResources {
+    VkRenderPass renderPass = VK_NULL_HANDLE;
+    VkDescriptorSetLayout descLayout = VK_NULL_HANDLE;
+    VkDescriptorPool descPool = VK_NULL_HANDLE;
+    VkDescriptorSet descSet = VK_NULL_HANDLE;
+    VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+    VkPipeline pipeline = VK_NULL_HANDLE;
+};
+
+bool ensureRasterPostFastResources(
+    VkDevice device,
+    const std::string& shaderDir,
+    uint32_t pushConstantSize,
+    RasterPostFastResources& out);
+
+void updateRasterPostFastDescriptor(
+    VkDevice device,
+    const RasterPostFastResources& res,
+    VkSampler sampler,
+    VkImageView hdrView);
+
+void destroyRasterPostFastResources(
+    VkDevice device,
+    RasterPostFastResources& res);
 
 bool ensureRayFusionViewportPasses(
     VkDevice vkDevice,
@@ -49,6 +83,12 @@ bool ensureRayFusionViewportPasses(
     VkRenderPass& renderPassLoad,
     VkRenderPass& hdrRenderPass,
     VkRenderPass& hdrRenderPassLoad,
-    bool storeReflectionGbuffer = true);
+    bool storeReflectionGbuffer = true,
+    bool storePreviousClip = true);
+
+VkRenderPass createHdrNoMotionRenderPass(
+    VkDevice device,
+    bool storeReflectionGbuffer,
+    bool loadColor);
 
 } // namespace Backend

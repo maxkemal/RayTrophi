@@ -10,11 +10,89 @@
 #include "SimFrameCompress.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
+#include <mutex>
+#include <unordered_map>
 
 namespace VulkanRT {
 
 namespace {
+
+struct CloudDeviceOptState {
+    // True when sheets 0..2 of m_cloudCellMap hold non-zero storm cells and
+    // need one clearing dispatch when active cell count returns to 0.
+    bool cellMapDirty = false;
+
+    // Inline params upload state for steady-state RayFusion drift updates:
+    // eliminates the per-frame standalone vkQueueSubmit + ALL_COMMANDS_BIT
+    // stall when only wind drift / time changed and recordCloudRaster runs.
+    bool hasLastParams = false;
+    bool rasterInlineReady = false;
+    bool hasPendingParams = false;
+    uint64_t lastNonDriftHash = 0;
+    Backend::CloudParamsGPU lastParams{};
+    Backend::CloudParamsGPU pendingParams{};
+
+    // Shadow map throttle / dirty tracking (512x512 x 32-step compute pass).
+    bool shadowValid = false;
+    bool shadowCellsActive = false;
+    uint64_t shadowNonDriftHash = 0;
+    float shadowSunDir[3] = {0.0f, 0.0f, 0.0f};
+    float shadowCenter[2] = {0.0f, 0.0f};
+    float shadowDrift[2] = {0.0f, 0.0f};
+    float shadowEvolution = 0.0f;
+    float shadowTime = 0.0f;
+};
+
+std::mutex g_cloudOptStateMutex;
+std::unordered_map<const VulkanDevice*, CloudDeviceOptState> g_cloudOptStates;
+
+uint64_t hashCloudNonDriftParams(const Backend::CloudParamsGPU& params) {
+    Backend::CloudParamsGPU key = params;
+    key.wind[0] = 0.0f;
+    key.wind[1] = 0.0f;
+    key.weather[2] = 0.0f;
+    key.cirrusDirection[2] = 0.0f;
+    Backend::clearTransientCloudKey(key);
+    uint64_t h = 1469598103934665603ull;
+    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(&key);
+    for (size_t i = 0; i < sizeof(key); ++i) {
+        h ^= bytes[i];
+        h *= 1099511628211ull;
+    }
+    return h | 1ull;
+}
+
+bool cloudParamsEqualIgnoringNearState(const Backend::CloudParamsGPU& a,
+                                       const Backend::CloudParamsGPU& b) {
+    Backend::CloudParamsGPU ca = a;
+    Backend::CloudParamsGPU cb = b;
+    ca.nearState = {};
+    cb.nearState = {};
+    return std::memcmp(&ca, &cb, sizeof(Backend::CloudParamsGPU)) == 0;
+}
+
+bool cloudParamsOnlyDriftChanged(const Backend::CloudParamsGPU& a,
+                                 const Backend::CloudParamsGPU& b) {
+    Backend::CloudParamsGPU ca = a;
+    Backend::CloudParamsGPU cb = b;
+    ca.wind[0] = cb.wind[0] = 0.0f;
+    ca.wind[1] = cb.wind[1] = 0.0f;
+    ca.weather[2] = cb.weather[2] = 0.0f;
+    ca.cirrusDirection[2] = cb.cirrusDirection[2] = 0.0f;
+    ca.nearState = {};
+    cb.nearState = {};
+    return std::memcmp(&ca, &cb, sizeof(Backend::CloudParamsGPU)) == 0;
+}
+
+void invalidateCloudShadowCache(const VulkanDevice* device) {
+    std::lock_guard<std::mutex> lock(g_cloudOptStateMutex);
+    auto it = g_cloudOptStates.find(device);
+    if (it != g_cloudOptStates.end()) {
+        it->second.shadowValid = false;
+    }
+}
 
 VkSampler makeRepeatSampler(VkDevice device) {
     VkSamplerCreateInfo s{};
@@ -163,6 +241,10 @@ void VulkanDevice::destroyCloudResources() {
     m_cloudQueryCapacity = 0;
     m_cloudNoiseReady = false;
     m_cloudWeatherHash = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudOptStateMutex);
+        g_cloudOptStates.erase(this);
+    }
 }
 
 bool VulkanDevice::ensureCloudTextures() {
@@ -462,6 +544,11 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     // generator or an atlas the flag is cleared and the shell keeps the cells
     // (an unpainted atlas reads "far" -- the cells would vanish otherwise).
     const bool volumesLive = m_cloudVolumePipeline != VK_NULL_HANDLE && m_cloudVolumeSlots > 0;
+    Backend::CloudParamsGPU gatedParams = params;
+    if (!volumesLive) {
+        gatedParams.volume[0] = 0.0f;
+    }
+    const uint64_t nonDriftHash = hashCloudNonDriftParams(gatedParams);
     constexpr VkDeviceSize kCellsOffset = (sizeof(Backend::CloudParamsGPU) + 255u) & ~VkDeviceSize(255u);
     // Local fog envelope: one RGBA16F cell-map sheet, uploaded only when the
     // published map changed (its placement is in `params`, same snapshot).
@@ -474,6 +561,63 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     const uint64_t fogRevision = fog && fog->active ? fog->revision : 0;
     const bool uploadFog = fogRevision != 0 && fogRevision != m_cloudFogRevision &&
         fog->texels.size() == size_t(Backend::kCloudCellMapSize) * Backend::kCloudCellMapSize;
+    const bool hasStormCells = cells.header[0] > 0.5f;
+    bool needVolumeRepaint = false;
+    if (volumesLive && m_cloudVolumeSet && gatedParams.volume[0] > 0.5f) {
+        for (int i = 0; i < atmosphere::kMaxCloudVolumeSlots; ++i) {
+            const Backend::CloudVolumeSlotGPU& v = gatedParams.volumeSlots[i];
+            if (v.a[3] < 0.5f) break;
+            const uint32_t atlasSlot = static_cast<uint32_t>(v.b[3] + 0.5f);
+            if (atlasSlot >= m_cloudVolumeSlots) continue;
+            if (hashCloudVolumeSlot(v) != m_cloudVolumeKeys[atlasSlot]) {
+                needVolumeRepaint = true;
+                break;
+            }
+        }
+    }
+    const bool needNearStateDispatch =
+        (gatedParams.precip3[3] > 0.0f || m_lensWeatherCamera.settings.enabled) &&
+        m_cloudSamplePipeline && m_cloudNearDescSet &&
+        m_cloudNoiseReady && m_cloudWeatherHash != 0;
+    bool needCellsDispatch = false;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudOptStateMutex);
+        CloudDeviceOptState& opt = g_cloudOptStates[this];
+        needCellsDispatch =
+            m_cloudCellsPipeline && m_cloudCellsSet && (hasStormCells || opt.cellMapDirty);
+        const bool needAuxWork =
+            uploadFog || needCellsDispatch || needVolumeRepaint || needNearStateDispatch;
+        if (!needAuxWork && opt.hasLastParams) {
+            if (!opt.hasPendingParams &&
+                cloudParamsEqualIgnoringNearState(gatedParams, opt.lastParams)) {
+                m_cloudVolumeLastRepaints = 0;
+                return;
+            }
+            if (opt.rasterInlineReady &&
+                cloudParamsOnlyDriftChanged(gatedParams, opt.lastParams)) {
+                opt.pendingParams = gatedParams;
+                opt.hasPendingParams = true;
+                opt.rasterInlineReady = false;
+                opt.lastParams = gatedParams;
+                opt.lastNonDriftHash = nonDriftHash;
+                opt.shadowCellsActive = false;
+                m_cloudVolumeLastRepaints = 0;
+                return;
+            }
+        }
+        opt.hasPendingParams = false;
+        opt.rasterInlineReady = false;
+        opt.lastParams = gatedParams;
+        opt.lastNonDriftHash = nonDriftHash;
+        opt.hasLastParams = true;
+        opt.shadowCellsActive = hasStormCells;
+        if (uploadFog || needVolumeRepaint || (needCellsDispatch && !hasStormCells)) {
+            opt.shadowValid = false;
+        }
+        if (needCellsDispatch) {
+            opt.cellMapDirty = hasStormCells;
+        }
+    }
     CloudUploadSlot& slot = m_cloudUploadSlots[m_cloudUploadNext];
     m_cloudUploadNext = (m_cloudUploadNext + 1u) % kCloudUploadSlots;
     if (!slot.fence) {
@@ -495,10 +639,12 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
             vkCreateFence(m_device, &fi, nullptr, &slot.fence) != VK_SUCCESS) {
             // Never lose an update: fall back to the blocking path (no volume
             // repaint on it, so the volumes are off for this update).
-            Backend::CloudParamsGPU gated = params;
+            Backend::CloudParamsGPU gated = gatedParams;
             gated.volume[0] = 0.0f;
             uploadBuffer(m_cloudRtParamsBuffer, &gated, sizeof(gated));
-            uploadBuffer(m_cloudCellsBuffer, &cells, sizeof(cells));
+            if (needCellsDispatch) {
+                uploadBuffer(m_cloudCellsBuffer, &cells, sizeof(cells));
+            }
             if (slot.cmd) vkFreeCommandBuffers(m_device, m_commandPool, 1, &slot.cmd);
             if (slot.staging.buffer) destroyBuffer(slot.staging);
             slot = {};
@@ -509,11 +655,10 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     vkResetFences(m_device, 1, &slot.fence);
     void* mapped = nullptr;
     if (vkMapMemory(m_device, slot.staging.memory, 0, kStagingBytes, 0, &mapped) != VK_SUCCESS) return;
-    std::memcpy(mapped, &params, sizeof(params));
-    if (!volumesLive) {
-        static_cast<Backend::CloudParamsGPU*>(mapped)->volume[0] = 0.0f;
+    std::memcpy(mapped, &gatedParams, sizeof(gatedParams));
+    if (needCellsDispatch) {
+        std::memcpy(static_cast<char*>(mapped) + kCellsOffset, &cells, sizeof(cells));
     }
-    std::memcpy(static_cast<char*>(mapped) + kCellsOffset, &cells, sizeof(cells));
     if (uploadFog) {
         uint16_t* halfs = reinterpret_cast<uint16_t*>(static_cast<char*>(mapped) + kFogOffset);
         for (size_t i = 0; i < fog->texels.size(); ++i) {
@@ -538,10 +683,12 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          0, 1, &before, 0, nullptr, 0, nullptr);
-    const VkBufferCopy paramsCopy{0, 0, sizeof(params)};
+    const VkBufferCopy paramsCopy{0, 0, sizeof(gatedParams)};
     vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudRtParamsBuffer.buffer, 1, &paramsCopy);
-    const VkBufferCopy cellsCopy{kCellsOffset, 0, sizeof(cells)};
-    vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudCellsBuffer.buffer, 1, &cellsCopy);
+    if (needCellsDispatch) {
+        const VkBufferCopy cellsCopy{kCellsOffset, 0, sizeof(cells)};
+        vkCmdCopyBuffer(slot.cmd, slot.staging.buffer, m_cloudCellsBuffer.buffer, 1, &cellsCopy);
+    }
     if (uploadFog) {
         VkBufferImageCopy region{};
         region.bufferOffset = kFogOffset;
@@ -559,7 +706,7 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     copied.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(slot.cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                          0, 1, &copied, 0, nullptr, 0, nullptr);
-    if (m_cloudCellsPipeline && m_cloudCellsSet) {
+    if (needCellsDispatch) {
         vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudCellsPipeline);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudCellsLayout, 0, 1,
                                 &m_cloudCellsSet, 0, nullptr);
@@ -576,10 +723,10 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     // leading barrier of this buffer already ordered the write after every
     // earlier frame's reads; the trailing one publishes it to later frames.
     m_cloudVolumeLastRepaints = 0;
-    if (volumesLive && m_cloudVolumeSet && params.volume[0] > 0.5f) {
+    if (needVolumeRepaint) {
         bool bound = false;
         for (int i = 0; i < atmosphere::kMaxCloudVolumeSlots; ++i) {
-            const Backend::CloudVolumeSlotGPU& v = params.volumeSlots[i];
+            const Backend::CloudVolumeSlotGPU& v = gatedParams.volumeSlots[i];
             if (v.a[3] < 0.5f) break;
             const uint32_t atlasSlot = static_cast<uint32_t>(v.b[3] + 0.5f);
             if (atlasSlot >= m_cloudVolumeSlots) continue;
@@ -617,8 +764,7 @@ void VulkanDevice::updateCloudRtParams(const Backend::CloudParamsGPU& params,
     // buffer, instead of in every pixel of RT and RayFusion. After the cell
     // map and volumes it reads; skipped (state stays zero = no drops) when
     // near drops are off or the field is not generated yet.
-    if ((params.precip3[3] > 0.0f || m_lensWeatherCamera.settings.enabled) && m_cloudSamplePipeline && m_cloudNearDescSet &&
-        m_cloudNoiseReady && m_cloudWeatherHash != 0) {
+    if (needNearStateDispatch) {
         vkCmdBindPipeline(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudSamplePipeline);
         vkCmdBindDescriptorSets(slot.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudSamplePipelineLayout,
                                 0, 1, &m_cloudNearDescSet, 0, nullptr);
@@ -931,6 +1077,7 @@ bool VulkanDevice::generateCloudNoise() {
     if (ok) {
         m_cloudNoiseReady = true;
         ++m_cloudNoiseGenerations;
+        invalidateCloudShadowCache(this);
     }
     return ok;
 }
@@ -943,6 +1090,7 @@ bool VulkanDevice::generateCloudWeather(const Backend::CloudWeatherGenParams& w)
         !dispatchCloudNoise(4u, Backend::kCloudMajorantSize, 0u, 0u)) return false;
     m_cloudWeatherHash = h;
     ++m_cloudWeatherGenerations;
+    invalidateCloudShadowCache(this);
     return true;
 }
 
@@ -1050,6 +1198,15 @@ void VulkanDevice::destroyCloudRaster() {
     m_cloudRasterPool = VK_NULL_HANDLE;
     m_cloudRasterSets[0] = m_cloudRasterSets[1] = VK_NULL_HANDLE;
     m_cloudRasterW = m_cloudRasterH = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudOptStateMutex);
+        auto it = g_cloudOptStates.find(this);
+        if (it != g_cloudOptStates.end()) {
+            it->second.rasterInlineReady = false;
+            it->second.hasPendingParams = false;
+            it->second.shadowValid = false;
+        }
+    }
 }
 
 bool VulkanDevice::createCloudRasterPipeline(const std::vector<uint32_t>& spv) {
@@ -1283,6 +1440,7 @@ bool VulkanDevice::createCloudShadowPipeline(const std::vector<uint32_t>& spv) {
         w[s].pImageInfo = &ii;
     }
     vkUpdateDescriptorSets(m_device, 2, w, 0, nullptr);
+    invalidateCloudShadowCache(this);
     return true;
 }
 
@@ -1401,6 +1559,57 @@ bool VulkanDevice::ensureCloudRasterTargets(uint32_t w, uint32_t h, uint32_t int
 
 void VulkanDevice::recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRasterFrameGPU& frame) {
     if (!m_cloudRasterPipeline || !m_cloudRasterOut.view || cmd == VK_NULL_HANDLE) return;
+    bool hasPendingParams = false;
+    Backend::CloudParamsGPU pendingParams{};
+    bool shouldUpdateShadow = false;
+    {
+        std::lock_guard<std::mutex> lock(g_cloudOptStateMutex);
+        CloudDeviceOptState& opt = g_cloudOptStates[this];
+        if (opt.hasPendingParams) {
+            pendingParams = opt.pendingParams;
+            hasPendingParams = true;
+            opt.hasPendingParams = false;
+        }
+        opt.rasterInlineReady = true;
+        if (m_cloudShadowPipeline) {
+            if (!opt.shadowValid || !opt.hasLastParams ||
+                opt.shadowNonDriftHash != opt.lastNonDriftHash ||
+                std::fabs(frame.sunDir[0] - opt.shadowSunDir[0]) > 1e-5f ||
+                std::fabs(frame.sunDir[1] - opt.shadowSunDir[1]) > 1e-5f ||
+                std::fabs(frame.sunDir[2] - opt.shadowSunDir[2]) > 1e-5f ||
+                frame.shadowCenter[0] != opt.shadowCenter[0] ||
+                frame.shadowCenter[1] != opt.shadowCenter[1]) {
+                shouldUpdateShadow = true;
+            } else {
+                const float dDriftX = opt.lastParams.wind[0] - opt.shadowDrift[0];
+                const float dDriftZ = opt.lastParams.wind[1] - opt.shadowDrift[1];
+                const float driftDistSq = dDriftX * dDriftX + dDriftZ * dDriftZ;
+                const float dEvo = std::fabs(opt.lastParams.weather[2] - opt.shadowEvolution);
+                const float dTime = std::fabs(opt.lastParams.cirrusDirection[2] - opt.shadowTime);
+                const bool driftMoved =
+                    driftDistSq > 1e-6f || dEvo > 1e-6f ||
+                    (opt.shadowCellsActive && dTime > 1e-6f);
+                // Re-bake at most ~20 Hz for gentle drift/evolution/storm motion,
+                // or immediately if drift moved >= 8 m (~1/8 of a 62.5 m texel).
+                if (driftMoved && (driftDistSq >= 64.0f || dEvo >= 0.05f || dTime >= 0.05f)) {
+                    shouldUpdateShadow = true;
+                }
+            }
+            if (shouldUpdateShadow) {
+                opt.shadowValid = true;
+                opt.shadowNonDriftHash = opt.lastNonDriftHash;
+                opt.shadowSunDir[0] = frame.sunDir[0];
+                opt.shadowSunDir[1] = frame.sunDir[1];
+                opt.shadowSunDir[2] = frame.sunDir[2];
+                opt.shadowCenter[0] = frame.shadowCenter[0];
+                opt.shadowCenter[1] = frame.shadowCenter[1];
+                opt.shadowDrift[0] = opt.lastParams.wind[0];
+                opt.shadowDrift[1] = opt.lastParams.wind[1];
+                opt.shadowEvolution = opt.lastParams.weather[2];
+                opt.shadowTime = opt.lastParams.cirrusDirection[2];
+            }
+        }
+    }
     // Last frame's sky pass read the output and last frame's dispatch wrote
     // the histories: both must finish before this frame overwrites them.
     VkMemoryBarrier pre{};
@@ -1410,6 +1619,13 @@ void VulkanDevice::recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRa
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
                          VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &pre, 0, nullptr, 0, nullptr);
     vkCmdUpdateBuffer(cmd, m_cloudRasterFrameBuf.buffer, 0, sizeof(frame), &frame);
+    if (hasPendingParams) {
+        static_assert(sizeof(Backend::CloudParamsGPU) <= 65536u &&
+                          (sizeof(Backend::CloudParamsGPU) % 4u) == 0u,
+                      "CloudParamsGPU must fit vkCmdUpdateBuffer limits");
+        vkCmdUpdateBuffer(cmd, m_cloudRtParamsBuffer.buffer, 0,
+                          sizeof(Backend::CloudParamsGPU), &pendingParams);
+    }
     VkMemoryBarrier up{};
     up.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
     up.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1441,7 +1657,7 @@ void VulkanDevice::recordCloudRaster(VkCommandBuffer cmd, const Backend::CloudRa
     // Resolve: every pixel of the target, full-resolution history.
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudResolvePipeline);
     vkCmdDispatch(cmd, (m_cloudRasterW + 7u) / 8u, (m_cloudRasterH + 7u) / 8u, 1);
-    if (m_cloudShadowPipeline) {
+    if (m_cloudShadowPipeline && shouldUpdateShadow) {
         // Same set (binding 11 + the frame block); independent of the march.
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_cloudShadowPipeline);
         vkCmdDispatch(cmd, (Backend::kCloudShadowMapSize + 7u) / 8u,

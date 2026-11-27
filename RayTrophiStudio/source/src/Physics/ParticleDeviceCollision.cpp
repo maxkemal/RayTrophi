@@ -195,7 +195,8 @@ bool ParticleSimulationSystem::stepDeviceCollisions(SimulationComputeContext& co
     const float particle_radius = std::max(0.0f, physics_settings_.particle_radius);
     refreshResolvedColliders(particle_radius);
 
-    std::vector<ParticleGpuCollider> packed;
+    thread_local std::vector<ParticleGpuCollider> packed;
+    packed.clear();
     packed.reserve(resolved_colliders_.size());
     uint64_t sdf_signature = 1469598103934665603ull;
     std::size_t sdf_floats = 0;

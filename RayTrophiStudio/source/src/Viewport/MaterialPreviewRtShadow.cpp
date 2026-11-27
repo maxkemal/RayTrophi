@@ -209,6 +209,10 @@ bool VulkanBackendAdapter::rtShadowCoveredLight(RtShadowCoverage& coverage,
         if (index >= kWorldSunSlot) {
             break;
         }
+        if (!light->cast_shadows) {
+            ++index;
+            continue;
+        }
         Vec3 toLight{};
         const bool directional = light->type() == LightType::Directional;
         const bool finitePosition = std::isfinite(light->position.x) &&

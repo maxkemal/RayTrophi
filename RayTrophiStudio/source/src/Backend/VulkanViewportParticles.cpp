@@ -11,6 +11,7 @@
 // set at all, and drew colours the CPU had already lerped.
 
 #include "Backend/VulkanViewportBackend.h"
+#include "ParticleBillboardCompaction.h"
 #include "PerfProfile.h"
 #include "globals.h"
 #include "Viewport/SphereImpostorAvailability.h"
@@ -23,6 +24,8 @@
 
 namespace Backend {
 namespace {
+
+namespace Compaction = ParticleBillboardCompaction;
 
 // Must match the push constant block in shaders/include/particle_appearance_lut.glsl.
 struct ParticlePushConstants {
@@ -80,13 +83,23 @@ VkBuffer toVkBuffer(uint64_t handle) {
     return reinterpret_cast<VkBuffer>(static_cast<uintptr_t>(handle));
 }
 
-VkDescriptorSetLayout createStorageLayout(VkDevice device, uint32_t bindingCount) {
+VkDescriptorSetLayout createStorageLayout(VkDevice device, uint32_t bindingCount,
+                                          bool particleLookup = false,
+                                          bool particleStreams = false) {
     std::vector<VkDescriptorSetLayoutBinding> bindings(bindingCount);
     for (uint32_t i = 0; i < bindingCount; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        if ((particleLookup && i == 1) ||
+            (particleStreams && (i == kPulledAlive || i == kPulledProfile ||
+                                 i >= Compaction::kFirstBinding))) {
+            bindings[i].stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;
+        }
+        if (particleStreams && i > Compaction::kFirstBinding) {
+            bindings[i].stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        }
     }
     VkDescriptorSetLayoutCreateInfo dslci{};
     dslci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -101,11 +114,12 @@ VkDescriptorSetLayout createStorageLayout(VkDevice device, uint32_t bindingCount
 
 VkPipelineLayout createParticlePipelineLayout(VkDevice device,
                                               const VkDescriptorSetLayout* sets,
-                                              uint32_t setCount) {
+                                              uint32_t setCount,
+                                              bool compute = false) {
     VkPushConstantRange range{};
-    range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+    range.stageFlags = compute ? VK_SHADER_STAGE_COMPUTE_BIT : VK_SHADER_STAGE_VERTEX_BIT;
     range.offset = 0;
-    range.size = sizeof(ParticlePushConstants);
+    range.size = compute ? sizeof(Compaction::Params) : sizeof(ParticlePushConstants);
     VkPipelineLayoutCreateInfo plci{};
     plci.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     plci.setLayoutCount = setCount;
@@ -328,14 +342,24 @@ void VulkanViewportBackend::ensureParticleBillboardPipelines(const std::string& 
     g_fluid_sphere_proxy_ready = iv.fluidSphereProxyPipeline != VK_NULL_HANDLE;
 
     if (iv.particleDescLayout == VK_NULL_HANDLE) {
-        iv.particleDescLayout = createStorageLayout(vkDevice, 2);  // LUT, row lookup
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(m_device->getPhysicalDevice(), &properties);
+        const auto& limits = properties.limits;
+        iv.particleCompactSupported =
+            limits.maxPerStageDescriptorStorageBuffers >= kPulledStreamCount + 3 &&
+            limits.maxDescriptorSetStorageBuffers >= kPulledStreamCount +
+                Compaction::kBindingCount + 2;
+        iv.particleDescLayout = createStorageLayout(vkDevice, 2, iv.particleCompactSupported);
         if (iv.particleDescLayout == VK_NULL_HANDLE) {
             SCENE_LOG_ERROR("[Particles] billboard descriptor layout creation failed");
             return;
         }
     }
     if (iv.particlePullDescLayout == VK_NULL_HANDLE) {
-        iv.particlePullDescLayout = createStorageLayout(vkDevice, kPulledStreamCount);
+        const uint32_t bindings = kPulledStreamCount +
+            (iv.particleCompactSupported ? Compaction::kBindingCount : 0);
+        iv.particlePullDescLayout = createStorageLayout(
+            vkDevice, bindings, false, iv.particleCompactSupported);
     }
     if (iv.particleDescPool == VK_NULL_HANDLE) {
         VkDescriptorPoolSize poolSize{};
@@ -377,7 +401,9 @@ void VulkanViewportBackend::ensureParticleBillboardPipelines(const std::string& 
     const bool needQuad = iv.particleAddPipeline == VK_NULL_HANDLE;
     const bool needPull = iv.particlePullAddPipeline == VK_NULL_HANDLE &&
                           iv.particlePullPipelineLayout != VK_NULL_HANDLE;
-    if (!needQuad && !needPull) {
+    const bool needCompact = iv.particleCompactSupported && !iv.particleCompactAttempted &&
+                             iv.particlePullPipelineLayout != VK_NULL_HANDLE;
+    if (!needQuad && !needPull && !needCompact) {
         return;
     }
     VkShaderModule frag = createModule(vkDevice, shaderDir + "/particle_viewport_frag.spv");
@@ -411,7 +437,105 @@ void VulkanViewportBackend::ensureParticleBillboardPipelines(const std::string& 
             }
         }
     }
+    if (needCompact) {
+        iv.particleCompactAttempted = true;
+        const VkDescriptorSetLayout sets[] = {iv.particleDescLayout, iv.particlePullDescLayout};
+        iv.particleCompactLayout = createParticlePipelineLayout(vkDevice, sets, 2, true);
+        VkShaderModule compute = createModule(vkDevice, shaderDir + "/particle_viewport_compact.spv");
+        if (compute != VK_NULL_HANDLE && iv.particleCompactLayout != VK_NULL_HANDLE) {
+            VkComputePipelineCreateInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+            info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            info.stage.module = compute;
+            info.stage.pName = "main";
+            info.layout = iv.particleCompactLayout;
+            if (vkCreateComputePipelines(vkDevice, VK_NULL_HANDLE, 1, &info, nullptr,
+                                         &iv.particleCompactPipeline) != VK_SUCCESS) {
+                iv.particleCompactPipeline = VK_NULL_HANDLE;
+            }
+        }
+        if (compute != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(vkDevice, compute, nullptr);
+        }
+        VkShaderModule vert = createModule(vkDevice, shaderDir + "/particle_viewport_pull_compact.spv");
+        if (vert != VK_NULL_HANDLE) {
+            if (iv.particleCompactPipeline != VK_NULL_HANDLE) {
+                createBillboardPipelines(vkDevice, iv.renderPass, iv.particlePullPipelineLayout,
+                                          vert, frag, false, iv.particleCompactAddPipeline,
+                                          iv.particleCompactAlphaPipeline);
+            }
+            vkDestroyShaderModule(vkDevice, vert, nullptr);
+        }
+    }
     vkDestroyShaderModule(vkDevice, frag, nullptr);
+}
+
+bool VulkanViewportBackend::recordParticleBillboardCompaction(VkCommandBuffer cmd) {
+    auto& iv = m_interactiveViewport;
+    if (iv.particleCompactPipeline == VK_NULL_HANDLE ||
+        iv.particleCompactAddPipeline == VK_NULL_HANDLE ||
+        iv.particleCompactAlphaPipeline == VK_NULL_HANDLE ||
+        iv.particleDescSet == VK_NULL_HANDLE || iv.particleLutDescriptorStale ||
+        !iv.particleLutBuffer.buffer || !iv.particleRowLookupBuffer.buffer) {
+        return false;
+    }
+
+    const auto count = std::min(iv.particlePulledDraws.size(), iv.particlePullSlots.size());
+    bool bound = false;
+    for (uint32_t phase = 0; phase < 3; ++phase) {
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& draw = iv.particlePulledDraws[i];
+            const auto& slot = iv.particlePullSlots[i];
+            if (draw.particle_count == 0 || draw.particle_count > slot.compactCapacity ||
+                slot.set == VK_NULL_HANDLE) {
+                continue;
+            }
+            if (!bound) {
+                // The scan reads simulation/LUT writes. Reused scratch also
+                // needs ordering after the prior frame's indirect and vertex reads.
+                constexpr VkPipelineStageFlags producers =
+                    VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT |
+                    VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT;
+                Compaction::barrier(cmd, producers,
+                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                    VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+                                    VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, iv.particleCompactPipeline);
+                bound = true;
+            }
+            const VkDescriptorSet sets[] = {iv.particleDescSet, slot.set};
+            const auto layout = iv.particleCompactLayout;
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout,
+                                    0, 2, sets, 0, nullptr);
+            const Compaction::Params params{
+                draw.particle_count, draw.lookup_offset, draw.lookup_count, phase
+            };
+            vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_COMPUTE_BIT,
+                               0, sizeof(params), &params);
+            const uint32_t groups = Compaction::blockCount(draw.particle_count);
+            vkCmdDispatch(cmd, phase == 1 ? 1 : groups, 1, 1);
+        }
+        if (!bound) {
+            return false;
+        }
+        if (phase < 2) {
+            Compaction::barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                                VK_ACCESS_SHADER_WRITE_BIT,
+                                VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+        }
+    }
+    return true;
+}
+
+void VulkanViewportBackend::makeParticleBillboardCompactionVisible(VkCommandBuffer cmd) {
+    // On the split HDR path, only the LDR overlay consumes the lists. Keeping
+    // this dependency at the overlay boundary leaves the HDR draw stages free.
+    Compaction::barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                        VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT,
+                        VK_ACCESS_SHADER_WRITE_BIT,
+                        VK_ACCESS_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_SHADER_READ_BIT);
 }
 
 void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
@@ -521,17 +645,25 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
         if (pipeline == VK_NULL_HANDLE || iv.particlePullPipelineLayout == VK_NULL_HANDLE) {
             return;
         }
-        bool bound = false;
+        VkPipeline bound = VK_NULL_HANDLE;
         const std::size_t n = std::min(iv.particlePulledDraws.size(), iv.particlePullSlots.size());
         for (std::size_t i = 0; i < n; ++i) {
             const ParticlePulledDraw& d = iv.particlePulledDraws[i];
-            const VkDescriptorSet set1 = iv.particlePullSlots[i].set;
+            const auto& slot = iv.particlePullSlots[i];
+            const VkDescriptorSet set1 = slot.set;
             if (d.particle_count == 0 || set1 == VK_NULL_HANDLE || (alphaPass && !d.has_alpha)) {
                 continue;
             }
-            if (!bound) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-                bound = true;
+            const bool compact = iv.particleCompactPipeline != VK_NULL_HANDLE &&
+                                 iv.particleCompactAddPipeline != VK_NULL_HANDLE &&
+                                 iv.particleCompactAlphaPipeline != VK_NULL_HANDLE &&
+                                 d.particle_count <= slot.compactCapacity;
+            const VkPipeline selected = compact
+                ? (alphaPass ? iv.particleCompactAlphaPipeline : iv.particleCompactAddPipeline)
+                : pipeline;
+            if (bound != selected) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, selected);
+                bound = selected;
             }
             const VkDescriptorSet sets[2] = {iv.particleDescSet, set1};
             vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -542,7 +674,13 @@ void VulkanViewportBackend::recordParticleBillboards(VkCommandBuffer cmd,
             pc.draw[3] = alphaPass ? 1u : 0u;
             vkCmdPushConstants(cmd, iv.particlePullPipelineLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                sizeof(ParticlePushConstants), &pc);
-            vkCmdDraw(cmd, d.particle_count * 6u, 1, 0, 0);
+            if (compact) {
+                const VkDeviceSize offset = alphaPass ? sizeof(VkDrawIndirectCommand) : 0;
+                vkCmdDrawIndirect(cmd, slot.compactBuffers[2].buffer, offset, 1,
+                                  sizeof(VkDrawIndirectCommand));
+            } else {
+                vkCmdDraw(cmd, d.particle_count * 6u, 1, 0, 0);
+            }
         }
     };
     // Alpha first, additive on top.
@@ -592,13 +730,17 @@ void VulkanViewportBackend::destroyParticleBillboardResources(bool keepPipeline)
     }
     if (!keepPipeline) {
         for (VkPipeline* p : {&iv.particleAddPipeline, &iv.particleAlphaPipeline,
-                              &iv.particlePullAddPipeline, &iv.particlePullAlphaPipeline}) {
+                              &iv.particlePullAddPipeline, &iv.particlePullAlphaPipeline,
+                              &iv.particleCompactPipeline, &iv.particleCompactAddPipeline,
+                              &iv.particleCompactAlphaPipeline}) {
             if (*p != VK_NULL_HANDLE) {
                 vkDestroyPipeline(vkDevice, *p, nullptr);
                 *p = VK_NULL_HANDLE;
             }
         }
-        for (VkPipelineLayout* l : {&iv.particlePipelineLayout, &iv.particlePullPipelineLayout}) {
+        iv.particleCompactAttempted = false;
+        for (VkPipelineLayout* l : {&iv.particlePipelineLayout, &iv.particlePullPipelineLayout,
+                                    &iv.particleCompactLayout}) {
             if (*l != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(vkDevice, *l, nullptr);
                 *l = VK_NULL_HANDLE;
@@ -614,6 +756,9 @@ void VulkanViewportBackend::destroyParticleBillboardResources(bool keepPipeline)
             iv.particlePullDescPool = VK_NULL_HANDLE;
         }
         iv.particlePullDescCapacity = 0;
+        for (auto& slot : iv.particlePullSlots) {
+            Compaction::release(*m_device, slot.compactBuffers);
+        }
         iv.particlePullSlots.clear();
         for (VkDescriptorSetLayout* l : {&iv.particleDescLayout, &iv.particlePullDescLayout}) {
             if (*l != VK_NULL_HANDLE) {
@@ -698,8 +843,12 @@ void VulkanBackendAdapter::uploadParticleBillboards(ParticleBillboardUpload& dat
             if (data.pulled.size() > iv.particlePullDescCapacity) return true;
             const std::size_t n = std::min(data.pulled.size(), iv.particlePullSlots.size());
             for (std::size_t i = 0; i < n; ++i) {
-                if (std::memcmp(iv.particlePullSlots[i].buffers, data.pulled[i].buffers,
-                                sizeof(iv.particlePullSlots[i].buffers)) != 0) {
+                const auto& slot = iv.particlePullSlots[i];
+                const auto& draw = data.pulled[i];
+                if (std::memcmp(slot.buffers, draw.buffers, sizeof(slot.buffers)) != 0 ||
+                    (iv.particleCompactAddPipeline && iv.particleCompactAlphaPipeline &&
+                     Compaction::needsAllocation(draw.slot_capacity, slot.compactCapacity,
+                                                 slot.compactAttemptedCapacity))) {
                     return true;
                 }
             }
@@ -888,13 +1037,18 @@ void VulkanBackendAdapter::uploadParticleBillboards(ParticleBillboardUpload& dat
                 vkDestroyDescriptorPool(vkDevice, iv.particlePullDescPool, nullptr);
                 iv.particlePullDescPool = VK_NULL_HANDLE;
             }
+            for (auto& slot : iv.particlePullSlots) {
+                Compaction::release(*m_device, slot.compactBuffers);
+            }
             iv.particlePullSlots.clear();
             iv.particlePullDescCapacity = 0;
             uint32_t capacity = 8;
             while (capacity < needed) capacity *= 2;
             VkDescriptorPoolSize poolSize{};
             poolSize.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            poolSize.descriptorCount = capacity * kPulledStreamCount;
+            const uint32_t bindings = kPulledStreamCount +
+                (iv.particleCompactSupported ? Compaction::kBindingCount : 0);
+            poolSize.descriptorCount = capacity * bindings;
             VkDescriptorPoolCreateInfo dpci{};
             dpci.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
             dpci.poolSizeCount = 1;
@@ -922,6 +1076,15 @@ void VulkanBackendAdapter::uploadParticleBillboards(ParticleBillboardUpload& dat
         for (std::size_t i = 0; i < n; ++i) {
             auto& slot = iv.particlePullSlots[i];
             const ParticlePulledDraw& d = data.pulled[i];
+            if (iv.particleCompactAddPipeline && iv.particleCompactAlphaPipeline &&
+                Compaction::needsAllocation(d.slot_capacity, slot.compactCapacity,
+                                            slot.compactAttemptedCapacity)) {
+                slot.compactAttemptedCapacity = d.slot_capacity;
+                if (Compaction::allocate(*m_device, slot.set, d.slot_capacity,
+                                         slot.compactBuffers)) {
+                    slot.compactCapacity = d.slot_capacity;
+                }
+            }
             if (std::memcmp(slot.buffers, d.buffers, sizeof(slot.buffers)) == 0) {
                 continue;
             }

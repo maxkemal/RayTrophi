@@ -48,6 +48,8 @@ py::dict lightToDict(const rtapi::LightInfo& info) {
     item["width"] = info.width;
     item["height"] = info.height;
     item["visible"] = info.visible;
+    item["cast_shadows"] = info.cast_shadows;
+    item["distance_falloff"] = info.distance_falloff;
     return item;
 }
 
@@ -295,6 +297,14 @@ void registerSceneBindings(py::module_& module) {
     lights.def("set_visible", [](int index, bool visible) {
         requireResult(rtapi::setLightVisible(index, visible));
     }, py::arg("index"), py::arg("visible"));
+
+    lights.def("set_cast_shadows", [](int index, bool cast_shadows) {
+        requireResult(rtapi::setLightCastShadows(index, cast_shadows));
+    }, py::arg("index"), py::arg("cast_shadows"));
+
+    lights.def("set_distance_falloff", [](int index, float distance_falloff) {
+        requireResult(rtapi::setLightDistanceFalloff(index, distance_falloff));
+    }, py::arg("index"), py::arg("distance_falloff"));
 
     lights.def("rename", [](int index, const std::string& name) {
         requireResult(rtapi::renameLight(index, name));

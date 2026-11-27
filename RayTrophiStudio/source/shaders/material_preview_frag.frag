@@ -1,4 +1,6 @@
 #version 450
+precision highp float;
+precision highp int;
 #ifdef PREVIEW_COVERED_SHADING
 layout(early_fragment_tests) in;
 #endif
@@ -37,7 +39,17 @@ layout(constant_id = 8) const bool RT_SPEC_OPT_TEX      = true;
 // Clearcoat lobe + film iridescence tint. Separated from RT_SPEC_EXT_LOBES so
 // scenes with clearcoated surfaces (e.g. glossy balloons/toys) do not pay for
 // sheen, subsurface, translucency, or micro/tile-break branches on Mali-G52.
-layout(constant_id = 9) const bool RT_SPEC_CLEARCOAT    = true;
+layout(constant_id = 9) const bool RT_SPEC_CLEARCOAT      = true;
+// Active material texture array page count (1..32). Specializing to the scene's
+// actual page count lets the driver fold unused textureGrad/Lod switch cases.
+layout(constant_id = 10) const uint RT_SPEC_TEX_PAGES     = 32u;
+#define RT_SPEC_HAS_TEX_PAGES 1
+// Wet paint canvas overlay (mat.paint_base_tex != 0). Off when no bound
+// material uses a paint base texture.
+layout(constant_id = 11) const bool RT_SPEC_PAINT_CANVAS  = true;
+// Clearcoat thin-film iridescence tint. Off when no clearcoated material sets
+// clearcoat_iridescence > 0.001.
+layout(constant_id = 12) const bool RT_SPEC_CLEARCOAT_IRID = true;
 #include "procedural_detail.glsl"
 #include "pbr_texture_policy.glsl"
 // ★★★ Goruntuleme donusumu artik BURADA TANIMLI DEGIL: tek tanim
@@ -56,8 +68,9 @@ layout(location = 7) flat in vec3 vWorldToObject1;
 layout(location = 8) flat in vec3 vWorldToObject2;
 layout(location = 9) flat in float vObjectRandom;
 layout(location = 10) in vec4 vPreviousClip;
+layout(location = 11) in vec4 vCurrentClip;
 
-layout(location = 0) out vec4 outColor;
+layout(location = 0) out mediump vec4 outColor;
 // ★★★ RayFusion reflection G-buffer. Bu iki cikis, yansima compute gecisinin
 //   OKUDUGU seydir ve onlari yazan shader, ayni degerlerle golgelendiren
 //   shader'in KENDISIDIR. Normali derinlikten geri kurmak bir secenek degildi:
@@ -65,9 +78,9 @@ layout(location = 0) out vec4 outColor;
 //   derece -- depth turevinden gelen geometrik normal o lobun icine sigmaz, ve
 //   normal map orada hic yok. Kanal sozlesmesi:
 //   rayfusion_reflection_gbuffer.glsl icinde, TEK yerde.
-layout(location = 1) out vec2 outRfNormal;
-layout(location = 2) out vec4 outRfSpecular;
-layout(location = 3) out vec4 outPreviousClip;
+layout(location = 1) out mediump vec2 outRfNormal;
+layout(location = 2) out mediump vec4 outRfSpecular;
+layout(location = 3) out mediump vec2 outPreviousClip;
 
 // Material buffer struct — single source of truth shared by every material-reading
 // shader. This shader historically called the type `GpuMaterial`; alias it so the
@@ -209,6 +222,9 @@ layout(set = 0, binding = 19, r32ui) uniform uimage2D previewTransmissionBackDep
 layout(std140, set = 0, binding = 28) uniform RayFusionFrameUniform {
     mat4 view;
     vec4 lightDir2;
+    mat4 curViewProj;
+    mat4 prevViewProj;
+    vec4 motionMeta;
 } rayFusionFrame;
 
 layout(push_constant) uniform MaterialPreviewPushConstants {
@@ -298,33 +314,45 @@ float previewCloudShadow(vec3 P) {
     return texture(cloudShadowMap, uv).r;
 }
 
-bool evalSceneLight(uint idx, vec3 P, out vec3 L, out vec3 radiance) {
-    LightData lt = sceneLights[idx];
-    int type = int(lt.position.w + 0.5);
-    vec3 base = lt.color.rgb * lt.color.w;
+bool evalSceneLight(uint idx, vec3 P, out mediump vec3 L, out mediump vec3 radiance, out vec3 lightPos) {
+    vec4 posType = sceneLights[idx].position;
+    lightPos = posType.xyz;
+    int type = int(posType.w + 0.5);
+    mediump vec4 colInt = sceneLights[idx].color;
+    mediump vec3 base = colInt.rgb * colInt.w;
 
     if (type == 1) {                       // Directional
-        L = normalize(lt.direction.xyz);
+        L = normalize(sceneLights[idx].direction.xyz);
         radiance = base * previewCloudShadow(P);
         return true;
     }
 
-    vec3 toLight = lt.position.xyz - P;
+    vec3 toLight = lightPos - P;
     float d2 = dot(toLight, toLight);
     if (d2 < 1e-6) return false;
-    L = toLight * inversesqrt(d2);
-    float atten = 1.0 / d2;
+    vec3 L_hp = toLight * inversesqrt(d2);
+    L = L_hp;
+    float falloffSoft = sceneLights[idx].area_v.w;
+    float atten;
+    if (falloffSoft <= 1e-4) {
+        atten = 1.0 / d2;
+    } else {
+        float falloffExp = max(2.0 - falloffSoft, 0.0);
+        atten = (falloffExp <= 1e-4) ? 1.0 : pow(d2, -0.5 * falloffExp);
+    }
 
     if (type == 2) {                       // Area: merkez ornegi, tek yuzlu
-        vec3 ln = normalize(cross(lt.area_u.xyz, lt.area_v.xyz));
+        vec3 ln = normalize(cross(sceneLights[idx].area_u.xyz, sceneLights[idx].area_v.xyz));
+        vec2 wh = sceneLights[idx].params.yz;
         // RT tarafinda cos/d^2 attenuation'i pdf = 1/alan ile bolunur, yani
         // etkin carpan cos * alan / d^2 olur. Ayni carpani burada dogrudan
         // uyguluyoruz ki iki hat AYNI parlaklik mertebesinde olsun.
-        atten *= max(dot(-L, ln), 0.0) * max(lt.params.y * lt.params.z, 0.0);
+        atten *= max(dot(-L_hp, ln), 0.0) * max(wh.x * wh.y, 0.0);
     } else if (type == 3) {                // Spot
-        float cosTheta = dot(-L, normalize(lt.direction.xyz));
-        float inner = lt.params.z;
-        float outer = lt.direction.w;
+        vec4 dirOuter = sceneLights[idx].direction;
+        float cosTheta = dot(-L_hp, normalize(dirOuter.xyz));
+        float inner = sceneLights[idx].params.z;
+        float outer = dirOuter.w;
         float f;
         if (cosTheta < outer)      f = 0.0;
         else if (cosTheta > inner) f = 1.0;
@@ -333,7 +361,8 @@ bool evalSceneLight(uint idx, vec3 P, out vec3 L, out vec3 radiance) {
     }
 
     if (atten <= 0.0) return false;
-    radiance = base * atten;
+    mediump float attenM = atten;
+    radiance = base * attenM;
     return true;
 }
 
@@ -344,8 +373,7 @@ uint pointShadowFace(vec3 d) {
     return d.z >= 0.0 ? 4u : 5u;
 }
 
-float evaluatePreviewShadow(uint lightIndex, vec3 P, vec3 N, vec3 L) {
-    vec3 lightPosition = lightIndex < kPreviewMaxSceneLights ? sceneLights[lightIndex].position.xyz : vec3(0);
+mediump float evaluatePreviewShadow(uint lightIndex, vec3 P, mediump vec3 N, mediump vec3 L, vec3 lightPosition) {
     return rtPreviewShadow(lightIndex, P, N, L, lightPosition, previewQualityMode());
 }
 
@@ -415,10 +443,10 @@ float G_Smith(float NdotV, float NdotL, float roughness) {
     return G_SchlickGGX(NdotV, roughness) * G_SchlickGGX(NdotL, roughness);
 }
 
-vec3 fresnelSchlick(float cosTheta, vec3 F0) {
-    float x = clamp(1.0 - cosTheta, 0.0, 1.0);
-    float x2 = x * x;
-    float x5 = x2 * x2 * x;
+mediump vec3 fresnelSchlick(mediump float cosTheta, mediump vec3 F0) {
+    mediump float x = clamp(1.0 - cosTheta, 0.0, 1.0);
+    mediump float x2 = x * x;
+    mediump float x5 = x2 * x2 * x;
     return F0 + (vec3(1.0) - F0) * x5;
 }
 
@@ -439,11 +467,11 @@ vec3 clearcoatFilmTint(float angularCosine, float iridescence,
 
 // Ambient Fresnel with roughness correction (Lagarde 2012).
 // Rough surfaces saturate toward F0 — the sharp Fresnel rim fades out.
-vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
-    float x = clamp(1.0 - cosTheta, 0.0, 1.0);
-    float x2 = x * x;
-    float x5 = x2 * x2 * x;
-    vec3 envelope = max(vec3(1.0 - roughness), F0);
+mediump vec3 fresnelSchlickRoughness(mediump float cosTheta, mediump vec3 F0, mediump float roughness) {
+    mediump float x = clamp(1.0 - cosTheta, 0.0, 1.0);
+    mediump float x2 = x * x;
+    mediump float x5 = x2 * x2 * x;
+    mediump vec3 envelope = max(vec3(1.0 - roughness), F0);
     return F0 + (envelope - F0) * x5;
 }
 
@@ -467,17 +495,26 @@ vec3 evaluateSheen(vec3 N, vec3 V, vec3 L, vec3 sheenColor, float sheenRoughness
     return sheenColor * D * Vs * NdotL;
 }
 
+mediump vec3 evaluateSpecularGGXPrecomputed(float NdotV, float NdotL, float NdotH,
+                                            mediump float VdotH, mediump vec3 F0, float roughness) {
+    if (NdotL <= 0.0 || NdotV <= 0.0) return vec3(0.0);
+    float D = D_GGX(NdotH, roughness);
+    float r = roughness + 1.0;
+    float k = (r * r) * 0.125;
+    float oneMinusK = 1.0 - k;
+    float visDenom = 4.0 * max(NdotV * oneMinusK + k, 1e-5) * max(NdotL * oneMinusK + k, 1e-5);
+    mediump vec3 F = fresnelSchlick(VdotH, F0);
+    mediump float specTerm = D / visDenom;
+    return specTerm * F;
+}
+
 vec3 evaluateSpecularGGX(vec3 N, vec3 V, vec3 L, vec3 F0, float roughness) {
     vec3 H = normalize(V + L);
     float NdotL = max(dot(N, L), 0.0);
     float NdotV = max(dot(N, V), 0.0);
     float NdotH = max(dot(N, H), 0.0);
     float VdotH = max(dot(V, H), 0.0);
-    if (NdotL <= 0.0 || NdotV <= 0.0) return vec3(0.0);
-    float D = D_GGX(NdotH, roughness);
-    float G = G_Smith(NdotV, NdotL, roughness);
-    vec3  F = fresnelSchlick(VdotH, F0);
-    return (D * G * F) / max(4.0 * NdotV * NdotL, 1e-5);
+    return evaluateSpecularGGXPrecomputed(NdotV, NdotL, NdotH, VdotH, F0, roughness);
 }
 
 vec3 sampleStudioEnvironment(vec3 dir) {
@@ -674,33 +711,27 @@ vec3 sampleEnvSpecular(vec3 reflectDir, uint lightingPreset) {
 
 // Derivative-based TBN (tangent from screen-space partial derivatives)
 // Returns a new perturbed normal using the normal map sample.
-vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strength, uint matFlags) {
+mediump vec3 applyNormalMapGrad(mediump vec3 N, vec3 worldPos, vec2 duv1, vec2 duv2,
+                                mediump vec3 nmSample, float strength, uint matFlags) {
     vec3 dp1  = dFdx(worldPos);
     vec3 dp2  = dFdy(worldPos);
-    vec2 duv1 = dFdx(uv);
-    vec2 duv2 = dFdy(uv);
 
     float det = duv1.x * duv2.y - duv2.x * duv1.y;
-    // Only reject truly degenerate geometry (UV singularity / zero-area triangle).
-    // 1e-7 was too coarse — at close range dFdx/dFdy shrink legitimately
-    // and det drops below that threshold even though the normal map is valid.
     if (abs(det) < 1e-20) return N;
 
     float invDet = 1.0 / det;
-    vec3 T = normalize((duv2.y * dp1 - duv1.y * dp2) * invDet);
-    vec3 B = normalize((-duv2.x * dp1 + duv1.x * dp2) * invDet);
+    mediump vec3 T = normalize((duv2.y * dp1 - duv1.y * dp2) * invDet);
+    mediump vec3 B = -normalize((-duv2.x * dp1 + duv1.x * dp2) * invDet);
 
-    // The vertex shader flips V for texture sampling (1-V), so dFdy(uv)
-    // has its V component negated. This inverts B relative to the UV space
-    // the normal map was authored in. Negate B to compensate.
-    B = -B;
-
-    // Decode tangent-space normal — handles BC5 Z reconstruction when bit 11 set.
-    vec3 tNormal = decodeNormalMapSample(nmSample, matFlags);
-    tNormal.xy  *= max(strength, 0.0);
-    tNormal       = normalize(tNormal);
+    mediump vec3 tNormal = decodeNormalMapSample(nmSample, matFlags);
+    tNormal.xy *= max(strength, 0.0);
+    tNormal     = normalize(tNormal);
 
     return normalize(mat3(T, B, N) * tNormal);
+}
+
+vec3 applyNormalMap(vec3 N, vec3 worldPos, vec2 uv, vec3 nmSample, float strength, uint matFlags) {
+    return applyNormalMapGrad(N, worldPos, dFdx(uv), dFdy(uv), nmSample, strength, matFlags);
 }
 
 #include "raster_material_policy.h"
@@ -736,9 +767,7 @@ vec3 previewRigColor(uint preset, int i) {
 }
 
 void main() {
-    outPreviousClip = vPreviousClip.w > 1e-9 ?
-        vec4(vPreviousClip.xyz / vPreviousClip.w, 1.0) : vec4(0.0, 0.0, 0.0, -1.0);
-    vec3 N = normalize(vWorldNormal);
+    mediump vec3 N = normalize(vWorldNormal);
     uint qualityMode = previewQualityMode();
     uint lightingPreset = RT_SPEC_ALT_LIGHTING ? pc.materialMeta.z : 3u;
 
@@ -755,12 +784,13 @@ void main() {
     bool isImpostor = (vMaterialID & 0x80000000u) != 0u;
     uint materialIndex = min(vMaterialID & 0x7FFFFFFFu, materialCount - 1u);
     GpuMaterial mat = materials[materialIndex];
+    uint matFlags = mat.flags;
 
     uint drawPhase = previewDrawPhase();
     uint graphOffset = RT_SPEC_GRAPH ? matProgramOffset(materialIndex) : MATPROG_NONE;
     // Wet paint canvas over a tiled base (docs/dev/WET_PAINT_CANVAS_UV.md): the
     // slots are canvas pages at the raw UV, the transform tiles only the base.
-    bool paintCanvas = mat.paint_base_tex != 0u;
+    bool paintCanvas = RT_SPEC_PAINT_CANVAS && mat.paint_base_tex != 0u;
     vec2 paintBaseUV = applyUVTransform(vTexCoord, mat);
     vec2 uv = paintCanvas ? vTexCoord : paintBaseUV;
 
@@ -776,35 +806,35 @@ void main() {
 
     vec2 uvDx = dFdx(uv);
     vec2 uvDy = dFdy(uv);
-    vec2 paintBaseDx = dFdx(paintBaseUV);
-    vec2 paintBaseDy = dFdy(paintBaseUV);
+    vec2 paintBaseDx = RT_SPEC_PAINT_CANVAS ? dFdx(paintBaseUV) : uvDx;
+    vec2 paintBaseDy = RT_SPEC_PAINT_CANVAS ? dFdy(paintBaseUV) : uvDy;
 
     // Reject provably opaque replay fragments before terrain, textures and
     // graph evaluation. Maps are authoritative and graphs may write transmission
     // or opacity; partial opacity also becomes legacy glass below. All of those
     // cases must retain the per-fragment classification path.
-    if (drawPhase == PREVIEW_PHASE_TRANSMISSION &&
+    if (RT_SPEC_GLASS && drawPhase == PREVIEW_PHASE_TRANSMISSION &&
         (isImpostor ||
          !rasterMaterialMayTransmit(mat.transmission, mat.opacity,
              validTexture(mat.transmission_tex), validTexture(mat.opacity_tex),
-             graphOffset != MATPROG_NONE, (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u,
-             (mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u))) {
+             graphOffset != MATPROG_NONE, (matFlags & PREVIEW_MAT_FLAG_BUBBLE) != 0u,
+             (matFlags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u))) {
         discard;
     }
 
     // Coverage first: transparent needle/card pixels must not fetch normal,
     // roughness, terrain layers, or evaluate lighting before being discarded.
     // A graph may REPLACE opacity, so only its final output may reject it.
-    float opacity = previewSurfaceOpacity(mat, uv, uvDx, uvDy, isImpostor);
+    mediump float opacity = previewSurfaceOpacity(mat, uv, uvDx, uvDy, isImpostor);
     if (graphOffset == MATPROG_NONE) {
         if (opacity == 0.0) discard;
         // Once opacity is sampled, opaque texels of a mixed card can also
         // leave replay before the rest of the material is evaluated.
-        if (drawPhase == PREVIEW_PHASE_TRANSMISSION &&
+        if (RT_SPEC_GLASS && drawPhase == PREVIEW_PHASE_TRANSMISSION &&
             !rasterMaterialMayTransmit(mat.transmission, opacity,
                 validTexture(mat.transmission_tex), false, false,
-                (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u,
-                (mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u)) discard;
+                (matFlags & PREVIEW_MAT_FLAG_BUBBLE) != 0u,
+                (matFlags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u)) discard;
     }
 
     // ── Terrain Splat-Layer Blending (FLAG_TERRAIN = bit 16) ──
@@ -812,7 +842,11 @@ void main() {
     // splat map, then overrides albedo / roughness / metallic / normal before the
     // standard per-material texture sampling below.
     const uint FLAG_TERRAIN = (1u << 16);
-    if (RT_SPEC_TERRAIN && (mat.flags & FLAG_TERRAIN) != 0u) {
+    bool terrainOverridden = false;
+    vec3  terrainAlbedo    = vec3(0.0);
+    float terrainRoughness = 0.0;
+    float terrainMetallic  = 0.0;
+    if (RT_SPEC_TERRAIN && (matFlags & FLAG_TERRAIN) != 0u) {
         uint layerIdx = mat._terrain_layer_idx;
         TerrainLayerData tl = terrainLayers[layerIdx];
         if (validTexture(tl.splat_map_tex) && tl.layer_count > 0u) {
@@ -924,57 +958,81 @@ void main() {
             }
 
             // Override albedo/roughness/metallic — skip per-material texture sections below
-            mat.albedo_r = blendAlbedo.r; mat.albedo_g = blendAlbedo.g; mat.albedo_b = blendAlbedo.b;
-            mat.roughness = blendRoughness; mat.metallic = blendMetallic;
-            mat.albedo_tex = 0xffffffffu; mat.roughness_tex = 0xffffffffu; mat.metallic_tex = 0xffffffffu; mat.normal_tex = 0xffffffffu;
+            terrainOverridden = true;
+            terrainAlbedo = blendAlbedo;
+            terrainRoughness = blendRoughness;
+            terrainMetallic = blendMetallic;
         }
     }
 
     // ── Albedo ──
-    vec3 albedo = vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b);
-    vec4 albedoTexel = vec4(1.0);
-    if (validTexture(mat.albedo_tex)) {
-        vec4 texAlbedo = sampleMaterialTextureGrad(mat.albedo_tex, uv, uvDx, uvDy);
-        if (paintCanvas && validTexture(mat.paint_base_tex)) {
-            // Premultiplied canvas over the tiled base; the canvas alpha is
-            // paint coverage, never surface opacity (the base keeps that).
-            vec4 baseTexel = sampleMaterialTextureGrad(mat.paint_base_tex, paintBaseUV, paintBaseDx, paintBaseDy);
-            texAlbedo = vec4(baseTexel.rgb * (1.0 - texAlbedo.a) + texAlbedo.rgb, baseTexel.a);
+    mediump vec3 albedo;
+    if (RT_SPEC_TERRAIN && terrainOverridden) {
+        albedo = terrainAlbedo;
+    } else {
+        uint albedoTex = mat.albedo_tex;
+        if (validTexture(albedoTex)) {
+            mediump vec4 texAlbedo = sampleMaterialTextureGrad(albedoTex, uv, uvDx, uvDy);
+            if (RT_SPEC_PAINT_CANVAS && paintCanvas) {
+                uint paintBaseTex = mat.paint_base_tex;
+                if (validTexture(paintBaseTex)) {
+                    // Premultiplied canvas over the tiled base; the canvas alpha is
+                    // paint coverage, never surface opacity (the base keeps that).
+                    mediump vec4 baseTexel = sampleMaterialTextureGrad(paintBaseTex, paintBaseUV, paintBaseDx, paintBaseDy);
+                    texAlbedo = vec4(baseTexel.rgb * (1.0 - texAlbedo.a) + texAlbedo.rgb, baseTexel.a);
+                }
+            }
+            // Vulkan RT contract: a bound Base Color texture is authoritative.
+            // Its sampled colour also becomes the depthless glass Beer tint.
+            albedo = texAlbedo.rgb;
+        } else {
+            albedo = vec3(mat.albedo_r, mat.albedo_g, mat.albedo_b);
         }
-        albedoTexel = texAlbedo;
-        // Vulkan RT contract: a bound Base Color texture is authoritative.
-        // Its sampled colour also becomes the depthless glass Beer tint.
-        albedo = texAlbedo.rgb;
     }
     // Only fall back to neutral gray when no albedo source is bound.
     // Previously this fired whenever base color × texture went to ~0, which
     // turned black-paint strokes into gray in the raster material preview.
 
     // ── Normal map ──
-    if (validTexture(mat.normal_tex)) {
-        vec3 nmSample = sampleMaterialTextureGrad(mat.normal_tex, uv, uvDx, uvDy).rgb;
-        float strength = (mat.normal_strength > 0.0) ? mat.normal_strength : 1.0;
-        N = applyNormalMap(N, vWorldPos, uv, nmSample, strength, mat.flags);
+    if (!(RT_SPEC_TERRAIN && terrainOverridden)) {
+        uint normalTex = mat.normal_tex;
+        if (validTexture(normalTex)) {
+            mediump vec3 nmSample = sampleMaterialTextureGrad(normalTex, uv, uvDx, uvDy).rgb;
+            float nStr = mat.normal_strength;
+            float strength = (nStr > 0.0) ? nStr : 1.0;
+            N = applyNormalMapGrad(N, vWorldPos, uvDx, uvDy, nmSample, strength, matFlags);
+        }
     }
 
     // ── Roughness / Metallic ──
-    float roughness = clamp(mat.roughness, 0.04, 1.0);
-    float metallic  = clamp(mat.metallic,  0.0,  1.0);
-    float specular  = clamp(mat.specular,  0.0,  1.0);
-    float transmission = clamp(mat.transmission, 0.0, 1.0);
-    float materialIor = max(mat.ior, 1.0001);
-    if (validTexture(mat.roughness_tex)) {
-        roughness = samplePackedRoughness(
-            sampleMaterialTextureGrad(mat.roughness_tex, uv, uvDx, uvDy), 0.04, mat.flags);
+    mediump float roughness;
+    if (RT_SPEC_TERRAIN && terrainOverridden) {
+        roughness = clamp(terrainRoughness, 0.04, 1.0);
+    } else {
+        uint roughTex = mat.roughness_tex;
+        if (validTexture(roughTex)) {
+            roughness = samplePackedRoughness(
+                sampleMaterialTextureGrad(roughTex, uv, uvDx, uvDy), 0.04, matFlags);
+        } else {
+            roughness = clamp(mat.roughness, 0.04, 1.0);
+        }
     }
-    if (RT_SPEC_OPT_TEX && validTexture(mat.metallic_tex)) {
+    mediump float metallic;
+    if (RT_SPEC_TERRAIN && terrainOverridden) {
+        metallic = clamp(terrainMetallic, 0.0, 1.0);
+    } else if (RT_SPEC_OPT_TEX && validTexture(mat.metallic_tex)) {
         metallic = samplePackedMetallic(
-            sampleMaterialTextureGrad(mat.metallic_tex, uv, uvDx, uvDy), mat.flags);
+            sampleMaterialTextureGrad(mat.metallic_tex, uv, uvDx, uvDy), matFlags);
+    } else {
+        metallic = clamp(mat.metallic, 0.0, 1.0);
     }
+    mediump float specular  = clamp(mat.specular,  0.0,  1.0);
     if (RT_SPEC_OPT_TEX && validTexture(mat.specular_tex)) {
         specular = clamp(sampleMaterialTextureGrad(mat.specular_tex, uv, uvDx, uvDy).r * specular, 0.0, 1.0);
     }
-    if (validTexture(mat.transmission_tex)) {
+    mediump float transmission = RT_SPEC_GLASS ? clamp(mat.transmission, 0.0, 1.0) : 0.0;
+    float materialIor  = RT_SPEC_GLASS ? max(mat.ior, 1.0001) : 1.5;
+    if (RT_SPEC_GLASS && validTexture(mat.transmission_tex)) {
         // RT contract: the map is authoritative, not multiplied by the scalar.
         // A graph Transmission output below intentionally overrides this fetch.
         transmission = clamp(
@@ -985,14 +1043,14 @@ void main() {
     // same flattened bytecode and evaluator. Raster has no barycentric
     // pointiness/named-attribute stream yet, so those inputs use neutral
     // values; UV/object/world procedural chains, textures, bump and Bevel run.
-    vec3 V = normalize(pc.cameraPos.xyz - vWorldPos);
-    vec2 rawUV = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
-    float graphAttrs[MP_ATTRIB_SLOTS];
-    for (int graphAttr = 0; graphAttr < MP_ATTRIB_SLOTS; ++graphAttr)
-        graphAttrs[graphAttr] = 0.0;
+    mediump vec3 V = normalize(pc.cameraPos.xyz - vWorldPos);
     MatProgOut graphOut = mp_defaultOut();
     uint graphWritten = 0u;
-    if (graphOffset != MATPROG_NONE) {
+    if (RT_SPEC_GRAPH && graphOffset != MATPROG_NONE) {
+        vec2 rawUV = vec2(vTexCoord.x, 1.0 - vTexCoord.y);
+        float graphAttrs[MP_ATTRIB_SLOTS];
+        for (int graphAttr = 0; graphAttr < MP_ATTRIB_SLOTS; ++graphAttr)
+            graphAttrs[graphAttr] = 0.0;
         graphOut = evalMaterialProgramWithObjectRandom(
             graphOffset, rawUV, vWorldPos, N, 0.5, vObjectOrigin,
             vObjectRandom,
@@ -1033,17 +1091,17 @@ void main() {
     //   "kabalasmaz", BOSALIR. Ustelik tek bir texel'in maskesini butun
     //   impostor'a uygulamanin fiziksel bir karsiligi da yok: proxy zaten
     //   yaprak deseninin degil SILUETIN yaklasikligidir.
-    if (!isImpostor && (graphWritten & MP_SLOT_OPACITY) != 0u) {
+    if (RT_SPEC_GRAPH && !isImpostor && (graphWritten & MP_SLOT_OPACITY) != 0u) {
         opacity = clamp(graphOut.opacity, 0.0, 1.0);
         if (opacity < 0.1) opacity = 0.0;
-    }
-    opacity = materialCoverageOpacity(opacity, !isImpostor && (mat.flags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u);
-    if (opacity == 0.0) {
-        discard;
+        opacity = materialCoverageOpacity(opacity, (matFlags & MATERIAL_FLAGS_PREVIEW_CUTOUT) != 0u);
+        if (opacity == 0.0) {
+            discard;
+        }
     }
     // Match closesthit's legacy glass contract: partial material opacity on a
     // non-metal becomes transmission when no explicit transmission is authored.
-    if (!isImpostor && opacity < 0.99 && metallic < 0.1 && transmission < 0.01)
+    if (RT_SPEC_GLASS && !isImpostor && opacity < 0.99 && metallic < 0.1 && transmission < 0.01)
         transmission = 1.0 - opacity;
     if (!RT_SPEC_GLASS) transmission = 0.0;
 
@@ -1051,10 +1109,9 @@ void main() {
     // per-fragment for opacity/transmission maps and Material Graph outputs.
     // Phase 0 preserves combined rendering until snapshot descriptors are
     // valid, avoiding a half-wired frame during resize/reload.
-    bool transmissiveFragment = !isImpostor &&
-        (transmission > 0.001 ||
-         (RT_SPEC_GLASS && (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u));
-    if (drawPhase == PREVIEW_PHASE_OPAQUE && transmissiveFragment) {
+    bool transmissiveFragment = RT_SPEC_GLASS && !isImpostor &&
+        (transmission > 0.001 || (matFlags & PREVIEW_MAT_FLAG_BUBBLE) != 0u);
+    if (RT_SPEC_GLASS && drawPhase == PREVIEW_PHASE_OPAQUE && transmissiveFragment) {
         // Capture the farthest back-facing surface in view-distance units.
         // Positive IEEE float bits preserve ordering for atomicMax. This image
         // is private to transmission and never replaces selection depth.
@@ -1065,7 +1122,7 @@ void main() {
         }
         discard;
     }
-    if (drawPhase == PREVIEW_PHASE_TRANSMISSION && !transmissiveFragment) {
+    if (RT_SPEC_GLASS && drawPhase == PREVIEW_PHASE_TRANSMISSION && !transmissiveFragment) {
         discard;
     }
     // With glass specialized off no fragment is transmissive, so the line
@@ -1077,7 +1134,7 @@ void main() {
     // ordinary opaque Spec control. Blend the two F0 values by Transmission so
     // partial materials remain continuous while full glass loses the broad
     // white opaque-specular coat.
-    bool bubbleSurface = RT_SPEC_GLASS && (mat.flags & PREVIEW_MAT_FLAG_BUBBLE) != 0u;
+    bool bubbleSurface = RT_SPEC_GLASS && (matFlags & PREVIEW_MAT_FLAG_BUBBLE) != 0u;
     float effectiveIor = bubbleSurface && matx.bubble_ior > 1.0001
         ? matx.bubble_ior : materialIor;
     float interiorDepth = RT_SPEC_GLASS ? max(matx.transmission_density, 0.0) : 0.0;
@@ -1093,18 +1150,18 @@ void main() {
     // become narrower than one pixel and disappear as the camera recedes.
     // Screen-space normal variation estimates that footprint and widens only
     // the reflection lobe, preserving a sharp close-up without adding samples.
-    float authoredReflectionRoughness = resinSurface
+    mediump float authoredReflectionRoughness = resinSurface
         ? clamp(matx.resin_roughness, 0.0, 1.0) : roughness;
-    float normalFootprint = max(length(dFdx(N)), length(dFdy(N)));
-    float specularAa = clamp(normalFootprint * 0.65, 0.0, 0.18);
-    float reflectionRoughness = clamp(sqrt(
+    mediump float normalFootprint = max(length(dFdx(N)), length(dFdy(N)));
+    mediump float specularAa = clamp(normalFootprint * 0.65, 0.0, 0.18);
+    mediump float reflectionRoughness = clamp(sqrt(
         authoredReflectionRoughness * authoredReflectionRoughness +
         specularAa * specularAa), 0.04, 1.0);
     // An ideal mirror is a delta distribution. RT traces that direction
     // explicitly, whereas a rasterized punctual-light GGX peak can fall
     // entirely between pixels. Widen only the analytic direct-light lobe;
     // environment and SSR keep reflectionRoughness and therefore remain sharp.
-    float directSpecularRoughness = max(
+    mediump float directSpecularRoughness = max(
         reflectionRoughness,
         (transmissiveFragment || resinSurface || bubbleSurface) ? 0.075 : 0.04);
 
@@ -1132,26 +1189,35 @@ void main() {
     }
 
     // ── Emission ──
-    vec3 emissionColor = vec3(mat.emission_r, mat.emission_g, mat.emission_b);
-    float emissionStrength = max(mat.emission_strength, 0.0);
-    if ((graphWritten & MP_SLOT_EMISSIONCOLOR) != 0u)
-        emissionColor = max(graphOut.emissionColor, vec3(0.0));
-    if ((graphWritten & MP_SLOT_EMISSIONSTRENGTH) != 0u)
-        emissionStrength = max(graphOut.emissionStrength, 0.0);
-    if (RT_SPEC_OPT_TEX && validTexture(mat.emission_tex) &&
-        (graphWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
-        emissionColor = sampleMaterialTextureGrad(mat.emission_tex, uv, uvDx, uvDy).rgb;
+    // When emission texture and Material Graph are both specialized off, defer
+    // the SSBO read until final compositing so emission does not occupy 3 live
+    // registers across the entire direct-light and IBL blocks on Mali-G52.
+    mediump vec3 emission = vec3(0.0);
+    if (RT_SPEC_OPT_TEX || RT_SPEC_GRAPH) {
+        vec3 emissionColor = vec3(mat.emission_r, mat.emission_g, mat.emission_b);
+        float emissionStrength = max(mat.emission_strength, 0.0);
+        if ((graphWritten & MP_SLOT_EMISSIONCOLOR) != 0u)
+            emissionColor = max(graphOut.emissionColor, vec3(0.0));
+        if ((graphWritten & MP_SLOT_EMISSIONSTRENGTH) != 0u)
+            emissionStrength = max(graphOut.emissionStrength, 0.0);
+        if (RT_SPEC_OPT_TEX && validTexture(mat.emission_tex) &&
+            (graphWritten & MP_SLOT_EMISSIONCOLOR) == 0u) {
+            emissionColor = sampleMaterialTextureGrad(mat.emission_tex, uv, uvDx, uvDy).rgb;
+        }
+        emission = emissionColor * emissionStrength;
     }
-    vec3 emission = emissionColor * emissionStrength;
 
     // ── Principled direct lighting ──
     // Opaque dielectric follows Spec; transmitting dielectric follows IOR.
-    float authoredDielectricF0 = clamp(0.08 * specular, 0.0, 0.08);
-    float interfaceDielectricF0 = previewDielectricF0(effectiveIor);
-    float dielectricF0 = mix(authoredDielectricF0, interfaceDielectricF0,
-                             (bubbleSurface || resinSurface) ? 1.0 : transmission);
-    vec3 F0           = mix(vec3(dielectricF0), albedo, metallic);
-    vec3 diffuseColor = albedo * (1.0 - metallic) * (1.0 - transmission);
+    mediump float authoredDielectricF0 = clamp(0.08 * specular, 0.0, 0.08);
+    mediump float dielectricF0 = authoredDielectricF0;
+    if (RT_SPEC_GLASS) {
+        float interfaceDielectricF0 = previewDielectricF0(effectiveIor);
+        dielectricF0 = mix(authoredDielectricF0, interfaceDielectricF0,
+                           (bubbleSurface || resinSurface) ? 1.0 : transmission);
+    }
+    mediump vec3 F0           = mix(vec3(dielectricF0), albedo, metallic);
+    mediump vec3 diffuseColor = albedo * (1.0 - metallic) * (1.0 - transmission);
 
     // Specular exponent from roughness
     float specExp = max(2.0, (1.0 - directSpecularRoughness) *
@@ -1179,8 +1245,8 @@ void main() {
     //   colour. The old raster path tinted base colour by 1-exp(-radius*scale),
     //   which at the presets' scale (0.05) is ~5%: the swatch the artist picked
     //   was nearly invisible here while RT showed it in full.
-    vec3  diffuseSurface    = diffuseColor * (1.0 - sssAmount);
-    vec3  diffuseSubsurface = clamp(sssColor, vec3(0.0), vec3(1.0)) *
+    mediump vec3 diffuseSurface    = diffuseColor * (1.0 - sssAmount);
+    mediump vec3 diffuseSubsurface = clamp(sssColor, vec3(0.0), vec3(1.0)) *
                               (1.0 - metallic) * (1.0 - transmission) * sssAmount;
     diffuseColor = diffuseSurface + diffuseSubsurface;
     // Light travel vs local curvature (pre-integrated-skin style). Mean free
@@ -1192,18 +1258,18 @@ void main() {
         ? (length(fwidth(normalize(vWorldNormal))) /
            max(length(fwidth(vWorldPos)), 1e-6))
         : 0.0;
-    vec3  sssWrap      = RT_SPEC_EXT_LOBES
+    mediump vec3 sssWrap      = RT_SPEC_EXT_LOBES
         ? clamp(sssMfp * sssCurvature, vec3(0.0), vec3(1.0))
         : vec3(0.0);
     // Thin-feature back-lighting: the osculating diameter 2/curvature is the
     // thickness proxy. Per channel, so a long red radius glows red (ears).
-    vec3  sssBackTransmit = (RT_SPEC_EXT_LOBES && sssCurvature > 1e-4)
+    mediump vec3 sssBackTransmit = (RT_SPEC_EXT_LOBES && sssCurvature > 1e-4)
         ? exp(-(2.0 / sssCurvature) / max(sssMfp, vec3(1e-5)))
         : vec3(0.0);
 
-    vec3 diffuseLit  = vec3(0.0);
-    vec3 specularLit = vec3(0.0);
-    vec3 sheenLit    = vec3(0.0);
+    mediump vec3 diffuseLit  = vec3(0.0);
+    mediump vec3 specularLit = vec3(0.0);
+    mediump vec3 sheenLit    = vec3(0.0);
 
     // ★★ Ust sinir var ve SESSIZ DEGIL: asildiginda C++ tarafi bir kez log
     //   basar. Scene golgeleri atlas tabanlidir; yine de sinirsiz bir isik
@@ -1224,15 +1290,22 @@ void main() {
     //   the scene has none (rtapi::ensureWorldSunLight).
     int lightLoopCount = (lightingPreset == 3u) ? sceneLoopCount : 3;
 
+    // Extract clearcoat scalars into mediump (1 register packed) so the
+    // 160-byte GpuMaterial `mat` dies before the light loop and IBL block.
+    mediump float matClearcoat = RT_SPEC_CLEARCOAT ? mat.clearcoat : 0.0;
+    mediump float matClearcoatRoughness = RT_SPEC_CLEARCOAT ? mat.clearcoat_roughness : 0.0;
+    bool hasClearcoat = RT_SPEC_CLEARCOAT && matClearcoat > 0.001;
+
     for (int i = 0; i < lightLoopCount; ++i) {
-        vec3 L;
-        vec3 radiance;
+        mediump vec3 L;
+        mediump vec3 radiance;
         if (lightingPreset == 3u) {
             // Koninin disinda / arkasinda kalan isik KATKI VERMEZ, sifir
             // katkiyla toplanmaz -- aksi halde alan isiginin arkasi da
             // NdotL uzerinden hafifce aydinlanirdi.
-            if (!evalSceneLight(uint(i), vWorldPos, L, radiance)) continue;
-            radiance *= evaluatePreviewShadow(uint(i), vWorldPos, N, L);
+            vec3 lightPos;
+            if (!evalSceneLight(uint(i), vWorldPos, L, radiance, lightPos)) continue;
+            radiance *= evaluatePreviewShadow(uint(i), vWorldPos, N, L, lightPos);
         } else {
             L        = previewRigDir(lightingPreset, i);
             radiance = previewRigColor(lightingPreset, i) * previewRigIntensity(lightingPreset, i);
@@ -1242,35 +1315,29 @@ void main() {
         // Shifts the NdotL threshold so light bleeds around the terminator.
         // Per-channel wrap on the SSS share only; the surface share and the
         // specular lobe keep the true cosine.
-        float rawNdotL = dot(N, L);
-        float NdotL = max(rawNdotL, 0.0);
-        vec3 sssNdotL = max((vec3(rawNdotL) + sssWrap) / (vec3(1.0) + sssWrap), vec3(0.0));
-        // ★★★★ 1/PI Lambert BRDF'in PARCASI, bir kadran degil. Yillarca eksikti
-        //   ve yerine asagida `diffuseWeight = 0.35` sihirli katsayisi vardi --
-        //   ama YALNIZCA dusuk kalite dalinda. Yani kalite preset'i degistirmek
-        //   POZLAMAYI degistiriyordu (olculdu: 0.4055 vs 0.4893). Kalite
-        //   preset'i BRDF kademesini degistirir, pozlamayi DEGIL.
-        // Same bounded directional-average Fresnel term as the Vulkan RT
-        // reference (bsdf_scatter.glsl::evaluate_brdf_gl). Diffuse only uses
-        // energy not assigned to the reflection lobe.
-        vec3 Favg = F0 + (vec3(1.0) - F0) * (1.0 / 21.0);
-        vec3 diffuseBrdf = (vec3(1.0) - Favg) * (1.0 / PI);
+        mediump float rawNdotL = dot(N, L);
+        mediump float NdotL = max(rawNdotL, 0.0);
+        mediump vec3 sssNdotL = RT_SPEC_EXT_LOBES
+            ? max((vec3(rawNdotL) + sssWrap) / (vec3(1.0) + sssWrap), vec3(0.0))
+            : vec3(0.0);
+        mediump vec3 Favg = F0 + (vec3(1.0) - F0) * (1.0 / 21.0);
+        mediump vec3 diffuseBrdf = (vec3(1.0) - Favg) * (1.0 / PI);
 
         // Clearcoat is a top layer, not an additive glow: coat Fresnel removes
         // energy from the base lobes before its own GGX reflection is added.
-        vec3 H = normalize(V + L);
-        float VdotH = max(dot(V, H), 0.0);
-        bool hasClearcoat = RT_SPEC_CLEARCOAT && mat.clearcoat > 0.001;
-        float coatFresnel = hasClearcoat
-            ? fresnelSchlick(VdotH, vec3(0.04)).r * clamp(mat.clearcoat, 0.0, 1.0)
+        mediump vec3 H = normalize(V + L);
+        mediump float VdotH = max(dot(V, H), 0.0);
+        mediump float NdotH = max(dot(N, H), 0.0);
+        mediump float coatFresnel = hasClearcoat
+            ? fresnelSchlick(VdotH, vec3(0.04)).r * clamp(matClearcoat, 0.0, 1.0)
             : 0.0;
-        vec3 coatTint = hasClearcoat
+        mediump vec3 coatTint = (hasClearcoat && RT_SPEC_CLEARCOAT_IRID)
             ? clearcoatFilmTint(
                 VdotH, matx.clearcoat_iridescence,
                 matx.clearcoat_film_thickness)
             : vec3(1.0);
-        float baseLayerWeight = 1.0 - coatFresnel;
-        diffuseLit += diffuseBrdf * radiance * baseLayerWeight *
+        mediump float baseLayerWeight = 1.0 - coatFresnel;
+        mediump vec3 lightDiffuse = diffuseBrdf * radiance * baseLayerWeight *
                       (diffuseSurface * NdotL + diffuseSubsurface *
                        (sssNdotL + sssBackTransmit * max(-rawNdotL, 0.0))) *
                       (1.0 - translucency);
@@ -1278,40 +1345,47 @@ void main() {
         // not claim refraction/thickness parity; those belong to the forward
         // transmission pass. The probability split mirrors RT's principled
         // diffuse sub-layer so translucency does not add energy to the front.
-        float backNdotL = max(dot(-N, L), 0.0);
-        diffuseLit += diffuseColor * radiance * backNdotL *
-                      translucency * (1.0 / PI) * baseLayerWeight;
+        if (RT_SPEC_EXT_LOBES && translucency > 0.0) {
+            mediump float backNdotL = max(dot(-N, L), 0.0);
+            lightDiffuse += diffuseColor * radiance * backNdotL *
+                            translucency * (1.0 / PI) * baseLayerWeight;
+        }
+        diffuseLit += lightDiffuse;
 
         // Scene is the path-traced comparison surface and always uses GGX.
         // The cheap lobe remains only in the independent inspection rig.
+        mediump vec3 lightSpec = vec3(0.0);
         bool useFullPbr = lightingPreset == 3u || qualityMode > 1u;
         if (!useFullPbr) {
-            float NdotH  = max(dot(N, H), 0.0);
-            float pureNdotL = max(dot(N, L), 0.0);
-            // ★★ Blinn-Phong lobu NORMALIZE edilir: (n+2)/(8*PI). Eskiden
-            //   normalizasyon yoktu ve yerine `specularWeight = 0.15` vardi.
-            //   Katsayi lobun uslu terimine bagli degildi, yani parlaklik
-            //   puruzlulukle birlikte yanlis yone kayiyordu.
+            mediump float pureNdotL = max(dot(N, L), 0.0);
             float spec   = pow(NdotH, specExp) * pureNdotL;
-            specularLit += F0 * radiance * spec *
-                           ((specExp + 2.0) / (8.0 * PI)) * baseLayerWeight;
+            lightSpec += F0 * radiance * spec *
+                         ((specExp + 2.0) / (8.0 * PI)) * baseLayerWeight;
             if (hasClearcoat) {
-                float ccExp = max(2.0, (1.0 - mat.clearcoat_roughness) * (1.0 - mat.clearcoat_roughness) * 128.0);
+                float ccR = matClearcoatRoughness;
+                float ccExp = max(2.0, (1.0 - ccR) * (1.0 - ccR) * 128.0);
                 float ccSpec = pow(NdotH, ccExp) * pureNdotL;
-                specularLit += vec3(0.04) * radiance * ccSpec * mat.clearcoat
-                             * ((ccExp + 2.0) / (8.0 * PI)) * coatTint;
+                lightSpec += vec3(0.04) * radiance * ccSpec * matClearcoat
+                           * ((ccExp + 2.0) / (8.0 * PI)) * coatTint;
             }
         } else {
-            float pureNdotL = max(dot(N, L), 0.0);
-            specularLit += evaluateSpecularGGX(
-                               N, V, L, F0, directSpecularRoughness) *
-                           radiance * pureNdotL * baseLayerWeight;
+            mediump float pureNdotL = NdotL;
+            mediump float pureNdotV = max(dot(N, V), 0.0);
+            lightSpec += evaluateSpecularGGXPrecomputed(
+                             pureNdotV, pureNdotL, NdotH, VdotH,
+                             F0, directSpecularRoughness) *
+                         radiance * pureNdotL * baseLayerWeight;
             if (hasClearcoat) {
-                specularLit += evaluateSpecularGGX(
-                    N, V, L, vec3(0.04), clamp(mat.clearcoat_roughness, 0.02, 1.0)) *
-                    radiance * pureNdotL * mat.clearcoat * coatTint;
+                lightSpec += evaluateSpecularGGXPrecomputed(
+                    pureNdotV, pureNdotL, NdotH, VdotH,
+                    vec3(0.04), clamp(matClearcoatRoughness, 0.02, 1.0)) *
+                    radiance * pureNdotL * matClearcoat * coatTint;
             }
         }
+        // Without glass/resin attenuation, diffuse and specular sum directly;
+        // folding into diffuseLit saves 3 live registers across the light loop.
+        if (RT_SPEC_GLASS) specularLit += lightSpec;
+        else diffuseLit += lightSpec;
 
         // ── Sheen lobe (fabric / velvet) ──
         if (sheenWeight > 0.001) {
@@ -1322,151 +1396,75 @@ void main() {
 
     // Lightning flash from the lit cloud base: diffuse lobe only (the disc is
     // kilometres wide; its specular highlight is the sky reflection's job).
-    if (lightingPreset == 3u) {
+    if (RT_SPEC_WEATHER && lightingPreset == 3u) {
         vec3 flashE = previewLightningIrradiance(vWorldPos, N);
         if (any(greaterThan(flashE, vec3(0.0)))) {
-            vec3 Favg = F0 + (vec3(1.0) - F0) * (1.0 / 21.0);
+            mediump vec3 Favg = F0 + (vec3(1.0) - F0) * (1.0 / 21.0);
             diffuseLit += (vec3(1.0) - Favg) * (1.0 / PI) * flashE * diffuseSurface *
                           (1.0 - translucency);
         }
     }
 
-    float NdotV_main = max(dot(N, V), 0.0);
-    bool hasEnvClearcoat = RT_SPEC_CLEARCOAT && mat.clearcoat > 0.001;
-    float coatViewFresnel = hasEnvClearcoat
-        ? fresnelSchlick(NdotV_main, vec3(0.04)).r *
-          clamp(mat.clearcoat, 0.0, 1.0)
+    mediump float NdotV_main = max(dot(N, V), 0.0);
+    bool hasEnvClearcoat = hasClearcoat;
+    mediump float coatViewFresnel = hasEnvClearcoat
+        ? fresnelSchlick(NdotV_main, vec3(0.04)).r * clamp(matClearcoat, 0.0, 1.0)
         : 0.0;
-    float ambientBaseWeight = 1.0 - coatViewFresnel;
-    vec3 coatEnvTint = hasEnvClearcoat
-        ? clearcoatFilmTint(
-            NdotV_main, matx.clearcoat_iridescence,
-            matx.clearcoat_film_thickness)
-        : vec3(1.0);
+    mediump float ambientBaseWeight = 1.0 - coatViewFresnel;
 
-    vec3 ambient = vec3(0.0);
-    vec3 envSpecular = vec3(0.0);
-    // ★★★ Yansima compute gecisinin uygulayacagi AGIRLIK. Bu, `envSpecular`in
-    //   ortam radyansi DISINDAKI her carpani -- yani yansima gecisi izlenen
-    //   radyansi bununla carpinca, yerine gectigi env lookup'iyla ENERJI OLARAK
-    //   TUTARLI olur.
-    // ★ Bu yuzden yansima "metalik ozelligi" DEGIL: agirlik bir Fresnel terimi
-    //   oldugu icin verniklenmis ahsap, boyali zemin, seramik ve plastik ayni
-    //   yoldan, hic ek kod olmadan devralir. Grazing acida agirlik zaten
-    //   yukselir, tepeden bakista dusertir -- kapi tam olarak orada acilir.
-    // ★ Yalnizca scene lighting (preset 3) doldurur: studio/matcap yollari
-    //   yazili sahne isiklarini temsil etmiyor, `rfSpecularSkyVisibility` de
-    //   ayni sebeple oraya dokunmuyor.
-    vec3 rfEnvSpecularWeight = vec3(0.0);
+    mediump vec3 ambient = vec3(0.0);
+    mediump vec3 envSpecular = vec3(0.0);
+    mediump vec3 rfEnvSpecularWeight = vec3(0.0);
     if (lightingPreset == 3u) {
-        vec3 R = reflect(-V, N);
-        // ★★★★ Prefiltered ambient is now the path for BOTH producers. Measured
-        //   before this change: the Nishita branch below ran a 9-tap cone
-        //   integral per lobe, twice per fragment, on a forward pass with no
-        //   depth prepass - ~60 ms of a 102 ms frame. Sky radiance depends only
-        //   on direction, so it belongs in a directional cache, and that cache
-        //   is the same slot a probe field will later fill.
+        mediump vec3 R = reflect(-V, N);
         if (!RT_SPEC_FALLBACK_SKY || (sceneFlags & 32u) != 0u) {
-            // The sky bake already carries its own intensities; only the HDRI
-            // path still scales by the environment intensity dial.
-            float intensity = worldMode == 1u ? max(worldParams.y, 0.0) : 1.0;
-            vec3 irradiance = vec3(0.0);
+            mediump float intensity = worldMode == 1u ? max(worldParams.y, 0.0) : 1.0;
+            mediump vec3 irradiance = vec3(0.0);
             float screenGiConfidence = 0.0;
             bool screenGiValid = RT_SPEC_RAYFUSION_GI
                 ? sampleScreenGi(N, irradiance, screenGiConfidence)
                 : false;
-            // ★★★ RayFusion Adım 1a: AYNI değer, FARKLI boru. Probe alanı bu
-            //   pikseli kapsıyorsa ambient oradan okunur. İlk üretici hâlâ aynı
-            //   gökyüzü bake'i olduğu için görüntü DEĞİŞMEMELİ; değişen tek şey,
-            //   ışın geldiği gün yalnızca üreticinin değişecek olması.
-            //   Kapsanmayan piksel global okumada kalır — sessizce kararmaz.
             vec3 probeIrradiance;
             if (!screenGiValid || screenGiConfidence < 1.0) {
-                // ★★★★★ GOKYUZU GORUNURLUGU DIFUZ TERIME DE UYGULANIR.
-                //
-                //   Bu satirlar olmadan asimetri suydu: `envSpecular` satir
-                //   ~1521'de `rfSpecularSkyVisibility` ile engelleniyordu ama
-                //   DIFUZ ambient hicbir gorunurluk testi gormuyordu. Odayi
-                //   duz maviye boyayan terim tam olarak difuz olandir --
-                //   parlak lob dogru davranirken oda gokyuzuyle doluyordu.
-                //
-                //   Asagidaki `fallbackIrradiance`in her iki kaynagi da INSAASI
-                //   GEREGI ENGELSIZDIR: `worldIrradiance` yalnizca yone bagli
-                //   bir on-suzulmus kuredir ve `sky_bake` ureticisi de hicbir
-                //   isin atmaz. Yani bu deger "acik arazide bu normale dusen
-                //   isima"dir; kapali bir odada tam gucuyle uygulamak, duvarlari
-                //   yokmus saymaktir.
-                //
-                // ★★★ Kaynak SIRASI, guclu olcumden zayifina:
-                //   1) Ekran-uzayi OLCUM: bu karede bu pikselden gercekten
-                //      atilmis yarim kure isinlari. Yuzey-kaynakli, parallaks
-                //      hatasi yok, kosinus agirlikli.
-                //   2) Probe tahmini (`rfSpecularSkyVisibility`, N boyunca):
-                //      ekran-uzayi olcum yoksa. Probe-kaynakli oldugu icin
-                //      parallaks tasir, ama hicbir seyden iyidir.
-                //   3) Hicbiri konusamiyorsa 1.0 -- yani DAVRANIS DEGISMEZ.
-                //      Bu, "olcemedim"in sessizce "gorus acik"a donusmedigi
-                //      TEK yer: ustteki iki kol da olcum YOKLUGUNU ayri bir
-                //      donus degeriyle bildirir, varsayilan bir deger degil.
-                float skyVisibility = 1.0;
+                mediump float skyVisibility = 1.0;
                 if (RT_SPEC_RAYFUSION_GI && !sampleScreenGiSkyVisibility(N, skyVisibility))
                     skyVisibility = rfSpecularSkyVisibility(vWorldPos, N, N);
 
-                vec3 fallbackIrradiance = texture(worldIrradiance, worldDirToUV(N)).rgb * intensity;
+                mediump vec3 fallbackIrradiance = texture(worldIrradiance, worldDirToUV(N)).rgb * intensity;
                 if (RT_SPEC_RAYFUSION_GI && rfSampleProbeField(vWorldPos, N, probeIrradiance))
                     fallbackIrradiance = probeIrradiance * intensity;
-                // ★★★★★ GORUNURLUK KAYNAK SECIMINDEN SONRA uygulanir.
-                //
-                //   Onceki halinde once gokyuzu okumasi olceklenip sonra probe
-                //   kolu onu TAMAMEN EZIYORDU -- yani olcum yapilip cope
-                //   atiliyordu. Ve baskin kaynak tam olarak o koldur.
-                //
-                // ★★★ Probe alani, YUZEYIN degil PROBE'un bulundugu yerin
-                //   isimasini verir. Izgara oda sinirlarina oturmadigi icin
-                //   (olculdu: spacing 3, kapsam [-6,6]x[-3,3]x[-6,6], oda bundan
-                //   kucuk) ODANIN DISINDAKI bir probe ACIK GOKYUZU gorur ve o
-                //   deger iceride bir duvara uygulanir. Ekran-uzayi olcum ise
-                //   YUZEY kaynaklidir: o pikselin yarim kuresinin ne kadarinin
-                //   gercekten gokyuzune baktigini bu karede olcer.
-                //
-                // ★★ Cift sayim riski kabul edildi ve OLCUMLE tartildi: `traced`
-                //   uretici kendi gorunurlugunu tasiyabilir, ama bu sahnede
-                //   `bounce_requested: false` -- yani probe pratikte yalnizca
-                //   gokyuzu tasiyor, neredeyse engelsiz. Olculen hata 10x fazla
-                //   aydinlatmaydi; cift sayimin riski ise bir miktar fazla
-                //   karartmadir. Yanlis yonu kucuk olani secildi.
                 fallbackIrradiance *= skyVisibility;
                 irradiance = screenGiValid ? mix(fallbackIrradiance, irradiance, screenGiConfidence) : fallbackIrradiance;
             }
-            vec3 prefiltered = textureLod(worldPrefiltered, worldDirToUV(R),
+            mediump vec3 prefiltered = textureLod(worldPrefiltered, worldDirToUV(R),
                                           reflectionRoughness * 8.0).rgb * intensity;
-            vec2 brdf = texture(worldBrdfLut,
+            mediump vec2 brdf = texture(worldBrdfLut,
                                 vec2(clamp(NdotV_main, 0.001, 0.999), reflectionRoughness)).rg;
-            vec3 fresnelAmb = fresnelSchlickRoughness(
+            mediump vec3 fresnelAmb = fresnelSchlickRoughness(
                 NdotV_main, F0, reflectionRoughness);
             ambient = irradiance * diffuseColor * (vec3(1.0) - fresnelAmb) *
                       ambientBaseWeight;
             envSpecular = prefiltered * (F0 * brdf.x + brdf.y) *
                           ambientBaseWeight;
             rfEnvSpecularWeight = (F0 * brdf.x + brdf.y) * ambientBaseWeight;
-            // The sun disc is deliberately absent from the bake - it reaches
-            // this surface as an analytic directional light, and baking it into
-            // irradiance would light every diffuse surface twice. A near-mirror
-            // must still show it, so those surfaces take one direct sample.
-            // One tap, not the nine-tap cone that was measured.
-            if (worldMode == 2u && reflectionRoughness <= 0.025) {
-                envSpecular = sampleCanonicalWorld(R) *
-                              (F0 * brdf.x + brdf.y) * ambientBaseWeight;
-            }
+            // Note: reflectionRoughness is clamped to [0.04, 1.0] above, so the
+            // legacy `reflectionRoughness <= 0.025` direct sun-disc branch was
+            // mathematically unreachable yet forced sampleCanonicalWorld() and
+            // all atmosphere/world LUT samplers into every prefiltered IBL shader.
             if (hasEnvClearcoat) {
-                float ccRoughness = clamp(mat.clearcoat_roughness, 0.02, 1.0);
-                vec3 ccEnv = textureLod(worldPrefiltered, worldDirToUV(R),
+                mediump vec3 coatEnvTint = RT_SPEC_CLEARCOAT_IRID
+                    ? clearcoatFilmTint(
+                        NdotV_main, matx.clearcoat_iridescence,
+                        matx.clearcoat_film_thickness)
+                    : vec3(1.0);
+                mediump float ccRoughness = clamp(matClearcoatRoughness, 0.02, 1.0);
+                mediump vec3 ccEnv = textureLod(worldPrefiltered, worldDirToUV(R),
                                         ccRoughness * 8.0).rgb * intensity;
-                vec2 ccBrdf = texture(worldBrdfLut,
+                mediump vec2 ccBrdf = texture(worldBrdfLut,
                                       vec2(clamp(NdotV_main, 0.001, 0.999),
                                            ccRoughness)).rg;
                 envSpecular += ccEnv * (vec3(0.04) * ccBrdf.x + ccBrdf.y) *
-                               mat.clearcoat * coatEnvTint;
+                               matClearcoat * coatEnvTint;
             }
         } else {
             // Fully metallic/transmitting surfaces have no diffuse term. Avoid
@@ -1495,6 +1493,11 @@ void main() {
                           mix(1.0, 0.18, reflectionRoughness * reflectionRoughness) *
                           ambientBaseWeight;
             if (hasEnvClearcoat) {
+                vec3 coatEnvTint = RT_SPEC_CLEARCOAT_IRID
+                    ? clearcoatFilmTint(
+                        NdotV_main, matx.clearcoat_iridescence,
+                        matx.clearcoat_film_thickness)
+                    : vec3(1.0);
                 vec3 ccFresnel = fresnelSchlickRoughness(
                     NdotV_main, vec3(0.04), mat.clearcoat_roughness);
                 envSpecular += envReflection * ccFresnel * mat.clearcoat *
@@ -1533,6 +1536,11 @@ void main() {
 
         // Clearcoat env reflection
         if (hasEnvClearcoat) {
+            vec3 coatEnvTint = RT_SPEC_CLEARCOAT_IRID
+                ? clearcoatFilmTint(
+                    NdotV_main, matx.clearcoat_iridescence,
+                    matx.clearcoat_film_thickness)
+                : vec3(1.0);
             vec3 ccFresnel = fresnelSchlickRoughness(NdotV_main, vec3(0.04), mat.clearcoat_roughness);
             envSpecular += envReflection * ccFresnel
                          * mix(0.9, 0.0, mat.clearcoat_roughness)
@@ -1763,6 +1771,15 @@ void main() {
     if (RT_SPEC_RAYFUSION_GI && !sceneReflectionValid && lightingPreset == 3u)
         envSpecular *= rfSpecularSkyVisibility(vWorldPos, N, reflect(-V, N));
 
+    if (!RT_SPEC_OPT_TEX && !RT_SPEC_GRAPH) {
+        mediump float emStr = max(materials[materialIndex].emission_strength, 0.0);
+        if (emStr > 0.0) {
+            emission = vec3(materials[materialIndex].emission_r,
+                            materials[materialIndex].emission_g,
+                            materials[materialIndex].emission_b) * emStr;
+        }
+    }
+
     vec3 color = (ambient + diffuseLit + sheenLit) * resinBaseAttenuation
                + specularLit + envSpecular
                + transmissionLit
@@ -1815,6 +1832,10 @@ void main() {
         // source of the homogeneous atmosphere-coloured glass body.
         outputOpacity = 1.0;
     }
+    if (any(isnan(color)) || any(isinf(color))) {
+        color = vec3(0.0);
+    }
+    color = clamp(color, vec3(0.0), vec3(65000.0));
     outColor = vec4(color, outputOpacity);
 
     // ─── RayFusion reflection G-buffer ───────────────────────────────────────
@@ -1846,4 +1867,11 @@ void main() {
     if (outputOpacity < 0.999) rfWeight = vec3(0.0);
     outRfNormal = rfOctEncodeNormal(N);
     outRfSpecular = vec4(max(rfWeight, vec3(0.0)), reflectionRoughness);
+    if (vPreviousClip.w > 1e-9 && vCurrentClip.w > 1e-9) {
+        vec2 deltaUv = (vPreviousClip.xy / vPreviousClip.w -
+                        vCurrentClip.xy / vCurrentClip.w) * 0.5;
+        outPreviousClip = clamp(deltaUv, vec2(-100.0), vec2(100.0));
+    } else {
+        outPreviousClip = vec2(-65504.0, 0.0);
+    }
 }

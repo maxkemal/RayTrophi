@@ -1,4 +1,4 @@
-﻿/*
+/*
 * =========================================================================
 * Project:       RayTrophi Studio
 * Repository:    https://github.com/maxkemal/RayTrophi
@@ -143,7 +143,11 @@ UNIFIED_FUNC bool sample_light_direction(
             ).normalize() * light.radius;
             
             wi = normalize(dir * distance + jitter);
-            attenuation = 1.0f / (distance * distance);
+            const float d2 = distance * distance;
+            const float df = light.distance_falloff;
+            attenuation = (df >= 1.9999f)
+                ? (1.0f / d2)
+                : ((df <= 1e-4f) ? 1.0f : powf(d2, -0.5f * df));
             break;
         }
         
@@ -192,7 +196,12 @@ UNIFIED_FUNC bool sample_light_direction(
             // Cosine falloff based on light normal
             Vec3f light_normal = normalize(cross(light.area_u, light.area_v));
             float cos_light = fmaxf(dot(-wi, light_normal), 0.0f);
-            attenuation = cos_light / (distance * distance);
+            const float d2 = distance * distance;
+            const float df = light.distance_falloff;
+            const float dist_atten = (df >= 1.9999f)
+                ? (1.0f / d2)
+                : ((df <= 1e-4f) ? 1.0f : powf(d2, -0.5f * df));
+            attenuation = cos_light * dist_atten;
             break;
         }
         
@@ -208,7 +217,12 @@ UNIFIED_FUNC bool sample_light_direction(
             float falloff = spot_light_falloff(light, wi);
             if (falloff < 1e-4f) return false;
             
-            attenuation = falloff / (distance * distance);
+            const float d2 = distance * distance;
+            const float df = light.distance_falloff;
+            const float dist_atten = (df >= 1.9999f)
+                ? (1.0f / d2)
+                : ((df <= 1e-4f) ? 1.0f : powf(d2, -0.5f * df));
+            attenuation = falloff * dist_atten;
             break;
         }
         
@@ -390,19 +404,21 @@ UNIFIED_FUNC int pick_smart_light_unified(
             
             float intensity = light.color.luminance() * light.intensity;
             
+            const float d2 = dist * dist;
+            const float df = light.distance_falloff;
+            const float falloff = (df >= 1.9999f)
+                ? (1.0f / d2)
+                : ((df <= 1e-4f) ? 1.0f : powf(d2, -0.5f * df));
             if (light.type == 0) { // Point
-                 float falloff = 1.0f / (dist * dist);
                  // Vulkan parity: include spherical area so selection pdf and per-light pdf are consistent
                  float area = 4.0f * UnifiedConstants::PI * light.radius * light.radius;
                  weight = falloff * intensity * area;
             }
             else if (light.type == 2) { // Area
-                 float falloff = 1.0f / (dist * dist);
                  float area = light.area_width * light.area_height;
                  weight = falloff * intensity * fminf(area, 10.0f);
             }
             else if (light.type == 3) { // Spot
-                 float falloff = 1.0f / (dist * dist);
                  weight = falloff * intensity * 0.8f;
             }
         }

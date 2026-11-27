@@ -834,6 +834,8 @@ struct LightInfo {
     float width = 0.0f;             // area only
     float height = 0.0f;            // area only
     bool visible = true;
+    bool cast_shadows = true;
+    float distance_falloff = 2.0f;
 };
 
 std::vector<LightInfo> listLights();
@@ -859,6 +861,8 @@ Result setLightParam(int index, const std::string& param, float value);
 Result setLightColor(int index, const Vec3& color);
 Result setLightIntensity(int index, float intensity);
 Result setLightVisible(int index, bool visible);
+Result setLightCastShadows(int index, bool cast_shadows);
+Result setLightDistanceFalloff(int index, float distance_falloff);
 Result renameLight(int index, const std::string& name);
 
 // ---------------------------------------------------------------------------

@@ -137,6 +137,15 @@ float compute_light_pdf_gl(const LightData light, float distance, float pdf_sele
     return 0.0;
 }
 
+float light_distance_atten_gl(const LightData light, float d2) {
+    float falloffSoft = light.area_v.w;
+    if (falloffSoft <= 1e-4) {
+        return 1.0 / d2;
+    }
+    float falloffExp = max(2.0 - falloffSoft, 0.0);
+    return (falloffExp <= 1e-4) ? 1.0 : pow(d2, -0.5 * falloffExp);
+}
+
 // Sample direction toward light (approximation matching CPU logic)
 bool sample_light_direction_gl(const LightData light, vec3 hit_pos, float rand_u, float rand_v, out vec3 wi, out float distance, out float attenuation) {
     int type = int(light.position.w + 0.5);
@@ -148,7 +157,7 @@ bool sample_light_direction_gl(const LightData light, vec3 hit_pos, float rand_u
         vec3 dir = L / distance;
         vec3 jitter = normalize(vec3((rand_u - 0.5) * 2.0, (rand_v - 0.5) * 2.0, (rand_u * rand_v - 0.5) * 2.0)) * light.params.x;
         wi = normalize(dir * distance + jitter);
-        attenuation = 1.0 / (distance * distance);
+        attenuation = light_distance_atten_gl(light, distance * distance);
         return true;
     } else if (type == 1) {
         vec3 L = normalize(light.direction.xyz);
@@ -188,7 +197,7 @@ bool sample_light_direction_gl(const LightData light, vec3 hit_pos, float rand_u
         wi = normalize(L);
         float falloff = spot_light_falloff_gl(light, wi);
         if (falloff < 1e-4) return false;
-        attenuation = falloff / (distance * distance);
+        attenuation = falloff * light_distance_atten_gl(light, distance * distance);
         return true;
     }
     return false;
@@ -262,11 +271,11 @@ float smart_light_weight_gl(int i, vec3 hit_pos) {
         // Point light: account for spherical sampling area (4*pi*r^2) so selection pdf
         // and per-light sampling pdf are consistent (avoids intensity scaling with radius).
         float area = 4.0 * PI * lights.l[i].params.x * lights.l[i].params.x;
-        return (1.0 / (dist * dist)) * intensity * area;
+        return light_distance_atten_gl(lights.l[i], dist * dist) * intensity * area;
     } else if (t == 2) {
         return (1.0 / (dist * dist)) * intensity * min(lights.l[i].params.y * lights.l[i].params.z, 10.0);
     } else if (t == 3) {
-        return (1.0 / (dist * dist)) * intensity * 0.8;
+        return light_distance_atten_gl(lights.l[i], dist * dist) * intensity * 0.8;
     }
     return 0.0;
 }
@@ -1128,13 +1137,17 @@ void addDielectricDirectLighting(vec3 hitPos,
     vec3 shadowOrigin = (originPush > 0.0) ? (hitPos + L * originPush)
                                            : offset_ray(hitPos, carrierNormal);
     float tMax = min(max(distanceToLight - 1e-3, SHADOW_TMIN * 2.0), 10000.0);
-    shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
-    uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
-                     | gl_RayFlagsSkipClosestHitShaderEXT;
-    traceRayEXT(topLevelAS, shadowFlags, RT_MASK_DIRECT_SHADOW, 0, 1, 1,
-                shadowOrigin, SHADOW_TMIN, L, tMax, 1);
-    vec3 visibility = shadowPayload.w > 0.5 ? shadowPayload.rgb : vec3(0.0);
-    if (!any(greaterThan(visibility, vec3(1e-4)))) return;
+    bool castShadow = (lights.l[lightIndex].area_u.w < 0.5);
+    vec3 visibility = vec3(1.0);
+    if (castShadow) {
+        shadowPayload = vec4(1.0, 1.0, 1.0, 0.0);
+        uint shadowFlags = gl_RayFlagsTerminateOnFirstHitEXT
+                         | gl_RayFlagsSkipClosestHitShaderEXT;
+        traceRayEXT(topLevelAS, shadowFlags, RT_MASK_DIRECT_SHADOW, 0, 1, 1,
+                    shadowOrigin, SHADOW_TMIN, L, tMax, 1);
+        visibility = shadowPayload.w > 0.5 ? shadowPayload.rgb : vec3(0.0);
+        if (!any(greaterThan(visibility, vec3(1e-4)))) return;
+    }
 
     vec3 H = safeNormalize(V + L, N);
     float NdotH = max(dot(N, H), 1e-5);
@@ -1168,7 +1181,9 @@ void addDielectricDirectLighting(vec3 hitPos,
         estimatorWeight = power_heuristic(lightPdf, bsdfPdf) / max(lightPdf, 1e-6);
     }
 
-    float volumeTransmittance = computeVolumeShadowTransmittance(shadowOrigin, L, tMax, lightIndex);
+    float volumeTransmittance = castShadow
+        ? computeVolumeShadowTransmittance(shadowOrigin, L, tMax, lightIndex)
+        : 1.0;
     vec3 contribution = brdf * Li * NdotL * estimatorWeight
                       * visibility * volumeTransmittance;
     contribution = clamp(max(contribution, vec3(0.0)), vec3(0.0), vec3(1e4));

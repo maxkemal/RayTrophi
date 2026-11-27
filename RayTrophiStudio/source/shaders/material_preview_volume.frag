@@ -234,7 +234,15 @@ bool evalLight(uint index,vec3 p,out vec3 l,out vec3 radiance){
     if(type==1){l=normalize(light.direction.xyz);return true;}
     vec3 to=light.position.xyz-p; float d2=dot(to,to);
     if(d2<1e-6)return false;
-    l=to*inversesqrt(d2); float atten=1.0/d2;
+    l=to*inversesqrt(d2);
+    float falloffSoft = light.area_v.w;
+    float atten;
+    if (falloffSoft <= 1e-4) {
+        atten = 1.0 / d2;
+    } else {
+        float falloffExp = max(2.0 - falloffSoft, 0.0);
+        atten = (falloffExp <= 1e-4) ? 1.0 : pow(d2, -0.5 * falloffExp);
+    }
     if(type==2){vec3 n=normalize(cross(light.area_u.xyz,light.area_v.xyz));atten*=max(dot(-l,n),0.0)*max(light.params.y*light.params.z,0.0);}
     else if(type==3){float c=dot(-l,normalize(light.direction.xyz));atten*=smoothstep(light.direction.w,light.params.z,c);}
     radiance*=atten; return atten>0.0;
@@ -393,10 +401,14 @@ void main(){
             for(uint li=0u;li<8u;++li){
                 if(li>=lights)break;vec3 l,rad;if(!evalLight(li,p,l,rad))continue;
                 if((s%stride)==0 || cachedShadows[li]<0.0){
-                    bool deep=(sceneFlags&1u)!=0u && deepMeta.z!=0u && shadowRecords[li].meta.x!=0u;
-                    float maxD=int(sceneLights[li].position.w+0.5)==1?1e30:distance(sceneLights[li].position.xyz,p);
-                    cachedShadows[li]=rtPreviewShadow(li,p,vec3(0),l,sceneLights[li].position.xyz,quality);
-                    if(!deep)cachedShadows[li]*=selfShadow(vi,p,l,maxD);
+                    if (sceneLights[li].area_u.w > 0.5) {
+                        cachedShadows[li] = 1.0;
+                    } else {
+                        bool deep=(sceneFlags&1u)!=0u && deepMeta.z!=0u && shadowRecords[li].meta.x!=0u;
+                        float maxD=int(sceneLights[li].position.w+0.5)==1?1e30:distance(sceneLights[li].position.xyz,p);
+                        cachedShadows[li]=rtPreviewShadow(li,p,vec3(0),l,sceneLights[li].position.xyz,quality);
+                        if(!deep)cachedShadows[li]*=selfShadow(vi,p,l,maxD);
+                    }
                 }
                 light+=rad*phaseDual(dot(rd,l),vi)*cachedShadows[li];
             }

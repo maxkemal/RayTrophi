@@ -105,6 +105,8 @@ struct LightGPU {
     float area_height;      // AreaLight yüksekliği
     float3 area_u;          // AreaLight U vektörü
     float3 area_v;          // AreaLight V vektörü
+    int cast_shadows;       // 1 = cast shadows, 0 = skip shadows
+    float distance_falloff; // 2.0 = inverse-square, 1.0 = linear, 0.0 = constant
 };
 
 struct GpuVolumetricInfo {

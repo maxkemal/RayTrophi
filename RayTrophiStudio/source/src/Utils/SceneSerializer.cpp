@@ -943,6 +943,8 @@ void SceneSerializer::Serialize(const SceneData& scene, const RenderSettings& se
         lj["color"] = vec3ToJson(l->color);
         lj["intensity"] = 1.0f; // Simplified for now as intensity is often baked in color
         lj["name"] = l->nodeName;
+        lj["cast_shadows"] = l->cast_shadows;
+        lj["distance_falloff"] = l->distance_falloff;
 
         if (l->type() == LightType::Point) {
             lj["radius"] = l->getRadius();
@@ -1259,6 +1261,17 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             std::string_view name_sv = "Light";
             l["name"].get(name_sv);
             std::string name(name_sv);
+
+            bool cast_shadows = true;
+            bool cast_shadows_saved = true;
+            if (!l["cast_shadows"].get(cast_shadows_saved)) {
+                cast_shadows = cast_shadows_saved;
+            }
+            double distance_falloff = 2.0;
+            double distance_falloff_saved = 2.0;
+            if (!l["distance_falloff"].get(distance_falloff_saved)) {
+                distance_falloff = std::clamp(distance_falloff_saved, 0.0, 2.0);
+            }
             
             if (type == (int)LightType::Point) {
                 double r = 0.1;
@@ -1291,6 +1304,8 @@ bool SceneSerializer::Deserialize(SceneData& scene, RenderSettings& settings, Re
             
             if (lightPtr) {
                 lightPtr->nodeName = name;
+                lightPtr->cast_shadows = cast_shadows;
+                lightPtr->distance_falloff = static_cast<float>(distance_falloff);
                 scene.lights.push_back(lightPtr);
             }
         }

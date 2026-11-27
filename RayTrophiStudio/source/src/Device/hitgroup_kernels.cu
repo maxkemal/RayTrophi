@@ -1101,7 +1101,8 @@ extern "C" __global__ void __closesthit__hair() {
             light_dir = to_light / (light_dist + 1e-4f);
 
             // Inverse-square falloff (parity with CPU PointLight/AreaLight::getIntensity)
-            float atten = 1.0f / fmaxf(light_dist * light_dist, 1e-4f);
+            const float dist_sq = fmaxf(light_dist * light_dist, 1e-4f);
+            float atten = compute_distance_attenuation(dist_sq, light.distance_falloff);
 
             if (light.type == 3) {
                 float3 spotDir = normalize(light.direction);
@@ -1121,6 +1122,8 @@ extern "C" __global__ void __closesthit__hair() {
 
         unsigned int shadow_hit = 0;
 
+        if (light.cast_shadows != 0) {
+
         float3 shadow_normal = safe_normalize(normal, make_float3(0.0f, 1.0f, 0.0f));
         float3 shadow_origin = hit_point + shadow_normal * 0.001f;
         optixTrace(
@@ -1137,6 +1140,8 @@ extern "C" __global__ void __closesthit__hair() {
             SHADOW_RAY_TYPE,
             shadow_hit
         );
+
+        }
 
         if (shadow_hit == 0) {
             float3 bsdf = HairGPU::hair_bsdf_eval(wo, light_dir, tangent, hair_mat_final, h, vStrand);
